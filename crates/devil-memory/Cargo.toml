@@ -1,0 +1,11 @@
+[package]
+name = "devil-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devil-protocol = { workspace = true }
+devil-storage = { workspace = true }
+thiserror = { workspace = true }

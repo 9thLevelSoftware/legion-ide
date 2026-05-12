@@ -1,0 +1,18 @@
+[package]
+name = "devil-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devil-ui = { workspace = true }
+devil-editor = { workspace = true }
+devil-project = { workspace = true }
+devil-index = { workspace = true }
+devil-ai = { workspace = true }
+devil-agent = { workspace = true }
+devil-tracker = { workspace = true }
+devil-observability = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "devil-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devil-protocol = { workspace = true }
+thiserror = { workspace = true }

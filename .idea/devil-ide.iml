@@ -2,6 +2,23 @@
 <module type="EMPTY_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-agent/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-ai-providers/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-ai/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-app/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-cli/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-editor/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-index/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-memory/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-observability/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-platform/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-project/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-protocol/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-security/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-storage/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-text/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-tracker/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-ui/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>

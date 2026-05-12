@@ -1,6 +1,53 @@
-[package]
-name = "devil-ide"
+[workspace]
+resolver = "3"
+members = [
+    "crates/devil-app",
+    "crates/devil-ui",
+    "crates/devil-editor",
+    "crates/devil-text",
+    "crates/devil-project",
+    "crates/devil-index",
+    "crates/devil-ai",
+    "crates/devil-ai-providers",
+    "crates/devil-agent",
+    "crates/devil-tracker",
+    "crates/devil-memory",
+    "crates/devil-security",
+    "crates/devil-platform",
+    "crates/devil-protocol",
+    "crates/devil-storage",
+    "crates/devil-observability",
+    "crates/devil-cli",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "Proprietary"
+publish = false
 
-[dependencies]
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# Internal crates (version managed by workspace)
+devil-protocol = { path = "crates/devil-protocol" }
+devil-text = { path = "crates/devil-text" }
+devil-platform = { path = "crates/devil-platform" }
+devil-storage = { path = "crates/devil-storage" }
+devil-observability = { path = "crates/devil-observability" }
+devil-security = { path = "crates/devil-security" }
+devil-editor = { path = "crates/devil-editor" }
+devil-project = { path = "crates/devil-project" }
+devil-index = { path = "crates/devil-index" }
+devil-ai-providers = { path = "crates/devil-ai-providers" }
+devil-ai = { path = "crates/devil-ai" }
+devil-tracker = { path = "crates/devil-tracker" }
+devil-memory = { path = "crates/devil-memory" }
+devil-agent = { path = "crates/devil-agent" }
+devil-ui = { path = "crates/devil-ui" }
