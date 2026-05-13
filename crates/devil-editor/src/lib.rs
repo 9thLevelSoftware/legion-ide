@@ -279,7 +279,6 @@ mod tests {
         let project = ProjectInfo {
             project_id: ProjectId(1),
             root_path: "root".into(),
-            allowed_extensions: vec!["rs".into()],
             language_id: Some("rust".into()),
             file_id: FileId(7),
         };

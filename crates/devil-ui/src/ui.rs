@@ -140,7 +140,6 @@ mod tests {
             project_id: ProjectId(1),
             root_path: "r".into(),
             file_id: FileId(9),
-            allowed_extensions: vec!["md".into()],
             language_id: None,
         };
         let editor = EditorSession::open("a.md", project, "first");
