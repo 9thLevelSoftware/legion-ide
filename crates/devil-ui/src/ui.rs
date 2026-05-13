@@ -64,7 +64,7 @@ impl Shell {
         println!("{}", self.editor.text());
         println!("{}", "-".repeat(self.layout.width as usize));
         println!("Path: {}", self.editor.file_path());
-        println!("Commands: :i text | :d start,end | :r start,end,text | :u | :r | :q");
+        println!("Commands: :i text | :d start,end | :r start,end,text | :u | :redo | :q");
     }
 
     /// Parse and apply a command in tiny interactive mode.

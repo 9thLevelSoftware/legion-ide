@@ -9,3 +9,4 @@ publish.workspace = true
 devil-protocol = { workspace = true }
 devil-text = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }

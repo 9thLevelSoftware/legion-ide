@@ -90,8 +90,14 @@ fn main() -> Result<()> {
         match command {
             ":q" => break,
             ":w" => {
-                vfs.write_file_text(Path::new(shell.editor.file_path()), shell.editor.text())?;
-                println!("Saved {}", shell.editor.file_path());
+                let save_request = shell.editor.request_save()?;
+                vfs.write_file_text(Path::new(shell.editor.file_path()), &save_request.text)?;
+                println!(
+                    "Saved {} (snapshot={}, hash={})",
+                    shell.editor.file_path(),
+                    save_request.snapshot_id.0,
+                    save_request.content_hash
+                );
             }
             other => {
                 let keep_running = shell.handle_command(other)?;
