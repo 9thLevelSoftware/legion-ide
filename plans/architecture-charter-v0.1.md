@@ -268,6 +268,7 @@ flowchart TD
     Editor --> Text[devil-text]
     Editor --> Protocol
     Project --> Platform[devil-platform]
+    Editor -. uses interface via .-> Protocol
     Index --> Text
     Index --> Storage[devil-storage]
     AI --> Protocol
@@ -944,6 +945,45 @@ Required validation:
 - Approval revocation.
 - Command execution sandbox policy.
 - Failure and pause behavior.
+
+### 16.6 Dependency-Direction Gate
+
+Do not scale crates or implement additional adapters until cross-crate direction is validated against the charter intent.
+
+Required validation:
+- Confirm `devil-ai` depends on `devil-protocol` and does not depend on `devil-ai-providers` directly.
+- Confirm `devil-ai-providers` depends on `devil-ai` and does not pull in feature semantics through hidden imports.
+- Confirm `devil-ui` and `devil-editor` consume `devil-protocol` data contracts for cross-domain interactions.
+- Confirm no domain crate introduces a hard dependency from `devil-editor` to `devil-project`.
+
+### 16.7 Protocol-Contract Gate
+
+Do not proceed to multi-crate implementation before project/editor contracts are explicitly versioned and validated.
+
+Required validation:
+- `ProjectInfoQuery`, `ProjectInfo`, and `EditorTransactionEvent` are defined in `devil-protocol` and consumed by intended callers.
+- `ProjectInfoPort` trait is stable and used for editor/project interaction tests.
+- Add a lightweight regression check to ensure protocol crate API changes are explicit and reviewed before downstream updates.
+
+### 16.8 Text-Model Stress Gate
+
+Do not scale Editor and indexing integration before text model stress benchmarks demonstrate deterministic behavior under worst-case local workload.
+
+Required validation:
+- Edit throughput and operation latency at baseline and at load on large files.
+- Snapshot memory growth over repeated edit bursts and rollback cycles.
+- Index update lag while typing in files over memory and line-length thresholds.
+- Heap profile stability with mixed short/long snapshots and undo/redo activity.
+
+### 16.9 Freeze-Gate Enforcement
+
+Do not proceed beyond Spike 1A until all freeze artifacts explicitly confirm implementation readiness.
+
+Required validation:
+- `plans/architecture-freeze-v0.1.md` completed and reviewed.
+- `plans/milestone-0-feasibility-proofs.md` completed and reviewed.
+- `plans/SPIKE-001A-native-shell-proof.md` completed and reviewed.
+- `plans/SPIKE-000-platform-boundary-proof.md` completed and reviewed.
 
 ---
 

@@ -6,13 +6,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+devil-protocol = { workspace = true }
 devil-ui = { workspace = true }
 devil-editor = { workspace = true }
+devil-platform = { workspace = true }
 devil-project = { workspace = true }
 devil-index = { workspace = true }
 devil-ai = { workspace = true }
 devil-agent = { workspace = true }
 devil-tracker = { workspace = true }
 devil-observability = { workspace = true }
-anyhow = { workspace = true }
 tokio = { workspace = true }

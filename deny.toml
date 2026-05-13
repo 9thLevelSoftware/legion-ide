@@ -1,0 +1,23 @@
+###############################################################################
+# Milestone-0 baseline policy for cargo-deny.
+#
+# This baseline enforces dependency governance used by CI gate checks.
+###############################################################################
+
+[advisories]
+vulnerability = "warn"
+unmaintained = "warn"
+unsoundness = "warn"
+yanked = "warn"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[licenses]
+unlicensed = "warn"
+copyleft = "warn"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
