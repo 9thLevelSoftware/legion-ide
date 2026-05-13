@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clap = { version = "=4.5.61", features = ["derive"] }
+cargo_metadata = { version = "=0.18.1" }

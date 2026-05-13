@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  validate:
+    name: Milestone-0 validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Workspace check
+        run: cargo check --workspace
+
+      - name: Dependency policy gate
+        run: cargo run -p xtask -- check-deps
+
+      - name: Cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
