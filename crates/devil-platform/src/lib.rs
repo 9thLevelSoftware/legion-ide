@@ -138,7 +138,11 @@ pub enum PlatformError {
 }
 
 impl PlatformError {
-    fn from_io_error(operation: impl Into<String>, path: impl Into<PathBuf>, source: io::Error) -> Self {
+    fn from_io_error(
+        operation: impl Into<String>,
+        path: impl Into<PathBuf>,
+        source: io::Error,
+    ) -> Self {
         let operation = operation.into();
         let path = path.into();
 
@@ -388,7 +392,8 @@ impl PathNormalizationService for NativeFileSystem {
     }
 
     fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, PlatformError> {
-        fs::canonicalize(path).map_err(|err| PlatformError::from_io_error("canonicalize", path, err))
+        fs::canonicalize(path)
+            .map_err(|err| PlatformError::from_io_error("canonicalize", path, err))
     }
 
     fn is_within_base(&self, base: &Path, candidate: &Path) -> Result<bool, PlatformError> {
@@ -406,8 +411,9 @@ impl FileSystemService for NativeFileSystem {
     fn write_text_file(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .map_err(|err| PlatformError::from_io_error("create parent directories", path, err))?;
+                fs::create_dir_all(parent).map_err(|err| {
+                    PlatformError::from_io_error("create parent directories", path, err)
+                })?;
             }
         }
 
@@ -416,9 +422,8 @@ impl FileSystemService for NativeFileSystem {
 
     fn write_text_file_atomic(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent).map_err(|err| {
-            PlatformError::from_io_error("create parent directories", path, err)
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|err| PlatformError::from_io_error("create parent directories", path, err))?;
 
         let stem = path
             .file_name()
@@ -427,9 +432,8 @@ impl FileSystemService for NativeFileSystem {
             .replace('\n', "_");
         let temp = parent.join(format!(".{stem}.tmp"));
 
-        fs::write(&temp, text).map_err(|err| {
-            PlatformError::from_io_error("write atomic temporary", &temp, err)
-        })?;
+        fs::write(&temp, text)
+            .map_err(|err| PlatformError::from_io_error("write atomic temporary", &temp, err))?;
 
         fs::rename(&temp, path).map_err(|err| match err.kind() {
             io::ErrorKind::Unsupported => PlatformError::AtomicReplaceUnsupported {
@@ -454,7 +458,8 @@ impl FileSystemService for NativeFileSystem {
     }
 
     fn hash_file(&self, path: &Path) -> Result<String, PlatformError> {
-        let content = fs::read(path).map_err(|err| PlatformError::from_io_error("hash", path, err))?;
+        let content =
+            fs::read(path).map_err(|err| PlatformError::from_io_error("hash", path, err))?;
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         Ok(format!("{:016x}", hasher.finish()))
@@ -481,14 +486,18 @@ impl ProcessService for NativeProcessService {
             command.env(key, value);
         }
 
-        let output = command.output().map_err(|err| PlatformError::ProcessSpawnFailure {
-            operation: "execute".to_string(),
-            command: request.command.clone(),
-            message: err.to_string(),
-        })?;
+        let output = command
+            .output()
+            .map_err(|err| PlatformError::ProcessSpawnFailure {
+                operation: "execute".to_string(),
+                command: request.command.clone(),
+                message: err.to_string(),
+            })?;
 
         let elapsed = started.elapsed();
-        if let Some(timeout) = request.timeout && elapsed > timeout {
+        if let Some(timeout) = request.timeout
+            && elapsed > timeout
+        {
             return Err(PlatformError::Timeout {
                 operation: format!("process `{}`", request.command),
                 duration: elapsed,
@@ -525,7 +534,8 @@ impl WatcherService for NativeWatcherService {
         let mut events = Vec::new();
         let mut sequence = 0u64;
 
-        let entries = fs::read_dir(path).map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?;
+        let entries = fs::read_dir(path)
+            .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?;
 
         for entry in entries {
             if events.len() >= WATCHER_OVERFLOW_THRESHOLD {
@@ -555,7 +565,8 @@ impl WatcherService for NativeWatcherService {
 
 impl EnvironmentService for NativeEnvironmentService {
     fn current_dir(&self) -> Result<PathBuf, PlatformError> {
-        env::current_dir().map_err(|err| PlatformError::from_io_error("current_dir", Path::new("."), err))
+        env::current_dir()
+            .map_err(|err| PlatformError::from_io_error("current_dir", Path::new("."), err))
     }
 
     fn get_var(&self, key: &str) -> Option<String> {
@@ -694,7 +705,11 @@ mod tests {
                 Ok(())
             }
 
-            fn write_text_file_atomic(&self, _path: &Path, _text: &str) -> Result<(), PlatformError> {
+            fn write_text_file_atomic(
+                &self,
+                _path: &Path,
+                _text: &str,
+            ) -> Result<(), PlatformError> {
                 Ok(())
             }
 
@@ -708,7 +723,7 @@ mod tests {
         }
 
         let fake = FakeFs;
-        let text = fake.read_text_file(Path::new("/tmp")) .expect("ok");
+        let text = fake.read_text_file(Path::new("/tmp")).expect("ok");
         let list = fake.list_directory(Path::new("/tmp")).expect("ok");
         fake.write_text_file(Path::new("/tmp"), "x").expect("ok");
         assert_eq!(text, "ok");

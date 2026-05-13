@@ -9,9 +9,9 @@ use std::{
 };
 
 use devil_protocol::{
-    CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityDenial, CapabilityGrant,
-    CapabilityId, CapabilityNamespace, CapabilityRequest, CapabilityResponse, CorrelationId,
-    PrincipalId, WorkspaceTrustState,
+    CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityDenial,
+    CapabilityGrant, CapabilityId, CapabilityNamespace, CapabilityRequest, CapabilityResponse,
+    CorrelationId, PrincipalId, WorkspaceTrustState,
 };
 use thiserror::Error;
 
@@ -63,7 +63,11 @@ pub struct PathPolicy {
 impl PathPolicy {
     /// Evaluates whether `path` can be used for provided access mode.
     pub fn can_access(&self, path: &str, access: PathAccess) -> bool {
-        if self.blocked_roots.iter().any(|prefix| path.starts_with(prefix)) {
+        if self
+            .blocked_roots
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+        {
             return false;
         }
 
@@ -224,7 +228,8 @@ impl Default for PluginCapabilityPolicy {
     fn default() -> Self {
         Self {
             allowed: HashMap::from([(
-                "plugin".to_string(), HashSet::from(["read".to_string(), "command".to_string()]),
+                "plugin".to_string(),
+                HashSet::from(["read".to_string(), "command".to_string()]),
             )]),
             namespace_required: true,
             allow_in_untrusted_workspace: false,
@@ -463,7 +468,9 @@ impl DenyByDefaultBroker {
                 && (self.policy.plugin_policy.allowed.is_empty() && !stripped.is_empty())
             {
                 SecurityDecision::deny("plugin namespace policy denied")
-            } else if !self.policy.plugin_policy.allow_in_untrusted_workspace && trust != TrustState::Trusted {
+            } else if !self.policy.plugin_policy.allow_in_untrusted_workspace
+                && trust != TrustState::Trusted
+            {
                 SecurityDecision::deny("plugin capability denied for untrusted workspace")
             } else {
                 SecurityDecision::allow()
@@ -472,10 +479,12 @@ impl DenyByDefaultBroker {
 
         if let Some(rest) = capability.strip_prefix("fs.") {
             return if rest == "write" {
-                if self.policy.file_write_policy.deny_when_untrusted && trust != TrustState::Trusted {
+                if self.policy.file_write_policy.deny_when_untrusted && trust != TrustState::Trusted
+                {
                     SecurityDecision::deny("file write denied for untrusted workspace")
                 } else if let Some(target_path) = path {
-                    if !self.policy
+                    if !self
+                        .policy
                         .path_policy
                         .can_access(target_path, PathAccess::Write)
                     {
@@ -541,15 +550,20 @@ impl DenyByDefaultBroker {
 
         if let Some(rest) = capability.strip_prefix("cmd.") {
             let class = self.policy.command_taxonomy.classify(rest);
-            if matches!(class, CommandClass::Mutate | CommandClass::Terminal | CommandClass::Network)
-                && trust != TrustState::Trusted
+            if matches!(
+                class,
+                CommandClass::Mutate | CommandClass::Terminal | CommandClass::Network
+            ) && trust != TrustState::Trusted
             {
                 SecurityDecision::deny(format!("command {rest} denied for untrusted workspace"))
             } else {
                 SecurityDecision::allow()
             }
         } else {
-            SecurityDecision::deny(format!("capability {} denied by deny-by-default", capability))
+            SecurityDecision::deny(format!(
+                "capability {} denied by deny-by-default",
+                capability
+            ))
         }
     }
 
@@ -559,7 +573,10 @@ impl DenyByDefaultBroker {
 }
 
 impl CapabilityBrokerPort for DenyByDefaultBroker {
-    fn handle(&self, request: CapabilityRequest) -> devil_protocol::ProtocolResult<CapabilityResponse> {
+    fn handle(
+        &self,
+        request: CapabilityRequest,
+    ) -> devil_protocol::ProtocolResult<CapabilityResponse> {
         let mut owned = self.clone();
 
         match request {
@@ -697,7 +714,9 @@ mod tests {
             .expect("decision");
 
         match response {
-            CapabilityResponse::Decision(_) | CapabilityResponse::Granted(_) | CapabilityResponse::Denied(_) => {}
+            CapabilityResponse::Decision(_)
+            | CapabilityResponse::Granted(_)
+            | CapabilityResponse::Denied(_) => {}
         }
     }
 }

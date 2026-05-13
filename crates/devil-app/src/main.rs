@@ -1,8 +1,8 @@
 //! Devil IDE desktop application entry point.
 
 use std::env;
-use std::path::{Path, PathBuf};
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -66,7 +66,11 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| String::new());
 
     let project_info = vfs.resolve_project_for_file(&normalized_path);
-    let editor = EditorSession::open(normalized_path.to_string_lossy(), project_info, initial_text);
+    let editor = EditorSession::open(
+        normalized_path.to_string_lossy(),
+        project_info,
+        initial_text,
+    );
     let mut shell = Shell::new(shell_title(), editor);
 
     let mut input = String::new();
@@ -123,7 +127,8 @@ mod tests {
         vfs.write_file_text(&target, updated)
             .expect("composition should write via platform fs service");
 
-        let on_disk = std::fs::read_to_string(&target).expect("writing via native fs should persist");
+        let on_disk =
+            std::fs::read_to_string(&target).expect("writing via native fs should persist");
         assert_eq!(on_disk, updated);
 
         let _ = std::fs::remove_file(&target);

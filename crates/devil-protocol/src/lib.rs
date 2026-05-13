@@ -713,10 +713,14 @@ impl ProposalVersionPreconditions {
         {
             return true;
         }
-        if let Some(expected) = self.snapshot_id && expected != context.snapshot_id {
+        if let Some(expected) = self.snapshot_id
+            && expected != context.snapshot_id
+        {
             return true;
         }
-        if let Some(expected) = self.generation && expected != context.generation {
+        if let Some(expected) = self.generation
+            && expected != context.generation
+        {
             return true;
         }
 
@@ -2156,14 +2160,18 @@ mod tests {
         let response = StorageRepositoryResponse::WorkspaceConfig(Some(WorkspaceConfigSnapshot {
             workspace_id: WorkspaceId(4),
             root_path: CanonicalPath("/project".to_string()),
-            merged: HashMap::from([("editor.trim_trailing_whitespace".to_string(), "true".to_string())]),
+            merged: HashMap::from([(
+                "editor.trim_trailing_whitespace".to_string(),
+                "true".to_string(),
+            )]),
             trust_state: WorkspaceTrustState::Trusted,
             captured_at: TimestampMillis(77),
             schema_version: "v1".to_string(),
         }));
 
         let response_text = serde_json::to_string_pretty(&response).unwrap();
-        let decoded_response: StorageRepositoryResponse = serde_json::from_str(&response_text).unwrap();
+        let decoded_response: StorageRepositoryResponse =
+            serde_json::from_str(&response_text).unwrap();
 
         match decoded_response {
             StorageRepositoryResponse::WorkspaceConfig(Some(value)) => {
@@ -2298,7 +2306,9 @@ mod tests {
                         payload: serde_json::json!({"ok": true}),
                     },
                 }),
-                s.handle(StorageRepositoryRequest::ReadWorkspaceConfig(WorkspaceId(1))),
+                s.handle(StorageRepositoryRequest::ReadWorkspaceConfig(WorkspaceId(
+                    1,
+                ))),
             );
         }
 

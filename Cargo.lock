@@ -193,6 +193,8 @@ dependencies = [
  "devil-editor",
  "devil-platform",
  "devil-protocol",
+ "devil-security",
+ "devil-storage",
  "devil-ui",
 ]
 
@@ -257,6 +259,8 @@ version = "0.1.0"
 dependencies = [
  "devil-platform",
  "devil-protocol",
+ "devil-security",
+ "devil-storage",
  "thiserror 2.0.18",
 ]
 
@@ -283,6 +287,7 @@ name = "devil-storage"
 version = "0.1.0"
 dependencies = [
  "devil-protocol",
+ "devil-security",
  "thiserror 2.0.18",
 ]
 
