@@ -205,6 +205,15 @@ pub struct CausalityId(pub Uuid);
 #[serde(transparent)]
 pub struct EventId(pub Uuid);
 
+/// Stable fingerprint for disk-backed file content or metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileFingerprint {
+    /// Fingerprint algorithm or provenance label.
+    pub algorithm: String,
+    /// Fingerprint value emitted by the producing subsystem.
+    pub value: String,
+}
+
 /// Coordinate encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TextCoordinateEncoding {
@@ -295,6 +304,73 @@ impl TextRange {
             None
         }
     }
+}
+
+/// Protocol-level text coordinate independent of editor internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TextCoordinate {
+    /// Zero-based line index.
+    pub line: u32,
+    /// Zero-based character offset within the line.
+    pub character: u32,
+    /// Optional UTF-8 byte offset in the snapshot.
+    pub byte_offset: Option<u64>,
+    /// Optional UTF-16 code-unit offset in the snapshot.
+    pub utf16_offset: Option<u64>,
+}
+
+/// Protocol-level text range independent of editor internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProtocolTextRange {
+    /// Inclusive start coordinate.
+    pub start: TextCoordinate,
+    /// Exclusive end coordinate.
+    pub end: TextCoordinate,
+}
+
+/// Pixel dimensions for viewport projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ViewportDimensions {
+    /// Viewport width in physical pixels.
+    pub width_px: u32,
+    /// Viewport height in physical pixels.
+    pub height_px: u32,
+}
+
+/// Scroll offsets for viewport projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ViewportScroll {
+    /// Top visible line index.
+    pub top_line: u32,
+    /// Leftmost visible column.
+    pub left_column: u32,
+}
+
+/// Protocol-level viewport projection for later UI rendering contracts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewportProjection {
+    /// Owning workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Projected buffer identifier.
+    pub buffer_id: BufferId,
+    /// Optional file identifier when the buffer is file-backed.
+    pub file_id: Option<FileId>,
+    /// Snapshot used to produce this projection.
+    pub snapshot_id: SnapshotId,
+    /// Buffer version used to produce this projection.
+    pub buffer_version: BufferVersion,
+    /// Visible text range in snapshot coordinates.
+    pub visible_range: ProtocolTextRange,
+    /// Selection ranges in snapshot coordinates.
+    pub selections: Vec<ProtocolTextRange>,
+    /// Primary cursor coordinate.
+    pub cursor: TextCoordinate,
+    /// Scroll offsets.
+    pub scroll: ViewportScroll,
+    /// Viewport dimensions.
+    pub dimensions: ViewportDimensions,
+    /// Viewport projection schema version.
+    pub schema_version: u16,
 }
 
 // -----------------------------------------------------------------------------
@@ -395,6 +471,12 @@ pub enum FileKind {
 pub struct FileMetadata {
     /// Canonical path.
     pub canonical_path: CanonicalPath,
+    /// Stable file identifier when metadata is persisted by a workspace authority.
+    #[serde(default)]
+    pub file_id: Option<FileId>,
+    /// Workspace owner when metadata is scoped to an open workspace.
+    #[serde(default)]
+    pub workspace_id: Option<WorkspaceId>,
     /// File kind.
     pub kind: FileKind,
     /// Size in bytes.
@@ -407,6 +489,18 @@ pub struct FileMetadata {
     pub permissions: Option<String>,
     /// Stable hash if available.
     pub hash: Option<String>,
+    /// Stable fingerprint if available.
+    #[serde(default)]
+    pub fingerprint: Option<FileFingerprint>,
+    /// File content version associated with this metadata, when known.
+    #[serde(default)]
+    pub content_version: Option<FileContentVersion>,
+    /// Workspace generation associated with this metadata, when known.
+    #[serde(default)]
+    pub workspace_generation: Option<WorkspaceGeneration>,
+    /// Metadata DTO schema version.
+    #[serde(default)]
+    pub schema_version: u16,
 }
 
 /// Tree node.
@@ -499,9 +593,87 @@ pub struct WorkspaceConfigSnapshot {
     pub schema_version: String,
 }
 
-/// Conflict state between disk and buffer.
+/// Protocol diagnostic severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProtocolDiagnosticSeverity {
+    /// Error diagnostic.
+    Error,
+    /// Warning diagnostic.
+    Warning,
+    /// Informational diagnostic.
+    Info,
+    /// Hint diagnostic.
+    Hint,
+}
+
+/// Structured protocol diagnostic shared by proposal, conflict, and audit DTOs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileConflictState {
+pub struct ProtocolDiagnostic {
+    /// Stable diagnostic code.
+    pub code: String,
+    /// Human-readable diagnostic message.
+    pub message: String,
+    /// Diagnostic severity.
+    pub severity: ProtocolDiagnosticSeverity,
+    /// Optional related path.
+    pub path: Option<CanonicalPath>,
+    /// Optional related text range.
+    pub range: Option<ProtocolTextRange>,
+}
+
+/// Typed conflict/save state for file-backed buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileConflictLifecycleState {
+    /// Buffer and disk are clean relative to the last acknowledged fingerprint.
+    Clean,
+    /// Buffer has unpersisted changes.
+    Dirty,
+    /// Save is currently in progress.
+    Saving,
+    /// A save attempt failed.
+    SaveFailed,
+    /// Disk changed while the buffer is clean.
+    DiskChangedClean,
+    /// Disk and buffer both changed and require conflict handling.
+    ConflictDirty,
+    /// Reload is available for a disk-changed buffer.
+    ReloadAvailable,
+    /// Keep-both resolution is pending.
+    KeepBothPending,
+    /// Compare resolution is pending.
+    ComparePending,
+}
+
+/// Typed reason for a conflict or save-state transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileConflictReason {
+    /// No conflict reason applies.
+    None,
+    /// Buffer contains unsaved changes.
+    BufferDirty,
+    /// Save is already in progress.
+    SaveInProgress,
+    /// Previous save attempt failed.
+    SaveFailed,
+    /// Disk fingerprint changed from the expected fingerprint.
+    DiskFingerprintChanged,
+    /// File disappeared from disk.
+    FileDeletedOnDisk,
+    /// File appeared on disk while a save was pending.
+    FileCreatedOnDisk,
+    /// Required metadata was unavailable.
+    MetadataUnavailable,
+    /// User requested reload resolution.
+    UserRequestedReload,
+    /// User requested keep-both resolution.
+    UserRequestedKeepBoth,
+    /// User requested compare resolution.
+    UserRequestedCompare,
+}
+
+/// Structured context for file conflict and save-state DTOs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileConflictContext {
     /// Workspace identifier.
     pub workspace_id: WorkspaceId,
     /// File identity.
@@ -512,8 +684,27 @@ pub struct FileConflictState {
     pub file_content_version: FileContentVersion,
     /// Snapshot id.
     pub snapshot_id: SnapshotId,
-    /// Conflict message.
-    pub reason: String,
+    /// Fingerprint observed on disk.
+    pub disk_fingerprint: Option<FileFingerprint>,
+    /// Fingerprint expected by the caller or proposal.
+    pub expected_fingerprint: Option<FileFingerprint>,
+    /// Typed conflict reason.
+    pub reason: FileConflictReason,
+    /// Diagnostics associated with this context.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Conflict state between disk and buffer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileConflictState {
+    /// Typed lifecycle state.
+    pub state: FileConflictLifecycleState,
+    /// Structured conflict context.
+    pub context: FileConflictContext,
+    /// State-level diagnostics.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Conflict DTO schema version.
+    pub schema_version: u16,
 }
 
 // -----------------------------------------------------------------------------
@@ -546,6 +737,149 @@ pub struct BufferLifecycle {
     pub kind: BufferLifecycleKind,
     /// Correlation id.
     pub correlation_id: CorrelationId,
+}
+
+/// Request to open a fully resolved text buffer in the editor authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorOpenBufferRequest {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifier supplied by workspace authority.
+    pub file_id: FileId,
+    /// Canonical file path for display and file-to-buffer binding.
+    pub path: CanonicalPath,
+    /// UTF-8 text used to initialize the buffer.
+    pub initial_text: String,
+    /// Correlation id for the open command.
+    pub correlation_id: CorrelationId,
+}
+
+/// Editor-emitted save request DTO used by proposal/workspace save orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorSaveRequest {
+    /// Request id.
+    pub request_id: Uuid,
+    /// Workspace id.
+    pub workspace_id: WorkspaceId,
+    /// Buffer id.
+    pub buffer_id: BufferId,
+    /// File id.
+    pub file_id: FileId,
+    /// Snapshot id to persist.
+    pub snapshot_id: SnapshotId,
+    /// Buffer version associated with snapshot.
+    pub buffer_version: BufferVersion,
+    /// Content hash for compare-and-save preconditions.
+    pub content_hash: String,
+    /// UTF-8 payload byte length for proposal capability checks.
+    pub payload_byte_len: u64,
+    /// UTF-8 text payload to persist through workspace/proposal ports.
+    pub text: String,
+    /// Emission timestamp.
+    pub requested_at: TimestampMillis,
+    /// Caller or generated correlation id.
+    pub correlation_id: CorrelationId,
+}
+
+/// Typed editor acknowledgement for a save request routed through the editor port.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EditorSaveOutcome {
+    /// Save applied successfully.
+    Saved,
+    /// Proposal became stale before apply.
+    Stale {
+        /// Optional conflict state projected from the stale response.
+        conflict: Option<FileConflictState>,
+        /// Diagnostics recorded for later UI projection.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+    /// Proposal encountered a disk/buffer conflict.
+    Conflict {
+        /// Queryable conflict state.
+        conflict: FileConflictState,
+    },
+    /// Save was denied by policy.
+    Denied {
+        /// Diagnostics recorded for later UI projection.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+    /// Save failed while applying or validating.
+    Failed {
+        /// Diagnostics recorded for later UI projection.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+}
+
+/// Save acknowledgement request routed back into the editor authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorSaveAcknowledgement {
+    /// Save request being acknowledged.
+    pub request_id: Uuid,
+    /// Typed save outcome.
+    pub outcome: EditorSaveOutcome,
+}
+
+/// Request to apply a text edit batch to an existing editor buffer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorApplyTransactionRequest {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Ordered edit batch.
+    pub edits: EditBatch,
+    /// Source of the transaction.
+    pub source: TransactionSource,
+    /// Optional undo group.
+    pub undo_group_id: Option<Uuid>,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+}
+
+/// Request to build a viewport projection for a buffer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EditorViewportRequest {
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// Scroll offsets.
+    pub scroll: ViewportScroll,
+    /// Viewport dimensions.
+    pub dimensions: ViewportDimensions,
+}
+
+/// Protocol buffer metadata projected from the editor authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorBufferMetadata {
+    /// Owning workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Canonical path for display.
+    pub path: CanonicalPath,
+    /// Current snapshot identifier.
+    pub snapshot_id: SnapshotId,
+    /// Current buffer version.
+    pub buffer_version: BufferVersion,
+    /// Current byte length.
+    pub byte_len: u64,
+    /// Current content hash.
+    pub content_hash: Option<String>,
+    /// Whether the buffer has unsaved changes.
+    pub dirty: bool,
+    /// Current save/conflict lifecycle state.
+    pub save_state: FileConflictLifecycleState,
+    /// Latest conflict state when one is active.
+    pub conflict: Option<FileConflictState>,
+    /// Number of undo entries retained for the buffer.
+    pub undo_len: usize,
+    /// Number of redo entries retained for the buffer.
+    pub redo_len: usize,
+    /// Metadata DTO schema version.
+    pub schema_version: u16,
 }
 
 /// Snapshot descriptor.
@@ -720,27 +1054,52 @@ pub struct WorkspaceEditProposal {
 /// Proposal preconditions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalVersionPreconditions {
-    /// File version.
+    /// Legacy file content version alias.
     pub file_version: Option<FileContentVersion>,
     /// Buffer version.
     pub buffer_version: Option<BufferVersion>,
     /// Snapshot id.
     pub snapshot_id: Option<SnapshotId>,
-    /// Workspace generation.
+    /// Legacy workspace generation alias.
     pub generation: Option<WorkspaceGeneration>,
+    /// Expected file content version.
+    #[serde(default)]
+    pub file_content_version: Option<FileContentVersion>,
+    /// Expected workspace generation.
+    #[serde(default)]
+    pub workspace_generation: Option<WorkspaceGeneration>,
+    /// Expected disk fingerprint.
+    #[serde(default)]
+    pub expected_fingerprint: Option<FileFingerprint>,
+    /// Expected file length when available.
+    #[serde(default)]
+    pub expected_file_length: Option<u64>,
+    /// Expected modified timestamp when available.
+    #[serde(default)]
+    pub expected_modified_at: Option<TimestampMillis>,
 }
 
 /// Proposal versioning context.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionContext {
-    /// File version.
+    /// Legacy file content version alias.
     pub file_version: FileContentVersion,
     /// Buffer version.
     pub buffer_version: BufferVersion,
     /// Snapshot id.
     pub snapshot_id: SnapshotId,
-    /// Workspace generation.
+    /// Legacy workspace generation alias.
     pub generation: WorkspaceGeneration,
+    /// Current file content version.
+    pub file_content_version: FileContentVersion,
+    /// Current workspace generation.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Current disk fingerprint when available.
+    pub fingerprint: Option<FileFingerprint>,
+    /// Current file length when available.
+    pub file_length: Option<u64>,
+    /// Current modified timestamp when available.
+    pub modified_at: Option<TimestampMillis>,
 }
 
 impl ProposalVersionPreconditions {
@@ -763,6 +1122,31 @@ impl ProposalVersionPreconditions {
         }
         if let Some(expected) = self.generation
             && expected != context.generation
+        {
+            return true;
+        }
+        if let Some(expected) = self.file_content_version
+            && expected != context.file_content_version
+        {
+            return true;
+        }
+        if let Some(expected) = self.workspace_generation
+            && expected != context.workspace_generation
+        {
+            return true;
+        }
+        if let Some(expected) = &self.expected_fingerprint
+            && context.fingerprint.as_ref() != Some(expected)
+        {
+            return true;
+        }
+        if let Some(expected) = self.expected_file_length
+            && context.file_length != Some(expected)
+        {
+            return true;
+        }
+        if let Some(expected) = self.expected_modified_at
+            && context.modified_at != Some(expected)
         {
             return true;
         }
@@ -870,13 +1254,80 @@ pub struct RenameFileProposal {
     pub destination: CanonicalPath,
 }
 
+/// User or system intent behind a save proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SaveIntent {
+    /// Explicit user-invoked save.
+    Manual,
+    /// Automatic save.
+    AutoSave,
+    /// Save requested after format-on-save.
+    FormatOnSave,
+    /// Save requested during shutdown or workspace close.
+    Shutdown,
+    /// Save requested by an extension, command, or automation.
+    ExternalCommand,
+}
+
+/// Policy for handling conflicts encountered by a save proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SaveConflictPolicy {
+    /// Reject the save when disk state differs from the expected fingerprint.
+    RejectIfChanged,
+    /// Prompt the user before resolving the conflict.
+    PromptUser,
+    /// Reload from disk before attempting a save.
+    ReloadThenSave,
+    /// Preserve both buffer and disk content.
+    KeepBoth,
+    /// Open a compare flow before deciding.
+    CompareBeforeSaving,
+}
+
+/// Trust and decision context associated with privileged proposal creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustDecisionContext {
+    /// Workspace trust state observed for this proposal.
+    pub workspace_trust_state: WorkspaceTrustState,
+    /// Capability decision id when a broker decision exists.
+    pub decision_id: Option<CapabilityDecisionId>,
+    /// Decision timestamp when available.
+    pub decided_at: Option<TimestampMillis>,
+}
+
 /// Save proposal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveFileProposal {
     /// File identity.
     pub file: FileIdentity,
+    /// Buffer identifier being saved.
+    pub buffer_id: BufferId,
+    /// File identifier being saved.
+    pub file_id: FileId,
     /// Snapshot id.
     pub snapshot_id: SnapshotId,
+    /// Buffer version being saved.
+    pub buffer_version: BufferVersion,
+    /// File content version expected by the save.
+    pub file_content_version: FileContentVersion,
+    /// Workspace generation expected by the save.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Expected disk fingerprint before writing.
+    pub expected_fingerprint: Option<FileFingerprint>,
+    /// Save intent.
+    pub save_intent: SaveIntent,
+    /// Conflict handling policy.
+    pub conflict_policy: SaveConflictPolicy,
+    /// Trust decision context.
+    pub trust_decision: TrustDecisionContext,
+    /// Required capability for this save.
+    pub required_capability: CapabilityId,
+    /// Principal requesting the save.
+    pub principal: PrincipalId,
+    /// Correlation id for this save proposal.
+    pub correlation_id: CorrelationId,
+    /// Proposal diagnostics.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
 }
 
 /// Format proposal.
@@ -912,6 +1363,199 @@ pub struct TerminalCommandProposal {
     pub cwd: Option<CanonicalPath>,
     /// Env vars.
     pub env: HashMap<String, String>,
+}
+
+/// Discriminant for proposal payload summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalPayloadKind {
+    /// Text edit payload.
+    TextEdit,
+    /// Create-file payload.
+    CreateFile,
+    /// Delete-file payload.
+    DeleteFile,
+    /// Rename-file payload.
+    RenameFile,
+    /// Save-file payload.
+    SaveFile,
+    /// Format-file payload.
+    FormatFile,
+    /// Code-action payload.
+    CodeAction,
+    /// Terminal-command payload.
+    TerminalCommand,
+}
+
+/// Proposal lifecycle state suitable for response and audit records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalLifecycleState {
+    /// Proposal was created.
+    Created,
+    /// Proposal was validated.
+    Validated,
+    /// Proposal preview was produced.
+    Previewed,
+    /// Proposal was approved.
+    Approved,
+    /// Proposal was rejected by a user or validation flow.
+    Rejected,
+    /// Proposal was applied.
+    Applied,
+    /// Proposal was denied by policy.
+    Denied,
+    /// Proposal failed while processing.
+    Failed,
+    /// Proposal changes were rolled back.
+    RolledBack,
+    /// Proposal became stale before application.
+    Stale,
+    /// Proposal encountered a file conflict.
+    Conflict,
+}
+
+/// Typed reason for proposal rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalRejectionReason {
+    /// User rejected the proposal.
+    UserRejected,
+    /// Validation rejected the proposal.
+    ValidationFailed,
+    /// Proposal expired.
+    Expired,
+    /// Proposal kind is unsupported.
+    Unsupported,
+    /// Proposal was cancelled.
+    Cancelled,
+}
+
+/// Typed reason for proposal denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalDenialReason {
+    /// Required capability was denied.
+    CapabilityDenied,
+    /// Workspace was not trusted.
+    WorkspaceUntrusted,
+    /// Principal was unauthorized.
+    PrincipalUnauthorized,
+    /// Policy denied the proposal.
+    PolicyDenied,
+}
+
+/// Typed reason for proposal failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalFailureReason {
+    /// Apply operation failed.
+    ApplyFailed,
+    /// Rollback operation failed.
+    RollbackFailed,
+    /// Audit or metadata storage failed.
+    StorageFailed,
+    /// Internal proposal engine failure.
+    InternalError,
+}
+
+/// Typed reason for proposal rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalRollbackReason {
+    /// Rollback followed an apply failure.
+    ApplyFailed,
+    /// Rollback was requested by a user.
+    UserRequested,
+    /// Rollback was requested by policy.
+    PolicyRequested,
+    /// Rollback was requested by the system.
+    SystemRequested,
+}
+
+/// Typed reason for proposal staleness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalStaleReason {
+    /// File content version mismatch.
+    FileContentVersionMismatch,
+    /// Buffer version mismatch.
+    BufferVersionMismatch,
+    /// Snapshot id mismatch.
+    SnapshotMismatch,
+    /// Workspace generation mismatch.
+    WorkspaceGenerationMismatch,
+    /// Disk fingerprint mismatch.
+    FingerprintMismatch,
+    /// File length mismatch.
+    FileLengthMismatch,
+    /// Modified timestamp mismatch.
+    ModifiedTimestampMismatch,
+}
+
+/// Common lifecycle transition metadata for proposal responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalLifecycleTransition {
+    /// Proposal identifier.
+    pub proposal_id: ProposalId,
+    /// Lifecycle state.
+    pub lifecycle_state: ProposalLifecycleState,
+    /// Transition timestamp.
+    pub timestamp: TimestampMillis,
+    /// Principal responsible for the transition.
+    pub principal: PrincipalId,
+    /// Capability associated with the proposal.
+    pub capability: CapabilityId,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Transition diagnostics.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Structured context for stale proposal responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalStaleContext {
+    /// Stale reason.
+    pub reason: ProposalStaleReason,
+    /// Expected preconditions.
+    pub expected: ProposalVersionPreconditions,
+    /// Actual version context when available.
+    pub actual: Option<VersionContext>,
+}
+
+/// Compact summary of a proposal payload for audit persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalPayloadSummary {
+    /// Payload kind.
+    pub kind: ProposalPayloadKind,
+    /// Affected file identifiers.
+    pub affected_files: Vec<FileId>,
+    /// Optional display title.
+    pub title: Option<String>,
+    /// Optional payload byte count.
+    pub byte_count: Option<u64>,
+}
+
+/// Proposal audit record suitable for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalAuditRecord {
+    /// Proposal identifier.
+    pub proposal_id: ProposalId,
+    /// Lifecycle state.
+    pub lifecycle_state: ProposalLifecycleState,
+    /// Audit timestamp.
+    pub timestamp: TimestampMillis,
+    /// Principal associated with the transition.
+    pub principal: PrincipalId,
+    /// Capability associated with the proposal.
+    pub capability: CapabilityId,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Payload summary.
+    pub payload_summary: ProposalPayloadSummary,
+    /// Diagnostics captured for the transition.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Redaction hints for persisted fields.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Audit DTO schema version.
+    pub schema_version: u16,
 }
 
 // -----------------------------------------------------------------------------
@@ -1360,6 +2004,53 @@ pub struct CapabilityDecision {
     pub reason: Option<String>,
 }
 
+/// Command class supplied to capability policies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityCommandClass {
+    /// Read-only command.
+    Read,
+    /// File or workspace mutation command.
+    Write,
+    /// Terminal command.
+    Terminal,
+    /// Network-capable command.
+    Network,
+    /// Language-server command.
+    LanguageServer,
+    /// Plugin command.
+    Plugin,
+    /// Other command class.
+    Other,
+}
+
+/// Network target supplied to capability policies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkTarget {
+    /// Network scheme or protocol.
+    pub scheme: String,
+    /// Target host.
+    pub host: String,
+    /// Target port when known.
+    pub port: Option<u16>,
+}
+
+/// Additional context supplied with capability requests.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CapabilityRequestContext {
+    /// Number of bytes a write request intends to write.
+    pub write_byte_count: Option<u64>,
+    /// Command binary being launched or inspected.
+    pub command_binary: Option<String>,
+    /// Command class for policy decisions.
+    pub command_class: Option<CapabilityCommandClass>,
+    /// Network target for network-scoped policy decisions.
+    pub network_target: Option<NetworkTarget>,
+    /// Plugin namespace for plugin-scoped policy decisions.
+    pub plugin_namespace: Option<CapabilityNamespace>,
+    /// Language-server binary for LSP-scoped policy decisions.
+    pub lsp_server_binary: Option<String>,
+}
+
 /// Plugin action proposal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginActionProposal {
@@ -1496,6 +2187,8 @@ pub enum WorkspaceRequest {
     },
     /// Read config.
     ReadConfig(WorkspaceId),
+    /// Read current workspace tree snapshot.
+    ReadTree(WorkspaceId),
     /// Apply tree delta.
     ApplyTreeDelta(FileTreeDelta),
 }
@@ -1527,8 +2220,27 @@ pub enum EditorRequest {
         /// Path.
         path: CanonicalPath,
     },
+    /// Open a buffer with workspace-resolved identity and text.
+    OpenBufferText(EditorOpenBufferRequest),
     /// Apply transaction.
     ApplyTransaction(TextTransactionDescriptor),
+    /// Apply a concrete edit batch as an editor transaction.
+    ApplyEdit(EditorApplyTransactionRequest),
+    /// Request a save DTO for a buffer.
+    RequestSave {
+        /// Buffer identifier.
+        buffer_id: BufferId,
+        /// Correlation id.
+        correlation_id: CorrelationId,
+    },
+    /// Acknowledge a pending save request.
+    AcknowledgeSave(EditorSaveAcknowledgement),
+    /// Build a viewport projection.
+    Viewport(EditorViewportRequest),
+    /// Query buffer metadata.
+    BufferMetadata(BufferId),
+    /// Query dirty/conflict/undo state for a buffer.
+    BufferState(BufferId),
     /// Completion.
     Completion(CompletionRequest),
     /// Snapshot descriptor.
@@ -1546,6 +2258,19 @@ pub enum EditorResponse {
     BufferClosed(CorrelationId),
     /// Transaction.
     Transaction(TextTransactionDescriptor),
+    /// Save request emitted by editor authority.
+    SaveRequested(EditorSaveRequest),
+    /// Save acknowledgement was accepted for the buffer.
+    SaveAcknowledged {
+        /// Buffer identifier for the acknowledged save, when still open.
+        buffer_id: Option<BufferId>,
+    },
+    /// Viewport projection.
+    Viewport(ViewportProjection),
+    /// Buffer metadata.
+    BufferMetadata(EditorBufferMetadata),
+    /// Buffer dirty/conflict/undo state.
+    BufferState(EditorBufferMetadata),
     /// Completion.
     Completion(LspCompletionResponse),
     /// Snapshot.
@@ -1568,18 +2293,62 @@ pub enum ProposalRequest {
 /// Proposal response envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProposalResponse {
-    /// Validation result.
-    Valid(ProposalId),
-    /// Preview result.
-    Preview(Box<WorkspaceProposal>),
-    /// Applied result.
-    Applied(ProposalId),
-    /// Denied.
+    /// Proposal-created result.
+    Created(ProposalLifecycleTransition),
+    /// Proposal-validated result.
+    Validated(ProposalLifecycleTransition),
+    /// Proposal-previewed result.
+    Previewed {
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Previewed proposal.
+        proposal: Box<WorkspaceProposal>,
+    },
+    /// Proposal-approved result.
+    Approved(ProposalLifecycleTransition),
+    /// Proposal-rejected result.
+    Rejected {
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Typed rejection reason.
+        reason: ProposalRejectionReason,
+    },
+    /// Proposal-applied result.
+    Applied(ProposalLifecycleTransition),
+    /// Proposal-denied result.
     Denied {
-        /// Proposal id.
-        proposal_id: ProposalId,
-        /// Reason.
-        reason: String,
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Typed denial reason.
+        reason: ProposalDenialReason,
+    },
+    /// Proposal-failed result.
+    Failed {
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Typed failure reason.
+        reason: ProposalFailureReason,
+    },
+    /// Proposal-rolled-back result.
+    RolledBack {
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Typed rollback reason.
+        reason: ProposalRollbackReason,
+    },
+    /// Proposal-stale result.
+    Stale {
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Stale context.
+        stale: ProposalStaleContext,
+    },
+    /// Proposal-conflict result.
+    Conflict {
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Conflict context.
+        conflict: FileConflictState,
     },
 }
 
@@ -1702,6 +2471,9 @@ pub enum CapabilityRequest {
         target_path: Option<CanonicalPath>,
         /// Optional prior decision id for continuation or replay contexts.
         decision_id: Option<CapabilityDecisionId>,
+        /// Additional policy context.
+        #[serde(default)]
+        context: CapabilityRequestContext,
         /// Correlation id.
         correlation_id: CorrelationId,
     },
@@ -1799,6 +2571,169 @@ pub struct EventSinkRequest {
     pub envelope: EventEnvelope,
 }
 
+/// Persisted workspace trust record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustRecord {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Principal identifier.
+    pub principal_id: PrincipalId,
+    /// Trust state.
+    pub trust_state: WorkspaceTrustState,
+    /// Optional decision id that established the trust state.
+    pub decision_id: Option<CapabilityDecisionId>,
+    /// Correlation id associated with the trust decision.
+    pub correlation_id: CorrelationId,
+    /// Record timestamp.
+    pub recorded_at: TimestampMillis,
+    /// Trust record schema version.
+    pub schema_version: u16,
+}
+
+/// Persisted session tab record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTab {
+    /// Stable tab identifier.
+    pub tab_id: String,
+    /// Buffer identifier when the tab is backed by an open buffer.
+    pub buffer_id: Option<BufferId>,
+    /// File identifier when the tab is file-backed.
+    pub file_id: Option<FileId>,
+    /// Canonical path when available.
+    pub path: Option<CanonicalPath>,
+    /// Display title.
+    pub title: String,
+    /// Whether the tab is pinned.
+    pub pinned: bool,
+    /// Whether the tab is a preview tab.
+    pub preview: bool,
+    /// Whether the tab has unsaved changes.
+    pub dirty: bool,
+}
+
+/// Persisted session tab group record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTabGroup {
+    /// Stable group identifier.
+    pub group_id: String,
+    /// Tab identifiers in display order.
+    pub tab_ids: Vec<String>,
+    /// Active tab in this group.
+    pub active_tab_id: Option<String>,
+}
+
+/// Orientation for persisted layout splits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionSplitOrientation {
+    /// Horizontal split.
+    Horizontal,
+    /// Vertical split.
+    Vertical,
+}
+
+/// Persisted layout split record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLayoutSplit {
+    /// Stable split identifier.
+    pub split_id: String,
+    /// Split orientation.
+    pub orientation: SessionSplitOrientation,
+    /// First child group or split identifier.
+    pub first: String,
+    /// Second child group or split identifier.
+    pub second: String,
+    /// Ratio assigned to the first child.
+    pub ratio: f32,
+}
+
+/// Persisted panel visibility and sizing state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPanelState {
+    /// Whether the bottom panel is visible.
+    pub bottom_visible: bool,
+    /// Whether the side panel is visible.
+    pub side_visible: bool,
+    /// Active panel identifier.
+    pub active_panel: Option<String>,
+    /// Bottom panel height in pixels.
+    pub bottom_height_px: Option<u32>,
+    /// Side panel width in pixels.
+    pub side_width_px: Option<u32>,
+}
+
+/// Persisted dirty indicator record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDirtyIndicator {
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// File identifier when available.
+    pub file_id: Option<FileId>,
+    /// Dirty flag.
+    pub dirty: bool,
+    /// Buffer version associated with the dirty flag.
+    pub buffer_version: BufferVersion,
+}
+
+/// Session metadata persisted for workspace restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSessionRecord {
+    /// Session identifier.
+    pub session_id: String,
+    /// Last workspace identifier.
+    pub last_workspace: Option<WorkspaceId>,
+    /// Last workspace path.
+    pub last_workspace_path: Option<CanonicalPath>,
+    /// Open tabs.
+    pub open_tabs: Vec<SessionTab>,
+    /// Active tab identifier.
+    pub active_tab: Option<String>,
+    /// Active buffer identifier.
+    pub active_buffer: Option<BufferId>,
+    /// Tab groups.
+    pub tab_groups: Vec<SessionTabGroup>,
+    /// Layout splits.
+    pub layout_splits: Vec<SessionLayoutSplit>,
+    /// Expanded explorer paths.
+    pub explorer_expansion: Vec<CanonicalPath>,
+    /// Panel state.
+    pub panel_state: SessionPanelState,
+    /// Dirty indicators.
+    pub dirty_indicators: Vec<SessionDirtyIndicator>,
+    /// Last saved timestamp.
+    pub saved_at: TimestampMillis,
+    /// Session DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Durable event metadata record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventMetadataRecord {
+    /// Event identifier.
+    pub event_id: EventId,
+    /// Optional parent event identifier.
+    pub parent_event_id: Option<EventId>,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Event name.
+    pub event: String,
+    /// Workspace identifier.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// Principal identifier.
+    pub principal_id: Option<PrincipalId>,
+    /// Retention label.
+    pub retention: RetentionLabel,
+    /// Redaction hint.
+    pub redaction: RedactionHint,
+    /// Event timestamp.
+    pub occurred_at: TimestampMillis,
+    /// Event metadata schema version.
+    pub schema_version: u16,
+}
+
 /// Storage repository request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageRepositoryRequest {
@@ -1806,10 +2741,34 @@ pub enum StorageRepositoryRequest {
     SaveWorkspaceConfig(WorkspaceConfigSnapshot),
     /// Save file metadata.
     SaveFileMetadata(FileMetadata),
+    /// Save workspace session record.
+    SaveSessionRecord(WorkspaceSessionRecord),
+    /// Save trust record.
+    SaveTrustRecord(TrustRecord),
+    /// Save proposal audit record.
+    SaveProposalAuditRecord(ProposalAuditRecord),
+    /// Save durable event metadata.
+    SaveEventMetadata(EventMetadataRecord),
     /// Read workspace config.
     ReadWorkspaceConfig(WorkspaceId),
     /// Read file metadata.
     ReadFileMetadata(FileId),
+    /// Read workspace session record.
+    ReadSessionRecord {
+        /// Session identifier.
+        session_id: String,
+    },
+    /// Read trust record.
+    ReadTrustRecord {
+        /// Workspace identifier.
+        workspace_id: WorkspaceId,
+        /// Principal identifier.
+        principal_id: PrincipalId,
+    },
+    /// Read proposal audit record.
+    ReadProposalAuditRecord(ProposalId),
+    /// Read durable event metadata.
+    ReadEventMetadata(EventId),
 }
 
 /// Storage repository response.
@@ -1824,6 +2783,14 @@ pub enum StorageRepositoryResponse {
     WorkspaceConfig(Option<WorkspaceConfigSnapshot>),
     /// Metadata.
     FileMetadata(Option<FileMetadata>),
+    /// Session record.
+    SessionRecord(Option<WorkspaceSessionRecord>),
+    /// Trust record.
+    TrustRecord(Option<TrustRecord>),
+    /// Proposal audit record.
+    ProposalAuditRecord(Option<ProposalAuditRecord>),
+    /// Event metadata.
+    EventMetadata(Option<EventMetadataRecord>),
     /// Missing.
     Missing,
 }
@@ -1982,6 +2949,11 @@ mod tests {
                 buffer_version: None,
                 snapshot_id: None,
                 generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
             },
             preview: PreviewSummary {
                 summary: "insert abc".to_string(),
@@ -2022,6 +2994,11 @@ mod tests {
                 buffer_version: Some(BufferVersion(9)),
                 snapshot_id: Some(SnapshotId(3)),
                 generation: Some(WorkspaceGeneration(1)),
+                file_content_version: Some(FileContentVersion(1)),
+                workspace_generation: Some(WorkspaceGeneration(1)),
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
             },
             preview: PreviewSummary {
                 summary: "delete".to_string(),
@@ -2036,6 +3013,11 @@ mod tests {
             buffer_version: BufferVersion(9),
             snapshot_id: SnapshotId(3),
             generation: WorkspaceGeneration(1),
+            file_content_version: FileContentVersion(1),
+            workspace_generation: WorkspaceGeneration(1),
+            fingerprint: None,
+            file_length: None,
+            modified_at: None,
         };
 
         let stale = VersionContext {
@@ -2043,6 +3025,11 @@ mod tests {
             buffer_version: BufferVersion(9),
             snapshot_id: SnapshotId(3),
             generation: WorkspaceGeneration(1),
+            file_content_version: FileContentVersion(2),
+            workspace_generation: WorkspaceGeneration(1),
+            fingerprint: None,
+            file_length: None,
+            modified_at: None,
         };
 
         assert!(!proposal.is_stale(up_to_date));
@@ -2072,6 +3059,11 @@ mod tests {
                 buffer_version: None,
                 snapshot_id: None,
                 generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
             },
             preview: PreviewSummary {
                 summary: "format".to_string(),
@@ -2393,13 +3385,35 @@ mod tests {
                             content_version: FileContentVersion(1),
                             content_hash: None,
                         },
+                        buffer_id: BufferId(1),
+                        file_id: FileId(1),
                         snapshot_id: SnapshotId(1),
+                        buffer_version: BufferVersion(1),
+                        file_content_version: FileContentVersion(1),
+                        workspace_generation: WorkspaceGeneration(1),
+                        expected_fingerprint: None,
+                        save_intent: SaveIntent::Manual,
+                        conflict_policy: SaveConflictPolicy::RejectIfChanged,
+                        trust_decision: TrustDecisionContext {
+                            workspace_trust_state: WorkspaceTrustState::Trusted,
+                            decision_id: None,
+                            decided_at: None,
+                        },
+                        required_capability: CapabilityId("fs.write".to_string()),
+                        principal: PrincipalId("x".to_string()),
+                        correlation_id: CorrelationId(1),
+                        diagnostics: vec![],
                     }),
                     preconditions: ProposalVersionPreconditions {
                         file_version: None,
                         buffer_version: None,
                         snapshot_id: None,
                         generation: None,
+                        file_content_version: None,
+                        workspace_generation: None,
+                        expected_fingerprint: None,
+                        expected_file_length: None,
+                        expected_modified_at: None,
                     },
                     preview: PreviewSummary {
                         summary: "save".to_string(),
@@ -2421,6 +3435,7 @@ mod tests {
                     workspace_trust_state: WorkspaceTrustState::Trusted,
                     target_path: None,
                     decision_id: None,
+                    context: CapabilityRequestContext::default(),
                     correlation_id: CorrelationId(1),
                 }),
                 es.emit(EventSinkRequest {

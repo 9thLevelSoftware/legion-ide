@@ -7,17 +7,30 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use devil_platform::{FileSystemService, PathNormalizationService, PlatformError, WatcherService};
+use devil_observability::{
+    NoopEventSink, conflict_created_event, fallback_denied_event, open_file_read_failure_event,
+    security_denial_event, stale_proposal_rejected_event, watcher_recovery_event,
+};
+use devil_platform::{
+    FileSystemEntryKind, FileSystemMetadata, FileSystemService, PathNormalizationService,
+    PlatformError, WatcherService,
+};
 use devil_protocol::{
-    CanonicalPath, CorrelationId, EventSequence, FileContentVersion, FileId, FileIdentity,
-    FileKind, FileMetadata, FileTreeDelta, FileTreeDeltaOp, FileTreeNode, PrincipalId, ProjectId,
-    ProtocolError, ProtocolResult, SnapshotId, TimestampMillis, WatcherEvent, WatcherEventKind,
-    WorkspaceCloseRequest, WorkspaceClosed, WorkspaceConfigSnapshot, WorkspaceGeneration,
-    WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspaceRequest, WorkspaceResponse,
-    WorkspaceRootId, WorkspaceTrustState,
+    BufferVersion, CanonicalPath, CapabilityId, CausalityId, CorrelationId, EventSequence,
+    EventSinkPort, EventSinkRequest, FileConflictContext, FileConflictLifecycleState,
+    FileConflictReason, FileConflictState, FileContentVersion,
+    FileFingerprint as ProtocolFileFingerprint, FileId, FileIdentity, FileKind, FileMetadata,
+    FileTreeDelta, FileTreeDeltaOp, FileTreeNode, PrincipalId, ProjectId, ProposalDenialReason,
+    ProposalFailureReason, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalResponse, ProposalStaleContext, ProposalStaleReason, ProposalVersionPreconditions,
+    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, SnapshotId,
+    TimestampMillis, WatcherEvent, WatcherEventKind, WorkspaceCloseRequest, WorkspaceClosed,
+    WorkspaceConfigSnapshot, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
+    WorkspaceOpened, WorkspaceRequest, WorkspaceResponse, WorkspaceRootId, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, TrustState};
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Internal filesystem trait alias used by [`WorkspaceActor`] for path-normalization and file-system operations.
 pub trait ProjectFilesystemService:
@@ -51,48 +64,6 @@ fn stable_hash(value: &str) -> u128 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish() as u128
-}
-
-fn platform_error_from_io(
-    operation: impl Into<String>,
-    path: impl Into<PathBuf>,
-    source: std::io::Error,
-) -> PlatformError {
-    let operation = operation.into();
-    let path = path.into();
-
-    match source.kind() {
-        std::io::ErrorKind::PermissionDenied => PlatformError::PermissionDenied { operation, path },
-        std::io::ErrorKind::NotFound => PlatformError::NotFound { operation, path },
-        std::io::ErrorKind::InvalidData => PlatformError::Encoding {
-            operation,
-            path,
-            source,
-        },
-        _ => {
-            let message = source.to_string().to_ascii_lowercase();
-            if message.contains("too many links")
-                || message.contains("symlink")
-                || message.contains("symbolic link")
-                || message.contains("circular")
-                || message.contains("loop")
-            {
-                PlatformError::SymlinkLoop { operation, path }
-            } else if message.contains("filename too long")
-                || message.contains("name too long")
-                || message.contains("path too long")
-                || message.contains("too long")
-            {
-                PlatformError::PathTooLong { operation, path }
-            } else {
-                PlatformError::Io {
-                    operation,
-                    path,
-                    source,
-                }
-            }
-        }
-    }
 }
 
 fn trust_to_protocol(state: TrustState) -> WorkspaceTrustState {
@@ -136,6 +107,99 @@ pub enum WorkspaceError {
 
 type WorkspaceResult<T> = Result<T, WorkspaceError>;
 
+/// Metadata returned with a successful workspace text open.
+#[derive(Debug, Clone)]
+pub struct OpenedFileText {
+    /// File identity captured at open time.
+    pub identity: FileIdentity,
+    /// UTF-8 text loaded from disk, or an explicit safe-new-file empty payload.
+    pub text: String,
+    /// Protocol fingerprint captured for save preconditions.
+    pub fingerprint: ProtocolFileFingerprint,
+    /// File content version captured at open time.
+    pub file_content_version: FileContentVersion,
+    /// Workspace generation captured at open time.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Modified timestamp captured at open time if available.
+    pub modified_at: Option<TimestampMillis>,
+    /// File length captured at open time if available.
+    pub file_length: Option<u64>,
+    /// Whether this open represented explicit create intent for a new file.
+    pub is_new_file: bool,
+}
+
+/// Proposal-context save request accepted by the workspace write pipeline.
+#[derive(Debug, Clone)]
+pub struct WorkspaceSaveRequest {
+    /// Workspace being mutated.
+    pub workspace_id: WorkspaceId,
+    /// Proposal authorizing this write.
+    pub proposal_id: ProposalId,
+    /// Principal requesting the save.
+    pub principal: PrincipalId,
+    /// Required capability.
+    pub required_capability: CapabilityId,
+    /// Expected file identity.
+    pub file_id: FileId,
+    /// Target path.
+    pub path: CanonicalPath,
+    /// Expected disk fingerprint.
+    pub expected_fingerprint: ProtocolFileFingerprint,
+    /// Expected file content version.
+    pub expected_file_content_version: FileContentVersion,
+    /// Expected workspace generation.
+    pub expected_workspace_generation: WorkspaceGeneration,
+    /// Buffer version being saved.
+    pub buffer_version: BufferVersion,
+    /// Snapshot being saved.
+    pub snapshot_id: SnapshotId,
+    /// Payload byte length.
+    pub payload_byte_len: u64,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id linking save/proposal/workspace events.
+    pub causality_id: CausalityId,
+    /// UTF-8 text payload to write.
+    pub text: String,
+}
+
+/// Non-atomic fallback policy for workspace saves.
+///
+/// Track 3 intentionally exposes only the fail-closed policy. Any future fallback variant must add
+/// explicit security approval, immediate fingerprint re-verification, visible fallback response,
+/// and event/audit hook placeholders before use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonAtomicSaveFallbackPolicy {
+    /// Fail closed when atomic replacement fails.
+    Disabled,
+}
+
+/// Successful workspace save metadata.
+#[derive(Debug, Clone)]
+pub struct WorkspaceSaveApplied {
+    /// Updated file identity.
+    pub identity: FileIdentity,
+    /// New disk fingerprint.
+    pub fingerprint: ProtocolFileFingerprint,
+    /// Updated file content version.
+    pub file_content_version: FileContentVersion,
+    /// Updated workspace generation.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Updated modified timestamp if available.
+    pub modified_at: Option<TimestampMillis>,
+    /// Updated file length if available.
+    pub file_length: Option<u64>,
+    /// Whether a non-atomic fallback path was used.
+    pub used_non_atomic_fallback: bool,
+    /// Visible fallback status for audit/UI surfaces.
+    pub fallback_status: Option<String>,
+    /// Proposal response for applied lifecycle.
+    pub response: ProposalResponse,
+}
+
+/// Workspace save result preserving typed stale/conflict/denial/failure responses.
+pub type WorkspaceSaveResult = Result<WorkspaceSaveApplied, ProposalResponse>;
+
 #[derive(Debug, Clone)]
 struct FileFingerprint {
     size: Option<u64>,
@@ -146,21 +210,40 @@ struct FileFingerprint {
 
 impl FileFingerprint {
     fn from_path(path: &Path, fs: &ProjectFilesystem) -> Result<Self, WorkspaceError> {
-        let metadata = std::fs::metadata(path).map_err(|err| {
-            WorkspaceError::Platform(platform_error_from_io("metadata", path, err))
-        })?;
+        let metadata = fs.read_metadata(path).map_err(WorkspaceError::Platform)?;
+        Self::from_metadata(path, fs, &metadata)
+    }
 
-        let size = metadata.len();
-        let read_only = metadata.permissions().readonly();
-        let modified = metadata.modified().ok().map(|value| {
-            TimestampMillis(
-                value
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64),
-            )
-        });
+    fn from_metadata(
+        path: &Path,
+        fs: &ProjectFilesystem,
+        metadata: &FileSystemMetadata,
+    ) -> Result<Self, WorkspaceError> {
+        let size = metadata.length;
+        let modified = metadata.modified_at.map(TimestampMillis);
         let hash = if metadata.is_file() && size <= LARGE_FILE_BYTES {
-            fs.hash_file(path).ok()
+            let fingerprint = fs
+                .read_fingerprint(path)
+                .map_err(WorkspaceError::Platform)?;
+            if fingerprint.length != Some(size) || fingerprint.modified_at != metadata.modified_at {
+                return Err(WorkspaceError::Platform(
+                    PlatformError::MetadataInconsistent {
+                        operation: "workspace fingerprint read".to_string(),
+                        path: path.to_path_buf(),
+                        details: format!(
+                            "metadata={metadata:?}, fingerprint_length={:?}, fingerprint_modified={:?}",
+                            fingerprint.length, fingerprint.modified_at
+                        ),
+                    },
+                ));
+            }
+            Some(fingerprint.stable_hash.ok_or_else(|| {
+                WorkspaceError::Platform(PlatformError::MetadataInconsistent {
+                    operation: "workspace fingerprint read".to_string(),
+                    path: path.to_path_buf(),
+                    details: "regular file fingerprint did not include stable hash".to_string(),
+                })
+            })?)
         } else {
             None
         };
@@ -169,7 +252,7 @@ impl FileFingerprint {
             size: Some(size),
             modified,
             hash,
-            read_only,
+            read_only: metadata.read_only,
         })
     }
 
@@ -179,6 +262,33 @@ impl FileFingerprint {
             modified: None,
             hash: None,
             read_only: false,
+        }
+    }
+
+    fn for_new_file(path: &Path) -> Self {
+        let mut value = path.to_string_lossy().into_owned();
+        value.push_str("|new-file|0");
+        Self {
+            size: Some(0),
+            modified: None,
+            hash: Some(format!("new:{:016x}", stable_hash(&value))),
+            read_only: false,
+        }
+    }
+
+    fn to_protocol(&self) -> ProtocolFileFingerprint {
+        let hash = self.hash.clone().unwrap_or_else(|| "nohash".to_string());
+        let modified = self
+            .modified
+            .map(|value| value.0.to_string())
+            .unwrap_or_else(|| "nomtime".to_string());
+        let size = self
+            .size
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "nosize".to_string());
+        ProtocolFileFingerprint {
+            algorithm: "devil-fingerprint-v1".to_string(),
+            value: format!("size={size};modified={modified};hash={hash}"),
         }
     }
 }
@@ -303,6 +413,7 @@ pub struct WorkspaceActor {
     security: Mutex<DenyByDefaultBroker>,
     state: Mutex<Option<WorkspaceState>>,
     discovery: DiscoveryConfig,
+    event_sink: Box<dyn EventSinkPort + Send + Sync>,
 }
 
 impl WorkspaceActor {
@@ -311,6 +422,16 @@ impl WorkspaceActor {
         fs: Arc<ProjectFilesystem>,
         watcher: Arc<dyn WatcherService + Send + Sync>,
         security: DenyByDefaultBroker,
+    ) -> Self {
+        Self::with_event_sink(fs, watcher, security, Box::new(NoopEventSink))
+    }
+
+    /// Creates a new workspace actor with an injected event sink.
+    pub fn with_event_sink(
+        fs: Arc<ProjectFilesystem>,
+        watcher: Arc<dyn WatcherService + Send + Sync>,
+        security: DenyByDefaultBroker,
+        event_sink: Box<dyn EventSinkPort + Send + Sync>,
     ) -> Self {
         Self {
             fs,
@@ -323,12 +444,21 @@ impl WorkspaceActor {
                 skip_binary: true,
                 skip_large: true,
             },
+            event_sink,
         }
     }
 
     fn now_sequence(state: &mut WorkspaceState) -> EventSequence {
         state.watcher_sequence = state.watcher_sequence.saturating_add(1);
         EventSequence(state.watcher_sequence)
+    }
+
+    fn causality() -> CausalityId {
+        CausalityId(Uuid::now_v7())
+    }
+
+    fn emit(&self, envelope: devil_protocol::EventEnvelope) {
+        let _ = self.event_sink.emit(EventSinkRequest { envelope });
     }
 
     fn canonicalize_root_path(&self, state: &WorkspaceState) -> WorkspaceResult<PathBuf> {
@@ -449,7 +579,7 @@ impl WorkspaceActor {
         Ok(normalized)
     }
 
-    fn should_skip_entry(&self, entry_name: &str, metadata: Option<&std::fs::Metadata>) -> bool {
+    fn should_skip_entry(&self, entry_name: &str, metadata: Option<&FileSystemMetadata>) -> bool {
         if self.discovery.skip_hidden && entry_name.starts_with('.') {
             return true;
         }
@@ -486,7 +616,7 @@ impl WorkspaceActor {
         if self.discovery.skip_large
             && let Some(meta) = metadata
             && meta.is_file()
-            && meta.len() > LARGE_FILE_BYTES
+            && meta.length > LARGE_FILE_BYTES
         {
             return true;
         }
@@ -494,24 +624,21 @@ impl WorkspaceActor {
         false
     }
 
-    fn kind_for_metadata(&self, metadata: &std::fs::Metadata) -> FileKind {
-        if metadata.is_dir() {
-            FileKind::Directory
-        } else if metadata.file_type().is_symlink() {
-            FileKind::Symlink
-        } else if metadata.is_file() {
-            FileKind::File
-        } else {
-            FileKind::Other("other".to_string())
+    fn kind_for_platform_metadata(&self, metadata: &FileSystemMetadata) -> FileKind {
+        match metadata.kind {
+            FileSystemEntryKind::Directory => FileKind::Directory,
+            FileSystemEntryKind::Symlink => FileKind::Symlink,
+            FileSystemEntryKind::File => FileKind::File,
+            FileSystemEntryKind::Other => FileKind::Other("other".to_string()),
         }
     }
 
-    fn file_identity(
+    fn file_identity_from_platform_metadata(
         &self,
         state: &mut WorkspaceState,
         canonical_path: &Path,
         fingerprint: &FileFingerprint,
-        metadata: &std::fs::Metadata,
+        metadata: &FileSystemMetadata,
     ) -> FileIdentity {
         let key = canonical_path.to_string_lossy().into_owned();
         let file_id = if let Some(id) = state.file_id_by_path.get(&key) {
@@ -529,7 +656,7 @@ impl WorkspaceActor {
             fingerprint.hash.as_ref(),
         ) {
             (Some(size), Some(ts), Some(hash)) => {
-                let digest = (size ^ ts.0) + (hash.len() as u64);
+                let digest = (size ^ ts.0).wrapping_add(stable_hash(hash) as u64);
                 FileContentVersion(digest)
             }
             (Some(size), Some(ts), None) => FileContentVersion(size.saturating_add(ts.0)),
@@ -537,15 +664,22 @@ impl WorkspaceActor {
             _ => FileContentVersion(0),
         };
 
-        let kind = self.kind_for_metadata(metadata);
+        let protocol_fingerprint = fingerprint.to_protocol();
+        let canonical_path = CanonicalPath(canonical_path.to_string_lossy().into_owned());
         let file_metadata = FileMetadata {
-            canonical_path: CanonicalPath(canonical_path.to_string_lossy().into_owned()),
-            kind,
+            canonical_path: canonical_path.clone(),
+            file_id: Some(file_id),
+            workspace_id: Some(state.workspace_id),
+            kind: self.kind_for_platform_metadata(metadata),
             size_bytes: fingerprint.size,
             modified_at: fingerprint.modified,
             read_only: fingerprint.read_only,
             permissions: None,
             hash: fingerprint.hash.clone(),
+            fingerprint: Some(protocol_fingerprint),
+            content_version: Some(content_version),
+            workspace_generation: Some(state.generation),
+            schema_version: 1,
         };
 
         state.file_metadata.insert(file_id, file_metadata);
@@ -553,10 +687,198 @@ impl WorkspaceActor {
         FileIdentity {
             file_id,
             workspace_id: state.workspace_id,
-            canonical_path: CanonicalPath(canonical_path.to_string_lossy().into_owned()),
+            canonical_path,
             content_version,
             content_hash: fingerprint.hash.clone(),
         }
+    }
+
+    fn file_identity_for_new_path(
+        &self,
+        state: &mut WorkspaceState,
+        canonical_path: &Path,
+        fingerprint: &FileFingerprint,
+    ) -> FileIdentity {
+        let key = canonical_path.to_string_lossy().into_owned();
+        let file_id = if let Some(id) = state.file_id_by_path.get(&key) {
+            *id
+        } else {
+            let id = state.next_file_id();
+            state.file_id_by_path.insert(key.clone(), id);
+            state.file_path_by_id.insert(id, key.clone());
+            id
+        };
+        let protocol_fingerprint = fingerprint.to_protocol();
+        state.file_metadata.insert(
+            file_id,
+            FileMetadata {
+                canonical_path: CanonicalPath(key.clone()),
+                file_id: Some(file_id),
+                workspace_id: Some(state.workspace_id),
+                kind: FileKind::File,
+                size_bytes: fingerprint.size,
+                modified_at: fingerprint.modified,
+                read_only: fingerprint.read_only,
+                permissions: Some("new-file-precondition".to_string()),
+                hash: fingerprint.hash.clone(),
+                fingerprint: Some(protocol_fingerprint),
+                content_version: Some(FileContentVersion(0)),
+                workspace_generation: Some(state.generation),
+                schema_version: 1,
+            },
+        );
+        FileIdentity {
+            file_id,
+            workspace_id: state.workspace_id,
+            canonical_path: CanonicalPath(key),
+            content_version: FileContentVersion(0),
+            content_hash: fingerprint.hash.clone(),
+        }
+    }
+
+    fn metadata_for_identity(
+        &self,
+        state: &WorkspaceState,
+        file_id: FileId,
+    ) -> Option<FileMetadata> {
+        state.file_metadata.get(&file_id).cloned()
+    }
+
+    fn open_existing_file_text_internal(
+        &self,
+        state: &mut WorkspaceState,
+        path: &str,
+        correlation_id: Option<CorrelationId>,
+        causality_id: Option<CausalityId>,
+    ) -> WorkspaceResult<OpenedFileText> {
+        let workspace_id = state.workspace_id;
+        let canonical = self.canonicalize_candidate(state, path)?;
+        let target_path = canonical.to_string_lossy().into_owned();
+        if let Err(err) = self.decision_for_workspace(state, "fs.read", Some(&target_path)) {
+            if let (Some(correlation_id), Some(causality_id)) = (correlation_id, causality_id) {
+                let sequence = Self::now_sequence(state);
+                self.emit(security_denial_event(
+                    workspace_id,
+                    None,
+                    Some(state.principal_id.clone()),
+                    &CapabilityId("fs.read".to_string()),
+                    correlation_id,
+                    causality_id,
+                    sequence,
+                    Some(&target_path),
+                    err.to_string(),
+                ));
+            }
+            return Err(err);
+        }
+
+        let metadata = match self.fs.read_metadata(&canonical) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                if let (Some(correlation_id), Some(causality_id)) = (correlation_id, causality_id) {
+                    let sequence = Self::now_sequence(state);
+                    self.emit(open_file_read_failure_event(
+                        workspace_id,
+                        correlation_id,
+                        causality_id,
+                        sequence,
+                        &target_path,
+                        err.to_string(),
+                    ));
+                }
+                return Err(WorkspaceError::Platform(err));
+            }
+        };
+        let fingerprint = if metadata.is_file() {
+            FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata)?
+        } else {
+            FileFingerprint::from_dir()
+        };
+        let identity =
+            self.file_identity_from_platform_metadata(state, &canonical, &fingerprint, &metadata);
+        let metadata =
+            self.metadata_for_identity(state, identity.file_id)
+                .ok_or(WorkspaceError::Internal(
+                    "file metadata missing after identity capture",
+                ))?;
+        let text = match self.fs.read_text_file(&canonical) {
+            Ok(text) => text,
+            Err(err) => {
+                if let (Some(correlation_id), Some(causality_id)) = (correlation_id, causality_id) {
+                    let sequence = Self::now_sequence(state);
+                    self.emit(open_file_read_failure_event(
+                        workspace_id,
+                        correlation_id,
+                        causality_id,
+                        sequence,
+                        canonical.to_string_lossy(),
+                        err.to_string(),
+                    ));
+                }
+                return Err(WorkspaceError::Platform(err));
+            }
+        };
+        if text.contains('\0') {
+            if let (Some(correlation_id), Some(causality_id)) = (correlation_id, causality_id) {
+                let sequence = Self::now_sequence(state);
+                self.emit(open_file_read_failure_event(
+                    workspace_id,
+                    correlation_id,
+                    causality_id,
+                    sequence,
+                    canonical.to_string_lossy(),
+                    "binary content rejected for text buffer",
+                ));
+            }
+            return Err(WorkspaceError::Platform(PlatformError::Encoding {
+                operation: "read".to_string(),
+                path: canonical,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "binary content rejected for text buffer",
+                ),
+            }));
+        }
+
+        state.active_sessions.insert(identity.file_id);
+        Ok(OpenedFileText {
+            identity: identity.clone(),
+            text,
+            fingerprint: fingerprint.to_protocol(),
+            file_content_version: identity.content_version,
+            workspace_generation: state.generation,
+            modified_at: metadata.modified_at,
+            file_length: metadata.size_bytes,
+            is_new_file: false,
+        })
+    }
+
+    fn open_new_file_text_internal(
+        &self,
+        state: &mut WorkspaceState,
+        path: &str,
+    ) -> WorkspaceResult<OpenedFileText> {
+        let canonical = self.canonicalize_candidate(state, path)?;
+        self.decision_for_workspace(state, "fs.write", Some(&canonical.to_string_lossy()))?;
+        match self.fs.read_metadata(&canonical) {
+            Ok(_) => return self.open_existing_file_text_internal(state, path, None, None),
+            Err(PlatformError::NotFound { .. }) => {}
+            Err(err) => return Err(WorkspaceError::Platform(err)),
+        }
+
+        let fingerprint = FileFingerprint::for_new_file(&canonical);
+        let identity = self.file_identity_for_new_path(state, &canonical, &fingerprint);
+        state.active_sessions.insert(identity.file_id);
+        Ok(OpenedFileText {
+            identity,
+            text: String::new(),
+            fingerprint: fingerprint.to_protocol(),
+            file_content_version: FileContentVersion(0),
+            workspace_generation: state.generation,
+            modified_at: None,
+            file_length: Some(0),
+            is_new_file: true,
+        })
     }
 
     fn scan_shallow(
@@ -609,7 +931,7 @@ impl WorkspaceActor {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
 
-            let meta = std::fs::metadata(&child).ok();
+            let meta = self.fs.read_metadata(&child).ok();
             let meta_ref = meta.as_ref();
 
             let entry_skip = if let Some(meta) = meta.as_ref() {
@@ -631,7 +953,7 @@ impl WorkspaceActor {
             let metadata = match meta_ref {
                 Some(meta) => {
                     if meta.is_file() {
-                        FileFingerprint::from_path(&canonical, self.fs.as_ref())?
+                        FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), meta)?
                     } else {
                         FileFingerprint::from_dir()
                     }
@@ -644,7 +966,7 @@ impl WorkspaceActor {
                 },
             };
             let identity = if let Some(meta) = meta_ref {
-                self.file_identity(state, &canonical, &metadata, meta)
+                self.file_identity_from_platform_metadata(state, &canonical, &metadata, meta)
             } else {
                 let key = canonical.to_string_lossy().into_owned();
                 let file_id = state.next_file_id();
@@ -654,12 +976,18 @@ impl WorkspaceActor {
                     file_id,
                     FileMetadata {
                         canonical_path: CanonicalPath(key.clone()),
+                        file_id: Some(file_id),
+                        workspace_id: Some(state.workspace_id),
                         kind: FileKind::Other("unreadable".to_string()),
                         size_bytes: metadata.size,
                         modified_at: metadata.modified,
                         read_only: metadata.read_only,
                         permissions: Some("unreadable".to_string()),
-                        hash: metadata.hash,
+                        hash: metadata.hash.clone(),
+                        fingerprint: Some(metadata.to_protocol()),
+                        content_version: Some(FileContentVersion(0)),
+                        workspace_generation: Some(state.generation),
+                        schema_version: 1,
                     },
                 );
                 FileIdentity {
@@ -698,12 +1026,18 @@ impl WorkspaceActor {
                 .cloned()
                 .unwrap_or_else(|| FileMetadata {
                     canonical_path: identity.canonical_path.clone(),
+                    file_id: Some(identity.file_id),
+                    workspace_id: Some(identity.workspace_id),
                     kind: FileKind::Other("unknown".to_string()),
                     size_bytes: None,
                     modified_at: None,
                     read_only: false,
                     permissions: None,
                     hash: None,
+                    fingerprint: None,
+                    content_version: Some(identity.content_version),
+                    workspace_generation: Some(state.generation),
+                    schema_version: 1,
                 });
 
             fingerprints.insert(
@@ -761,6 +1095,142 @@ impl WorkspaceActor {
         }
     }
 
+    fn diagnostic(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        path: Option<CanonicalPath>,
+    ) -> ProtocolDiagnostic {
+        ProtocolDiagnostic {
+            code: code.into(),
+            message: message.into(),
+            severity: ProtocolDiagnosticSeverity::Error,
+            path,
+            range: None,
+        }
+    }
+
+    fn save_transition(
+        request: &WorkspaceSaveRequest,
+        state: ProposalLifecycleState,
+        diagnostics: Vec<ProtocolDiagnostic>,
+    ) -> ProposalLifecycleTransition {
+        ProposalLifecycleTransition {
+            proposal_id: request.proposal_id,
+            lifecycle_state: state,
+            timestamp: TimestampMillis::now(),
+            principal: request.principal.clone(),
+            capability: request.required_capability.clone(),
+            correlation_id: request.correlation_id,
+            causality_id: request.causality_id,
+            diagnostics,
+        }
+    }
+
+    fn denied_save_response(
+        request: &WorkspaceSaveRequest,
+        reason: ProposalDenialReason,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = Self::diagnostic("proposal.denied", message, Some(request.path.clone()));
+        ProposalResponse::Denied {
+            transition: Self::save_transition(
+                request,
+                ProposalLifecycleState::Denied,
+                vec![diagnostic],
+            ),
+            reason,
+        }
+    }
+
+    fn failed_save_response(
+        request: &WorkspaceSaveRequest,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = Self::diagnostic("proposal.failed", message, Some(request.path.clone()));
+        ProposalResponse::Failed {
+            transition: Self::save_transition(
+                request,
+                ProposalLifecycleState::Failed,
+                vec![diagnostic],
+            ),
+            reason: ProposalFailureReason::ApplyFailed,
+        }
+    }
+
+    fn stale_save_response(
+        &self,
+        request: &WorkspaceSaveRequest,
+        reason: ProposalStaleReason,
+        actual: Option<devil_protocol::VersionContext>,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = Self::diagnostic("proposal.stale", message, Some(request.path.clone()));
+        ProposalResponse::Stale {
+            transition: Self::save_transition(
+                request,
+                ProposalLifecycleState::Stale,
+                vec![diagnostic],
+            ),
+            stale: ProposalStaleContext {
+                reason,
+                expected: ProposalVersionPreconditions {
+                    file_version: Some(request.expected_file_content_version),
+                    buffer_version: Some(request.buffer_version),
+                    snapshot_id: Some(request.snapshot_id),
+                    generation: Some(request.expected_workspace_generation),
+                    file_content_version: Some(request.expected_file_content_version),
+                    workspace_generation: Some(request.expected_workspace_generation),
+                    expected_fingerprint: Some(request.expected_fingerprint.clone()),
+                    expected_file_length: None,
+                    expected_modified_at: None,
+                },
+                actual,
+            },
+        }
+    }
+
+    fn conflict_save_response(
+        &self,
+        state: &mut WorkspaceState,
+        request: &WorkspaceSaveRequest,
+        identity: FileIdentity,
+        actual_fingerprint: Option<ProtocolFileFingerprint>,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = Self::diagnostic("proposal.conflict", message, Some(request.path.clone()));
+        let conflict = FileConflictState {
+            state: FileConflictLifecycleState::ConflictDirty,
+            context: FileConflictContext {
+                workspace_id: request.workspace_id,
+                file_identity: identity,
+                buffer_version: request.buffer_version,
+                file_content_version: request.expected_file_content_version,
+                snapshot_id: request.snapshot_id,
+                disk_fingerprint: actual_fingerprint,
+                expected_fingerprint: Some(request.expected_fingerprint.clone()),
+                reason: FileConflictReason::DiskFingerprintChanged,
+                diagnostics: vec![diagnostic.clone()],
+            },
+            diagnostics: vec![diagnostic],
+            schema_version: 1,
+        };
+        let sequence = Self::now_sequence(state);
+        self.emit(conflict_created_event(
+            &conflict,
+            request.correlation_id,
+            request.causality_id,
+            sequence,
+        ));
+        ProposalResponse::Conflict {
+            transition: Self::save_transition(
+                request,
+                ProposalLifecycleState::Conflict,
+                conflict.diagnostics.clone(),
+            ),
+            conflict,
+        }
+    }
+
     fn resolve_identity_internal(
         &self,
         state: &mut WorkspaceState,
@@ -769,16 +1239,18 @@ impl WorkspaceActor {
         let canonical = self.canonicalize_candidate(state, path)?;
         self.decision_for_workspace(state, "fs.read", Some(&canonical.to_string_lossy()))?;
 
-        let metadata = std::fs::metadata(&canonical).map_err(|err| {
-            WorkspaceError::Platform(platform_error_from_io("metadata", &canonical, err))
-        })?;
+        let metadata = self
+            .fs
+            .read_metadata(&canonical)
+            .map_err(WorkspaceError::Platform)?;
         let fingerprint = if metadata.is_file() {
-            FileFingerprint::from_path(&canonical, self.fs.as_ref())?
+            FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata)?
         } else {
             FileFingerprint::from_dir()
         };
 
-        let identity = self.file_identity(state, &canonical, &fingerprint, &metadata);
+        let identity =
+            self.file_identity_from_platform_metadata(state, &canonical, &fingerprint, &metadata);
         state.active_sessions.insert(identity.file_id);
         Ok(identity)
     }
@@ -860,12 +1332,20 @@ impl WorkspaceActor {
             let recovered = self.rebuild_tree_from_scan_bounded(state)?;
             if recovered {
                 state.in_recovery = false;
+                let sequence = Self::now_sequence(state);
+                self.emit(watcher_recovery_event(
+                    workspace_id,
+                    CorrelationId(sequence.0),
+                    Self::causality(),
+                    sequence,
+                    true,
+                ));
                 let event = WatcherEvent {
                     workspace_id,
                     kind: WatcherEventKind::Modified,
                     path: CanonicalPath(root.to_string_lossy().into_owned()),
                     old_path: None,
-                    sequence: Self::now_sequence(state),
+                    sequence,
                 };
                 state.enqueue_watcher_event(event.clone());
                 return Ok(vec![event]);
@@ -880,12 +1360,20 @@ impl WorkspaceActor {
                 .collect(),
             Err(PlatformError::WatcherOverflow { .. }) => {
                 state.in_recovery = true;
+                let sequence = Self::now_sequence(state);
+                self.emit(watcher_recovery_event(
+                    workspace_id,
+                    CorrelationId(sequence.0),
+                    Self::causality(),
+                    sequence,
+                    false,
+                ));
                 let overflow = WatcherEvent {
                     workspace_id,
                     kind: WatcherEventKind::Overflow,
                     path: CanonicalPath(root.to_string_lossy().into_owned()),
                     old_path: None,
-                    sequence: Self::now_sequence(state),
+                    sequence,
                 };
                 state.enqueue_watcher_event(overflow.clone());
                 return Ok(vec![overflow]);
@@ -1079,13 +1567,23 @@ impl WorkspaceActor {
             .map_err(WorkspaceError::Platform)
     }
 
-    /// Write file text with trust checks and atomic write fallback.
-    pub fn write_file_text(
+    /// Open an existing text file and return mandatory save-precondition metadata.
+    pub fn open_existing_file_text(
         &self,
         workspace_id: WorkspaceId,
         path: impl AsRef<str>,
-        text: impl AsRef<str>,
-    ) -> WorkspaceResult<()> {
+    ) -> WorkspaceResult<OpenedFileText> {
+        self.open_existing_file_text_with_causality(workspace_id, path, None, None)
+    }
+
+    /// Open an existing text file and emit read-failure metadata when causality is supplied.
+    pub fn open_existing_file_text_with_causality(
+        &self,
+        workspace_id: WorkspaceId,
+        path: impl AsRef<str>,
+        correlation_id: Option<CorrelationId>,
+        causality_id: Option<CausalityId>,
+    ) -> WorkspaceResult<OpenedFileText> {
         let mut state_guard = self
             .state
             .lock()
@@ -1093,47 +1591,317 @@ impl WorkspaceActor {
         let state = state_guard
             .as_mut()
             .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
-        let path = self.canonicalize_candidate(state, path.as_ref())?;
-        self.decision_for_workspace(state, "fs.write", Some(&path.to_string_lossy()))?;
+        if state.workspace_id != workspace_id {
+            return Err(WorkspaceError::WorkspaceMissing { workspace_id });
+        }
+        self.open_existing_file_text_internal(state, path.as_ref(), correlation_id, causality_id)
+    }
 
-        self.fs
-            .write_text_file_atomic(&path, text.as_ref())
-            .or_else(|_| {
-                self.fs
-                    .write_text_file(&path, text.as_ref())
-                    .map_err(WorkspaceError::Platform)
-            })?;
+    /// Open a safe new-file buffer only when the caller explicitly requested create intent.
+    pub fn open_new_file_text(
+        &self,
+        workspace_id: WorkspaceId,
+        path: impl AsRef<str>,
+    ) -> WorkspaceResult<OpenedFileText> {
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+        if state.workspace_id != workspace_id {
+            return Err(WorkspaceError::WorkspaceMissing { workspace_id });
+        }
+        self.open_new_file_text_internal(state, path.as_ref())
+    }
 
-        let metadata = std::fs::metadata(&path).map_err(|err| {
-            WorkspaceError::Platform(platform_error_from_io("metadata", &path, err))
-        })?;
-        let fingerprint = if metadata.is_file() {
-            FileFingerprint::from_path(&path, self.fs.as_ref())?
-        } else {
-            FileFingerprint::from_dir()
+    /// Apply a save through mandatory proposal context and fail-closed fingerprint preconditions.
+    pub fn save_file_with_proposal(&self, request: WorkspaceSaveRequest) -> WorkspaceSaveResult {
+        let mut state_guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(Self::failed_save_response(
+                    &request,
+                    "workspace state lock poisoned",
+                ));
+            }
         };
-        let identity = self.file_identity(state, &path, &fingerprint, &metadata);
-        let key = identity.canonical_path.0.clone();
-        state.last_scan.insert(key.clone(), fingerprint);
-        let file_id = identity.file_id;
+        let Some(state) = state_guard.as_mut() else {
+            return Err(Self::failed_save_response(
+                &request,
+                "workspace is not open",
+            ));
+        };
+        if state.workspace_id != request.workspace_id {
+            return Err(Self::failed_save_response(
+                &request,
+                "workspace id does not match opened workspace",
+            ));
+        }
+
+        let canonical = match self.canonicalize_candidate(state, &request.path.0) {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(Self::denied_save_response(
+                    &request,
+                    ProposalDenialReason::PolicyDenied,
+                    err.to_string(),
+                ));
+            }
+        };
+
+        if request.payload_byte_len != request.text.len() as u64 {
+            return Err(Self::failed_save_response(
+                &request,
+                "payload byte length does not match text payload",
+            ));
+        }
+
+        if let Err(err) = self.decision_for_workspace(
+            state,
+            &request.required_capability.0,
+            Some(&canonical.to_string_lossy()),
+        ) {
+            let sequence = Self::now_sequence(state);
+            self.emit(security_denial_event(
+                request.workspace_id,
+                Some(request.file_id),
+                Some(request.principal.clone()),
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                sequence,
+                Some(&canonical.to_string_lossy()),
+                err.to_string(),
+            ));
+            return Err(Self::denied_save_response(
+                &request,
+                ProposalDenialReason::CapabilityDenied,
+                err.to_string(),
+            ));
+        }
+
+        if state.generation != request.expected_workspace_generation {
+            let sequence = Self::now_sequence(state);
+            self.emit(stale_proposal_rejected_event(
+                request.workspace_id,
+                request.file_id,
+                request.correlation_id,
+                request.causality_id,
+                sequence,
+                request.proposal_id,
+                ProposalStaleReason::WorkspaceGenerationMismatch,
+            ));
+            return Err(self.stale_save_response(
+                &request,
+                ProposalStaleReason::WorkspaceGenerationMismatch,
+                None,
+                "workspace generation changed before save",
+            ));
+        }
+
+        let fallback_policy = NonAtomicSaveFallbackPolicy::Disabled;
+
+        let actual_metadata = match self.fs.read_metadata(&canonical) {
+            Ok(metadata) => Some(metadata),
+            Err(PlatformError::NotFound { .. }) => {
+                if request.expected_file_content_version == FileContentVersion(0)
+                    && request.expected_fingerprint.value.contains("hash=new:")
+                {
+                    None
+                } else {
+                    let identity = FileIdentity {
+                        file_id: request.file_id,
+                        workspace_id: request.workspace_id,
+                        canonical_path: request.path.clone(),
+                        content_version: FileContentVersion(0),
+                        content_hash: None,
+                    };
+                    return Err(self.conflict_save_response(
+                        state,
+                        &request,
+                        identity,
+                        None,
+                        "file disappeared from disk before save",
+                    ));
+                }
+            }
+            Err(err) => {
+                return Err(Self::failed_save_response(&request, err.to_string()));
+            }
+        };
+        let actual_fingerprint = match actual_metadata.as_ref() {
+            Some(metadata) if metadata.is_file() => {
+                match FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), metadata) {
+                    Ok(fingerprint) => fingerprint,
+                    Err(err) => {
+                        return Err(Self::failed_save_response(&request, err.to_string()));
+                    }
+                }
+            }
+            Some(_) => FileFingerprint::from_dir(),
+            None => FileFingerprint::for_new_file(&canonical),
+        };
+        let actual_protocol_fingerprint = actual_fingerprint.to_protocol();
+
+        let actual_identity = if let Some(metadata) = actual_metadata.as_ref() {
+            self.file_identity_from_platform_metadata(
+                state,
+                &canonical,
+                &actual_fingerprint,
+                metadata,
+            )
+        } else {
+            self.file_identity_for_new_path(state, &canonical, &actual_fingerprint)
+        };
+
+        if actual_identity.file_id != request.file_id {
+            return Err(self.conflict_save_response(
+                state,
+                &request,
+                actual_identity,
+                Some(actual_protocol_fingerprint),
+                "file identity changed before save",
+            ));
+        }
+
+        if actual_identity.content_version != request.expected_file_content_version {
+            let actual_context = devil_protocol::VersionContext {
+                file_version: actual_identity.content_version,
+                buffer_version: request.buffer_version,
+                snapshot_id: request.snapshot_id,
+                generation: state.generation,
+                file_content_version: actual_identity.content_version,
+                workspace_generation: state.generation,
+                fingerprint: Some(actual_protocol_fingerprint.clone()),
+                file_length: actual_fingerprint.size,
+                modified_at: actual_fingerprint.modified,
+            };
+            let sequence = Self::now_sequence(state);
+            self.emit(stale_proposal_rejected_event(
+                request.workspace_id,
+                request.file_id,
+                request.correlation_id,
+                request.causality_id,
+                sequence,
+                request.proposal_id,
+                ProposalStaleReason::FileContentVersionMismatch,
+            ));
+            return Err(self.stale_save_response(
+                &request,
+                ProposalStaleReason::FileContentVersionMismatch,
+                Some(actual_context),
+                "file content version changed before save",
+            ));
+        }
+
+        if actual_protocol_fingerprint != request.expected_fingerprint {
+            return Err(self.conflict_save_response(
+                state,
+                &request,
+                actual_identity,
+                Some(actual_protocol_fingerprint),
+                "disk fingerprint changed before save",
+            ));
+        }
+
+        if let Err(err) = self.fs.write_text_file_atomic(&canonical, &request.text) {
+            let fallback_status = match fallback_policy {
+                NonAtomicSaveFallbackPolicy::Disabled => {
+                    "non-atomic fallback disabled; failing closed"
+                }
+            };
+            let sequence = Self::now_sequence(state);
+            self.emit(fallback_denied_event(
+                request.workspace_id,
+                request.file_id,
+                request.correlation_id,
+                request.causality_id,
+                sequence,
+                fallback_status,
+            ));
+            return Err(Self::failed_save_response(
+                &request,
+                format!("{err}; {fallback_status}"),
+            ));
+        }
+
+        let metadata = match self.fs.read_metadata(&canonical) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                return Err(Self::failed_save_response(&request, err.to_string()));
+            }
+        };
+        let new_fingerprint =
+            match FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata) {
+                Ok(fingerprint) => fingerprint,
+                Err(err) => return Err(Self::failed_save_response(&request, err.to_string())),
+            };
+        let new_identity = self.file_identity_from_platform_metadata(
+            state,
+            &canonical,
+            &new_fingerprint,
+            &metadata,
+        );
+        let metadata = self
+            .metadata_for_identity(state, new_identity.file_id)
+            .unwrap_or_else(|| FileMetadata {
+                canonical_path: new_identity.canonical_path.clone(),
+                file_id: Some(new_identity.file_id),
+                workspace_id: Some(new_identity.workspace_id),
+                kind: FileKind::File,
+                size_bytes: new_fingerprint.size,
+                modified_at: new_fingerprint.modified,
+                read_only: new_fingerprint.read_only,
+                permissions: None,
+                hash: new_fingerprint.hash.clone(),
+                fingerprint: Some(new_fingerprint.to_protocol()),
+                content_version: Some(new_identity.content_version),
+                workspace_generation: Some(state.generation),
+                schema_version: 1,
+            });
+        let key = new_identity.canonical_path.0.clone();
+        state.last_scan.insert(key.clone(), new_fingerprint.clone());
         if !state
             .tree
             .iter()
-            .any(|node| node.identity.file_id == file_id)
+            .any(|node| node.identity.file_id == new_identity.file_id)
         {
             state.tree.push(FileTreeNode {
-                identity,
+                identity: new_identity.clone(),
                 name: key
                     .rsplit(['/', '\\'])
                     .next()
                     .unwrap_or("unknown")
                     .to_string(),
                 children: Vec::new(),
-                metadata: state.file_metadata.get(&file_id).cloned(),
+                metadata: Some(metadata.clone()),
             });
+        } else if let Some(node) = state
+            .tree
+            .iter_mut()
+            .find(|node| node.identity.file_id == new_identity.file_id)
+        {
+            node.identity = new_identity.clone();
+            node.metadata = Some(metadata.clone());
         }
+        state.generation = WorkspaceGeneration(state.generation.0.saturating_add(1));
+        state.config.captured_at = TimestampMillis(now_millis());
 
-        Ok(())
+        let transition =
+            Self::save_transition(&request, ProposalLifecycleState::Applied, Vec::new());
+        Ok(WorkspaceSaveApplied {
+            identity: new_identity.clone(),
+            fingerprint: new_fingerprint.to_protocol(),
+            file_content_version: new_identity.content_version,
+            workspace_generation: state.generation,
+            modified_at: metadata.modified_at,
+            file_length: metadata.size_bytes,
+            used_non_atomic_fallback: false,
+            fallback_status: Some("atomic-write-only; non-atomic fallback disabled".to_string()),
+            response: ProposalResponse::Applied(transition),
+        })
     }
 
     /// Read current cached shallow tree.
@@ -1268,6 +2036,21 @@ impl devil_protocol::WorkspacePort for WorkspaceActor {
                 }
                 WorkspaceResponse::Config(state.config.clone())
             }
+            WorkspaceRequest::ReadTree(workspace_id) => {
+                let guard = self.state.lock().map_err(|_| {
+                    Self::protocol_error(WorkspaceError::Internal("workspace state lock poisoned"))
+                })?;
+                let state = guard.as_ref().ok_or_else(|| {
+                    Self::protocol_error(WorkspaceError::WorkspaceMissing { workspace_id })
+                })?;
+                if state.workspace_id != workspace_id {
+                    return Err(Self::protocol_error(WorkspaceError::WorkspaceMissing {
+                        workspace_id,
+                    }));
+                }
+
+                WorkspaceResponse::Tree(state.tree.clone())
+            }
             WorkspaceRequest::ApplyTreeDelta(delta) => {
                 let mut guard = self.state.lock().map_err(|_| {
                     Self::protocol_error(WorkspaceError::Internal("workspace state lock poisoned"))
@@ -1340,11 +2123,201 @@ impl devil_protocol::ProjectInfoPort for WorkspaceActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devil_platform::{NativeFileSystem, NativeWatcherService};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use devil_platform::{
+        FileSystemFingerprint, FileSystemMetadata, NativeFileSystem, NativeWatcherService,
+    };
     use devil_protocol::{
         WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceRequest, WorkspaceTrustState,
     };
     use devil_security::{DenyByDefaultBroker, SecurityPolicy};
+
+    static TEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn next_test_temp_suffix() -> u64 {
+        TEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[derive(Debug)]
+    struct FailingAtomicFs {
+        root: PathBuf,
+        atomic_error: PlatformError,
+    }
+
+    impl FailingAtomicFs {
+        fn new(root: PathBuf, atomic_error: PlatformError) -> Self {
+            Self { root, atomic_error }
+        }
+    }
+
+    impl PathNormalizationService for FailingAtomicFs {
+        fn normalize_path(&self, path: &Path) -> Result<PathBuf, PlatformError> {
+            NativeFileSystem.normalize_path(path)
+        }
+
+        fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, PlatformError> {
+            NativeFileSystem.canonicalize_path(path)
+        }
+
+        fn is_within_base(&self, base: &Path, candidate: &Path) -> Result<bool, PlatformError> {
+            NativeFileSystem.is_within_base(base, candidate)
+        }
+    }
+
+    impl FileSystemService for FailingAtomicFs {
+        fn read_text_file(&self, path: &Path) -> Result<String, PlatformError> {
+            NativeFileSystem.read_text_file(path)
+        }
+
+        fn write_text_file(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
+            NativeFileSystem.write_text_file(path, text)
+        }
+
+        fn write_text_file_atomic(&self, _path: &Path, _text: &str) -> Result<(), PlatformError> {
+            Err(match &self.atomic_error {
+                PlatformError::UnsupportedOperation {
+                    operation,
+                    path,
+                    reason,
+                } => PlatformError::UnsupportedOperation {
+                    operation: operation.clone(),
+                    path: path.clone(),
+                    reason: reason.clone(),
+                },
+                PlatformError::PermissionDenied { operation, path } => {
+                    PlatformError::PermissionDenied {
+                        operation: operation.clone(),
+                        path: path.clone(),
+                    }
+                }
+                _ => PlatformError::UnsupportedOperation {
+                    operation: "atomic write".to_string(),
+                    path: self.root.join("unknown"),
+                    reason: self.atomic_error.to_string(),
+                },
+            })
+        }
+
+        fn read_metadata(&self, path: &Path) -> Result<FileSystemMetadata, PlatformError> {
+            NativeFileSystem.read_metadata(path)
+        }
+
+        fn read_fingerprint(&self, path: &Path) -> Result<FileSystemFingerprint, PlatformError> {
+            NativeFileSystem.read_fingerprint(path)
+        }
+
+        fn stable_hash(&self, bytes: &[u8]) -> String {
+            NativeFileSystem.stable_hash(bytes)
+        }
+
+        fn stable_hash_file(&self, path: &Path) -> Result<String, PlatformError> {
+            NativeFileSystem.stable_hash_file(path)
+        }
+
+        fn modified_timestamp(&self, path: &Path) -> Result<Option<u64>, PlatformError> {
+            NativeFileSystem.modified_timestamp(path)
+        }
+
+        fn file_length(&self, path: &Path) -> Result<u64, PlatformError> {
+            NativeFileSystem.file_length(path)
+        }
+
+        fn list_directory(&self, path: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+            NativeFileSystem.list_directory(path)
+        }
+    }
+
+    #[derive(Debug)]
+    struct InconsistentMetadataFs {
+        metadata_calls: Mutex<u64>,
+    }
+
+    impl InconsistentMetadataFs {
+        fn new(_root: PathBuf) -> Self {
+            Self {
+                metadata_calls: Mutex::new(0),
+            }
+        }
+    }
+
+    impl PathNormalizationService for InconsistentMetadataFs {
+        fn normalize_path(&self, path: &Path) -> Result<PathBuf, PlatformError> {
+            NativeFileSystem.normalize_path(path)
+        }
+
+        fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, PlatformError> {
+            NativeFileSystem.canonicalize_path(path)
+        }
+
+        fn is_within_base(&self, base: &Path, candidate: &Path) -> Result<bool, PlatformError> {
+            NativeFileSystem.is_within_base(base, candidate)
+        }
+    }
+
+    impl FileSystemService for InconsistentMetadataFs {
+        fn read_text_file(&self, path: &Path) -> Result<String, PlatformError> {
+            NativeFileSystem.read_text_file(path)
+        }
+
+        fn write_text_file(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
+            NativeFileSystem.write_text_file(path, text)
+        }
+
+        fn write_text_file_atomic(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
+            NativeFileSystem.write_text_file_atomic(path, text)
+        }
+
+        fn read_metadata(&self, path: &Path) -> Result<FileSystemMetadata, PlatformError> {
+            let mut calls = self.metadata_calls.lock().expect("metadata calls lock");
+            *calls = calls.saturating_add(1);
+            let mut metadata = NativeFileSystem.read_metadata(path)?;
+            if *calls > 1 && metadata.is_file() {
+                metadata.length = metadata.length.saturating_add(1);
+            }
+            Ok(metadata)
+        }
+
+        fn read_fingerprint(&self, path: &Path) -> Result<FileSystemFingerprint, PlatformError> {
+            let metadata = self.read_metadata(path)?;
+            let stable_hash = if metadata.is_file() {
+                Some(NativeFileSystem.stable_hash_file(path)?)
+            } else {
+                None
+            };
+            Ok(FileSystemFingerprint {
+                path: path.to_path_buf(),
+                algorithm: "inconsistent-test".to_string(),
+                kind: metadata.kind,
+                length: metadata
+                    .is_file()
+                    .then_some(metadata.length.saturating_add(1)),
+                modified_at: metadata.modified_at,
+                stable_hash,
+                read_only: metadata.read_only,
+            })
+        }
+
+        fn stable_hash(&self, bytes: &[u8]) -> String {
+            NativeFileSystem.stable_hash(bytes)
+        }
+
+        fn stable_hash_file(&self, path: &Path) -> Result<String, PlatformError> {
+            NativeFileSystem.stable_hash_file(path)
+        }
+
+        fn modified_timestamp(&self, path: &Path) -> Result<Option<u64>, PlatformError> {
+            NativeFileSystem.modified_timestamp(path)
+        }
+
+        fn file_length(&self, path: &Path) -> Result<u64, PlatformError> {
+            NativeFileSystem.file_length(path)
+        }
+
+        fn list_directory(&self, path: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+            NativeFileSystem.list_directory(path)
+        }
+    }
 
     struct FakeWatcher;
     impl WatcherService for FakeWatcher {
@@ -1386,7 +2359,12 @@ mod tests {
         trust: WorkspaceTrustState,
     ) -> (WorkspaceActor, WorkspaceOpened, PrincipalId, PathBuf) {
         let base = std::env::temp_dir();
-        let unique = format!("devil-project-test-{}-{}", std::process::id(), now_millis());
+        let unique = format!(
+            "devil-project-test-{}-{}-{}",
+            std::process::id(),
+            now_millis(),
+            next_test_temp_suffix()
+        );
         let root = base.join(unique);
         std::fs::create_dir_all(&root).expect("create temporary workspace directory");
         let canonical_root =
@@ -1419,6 +2397,34 @@ mod tests {
             PrincipalId("temp-principal".to_string()),
             root,
         )
+    }
+
+    fn save_new_file_for_tests(
+        actor: &WorkspaceActor,
+        workspace_id: WorkspaceId,
+        path: &str,
+        text: &str,
+    ) -> WorkspaceSaveResult {
+        let opened = actor
+            .open_new_file_text(workspace_id, path)
+            .expect("open new file for proposal save");
+        actor.save_file_with_proposal(WorkspaceSaveRequest {
+            workspace_id,
+            proposal_id: ProposalId(1),
+            principal: PrincipalId("temp-principal".to_string()),
+            required_capability: CapabilityId("fs.write".to_string()),
+            file_id: opened.identity.file_id,
+            path: opened.identity.canonical_path,
+            expected_fingerprint: opened.fingerprint,
+            expected_file_content_version: opened.file_content_version,
+            expected_workspace_generation: opened.workspace_generation,
+            buffer_version: BufferVersion(1),
+            snapshot_id: SnapshotId(1),
+            payload_byte_len: text.len() as u64,
+            correlation_id: CorrelationId(1),
+            causality_id: CausalityId(Uuid::now_v7()),
+            text: text.to_string(),
+        })
     }
 
     #[test]
@@ -1483,8 +2489,8 @@ mod tests {
         assert!(matches!(read_err, WorkspaceError::PathOutsideRoot { .. }));
 
         let write_err = actor
-            .write_file_text(opened.workspace_id, outside.to_string_lossy(), "ignored")
-            .expect_err("write should fail for outside root");
+            .open_new_file_text(opened.workspace_id, outside.to_string_lossy())
+            .expect_err("new-file open should fail for outside root");
         assert!(matches!(write_err, WorkspaceError::PathOutsideRoot { .. }));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1496,8 +2502,8 @@ mod tests {
         let file_path = "blocked.txt";
 
         let write_err = actor
-            .write_file_text(opened.workspace_id, file_path, "value")
-            .expect_err("untrusted workspace should not be able to write");
+            .open_new_file_text(opened.workspace_id, file_path)
+            .expect_err("untrusted workspace should not be able to create a new-file buffer");
 
         assert!(matches!(write_err, WorkspaceError::SecurityDenied { .. }));
 
@@ -1509,14 +2515,231 @@ mod tests {
         let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
         let file_path = "integration.txt";
 
-        actor
-            .write_file_text(opened.workspace_id, file_path, "hello\n")
-            .expect("write via actor should succeed");
+        let applied = save_new_file_for_tests(&actor, opened.workspace_id, file_path, "hello\n")
+            .expect("proposal save via actor should succeed");
+        assert!(!applied.used_non_atomic_fallback);
+        assert_eq!(
+            applied.fallback_status.as_deref(),
+            Some("atomic-write-only; non-atomic fallback disabled")
+        );
 
         let actual = actor
             .read_file_text(opened.workspace_id, file_path)
             .expect("read via actor should succeed");
         assert_eq!(actual, "hello\n");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn atomic_write_failure_fails_closed_without_plain_write() {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "devil-project-atomic-failure-{}-{}-{}",
+            std::process::id(),
+            now_millis(),
+            next_test_temp_suffix()
+        );
+        let root = base.join(unique);
+        std::fs::create_dir_all(&root).expect("create atomic failure workspace");
+        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize root");
+        let target = canonical_root.join("atomic-failure.txt");
+        std::fs::write(&target, "seed").expect("seed target");
+
+        let mut policy = SecurityPolicy::default();
+        policy.path_policy.readable_roots = vec![canonical_root.to_string_lossy().into_owned()];
+        policy.path_policy.writable_roots = vec![canonical_root.to_string_lossy().into_owned()];
+
+        let fs: Arc<ProjectFilesystem> = Arc::new(FailingAtomicFs::new(
+            canonical_root.clone(),
+            PlatformError::UnsupportedOperation {
+                operation: "atomic replace".to_string(),
+                path: target.clone(),
+                reason: "synthetic unsupported atomic replacement".to_string(),
+            },
+        ));
+        let actor = WorkspaceActor::new(
+            fs,
+            Arc::new(NativeWatcherService),
+            DenyByDefaultBroker::new(
+                policy,
+                devil_protocol::CapabilityNamespace("test".to_string()),
+            ),
+        );
+        let opened = actor
+            .open_workspace(WorkspaceOpenRequest {
+                correlation_id: CorrelationId(11),
+                principal_id: PrincipalId("temp-principal".to_string()),
+                root_path: CanonicalPath(canonical_root.to_string_lossy().into_owned()),
+                trust: Some(WorkspaceTrustState::Trusted),
+            })
+            .expect("open workspace");
+        let opened_file = actor
+            .open_existing_file_text(opened.workspace_id, target.to_string_lossy())
+            .expect("open target");
+
+        let response = actor
+            .save_file_with_proposal(WorkspaceSaveRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(99),
+                principal: PrincipalId("temp-principal".to_string()),
+                required_capability: CapabilityId("fs.write".to_string()),
+                file_id: opened_file.identity.file_id,
+                path: opened_file.identity.canonical_path,
+                expected_fingerprint: opened_file.fingerprint,
+                expected_file_content_version: opened_file.file_content_version,
+                expected_workspace_generation: opened_file.workspace_generation,
+                buffer_version: BufferVersion(2),
+                snapshot_id: SnapshotId(2),
+                payload_byte_len: "replacement".len() as u64,
+                correlation_id: CorrelationId(99),
+                causality_id: CausalityId(Uuid::now_v7()),
+                text: "replacement".to_string(),
+            })
+            .expect_err("atomic write failure should fail closed");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("target content"),
+            "seed"
+        );
+        match response {
+            ProposalResponse::Failed { transition, .. } => {
+                assert!(transition.diagnostics.iter().any(|diagnostic| {
+                    diagnostic
+                        .message
+                        .contains("non-atomic fallback disabled; failing closed")
+                }));
+            }
+            other => panic!("expected failed response, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn permission_failure_from_platform_is_reported_without_plain_write() {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "devil-project-permission-failure-{}-{}-{}",
+            std::process::id(),
+            now_millis(),
+            next_test_temp_suffix()
+        );
+        let root = base.join(unique);
+        std::fs::create_dir_all(&root).expect("create permission failure workspace");
+        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize root");
+        let target = canonical_root.join("permission-failure.txt");
+        std::fs::write(&target, "seed").expect("seed target");
+
+        let mut policy = SecurityPolicy::default();
+        policy.path_policy.readable_roots = vec![canonical_root.to_string_lossy().into_owned()];
+        policy.path_policy.writable_roots = vec![canonical_root.to_string_lossy().into_owned()];
+
+        let fs: Arc<ProjectFilesystem> = Arc::new(FailingAtomicFs::new(
+            canonical_root.clone(),
+            PlatformError::PermissionDenied {
+                operation: "atomic write".to_string(),
+                path: target.clone(),
+            },
+        ));
+        let actor = WorkspaceActor::new(
+            fs,
+            Arc::new(NativeWatcherService),
+            DenyByDefaultBroker::new(
+                policy,
+                devil_protocol::CapabilityNamespace("test".to_string()),
+            ),
+        );
+        let opened = actor
+            .open_workspace(WorkspaceOpenRequest {
+                correlation_id: CorrelationId(12),
+                principal_id: PrincipalId("temp-principal".to_string()),
+                root_path: CanonicalPath(canonical_root.to_string_lossy().into_owned()),
+                trust: Some(WorkspaceTrustState::Trusted),
+            })
+            .expect("open workspace");
+        let opened_file = actor
+            .open_existing_file_text(opened.workspace_id, target.to_string_lossy())
+            .expect("open target");
+
+        let response = actor
+            .save_file_with_proposal(WorkspaceSaveRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(100),
+                principal: PrincipalId("temp-principal".to_string()),
+                required_capability: CapabilityId("fs.write".to_string()),
+                file_id: opened_file.identity.file_id,
+                path: opened_file.identity.canonical_path,
+                expected_fingerprint: opened_file.fingerprint,
+                expected_file_content_version: opened_file.file_content_version,
+                expected_workspace_generation: opened_file.workspace_generation,
+                buffer_version: BufferVersion(2),
+                snapshot_id: SnapshotId(2),
+                payload_byte_len: "replacement".len() as u64,
+                correlation_id: CorrelationId(100),
+                causality_id: CausalityId(Uuid::now_v7()),
+                text: "replacement".to_string(),
+            })
+            .expect_err("permission failure should fail closed");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("target content"),
+            "seed"
+        );
+        match response {
+            ProposalResponse::Failed { transition, .. } => {
+                assert!(
+                    transition
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.message.contains("permission denied"))
+                );
+            }
+            other => panic!("expected failed response, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn metadata_inconsistency_blocks_open_before_save_preconditions() {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "devil-project-metadata-inconsistent-{}-{}-{}",
+            std::process::id(),
+            now_millis(),
+            next_test_temp_suffix()
+        );
+        let root = base.join(unique);
+        std::fs::create_dir_all(&root).expect("create metadata workspace");
+        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize root");
+        let target = canonical_root.join("metadata.txt");
+        std::fs::write(&target, "seed").expect("seed target");
+
+        let mut policy = SecurityPolicy::default();
+        policy.path_policy.readable_roots = vec![canonical_root.to_string_lossy().into_owned()];
+        policy.path_policy.writable_roots = vec![canonical_root.to_string_lossy().into_owned()];
+
+        let actor = WorkspaceActor::new(
+            Arc::new(InconsistentMetadataFs::new(canonical_root.clone())),
+            Arc::new(NativeWatcherService),
+            DenyByDefaultBroker::new(
+                policy,
+                devil_protocol::CapabilityNamespace("test".to_string()),
+            ),
+        );
+        let err = actor
+            .open_workspace(WorkspaceOpenRequest {
+                correlation_id: CorrelationId(13),
+                principal_id: PrincipalId("temp-principal".to_string()),
+                root_path: CanonicalPath(canonical_root.to_string_lossy().into_owned()),
+                trust: Some(WorkspaceTrustState::Trusted),
+            })
+            .expect_err("metadata inconsistency should block workspace open");
+        assert!(matches!(
+            err,
+            WorkspaceError::Platform(PlatformError::MetadataInconsistent { .. })
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }

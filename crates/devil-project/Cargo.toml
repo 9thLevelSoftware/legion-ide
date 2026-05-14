@@ -9,5 +9,6 @@ publish.workspace = true
 devil-protocol = { workspace = true }
 devil-platform = { workspace = true }
 devil-security = { workspace = true }
-devil-storage = { workspace = true }
+devil-observability = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }

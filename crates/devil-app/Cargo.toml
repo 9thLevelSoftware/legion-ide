@@ -11,7 +11,9 @@ devil-editor = { workspace = true }
 devil-platform = { workspace = true }
 devil-project = { workspace = true }
 devil-protocol = { workspace = true }
+devil-observability = { workspace = true }
 devil-security = { workspace = true }
 devil-storage = { workspace = true }
 devil-ui = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
