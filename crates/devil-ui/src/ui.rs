@@ -1,16 +1,47 @@
-//! Basic text-editor UI primitives for a native shell spike.
+//! Projection-only UI primitives for the native shell.
 
-use devil_editor::{EditorError, EditorSession, TextPosition, TextRange};
+use devil_editor::{TextPosition, TextRange};
+use devil_protocol::{BufferId, CanonicalPath, FileId, WorkspaceId};
+use thiserror::Error;
 
-/// Render mode for the spike shell.
+/// Render mode for shell projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
-    /// Basic read/write listing.
+    /// Basic projection listing.
     Plain,
 }
 
-/// Minimal layout model used by the spike.
-#[derive(Debug)]
+/// Explorer tree projection consumed by shell-style UI surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerProjection {
+    /// Flat node list from workspace tree snapshot.
+    pub nodes: Vec<ExplorerNodeProjection>,
+    /// Optional selected node in the explorer.
+    pub selection: Option<ExplorerSelectionProjection>,
+}
+
+/// Projected explorer node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerNodeProjection {
+    /// Stable file identifier.
+    pub file_id: FileId,
+    /// Canonical file path.
+    pub canonical_path: CanonicalPath,
+    /// Display name for UI list/tree rows.
+    pub name: String,
+    /// Child identifiers for directory rows.
+    pub children: Vec<FileId>,
+}
+
+/// Projected explorer selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerSelectionProjection {
+    /// Selected file identifier.
+    pub file_id: FileId,
+}
+
+/// Minimal layout model used by the shell projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     /// Window title for the shell.
     pub title: String,
@@ -31,122 +62,419 @@ impl Layout {
     }
 }
 
-/// Minimal IDE surface for spike verification.
-#[derive(Debug)]
-pub struct Shell {
-    /// Top-level layout.
+/// Top-level layout projection consumed by the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellLayoutProjection {
+    /// Window layout.
     pub layout: Layout,
-    /// Backing editor session.
-    pub editor: EditorSession,
-    /// Current mode.
+    /// Current render mode.
     pub mode: RenderMode,
 }
 
-impl Shell {
-    /// Create a shell surface for a file.
-    pub fn new(title: impl Into<String>, editor: EditorSession) -> Self {
+impl ShellLayoutProjection {
+    /// Construct a plain layout projection.
+    pub fn plain(title: impl Into<String>) -> Self {
         Self {
             layout: Layout::new(title),
-            editor,
             mode: RenderMode::Plain,
         }
+    }
+}
+
+/// Active editor-buffer projection received by the UI from application state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveBufferProjection {
+    /// Owning workspace identifier if a workspace is open.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Active editor buffer identifier.
+    pub buffer_id: Option<BufferId>,
+    /// Active workspace file identifier.
+    pub file_id: Option<FileId>,
+    /// Canonical path for display only.
+    pub file_path: Option<CanonicalPath>,
+    /// Projected text snapshot for rendering.
+    pub text: String,
+    /// Dirty indicator projected from the editor engine.
+    pub dirty: bool,
+}
+
+impl ActiveBufferProjection {
+    /// Construct an empty active-buffer projection.
+    pub fn empty() -> Self {
+        Self {
+            workspace_id: None,
+            buffer_id: None,
+            file_id: None,
+            file_path: None,
+            text: String::new(),
+            dirty: false,
+        }
+    }
+}
+
+impl Default for ActiveBufferProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// UI status severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusSeverity {
+    /// Informational status message.
+    Info,
+    /// Warning status message.
+    Warning,
+    /// Error status message.
+    Error,
+}
+
+/// Projected status message shown by the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusMessageProjection {
+    /// Severity classification.
+    pub severity: StatusSeverity,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// Typed command intent emitted by UI input handling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandDispatchIntent {
+    /// No command was recognized.
+    Noop,
+    /// Quit the active shell loop.
+    Quit,
+    /// Undo through the editor engine for the target buffer.
+    Undo {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Redo through the editor engine for the target buffer.
+    Redo {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Insert text through the editor engine for the target buffer.
+    Insert {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Insertion position in projected text coordinates.
+        at: TextPosition,
+        /// Replacement payload.
+        text: String,
+    },
+    /// Delete a text range through the editor engine for the target buffer.
+    Delete {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Range to delete.
+        range: TextRange,
+    },
+    /// Replace a text range through the editor engine for the target buffer.
+    Replace {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Range to replace.
+        range: TextRange,
+        /// Replacement payload.
+        replacement: String,
+    },
+    /// Save through the editor save-request and workspace write path.
+    Save {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Open a file by path through workspace authority.
+    OpenPath {
+        /// User-provided path text.
+        path: String,
+    },
+    /// Refresh explorer state through workspace ports.
+    RefreshExplorer,
+    /// Reveal a workspace file in the explorer projection.
+    RevealInExplorer {
+        /// File identifier to reveal.
+        file_id: FileId,
+    },
+}
+
+/// Projection snapshot provided to the shell by the application layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellProjectionSnapshot {
+    /// Layout projection.
+    pub layout_projection: ShellLayoutProjection,
+    /// Explorer projection.
+    pub explorer_projection: ExplorerProjection,
+    /// Active buffer projection.
+    pub active_buffer_projection: ActiveBufferProjection,
+    /// Status message projections.
+    pub status_messages: Vec<StatusMessageProjection>,
+}
+
+/// Command parsing errors surfaced by projection-only shell input handling.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ShellCommandError {
+    /// A command requires an active buffer projection, but none is present.
+    #[error("active buffer projection is missing")]
+    ActiveBufferMissing,
+    /// A command supplied a range with start after end.
+    #[error("command range start must be <= end")]
+    InvalidRange,
+}
+
+/// Projection-only IDE shell state.
+#[derive(Debug)]
+pub struct Shell {
+    /// Projection-only layout state.
+    pub layout_projection: ShellLayoutProjection,
+    /// Projection-only explorer state.
+    pub explorer_projection: ExplorerProjection,
+    /// Projection-only active buffer state.
+    pub active_buffer_projection: ActiveBufferProjection,
+    /// Projected status messages.
+    pub status_messages: Vec<StatusMessageProjection>,
+    /// Command dispatch intents emitted by input parsing.
+    pub command_dispatch_intents: Vec<CommandDispatchIntent>,
+}
+
+impl Shell {
+    /// Create a shell from a projection snapshot.
+    pub fn new(snapshot: ShellProjectionSnapshot) -> Self {
+        Self {
+            layout_projection: snapshot.layout_projection,
+            explorer_projection: snapshot.explorer_projection,
+            active_buffer_projection: snapshot.active_buffer_projection,
+            status_messages: snapshot.status_messages,
+            command_dispatch_intents: Vec::new(),
+        }
+    }
+
+    /// Create an empty projection-only shell.
+    pub fn empty(title: impl Into<String>) -> Self {
+        Self::new(ShellProjectionSnapshot {
+            layout_projection: ShellLayoutProjection::plain(title),
+            explorer_projection: ExplorerProjection {
+                nodes: Vec::new(),
+                selection: None,
+            },
+            active_buffer_projection: ActiveBufferProjection::empty(),
+            status_messages: Vec::new(),
+        })
+    }
+
+    /// Return a cloned shell projection snapshot.
+    pub fn projection_snapshot(&self) -> ShellProjectionSnapshot {
+        ShellProjectionSnapshot {
+            layout_projection: self.layout_projection.clone(),
+            explorer_projection: self.explorer_projection.clone(),
+            active_buffer_projection: self.active_buffer_projection.clone(),
+            status_messages: self.status_messages.clone(),
+        }
+    }
+
+    /// Replace all render projections at once.
+    pub fn replace_projection_snapshot(&mut self, snapshot: ShellProjectionSnapshot) {
+        self.layout_projection = snapshot.layout_projection;
+        self.explorer_projection = snapshot.explorer_projection;
+        self.active_buffer_projection = snapshot.active_buffer_projection;
+        self.status_messages = snapshot.status_messages;
+    }
+
+    /// Drain queued command-dispatch intents.
+    pub fn drain_command_dispatch_intents(&mut self) -> Vec<CommandDispatchIntent> {
+        self.command_dispatch_intents.drain(..).collect()
     }
 
     /// Render basic status and file content.
     pub fn render(&self) {
         print!("\x1b[2J\x1b[H");
-        println!("{}", self.layout.title);
+        println!("{}", self.layout_projection.layout.title);
         println!(
             "Mode: {:?} | {}x{}",
-            self.mode, self.layout.width, self.layout.height
+            self.layout_projection.mode,
+            self.layout_projection.layout.width,
+            self.layout_projection.layout.height
         );
-        println!("{}", "-".repeat(self.layout.width as usize));
-        println!("{}", self.editor.text());
-        println!("{}", "-".repeat(self.layout.width as usize));
-        println!("Path: {}", self.editor.file_path());
-        println!("Commands: :i text | :d start,end | :r start,end,text | :u | :redo | :q");
+        println!(
+            "{}",
+            "-".repeat(self.layout_projection.layout.width as usize)
+        );
+        println!("{}", self.active_buffer_projection.text);
+        println!(
+            "{}",
+            "-".repeat(self.layout_projection.layout.width as usize)
+        );
+        let path = self
+            .active_buffer_projection
+            .file_path
+            .as_ref()
+            .map(|path| path.0.as_str())
+            .unwrap_or("<no active file>");
+        println!("Path: {}", path);
+        println!("Commands: :i text | :d start,end | :r start,end,text | :w | :u | :redo | :q");
     }
 
-    /// Parse and apply a command in tiny interactive mode.
-    pub fn handle_command(&mut self, input: &str) -> Result<bool, EditorError> {
+    /// Parse a command and emit a typed dispatch intent without mutating editor or workspace state.
+    pub fn handle_command(
+        &mut self,
+        input: &str,
+    ) -> Result<Option<CommandDispatchIntent>, ShellCommandError> {
         let trimmed = input.trim();
         if trimmed == ":q" {
-            return Ok(false);
+            return Ok(Some(self.push_intent(CommandDispatchIntent::Quit)));
         }
         if trimmed == ":u" {
-            let _ = self.editor.undo();
-            return Ok(true);
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::Undo { buffer_id }),
+            ));
         }
         if trimmed == ":redo" {
-            let _ = self.editor.redo();
-            return Ok(true);
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::Redo { buffer_id }),
+            ));
+        }
+        if trimmed == ":w" {
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::Save { buffer_id }),
+            ));
         }
 
         if let Some(payload) = trimmed.strip_prefix(":i ") {
+            let buffer_id = self.active_buffer_id()?;
             let pos = TextPosition::new(0, 0);
-            self.editor.insert_at(pos, payload)?;
-            return Ok(true);
+            return Ok(Some(self.push_intent(CommandDispatchIntent::Insert {
+                buffer_id,
+                at: pos,
+                text: payload.to_string(),
+            })));
         }
 
         if let Some(payload) = trimmed.strip_prefix(":d ") {
+            let buffer_id = self.active_buffer_id()?;
             let mut split = payload.split(',');
             let start = split.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
             let end = split.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
-            let start = parse_pos(&self.editor, start);
-            let end = parse_pos(&self.editor, end);
-            self.editor.delete_range(TextRange::new(start, end))?;
-            return Ok(true);
+            if start > end {
+                return Err(ShellCommandError::InvalidRange);
+            }
+            let start = self.parse_pos(start);
+            let end = self.parse_pos(end);
+            return Ok(Some(self.push_intent(CommandDispatchIntent::Delete {
+                buffer_id,
+                range: TextRange::new(start, end),
+            })));
         }
 
         if let Some(payload) = trimmed.strip_prefix(":r ") {
+            let buffer_id = self.active_buffer_id()?;
             let mut split = payload.splitn(3, ',');
             let start = split.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
             let end = split.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
             let replacement = split.next().unwrap_or("");
-            let start = parse_pos(&self.editor, start);
-            let end = parse_pos(&self.editor, end);
-            self.editor
-                .replace_range(TextRange::new(start, end), replacement)?;
-            return Ok(true);
+            if start > end {
+                return Err(ShellCommandError::InvalidRange);
+            }
+            let start = self.parse_pos(start);
+            let end = self.parse_pos(end);
+            return Ok(Some(self.push_intent(CommandDispatchIntent::Replace {
+                buffer_id,
+                range: TextRange::new(start, end),
+                replacement: replacement.to_string(),
+            })));
         }
 
-        Ok(true)
+        Ok(Some(self.push_intent(CommandDispatchIntent::Noop)))
     }
-}
 
-fn parse_pos(session: &EditorSession, byte_offset: usize) -> TextPosition {
-    session
-        .snapshot()
-        .text()
-        .as_bytes()
-        .get(..byte_offset)
-        .map(|prefix| {
-            let line = prefix.iter().filter(|b| **b == b'\n').count();
-            let column = prefix.iter().rev().take_while(|b| **b != b'\n').count();
-            TextPosition::new(line, column)
-        })
-        .unwrap_or_else(|| TextPosition::new(0, 0))
+    fn active_buffer_id(&self) -> Result<BufferId, ShellCommandError> {
+        self.active_buffer_projection
+            .buffer_id
+            .ok_or(ShellCommandError::ActiveBufferMissing)
+    }
+
+    fn push_intent(&mut self, intent: CommandDispatchIntent) -> CommandDispatchIntent {
+        self.command_dispatch_intents.push(intent.clone());
+        intent
+    }
+
+    fn parse_pos(&self, byte_offset: usize) -> TextPosition {
+        self.active_buffer_projection
+            .text
+            .as_bytes()
+            .get(..byte_offset)
+            .map(|prefix| {
+                let line = prefix.iter().filter(|b| **b == b'\n').count();
+                let column = prefix.iter().rev().take_while(|b| **b != b'\n').count();
+                TextPosition::new(line, column)
+            })
+            .unwrap_or_else(|| TextPosition::new(0, 0))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devil_editor::EditorSession;
-    use devil_protocol::{FileId, ProjectId, ProjectInfo};
+    use devil_protocol::{BufferId, CanonicalPath, FileId, WorkspaceId};
 
     #[test]
-    fn shell_handles_commands() {
-        let project = ProjectInfo {
-            project_id: ProjectId(1),
-            root_path: "r".into(),
-            file_id: FileId(9),
-            language_id: None,
-        };
-        let editor = EditorSession::open("a.md", project, "first");
-        let mut shell = Shell::new("t", editor);
-        shell
+    fn shell_parses_commands_into_dispatch_intents_without_editor_ownership() {
+        let mut shell = Shell::new(ShellProjectionSnapshot {
+            layout_projection: ShellLayoutProjection::plain("t"),
+            explorer_projection: ExplorerProjection {
+                nodes: Vec::new(),
+                selection: None,
+            },
+            active_buffer_projection: ActiveBufferProjection {
+                workspace_id: Some(WorkspaceId(1)),
+                buffer_id: Some(BufferId(2)),
+                file_id: Some(FileId(9)),
+                file_path: Some(CanonicalPath("a.md".to_string())),
+                text: "first".to_string(),
+                dirty: false,
+            },
+            status_messages: Vec::new(),
+        });
+
+        let intent = shell
             .handle_command(":i \\n")
-            .expect("insert command should succeed");
-        assert!(!shell.editor.text().is_empty());
+            .expect("insert command should parse")
+            .expect("intent should be emitted");
+
+        assert_eq!(
+            intent,
+            CommandDispatchIntent::Insert {
+                buffer_id: BufferId(2),
+                at: TextPosition::new(0, 0),
+                text: "\\n".to_string(),
+            }
+        );
+        assert_eq!(shell.active_buffer_projection.text, "first");
+        assert_eq!(shell.command_dispatch_intents.len(), 1);
+    }
+
+    #[test]
+    fn explorer_projection_holds_nodes_and_selection() {
+        let projection = ExplorerProjection {
+            nodes: vec![ExplorerNodeProjection {
+                file_id: FileId(10),
+                canonical_path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                name: "main.rs".to_string(),
+                children: vec![],
+            }],
+            selection: Some(ExplorerSelectionProjection {
+                file_id: FileId(10),
+            }),
+        };
+
+        assert_eq!(projection.nodes.len(), 1);
+        assert_eq!(projection.nodes[0].name, "main.rs");
+        assert_eq!(
+            projection.selection.map(|sel| sel.file_id),
+            Some(FileId(10))
+        );
     }
 }

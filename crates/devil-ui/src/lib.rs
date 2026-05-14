@@ -4,4 +4,8 @@
 
 pub mod ui;
 
-pub use ui::{Layout, RenderMode, Shell};
+pub use ui::{
+    ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
+    ExplorerSelectionProjection, Layout, RenderMode, Shell, ShellCommandError,
+    ShellLayoutProjection, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+};

@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use devil_editor::{EditorEngine, TextPosition};
+use devil_editor::{
+    EditorEngine, SnapshotEvictionPreference, SnapshotRetentionPolicy, TextPosition,
+};
 use devil_protocol::{FileId, TransactionSource, WorkspaceId};
 use devil_text::{TextEdit, TextRange};
 
@@ -8,6 +10,105 @@ fn percentile(durations: &mut [Duration], pct: f64) -> Duration {
     durations.sort();
     let idx = ((durations.len() as f64 - 1.0) * pct).round() as usize;
     durations[idx]
+}
+
+fn deterministic_retention_policy(max_snapshot_count: usize) -> SnapshotRetentionPolicy {
+    SnapshotRetentionPolicy {
+        max_snapshot_count,
+        max_estimated_bytes: usize::MAX,
+        eviction_preference: SnapshotEvictionPreference::UndoThenRedo,
+    }
+}
+
+#[test]
+fn ci_typical_edit_latency_on_budget_sized_file() {
+    let mut engine = EditorEngine::new();
+    let size = 256 * 1024;
+    let text = "a".repeat(size);
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(90), "ci-budget.txt", text)
+        .expect("open buffer");
+    let mut samples = Vec::new();
+
+    for i in 0..16 {
+        let at = TextPosition::new(0, size / 2 + i);
+        let start = Instant::now();
+        engine
+            .apply_edit(
+                buffer,
+                TextEdit::insert(at, "x"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("insert edit");
+        samples.push(start.elapsed());
+    }
+
+    let mut sorted = samples.clone();
+    let p95 = percentile(&mut sorted, 0.95);
+    eprintln!("ci budget edit latency p95={p95:?}");
+    assert!(p95 < Duration::from_millis(250));
+}
+
+#[test]
+fn ci_snapshot_retention_budget_is_enforced() {
+    let mut engine =
+        EditorEngine::with_snapshot_retention_policy(deterministic_retention_policy(6));
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(91), "ci-retention.txt", "seed")
+        .expect("open buffer");
+
+    for _ in 0..24 {
+        engine
+            .apply_edit(
+                buffer,
+                TextEdit::insert(TextPosition::new(0, 0), "x"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("edit");
+    }
+
+    assert!(engine.retained_snapshot_count() <= 6);
+    assert!(engine.undo_len(buffer).expect("undo len") <= 5);
+}
+
+#[test]
+fn ci_undo_redo_burst_small_deterministic_sample() {
+    let mut engine = EditorEngine::new();
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(92), "ci-burst.txt", "a")
+        .expect("open buffer");
+
+    for _ in 0..64 {
+        engine
+            .apply_edit(
+                buffer,
+                TextEdit::insert(TextPosition::new(0, 0), "x"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("apply edit");
+    }
+
+    let undo_start = Instant::now();
+    for _ in 0..64 {
+        engine.undo(buffer, None).expect("undo");
+    }
+    let undo_total = undo_start.elapsed();
+
+    let redo_start = Instant::now();
+    for _ in 0..64 {
+        engine.redo(buffer, None).expect("redo");
+    }
+    let redo_total = redo_start.elapsed();
+
+    eprintln!("ci undo_total={undo_total:?} redo_total={redo_total:?}");
+    assert!(undo_total < Duration::from_millis(500));
+    assert!(redo_total < Duration::from_millis(500));
 }
 
 #[test]
@@ -117,4 +218,3 @@ fn snapshot_retention_and_release() {
     let pin_after_ack = engine.pinned_snapshot_count();
     assert!(pin_after_ack <= pin_after_save);
 }
-

@@ -36,6 +36,7 @@ const LARGE_FILE_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_TREE_CHILDREN_DEPTH: usize = 2;
 const WATCHER_EVENT_BUFFER: usize = 1_024;
 const WATCHER_RENAME_DEBOUNCE_MILLIS: u64 = 64;
+const WATCHER_RECOVERY_MAX_RESCANS: usize = 2;
 
 fn now_millis() -> u64 {
     SystemTime::now()
@@ -212,17 +213,29 @@ struct WorkspaceState {
     in_recovery: bool,
 }
 
+struct WorkspaceStateInit {
+    workspace_id: WorkspaceId,
+    workspace_root_id: WorkspaceRootId,
+    principal_id: PrincipalId,
+    root_path: PathBuf,
+    trust: TrustState,
+    snapshot_id: SnapshotId,
+    tree: Vec<FileTreeNode>,
+    scan: HashMap<String, FileFingerprint>,
+}
+
 impl WorkspaceState {
-    fn new(
-        workspace_id: WorkspaceId,
-        workspace_root_id: WorkspaceRootId,
-        principal_id: PrincipalId,
-        root_path: PathBuf,
-        trust: TrustState,
-        snapshot_id: SnapshotId,
-        tree: Vec<FileTreeNode>,
-        scan: HashMap<String, FileFingerprint>,
-    ) -> Self {
+    fn new(init: WorkspaceStateInit) -> Self {
+        let WorkspaceStateInit {
+            workspace_id,
+            workspace_root_id,
+            principal_id,
+            root_path,
+            trust,
+            snapshot_id,
+            tree,
+            scan,
+        } = init;
         let canonical_root = CanonicalPath(root_path.to_string_lossy().into_owned());
 
         Self {
@@ -318,38 +331,103 @@ impl WorkspaceActor {
         EventSequence(state.watcher_sequence)
     }
 
-    fn check_path_within_root(&self, state: &WorkspaceState, path: &Path) -> WorkspaceResult<()> {
-        let root = self
-            .fs
+    fn canonicalize_root_path(&self, state: &WorkspaceState) -> WorkspaceResult<PathBuf> {
+        self.fs
             .canonicalize_path(&state.root_path)
             .or_else(|_| self.fs.normalize_path(&state.root_path))
-            .map_err(WorkspaceError::Platform)?;
-        let normalized = self
-            .fs
-            .canonicalize_path(path)
-            .or_else(|_| self.fs.normalize_path(path))
-            .map_err(WorkspaceError::Platform)?;
+            .map_err(WorkspaceError::Platform)
+    }
 
-        if normalized.starts_with(&root) {
+    fn canonicalize_with_parent_fallback(&self, path: &Path) -> WorkspaceResult<PathBuf> {
+        match self.fs.canonicalize_path(path) {
+            Ok(path) => Ok(path),
+            Err(PlatformError::NotFound { .. }) => {
+                let mut suffix = Vec::new();
+                let mut cursor = path.to_path_buf();
+
+                while let Err(PlatformError::NotFound { .. }) = self.fs.canonicalize_path(&cursor) {
+                    let Some(name) = cursor.file_name() else {
+                        break;
+                    };
+                    suffix.push(name.to_os_string());
+
+                    let Some(parent) = cursor.parent() else {
+                        break;
+                    };
+                    cursor = parent.to_path_buf();
+                }
+
+                let mut rebuilt = self
+                    .fs
+                    .canonicalize_path(&cursor)
+                    .or_else(|_| self.fs.normalize_path(&cursor))
+                    .map_err(WorkspaceError::Platform)?;
+
+                for part in suffix.iter().rev() {
+                    rebuilt.push(part);
+                }
+
+                self.fs
+                    .normalize_path(&rebuilt)
+                    .map_err(WorkspaceError::Platform)
+            }
+            Err(err) => Err(WorkspaceError::Platform(err)),
+        }
+    }
+
+    fn path_components_for_compare(path: &Path) -> Vec<String> {
+        let mut normalized = path.to_string_lossy().replace('\\', "/");
+
+        if normalized.starts_with("//?/UNC/") {
+            normalized = format!("//{}", &normalized[8..]);
+        } else if normalized.starts_with("//?/") || normalized.starts_with("//./") {
+            normalized = normalized[4..].to_string();
+        }
+
+        #[cfg(windows)]
+        {
+            normalized = normalized.to_ascii_lowercase();
+        }
+
+        let mut components = Vec::new();
+        for part in normalized.split('/') {
+            if part.is_empty() || part == "." {
+                continue;
+            }
+            if part == ".." {
+                components.pop();
+                continue;
+            }
+            components.push(part.to_string());
+        }
+        components
+    }
+
+    fn path_is_within_root(root: &Path, candidate: &Path) -> bool {
+        let root_parts = Self::path_components_for_compare(root);
+        let candidate_parts = Self::path_components_for_compare(candidate);
+
+        if root_parts.len() > candidate_parts.len() {
+            return false;
+        }
+
+        root_parts
+            .iter()
+            .zip(candidate_parts.iter())
+            .all(|(left, right)| left == right)
+    }
+
+    fn check_path_within_root(&self, state: &WorkspaceState, path: &Path) -> WorkspaceResult<()> {
+        let root = self.canonicalize_root_path(state)?;
+        let candidate = self.canonicalize_with_parent_fallback(path)?;
+
+        if Self::path_is_within_root(&root, &candidate) {
             Ok(())
         } else {
             Err(WorkspaceError::PathOutsideRoot {
-                path: normalized.to_string_lossy().into_owned(),
+                path: candidate.to_string_lossy().into_owned(),
             })
         }
-
-        /*self.fs
-        .is_within_base(&state.root_path, path)
-        .map_err(WorkspaceError::Platform)
-        .and_then(|inside| {
-            if inside {
-                Ok(())
-            } else {
-                Err(WorkspaceError::PathOutsideRoot {
-                    path: path.to_string_lossy().into_owned(),
-                })
-            }
-        })*/
     }
 
     fn canonicalize_candidate(
@@ -394,24 +472,23 @@ impl WorkspaceActor {
             ".exe", ".dll", ".so", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".class",
             ".jar", ".ico", ".bin", ".mp4", ".mp3",
         ];
-        if self.discovery.skip_binary {
-            if let Some(ext) = Path::new(entry_name)
+        if self.discovery.skip_binary
+            && let Some(ext) = Path::new(entry_name)
                 .extension()
                 .and_then(|value| value.to_str())
-            {
-                let suffix = format!(".{ext}").to_ascii_lowercase();
-                if binaries.iter().any(|value| *value == suffix) {
-                    return true;
-                }
+        {
+            let suffix = format!(".{ext}").to_ascii_lowercase();
+            if binaries.iter().any(|value| *value == suffix) {
+                return true;
             }
         }
 
-        if self.discovery.skip_large {
-            if let Some(meta) = metadata {
-                if meta.is_file() && meta.len() > LARGE_FILE_BYTES {
-                    return true;
-                }
-            }
+        if self.discovery.skip_large
+            && let Some(meta) = metadata
+            && meta.is_file()
+            && meta.len() > LARGE_FILE_BYTES
+        {
+            return true;
         }
 
         false
@@ -532,10 +609,7 @@ impl WorkspaceActor {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
 
-            let meta = match std::fs::metadata(&child) {
-                Ok(meta) => Some(meta),
-                Err(_) => None,
-            };
+            let meta = std::fs::metadata(&child).ok();
             let meta_ref = meta.as_ref();
 
             let entry_skip = if let Some(meta) = meta.as_ref() {
@@ -599,24 +673,22 @@ impl WorkspaceActor {
 
             let mut child_ids = Vec::new();
             let is_dir = meta.as_ref().map(|meta| meta.is_dir()).unwrap_or(false);
-            if is_dir {
-                if depth < MAX_TREE_CHILDREN_DEPTH {
-                    let mut grandchildren: Vec<FileTreeNode> = Vec::new();
-                    let mut extra_meta = HashMap::new();
-                    self.collect_tree_nodes(
-                        root,
-                        &relative.join(&entry_name),
-                        depth + 1,
-                        state,
-                        &mut grandchildren,
-                        &mut extra_meta,
-                    )?;
-                    for child_node in &grandchildren {
-                        child_ids.push(child_node.identity.file_id);
-                    }
-                    for (k, v) in extra_meta {
-                        fingerprints.insert(k, v);
-                    }
+            if is_dir && depth < MAX_TREE_CHILDREN_DEPTH {
+                let mut grandchildren: Vec<FileTreeNode> = Vec::new();
+                let mut extra_meta = HashMap::new();
+                self.collect_tree_nodes(
+                    root,
+                    &relative.join(&entry_name),
+                    depth + 1,
+                    state,
+                    &mut grandchildren,
+                    &mut extra_meta,
+                )?;
+                for child_node in &grandchildren {
+                    child_ids.push(child_node.identity.file_id);
+                }
+                for (k, v) in extra_meta {
+                    fingerprints.insert(k, v);
                 }
             }
 
@@ -762,6 +834,15 @@ impl WorkspaceActor {
         Ok(())
     }
 
+    fn rebuild_tree_from_scan_bounded(&self, state: &mut WorkspaceState) -> WorkspaceResult<bool> {
+        for _ in 0..WATCHER_RECOVERY_MAX_RESCANS {
+            if self.rebuild_tree_from_scan(state).is_ok() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn collect_watcher_events(
         &self,
         state: &mut WorkspaceState,
@@ -774,6 +855,23 @@ impl WorkspaceActor {
 
         let root = state.root_path.clone();
         let workspace_id = state.workspace_id;
+
+        if state.in_recovery {
+            let recovered = self.rebuild_tree_from_scan_bounded(state)?;
+            if recovered {
+                state.in_recovery = false;
+                let event = WatcherEvent {
+                    workspace_id,
+                    kind: WatcherEventKind::Modified,
+                    path: CanonicalPath(root.to_string_lossy().into_owned()),
+                    old_path: None,
+                    sequence: Self::now_sequence(state),
+                };
+                state.enqueue_watcher_event(event.clone());
+                return Ok(vec![event]);
+            }
+        }
+
         let snapshot = self.watcher.snapshot(workspace_id, &root);
         let new_entries: Vec<PathBuf> = match snapshot {
             Ok(events) => events
@@ -901,30 +999,30 @@ impl WorkspaceActor {
             .lock()
             .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
 
-        if let Some(existing) = state_guard.as_ref() {
-            if existing.workspace_id == workspace_id {
-                return Ok(WorkspaceOpened {
-                    workspace_id,
-                    root_id: existing.workspace_root_id,
-                    generation: existing.generation,
-                    snapshot_id: existing.config_snapshot_id,
-                    correlation_id: request.correlation_id,
-                });
-            }
+        if let Some(existing) = state_guard.as_ref()
+            && existing.workspace_id == workspace_id
+        {
+            return Ok(WorkspaceOpened {
+                workspace_id,
+                root_id: existing.workspace_root_id,
+                generation: existing.generation,
+                snapshot_id: existing.config_snapshot_id,
+                correlation_id: request.correlation_id,
+            });
         }
 
-        let mut state = WorkspaceState::new(
+        let mut state = WorkspaceState::new(WorkspaceStateInit {
             workspace_id,
-            root_id,
+            workspace_root_id: root_id,
             principal_id,
-            root.clone(),
+            root_path: root.clone(),
             trust,
-            SnapshotId(stable_hash(
+            snapshot_id: SnapshotId(stable_hash(
                 &(root.to_string_lossy().into_owned() + "snapshot"),
             )),
-            Vec::new(),
-            HashMap::new(),
-        );
+            tree: Vec::new(),
+            scan: HashMap::new(),
+        });
         self.rebuild_tree_from_scan(&mut state)?;
         let snapshot_id = state.config_snapshot_id;
 
@@ -976,10 +1074,9 @@ impl WorkspaceActor {
             .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
         let path = self.canonicalize_candidate(state, path.as_ref())?;
         self.decision_for_workspace(state, "fs.read", Some(&path.to_string_lossy()))?;
-        Ok(self
-            .fs
+        self.fs
             .read_text_file(&path)
-            .map_err(WorkspaceError::Platform)?)
+            .map_err(WorkspaceError::Platform)
     }
 
     /// Write file text with trust checks and atomic write fallback.
@@ -989,12 +1086,12 @@ impl WorkspaceActor {
         path: impl AsRef<str>,
         text: impl AsRef<str>,
     ) -> WorkspaceResult<()> {
-        let state_guard = self
+        let mut state_guard = self
             .state
             .lock()
             .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
         let state = state_guard
-            .as_ref()
+            .as_mut()
             .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
         let path = self.canonicalize_candidate(state, path.as_ref())?;
         self.decision_for_workspace(state, "fs.write", Some(&path.to_string_lossy()))?;
@@ -1006,6 +1103,35 @@ impl WorkspaceActor {
                     .write_text_file(&path, text.as_ref())
                     .map_err(WorkspaceError::Platform)
             })?;
+
+        let metadata = std::fs::metadata(&path).map_err(|err| {
+            WorkspaceError::Platform(platform_error_from_io("metadata", &path, err))
+        })?;
+        let fingerprint = if metadata.is_file() {
+            FileFingerprint::from_path(&path, self.fs.as_ref())?
+        } else {
+            FileFingerprint::from_dir()
+        };
+        let identity = self.file_identity(state, &path, &fingerprint, &metadata);
+        let key = identity.canonical_path.0.clone();
+        state.last_scan.insert(key.clone(), fingerprint);
+        let file_id = identity.file_id;
+        if !state
+            .tree
+            .iter()
+            .any(|node| node.identity.file_id == file_id)
+        {
+            state.tree.push(FileTreeNode {
+                identity,
+                name: key
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                children: Vec::new(),
+                metadata: state.file_metadata.get(&file_id).cloned(),
+            });
+        }
 
         Ok(())
     }
@@ -1260,14 +1386,11 @@ mod tests {
         trust: WorkspaceTrustState,
     ) -> (WorkspaceActor, WorkspaceOpened, PrincipalId, PathBuf) {
         let base = std::env::temp_dir();
-        let unique = format!(
-            "devil-project-test-{}-{}",
-            std::process::id(),
-            now_millis()
-        );
+        let unique = format!("devil-project-test-{}-{}", std::process::id(), now_millis());
         let root = base.join(unique);
         std::fs::create_dir_all(&root).expect("create temporary workspace directory");
-        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize temp workspace root");
+        let canonical_root =
+            std::fs::canonicalize(&root).expect("canonicalize temp workspace root");
         let canonical_root = canonical_root.to_string_lossy().into_owned();
 
         let mut policy = SecurityPolicy::default();
@@ -1277,7 +1400,10 @@ mod tests {
         let actor = WorkspaceActor::new(
             Arc::new(NativeFileSystem),
             Arc::new(NativeWatcherService),
-            DenyByDefaultBroker::new(policy, devil_protocol::CapabilityNamespace("test".to_string())),
+            DenyByDefaultBroker::new(
+                policy,
+                devil_protocol::CapabilityNamespace("test".to_string()),
+            ),
         );
         let req = WorkspaceOpenRequest {
             correlation_id: CorrelationId(3),
@@ -1287,7 +1413,12 @@ mod tests {
         };
 
         let opened = actor.open_workspace(req).expect("open temporary workspace");
-        (actor, opened, PrincipalId("temp-principal".to_string()), root)
+        (
+            actor,
+            opened,
+            PrincipalId("temp-principal".to_string()),
+            root,
+        )
     }
 
     #[test]
@@ -1306,8 +1437,7 @@ mod tests {
         let (actor, _, principal) = root_workspace();
         let response = actor
             .handle(WorkspaceRequest::ReadConfig(WorkspaceId(0)))
-            .err()
-            .expect("read config should fail when workspace id mismatch");
+            .expect_err("read config should fail when workspace id mismatch");
         assert_eq!(response.code, "workspace_error");
         let _ = principal;
     }
@@ -1349,14 +1479,12 @@ mod tests {
 
         let read_err = actor
             .resolve_file(opened.workspace_id, outside.to_string_lossy())
-            .err()
-            .expect("resolve should fail for outside root");
+            .expect_err("resolve should fail for outside root");
         assert!(matches!(read_err, WorkspaceError::PathOutsideRoot { .. }));
 
         let write_err = actor
             .write_file_text(opened.workspace_id, outside.to_string_lossy(), "ignored")
-            .err()
-            .expect("write should fail for outside root");
+            .expect_err("write should fail for outside root");
         assert!(matches!(write_err, WorkspaceError::PathOutsideRoot { .. }));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1368,14 +1496,10 @@ mod tests {
         let file_path = "blocked.txt";
 
         let write_err = actor
-            .write_file_text(opened.workspace_id, file_path.to_string(), "value")
-            .err()
-            .expect("untrusted workspace should not be able to write");
+            .write_file_text(opened.workspace_id, file_path, "value")
+            .expect_err("untrusted workspace should not be able to write");
 
-        assert!(matches!(
-            write_err,
-            WorkspaceError::SecurityDenied { .. }
-        ));
+        assert!(matches!(write_err, WorkspaceError::SecurityDenied { .. }));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1401,7 +1525,7 @@ mod tests {
         fn set_watchers_for_tests(&self) {
             let mut state = self.state.lock().expect("lock");
             if let Some(state) = state.as_mut() {
-                state.watcher_sequence = state.watcher_sequence + 1;
+                state.watcher_sequence += 1;
             }
         }
     }

@@ -229,10 +229,12 @@ dependencies = [
  "anyhow",
  "devil-editor",
  "devil-platform",
+ "devil-project",
  "devil-protocol",
  "devil-security",
  "devil-storage",
  "devil-ui",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -279,8 +281,10 @@ name = "devil-observability"
 version = "0.1.0"
 dependencies = [
  "devil-protocol",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -326,6 +330,8 @@ version = "0.1.0"
 dependencies = [
  "devil-protocol",
  "devil-security",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

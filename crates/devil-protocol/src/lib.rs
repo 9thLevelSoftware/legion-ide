@@ -168,6 +168,43 @@ pub struct Utf16Offset {
     pub value: u64,
 }
 
+/// UTF-16 line/character position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Utf16Position {
+    /// Zero-based UTF-16 line index.
+    pub line: u32,
+    /// Zero-based UTF-16 code-unit character offset on line.
+    pub character: u32,
+}
+
+/// UTF-16 range in line/character coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Utf16Range {
+    /// Inclusive start UTF-16 position.
+    pub start: Utf16Position,
+    /// Exclusive end UTF-16 position.
+    pub end: Utf16Position,
+}
+
+/// Byte + UTF-16 changed range descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChangedTextRange {
+    /// Changed byte range in post-edit coordinates.
+    pub byte_range: ByteRange,
+    /// Changed UTF-16 range in post-edit coordinates.
+    pub utf16_range: Utf16Range,
+}
+
+/// Causality chain identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CausalityId(pub Uuid);
+
+/// Event identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventId(pub Uuid);
+
 /// Coordinate encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TextCoordinateEncoding {
@@ -584,8 +621,14 @@ pub struct TextTransactionDescriptor {
     pub pre_buffer_version: BufferVersion,
     /// Post-version.
     pub post_buffer_version: BufferVersion,
-    /// Changed ranges.
-    pub changed_ranges: Vec<TextRange>,
+    /// Changed ranges with byte + UTF-16 metadata.
+    pub changed_ranges: Vec<ChangedTextRange>,
+    /// Causality chain identifier.
+    pub causality_id: CausalityId,
+    /// Optional parent transaction id when transaction is causally linked.
+    pub parent_transaction_id: Option<Uuid>,
+    /// Transaction DTO schema version.
+    pub schema_version: u16,
     /// Undo grouping id.
     pub undo_group_id: Option<Uuid>,
     /// Timestamp.
@@ -1528,7 +1571,7 @@ pub enum ProposalResponse {
     /// Validation result.
     Valid(ProposalId),
     /// Preview result.
-    Preview(WorkspaceProposal),
+    Preview(Box<WorkspaceProposal>),
     /// Applied result.
     Applied(ProposalId),
     /// Denied.
@@ -1653,6 +1696,12 @@ pub enum CapabilityRequest {
         principal_id: PrincipalId,
         /// Capability.
         capability_id: CapabilityId,
+        /// Explicit workspace trust state for policy decisions.
+        workspace_trust_state: WorkspaceTrustState,
+        /// Optional target path for path-scoped capability checks.
+        target_path: Option<CanonicalPath>,
+        /// Optional prior decision id for continuation or replay contexts.
+        decision_id: Option<CapabilityDecisionId>,
         /// Correlation id.
         correlation_id: CorrelationId,
     },
@@ -1676,8 +1725,22 @@ pub enum CapabilityResponse {
 /// Event envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
+    /// Event envelope schema version.
+    pub schema_version: u16,
+    /// Stable event identifier.
+    pub event_id: EventId,
+    /// Optional parent event identifier for event lineage.
+    pub parent_event_id: Option<EventId>,
+    /// Causality chain identifier.
+    pub causality_id: CausalityId,
     /// Event name.
     pub event: String,
+    /// Event severity classification.
+    pub severity: EventSeverity,
+    /// Event retention label.
+    pub retention: RetentionLabel,
+    /// Event redaction hint.
+    pub redaction: RedactionHint,
     /// Correlation id.
     pub correlation_id: CorrelationId,
     /// Workspace id.
@@ -1686,8 +1749,47 @@ pub struct EventEnvelope {
     pub sequence: EventSequence,
     /// Actor principal.
     pub principal_id: Option<PrincipalId>,
+    /// Occurrence timestamp.
+    pub occurred_at: TimestampMillis,
     /// Payload body.
     pub payload: serde_json::Value,
+}
+
+/// Event severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventSeverity {
+    /// Debug-level event.
+    Debug,
+    /// Informational event.
+    Info,
+    /// Warning-level event.
+    Warning,
+    /// Error-level event.
+    Error,
+    /// Critical-level event.
+    Critical,
+}
+
+/// Event retention label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RetentionLabel {
+    /// Keep only short-lived hot-window data.
+    Hot,
+    /// Keep medium-term warm-window data.
+    Warm,
+    /// Keep long-term audit data.
+    Audit,
+}
+
+/// Event payload redaction hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RedactionHint {
+    /// Payload is safe to keep in full.
+    None,
+    /// Keep metadata and remove source text or sensitive values.
+    MetadataOnly,
+    /// Remove payload content completely.
+    Full,
 }
 
 /// Event sink request.
@@ -2236,16 +2338,38 @@ mod tests {
             }
         }
 
-        fn use_all_ports(
-            w: impl WorkspacePort,
-            e: impl EditorPort,
-            p: impl ProposalPort,
-            t: impl TerminalPort,
-            l: impl LspPort,
-            c: impl CapabilityBrokerPort,
-            es: impl EventSinkPort,
-            s: impl StorageRepositoryPort,
-        ) {
+        struct AllPorts<W, E, P, T, L, C, ES, S> {
+            w: W,
+            e: E,
+            p: P,
+            t: T,
+            l: L,
+            c: C,
+            es: ES,
+            s: S,
+        }
+
+        fn use_all_ports<W, E, P, T, L, C, ES, S>(ports: AllPorts<W, E, P, T, L, C, ES, S>)
+        where
+            W: WorkspacePort,
+            E: EditorPort,
+            P: ProposalPort,
+            T: TerminalPort,
+            L: LspPort,
+            C: CapabilityBrokerPort,
+            ES: EventSinkPort,
+            S: StorageRepositoryPort,
+        {
+            let AllPorts {
+                w,
+                e,
+                p,
+                t,
+                l,
+                c,
+                es,
+                s,
+            } = ports;
             let _ = (
                 w.handle(WorkspaceRequest::ReadConfig(WorkspaceId(1))),
                 e.handle(EditorRequest::Snapshot(SnapshotDescriptor {
@@ -2294,15 +2418,26 @@ mod tests {
                 c.handle(CapabilityRequest::Request {
                     principal_id: PrincipalId("x".to_string()),
                     capability_id: CapabilityId("k".to_string()),
+                    workspace_trust_state: WorkspaceTrustState::Trusted,
+                    target_path: None,
+                    decision_id: None,
                     correlation_id: CorrelationId(1),
                 }),
                 es.emit(EventSinkRequest {
                     envelope: EventEnvelope {
+                        schema_version: 1,
+                        event_id: EventId(Uuid::nil()),
+                        parent_event_id: None,
+                        causality_id: CausalityId(Uuid::nil()),
                         event: "init".to_string(),
+                        severity: EventSeverity::Info,
+                        retention: RetentionLabel::Hot,
+                        redaction: RedactionHint::None,
                         correlation_id: CorrelationId(1),
                         workspace_id: None,
                         sequence: EventSequence(1),
                         principal_id: None,
+                        occurred_at: TimestampMillis(1),
                         payload: serde_json::json!({"ok": true}),
                     },
                 }),
@@ -2312,15 +2447,15 @@ mod tests {
             );
         }
 
-        use_all_ports(
-            MockWorkspacePort,
-            MockEditorPort,
-            MockProposalPort,
-            MockTerminalPort,
-            MockLspPort,
-            MockCapabilityBrokerPort,
-            MockEventSinkPort,
-            MockStorageRepositoryPort,
-        );
+        use_all_ports(AllPorts {
+            w: MockWorkspacePort,
+            e: MockEditorPort,
+            p: MockProposalPort,
+            t: MockTerminalPort,
+            l: MockLspPort,
+            c: MockCapabilityBrokerPort,
+            es: MockEventSinkPort,
+            s: MockStorageRepositoryPort,
+        });
     }
 }

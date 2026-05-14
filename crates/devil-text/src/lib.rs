@@ -14,6 +14,12 @@ use thiserror::Error;
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
 
 const DEFAULT_LEAF_TARGET_BYTES: usize = 1024;
+/// Maximum UTF-8 bytes allowed in the full text cache used by the text model.
+///
+/// This aligns with the workspace large-file exclusion threshold so buffers that need a larger
+/// payload can be routed through degraded/streaming editor paths instead of materializing a full
+/// cache and line index.
+pub const DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 /// A position in text expressed as zero-indexed line and UTF-8 column within that line.
 ///
@@ -200,8 +206,21 @@ impl Eq for TextSnapshot {}
 
 impl TextSnapshot {
     /// Create a snapshot from a string with an automatically assigned ID and version 0.
+    ///
+    /// This compatibility constructor panics when the text exceeds the default full-cache budget.
+    /// Prefer [`TextSnapshot::try_new`] or [`TextSnapshot::try_from_rope`] on fallible paths.
     pub fn new(text: impl Into<String>) -> Self {
-        Self::from_rope(
+        Self::try_from_rope(
+            Rope::from_str(&text.into()),
+            BufferVersion(0),
+            RetentionPinReason::Explicit("standalone snapshot".to_string()),
+        )
+        .expect("standalone snapshot text must fit the full-cache budget")
+    }
+
+    /// Try to create a snapshot from a string with an automatically assigned ID and version 0.
+    pub fn try_new(text: impl Into<String>) -> TextResult<Self> {
+        Self::try_from_rope(
             Rope::from_str(&text.into()),
             BufferVersion(0),
             RetentionPinReason::Explicit("standalone snapshot".to_string()),
@@ -209,12 +228,27 @@ impl TextSnapshot {
     }
 
     /// Create a snapshot from a rope, version, and retention reason.
+    ///
+    /// This compatibility constructor panics when the rope exceeds the default full-cache budget.
+    /// Prefer [`TextSnapshot::try_from_rope`] on fallible paths.
     pub fn from_rope(
         rope: Rope,
         buffer_version: BufferVersion,
         retention_pin_reason: RetentionPinReason,
     ) -> Self {
+        Self::try_from_rope(rope, buffer_version, retention_pin_reason)
+            .expect("snapshot rope must fit the full-cache budget")
+    }
+
+    /// Try to create a snapshot from a rope, version, and retention reason.
+    pub fn try_from_rope(
+        rope: Rope,
+        buffer_version: BufferVersion,
+        retention_pin_reason: RetentionPinReason,
+    ) -> TextResult<Self> {
+        enforce_full_cache_budget(rope.len_bytes())?;
         let text = rope.to_string();
+        enforce_full_cache_budget(text.len())?;
         let line_index = LineIndex::new(&text);
         let content_hash = content_hash(&text);
         let descriptor = TextSnapshotDescriptor {
@@ -223,16 +257,20 @@ impl TextSnapshot {
             content_hash,
             byte_len: text.len(),
             line_count: line_index.line_count(),
-            memory_footprint_bytes: estimate_rope_memory(&rope, text.len(), line_index.memory_footprint_bytes()),
+            memory_footprint_bytes: estimate_rope_memory(
+                &rope,
+                text.len(),
+                line_index.memory_footprint_bytes(),
+            ),
             retention_pin_reason,
         };
 
-        Self {
+        Ok(Self {
             rope: Arc::new(rope),
             text_cache: Arc::new(text),
             line_index: Arc::new(line_index),
             descriptor,
-        }
+        })
     }
 
     /// Return the full text.
@@ -343,6 +381,16 @@ pub enum TextError {
         start: usize,
         /// End offset.
         end: usize,
+    },
+    /// A full-cache operation exceeded the text model byte budget and must use degraded mode.
+    #[error(
+        "text byte length {byte_len} exceeds full-cache budget {budget}; degraded large-file mode required"
+    )]
+    FullCacheBudgetExceeded {
+        /// Requested post-operation text length in bytes.
+        byte_len: usize,
+        /// Maximum allowed full-cache text length in bytes.
+        budget: usize,
     },
 }
 
@@ -528,7 +576,10 @@ impl LineIndex {
         let line = self.line(line_index)?;
         let column_end = offset.min(line.content_end_byte);
         let prefix = &self.text[line.start_byte..column_end];
-        Ok(Utf16Position::new(line_index, prefix.encode_utf16().count()))
+        Ok(Utf16Position::new(
+            line_index,
+            prefix.encode_utf16().count(),
+        ))
     }
 
     /// Convert an LSP UTF-16 position to an absolute byte offset.
@@ -595,20 +646,18 @@ impl LineIndex {
 
     fn line_for_offset(&self, offset: usize) -> TextResult<usize> {
         self.ensure_valid_offset(offset)?;
-        match self
-            .lines
-            .binary_search_by(|line| {
-                if offset < line.start_byte {
-                    std::cmp::Ordering::Greater
-                } else if offset > line.end_byte {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-        {
+        match self.lines.binary_search_by(|line| {
+            if offset < line.start_byte {
+                std::cmp::Ordering::Greater
+            } else if offset > line.end_byte {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        }) {
             Ok(mut idx) => {
-                while idx + 1 < self.lines.len() && !self.lines[idx].contains_offset(offset, false) {
+                while idx + 1 < self.lines.len() && !self.lines[idx].contains_offset(offset, false)
+                {
                     idx += 1;
                 }
                 Ok(idx)
@@ -659,15 +708,22 @@ impl TextBuffer {
 
     /// Create a new buffer with an explicit buffer version.
     pub fn with_version(text: impl Into<String>, version: BufferVersion) -> Self {
+        Self::try_with_version(text, version)
+            .expect("text buffer must fit the full-cache budget; use degraded large-file mode")
+    }
+
+    /// Try to create a new buffer with an explicit buffer version.
+    pub fn try_with_version(text: impl Into<String>, version: BufferVersion) -> TextResult<Self> {
         let text = text.into();
+        enforce_full_cache_budget(text.len())?;
         let rope = Rope::from_str(&text);
         let line_index = LineIndex::new(&text);
-        Self {
+        Ok(Self {
             rope,
             line_index,
             version,
             text_cache: text,
-        }
+        })
     }
 
     /// Return the full text.
@@ -763,11 +819,18 @@ impl TextBuffer {
     /// Replace the byte range `[start, end)` with `text` and return detailed errors.
     pub fn try_replace_range(&mut self, start: usize, end: usize, text: &str) -> TextResult<()> {
         self.validate_range(start, end)?;
+        let removed_len = end.saturating_sub(start);
+        let post_edit_len = self
+            .text_cache
+            .len()
+            .saturating_sub(removed_len)
+            .saturating_add(text.len());
+        enforce_full_cache_budget(post_edit_len)?;
         let start_char = self.rope.byte_to_char(start);
         let end_char = self.rope.byte_to_char(end);
         self.rope.remove(start_char..end_char);
         self.rope.insert(start_char, text);
-        self.refresh_cache_and_index();
+        self.refresh_cache_and_index()?;
         Ok(())
     }
 
@@ -788,14 +851,32 @@ impl TextBuffer {
         self.snapshot_with_retention(RetentionPinReason::CurrentBuffer)
     }
 
+    /// Try to create an immutable [`TextSnapshot`] of the current contents.
+    pub fn try_snapshot(&self) -> TextResult<TextSnapshot> {
+        self.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)
+    }
+
     /// Create an immutable [`TextSnapshot`] with an explicit retention reason.
     pub fn snapshot_with_retention(&self, reason: RetentionPinReason) -> TextSnapshot {
-        TextSnapshot::from_rope(self.rope.clone(), self.version, reason)
+        self.try_snapshot_with_retention(reason)
+            .expect("text buffer snapshot must fit the full-cache budget")
+    }
+
+    /// Try to create an immutable [`TextSnapshot`] with an explicit retention reason.
+    pub fn try_snapshot_with_retention(
+        &self,
+        reason: RetentionPinReason,
+    ) -> TextResult<TextSnapshot> {
+        TextSnapshot::try_from_rope(self.rope.clone(), self.version, reason)
     }
 
     /// Return the estimated memory footprint of the buffer.
     pub fn memory_footprint_bytes(&self) -> usize {
-        estimate_rope_memory(&self.rope, self.text_cache.len(), self.line_index.memory_footprint_bytes())
+        estimate_rope_memory(
+            &self.rope,
+            self.text_cache.len(),
+            self.line_index.memory_footprint_bytes(),
+        )
     }
 
     fn validate_range(&self, start: usize, end: usize) -> TextResult<()> {
@@ -809,9 +890,12 @@ impl TextBuffer {
         Ok(())
     }
 
-    fn refresh_cache_and_index(&mut self) {
-        self.text_cache = self.rope.to_string();
+    fn refresh_cache_and_index(&mut self) -> TextResult<()> {
+        let refreshed = self.rope.to_string();
+        enforce_full_cache_budget(refreshed.len())?;
+        self.text_cache = refreshed;
         self.line_index = LineIndex::new(&self.text_cache);
+        Ok(())
     }
 }
 
@@ -844,6 +928,17 @@ fn estimate_rope_memory(rope: &Rope, byte_len: usize, line_index_bytes: usize) -
         + line_index_bytes
         + rope.len_lines() * std::mem::size_of::<usize>() * 4
         + DEFAULT_LEAF_TARGET_BYTES
+}
+
+fn enforce_full_cache_budget(byte_len: usize) -> TextResult<()> {
+    if byte_len > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
+        Err(TextError::FullCacheBudgetExceeded {
+            byte_len,
+            budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -932,7 +1027,11 @@ mod tests {
         assert_eq!(idx.utf16_position(1).unwrap(), Utf16Position::new(0, 1));
         assert_eq!(idx.utf16_position(5).unwrap(), Utf16Position::new(0, 3));
         assert_eq!(idx.utf16_position(6).unwrap(), Utf16Position::new(0, 4));
-        assert_eq!(idx.byte_offset_from_utf16(Utf16Position::new(0, 3)).unwrap(), 5);
+        assert_eq!(
+            idx.byte_offset_from_utf16(Utf16Position::new(0, 3))
+                .unwrap(),
+            5
+        );
         assert!(matches!(
             idx.byte_offset_from_utf16(Utf16Position::new(0, 2)),
             Err(TextError::Utf16InsideSurrogatePair { .. })
@@ -958,9 +1057,21 @@ mod tests {
                 .collect();
             let mut rope = TextBuffer::new(model.clone());
             let len = model.len();
-            let start = if len == 0 { 0 } else { (a as usize) % (len + 1) };
-            let end = if len == 0 { 0 } else { (b as usize) % (len + 1) };
-            let (start, end) = if start <= end { (start, end) } else { (end, start) };
+            let start = if len == 0 {
+                0
+            } else {
+                (a as usize) % (len + 1)
+            };
+            let end = if len == 0 {
+                0
+            } else {
+                (b as usize) % (len + 1)
+            };
+            let (start, end) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
 
             model.replace_range(start..end, &replacement);
             rope.replace_range(start, end, &replacement).unwrap();

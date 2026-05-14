@@ -2,20 +2,21 @@
 
 #![warn(missing_docs)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use devil_protocol::{
-    BufferId, BufferVersion, ByteRange, CorrelationId, FileId, SnapshotId, TextOffset,
-    TextRange as ProtocolTextRange, TextTransactionDescriptor, TimestampMillis, TransactionSource,
-    WorkspaceId,
+    BufferId, BufferVersion, ByteRange, CausalityId, ChangedTextRange, CorrelationId, FileId,
+    SnapshotId, TextTransactionDescriptor, TimestampMillis, TransactionSource, Utf16Position,
+    Utf16Range as ProtocolUtf16Range, WorkspaceId,
 };
 use devil_text::{
-    RetentionPinReason, TextBuffer, TextEdit, TextError, TextSnapshotDescriptor, Utf16Range,
+    DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
+    TextSnapshotDescriptor, Utf16Range,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
-pub use devil_text::{TextPosition, TextRange};
+pub use devil_text::{TextEdit, TextPosition, TextRange};
 
 /// Editor operation errors.
 #[derive(Debug, Error)]
@@ -122,11 +123,23 @@ impl TransactionRecord {
             changed_ranges: self
                 .deltas
                 .iter()
-                .map(|delta| ProtocolTextRange {
-                    start: TextOffset::byte(delta.byte_range.start),
-                    end: TextOffset::byte(delta.byte_range.end),
+                .map(|delta| ChangedTextRange {
+                    byte_range: delta.byte_range,
+                    utf16_range: ProtocolUtf16Range {
+                        start: Utf16Position {
+                            line: delta.utf16_range.start.line as u32,
+                            character: delta.utf16_range.start.character as u32,
+                        },
+                        end: Utf16Position {
+                            line: delta.utf16_range.end.line as u32,
+                            character: delta.utf16_range.end.character as u32,
+                        },
+                    },
                 })
                 .collect(),
+            causality_id: CausalityId(self.causality_trace_id),
+            parent_transaction_id: None,
+            schema_version: 1,
             undo_group_id: self.undo_group_id,
             occurred_at: self.occurred_at,
         }
@@ -165,12 +178,41 @@ struct UndoEntry {
 }
 
 #[derive(Debug, Clone)]
+struct PreparedBatchEdit {
+    start: usize,
+    end: usize,
+    new_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct BatchEditPlan {
+    pre_snapshot: devil_text::TextSnapshot,
+    pre_descriptor: TextSnapshotDescriptor,
+    pre_version: BufferVersion,
+    edits: Vec<PreparedBatchEdit>,
+}
+
+#[derive(Debug, Clone)]
+struct SaveSnapshotPayload {
+    snapshot: devil_text::TextSnapshot,
+    dto: SaveRequestDto,
+}
+
+#[derive(Debug, Clone)]
+struct RetainedSnapshotDescriptor {
+    buffer_id: BufferId,
+    reason: RetentionPinReason,
+    descriptor: TextSnapshotDescriptor,
+}
+
+#[derive(Debug, Clone)]
 struct EditorBufferState {
     workspace_id: WorkspaceId,
     buffer_id: BufferId,
     file_id: FileId,
     file_path: String,
     buffer: TextBuffer,
+    mode: BufferMode,
     dirty: bool,
     cursors: Vec<Cursor>,
     selections: Vec<Selection>,
@@ -187,17 +229,20 @@ impl EditorBufferState {
         file_id: FileId,
         file_path: impl Into<String>,
         initial_text: impl Into<String>,
-    ) -> Self {
-        let mut buffer = TextBuffer::new(initial_text.into());
+        mode: BufferMode,
+    ) -> Result<Self, EditorError> {
+        let mut buffer = TextBuffer::try_with_version(initial_text.into(), BufferVersion(0))?;
         buffer.set_version(BufferVersion(0));
-        let current_snapshot = buffer.snapshot_with_retention(RetentionPinReason::CurrentBuffer);
+        let current_snapshot =
+            buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
 
-        Self {
+        Ok(Self {
             workspace_id,
             buffer_id,
             file_id,
             file_path: file_path.into(),
             buffer,
+            mode,
             dirty: false,
             cursors: vec![Cursor {
                 position: TextPosition::zero(),
@@ -207,8 +252,14 @@ impl EditorBufferState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             current_snapshot,
-        }
+        })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotStackKind {
+    Undo,
+    Redo,
 }
 
 /// Production multi-buffer editor engine.
@@ -220,6 +271,69 @@ pub struct EditorEngine {
     transaction_log: Vec<TransactionRecord>,
     pending_save_requests: Vec<SaveRequestDto>,
     pinned_snapshot_ids: HashSet<SnapshotId>,
+    thresholds: EditorThresholds,
+    snapshot_retention_policy: SnapshotRetentionPolicy,
+    retained_snapshots: VecDeque<RetainedSnapshotDescriptor>,
+}
+
+const DEFAULT_RETENTION_BUDGET_SNAPSHOTS: usize = 256;
+const DEFAULT_RETENTION_BUDGET_BYTES: usize = DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES * 4;
+
+/// Buffer operating mode selected by size-based degradation gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferMode {
+    /// Full-featured editing mode.
+    Normal,
+    /// Degraded mode for large buffers to protect interactive latency.
+    Degraded,
+}
+
+/// Editor runtime thresholds used for degraded mode and retention behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorThresholds {
+    /// Byte-size threshold above which buffers open in degraded mode.
+    pub large_file_threshold_bytes: usize,
+    /// Max retained undo/redo snapshots per buffer before trimming oldest history.
+    pub retention_budget_snapshots: usize,
+}
+
+impl Default for EditorThresholds {
+    fn default() -> Self {
+        Self {
+            large_file_threshold_bytes: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
+            retention_budget_snapshots: DEFAULT_RETENTION_BUDGET_SNAPSHOTS,
+        }
+    }
+}
+
+/// Preference used when snapshot retention budgets require eviction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotEvictionPreference {
+    /// Evict the oldest undo-history snapshot before redo-history snapshots.
+    UndoThenRedo,
+    /// Evict the oldest redo-history snapshot before undo-history snapshots.
+    RedoThenUndo,
+}
+
+/// Snapshot retention budgets for editor-owned undo/redo history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotRetentionPolicy {
+    /// Maximum number of retained snapshots, including current and pending-save pins.
+    pub max_snapshot_count: usize,
+    /// Maximum estimated bytes retained across tracked snapshots.
+    pub max_estimated_bytes: usize,
+    /// Preferred eviction order for unpinned history snapshots.
+    pub eviction_preference: SnapshotEvictionPreference,
+}
+
+impl Default for SnapshotRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_snapshot_count: DEFAULT_RETENTION_BUDGET_SNAPSHOTS,
+            max_estimated_bytes: DEFAULT_RETENTION_BUDGET_BYTES,
+            eviction_preference: SnapshotEvictionPreference::UndoThenRedo,
+        }
+    }
 }
 
 impl EditorEngine {
@@ -227,8 +341,36 @@ impl EditorEngine {
     pub fn new() -> Self {
         Self {
             next_buffer_id: 1,
+            thresholds: EditorThresholds::default(),
+            snapshot_retention_policy: SnapshotRetentionPolicy::default(),
             ..Self::default()
         }
+    }
+
+    /// Create an engine with explicit threshold tuning for degraded mode and retention controls.
+    pub fn with_thresholds(thresholds: EditorThresholds) -> Self {
+        Self {
+            thresholds,
+            ..Self::new()
+        }
+    }
+
+    /// Create an engine with explicit snapshot retention policy.
+    pub fn with_snapshot_retention_policy(policy: SnapshotRetentionPolicy) -> Self {
+        Self {
+            snapshot_retention_policy: policy,
+            ..Self::new()
+        }
+    }
+
+    /// Returns the threshold configuration currently active for this editor.
+    pub fn thresholds(&self) -> EditorThresholds {
+        self.thresholds
+    }
+
+    /// Returns the active snapshot retention policy.
+    pub fn snapshot_retention_policy(&self) -> SnapshotRetentionPolicy {
+        self.snapshot_retention_policy
     }
 
     /// Open a new buffer for a workspace file.
@@ -245,10 +387,23 @@ impl EditorEngine {
         let buffer_id = BufferId(self.next_buffer_id);
         self.next_buffer_id += 1;
 
-        let state = EditorBufferState::new(workspace_id, buffer_id, file_id, file_path, initial_text);
-        self.pinned_snapshot_ids
-            .insert(state.current_snapshot.snapshot_id());
-        self.file_to_buffer.insert((workspace_id, file_id), buffer_id);
+        let initial_text = initial_text.into();
+        let mode = if initial_text.len() > self.thresholds.large_file_threshold_bytes {
+            BufferMode::Degraded
+        } else {
+            BufferMode::Normal
+        };
+        let state = EditorBufferState::new(
+            workspace_id,
+            buffer_id,
+            file_id,
+            file_path,
+            initial_text,
+            mode,
+        )?;
+        self.retain_snapshot_descriptor(buffer_id, state.current_snapshot.descriptor());
+        self.file_to_buffer
+            .insert((workspace_id, file_id), buffer_id);
         self.buffers.insert(buffer_id, state);
         Ok(buffer_id)
     }
@@ -259,11 +414,11 @@ impl EditorEngine {
             .buffers
             .remove(&buffer_id)
             .ok_or(EditorError::BufferNotFound(buffer_id))?;
-        self.file_to_buffer.remove(&(state.workspace_id, state.file_id));
-        self.pinned_snapshot_ids
-            .remove(&state.current_snapshot.snapshot_id());
+        self.file_to_buffer
+            .remove(&(state.workspace_id, state.file_id));
+        self.remove_snapshot_descriptor(state.current_snapshot.snapshot_id());
         for entry in state.undo_stack.iter().chain(state.redo_stack.iter()) {
-            self.pinned_snapshot_ids.remove(&entry.snapshot.snapshot_id());
+            self.remove_snapshot_descriptor(entry.snapshot.snapshot_id());
         }
         Ok(())
     }
@@ -306,6 +461,15 @@ impl EditorEngine {
             .version())
     }
 
+    /// Return the current operating mode for a buffer.
+    pub fn buffer_mode(&self, buffer_id: BufferId) -> Result<BufferMode, EditorError> {
+        Ok(self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .mode)
+    }
+
     /// Return the current snapshot descriptor for a buffer.
     pub fn current_snapshot(
         &self,
@@ -335,7 +499,7 @@ impl EditorEngine {
     pub fn apply_edits(
         &mut self,
         buffer_id: BufferId,
-        mut edits: Vec<TextEdit>,
+        edits: Vec<TextEdit>,
         source: TransactionSource,
         undo_group_id: Option<Uuid>,
         correlation_id: Option<CorrelationId>,
@@ -346,62 +510,86 @@ impl EditorEngine {
 
         let state = self
             .buffers
-            .get_mut(&buffer_id)
+            .get(&buffer_id)
             .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        let plan = Self::prepare_batch_edit_plan(state, edits)?;
+        let mut staged_buffer = state.buffer.clone();
+        let mut deltas = Vec::with_capacity(plan.edits.len());
 
-        let pre_snapshot = state.current_snapshot.clone();
-        let pre_descriptor = pre_snapshot.descriptor().clone();
-
-        state.undo_stack.push(UndoEntry {
-            snapshot: pre_snapshot.clone(),
-            undo_group_id,
-        });
-        self.pinned_snapshot_ids.insert(pre_snapshot.snapshot_id());
-        state.redo_stack.clear();
-
-        let mut deltas = Vec::with_capacity(edits.len());
-        // Apply from highest start offset to lowest for deterministic no-shift behavior
-        edits.sort_by_key(|edit| {
-            state
-                .buffer
-                .try_byte_offset(edit.range.start)
-                .unwrap_or(usize::MAX)
-        });
-        edits.reverse();
-
-        for edit in edits {
-            let start = state.buffer.try_byte_offset(edit.range.start)?;
-            let end = state.buffer.try_byte_offset(edit.range.end)?;
-            state.buffer.try_replace_range(start, end, &edit.new_text)?;
-
-            let changed_end = start + edit.new_text.len();
-            let utf16 = state.buffer.line_index().utf16_range(start, changed_end)?;
+        for prepared in &plan.edits {
+            staged_buffer.try_replace_range(prepared.start, prepared.end, &prepared.new_text)?;
+            let changed_end = prepared.start + prepared.new_text.len();
+            let utf16 = staged_buffer
+                .line_index()
+                .utf16_range(prepared.start, changed_end)?;
             deltas.push(ChangedDelta {
-                byte_range: ByteRange::new(start as u64, changed_end as u64),
+                byte_range: ByteRange::new(prepared.start as u64, changed_end as u64),
                 utf16_range: utf16,
             });
         }
 
-        let next_version = BufferVersion(state.buffer.version().0 + 1);
-        state.buffer.set_version(next_version);
-        state.current_snapshot =
-            state
-                .buffer
-                .snapshot_with_retention(RetentionPinReason::CurrentBuffer);
-        state.dirty = true;
+        deltas.reverse();
 
-        self.pinned_snapshot_ids
-            .insert(state.current_snapshot.snapshot_id());
+        let next_version = BufferVersion(plan.pre_version.0 + 1);
+        staged_buffer.set_version(next_version);
+        let post_snapshot =
+            staged_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
+        let post_descriptor = post_snapshot.descriptor().clone();
+
+        let (
+            workspace_id,
+            file_id,
+            old_current_snapshot_id,
+            redo_snapshot_ids,
+            post_descriptor_for_retention,
+        ) = {
+            let state = self
+                .buffers
+                .get_mut(&buffer_id)
+                .ok_or(EditorError::BufferNotFound(buffer_id))?;
+            let redo_snapshot_ids = state
+                .redo_stack
+                .iter()
+                .map(|entry| entry.snapshot.snapshot_id())
+                .collect::<Vec<_>>();
+            let old_current_snapshot_id = state.current_snapshot.snapshot_id();
+            state.undo_stack.push(UndoEntry {
+                snapshot: plan.pre_snapshot.clone(),
+                undo_group_id,
+            });
+            state.redo_stack.clear();
+            state.buffer = staged_buffer;
+            state.current_snapshot = post_snapshot;
+            state.dirty = true;
+            (
+                state.workspace_id,
+                state.file_id,
+                old_current_snapshot_id,
+                redo_snapshot_ids,
+                state.current_snapshot.descriptor().clone(),
+            )
+        };
+
+        for snapshot_id in redo_snapshot_ids {
+            self.remove_snapshot_descriptor(snapshot_id);
+        }
+        self.remove_snapshot_descriptor(old_current_snapshot_id);
+        let mut undo_descriptor = plan.pre_snapshot.descriptor().clone();
+        undo_descriptor.retention_pin_reason = RetentionPinReason::UndoHistory;
+        self.retain_snapshot_descriptor(buffer_id, &undo_descriptor);
+        self.retain_snapshot_descriptor(buffer_id, &post_descriptor_for_retention);
+
+        self.enforce_snapshot_retention_policy();
 
         let tx = TransactionRecord {
             transaction_id: Uuid::now_v7(),
             causality_trace_id: Uuid::now_v7(),
-            workspace_id: state.workspace_id,
-            buffer_id: state.buffer_id,
-            file_id: state.file_id,
+            workspace_id,
+            buffer_id,
+            file_id,
             source,
-            pre_snapshot: pre_descriptor,
-            post_snapshot: state.current_snapshot.descriptor().clone(),
+            pre_snapshot: plan.pre_descriptor,
+            post_snapshot: post_descriptor,
             deltas,
             undo_group_id,
             occurred_at: TimestampMillis::now(),
@@ -412,62 +600,239 @@ impl EditorEngine {
         Ok(tx)
     }
 
+    fn prepare_batch_edit_plan(
+        state: &EditorBufferState,
+        edits: Vec<TextEdit>,
+    ) -> Result<BatchEditPlan, EditorError> {
+        let mut prepared = Vec::with_capacity(edits.len());
+        for edit in edits {
+            let start = state.buffer.try_byte_offset(edit.range.start)?;
+            let end = state.buffer.try_byte_offset(edit.range.end)?;
+            if start > end {
+                return Err(EditorError::InvalidEdit("edit range start must be <= end"));
+            }
+            prepared.push(PreparedBatchEdit {
+                start,
+                end,
+                new_text: edit.new_text,
+            });
+        }
+
+        prepared.sort_by_key(|edit| edit.start);
+        for pair in prepared.windows(2) {
+            if pair[0].end > pair[1].start {
+                return Err(EditorError::InvalidEdit(
+                    "edit batch ranges must not overlap",
+                ));
+            }
+        }
+        prepared.reverse();
+
+        Ok(BatchEditPlan {
+            pre_snapshot: state.current_snapshot.clone(),
+            pre_descriptor: state.current_snapshot.descriptor().clone(),
+            pre_version: state.buffer.version(),
+            edits: prepared,
+        })
+    }
+
+    fn retain_snapshot_descriptor(
+        &mut self,
+        buffer_id: BufferId,
+        descriptor: &TextSnapshotDescriptor,
+    ) {
+        self.remove_snapshot_descriptor(descriptor.snapshot_id);
+        self.pinned_snapshot_ids.insert(descriptor.snapshot_id);
+        self.retained_snapshots
+            .push_back(RetainedSnapshotDescriptor {
+                buffer_id,
+                reason: descriptor.retention_pin_reason.clone(),
+                descriptor: descriptor.clone(),
+            });
+    }
+
+    fn remove_snapshot_descriptor(&mut self, snapshot_id: SnapshotId) {
+        self.pinned_snapshot_ids.remove(&snapshot_id);
+        self.retained_snapshots
+            .retain(|snapshot| snapshot.descriptor.snapshot_id != snapshot_id);
+    }
+
+    fn retained_snapshot_bytes(&self) -> usize {
+        self.retained_snapshots
+            .iter()
+            .map(|snapshot| snapshot.descriptor.memory_footprint_bytes)
+            .sum()
+    }
+
+    fn enforce_snapshot_retention_policy(&mut self) {
+        loop {
+            let over_count =
+                self.retained_snapshots.len() > self.snapshot_retention_policy.max_snapshot_count;
+            let over_bytes =
+                self.retained_snapshot_bytes() > self.snapshot_retention_policy.max_estimated_bytes;
+            if !over_count && !over_bytes {
+                break;
+            }
+
+            let Some((buffer_id, stack_kind, snapshot_id)) =
+                self.oldest_evictable_history_snapshot()
+            else {
+                break;
+            };
+
+            if let Some(state) = self.buffers.get_mut(&buffer_id) {
+                match stack_kind {
+                    SnapshotStackKind::Undo => {
+                        if let Some(idx) = state
+                            .undo_stack
+                            .iter()
+                            .position(|entry| entry.snapshot.snapshot_id() == snapshot_id)
+                        {
+                            state.undo_stack.remove(idx);
+                        }
+                    }
+                    SnapshotStackKind::Redo => {
+                        if let Some(idx) = state
+                            .redo_stack
+                            .iter()
+                            .position(|entry| entry.snapshot.snapshot_id() == snapshot_id)
+                        {
+                            state.redo_stack.remove(idx);
+                        }
+                    }
+                }
+            }
+            self.remove_snapshot_descriptor(snapshot_id);
+        }
+    }
+
+    fn oldest_evictable_history_snapshot(
+        &self,
+    ) -> Option<(BufferId, SnapshotStackKind, SnapshotId)> {
+        match self.snapshot_retention_policy.eviction_preference {
+            SnapshotEvictionPreference::UndoThenRedo => self
+                .oldest_evictable_history_snapshot_for(RetentionPinReason::UndoHistory)
+                .or_else(|| {
+                    self.oldest_evictable_history_snapshot_for(RetentionPinReason::RedoHistory)
+                }),
+            SnapshotEvictionPreference::RedoThenUndo => self
+                .oldest_evictable_history_snapshot_for(RetentionPinReason::RedoHistory)
+                .or_else(|| {
+                    self.oldest_evictable_history_snapshot_for(RetentionPinReason::UndoHistory)
+                }),
+        }
+    }
+
+    fn oldest_evictable_history_snapshot_for(
+        &self,
+        reason: RetentionPinReason,
+    ) -> Option<(BufferId, SnapshotStackKind, SnapshotId)> {
+        self.retained_snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.reason == reason
+                    && !self.is_snapshot_pinned(snapshot.descriptor.snapshot_id)
+            })
+            .map(|snapshot| {
+                let kind = if reason == RetentionPinReason::UndoHistory {
+                    SnapshotStackKind::Undo
+                } else {
+                    SnapshotStackKind::Redo
+                };
+                (snapshot.buffer_id, kind, snapshot.descriptor.snapshot_id)
+            })
+    }
+
+    fn is_snapshot_pinned(&self, snapshot_id: SnapshotId) -> bool {
+        self.pending_save_requests
+            .iter()
+            .any(|request| request.snapshot_id == snapshot_id)
+            || self
+                .buffers
+                .values()
+                .any(|state| state.current_snapshot.snapshot_id() == snapshot_id)
+    }
+
     /// Undo one transaction for the given buffer.
     pub fn undo(
         &mut self,
         buffer_id: BufferId,
         correlation_id: Option<CorrelationId>,
     ) -> Result<TransactionRecord, EditorError> {
-        let state = self
-            .buffers
-            .get_mut(&buffer_id)
-            .ok_or(EditorError::BufferNotFound(buffer_id))?;
-        let undo_entry = state.undo_stack.pop().ok_or(EditorError::NothingToUndo)?;
-        let pre_snapshot = state.current_snapshot.clone();
+        let (
+            workspace_id,
+            file_id,
+            undo_group_id,
+            pre_snapshot_descriptor,
+            redo_snapshot_descriptor,
+            post_snapshot_descriptor,
+            undo_snapshot_id,
+            delta,
+        ) = {
+            let state = self
+                .buffers
+                .get_mut(&buffer_id)
+                .ok_or(EditorError::BufferNotFound(buffer_id))?;
+            let undo_entry = state
+                .undo_stack
+                .last()
+                .cloned()
+                .ok_or(EditorError::NothingToUndo)?;
+            let pre_snapshot = state.current_snapshot.clone();
+            let next_version = BufferVersion(state.buffer.version().0 + 1);
+            let mut restored_buffer =
+                TextBuffer::try_with_version(undo_entry.snapshot.text().to_string(), next_version)?;
+            restored_buffer.set_version(next_version);
+            let restored_snapshot =
+                restored_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
+            let delta = ChangedDelta {
+                byte_range: ByteRange::new(0, restored_buffer.len() as u64),
+                utf16_range: restored_buffer
+                    .line_index()
+                    .utf16_range(0, restored_buffer.len())?,
+            };
+            let restored_snapshot_descriptor = restored_snapshot.descriptor().clone();
+            let pre_snapshot_descriptor = pre_snapshot.descriptor().clone();
+            let mut redo_snapshot_descriptor = pre_snapshot_descriptor.clone();
+            redo_snapshot_descriptor.retention_pin_reason = RetentionPinReason::RedoHistory;
+            let undo_snapshot_id = undo_entry.snapshot.snapshot_id();
 
-        state.redo_stack.push(UndoEntry {
-            snapshot: pre_snapshot.clone(),
-            undo_group_id: undo_entry.undo_group_id,
-        });
-        self.pinned_snapshot_ids.insert(pre_snapshot.snapshot_id());
+            state.undo_stack.pop();
+            state.redo_stack.push(UndoEntry {
+                snapshot: pre_snapshot.clone(),
+                undo_group_id: undo_entry.undo_group_id,
+            });
+            state.buffer = restored_buffer;
+            state.current_snapshot = restored_snapshot;
+            state.dirty = true;
 
-        state.buffer = TextBuffer::with_version(
-            undo_entry.snapshot.text().to_string(),
-            BufferVersion(state.buffer.version().0 + 1),
-        );
-        state.current_snapshot =
-            state
-                .buffer
-                .snapshot_with_retention(RetentionPinReason::CurrentBuffer);
-        state.dirty = true;
+            (
+                state.workspace_id,
+                state.file_id,
+                undo_entry.undo_group_id,
+                pre_snapshot_descriptor,
+                redo_snapshot_descriptor,
+                restored_snapshot_descriptor,
+                undo_snapshot_id,
+                delta,
+            )
+        };
+        self.remove_snapshot_descriptor(undo_snapshot_id);
+        self.retain_snapshot_descriptor(buffer_id, &redo_snapshot_descriptor);
+        self.retain_snapshot_descriptor(buffer_id, &post_snapshot_descriptor);
+        self.enforce_snapshot_retention_policy();
 
         let tx = TransactionRecord {
             transaction_id: Uuid::now_v7(),
             causality_trace_id: Uuid::now_v7(),
-            workspace_id: state.workspace_id,
-            buffer_id: state.buffer_id,
-            file_id: state.file_id,
+            workspace_id,
+            buffer_id,
+            file_id,
             source: TransactionSource::Restore,
-            pre_snapshot: pre_snapshot.descriptor().clone(),
-            post_snapshot: state.current_snapshot.descriptor().clone(),
-            deltas: vec![ChangedDelta {
-                byte_range: ByteRange::new(0, state.buffer.len() as u64),
-                utf16_range: state
-                    .buffer
-                    .line_index()
-                    .utf16_range(0, state.buffer.len())
-                    .unwrap_or(Utf16Range {
-                        start: devil_text::Utf16Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: devil_text::Utf16Position {
-                            line: 0,
-                            character: 0,
-                        },
-                    }),
-            }],
-            undo_group_id: undo_entry.undo_group_id,
+            pre_snapshot: pre_snapshot_descriptor,
+            post_snapshot: post_snapshot_descriptor,
+            deltas: vec![delta],
+            undo_group_id,
             occurred_at: TimestampMillis::now(),
             correlation_id,
         };
@@ -481,55 +846,80 @@ impl EditorEngine {
         buffer_id: BufferId,
         correlation_id: Option<CorrelationId>,
     ) -> Result<TransactionRecord, EditorError> {
-        let state = self
-            .buffers
-            .get_mut(&buffer_id)
-            .ok_or(EditorError::BufferNotFound(buffer_id))?;
-        let redo_entry = state.redo_stack.pop().ok_or(EditorError::NothingToRedo)?;
-        let pre_snapshot = state.current_snapshot.clone();
+        let (
+            workspace_id,
+            file_id,
+            undo_group_id,
+            pre_snapshot_descriptor,
+            undo_snapshot_descriptor,
+            post_snapshot_descriptor,
+            redo_snapshot_id,
+            delta,
+        ) = {
+            let state = self
+                .buffers
+                .get_mut(&buffer_id)
+                .ok_or(EditorError::BufferNotFound(buffer_id))?;
+            let redo_entry = state
+                .redo_stack
+                .last()
+                .cloned()
+                .ok_or(EditorError::NothingToRedo)?;
+            let pre_snapshot = state.current_snapshot.clone();
+            let next_version = BufferVersion(state.buffer.version().0 + 1);
+            let mut restored_buffer =
+                TextBuffer::try_with_version(redo_entry.snapshot.text().to_string(), next_version)?;
+            restored_buffer.set_version(next_version);
+            let restored_snapshot =
+                restored_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
+            let delta = ChangedDelta {
+                byte_range: ByteRange::new(0, restored_buffer.len() as u64),
+                utf16_range: restored_buffer
+                    .line_index()
+                    .utf16_range(0, restored_buffer.len())?,
+            };
+            let restored_snapshot_descriptor = restored_snapshot.descriptor().clone();
+            let pre_snapshot_descriptor = pre_snapshot.descriptor().clone();
+            let mut undo_snapshot_descriptor = pre_snapshot_descriptor.clone();
+            undo_snapshot_descriptor.retention_pin_reason = RetentionPinReason::UndoHistory;
+            let redo_snapshot_id = redo_entry.snapshot.snapshot_id();
 
-        state.undo_stack.push(UndoEntry {
-            snapshot: pre_snapshot.clone(),
-            undo_group_id: redo_entry.undo_group_id,
-        });
+            state.redo_stack.pop();
+            state.undo_stack.push(UndoEntry {
+                snapshot: pre_snapshot.clone(),
+                undo_group_id: redo_entry.undo_group_id,
+            });
+            state.buffer = restored_buffer;
+            state.current_snapshot = restored_snapshot;
+            state.dirty = true;
 
-        state.buffer = TextBuffer::with_version(
-            redo_entry.snapshot.text().to_string(),
-            BufferVersion(state.buffer.version().0 + 1),
-        );
-        state.current_snapshot =
-            state
-                .buffer
-                .snapshot_with_retention(RetentionPinReason::CurrentBuffer);
-        state.dirty = true;
+            (
+                state.workspace_id,
+                state.file_id,
+                redo_entry.undo_group_id,
+                pre_snapshot_descriptor,
+                undo_snapshot_descriptor,
+                restored_snapshot_descriptor,
+                redo_snapshot_id,
+                delta,
+            )
+        };
+        self.remove_snapshot_descriptor(redo_snapshot_id);
+        self.retain_snapshot_descriptor(buffer_id, &undo_snapshot_descriptor);
+        self.retain_snapshot_descriptor(buffer_id, &post_snapshot_descriptor);
+        self.enforce_snapshot_retention_policy();
 
         let tx = TransactionRecord {
             transaction_id: Uuid::now_v7(),
             causality_trace_id: Uuid::now_v7(),
-            workspace_id: state.workspace_id,
-            buffer_id: state.buffer_id,
-            file_id: state.file_id,
+            workspace_id,
+            buffer_id,
+            file_id,
             source: TransactionSource::Restore,
-            pre_snapshot: pre_snapshot.descriptor().clone(),
-            post_snapshot: state.current_snapshot.descriptor().clone(),
-            deltas: vec![ChangedDelta {
-                byte_range: ByteRange::new(0, state.buffer.len() as u64),
-                utf16_range: state
-                    .buffer
-                    .line_index()
-                    .utf16_range(0, state.buffer.len())
-                    .unwrap_or(Utf16Range {
-                        start: devil_text::Utf16Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: devil_text::Utf16Position {
-                            line: 0,
-                            character: 0,
-                        },
-                    }),
-            }],
-            undo_group_id: redo_entry.undo_group_id,
+            pre_snapshot: pre_snapshot_descriptor,
+            post_snapshot: post_snapshot_descriptor,
+            deltas: vec![delta],
+            undo_group_id,
             occurred_at: TimestampMillis::now(),
             correlation_id,
         };
@@ -543,31 +933,33 @@ impl EditorEngine {
         buffer_id: BufferId,
         correlation_id: Option<CorrelationId>,
     ) -> Result<SaveRequestDto, EditorError> {
-        let state = self
-            .buffers
-            .get_mut(&buffer_id)
-            .ok_or(EditorError::BufferNotFound(buffer_id))?;
-        let snapshot =
-            state
+        let payload = {
+            let state = self
+                .buffers
+                .get(&buffer_id)
+                .ok_or(EditorError::BufferNotFound(buffer_id))?;
+            let snapshot = state
                 .buffer
-                .snapshot_with_retention(RetentionPinReason::BackgroundSave);
-
-        self.pinned_snapshot_ids.insert(snapshot.snapshot_id());
-
-        let dto = SaveRequestDto {
-            request_id: Uuid::now_v7(),
-            workspace_id: state.workspace_id,
-            buffer_id: state.buffer_id,
-            file_id: state.file_id,
-            snapshot_id: snapshot.snapshot_id(),
-            buffer_version: snapshot.buffer_version(),
-            content_hash: snapshot.content_hash().to_string(),
-            text: snapshot.text().to_string(),
-            requested_at: TimestampMillis::now(),
-            correlation_id,
+                .try_snapshot_with_retention(RetentionPinReason::BackgroundSave)?;
+            let dto = SaveRequestDto {
+                request_id: Uuid::now_v7(),
+                workspace_id: state.workspace_id,
+                buffer_id: state.buffer_id,
+                file_id: state.file_id,
+                snapshot_id: snapshot.snapshot_id(),
+                buffer_version: snapshot.buffer_version(),
+                content_hash: snapshot.content_hash().to_string(),
+                text: snapshot.text().to_string(),
+                requested_at: TimestampMillis::now(),
+                correlation_id,
+            };
+            SaveSnapshotPayload { snapshot, dto }
         };
-        self.pending_save_requests.push(dto.clone());
-        Ok(dto)
+
+        self.retain_snapshot_descriptor(buffer_id, payload.snapshot.descriptor());
+        self.pending_save_requests.push(payload.dto.clone());
+        self.enforce_snapshot_retention_policy();
+        Ok(payload.dto)
     }
 
     /// Mark that a save request completed and clear dirty state when matching current snapshot.
@@ -578,31 +970,30 @@ impl EditorEngine {
             .position(|request| request.request_id == request_id)
         {
             let request = self.pending_save_requests.remove(idx);
-            if success {
-                if let Some(state) = self.buffers.get_mut(&request.buffer_id) {
-                    if state.current_snapshot.snapshot_id() == request.snapshot_id {
-                        state.dirty = false;
-                    }
-                }
+            if success
+                && let Some(state) = self.buffers.get_mut(&request.buffer_id)
+                && state.current_snapshot.snapshot_id() == request.snapshot_id
+            {
+                state.dirty = false;
             }
 
-            if self.pending_save_requests.iter().all(|pending| pending.snapshot_id != request.snapshot_id)
-                && self
-                    .buffers
-                    .values()
-                    .all(|state| {
-                        state.current_snapshot.snapshot_id() != request.snapshot_id
-                            && state
-                                .undo_stack
-                                .iter()
-                                .all(|entry| entry.snapshot.snapshot_id() != request.snapshot_id)
-                            && state
-                                .redo_stack
-                                .iter()
-                                .all(|entry| entry.snapshot.snapshot_id() != request.snapshot_id)
-                    })
+            if self
+                .pending_save_requests
+                .iter()
+                .all(|pending| pending.snapshot_id != request.snapshot_id)
+                && self.buffers.values().all(|state| {
+                    state.current_snapshot.snapshot_id() != request.snapshot_id
+                        && state
+                            .undo_stack
+                            .iter()
+                            .all(|entry| entry.snapshot.snapshot_id() != request.snapshot_id)
+                        && state
+                            .redo_stack
+                            .iter()
+                            .all(|entry| entry.snapshot.snapshot_id() != request.snapshot_id)
+                })
             {
-                self.pinned_snapshot_ids.remove(&request.snapshot_id);
+                self.remove_snapshot_descriptor(request.snapshot_id);
             }
         }
     }
@@ -620,6 +1011,36 @@ impl EditorEngine {
     /// Number of pinned snapshots retained by active undo/redo/save references.
     pub fn pinned_snapshot_count(&self) -> usize {
         self.pinned_snapshot_ids.len()
+    }
+
+    /// Number of retained snapshot descriptors tracked by the retention policy.
+    pub fn retained_snapshot_count(&self) -> usize {
+        self.retained_snapshots.len()
+    }
+
+    /// Estimated bytes retained by tracked snapshot descriptors.
+    pub fn retained_snapshot_estimated_bytes(&self) -> usize {
+        self.retained_snapshot_bytes()
+    }
+
+    /// Undo entries retained for a buffer.
+    pub fn undo_len(&self, buffer_id: BufferId) -> Result<usize, EditorError> {
+        Ok(self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .undo_stack
+            .len())
+    }
+
+    /// Redo entries retained for a buffer.
+    pub fn redo_len(&self, buffer_id: BufferId) -> Result<usize, EditorError> {
+        Ok(self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .redo_stack
+            .len())
     }
 
     /// Replace cursors for a buffer.
@@ -665,7 +1086,13 @@ impl EditorEngine {
     }
 }
 
-/// Backward-compatible session wrapper around one active buffer.
+/// Compatibility-only wrapper around one active buffer.
+///
+/// `EditorSession` is retained solely as a legacy spike-test shim during the
+/// editor-engine migration. New application and UI code must not own or route
+/// commands through this wrapper; it must use [`EditorEngine`] through protocol
+/// and workspace ports so buffer IDs, file IDs, transactions, saves, and
+/// observability metadata remain explicit.
 #[derive(Debug)]
 pub struct EditorSession {
     engine: EditorEngine,
@@ -673,7 +1100,7 @@ pub struct EditorSession {
 }
 
 impl EditorSession {
-    /// Create a session with one open buffer.
+    /// Compatibility constructor for a single-buffer legacy session.
     pub fn open(
         file_path: impl Into<String>,
         project_info: devil_protocol::ProjectInfo,
@@ -695,7 +1122,7 @@ impl EditorSession {
         }
     }
 
-    /// Create a session with explicit buffer id ignored for compatibility.
+    /// Compatibility constructor with an ignored legacy buffer id.
     pub fn open_with_buffer_id(
         file_path: impl Into<String>,
         _buffer_id: BufferId,
@@ -720,10 +1147,7 @@ impl EditorSession {
     }
 
     /// Apply an edit and return protocol descriptor metadata.
-    pub fn apply_edit(
-        &mut self,
-        edit: TextEdit,
-    ) -> Result<TextTransactionDescriptor, EditorError> {
+    pub fn apply_edit(&mut self, edit: TextEdit) -> Result<TextTransactionDescriptor, EditorError> {
         let record = self.engine.apply_edit(
             self.active_buffer_id,
             edit,
@@ -812,7 +1236,10 @@ impl EditorSession {
     }
 
     /// Deletes a [`TextRange`].
-    pub fn delete_range(&mut self, range: TextRange) -> Result<TextTransactionDescriptor, EditorError> {
+    pub fn delete_range(
+        &mut self,
+        range: TextRange,
+    ) -> Result<TextTransactionDescriptor, EditorError> {
         self.apply_edit(TextEdit::delete(range))
     }
 
@@ -878,27 +1305,20 @@ mod tests {
     fn engine_multi_buffer_lifecycle() {
         let mut engine = EditorEngine::new();
         let a = engine
-            .open_buffer(
-                WorkspaceId(1),
-                FileId(10),
-                "src/a.rs",
-                "fn a() {}\n",
-            )
+            .open_buffer(WorkspaceId(1), FileId(10), "src/a.rs", "fn a() {}\n")
             .unwrap();
         let b = engine
-            .open_buffer(
-                WorkspaceId(1),
-                FileId(11),
-                "src/b.rs",
-                "fn b() {}\n",
-            )
+            .open_buffer(WorkspaceId(1), FileId(11), "src/b.rs", "fn b() {}\n")
             .unwrap();
 
         assert_eq!(engine.text(a).unwrap(), "fn a() {}\n");
         assert_eq!(engine.text(b).unwrap(), "fn b() {}\n");
 
         engine.close_buffer(a).unwrap();
-        assert!(matches!(engine.text(a), Err(EditorError::BufferNotFound(_))));
+        assert!(matches!(
+            engine.text(a),
+            Err(EditorError::BufferNotFound(_))
+        ));
     }
 
     #[test]
@@ -924,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_redo_invariants() {
+    fn compatibility_session_undo_redo_invariants() {
         let mut session = EditorSession::open("src/main.rs", project(7), "hello");
         session
             .insert_at(TextPosition::new(0, 5), " world")
@@ -937,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn save_request_is_decoupled_from_disk_writes() {
+    fn compatibility_session_save_request_is_decoupled_from_disk_writes() {
         let mut session = EditorSession::open("src/main.rs", project(8), "hello");
         session
             .insert_at(TextPosition::new(0, 5), "!")

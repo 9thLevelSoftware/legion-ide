@@ -62,6 +62,11 @@ This document defines the required crate dependency direction used by `cargo run
   - `ByteRange`
   - `ByteOffset`
   - `Utf16Offset`
+  - `Utf16Position`
+  - `Utf16Range`
+  - `ChangedTextRange`
+  - `CausalityId`
+  - `EventId`
   - `TextCoordinateEncoding`
   - `TextOffset`
   - `TextRange`
@@ -164,6 +169,9 @@ This document defines the required crate dependency direction used by `cargo run
   - `CapabilityRequest`
   - `CapabilityResponse`
   - `EventEnvelope`
+  - `EventSeverity`
+  - `RetentionLabel`
+  - `RedactionHint`
   - `EventSinkRequest`
   - `StorageRepositoryRequest`
   - `StorageRepositoryResponse`

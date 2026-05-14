@@ -2,62 +2,85 @@
 
 ## Status
 
-Draft, blocking implementation milestone.
+Accepted
+
+Accepted at: 2026-05-14T02:07:05Z
 
 ## Purpose
 
-Milestone 0 validates Spike 1A viability before any broad feature implementation in other domains. It focuses on architecture direction, platform boundaries, and text/index performance under representative load.
+Milestone 0 validates Spike 1A viability before broad feature implementation in other domains. It focuses on architecture direction, platform boundaries, and text/index performance under representative load.
 
 ## Scope
 
-- Spike 1A (Native editor shell latency path)
-- Required contract hardening for editor/project boundary
-- Freeze criteria enforcement before scaling
+- Spike 1A native editor shell latency path.
+- Required contract hardening for editor/project boundary.
+- Freeze criteria enforcement before scaling.
 
-## Proof Tracks
+## Proof tracks
 
-### Track A — UI Native Path Validation (`SPIKE-001A`)
+### Track A — UI Native Path Validation
 
-- Validate editor latency and interaction quality on target platforms.
-- Validate IME/clipboard/scroll/text input feasibility.
-- Confirm accessibility and input/event-loop integration feasibility.
-- Produce proof report with metrics and pass/fail decision.
+Status: Accepted with reservations
 
-Acceptance:
-- Pass conditions from `plans/SPIKE-001A-native-shell-proof.md` are met.
+Evidence:
+- `plans/SPIKE-001A-native-shell-proof.md`
+- `plans/spikes/SPIKE-001A-result.md`
+- `plans/evidence/phase-0/native-shell-proof-summary.md`
+
+Result:
+- Editor and application command paths route UI intents through projection snapshots, `EditorEngine`, and `WorkspaceActor`.
+- SPIKE-001A decision is `PASS WITH RESERVATIONS` because compositor-backed p50/frame/GPU/IME/clipboard/accessibility measurements are owned follow-ups.
 
 ### Track B — Boundary and Dependency Direction Validation
 
-- Validate dependency inversion for `devil-ai` vs `devil-ai-providers`.
-- Validate no hard editor→project dependency via direct crate edge.
-- Validate protocol contracts for `ProjectInfo*` and editor transaction flow in `devil-protocol`.
+Status: Accepted
 
-Acceptance:
-- Checks in `plans/architecture-freeze-v0.1.md` gates 1 and 2 are satisfied.
+Evidence:
+- `plans/architecture-freeze-v0.1.md`
+- `plans/evidence/phase-0/check-deps.txt`
+- `plans/evidence/phase-0/cargo-test-workspace-all-targets.txt`
+
+Result:
+- Dependency direction validation passed.
+- Protocol DTO and event-envelope tests passed.
+- Editor/project boundaries remain mediated by protocol and workspace/editor ports.
 
 ### Track C — Text + Index Stress Baseline
 
-- Validate large-file edit throughput and undo/redo under load.
-- Validate snapshot memory growth and rollback behavior at scale.
-- Validate index update responsiveness while typing on large files.
+Status: Accepted with reservations
 
-Acceptance:
-- Metrics in `plans/architecture-charter-v0.1.md §16.8` are collected and reviewed.
+Evidence:
+- `plans/evidence/phase-0/text-index-stress-baseline.md`
+- `plans/evidence/phase-0/cargo-test-workspace-all-targets.txt`
+- `plans/evidence/phase-0/editor-performance-suite.txt`
+
+Result:
+- Non-ignored performance tests `ci_typical_edit_latency_on_budget_sized_file`, `ci_snapshot_retention_budget_is_enforced`, and `ci_undo_redo_burst_small_deterministic_sample` passed.
+- Atomicity and UTF-16 transaction descriptor tests passed.
+- Archived ignored benchmark output records the 100MB full-cache boundary and retained-history reservations without treating them as green benchmark data.
+- Index responsiveness remains a baseline no-op because `devil-index` is not active in Phase 0.
 
 ### Track D — Platform Boundary Verification
 
-- Validate that `devil-platform` is constrained to OS abstractions and no editor-level ownership.
-- Validate service interfaces are documented and stable for platform duties.
+Status: Accepted
 
-Acceptance:
-- `plans/SPIKE-000-platform-boundary-proof.md` is completed and reviewed.
+Evidence:
+- `plans/SPIKE-000-platform-boundary-proof.md`
+- `plans/evidence/phase-0/platform-boundary-api-map.md`
+- `plans/evidence/phase-0/cargo-check-workspace-all-targets.txt`
+- `plans/evidence/phase-0/cargo-test-workspace-all-targets.txt`
 
-## Milestone Exit Criteria
+Result:
+- Every public `devil-platform` API is mapped to an OS concern.
+- Editor, window, model, and request-routing ownership are explicitly excluded from platform ownership.
 
-- All tracks above have evidence artifacts.
-- Architecture freeze conditions from `plans/architecture-freeze-v0.1.md` are met.
-- Any unresolved risks are explicitly logged with owners and mitigation before moving to Milestone 1.
+## Milestone exit criteria
+
+- All tracks have linked evidence artifacts.
+- Architecture freeze conditions are accepted in `plans/architecture-freeze-v0.1.md`.
+- Reservations are documented with owner roles and follow-up criteria.
+- No unresolved blocker is treated as cleared without evidence.
 
 ## Notes
 
-- Keep implementation of `devil-agent`, `devil-memory`, `devil-observability`, and `devil-cli` at minimum viable scaffolding until this milestone is passed.
+- Minimal scaffold crates can now grow only through the approved phase sequence and global validation gates.

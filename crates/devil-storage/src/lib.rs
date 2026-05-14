@@ -3,12 +3,17 @@
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use devil_protocol::{CanonicalPath, CorrelationId, FileId, SnapshotId, WorkspaceId, WorkspaceTrustState};
+use devil_protocol::{
+    CanonicalPath, CorrelationId, FileId, SnapshotId, WorkspaceId, WorkspaceTrustState,
+};
 use devil_security::TrustState;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Lightweight record for persisted workspace configuration snapshots.
 pub struct WorkspaceConfigRecord {
     /// Serialized configuration payload.
@@ -17,7 +22,7 @@ pub struct WorkspaceConfigRecord {
     pub snapshot_id: SnapshotId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Stored trust decision metadata for a workspace principal.
 pub struct TrustDecisionRecord {
     /// Last known trust state.
@@ -26,7 +31,7 @@ pub struct TrustDecisionRecord {
     pub correlation_id: CorrelationId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Cached file metadata used by shallow-discovery reconciliation.
 pub struct FileMetadataRecord {
     /// Fingerprint hash or digest string.
@@ -35,7 +40,7 @@ pub struct FileMetadataRecord {
     pub file_id: FileId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Session metadata persisted for recovery and restore.
 pub struct SessionRecord {
     /// Owning workspace identifier.
@@ -61,6 +66,14 @@ pub enum StorageError {
         /// Detailed failure text.
         message: String,
     },
+    /// Persisted storage file was corrupt and got quarantined.
+    #[error("storage corruption detected at `{path}`; quarantined to `{quarantine_path}`")]
+    Corrupt {
+        /// Original corrupt storage file path.
+        path: String,
+        /// Quarantine destination path.
+        quarantine_path: String,
+    },
 }
 
 type StorageResult<T> = Result<T, StorageError>;
@@ -68,7 +81,11 @@ type StorageResult<T> = Result<T, StorageError>;
 /// Persistent workspace config persistence API.
 pub trait WorkspaceConfigRepository {
     /// Store workspace configuration data.
-    fn save(&mut self, workspace_id: WorkspaceId, config: WorkspaceConfigRecord) -> StorageResult<()>;
+    fn save(
+        &mut self,
+        workspace_id: WorkspaceId,
+        config: WorkspaceConfigRecord,
+    ) -> StorageResult<()>;
     /// Load workspace configuration data.
     fn load(&self, workspace_id: WorkspaceId) -> StorageResult<WorkspaceConfigRecord>;
     /// Remove workspace configuration data.
@@ -114,11 +131,7 @@ pub trait FileMetadataCache {
 /// Session persistence API.
 pub trait WorkspaceSessionRepository {
     /// Persist session metadata.
-    fn save_session(
-        &mut self,
-        session_id: &str,
-        session: SessionRecord,
-    ) -> StorageResult<()>;
+    fn save_session(&mut self, session_id: &str, session: SessionRecord) -> StorageResult<()>;
     /// Restore session metadata.
     fn load_session(&self, session_id: &str) -> StorageResult<SessionRecord>;
     /// Delete session metadata.
@@ -134,6 +147,184 @@ pub struct InMemoryStorage {
     sessions: HashMap<String, SessionRecord>,
 }
 
+#[derive(Debug)]
+/// JSON file-backed storage implementation with corruption quarantine behavior.
+pub struct FileBackedStorage {
+    path: PathBuf,
+    state: InMemoryStorage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedState {
+    schema_version: u16,
+    workspace_configs: HashMap<WorkspaceId, WorkspaceConfigRecord>,
+    trust: HashMap<(WorkspaceId, String), TrustDecisionRecord>,
+    metadata: HashMap<(WorkspaceId, String), FileMetadataRecord>,
+    sessions: HashMap<String, SessionRecord>,
+}
+
+impl From<&InMemoryStorage> for PersistedState {
+    fn from(value: &InMemoryStorage) -> Self {
+        Self {
+            schema_version: 1,
+            workspace_configs: value.workspace_configs.clone(),
+            trust: value.trust.clone(),
+            metadata: value.metadata.clone(),
+            sessions: value.sessions.clone(),
+        }
+    }
+}
+
+impl From<PersistedState> for InMemoryStorage {
+    fn from(value: PersistedState) -> Self {
+        Self {
+            workspace_configs: value.workspace_configs,
+            trust: value.trust,
+            metadata: value.metadata,
+            sessions: value.sessions,
+        }
+    }
+}
+
+impl FileBackedStorage {
+    /// Open file-backed storage from path, creating defaults when missing.
+    pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| StorageError::Failed {
+                message: format!("create storage directory failed: {err}"),
+            })?;
+        }
+
+        let state = match fs::read_to_string(&path) {
+            Ok(contents) => {
+                let persisted: PersistedState = serde_json::from_str(&contents).map_err(|_| {
+                    let quarantine = Self::quarantine_path(&path);
+                    let _ = fs::rename(&path, &quarantine);
+                    StorageError::Corrupt {
+                        path: path.to_string_lossy().into_owned(),
+                        quarantine_path: quarantine.to_string_lossy().into_owned(),
+                    }
+                })?;
+                InMemoryStorage::from(persisted)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => InMemoryStorage::new(),
+            Err(err) => {
+                return Err(StorageError::Failed {
+                    message: format!("read storage file failed: {err}"),
+                });
+            }
+        };
+
+        let mut storage = Self { path, state };
+        storage.flush()?;
+        Ok(storage)
+    }
+
+    fn quarantine_path(path: &Path) -> PathBuf {
+        let mut extension = path
+            .extension()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| "json".to_string());
+        extension.push_str(".corrupt");
+        path.with_extension(extension)
+    }
+
+    fn flush(&mut self) -> StorageResult<()> {
+        let persisted = PersistedState::from(&self.state);
+        let body =
+            serde_json::to_string_pretty(&persisted).map_err(|err| StorageError::Failed {
+                message: format!("serialize storage state failed: {err}"),
+            })?;
+
+        fs::write(&self.path, body).map_err(|err| StorageError::Failed {
+            message: format!("write storage file failed: {err}"),
+        })
+    }
+}
+
+impl WorkspaceConfigRepository for FileBackedStorage {
+    fn save(
+        &mut self,
+        workspace_id: WorkspaceId,
+        config: WorkspaceConfigRecord,
+    ) -> StorageResult<()> {
+        self.state.save(workspace_id, config)?;
+        self.flush()
+    }
+
+    fn load(&self, workspace_id: WorkspaceId) -> StorageResult<WorkspaceConfigRecord> {
+        self.state.load(workspace_id)
+    }
+
+    fn remove(&mut self, workspace_id: WorkspaceId) -> StorageResult<()> {
+        self.state.remove(workspace_id)?;
+        self.flush()
+    }
+}
+
+impl WorkspaceTrustRepository for FileBackedStorage {
+    fn persist(
+        &mut self,
+        workspace_id: WorkspaceId,
+        principal_id: &str,
+        decision: TrustDecisionRecord,
+    ) -> StorageResult<()> {
+        self.state.persist(workspace_id, principal_id, decision)?;
+        self.flush()
+    }
+
+    fn resolve(
+        &self,
+        workspace_id: WorkspaceId,
+        principal_id: &str,
+    ) -> StorageResult<TrustDecisionRecord> {
+        self.state.resolve(workspace_id, principal_id)
+    }
+}
+
+impl FileMetadataCache for FileBackedStorage {
+    fn put_fingerprint(
+        &mut self,
+        workspace_id: WorkspaceId,
+        canonical_path: &str,
+        metadata: FileMetadataRecord,
+    ) -> StorageResult<()> {
+        self.state
+            .put_fingerprint(workspace_id, canonical_path, metadata)?;
+        self.flush()
+    }
+
+    fn get_fingerprint(
+        &self,
+        workspace_id: WorkspaceId,
+        canonical_path: &str,
+    ) -> StorageResult<FileMetadataRecord> {
+        self.state.get_fingerprint(workspace_id, canonical_path)
+    }
+
+    fn clear_workspace(&mut self, workspace_id: WorkspaceId) -> StorageResult<()> {
+        self.state.clear_workspace(workspace_id)?;
+        self.flush()
+    }
+}
+
+impl WorkspaceSessionRepository for FileBackedStorage {
+    fn save_session(&mut self, session_id: &str, session: SessionRecord) -> StorageResult<()> {
+        self.state.save_session(session_id, session)?;
+        self.flush()
+    }
+
+    fn load_session(&self, session_id: &str) -> StorageResult<SessionRecord> {
+        self.state.load_session(session_id)
+    }
+
+    fn delete_session(&mut self, session_id: &str) -> StorageResult<()> {
+        self.state.delete_session(session_id)?;
+        self.flush()
+    }
+}
+
 impl InMemoryStorage {
     /// Construct a new in-memory store.
     pub fn new() -> Self {
@@ -142,7 +333,11 @@ impl InMemoryStorage {
 }
 
 impl WorkspaceConfigRepository for InMemoryStorage {
-    fn save(&mut self, workspace_id: WorkspaceId, config: WorkspaceConfigRecord) -> StorageResult<()> {
+    fn save(
+        &mut self,
+        workspace_id: WorkspaceId,
+        config: WorkspaceConfigRecord,
+    ) -> StorageResult<()> {
         self.workspace_configs.insert(workspace_id, config);
         Ok(())
     }
@@ -278,6 +473,16 @@ pub fn protocol_trust_to_security(state: WorkspaceTrustState) -> TrustState {
 mod tests {
     use super::*;
 
+    fn temp_storage_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "devil-storage-{tag}-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |value| value.as_millis() as u64)
+        ))
+    }
+
     #[test]
     fn in_memory_storage_roundtrip_config() {
         let mut storage = InMemoryStorage::new();
@@ -287,7 +492,9 @@ mod tests {
             snapshot_id: SnapshotId(99),
         };
 
-        storage.save(id, record.clone()).expect("save workspace config");
+        storage
+            .save(id, record.clone())
+            .expect("save workspace config");
         let loaded = storage.load(id).expect("load workspace config");
         assert_eq!(loaded.serialized, record.serialized);
         assert_eq!(loaded.snapshot_id, record.snapshot_id);
@@ -308,8 +515,7 @@ mod tests {
             .resolve(WorkspaceId(20), "principal")
             .expect("load trust decision");
         assert_eq!(
-            loaded.trust_state as u8,
-            record.trust_state as u8,
+            loaded.trust_state as u8, record.trust_state as u8,
             "stored and loaded trust state must match"
         );
     }
@@ -333,7 +539,11 @@ mod tests {
         storage
             .clear_workspace(WorkspaceId(30))
             .expect("clear workspace");
-        assert!(storage.get_fingerprint(WorkspaceId(30), "/tmp/a.txt").is_err());
+        assert!(
+            storage
+                .get_fingerprint(WorkspaceId(30), "/tmp/a.txt")
+                .is_err()
+        );
     }
 
     #[test]
@@ -351,9 +561,7 @@ mod tests {
         let loaded = storage.load_session("session-1").expect("load session");
         assert_eq!(loaded.workspace_id, rec.workspace_id);
 
-        storage
-            .delete_session("session-1")
-            .expect("delete session");
+        storage.delete_session("session-1").expect("delete session");
         assert!(storage.load_session("session-1").is_err());
     }
 
@@ -368,6 +576,70 @@ mod tests {
             protocol_trust_to_security(protocol_from_security_roundtrip),
             TrustState::Untrusted
         ));
-        assert!(matches!(protocol_from_security, WorkspaceTrustState::Untrusted));
+        assert!(matches!(
+            protocol_from_security,
+            WorkspaceTrustState::Untrusted
+        ));
+    }
+
+    #[test]
+    fn file_backed_storage_roundtrip_config_and_session() {
+        let path = temp_storage_path("roundtrip");
+        let mut storage = FileBackedStorage::open(&path).expect("open file-backed storage");
+
+        storage
+            .save(
+                WorkspaceId(88),
+                WorkspaceConfigRecord {
+                    serialized: "{\"theme\":\"dark\"}".to_string(),
+                    snapshot_id: SnapshotId(123),
+                },
+            )
+            .expect("save config");
+        storage
+            .save_session(
+                "session-a",
+                SessionRecord {
+                    workspace_id: WorkspaceId(88),
+                    workspace_path: CanonicalPath("C:/repo".to_string()),
+                    trust_state: WorkspaceTrustState::Trusted,
+                },
+            )
+            .expect("save session");
+
+        let storage_reloaded = FileBackedStorage::open(&path).expect("reopen storage");
+        let loaded_config = storage_reloaded
+            .load(WorkspaceId(88))
+            .expect("load saved config");
+        let loaded_session = storage_reloaded
+            .load_session("session-a")
+            .expect("load saved session");
+
+        assert_eq!(loaded_config.snapshot_id, SnapshotId(123));
+        assert_eq!(loaded_session.workspace_id, WorkspaceId(88));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backed_storage_corrupt_file_is_quarantined() {
+        let path = temp_storage_path("corrupt");
+        fs::write(&path, "{ invalid json").expect("write corrupt content");
+
+        let err = FileBackedStorage::open(&path).expect_err("opening corrupt file should fail");
+        match err {
+            StorageError::Corrupt {
+                path: original,
+                quarantine_path,
+            } => {
+                assert!(original.ends_with(".json"));
+                assert!(quarantine_path.ends_with(".json.corrupt"));
+                assert!(Path::new(&quarantine_path).exists());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let quarantine = FileBackedStorage::quarantine_path(&path);
+        let _ = fs::remove_file(quarantine);
     }
 }

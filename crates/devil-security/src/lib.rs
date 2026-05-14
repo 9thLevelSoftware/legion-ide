@@ -60,14 +60,96 @@ pub struct PathPolicy {
     pub max_write_bytes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedPolicyPath {
+    prefix: Option<String>,
+    segments: Vec<String>,
+}
+
+impl NormalizedPolicyPath {
+    fn parse(raw: &str) -> Option<Self> {
+        let mut normalized = raw.trim().replace('\\', "/");
+
+        if normalized.starts_with("//?/UNC/") {
+            normalized = format!("//{}", &normalized[8..]);
+        } else if normalized.starts_with("//?/") || normalized.starts_with("//./") {
+            normalized = normalized[4..].to_string();
+        }
+
+        let mut prefix = None;
+        let mut tail = normalized;
+
+        if let Some(rest) = tail.strip_prefix("//") {
+            let mut iter = rest.split('/').filter(|part| !part.is_empty());
+            let host = iter.next()?;
+            let share = iter.next()?;
+            prefix = Some(Self::normalize_case(format!("//{host}/{share}")));
+            tail = iter.collect::<Vec<_>>().join("/");
+        } else if tail.len() >= 2 && tail.as_bytes()[1] == b':' {
+            prefix = Some(Self::normalize_case(tail[..2].to_string()));
+            tail = tail[2..].trim_start_matches('/').to_string();
+        } else if let Some(rest) = tail.strip_prefix('/') {
+            prefix = Some(Self::normalize_case("/".to_string()));
+            tail = rest.to_string();
+        }
+
+        let mut segments = Vec::new();
+        for part in tail.split('/') {
+            if part.is_empty() || part == "." {
+                continue;
+            }
+            if part == ".." {
+                segments.pop()?;
+                continue;
+            }
+            segments.push(Self::normalize_case(part.to_string()));
+        }
+
+        Some(Self { prefix, segments })
+    }
+
+    fn normalize_case(value: String) -> String {
+        #[cfg(windows)]
+        {
+            value.to_ascii_lowercase()
+        }
+
+        #[cfg(not(windows))]
+        {
+            value
+        }
+    }
+
+    fn starts_with(&self, root: &Self) -> bool {
+        if let Some(expected_prefix) = &root.prefix
+            && self.prefix.as_ref() != Some(expected_prefix)
+        {
+            return false;
+        }
+
+        if root.segments.len() > self.segments.len() {
+            return false;
+        }
+
+        self.segments
+            .iter()
+            .zip(root.segments.iter())
+            .all(|(left, right)| left == right)
+    }
+}
+
 impl PathPolicy {
     /// Evaluates whether `path` can be used for provided access mode.
     pub fn can_access(&self, path: &str, access: PathAccess) -> bool {
-        if self
-            .blocked_roots
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-        {
+        let Some(candidate) = NormalizedPolicyPath::parse(path) else {
+            return false;
+        };
+
+        if self.blocked_roots.iter().any(|blocked| {
+            NormalizedPolicyPath::parse(blocked)
+                .map(|blocked| candidate.starts_with(&blocked))
+                .unwrap_or(false)
+        }) {
             return false;
         }
 
@@ -80,7 +162,11 @@ impl PathPolicy {
             return false;
         }
 
-        allowed.iter().any(|prefix| path.starts_with(prefix))
+        allowed.iter().any(|root| {
+            NormalizedPolicyPath::parse(root)
+                .map(|root| candidate.starts_with(&root))
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -280,7 +366,7 @@ impl Default for NetworkPolicy {
 }
 
 /// Domain-level root policy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SecurityPolicy {
     /// Path access policy.
     pub path_policy: PathPolicy,
@@ -296,20 +382,6 @@ pub struct SecurityPolicy {
     pub file_write_policy: FileWritePolicy,
     /// Network policy.
     pub network_policy: NetworkPolicy,
-}
-
-impl Default for SecurityPolicy {
-    fn default() -> Self {
-        Self {
-            path_policy: PathPolicy::default(),
-            command_taxonomy: CommandTaxonomy::default(),
-            terminal_policy: TerminalPolicy::default(),
-            lsp_policy: LspLaunchPolicy::default(),
-            plugin_policy: PluginCapabilityPolicy::default(),
-            file_write_policy: FileWritePolicy::default(),
-            network_policy: NetworkPolicy::default(),
-        }
-    }
 }
 
 /// Security errors.
@@ -515,11 +587,9 @@ impl DenyByDefaultBroker {
             };
         }
 
-        if let Some(rest) = capability.strip_prefix("terminal.") {
+        if capability.starts_with("terminal.") {
             return if !self.policy.terminal_policy.allow_untrusted && trust != TrustState::Trusted {
                 SecurityDecision::deny("terminal denied for untrusted workspace")
-            } else if rest == "spawn" {
-                SecurityDecision::allow()
             } else {
                 SecurityDecision::allow()
             };
@@ -570,6 +640,29 @@ impl DenyByDefaultBroker {
     fn namespace_policy_enabled(&self, namespace: &CapabilityNamespace) -> bool {
         !namespace.0.is_empty()
     }
+
+    fn requires_trusted_workspace_for_request(&self, capability: &str) -> bool {
+        if capability.starts_with("fs.write")
+            || capability.starts_with("terminal.")
+            || capability.starts_with("lsp.")
+            || capability.starts_with("network.")
+            || capability.starts_with("plugin.")
+        {
+            return true;
+        }
+
+        if let Some(command) = capability.strip_prefix("cmd.") {
+            return matches!(
+                self.policy.command_taxonomy.classify(command),
+                CommandClass::Mutate
+                    | CommandClass::Terminal
+                    | CommandClass::Network
+                    | CommandClass::LanguageServer
+            );
+        }
+
+        false
+    }
 }
 
 impl CapabilityBrokerPort for DenyByDefaultBroker {
@@ -583,23 +676,32 @@ impl CapabilityBrokerPort for DenyByDefaultBroker {
             CapabilityRequest::Request {
                 principal_id,
                 capability_id,
+                workspace_trust_state,
+                target_path,
+                decision_id,
                 correlation_id: _,
             } => {
-                let principal_state = if principal_id.0.is_empty() {
-                    TrustState::Unknown
+                let trust_state: TrustState = workspace_trust_state.into();
+                let decision = if trust_state == TrustState::Unknown
+                    && owned.requires_trusted_workspace_for_request(&capability_id.0)
+                {
+                    owned.counter = owned.counter.saturating_add(1);
+                    SecurityDecision::deny(format!(
+                        "capability {} denied: workspace trust state is unknown",
+                        capability_id.0
+                    ))
                 } else {
-                    TrustState::Trusted
+                    owned.decide(
+                        trust_state,
+                        principal_id.clone(),
+                        capability_id.clone(),
+                        target_path.as_ref().map(|value| value.0.as_str()),
+                    )
                 };
+                let resolved_decision_id =
+                    decision_id.unwrap_or(CapabilityDecisionId(owned.counter));
 
-                let decision = owned.decide(
-                    principal_state,
-                    principal_id.clone(),
-                    capability_id.clone(),
-                    None,
-                );
-                let decision_id = CapabilityDecisionId(owned.counter.saturating_add(1));
-
-                Ok(decision.into_protocol(decision_id, principal_id, capability_id))
+                Ok(decision.into_protocol(resolved_decision_id, principal_id, capability_id))
             }
             CapabilityRequest::Grant(grant) => Ok(CapabilityResponse::Granted(grant)),
             CapabilityRequest::Deny(deny) => Ok(CapabilityResponse::Denied(deny)),
@@ -631,6 +733,55 @@ mod tests {
         assert!(!policy.can_access("./workspace/secret/file.txt", PathAccess::Read));
         assert!(!policy.can_access("/outside/file", PathAccess::Read));
         assert!(policy.can_access("./workspace/public.rs", PathAccess::Write));
+    }
+
+    #[test]
+    fn path_policy_rejects_sibling_prefix_escape() {
+        let policy = PathPolicy {
+            writable_roots: vec!["/repo/root".to_string()],
+            readable_roots: vec!["/repo/root".to_string()],
+            blocked_roots: vec![],
+            max_write_bytes: 1024,
+        };
+
+        assert!(policy.can_access("/repo/root/src/main.rs", PathAccess::Read));
+        assert!(!policy.can_access("/repo/root-evil/src/main.rs", PathAccess::Read));
+    }
+
+    #[test]
+    fn path_policy_parent_escape_is_rejected() {
+        let policy = PathPolicy {
+            writable_roots: vec!["/repo/root".to_string()],
+            readable_roots: vec!["/repo/root".to_string()],
+            blocked_roots: vec![],
+            max_write_bytes: 1024,
+        };
+
+        assert!(!policy.can_access("/repo/root/../../outside.txt", PathAccess::Write));
+    }
+
+    #[test]
+    fn broker_rejects_unknown_trust_for_sensitive_requests() {
+        let broker = DenyByDefaultBroker::default();
+        let response = broker
+            .handle(CapabilityRequest::Request {
+                principal_id: PrincipalId("u".to_string()),
+                capability_id: CapabilityId("fs.write".to_string()),
+                workspace_trust_state: WorkspaceTrustState::Unknown,
+                target_path: Some(devil_protocol::CanonicalPath(
+                    "./workspace/file.txt".to_string(),
+                )),
+                decision_id: None,
+                correlation_id: CorrelationId(10),
+            })
+            .expect("decision");
+
+        match response {
+            CapabilityResponse::Decision(decision) => {
+                assert!(!decision.granted);
+            }
+            _ => panic!("expected decision response"),
+        }
     }
 
     #[test]
@@ -691,8 +842,10 @@ mod tests {
 
     #[test]
     fn broker_request_is_denied_when_namespace_empty() {
-        let mut broker = DenyByDefaultBroker::default();
-        broker.namespace = CapabilityNamespace(String::new());
+        let mut broker = DenyByDefaultBroker {
+            namespace: CapabilityNamespace(String::new()),
+            ..DenyByDefaultBroker::default()
+        };
         let decision = broker.decide(
             TrustState::Trusted,
             PrincipalId("principal-1".to_string()),
@@ -709,6 +862,9 @@ mod tests {
             .handle(CapabilityRequest::Request {
                 principal_id: PrincipalId("u".to_string()),
                 capability_id: CapabilityId("terminal.spawn".to_string()),
+                workspace_trust_state: WorkspaceTrustState::Trusted,
+                target_path: None,
+                decision_id: None,
                 correlation_id: CorrelationId(10),
             })
             .expect("decision");

@@ -409,12 +409,12 @@ impl FileSystemService for NativeFileSystem {
     }
 
     fn write_text_file(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    PlatformError::from_io_error("create parent directories", path, err)
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|err| {
+                PlatformError::from_io_error("create parent directories", path, err)
+            })?;
         }
 
         fs::write(path, text).map_err(|err| PlatformError::from_io_error("write", path, err))
@@ -453,7 +453,7 @@ impl FileSystemService for NativeFileSystem {
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.cmp(right));
+        entries.sort();
         Ok(entries)
     }
 

@@ -2,64 +2,33 @@
 
 ## Status
 
-Draft, pre-implementation freeze criteria.
+Accepted
+
+Accepted at: 2026-05-14T02:07:05Z
 
 ## Scope
 
-This freeze defines the minimum contractual, architectural, and sequencing conditions that must be satisfied before broad implementation for Spike 1A proceeds.
+This freeze records the contractual, architectural, and sequencing evidence required before implementation can scale beyond Spike 1A baseline work.
 
-## Required Gates
+## Gate acceptance table
 
-### Gate 1: Dependency Direction Validation
+| Gate | Evidence Artifact | Command or Test | Result | Owner Role | Accepted At |
+|---|---|---|---|---|---|
+| Dependency direction validation | `plans/evidence/phase-0/check-deps.txt` | `cargo run -p xtask -- check-deps` | Passed | Architecture + dependency policy owner | 2026-05-14T02:07:05Z |
+| Protocol contract stability | `plans/evidence/phase-0/cargo-test-workspace-all-targets.txt` | `cargo test --workspace --all-targets` protocol DTO tests | Passed | Protocol owner | 2026-05-14T02:07:05Z |
+| Text-model stress validation | `plans/evidence/phase-0/text-index-stress-baseline.md` | Non-ignored editor performance and atomicity tests | Passed with recorded reservations for ignored heavy benchmarks | Editor + text owner | 2026-05-14T02:07:05Z |
+| Platform boundary proofing | `plans/evidence/phase-0/platform-boundary-api-map.md` | `cargo check --workspace --all-targets` and `cargo test --workspace --all-targets` platform boundary slice | Passed | Platform + security owner | 2026-05-14T02:07:05Z |
+| UI native shell dependency | `plans/evidence/phase-0/native-shell-proof-summary.md` and `plans/spikes/SPIKE-001A-result.md` | UI/app command-intent tests plus editor latency baseline tests | Passed with Spike 1A reservations | UI/runtime + architecture owner | 2026-05-14T02:07:05Z |
+| Repository health gate | `plans/evidence/phase-0/fmt-check.txt`, `plans/evidence/phase-0/cargo-check-workspace-all-targets.txt`, `plans/evidence/phase-0/cargo-test-workspace-all-targets.txt`, `plans/evidence/phase-0/cargo-clippy-workspace-all-targets.txt` | `cargo fmt --all --check`; `cargo check --workspace --all-targets`; `cargo test --workspace --all-targets`; `cargo clippy --workspace --all-targets -- -D warnings` | Passed | QA + release owner | 2026-05-14T02:07:05Z |
 
-- `devil-ai` depends on `devil-protocol` and does not depend on `devil-ai-providers`.
-- `devil-ai-providers` depends on `devil-ai`.
-- `devil-editor` and `devil-ui` consume protocol contracts for cross-domain interaction.
-- No hard dependency `devil-editor -> devil-project` is introduced.
+## Accepted conditions
 
-Evidence check:
-- `crates/devil-ai/Cargo.toml` dependency list.
-- `crates/devil-ai-providers/Cargo.toml` dependency list.
-- `crates/devil-protocol/src/lib.rs` exposes shared contract DTOs and `ProjectInfoPort`.
-- `plans/architecture-charter-v0.1.md` mermaid and rule sections updated to show interface boundary.
+- Dependency inversion and dependency policy are enforced by the archived `xtask` run.
+- Protocol DTO, text transaction, event envelope, storage, security, workspace, editor, UI, and app tests all pass in the workspace test evidence.
+- Platform API ownership is accepted as OS-only and explicitly excludes editor state, window ownership, model authority, and request routing.
+- SPIKE-001A is accepted with reservations documented in the result artifact and native shell proof summary.
+- The repository health baseline is accepted with formatting, checking, testing, and warning-clean lint evidence.
 
-### Gate 2: Protocol Contract Stability
+## Freeze decision
 
-- `ProjectInfoQuery`, `ProjectInfo`, and `EditorTransactionEvent` are defined in `devil-protocol`.
-- `ProjectInfoPort` is used as the contract abstraction for editor/project lookup and transaction notification.
-- Changes to protocol types require review before dependent crates are extended.
-
-Evidence check:
-- `crates/devil-protocol/src/lib.rs` contains all boundary data structures and the trait.
-- Plan includes a lightweight regression strategy for protocol changes.
-
-### Gate 3: Text-Model Stress Validation
-
-- The stress criteria for large-file edit throughput and deterministic rollback behavior are included in charter gates.
-
-Evidence check:
-- `plans/architecture-charter-v0.1.md §16.8` defines explicit validation metrics.
-
-### Gate 4: Platform Boundary Proofing
-
-- `devil-platform` scope is restricted to OS abstraction duties.
-- Platform-boundary spike proof is documented and accepted.
-
-Evidence check:
-- `plans/SPIKE-000-platform-boundary-proof.md` populated and reviewed.
-- `plans/architecture-charter-v0.1.md` keeps platform responsibilities aligned with OS-level concerns.
-
-### Gate 5: UI Spike Dependency
-
-- Front-end hiring or UI scaling is blocked until Spike 1A validates editor latency and rendering behavior.
-
-Evidence check:
-- `plans/architecture-charter-v0.1.md §16.1`.
- - `plans/SPIKE-001A-native-shell-proof.md` completed and accepted.
-
-## Architecture Freeze Condition
-
-Implementation is allowed to scale only when all five gates above are satisfied and documented. Until then:
-
-- Keep `devil-agent`, `devil-memory`, `devil-ai-providers`, `devil-cli`, and `devil-observability` at minimal scope.
-- Defer broad AI orchestration and agent expansion to approved post-freeze milestones.
+The architecture freeze is accepted for Phase 0 evidence closure. Broad implementation may proceed only through the phase sequence and validation gates defined by the roadmap and implementation plan.
