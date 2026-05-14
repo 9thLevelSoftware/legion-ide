@@ -4,7 +4,7 @@ use std::env;
 use std::io::{self, Write};
 
 use anyhow::Result;
-use devil_app::AppComposition;
+use devil_app::{AppComposition, AppSaveOutcome};
 use devil_protocol::{PrincipalId, WorkspaceTrustState};
 
 fn main() -> Result<()> {
@@ -36,13 +36,17 @@ fn main() -> Result<()> {
 
         match input.trim_end() {
             ":q" => break,
-            ":w" => {
-                let save = app.save_active_buffer()?;
-                println!(
-                    "Saved file_id={:?} snapshot={} hash={}",
-                    save.file_id, save.snapshot_id.0, save.content_hash
-                );
-            }
+            ":w" => match app.save_active_buffer()? {
+                AppSaveOutcome::Saved(save) => {
+                    println!(
+                        "Saved file_id={:?} snapshot={} hash={}",
+                        save.file_id, save.snapshot_id.0, save.content_hash
+                    );
+                }
+                AppSaveOutcome::Rejected(response) => {
+                    println!("Save did not apply: {response:?}");
+                }
+            },
             _ => {}
         }
     }

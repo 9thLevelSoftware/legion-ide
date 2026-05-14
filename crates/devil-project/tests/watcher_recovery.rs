@@ -6,13 +6,15 @@ use std::sync::{
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+use devil_observability::{InMemoryEventSink, SharedEventSink};
 use devil_platform::{NativeFileSystem, PlatformError, WatcherService};
 use devil_project::WorkspaceActor;
 use devil_protocol::{
-    CanonicalPath, CapabilityNamespace, CorrelationId, PrincipalId, WatcherEvent, WatcherEventKind,
-    WorkspaceId, WorkspaceOpenRequest, WorkspaceTrustState,
+    CanonicalPath, CapabilityNamespace, CorrelationId, EventEnvelope, PrincipalId, WatcherEvent,
+    WatcherEventKind, WorkspaceId, WorkspaceOpenRequest, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
+use uuid::Uuid;
 
 fn create_temp_workspace() -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -65,6 +67,16 @@ impl WatcherService for OverflowThenOkWatcher {
     }
 }
 
+fn assert_non_zero_core_ids(event: &EventEnvelope) {
+    assert_ne!(event.correlation_id.0, 0, "correlation id must be non-zero");
+    assert_ne!(
+        event.causality_id.0,
+        Uuid::nil(),
+        "causality id must be non-zero"
+    );
+    assert_ne!(event.sequence.0, 0, "event sequence must be non-zero");
+}
+
 #[test]
 fn watcher_recovery_overflow_then_rescan_emits_recovery_event() {
     let root = create_temp_workspace();
@@ -75,13 +87,15 @@ fn watcher_recovery_overflow_then_rescan_emits_recovery_event() {
     policy.path_policy.readable_roots = vec![root.to_string_lossy().into_owned()];
     policy.path_policy.writable_roots = vec![root.to_string_lossy().into_owned()];
 
-    let actor = WorkspaceActor::new(
+    let sink = InMemoryEventSink::new();
+    let actor = WorkspaceActor::with_event_sink(
         Arc::new(NativeFileSystem),
         Arc::new(OverflowThenOkWatcher::new()),
         DenyByDefaultBroker::new(
             policy,
             CapabilityNamespace("watcher-recovery-test".to_string()),
         ),
+        Box::new(SharedEventSink::new(sink.clone())),
     );
 
     let opened = actor
@@ -114,6 +128,19 @@ fn watcher_recovery_overflow_then_rescan_emits_recovery_event() {
             .any(|event| matches!(event.kind, WatcherEventKind::Modified)),
         "expected recovery completion event"
     );
+
+    let events = sink.events().expect("watcher observability events");
+    let names = events
+        .iter()
+        .map(|event| event.event.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec!["workspace.watcher_overflow", "workspace.watcher_recovery"]
+    );
+    for event in &events {
+        assert_non_zero_core_ids(event);
+    }
 
     let _ = std::fs::remove_dir_all(root);
 }

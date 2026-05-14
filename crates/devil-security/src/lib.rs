@@ -679,6 +679,7 @@ impl CapabilityBrokerPort for DenyByDefaultBroker {
                 workspace_trust_state,
                 target_path,
                 decision_id,
+                context: _,
                 correlation_id: _,
             } => {
                 let trust_state: TrustState = workspace_trust_state.into();
@@ -772,6 +773,7 @@ mod tests {
                     "./workspace/file.txt".to_string(),
                 )),
                 decision_id: None,
+                context: Default::default(),
                 correlation_id: CorrelationId(10),
             })
             .expect("decision");
@@ -865,6 +867,7 @@ mod tests {
                 workspace_trust_state: WorkspaceTrustState::Trusted,
                 target_path: None,
                 decision_id: None,
+                context: Default::default(),
                 correlation_id: CorrelationId(10),
             })
             .expect("decision");

@@ -3,11 +3,18 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Mutex;
 
+use devil_observability::{NoopEventSink, transaction_event};
 use devil_protocol::{
-    BufferId, BufferVersion, ByteRange, CausalityId, ChangedTextRange, CorrelationId, FileId,
-    SnapshotId, TextTransactionDescriptor, TimestampMillis, TransactionSource, Utf16Position,
-    Utf16Range as ProtocolUtf16Range, WorkspaceId,
+    BufferId, BufferOpened, BufferVersion, ByteRange, CanonicalPath, CausalityId, ChangedTextRange,
+    CorrelationId, EditorApplyTransactionRequest, EditorBufferMetadata, EditorOpenBufferRequest,
+    EditorPort, EditorRequest, EditorResponse, EditorSaveAcknowledgement, EditorSaveOutcome,
+    EditorSaveRequest, EditorViewportRequest, EventSequence, EventSinkPort, EventSinkRequest,
+    FileConflictLifecycleState, FileConflictState, FileId, ProtocolDiagnostic, ProtocolError,
+    ProtocolResult, ProtocolTextRange, SnapshotId, TextCoordinate, TextTransactionDescriptor,
+    TimestampMillis, TransactionSource, Utf16Position, Utf16Range as ProtocolUtf16Range,
+    ViewportProjection, WorkspaceId,
 };
 use devil_text::{
     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
@@ -109,12 +116,13 @@ pub struct TransactionRecord {
 impl TransactionRecord {
     /// Convert local transaction record into the protocol descriptor.
     pub fn to_protocol_descriptor(&self) -> TextTransactionDescriptor {
+        let correlation_id = self.correlation_id.unwrap_or(CorrelationId(1));
         TextTransactionDescriptor {
             workspace_id: self.workspace_id,
             buffer_id: self.buffer_id,
             file_id: self.file_id,
             transaction_id: self.transaction_id,
-            correlation_id: self.correlation_id.unwrap_or(CorrelationId(0)),
+            correlation_id,
             source: self.source.clone(),
             pre_snapshot_id: self.pre_snapshot.snapshot_id,
             post_snapshot_id: self.post_snapshot.snapshot_id,
@@ -163,12 +171,43 @@ pub struct SaveRequestDto {
     pub buffer_version: BufferVersion,
     /// Content hash for compare-and-save preconditions.
     pub content_hash: String,
+    /// UTF-8 payload byte length for proposal capability checks.
+    pub payload_byte_len: u64,
     /// UTF-8 text payload to persist asynchronously through workspace/proposal ports.
     pub text: String,
     /// Emission timestamp.
     pub requested_at: TimestampMillis,
-    /// Optional caller correlation id.
-    pub correlation_id: Option<CorrelationId>,
+    /// Caller or generated correlation id.
+    pub correlation_id: CorrelationId,
+}
+
+/// Typed editor acknowledgement for a pending save request.
+#[derive(Debug, Clone)]
+pub enum SaveAcknowledgement {
+    /// Save applied successfully.
+    Saved,
+    /// Proposal became stale before apply.
+    Stale {
+        /// Optional conflict state projected from the stale response.
+        conflict: Option<FileConflictState>,
+        /// Diagnostics recorded for later UI projection.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+    /// Proposal encountered a disk/buffer conflict.
+    Conflict {
+        /// Queryable conflict state.
+        conflict: FileConflictState,
+    },
+    /// Save was denied by policy.
+    Denied {
+        /// Diagnostics recorded for later UI projection.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+    /// Save failed while applying or validating.
+    Failed {
+        /// Diagnostics recorded for later UI projection.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +259,9 @@ struct EditorBufferState {
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
     current_snapshot: devil_text::TextSnapshot,
+    save_state: FileConflictLifecycleState,
+    save_diagnostics: Vec<ProtocolDiagnostic>,
+    conflict_state: Option<FileConflictState>,
 }
 
 impl EditorBufferState {
@@ -252,6 +294,9 @@ impl EditorBufferState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             current_snapshot,
+            save_state: FileConflictLifecycleState::Clean,
+            save_diagnostics: Vec::new(),
+            conflict_state: None,
         })
     }
 }
@@ -274,6 +319,72 @@ pub struct EditorEngine {
     thresholds: EditorThresholds,
     snapshot_retention_policy: SnapshotRetentionPolicy,
     retained_snapshots: VecDeque<RetainedSnapshotDescriptor>,
+}
+
+struct EditorEventContext<'a> {
+    event_sink: &'a dyn EventSinkPort,
+    next_sequence: &'a mut u64,
+}
+
+impl<'a> EditorEventContext<'a> {
+    fn sequence(&mut self) -> EventSequence {
+        *self.next_sequence = self.next_sequence.saturating_add(1).max(1);
+        EventSequence(*self.next_sequence)
+    }
+
+    fn emit_transaction(
+        &mut self,
+        record: &TransactionRecord,
+        applied: bool,
+        reason: Option<&str>,
+    ) {
+        let envelope = transaction_event(
+            &record.to_protocol_descriptor(),
+            applied,
+            reason,
+            self.sequence(),
+        );
+        let _ = self.event_sink.emit(EventSinkRequest { envelope });
+    }
+}
+
+/// Mutex-backed adapter exposing [`EditorEngine`] through the protocol [`EditorPort`].
+pub struct EditorEnginePort {
+    engine: Mutex<EditorEngine>,
+    event_sink: Box<dyn EventSinkPort + Send + Sync>,
+    next_event_sequence: Mutex<u64>,
+}
+
+impl EditorEnginePort {
+    /// Construct a new editor port adapter from an editor engine.
+    pub fn new(engine: EditorEngine) -> Self {
+        Self::with_event_sink(engine, Box::new(NoopEventSink))
+    }
+
+    /// Construct a new editor port adapter from an editor engine and event sink.
+    pub fn with_event_sink(
+        engine: EditorEngine,
+        event_sink: Box<dyn EventSinkPort + Send + Sync>,
+    ) -> Self {
+        Self {
+            engine: Mutex::new(engine),
+            event_sink,
+            next_event_sequence: Mutex::new(0),
+        }
+    }
+
+    /// Consume the adapter and return the wrapped editor engine.
+    pub fn into_inner(self) -> Result<EditorEngine, EditorError> {
+        self.engine
+            .into_inner()
+            .map_err(|_| EditorError::InvalidEdit("editor engine lock poisoned"))
+    }
+}
+
+impl Default for EditorEnginePort {
+    fn default() -> Self {
+        Self::new(EditorEngine::default())
+    }
 }
 
 const DEFAULT_RETENTION_BUDGET_SNAPSHOTS: usize = 256;
@@ -483,6 +594,147 @@ impl EditorEngine {
             .descriptor())
     }
 
+    /// Return the workspace id and file id for a buffer.
+    pub fn buffer_identity(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<(WorkspaceId, FileId), EditorError> {
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        Ok((state.workspace_id, state.file_id))
+    }
+
+    /// Return protocol metadata for a buffer.
+    pub fn buffer_metadata(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<EditorBufferMetadata, EditorError> {
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        let descriptor = state.current_snapshot.descriptor();
+
+        Ok(EditorBufferMetadata {
+            workspace_id: state.workspace_id,
+            buffer_id: state.buffer_id,
+            file_id: state.file_id,
+            path: CanonicalPath(state.file_path.clone()),
+            snapshot_id: descriptor.snapshot_id,
+            buffer_version: descriptor.buffer_version,
+            byte_len: descriptor.byte_len as u64,
+            content_hash: Some(descriptor.content_hash.clone()),
+            dirty: state.dirty,
+            save_state: state.save_state,
+            conflict: state.conflict_state.clone(),
+            undo_len: state.undo_stack.len(),
+            redo_len: state.redo_stack.len(),
+            schema_version: 1,
+        })
+    }
+
+    /// Build a protocol viewport projection over the current buffer snapshot.
+    pub fn viewport_projection(
+        &self,
+        request: EditorViewportRequest,
+    ) -> Result<ViewportProjection, EditorError> {
+        let state = self
+            .buffers
+            .get(&request.buffer_id)
+            .ok_or(EditorError::BufferNotFound(request.buffer_id))?;
+        let descriptor = state.current_snapshot.descriptor();
+        let line_count = state.current_snapshot.line_count().max(1);
+        let top_line = (request.scroll.top_line as usize).min(line_count.saturating_sub(1));
+        let approx_visible_lines = ((request.dimensions.height_px / 16).max(1)) as usize;
+        let end_line = (top_line + approx_visible_lines).min(line_count);
+        let start = state
+            .buffer
+            .try_byte_offset(TextPosition::new(top_line, 0))?;
+        let end = if end_line >= line_count {
+            state.buffer.len()
+        } else {
+            state
+                .buffer
+                .try_byte_offset(TextPosition::new(end_line, 0))?
+        };
+        let cursor = state
+            .cursors
+            .first()
+            .map(|cursor| cursor.position)
+            .unwrap_or_else(TextPosition::zero);
+
+        Ok(ViewportProjection {
+            workspace_id: state.workspace_id,
+            buffer_id: state.buffer_id,
+            file_id: Some(state.file_id),
+            snapshot_id: descriptor.snapshot_id,
+            buffer_version: descriptor.buffer_version,
+            visible_range: ProtocolTextRange {
+                start: Self::protocol_coordinate(&state.buffer, top_line, start)?,
+                end: Self::protocol_coordinate_from_offset(&state.buffer, end)?,
+            },
+            selections: state
+                .selections
+                .iter()
+                .map(|selection| Self::protocol_range(&state.buffer, selection.range))
+                .collect::<Result<Vec<_>, _>>()?,
+            cursor: Self::protocol_coordinate(
+                &state.buffer,
+                cursor.line,
+                state.buffer.try_byte_offset(cursor)?,
+            )?,
+            scroll: request.scroll,
+            dimensions: request.dimensions,
+            schema_version: 1,
+        })
+    }
+
+    fn protocol_range(
+        buffer: &TextBuffer,
+        range: TextRange,
+    ) -> Result<ProtocolTextRange, EditorError> {
+        Ok(ProtocolTextRange {
+            start: Self::protocol_coordinate(
+                buffer,
+                range.start.line,
+                buffer.try_byte_offset(range.start)?,
+            )?,
+            end: Self::protocol_coordinate(
+                buffer,
+                range.end.line,
+                buffer.try_byte_offset(range.end)?,
+            )?,
+        })
+    }
+
+    fn protocol_coordinate_from_offset(
+        buffer: &TextBuffer,
+        offset: usize,
+    ) -> Result<TextCoordinate, EditorError> {
+        let position = buffer.try_position(offset)?;
+        Self::protocol_coordinate(buffer, position.line, offset)
+    }
+
+    fn protocol_coordinate(
+        buffer: &TextBuffer,
+        line: usize,
+        byte_offset: usize,
+    ) -> Result<TextCoordinate, EditorError> {
+        let position = buffer.try_position(byte_offset)?;
+        let utf16_offset = buffer
+            .text()
+            .get(..byte_offset)
+            .map(|prefix| prefix.encode_utf16().count() as u64);
+        Ok(TextCoordinate {
+            line: line as u32,
+            character: position.column as u32,
+            byte_offset: Some(byte_offset as u64),
+            utf16_offset,
+        })
+    }
+
     /// Apply a single edit as an atomic transaction.
     pub fn apply_edit(
         &mut self,
@@ -561,6 +813,11 @@ impl EditorEngine {
             state.buffer = staged_buffer;
             state.current_snapshot = post_snapshot;
             state.dirty = true;
+            state.save_state = if state.conflict_state.is_some() {
+                FileConflictLifecycleState::ConflictDirty
+            } else {
+                FileConflictLifecycleState::Dirty
+            };
             (
                 state.workspace_id,
                 state.file_id,
@@ -805,6 +1062,11 @@ impl EditorEngine {
             state.buffer = restored_buffer;
             state.current_snapshot = restored_snapshot;
             state.dirty = true;
+            state.save_state = if state.conflict_state.is_some() {
+                FileConflictLifecycleState::ConflictDirty
+            } else {
+                FileConflictLifecycleState::Dirty
+            };
 
             (
                 state.workspace_id,
@@ -892,6 +1154,11 @@ impl EditorEngine {
             state.buffer = restored_buffer;
             state.current_snapshot = restored_snapshot;
             state.dirty = true;
+            state.save_state = if state.conflict_state.is_some() {
+                FileConflictLifecycleState::ConflictDirty
+            } else {
+                FileConflictLifecycleState::Dirty
+            };
 
             (
                 state.workspace_id,
@@ -949,52 +1216,107 @@ impl EditorEngine {
                 snapshot_id: snapshot.snapshot_id(),
                 buffer_version: snapshot.buffer_version(),
                 content_hash: snapshot.content_hash().to_string(),
+                payload_byte_len: snapshot.text().len() as u64,
                 text: snapshot.text().to_string(),
                 requested_at: TimestampMillis::now(),
-                correlation_id,
+                correlation_id: correlation_id
+                    .unwrap_or_else(|| CorrelationId(TimestampMillis::now().0)),
             };
             SaveSnapshotPayload { snapshot, dto }
         };
 
         self.retain_snapshot_descriptor(buffer_id, payload.snapshot.descriptor());
+        if let Some(state) = self.buffers.get_mut(&buffer_id) {
+            state.save_state = FileConflictLifecycleState::Saving;
+        }
         self.pending_save_requests.push(payload.dto.clone());
         self.enforce_snapshot_retention_policy();
         Ok(payload.dto)
     }
 
-    /// Mark that a save request completed and clear dirty state when matching current snapshot.
+    /// Mark that a save request completed and clear dirty state only on matching successful snapshots.
     pub fn acknowledge_save(&mut self, request_id: Uuid, success: bool) {
+        let acknowledgement = if success {
+            SaveAcknowledgement::Saved
+        } else {
+            SaveAcknowledgement::Failed {
+                diagnostics: Vec::new(),
+            }
+        };
+        self.acknowledge_save_outcome(request_id, acknowledgement);
+    }
+
+    /// Mark that a save request completed with a typed proposal outcome.
+    pub fn acknowledge_save_outcome(
+        &mut self,
+        request_id: Uuid,
+        acknowledgement: SaveAcknowledgement,
+    ) {
         if let Some(idx) = self
             .pending_save_requests
             .iter()
             .position(|request| request.request_id == request_id)
         {
             let request = self.pending_save_requests.remove(idx);
-            if success
-                && let Some(state) = self.buffers.get_mut(&request.buffer_id)
-                && state.current_snapshot.snapshot_id() == request.snapshot_id
-            {
-                state.dirty = false;
+            if let Some(state) = self.buffers.get_mut(&request.buffer_id) {
+                match acknowledgement {
+                    SaveAcknowledgement::Saved => {
+                        if state.current_snapshot.snapshot_id() == request.snapshot_id
+                            || state.current_snapshot.content_hash() == request.content_hash
+                        {
+                            state.dirty = false;
+                            state.save_state = FileConflictLifecycleState::Clean;
+                            state.save_diagnostics.clear();
+                            state.conflict_state = None;
+                        } else if state.dirty {
+                            state.save_state = FileConflictLifecycleState::Dirty;
+                        }
+                    }
+                    SaveAcknowledgement::Stale {
+                        conflict,
+                        diagnostics,
+                    } => {
+                        state.dirty = true;
+                        state.save_state = FileConflictLifecycleState::ConflictDirty;
+                        state.save_diagnostics = diagnostics;
+                        state.conflict_state = conflict;
+                    }
+                    SaveAcknowledgement::Conflict { conflict } => {
+                        state.dirty = true;
+                        state.save_state = FileConflictLifecycleState::ConflictDirty;
+                        state.save_diagnostics = conflict.diagnostics.clone();
+                        state.conflict_state = Some(conflict);
+                    }
+                    SaveAcknowledgement::Denied { diagnostics }
+                    | SaveAcknowledgement::Failed { diagnostics } => {
+                        state.dirty = true;
+                        state.save_state = FileConflictLifecycleState::SaveFailed;
+                        state.save_diagnostics = diagnostics;
+                    }
+                }
             }
+            self.release_save_snapshot_if_unreferenced(request.snapshot_id);
+        }
+    }
 
-            if self
-                .pending_save_requests
-                .iter()
-                .all(|pending| pending.snapshot_id != request.snapshot_id)
-                && self.buffers.values().all(|state| {
-                    state.current_snapshot.snapshot_id() != request.snapshot_id
-                        && state
-                            .undo_stack
-                            .iter()
-                            .all(|entry| entry.snapshot.snapshot_id() != request.snapshot_id)
-                        && state
-                            .redo_stack
-                            .iter()
-                            .all(|entry| entry.snapshot.snapshot_id() != request.snapshot_id)
-                })
-            {
-                self.remove_snapshot_descriptor(request.snapshot_id);
-            }
+    fn release_save_snapshot_if_unreferenced(&mut self, snapshot_id: SnapshotId) {
+        if self
+            .pending_save_requests
+            .iter()
+            .all(|pending| pending.snapshot_id != snapshot_id)
+            && self.buffers.values().all(|state| {
+                state.current_snapshot.snapshot_id() != snapshot_id
+                    && state
+                        .undo_stack
+                        .iter()
+                        .all(|entry| entry.snapshot.snapshot_id() != snapshot_id)
+                    && state
+                        .redo_stack
+                        .iter()
+                        .all(|entry| entry.snapshot.snapshot_id() != snapshot_id)
+            })
+        {
+            self.remove_snapshot_descriptor(snapshot_id);
         }
     }
 
@@ -1006,6 +1328,43 @@ impl EditorEngine {
     /// Read-only pending save queue.
     pub fn pending_save_requests(&self) -> &[SaveRequestDto] {
         &self.pending_save_requests
+    }
+
+    /// Current save/conflict lifecycle state for a buffer.
+    pub fn buffer_save_state(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<FileConflictLifecycleState, EditorError> {
+        Ok(self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .save_state)
+    }
+
+    /// Query the latest conflict state captured for a buffer.
+    pub fn conflict_state(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<Option<&FileConflictState>, EditorError> {
+        Ok(self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .conflict_state
+            .as_ref())
+    }
+
+    /// Save diagnostics captured for the most recent failed/stale/conflicting save.
+    pub fn save_diagnostics(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<&[ProtocolDiagnostic], EditorError> {
+        Ok(&self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .save_diagnostics)
     }
 
     /// Number of pinned snapshots retained by active undo/redo/save references.
@@ -1083,6 +1442,240 @@ impl EditorEngine {
             .ok_or(EditorError::BufferNotFound(buffer_id))?;
         state.overlays = overlays;
         Ok(())
+    }
+}
+
+impl From<SaveRequestDto> for EditorSaveRequest {
+    fn from(value: SaveRequestDto) -> Self {
+        Self {
+            request_id: value.request_id,
+            workspace_id: value.workspace_id,
+            buffer_id: value.buffer_id,
+            file_id: value.file_id,
+            snapshot_id: value.snapshot_id,
+            buffer_version: value.buffer_version,
+            content_hash: value.content_hash,
+            payload_byte_len: value.payload_byte_len,
+            text: value.text,
+            requested_at: value.requested_at,
+            correlation_id: value.correlation_id,
+        }
+    }
+}
+
+impl From<EditorSaveRequest> for SaveRequestDto {
+    fn from(value: EditorSaveRequest) -> Self {
+        Self {
+            request_id: value.request_id,
+            workspace_id: value.workspace_id,
+            buffer_id: value.buffer_id,
+            file_id: value.file_id,
+            snapshot_id: value.snapshot_id,
+            buffer_version: value.buffer_version,
+            content_hash: value.content_hash,
+            payload_byte_len: value.payload_byte_len,
+            text: value.text,
+            requested_at: value.requested_at,
+            correlation_id: value.correlation_id,
+        }
+    }
+}
+
+impl From<EditorSaveOutcome> for SaveAcknowledgement {
+    fn from(value: EditorSaveOutcome) -> Self {
+        match value {
+            EditorSaveOutcome::Saved => Self::Saved,
+            EditorSaveOutcome::Stale {
+                conflict,
+                diagnostics,
+            } => Self::Stale {
+                conflict,
+                diagnostics,
+            },
+            EditorSaveOutcome::Conflict { conflict } => Self::Conflict { conflict },
+            EditorSaveOutcome::Denied { diagnostics } => Self::Denied { diagnostics },
+            EditorSaveOutcome::Failed { diagnostics } => Self::Failed { diagnostics },
+        }
+    }
+}
+
+impl From<SaveAcknowledgement> for EditorSaveOutcome {
+    fn from(value: SaveAcknowledgement) -> Self {
+        match value {
+            SaveAcknowledgement::Saved => Self::Saved,
+            SaveAcknowledgement::Stale {
+                conflict,
+                diagnostics,
+            } => Self::Stale {
+                conflict,
+                diagnostics,
+            },
+            SaveAcknowledgement::Conflict { conflict } => Self::Conflict { conflict },
+            SaveAcknowledgement::Denied { diagnostics } => Self::Denied { diagnostics },
+            SaveAcknowledgement::Failed { diagnostics } => Self::Failed { diagnostics },
+        }
+    }
+}
+
+impl EditorEnginePort {
+    fn protocol_error(error: EditorError) -> ProtocolError {
+        ProtocolError {
+            code: "editor_error".to_string(),
+            message: error.to_string(),
+        }
+    }
+
+    fn poisoned_error() -> ProtocolError {
+        ProtocolError {
+            code: "editor_lock_poisoned".to_string(),
+            message: "editor engine lock poisoned".to_string(),
+        }
+    }
+
+    fn open_buffer_text(
+        engine: &mut EditorEngine,
+        request: EditorOpenBufferRequest,
+    ) -> Result<EditorResponse, EditorError> {
+        let buffer_id = engine.open_buffer(
+            request.workspace_id,
+            request.file_id,
+            request.path.0,
+            request.initial_text,
+        )?;
+        Ok(EditorResponse::BufferOpened(BufferOpened {
+            project_id: None,
+            file_id: Some(request.file_id),
+            buffer_id,
+        }))
+    }
+
+    fn apply_edit(
+        engine: &mut EditorEngine,
+        request: EditorApplyTransactionRequest,
+        event_context: &mut EditorEventContext<'_>,
+    ) -> Result<EditorResponse, EditorError> {
+        let (workspace_id, file_id) = engine.buffer_identity(request.buffer_id)?;
+        if workspace_id != request.workspace_id {
+            return Err(EditorError::InvalidEdit(
+                "workspace id does not match buffer",
+            ));
+        }
+        if file_id != request.file_id {
+            return Err(EditorError::InvalidEdit("file id does not match buffer"));
+        }
+        let edits = request
+            .edits
+            .edits
+            .into_iter()
+            .map(|edit| {
+                let range = edit.range.as_byte_range().ok_or(EditorError::InvalidEdit(
+                    "editor port apply edit requires byte-coordinate ranges",
+                ))?;
+                let start = engine
+                    .buffers
+                    .get(&request.buffer_id)
+                    .ok_or(EditorError::BufferNotFound(request.buffer_id))?
+                    .buffer
+                    .try_position(range.start as usize)?;
+                let end = engine
+                    .buffers
+                    .get(&request.buffer_id)
+                    .ok_or(EditorError::BufferNotFound(request.buffer_id))?
+                    .buffer
+                    .try_position(range.end as usize)?;
+                Ok(TextEdit::new(TextRange::new(start, end), edit.replacement))
+            })
+            .collect::<Result<Vec<_>, EditorError>>()?;
+        let record = engine.apply_edits(
+            request.buffer_id,
+            edits,
+            request.source,
+            request.undo_group_id,
+            Some(request.correlation_id),
+        )?;
+        event_context.emit_transaction(&record, true, None);
+        Ok(EditorResponse::Transaction(record.to_protocol_descriptor()))
+    }
+}
+
+impl EditorPort for EditorEnginePort {
+    fn handle(&self, request: EditorRequest) -> ProtocolResult<EditorResponse> {
+        let mut engine = self.engine.lock().map_err(|_| Self::poisoned_error())?;
+        let mut next_event_sequence =
+            self.next_event_sequence.lock().map_err(|_| ProtocolError {
+                code: "editor_event_sequence_lock_poisoned".to_string(),
+                message: "editor event sequence lock poisoned".to_string(),
+            })?;
+        let mut event_context = EditorEventContext {
+            event_sink: self.event_sink.as_ref(),
+            next_sequence: &mut next_event_sequence,
+        };
+        match request {
+            EditorRequest::OpenBuffer { .. } => Err(ProtocolError::unsupported(
+                "workspace-resolved text is required; use OpenBufferText",
+            )),
+            EditorRequest::OpenBufferText(request) => {
+                Self::open_buffer_text(&mut engine, request).map_err(Self::protocol_error)
+            }
+            EditorRequest::ApplyTransaction(descriptor) => {
+                let metadata = engine
+                    .buffer_metadata(descriptor.buffer_id)
+                    .map_err(Self::protocol_error)?;
+                if metadata.workspace_id == descriptor.workspace_id
+                    && metadata.file_id == descriptor.file_id
+                {
+                    Ok(EditorResponse::Transaction(descriptor))
+                } else {
+                    Err(ProtocolError {
+                        code: "editor_transaction_mismatch".to_string(),
+                        message: "transaction descriptor does not match buffer identity"
+                            .to_string(),
+                    })
+                }
+            }
+            EditorRequest::ApplyEdit(request) => {
+                Self::apply_edit(&mut engine, request, &mut event_context)
+                    .map_err(Self::protocol_error)
+            }
+            EditorRequest::RequestSave {
+                buffer_id,
+                correlation_id,
+            } => engine
+                .request_save(buffer_id, Some(correlation_id))
+                .map(|save| EditorResponse::SaveRequested(save.into()))
+                .map_err(Self::protocol_error),
+            EditorRequest::AcknowledgeSave(EditorSaveAcknowledgement {
+                request_id,
+                outcome,
+            }) => {
+                let buffer_id = engine
+                    .pending_save_requests()
+                    .iter()
+                    .find(|request| request.request_id == request_id)
+                    .map(|request| request.buffer_id);
+                engine.acknowledge_save_outcome(request_id, outcome.into());
+                Ok(EditorResponse::SaveAcknowledged { buffer_id })
+            }
+            EditorRequest::Viewport(request) => engine
+                .viewport_projection(request)
+                .map(EditorResponse::Viewport)
+                .map_err(Self::protocol_error),
+            EditorRequest::BufferMetadata(buffer_id) => engine
+                .buffer_metadata(buffer_id)
+                .map(EditorResponse::BufferMetadata)
+                .map_err(Self::protocol_error),
+            EditorRequest::BufferState(buffer_id) => engine
+                .buffer_metadata(buffer_id)
+                .map(EditorResponse::BufferState)
+                .map_err(Self::protocol_error),
+            EditorRequest::Completion(_) => Err(ProtocolError::unsupported(
+                "completion is not implemented by the editor port in Track 4",
+            )),
+            EditorRequest::Snapshot(snapshot) => Ok(EditorResponse::Snapshot(snapshot)),
+            EditorRequest::Overlay(overlay) => {
+                Ok(EditorResponse::OverlayApplied(overlay.overlay_id))
+            }
+        }
     }
 }
 
@@ -1290,7 +1883,11 @@ impl EditorSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devil_protocol::{ProjectId, ProjectInfo};
+    use devil_observability::{InMemoryEventSink, SharedEventSink};
+    use devil_protocol::{
+        EditBatch, ProjectId, ProjectInfo, TextEdit as ProtocolTextEdit,
+        TextRange as ProtocolTextRange,
+    };
 
     fn project(file_id: u128) -> ProjectInfo {
         ProjectInfo {
@@ -1390,5 +1987,63 @@ mod tests {
         for pair in engine.transaction_log().windows(2) {
             assert_ne!(pair[0].transaction_id, pair[1].transaction_id);
         }
+        for record in engine.transaction_log() {
+            let descriptor = record.to_protocol_descriptor();
+            assert_ne!(descriptor.correlation_id.0, 0);
+            assert_ne!(descriptor.causality_id.0, Uuid::nil());
+        }
+    }
+
+    #[test]
+    fn editor_port_emits_non_zero_transaction_event_for_routed_edit() {
+        let sink = InMemoryEventSink::new();
+        let port = EditorEnginePort::with_event_sink(
+            EditorEngine::new(),
+            Box::new(SharedEventSink::new(sink.clone())),
+        );
+        let opened = port
+            .handle(EditorRequest::OpenBufferText(EditorOpenBufferRequest {
+                workspace_id: WorkspaceId(1),
+                file_id: FileId(2),
+                path: CanonicalPath("src/lib.rs".to_string()),
+                initial_text: "abc".to_string(),
+                correlation_id: CorrelationId(7),
+            }))
+            .expect("open buffer through editor port");
+        let buffer_id = match opened {
+            EditorResponse::BufferOpened(opened) => opened.buffer_id,
+            other => panic!("expected buffer opened, got {other:?}"),
+        };
+
+        let response = port
+            .handle(EditorRequest::ApplyEdit(EditorApplyTransactionRequest {
+                workspace_id: WorkspaceId(1),
+                buffer_id,
+                file_id: FileId(2),
+                edits: EditBatch {
+                    edits: vec![ProtocolTextEdit {
+                        range: ProtocolTextRange::byte(3, 3),
+                        replacement: "!".to_string(),
+                    }],
+                },
+                source: TransactionSource::User,
+                undo_group_id: None,
+                correlation_id: CorrelationId(42),
+            }))
+            .expect("apply edit through editor port");
+        let descriptor = match response {
+            EditorResponse::Transaction(descriptor) => descriptor,
+            other => panic!("expected transaction response, got {other:?}"),
+        };
+
+        let events = sink.events().expect("editor transaction event");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.event, "editor.transaction_applied");
+        assert_eq!(event.correlation_id, CorrelationId(42));
+        assert_eq!(event.causality_id, descriptor.causality_id);
+        assert_ne!(event.correlation_id.0, 0);
+        assert_ne!(event.causality_id.0, Uuid::nil());
+        assert_ne!(event.sequence.0, 0);
     }
 }

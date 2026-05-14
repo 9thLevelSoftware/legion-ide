@@ -5,9 +5,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use devil_observability::{SharedEventSink, event_metadata_record};
 use devil_protocol::{
-    CanonicalPath, CorrelationId, FileId, SnapshotId, WorkspaceId, WorkspaceTrustState,
+    CanonicalPath, CorrelationId, EventEnvelope, EventId, EventMetadataRecord, EventSinkPort,
+    EventSinkRequest, FileId, FileMetadata, PrincipalId, ProposalAuditRecord, ProposalId,
+    ProtocolError, ProtocolResult, SnapshotId, StorageRepositoryPort, StorageRepositoryRequest,
+    StorageRepositoryResponse, TrustRecord, WorkspaceConfigSnapshot, WorkspaceId,
+    WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_security::TrustState;
 use serde::{Deserialize, Serialize};
@@ -145,6 +151,12 @@ pub struct InMemoryStorage {
     trust: HashMap<(WorkspaceId, String), TrustDecisionRecord>,
     metadata: HashMap<(WorkspaceId, String), FileMetadataRecord>,
     sessions: HashMap<String, SessionRecord>,
+    protocol_workspace_configs: HashMap<WorkspaceId, WorkspaceConfigSnapshot>,
+    protocol_file_metadata: HashMap<FileId, FileMetadata>,
+    protocol_sessions: HashMap<String, WorkspaceSessionRecord>,
+    protocol_trust: HashMap<(WorkspaceId, PrincipalId), TrustRecord>,
+    protocol_proposal_audit: HashMap<ProposalId, ProposalAuditRecord>,
+    protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
 }
 
 #[derive(Debug)]
@@ -175,6 +187,111 @@ impl From<&InMemoryStorage> for PersistedState {
     }
 }
 
+impl Clone for InMemoryStorage {
+    fn clone(&self) -> Self {
+        Self {
+            workspace_configs: self.workspace_configs.clone(),
+            trust: self.trust.clone(),
+            metadata: self.metadata.clone(),
+            sessions: self.sessions.clone(),
+            protocol_workspace_configs: self.protocol_workspace_configs.clone(),
+            protocol_file_metadata: self.protocol_file_metadata.clone(),
+            protocol_sessions: self.protocol_sessions.clone(),
+            protocol_trust: self.protocol_trust.clone(),
+            protocol_proposal_audit: self.protocol_proposal_audit.clone(),
+            protocol_event_metadata: self.protocol_event_metadata.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+/// Mutex-backed protocol repository adapter for [`InMemoryStorage`].
+pub struct InMemoryStorageRepositoryPort {
+    storage: Mutex<InMemoryStorage>,
+    event_sink: SharedEventSink,
+}
+
+impl InMemoryStorageRepositoryPort {
+    /// Construct a protocol storage repository port around a fresh in-memory store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct a protocol storage repository port around an existing in-memory store.
+    pub fn from_storage(storage: InMemoryStorage) -> Self {
+        Self {
+            storage: Mutex::new(storage),
+            event_sink: SharedEventSink::default(),
+        }
+    }
+
+    /// Construct a protocol storage repository port with an injected audit event sink.
+    pub fn with_event_sink(event_sink: SharedEventSink) -> Self {
+        Self {
+            storage: Mutex::new(InMemoryStorage::new()),
+            event_sink,
+        }
+    }
+
+    /// Construct a protocol storage repository port around an existing store and event sink.
+    pub fn from_storage_with_event_sink(
+        storage: InMemoryStorage,
+        event_sink: SharedEventSink,
+    ) -> Self {
+        Self {
+            storage: Mutex::new(storage),
+            event_sink,
+        }
+    }
+
+    /// Persist redacted event metadata and emit through the injected sink.
+    pub fn record_event(
+        &self,
+        envelope: EventEnvelope,
+    ) -> ProtocolResult<StorageRepositoryResponse> {
+        let metadata = event_metadata_record(&envelope);
+        let emitted = self.event_sink.emit(EventSinkRequest { envelope });
+        let stored = self.handle(StorageRepositoryRequest::SaveEventMetadata(metadata));
+        emitted?;
+        stored
+    }
+
+    /// Consume the adapter and return the wrapped in-memory store.
+    pub fn into_inner(self) -> ProtocolResult<InMemoryStorage> {
+        self.storage.into_inner().map_err(|_| ProtocolError {
+            code: "storage_lock_poisoned".to_string(),
+            message: "in-memory storage lock poisoned".to_string(),
+        })
+    }
+
+    /// Execute a closure with read-only access to the wrapped in-memory store.
+    pub fn with_storage<T>(&self, read: impl FnOnce(&InMemoryStorage) -> T) -> ProtocolResult<T> {
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        Ok(read(&storage))
+    }
+
+    fn poisoned_error(
+        _: std::sync::PoisonError<std::sync::MutexGuard<'_, InMemoryStorage>>,
+    ) -> ProtocolError {
+        ProtocolError {
+            code: "storage_lock_poisoned".to_string(),
+            message: "in-memory storage lock poisoned".to_string(),
+        }
+    }
+}
+
+impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
+    fn handle(
+        &self,
+        request: StorageRepositoryRequest,
+    ) -> ProtocolResult<StorageRepositoryResponse> {
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        storage
+            .handle_protocol_request(request)
+            .map_err(InMemoryStorage::protocol_error)
+    }
+}
+
 impl From<PersistedState> for InMemoryStorage {
     fn from(value: PersistedState) -> Self {
         Self {
@@ -182,6 +299,12 @@ impl From<PersistedState> for InMemoryStorage {
             trust: value.trust,
             metadata: value.metadata,
             sessions: value.sessions,
+            protocol_workspace_configs: HashMap::new(),
+            protocol_file_metadata: HashMap::new(),
+            protocol_sessions: HashMap::new(),
+            protocol_trust: HashMap::new(),
+            protocol_proposal_audit: HashMap::new(),
+            protocol_event_metadata: HashMap::new(),
         }
     }
 }
@@ -330,6 +453,122 @@ impl InMemoryStorage {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn protocol_saved(key: impl Into<String>) -> StorageRepositoryResponse {
+        StorageRepositoryResponse::Saved { key: key.into() }
+    }
+
+    fn protocol_error(error: StorageError) -> ProtocolError {
+        match error {
+            StorageError::NotFound { key } => ProtocolError {
+                code: "storage_not_found".to_string(),
+                message: key,
+            },
+            StorageError::Failed { message } => ProtocolError {
+                code: "storage_failed".to_string(),
+                message,
+            },
+            StorageError::Corrupt {
+                path,
+                quarantine_path,
+            } => ProtocolError {
+                code: "storage_corrupt".to_string(),
+                message: format!("{path} quarantined to {quarantine_path}"),
+            },
+        }
+    }
+
+    fn handle_protocol_request(
+        &mut self,
+        request: StorageRepositoryRequest,
+    ) -> StorageResult<StorageRepositoryResponse> {
+        match request {
+            StorageRepositoryRequest::SaveWorkspaceConfig(config) => {
+                let key = format!("workspace_config:{:?}", config.workspace_id);
+                self.protocol_workspace_configs
+                    .insert(config.workspace_id, config);
+                Ok(Self::protocol_saved(key))
+            }
+            StorageRepositoryRequest::SaveFileMetadata(metadata) => {
+                let file_id = self
+                    .protocol_file_metadata
+                    .iter()
+                    .find(|(_, existing)| existing.canonical_path == metadata.canonical_path)
+                    .map(|(id, _)| *id);
+                let file_id = file_id.unwrap_or(FileId(devil_protocol_stable_hash(
+                    &metadata.canonical_path.0,
+                )));
+                self.protocol_file_metadata.insert(file_id, metadata);
+                Ok(Self::protocol_saved(format!("file_metadata:{file_id:?}")))
+            }
+            StorageRepositoryRequest::SaveSessionRecord(record) => {
+                let key = record.session_id.clone();
+                self.protocol_sessions.insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!("session:{key}")))
+            }
+            StorageRepositoryRequest::SaveTrustRecord(record) => {
+                let key = (record.workspace_id, record.principal_id.clone());
+                self.protocol_trust.insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!(
+                    "trust:{:?}:{}",
+                    key.0,
+                    (key.1).0
+                )))
+            }
+            StorageRepositoryRequest::SaveProposalAuditRecord(record) => {
+                let key = record.proposal_id;
+                self.protocol_proposal_audit.insert(key, record);
+                Ok(Self::protocol_saved(format!("proposal_audit:{key:?}")))
+            }
+            StorageRepositoryRequest::SaveEventMetadata(record) => {
+                let key = record.event_id;
+                self.protocol_event_metadata.insert(key, record);
+                Ok(Self::protocol_saved(format!("event_metadata:{key:?}")))
+            }
+            StorageRepositoryRequest::ReadWorkspaceConfig(workspace_id) => {
+                Ok(StorageRepositoryResponse::WorkspaceConfig(
+                    self.protocol_workspace_configs.get(&workspace_id).cloned(),
+                ))
+            }
+            StorageRepositoryRequest::ReadFileMetadata(file_id) => {
+                Ok(StorageRepositoryResponse::FileMetadata(
+                    self.protocol_file_metadata.get(&file_id).cloned(),
+                ))
+            }
+            StorageRepositoryRequest::ReadSessionRecord { session_id } => {
+                Ok(StorageRepositoryResponse::SessionRecord(
+                    self.protocol_sessions.get(&session_id).cloned(),
+                ))
+            }
+            StorageRepositoryRequest::ReadTrustRecord {
+                workspace_id,
+                principal_id,
+            } => Ok(StorageRepositoryResponse::TrustRecord(
+                self.protocol_trust
+                    .get(&(workspace_id, principal_id))
+                    .cloned(),
+            )),
+            StorageRepositoryRequest::ReadProposalAuditRecord(proposal_id) => {
+                Ok(StorageRepositoryResponse::ProposalAuditRecord(
+                    self.protocol_proposal_audit.get(&proposal_id).cloned(),
+                ))
+            }
+            StorageRepositoryRequest::ReadEventMetadata(event_id) => {
+                Ok(StorageRepositoryResponse::EventMetadata(
+                    self.protocol_event_metadata.get(&event_id).cloned(),
+                ))
+            }
+        }
+    }
+}
+
+fn devil_protocol_stable_hash(value: &str) -> u128 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish() as u128
 }
 
 impl WorkspaceConfigRepository for InMemoryStorage {
