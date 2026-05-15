@@ -6,7 +6,10 @@ use std::sync::{
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-use devil_platform::{NativeFileSystem, NativeWatcherService};
+use devil_platform::{
+    FileSystemFingerprint, FileSystemMetadata, FileSystemService, NativeFileSystem,
+    NativeWatcherService, PathNormalizationService, PlatformError,
+};
 use devil_project::{WorkspaceActor, WorkspaceError, WorkspaceSaveRequest};
 use devil_protocol::{
     BufferVersion, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId, CorrelationId,
@@ -16,16 +19,129 @@ use devil_protocol::{
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use uuid::Uuid;
 
+#[derive(Debug)]
+struct CountingFileSystem {
+    inner: NativeFileSystem,
+    write_attempts: Arc<AtomicU64>,
+}
+
+impl CountingFileSystem {
+    fn new(write_attempts: Arc<AtomicU64>) -> Self {
+        Self {
+            inner: NativeFileSystem,
+            write_attempts,
+        }
+    }
+}
+
+impl PathNormalizationService for CountingFileSystem {
+    fn normalize_path(&self, path: &Path) -> Result<PathBuf, PlatformError> {
+        self.inner.normalize_path(path)
+    }
+
+    fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, PlatformError> {
+        self.inner.canonicalize_path(path)
+    }
+
+    fn is_within_base(&self, base: &Path, candidate: &Path) -> Result<bool, PlatformError> {
+        self.inner.is_within_base(base, candidate)
+    }
+}
+
+impl FileSystemService for CountingFileSystem {
+    fn read_text_file(&self, path: &Path) -> Result<String, PlatformError> {
+        self.inner.read_text_file(path)
+    }
+
+    fn write_text_file(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
+        self.write_attempts.fetch_add(1, Ordering::SeqCst);
+        self.inner.write_text_file(path, text)
+    }
+
+    fn write_text_file_atomic(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
+        self.write_attempts.fetch_add(1, Ordering::SeqCst);
+        self.inner.write_text_file_atomic(path, text)
+    }
+
+    fn read_metadata(&self, path: &Path) -> Result<FileSystemMetadata, PlatformError> {
+        self.inner.read_metadata(path)
+    }
+
+    fn read_fingerprint(&self, path: &Path) -> Result<FileSystemFingerprint, PlatformError> {
+        self.inner.read_fingerprint(path)
+    }
+
+    fn stable_hash(&self, bytes: &[u8]) -> String {
+        self.inner.stable_hash(bytes)
+    }
+
+    fn stable_hash_file(&self, path: &Path) -> Result<String, PlatformError> {
+        self.inner.stable_hash_file(path)
+    }
+
+    fn modified_timestamp(&self, path: &Path) -> Result<Option<u64>, PlatformError> {
+        self.inner.modified_timestamp(path)
+    }
+
+    fn file_length(&self, path: &Path) -> Result<u64, PlatformError> {
+        self.inner.file_length(path)
+    }
+
+    fn list_directory(&self, path: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+        self.inner.list_directory(path)
+    }
+}
+
+fn security_policy_for_root(root: &Path) -> SecurityPolicy {
+    let mut policy = SecurityPolicy::default();
+    policy.path_policy.readable_roots = vec![root.to_string_lossy().into_owned()];
+    policy.path_policy.writable_roots = vec![root.to_string_lossy().into_owned()];
+    policy
+}
+
+fn security_policy_for_root_with_limits(
+    root: &Path,
+    path_max_write_bytes: usize,
+    file_max_bytes_per_write: usize,
+) -> SecurityPolicy {
+    let mut policy = security_policy_for_root(root);
+    policy.path_policy.max_write_bytes = path_max_write_bytes;
+    policy.file_write_policy.max_bytes_per_write = file_max_bytes_per_write;
+    policy
+}
+
 fn open_workspace(
     root: &Path,
     trust: WorkspaceTrustState,
 ) -> (WorkspaceActor, devil_protocol::WorkspaceOpened) {
-    let mut policy = SecurityPolicy::default();
-    policy.path_policy.readable_roots = vec![root.to_string_lossy().into_owned()];
-    policy.path_policy.writable_roots = vec![root.to_string_lossy().into_owned()];
+    let policy = security_policy_for_root(root);
 
     let actor = WorkspaceActor::new(
         Arc::new(NativeFileSystem),
+        Arc::new(NativeWatcherService),
+        DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string())),
+    );
+
+    let opened = actor
+        .open_workspace(WorkspaceOpenRequest {
+            correlation_id: CorrelationId(1),
+            principal_id: PrincipalId("tester".to_string()),
+            root_path: CanonicalPath(root.to_string_lossy().into_owned()),
+            trust: Some(trust),
+        })
+        .expect("open workspace");
+
+    (actor, opened)
+}
+
+fn open_workspace_with_counting_fs(
+    root: &Path,
+    trust: WorkspaceTrustState,
+    policy: SecurityPolicy,
+    write_attempts: Arc<AtomicU64>,
+) -> (WorkspaceActor, devil_protocol::WorkspaceOpened) {
+    let actor = WorkspaceActor::new(
+        Arc::new(CountingFileSystem::new(write_attempts)),
         Arc::new(NativeWatcherService),
         DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string())),
     );
@@ -169,6 +285,110 @@ fn stale_save_preserves_disk_content_and_returns_typed_response() {
         ProposalResponse::Conflict { .. } => {}
         other => panic!("expected stale or conflict response, got {other:?}"),
     }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn oversized_save_denied_by_path_limit_before_atomic_write() {
+    let root = create_temp_workspace();
+    let target = root.join("path-limit.txt");
+    let write_attempts = Arc::new(AtomicU64::new(0));
+    let policy = security_policy_for_root_with_limits(&root, 4, 64);
+    let (actor, opened) = open_workspace_with_counting_fs(
+        &root,
+        WorkspaceTrustState::Trusted,
+        policy,
+        write_attempts.clone(),
+    );
+
+    let response = save_new_file(
+        &actor,
+        opened.workspace_id,
+        target.to_string_lossy(),
+        "12345",
+    )
+    .expect_err("oversized save should be denied");
+
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 0);
+    assert!(!target.exists());
+    match response {
+        ProposalResponse::Denied { transition, .. } => {
+            let diagnostic = transition
+                .diagnostics
+                .first()
+                .expect("write-size denial diagnostic");
+            assert!(diagnostic.message.contains("write-size limit 4 bytes"));
+        }
+        other => panic!("expected denied response, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn oversized_save_denied_by_file_write_limit_before_atomic_write() {
+    let root = create_temp_workspace();
+    let target = root.join("file-limit.txt");
+    let write_attempts = Arc::new(AtomicU64::new(0));
+    let policy = security_policy_for_root_with_limits(&root, 64, 4);
+    let (actor, opened) = open_workspace_with_counting_fs(
+        &root,
+        WorkspaceTrustState::Trusted,
+        policy,
+        write_attempts.clone(),
+    );
+
+    let response = save_new_file(
+        &actor,
+        opened.workspace_id,
+        target.to_string_lossy(),
+        "12345",
+    )
+    .expect_err("oversized save should be denied by file write limit");
+
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 0);
+    assert!(!target.exists());
+    match response {
+        ProposalResponse::Denied { transition, .. } => {
+            let diagnostic = transition
+                .diagnostics
+                .first()
+                .expect("write-size denial diagnostic");
+            assert!(diagnostic.message.contains("write-size limit 4 bytes"));
+        }
+        other => panic!("expected denied response, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn in_limit_save_uses_stricter_limit_and_writes_once() {
+    let root = create_temp_workspace();
+    let target = root.join("in-limit.txt");
+    let write_attempts = Arc::new(AtomicU64::new(0));
+    let policy = security_policy_for_root_with_limits(&root, 64, 4);
+    let (actor, opened) = open_workspace_with_counting_fs(
+        &root,
+        WorkspaceTrustState::Trusted,
+        policy,
+        write_attempts.clone(),
+    );
+
+    save_new_file(
+        &actor,
+        opened.workspace_id,
+        target.to_string_lossy(),
+        "1234",
+    )
+    .expect("payload at effective write limit should save");
+
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("saved content"),
+        "1234"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

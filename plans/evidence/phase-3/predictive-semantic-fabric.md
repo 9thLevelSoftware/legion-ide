@@ -8,6 +8,14 @@ This scaffold records the required evidence for completing Phase 3 of [`implemen
 
 This document is not implementation evidence yet. It defines the workflows, validation commands, artifacts, and final checklist that implementation subtasks must complete.
 
+## Acceptance status
+
+- Runtime surface status: Partial `devil-index` indexing behavior is active; acceptance evidence is incomplete. Active code exists in [`lib.rs`](../../../crates/devil-index/src/lib.rs:1) and targeted tests exist in [`index_workflows.rs`](../../../crates/devil-index/tests/index_workflows.rs:1), but these do not satisfy Phase 3 acceptance by themselves.
+- Phase 3 acceptance: Not accepted.
+- LSP supervision acceptance: Not accepted.
+- ADR status note: [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:111) and [`ADR-0018-lsp-runtime-supervision.md`](../../adrs/ADR-0018-lsp-runtime-supervision.md:91) are accepted for governance and implementation gating only; their exit conditions remain unsatisfied until this document records validation evidence.
+- Gate behavior: [`main.rs`](../../../xtask/src/main.rs:49) treats the not-accepted markers above as the passing scaffold state. If a future change claims accepted Phase 3 or LSP status, the check escalates to a failure unless required artifact names remain listed, evidence files exist under this directory, the scaffold disclaimer is removed, and the final validation checklist contains no unchecked items.
+
 ## Governance prerequisites
 
 - [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:1) is accepted before semantic indexing runtime behavior lands.

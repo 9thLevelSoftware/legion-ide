@@ -212,6 +212,75 @@ fn workspace_vfs_integration_untrusted_save_is_denied_without_disk_mutation() {
 }
 
 #[test]
+fn workspace_vfs_integration_oversized_save_is_rejected_and_preserves_dirty_text() {
+    let root = create_root();
+    let target = root.join("oversized-save.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let (mut app, sink) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(target.to_string_lossy())
+        .expect("open target file");
+
+    let oversized_insert = deterministic_large_text(512 * 1024 + 1);
+    app.edit_active_buffer(TextEdit::insert(
+        TextPosition::new(0, 4),
+        oversized_insert.clone(),
+    ))
+    .expect("dirty oversized buffer");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+
+    let save = app
+        .save_active_buffer()
+        .expect("oversized save should return outcome");
+    assert!(matches!(
+        &save,
+        AppSaveOutcome::Rejected(response) if matches!(response.as_ref(), ProposalResponse::Denied { .. })
+    ));
+
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("disk content preserved"),
+        "seed"
+    );
+    assert_eq!(
+        app.editor().text(buffer_id).expect("dirty text preserved"),
+        format!("seed{oversized_insert}")
+    );
+    assert!(app.editor().is_dirty(buffer_id).expect("dirty retained"));
+    assert_eq!(
+        app.editor()
+            .buffer_save_state(buffer_id)
+            .expect("save state"),
+        FileConflictLifecycleState::SaveFailed
+    );
+
+    let events = sink.events().expect("captured oversized save events");
+    for event in &events {
+        assert_non_zero_core_ids(event);
+    }
+    assert_events_include_order(
+        &events,
+        &[
+            "editor.transaction_applied",
+            "proposal.created",
+            "proposal.validated",
+            "proposal.previewed",
+            "security.denial",
+            "proposal.rejected",
+            "workspace.save_denied",
+        ],
+    );
+
+    let _ = save;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn workspace_vfs_integration_failed_existing_read_does_not_create_empty_buffer() {
     let root = create_root();
     let missing = root.join("missing.txt");

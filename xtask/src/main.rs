@@ -10,6 +10,27 @@ use clap::{Parser, Subcommand};
 
 const DEFAULT_POLICY_PATH: &str = "plans/dependency-policy.md";
 const DEFAULT_PROTOCOL_PATH: &str = "crates/devil-protocol/src/lib.rs";
+const DEFAULT_PHASE3_EVIDENCE_PATH: &str = "plans/evidence/phase-3/predictive-semantic-fabric.md";
+const PHASE3_STATUS_HEADING: &str = "## Acceptance status";
+const PHASE3_FINAL_CHECKLIST_HEADING: &str = "## Final validation checklist";
+const PHASE3_PARTIAL_RUNTIME_MARKER: &str = "Runtime surface status: Partial `devil-index` indexing behavior is active; acceptance evidence is incomplete.";
+const PHASE3_NOT_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Not accepted.";
+const PHASE3_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Accepted.";
+const LSP_NOT_ACCEPTED_MARKER: &str = "LSP supervision acceptance: Not accepted.";
+const LSP_ACCEPTED_MARKER: &str = "LSP supervision acceptance: Accepted.";
+const PHASE3_REQUIRED_ARTIFACTS: &[&str] = &[
+    "semantic-fabric-architecture-map.md",
+    "index-dependency-boundary.txt",
+    "repository-discovery-ignore-fingerprint.md",
+    "lexical-symbol-map-tests.txt",
+    "tree-sitter-cache-tests.txt",
+    "normalized-graph-contract-tests.txt",
+    "semantic-query-api-tests.txt",
+    "lsp-supervision-tests.txt",
+    "proposal-routing-regression.txt",
+    "privacy-redaction-audit.md",
+    "vector-deferral-audit.md",
+];
 
 #[derive(Parser)]
 #[command(author, version, about = "Repository maintenance and validation tasks")]
@@ -64,8 +85,23 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
         policy.protocol_symbols(),
     )?;
 
+    let phase3_evidence_path = workspace_root.join(DEFAULT_PHASE3_EVIDENCE_PATH);
+    let phase3_evidence = fs::read_to_string(&phase3_evidence_path).map_err(|err| {
+        format!(
+            "unable to read Phase 3 evidence at `{}`: {err}",
+            phase3_evidence_path.display()
+        )
+    })?;
+    let phase3_evidence_dir = phase3_evidence_path
+        .parent()
+        .ok_or_else(|| "unable to resolve Phase 3 evidence directory".to_string())?;
+    let phase3_violations = validate_phase3_acceptance_governance(&phase3_evidence, |artifact| {
+        phase3_evidence_dir.join(artifact).is_file()
+    });
+
     let mut all = violations;
     all.extend(protocol_violations);
+    all.extend(phase3_violations);
 
     if !all.is_empty() {
         let mut output = String::new();
@@ -244,6 +280,115 @@ fn protocol_definition_has_token(line: &str, keyword: &str, symbol: &str) -> boo
     };
 
     found_symbol == symbol
+}
+
+fn validate_phase3_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    let Some(status_section) = markdown_section(evidence, PHASE3_STATUS_HEADING) else {
+        issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` must include `{PHASE3_STATUS_HEADING}` with explicit Phase 3 and LSP acceptance status"
+        ));
+        return issues;
+    };
+
+    let phase3_not_accepted = status_section.contains(PHASE3_NOT_ACCEPTED_MARKER);
+    let phase3_accepted = status_section.contains(PHASE3_ACCEPTED_MARKER);
+    match (phase3_not_accepted, phase3_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` must not declare both `{PHASE3_NOT_ACCEPTED_MARKER}` and `{PHASE3_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` must declare either `{PHASE3_NOT_ACCEPTED_MARKER}` or `{PHASE3_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    let lsp_not_accepted = status_section.contains(LSP_NOT_ACCEPTED_MARKER);
+    let lsp_accepted = status_section.contains(LSP_ACCEPTED_MARKER);
+    match (lsp_not_accepted, lsp_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` must not declare both `{LSP_NOT_ACCEPTED_MARKER}` and `{LSP_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` must declare either `{LSP_NOT_ACCEPTED_MARKER}` or `{LSP_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    if (phase3_not_accepted || lsp_not_accepted)
+        && !status_section.contains(PHASE3_PARTIAL_RUNTIME_MARKER)
+    {
+        issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` partial acceptance status must state `{PHASE3_PARTIAL_RUNTIME_MARKER}`"
+        ));
+    }
+
+    if phase3_accepted || lsp_accepted {
+        issues.extend(validate_phase3_completion_evidence(
+            evidence,
+            &artifact_exists,
+        ));
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_phase3_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    if evidence.contains("This document is not implementation evidence yet") {
+        issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` claims acceptance while still saying it is not implementation evidence yet"
+        ));
+    }
+
+    if let Some(checklist) = markdown_section(evidence, PHASE3_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_PHASE3_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_PHASE3_EVIDENCE_PATH}` claims acceptance but `{PHASE3_FINAL_CHECKLIST_HEADING}` is missing"
+        ));
+    }
+
+    for artifact in PHASE3_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE3_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is not listed"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE3_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing from `plans/evidence/phase-3`"
+            ));
+        }
+    }
+
+    issues
+}
+
+fn markdown_section<'a>(source: &'a str, heading: &str) -> Option<&'a str> {
+    let start = source.find(heading)?;
+    let tail = &source[start..];
+    let body_start = tail.find('\n').map_or(tail.len(), |idx| idx + 1);
+    let body = &tail[body_start..];
+    let end = body.find("\n## ").unwrap_or(body.len());
+    Some(&body[..end])
 }
 
 #[derive(Default)]
@@ -438,6 +583,37 @@ mod tests {
         );
     }
 
+    fn accepted_phase3_evidence(scaffold_disclaimer: bool, checklist_checked: bool) -> String {
+        let artifacts = PHASE3_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let disclaimer = if scaffold_disclaimer {
+            "This document is not implementation evidence yet.\n"
+        } else {
+            ""
+        };
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# Phase 3 evidence
+
+## Acceptance status
+
+- {PHASE3_ACCEPTED_MARKER}
+- {LSP_ACCEPTED_MARKER}
+
+{disclaimer}
+## Expected evidence artifacts
+
+{artifacts}
+## Final validation checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
     #[test]
     fn missing_workspace_crate_policy_is_reported() {
         let packages = HashMap::from([(
@@ -488,6 +664,81 @@ mod tests {
                 .contains(&("devil-ui".to_string(), "devil-project".to_string()))
         );
         assert!(policy.protocol_symbols().contains("WorkspaceId"));
+    }
+
+    #[test]
+    fn phase3_acceptance_status_section_is_required() {
+        let issues = validate_phase3_acceptance_governance(
+            "# Phase 3 evidence\n\n## Final validation checklist\n\n- [ ] pending\n",
+            |_| false,
+        );
+
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains(PHASE3_STATUS_HEADING))
+        );
+    }
+
+    #[test]
+    fn phase3_not_accepted_status_allows_scaffold_without_artifacts() {
+        let evidence = format!(
+            r#"# Phase 3 evidence
+
+## Acceptance status
+
+- {PHASE3_PARTIAL_RUNTIME_MARKER}
+- {PHASE3_NOT_ACCEPTED_MARKER}
+- {LSP_NOT_ACCEPTED_MARKER}
+
+## Final validation checklist
+
+- [ ] pending
+"#
+        );
+
+        let issues = validate_phase3_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase3_acceptance_claim_requires_artifacts_and_checked_checklist() {
+        let evidence = accepted_phase3_evidence(true, false);
+        let issues = validate_phase3_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while still saying it is not implementation evidence yet"
+        )));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required artifact `lsp-supervision-tests.txt` is missing")
+        }));
+    }
+
+    #[test]
+    fn phase3_acceptance_claim_passes_with_checked_checklist_and_artifacts() {
+        let evidence = accepted_phase3_evidence(false, true);
+        let issues = validate_phase3_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase3_evidence_declares_partial_activation_not_acceptance() {
+        let source = read_workspace_file(DEFAULT_PHASE3_EVIDENCE_PATH);
+        let issues = validate_phase3_acceptance_governance(&source, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+        assert!(source.contains("This document is not implementation evidence yet"));
+        for artifact in PHASE3_REQUIRED_ARTIFACTS {
+            assert!(
+                source.contains(artifact),
+                "Phase 3 scaffold must list required artifact `{artifact}`"
+            );
+        }
     }
 
     #[test]

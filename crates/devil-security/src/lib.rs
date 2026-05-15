@@ -10,8 +10,8 @@ use std::{
 
 use devil_protocol::{
     CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityDenial,
-    CapabilityGrant, CapabilityId, CapabilityNamespace, CapabilityRequest, CapabilityResponse,
-    CorrelationId, PrincipalId, WorkspaceTrustState,
+    CapabilityGrant, CapabilityId, CapabilityNamespace, CapabilityRequest,
+    CapabilityRequestContext, CapabilityResponse, CorrelationId, PrincipalId, WorkspaceTrustState,
 };
 use thiserror::Error;
 
@@ -511,9 +511,27 @@ impl DenyByDefaultBroker {
     pub fn decide(
         &mut self,
         trust: TrustState,
-        _principal: PrincipalId,
+        principal: PrincipalId,
         capability: CapabilityId,
         path: Option<&str>,
+    ) -> SecurityDecision {
+        self.decide_with_request_context(
+            trust,
+            principal,
+            capability,
+            path,
+            CapabilityRequestContext::default(),
+        )
+    }
+
+    /// Pure policy matrix for a capability request with structured operation context.
+    pub fn decide_with_request_context(
+        &mut self,
+        trust: TrustState,
+        principal: PrincipalId,
+        capability: CapabilityId,
+        path: Option<&str>,
+        context: CapabilityRequestContext,
     ) -> SecurityDecision {
         self.counter = self.counter.saturating_add(1);
         let decision_id = CapabilityDecisionId(self.counter);
@@ -522,7 +540,26 @@ impl DenyByDefaultBroker {
             return SecurityDecision::deny(format!("namespace {} disabled", self.namespace.0));
         }
 
-        self.decide_with_context(trust, _principal, capability, path, decision_id)
+        self.decide_with_context(trust, principal, capability, path, &context, decision_id)
+    }
+
+    fn effective_max_write_bytes(&self) -> u64 {
+        // Workspace saves honor both legacy path-level and file-write limits. The stricter limit
+        // wins so either policy surface can safely constrain a write payload before disk mutation.
+        (self.policy.path_policy.max_write_bytes as u64)
+            .min(self.policy.file_write_policy.max_bytes_per_write as u64)
+    }
+
+    fn write_size_decision(&self, context: &CapabilityRequestContext) -> Option<SecurityDecision> {
+        let write_byte_count = context.write_byte_count?;
+        let effective_max = self.effective_max_write_bytes();
+        if write_byte_count > effective_max {
+            Some(SecurityDecision::deny(format!(
+                "write payload {write_byte_count} bytes exceeds configured write-size limit {effective_max} bytes"
+            )))
+        } else {
+            None
+        }
     }
 
     fn decide_with_context(
@@ -531,6 +568,7 @@ impl DenyByDefaultBroker {
         _principal: PrincipalId,
         capability: CapabilityId,
         path: Option<&str>,
+        context: &CapabilityRequestContext,
         _decision_id: CapabilityDecisionId,
     ) -> SecurityDecision {
         let capability = capability.0;
@@ -554,6 +592,8 @@ impl DenyByDefaultBroker {
                 if self.policy.file_write_policy.deny_when_untrusted && trust != TrustState::Trusted
                 {
                     SecurityDecision::deny("file write denied for untrusted workspace")
+                } else if let Some(decision) = self.write_size_decision(context) {
+                    decision
                 } else if let Some(target_path) = path {
                     if !self
                         .policy
@@ -679,7 +719,7 @@ impl CapabilityBrokerPort for DenyByDefaultBroker {
                 workspace_trust_state,
                 target_path,
                 decision_id,
-                context: _,
+                context,
                 correlation_id: _,
             } => {
                 let trust_state: TrustState = workspace_trust_state.into();
@@ -692,11 +732,12 @@ impl CapabilityBrokerPort for DenyByDefaultBroker {
                         capability_id.0
                     ))
                 } else {
-                    owned.decide(
+                    owned.decide_with_request_context(
                         trust_state,
                         principal_id.clone(),
                         capability_id.clone(),
                         target_path.as_ref().map(|value| value.0.as_str()),
+                        context,
                     )
                 };
                 let resolved_decision_id =

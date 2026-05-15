@@ -16,9 +16,9 @@ use devil_platform::{
     PlatformError, WatcherService,
 };
 use devil_protocol::{
-    BufferVersion, CanonicalPath, CapabilityId, CausalityId, CorrelationId, EventSequence,
-    EventSinkPort, EventSinkRequest, FileConflictContext, FileConflictLifecycleState,
-    FileConflictReason, FileConflictState, FileContentVersion,
+    BufferVersion, CanonicalPath, CapabilityId, CapabilityRequestContext, CausalityId,
+    CorrelationId, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
+    FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
     FileFingerprint as ProtocolFileFingerprint, FileId, FileIdentity, FileKind, FileMetadata,
     FileTreeDelta, FileTreeDeltaOp, FileTreeNode, PrincipalId, ProjectId, ProposalDenialReason,
     ProposalFailureReason, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
@@ -1076,16 +1076,32 @@ impl WorkspaceActor {
         capability: &str,
         path: Option<&str>,
     ) -> WorkspaceResult<()> {
+        self.decision_for_workspace_with_context(
+            state,
+            capability,
+            path,
+            CapabilityRequestContext::default(),
+        )
+    }
+
+    fn decision_for_workspace_with_context(
+        &self,
+        state: &WorkspaceState,
+        capability: &str,
+        path: Option<&str>,
+        context: CapabilityRequestContext,
+    ) -> WorkspaceResult<()> {
         let mut security = self
             .security
             .lock()
             .map_err(|_| WorkspaceError::Internal("security lock poisoned"))?;
 
-        let decision = security.decide(
+        let decision = security.decide_with_request_context(
             state.trust,
             state.principal_id.clone(),
             devil_protocol::CapabilityId(capability.to_string()),
             path,
+            context,
         );
         match decision {
             devil_security::SecurityDecision::Allow => Ok(()),
@@ -1660,10 +1676,14 @@ impl WorkspaceActor {
             ));
         }
 
-        if let Err(err) = self.decision_for_workspace(
+        if let Err(err) = self.decision_for_workspace_with_context(
             state,
             &request.required_capability.0,
             Some(&canonical.to_string_lossy()),
+            CapabilityRequestContext {
+                write_byte_count: Some(request.payload_byte_len),
+                ..CapabilityRequestContext::default()
+            },
         ) {
             let sequence = Self::now_sequence(state);
             self.emit(security_denial_event(
