@@ -23,6 +23,7 @@
       <sourceFolder url="file://$MODULE_DIR$/xtask/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-app/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-editor/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-index/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-project/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-protocol/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-security/tests" isTestSource="true" />

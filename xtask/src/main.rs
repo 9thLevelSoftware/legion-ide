@@ -526,7 +526,6 @@ mod tests {
     #[test]
     fn placeholder_crates_remain_inert_until_activation_gates_land() {
         for path in [
-            "crates/devil-index/src/lib.rs",
             "crates/devil-agent/src/lib.rs",
             "crates/devil-tracker/src/lib.rs",
             "crates/devil-memory/src/lib.rs",

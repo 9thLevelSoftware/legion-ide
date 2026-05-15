@@ -265,9 +265,9 @@ name = "devil-index"
 version = "0.1.0"
 dependencies = [
  "devil-protocol",
- "devil-storage",
  "devil-text",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

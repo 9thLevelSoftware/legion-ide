@@ -1,24 +1,4 @@
-use devil_protocol::{
-    BufferId, BufferVersion, CanonicalPath, CapabilityCommandClass, CapabilityDecisionId,
-    CapabilityId, CapabilityNamespace, CapabilityRequest, CapabilityRequestContext, CausalityId,
-    ChangedTextRange, CorrelationId, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
-    EventSeverity, FileConflictContext, FileConflictLifecycleState, FileConflictReason,
-    FileConflictState, FileContentVersion, FileFingerprint, FileId, FileIdentity, FileKind,
-    FileMetadata, LargeFileStatus, LineIndexRange, NetworkTarget, PrincipalId, ProposalAuditRecord,
-    ProposalDenialReason, ProposalFailureReason, ProposalLifecycleState,
-    ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
-    ProposalRejectionReason, ProposalResponse, ProposalRollbackReason, ProposalStaleContext,
-    ProposalStaleReason, ProposalVersionPreconditions, ProtocolDiagnostic,
-    ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, RetentionLabel,
-    SaveConflictPolicy, SaveFileProposal, SaveIntent, SessionDirtyIndicator, SessionLayoutSplit,
-    SessionPanelState, SessionSplitOrientation, SessionTab, SessionTabGroup,
-    SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId, SnapshotLeaseDescriptor,
-    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor,
-    TimestampMillis, TransactionSource, TrustDecisionContext, TrustRecord, Utf16Position,
-    Utf16Range, VersionContext, ViewportDimensions, ViewportLineMetric, ViewportLineSlice,
-    ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode, ViewportScroll,
-    WorkspaceGeneration, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
-};
+use devil_protocol::*;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -171,6 +151,284 @@ fn payload_summary() -> ProposalPayloadSummary {
         affected_files: vec![FileId(33)],
         title: Some("save main.rs".to_string()),
         byte_count: Some(1234),
+    }
+}
+
+fn empty_preconditions() -> ProposalVersionPreconditions {
+    ProposalVersionPreconditions {
+        file_version: None,
+        buffer_version: None,
+        snapshot_id: None,
+        generation: None,
+        file_content_version: None,
+        workspace_generation: None,
+        expected_fingerprint: None,
+        expected_file_length: None,
+        expected_modified_at: None,
+    }
+}
+
+fn batch_target_coverage() -> ProposalTargetCoverage {
+    ProposalTargetCoverage {
+        coverage_kind: ProposalTargetCoverageKind::Complete,
+        targets: vec![
+            ProposalAffectedTarget {
+                target_id: "target-buffer-main".to_string(),
+                kind: ProposalTargetKind::OpenBuffer,
+                workspace_id: Some(WorkspaceId(11)),
+                file_id: Some(FileId(33)),
+                buffer_id: Some(BufferId(22)),
+                path: Some(CanonicalPath("C:/repo/src/main.rs".to_string())),
+                terminal_session_id: None,
+                plugin_id: None,
+                remote_authority: None,
+                collaboration_session_id: None,
+                byte_ranges: vec![devil_protocol::ByteRange::new(10, 14)],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            },
+            ProposalAffectedTarget {
+                target_id: "target-file-lib".to_string(),
+                kind: ProposalTargetKind::PathOnly,
+                workspace_id: Some(WorkspaceId(11)),
+                file_id: None,
+                buffer_id: None,
+                path: Some(CanonicalPath("C:/repo/src/lib.rs".to_string())),
+                terminal_session_id: None,
+                plugin_id: None,
+                remote_authority: None,
+                collaboration_session_id: None,
+                byte_ranges: vec![],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            },
+        ],
+        omitted_target_count: 0,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+    }
+}
+
+fn batch_payload() -> BatchProposalPayload {
+    BatchProposalPayload {
+        batch_id: Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap(),
+        atomicity: ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        rollback_policy: ProposalBatchRollbackPolicy::Required,
+        target_coverage: batch_target_coverage(),
+        items: vec![
+            ProposalBatchItem {
+                order: 0,
+                item_id: "item-edit-main".to_string(),
+                payload: Box::new(ProposalPayload::TextEdit(
+                    devil_protocol::TextEditProposal {
+                        file_id: FileId(33),
+                        edits: devil_protocol::EditBatch {
+                            edits: vec![devil_protocol::TextEdit {
+                                range: devil_protocol::TextRange::byte(10, 14),
+                                replacement: "main".to_string(),
+                            }],
+                        },
+                    },
+                )),
+                target_ids: vec!["target-buffer-main".to_string()],
+                required_capability: CapabilityId("editor.write".to_string()),
+                rollback_step_ids: vec!["rollback-edit-main".to_string()],
+            },
+            ProposalBatchItem {
+                order: 1,
+                item_id: "item-create-lib".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(CreateFileProposal {
+                    path: CanonicalPath("C:/repo/src/lib.rs".to_string()),
+                    initial_content: None,
+                })),
+                target_ids: vec!["target-file-lib".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: vec!["rollback-create-lib".to_string()],
+            },
+        ],
+        dependency_edges: vec![ProposalBatchDependency {
+            prerequisite_item_id: "item-edit-main".to_string(),
+            dependent_item_id: "item-create-lib".to_string(),
+            kind: ProposalBatchDependencyKind::RequiresValidation,
+        }],
+        rollback_steps: vec![
+            ProposalRollbackStep {
+                order: 0,
+                step_id: "rollback-create-lib".to_string(),
+                item_id: "item-create-lib".to_string(),
+                target_id: "target-file-lib".to_string(),
+                action: ProposalRollbackAction::DeleteCreatedFile,
+                expected_preconditions: empty_preconditions(),
+                diagnostics: vec![],
+            },
+            ProposalRollbackStep {
+                order: 1,
+                step_id: "rollback-edit-main".to_string(),
+                item_id: "item-edit-main".to_string(),
+                target_id: "target-buffer-main".to_string(),
+                action: ProposalRollbackAction::EditorUndoGroup,
+                expected_preconditions: preconditions(),
+                diagnostics: vec![diagnostic("rollback")],
+            },
+        ],
+        partial_failures: vec![ProposalPartialFailureRecord {
+            item_id: "item-create-lib".to_string(),
+            target_id: "target-file-lib".to_string(),
+            reason: ProposalFailureReason::ApplyFailed,
+            disposition: ProposalPartialFailureDisposition::RolledBack,
+            diagnostics: vec![diagnostic("partial")],
+        }],
+        preview_warnings: vec![ProposalPreviewWarning {
+            code: "proposal.preview.rollback_required".to_string(),
+            kind: ProposalPreviewWarningKind::RollbackBestEffort,
+            message: "batch includes rollback metadata".to_string(),
+            target_id: Some("target-file-lib".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }],
+        schema_version: 1,
+    }
+}
+
+fn lsp_request_id() -> LspRequestId {
+    LspRequestId(Uuid::parse_str("12121212-1212-1212-1212-121212121212").unwrap())
+}
+
+fn cancellation_token_id() -> CancellationTokenId {
+    CancellationTokenId(Uuid::parse_str("34343434-3434-3434-3434-343434343434").unwrap())
+}
+
+fn semantic_query_id() -> SemanticQueryId {
+    SemanticQueryId(Uuid::parse_str("56565656-5656-5656-5656-565656565656").unwrap())
+}
+
+fn lsp_context() -> LspOperationContext {
+    LspOperationContext {
+        request_id: lsp_request_id(),
+        workspace_id: WorkspaceId(11),
+        file_id: FileId(33),
+        buffer_id: BufferId(22),
+        snapshot_id: SnapshotId(66),
+        buffer_version: BufferVersion(55),
+        language_id: LanguageId("rust".to_string()),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        timeout_ms: 2500,
+        cancellation_token: cancellation_token_id(),
+        content_hash: Some(fingerprint("content")),
+        privacy_scope: SemanticPrivacyScope::Workspace,
+        schema_version: 1,
+    }
+}
+
+fn lsp_metadata(status: LspResultStatus) -> LspResultMetadata {
+    LspResultMetadata {
+        request_id: lsp_request_id(),
+        server_id: LanguageServerId(7),
+        snapshot_id: SnapshotId(66),
+        buffer_version: BufferVersion(55),
+        content_hash: Some(fingerprint("content")),
+        status,
+        generated_at: TimestampMillis(1234),
+        diagnostics: vec![diagnostic("lsp")],
+        schema_version: 1,
+    }
+}
+
+fn lsp_location() -> LspLocation {
+    LspLocation {
+        workspace_id: WorkspaceId(11),
+        file_id: FileId(33),
+        path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+        range: protocol_range(),
+        target_selection_range: Some(protocol_range()),
+        symbol_name: Some("main".to_string()),
+        symbol_kind: Some("Function".to_string()),
+    }
+}
+
+fn workspace_edit_payload(source: WorkspaceEditSourceKind) -> WorkspaceEditProposalPayload {
+    WorkspaceEditProposalPayload {
+        workspace_id: WorkspaceId(11),
+        edit_id: Uuid::parse_str("78787878-7878-7878-7878-787878787878").unwrap(),
+        title: "rename symbol".to_string(),
+        source,
+        target_coverage: batch_target_coverage(),
+        file_edits: vec![WorkspaceTextEdit {
+            file: file_identity(),
+            buffer_id: Some(BufferId(22)),
+            edits: EditBatch {
+                edits: vec![TextEdit {
+                    range: TextRange::byte(10, 14),
+                    replacement: "renamed".to_string(),
+                }],
+            },
+            preconditions: preconditions(),
+        }],
+        file_operations: vec![
+            WorkspaceFileOperation::Create {
+                path: CanonicalPath("C:/repo/src/new.rs".to_string()),
+                initial_content_hash: Some(fingerprint("new")),
+            },
+            WorkspaceFileOperation::Delete {
+                file: file_identity(),
+            },
+            WorkspaceFileOperation::Rename {
+                file: file_identity(),
+                destination: CanonicalPath("C:/repo/src/main_renamed.rs".to_string()),
+            },
+        ],
+        required_capability: CapabilityId("fs.write".to_string()),
+        diagnostics: vec![diagnostic("workspace-edit")],
+        schema_version: 1,
+    }
+}
+
+fn proposal_for_lsp() -> WorkspaceProposal {
+    WorkspaceProposal {
+        proposal_id: devil_protocol::ProposalId(701),
+        principal: PrincipalId("principal-1".to_string()),
+        capability: CapabilityId("fs.write".to_string()),
+        correlation_id: CorrelationId(901),
+        payload: ProposalPayload::WorkspaceEdit(workspace_edit_payload(
+            WorkspaceEditSourceKind::LspRename,
+        )),
+        preconditions: preconditions(),
+        preview: PreviewSummary {
+            summary: "rename symbol".to_string(),
+            details: vec!["proposal-mediated LSP rename".to_string()],
+        },
+        expires_at: Some(TimestampMillis(2000)),
+        created_at: TimestampMillis(1000),
+    }
+}
+
+fn semantic_invalidation_key() -> SemanticInvalidationKey {
+    SemanticInvalidationKey {
+        workspace_id: WorkspaceId(11),
+        file_id: FileId(33),
+        snapshot_id: Some(SnapshotId(66)),
+        file_content_version: FileContentVersion(44),
+        workspace_generation: WorkspaceGeneration(77),
+        content_hash: fingerprint("content"),
+        grammar_version: Some(SemanticGrammarVersion("tree-sitter-rust@1".to_string())),
+        model_version: Some(SemanticModelVersion("ranker@0".to_string())),
+        privacy_scope: SemanticPrivacyScope::Workspace,
+        schema_version: 1,
+    }
+}
+
+fn semantic_freshness(state: SemanticFreshnessState) -> SemanticFreshness {
+    SemanticFreshness {
+        state,
+        key: semantic_invalidation_key(),
+        degraded_reasons: vec!["lsp_unavailable".to_string()],
+        observed_at: TimestampMillis(2222),
+    }
+}
+
+fn semantic_provenance(source: SemanticRecordSource) -> SemanticRecordProvenance {
+    SemanticRecordProvenance {
+        source,
+        server_id: Some(LanguageServerId(7)),
+        extraction_version: "phase3-contract-v1".to_string(),
+        confidence_basis_points: 9000,
     }
 }
 
@@ -500,6 +758,598 @@ fn dto_contracts_snapshot_lease_descriptor_golden_and_required_fields() {
 }
 
 #[test]
+fn dto_contracts_lsp_phase3_definition_references_and_cancellation_golden() {
+    let definition_request = LspRequest::Definition(LspDefinitionRequest {
+        context: lsp_context(),
+        position: TextCoordinate {
+            line: 1,
+            character: 4,
+            byte_offset: Some(12),
+            utf16_offset: Some(10),
+        },
+        include_declaration: true,
+    });
+    let references_request = LspRequest::References(LspReferenceRequest {
+        context: lsp_context(),
+        position: TextCoordinate {
+            line: 1,
+            character: 4,
+            byte_offset: Some(12),
+            utf16_offset: Some(10),
+        },
+        include_declaration: false,
+        scope: LspReferenceScope::Workspace,
+    });
+    let cancel_request = LspRequest::Cancel(LspCancellationRequest {
+        request_id: lsp_request_id(),
+        cancellation_token: cancellation_token_id(),
+        reason: "user cancelled navigation".to_string(),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+    });
+
+    let requests = vec![definition_request, references_request, cancel_request];
+    let request_value = serde_json::to_value(&requests).expect("serialize phase3 lsp requests");
+    let expected_requests = json!([
+        {
+            "Definition": {
+                "context": {
+                    "request_id": "12121212-1212-1212-1212-121212121212",
+                    "workspace_id": 11,
+                    "file_id": 33,
+                    "buffer_id": 22,
+                    "snapshot_id": 66,
+                    "buffer_version": 55,
+                    "language_id": "rust",
+                    "correlation_id": 901,
+                    "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                    "timeout_ms": 2500,
+                    "cancellation_token": "34343434-3434-3434-3434-343434343434",
+                    "content_hash": {"algorithm": "sha256", "value": "content"},
+                    "privacy_scope": "Workspace",
+                    "schema_version": 1
+                },
+                "position": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
+                "include_declaration": true
+            }
+        },
+        {
+            "References": {
+                "context": {
+                    "request_id": "12121212-1212-1212-1212-121212121212",
+                    "workspace_id": 11,
+                    "file_id": 33,
+                    "buffer_id": 22,
+                    "snapshot_id": 66,
+                    "buffer_version": 55,
+                    "language_id": "rust",
+                    "correlation_id": 901,
+                    "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                    "timeout_ms": 2500,
+                    "cancellation_token": "34343434-3434-3434-3434-343434343434",
+                    "content_hash": {"algorithm": "sha256", "value": "content"},
+                    "privacy_scope": "Workspace",
+                    "schema_version": 1
+                },
+                "position": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
+                "include_declaration": false,
+                "scope": "Workspace"
+            }
+        },
+        {
+            "Cancel": {
+                "request_id": "12121212-1212-1212-1212-121212121212",
+                "cancellation_token": "34343434-3434-3434-3434-343434343434",
+                "reason": "user cancelled navigation",
+                "correlation_id": 901,
+                "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc"
+            }
+        }
+    ]);
+    assert_eq!(request_value, expected_requests);
+
+    let responses = vec![
+        LspResponse::Definition(LspDefinitionResponse {
+            metadata: lsp_metadata(LspResultStatus::Fresh),
+            locations: vec![lsp_location()],
+        }),
+        LspResponse::References(LspReferenceResponse {
+            metadata: lsp_metadata(LspResultStatus::Partial),
+            references: vec![lsp_location()],
+        }),
+        LspResponse::Cancelled(LspCancellationAck {
+            request_id: lsp_request_id(),
+            cancellation_token: cancellation_token_id(),
+            propagated_to_server: true,
+            acknowledged_at: TimestampMillis(1300),
+        }),
+    ];
+    let response_value = serde_json::to_value(&responses).expect("serialize phase3 lsp responses");
+    assert_eq!(
+        response_value[0]["Definition"]["metadata"]["status"],
+        "Fresh"
+    );
+    assert_eq!(
+        response_value[0]["Definition"]["locations"][0]["symbol_name"],
+        "main"
+    );
+    assert_eq!(
+        response_value[1]["References"]["metadata"]["status"],
+        "Partial"
+    );
+    assert_eq!(response_value[2]["Cancelled"]["propagated_to_server"], true);
+
+    let roundtrip_requests: Vec<LspRequest> =
+        serde_json::from_value(request_value).expect("deserialize lsp requests");
+    assert!(matches!(roundtrip_requests[0], LspRequest::Definition(_)));
+    assert!(matches!(roundtrip_requests[1], LspRequest::References(_)));
+    assert!(matches!(roundtrip_requests[2], LspRequest::Cancel(_)));
+
+    let roundtrip_responses: Vec<LspResponse> =
+        serde_json::from_value(response_value).expect("deserialize lsp responses");
+    assert!(matches!(roundtrip_responses[0], LspResponse::Definition(_)));
+    assert!(matches!(roundtrip_responses[1], LspResponse::References(_)));
+    assert!(matches!(roundtrip_responses[2], LspResponse::Cancelled(_)));
+
+    let mut missing = serde_json::to_value(lsp_context()).expect("serialize lsp context");
+    remove_required_field::<LspOperationContext>(&mut missing, "cancellation_token");
+}
+
+#[test]
+fn dto_contracts_lsp_phase3_mutation_proposals_are_proposal_ready() {
+    let rename_request = LspRequest::Rename(LspRenameRequest {
+        context: lsp_context(),
+        position: TextCoordinate {
+            line: 1,
+            character: 4,
+            byte_offset: Some(12),
+            utf16_offset: Some(10),
+        },
+        new_name: "renamed".to_string(),
+        prepare_only: false,
+    });
+    let formatting_request = LspRequest::FormattingProposal(LspFormattingProposalRequest {
+        context: lsp_context(),
+        mode: LspFormattingMode::Document,
+        range: None,
+        options: LspFormattingOptions {
+            tab_size: 4,
+            insert_spaces: true,
+            trim_trailing_whitespace: true,
+            insert_final_newline: true,
+            custom_options: vec![("rustfmt.edition".to_string(), "2024".to_string())],
+        },
+    });
+    let code_action_request = LspRequest::CodeActionProposal(LspCodeActionProposalRequest {
+        context: lsp_context(),
+        range: protocol_range(),
+        diagnostics: vec![LspDiagnostic {
+            file_id: FileId(33),
+            range: TextRange::byte(10, 14),
+            severity: LspDiagnosticSeverity::Warning,
+            message: "unused import".to_string(),
+            source: Some("rust-analyzer".to_string()),
+        }],
+        only: vec!["quickfix".to_string(), "refactor.rename".to_string()],
+    });
+
+    let request_value = serde_json::to_value(vec![
+        rename_request,
+        formatting_request,
+        code_action_request,
+    ])
+    .expect("serialize mutation lsp requests");
+    assert_eq!(request_value[0]["Rename"]["new_name"], "renamed");
+    assert_eq!(request_value[1]["FormattingProposal"]["mode"], "Document");
+    assert_eq!(
+        request_value[1]["FormattingProposal"]["options"]["custom_options"][0][0],
+        "rustfmt.edition"
+    );
+    assert_eq!(
+        request_value[2]["CodeActionProposal"]["only"][0],
+        "quickfix"
+    );
+
+    let rename_response = LspResponse::Rename(LspRenameResponse {
+        metadata: lsp_metadata(LspResultStatus::Fresh),
+        prepare: Some(LspPrepareRenameResult {
+            range: protocol_range(),
+            placeholder: Some("main".to_string()),
+            allowed: true,
+        }),
+        proposal: Some(LspMutationProposalResult::Proposal(Box::new(
+            proposal_for_lsp(),
+        ))),
+    });
+    let formatting_response = LspResponse::FormattingProposal(LspFormattingProposalResponse {
+        metadata: lsp_metadata(LspResultStatus::Fresh),
+        proposal: LspMutationProposalResult::NoChanges {
+            diagnostics: vec![diagnostic("already-formatted")],
+        },
+    });
+    let code_action_response = LspResponse::CodeActionProposals(LspCodeActionProposalResponse {
+        metadata: lsp_metadata(LspResultStatus::Degraded),
+        actions: vec![
+            LspCodeActionCandidate {
+                title: "Apply fix".to_string(),
+                kind: Some("quickfix".to_string()),
+                is_preferred: true,
+                payload: LspCodeActionPayload::EditOnly {
+                    workspace_edit: workspace_edit_payload(WorkspaceEditSourceKind::LspCodeAction),
+                },
+                diagnostics: vec![diagnostic("edit-action")],
+            },
+            LspCodeActionCandidate {
+                title: "Run command".to_string(),
+                kind: Some("source.organizeImports".to_string()),
+                is_preferred: false,
+                payload: LspCodeActionPayload::CommandOnly {
+                    command: LspCommandDescriptor {
+                        command_id: "rust-analyzer.organizeImports".to_string(),
+                        title: "Organize imports".to_string(),
+                        argument_hints: vec!["workspace-edit-redacted".to_string()],
+                    },
+                },
+                diagnostics: vec![diagnostic("command-action")],
+            },
+            LspCodeActionCandidate {
+                title: "Edit and command".to_string(),
+                kind: Some("refactor.extract".to_string()),
+                is_preferred: false,
+                payload: LspCodeActionPayload::EditAndCommand {
+                    workspace_edit: workspace_edit_payload(WorkspaceEditSourceKind::LspCodeAction),
+                    command: LspCommandDescriptor {
+                        command_id: "server.followup".to_string(),
+                        title: "Follow up".to_string(),
+                        argument_hints: vec!["metadata-only".to_string()],
+                    },
+                },
+                diagnostics: vec![],
+            },
+            LspCodeActionCandidate {
+                title: "Disabled".to_string(),
+                kind: None,
+                is_preferred: false,
+                payload: LspCodeActionPayload::Disabled {
+                    reason: "server returned unsafe edit".to_string(),
+                },
+                diagnostics: vec![diagnostic("disabled-action")],
+            },
+        ],
+    });
+
+    let response_value = serde_json::to_value(vec![
+        rename_response,
+        formatting_response,
+        code_action_response,
+    ])
+    .expect("serialize mutation lsp responses");
+    assert_eq!(response_value[0]["Rename"]["prepare"]["allowed"], true);
+    assert_eq!(
+        response_value[0]["Rename"]["proposal"]["Proposal"]["payload"]["WorkspaceEdit"]["source"],
+        "LspRename"
+    );
+    assert_eq!(
+        response_value[1]["FormattingProposal"]["proposal"]["NoChanges"]["diagnostics"][0]["code"],
+        "already-formatted"
+    );
+    assert_eq!(
+        response_value[2]["CodeActionProposals"]["actions"][0]["payload"]["EditOnly"]["workspace_edit"]
+            ["source"],
+        "LspCodeAction"
+    );
+    assert_eq!(
+        response_value[2]["CodeActionProposals"]["actions"][1]["payload"]["CommandOnly"]["command"]
+            ["command_id"],
+        "rust-analyzer.organizeImports"
+    );
+    assert_eq!(
+        response_value[2]["CodeActionProposals"]["actions"][2]["payload"]["EditAndCommand"]["command"]
+            ["title"],
+        "Follow up"
+    );
+    assert_eq!(
+        response_value[2]["CodeActionProposals"]["actions"][3]["payload"]["Disabled"]["reason"],
+        "server returned unsafe edit"
+    );
+
+    let payload_value = serde_json::to_value(ProposalPayload::WorkspaceEdit(
+        workspace_edit_payload(WorkspaceEditSourceKind::SemanticRefactor),
+    ))
+    .expect("serialize workspace edit proposal payload");
+    assert_eq!(payload_value["WorkspaceEdit"]["source"], "SemanticRefactor");
+    assert_eq!(
+        payload_value["WorkspaceEdit"]["file_edits"][0]["preconditions"]["snapshot_id"],
+        66
+    );
+    assert_eq!(
+        payload_value["WorkspaceEdit"]["file_operations"][0]["Create"]["path"],
+        "C:/repo/src/new.rs"
+    );
+    assert_eq!(
+        payload_value["WorkspaceEdit"]["file_operations"][1]["Delete"]["file"]["file_id"],
+        33
+    );
+    assert_eq!(
+        payload_value["WorkspaceEdit"]["file_operations"][2]["Rename"]["destination"],
+        "C:/repo/src/main_renamed.rs"
+    );
+
+    let roundtrip: Vec<LspResponse> =
+        serde_json::from_value(response_value).expect("deserialize mutation responses");
+    assert!(matches!(roundtrip[0], LspResponse::Rename(_)));
+    assert!(matches!(roundtrip[1], LspResponse::FormattingProposal(_)));
+    assert!(matches!(roundtrip[2], LspResponse::CodeActionProposals(_)));
+}
+
+#[test]
+fn dto_contracts_semantic_indexing_records_golden_and_required_fields() {
+    let token = SemanticCancellationToken {
+        token_id: cancellation_token_id(),
+        workspace_id: WorkspaceId(11),
+        file_id: Some(FileId(33)),
+        snapshot_id: Some(SnapshotId(66)),
+        content_hash: Some(fingerprint("content")),
+        workspace_generation: Some(WorkspaceGeneration(77)),
+        privacy_scope: SemanticPrivacyScope::MetadataOnly,
+        reason: Some(SemanticCancellationReason::SnapshotSuperseded),
+        issued_at: TimestampMillis(1000),
+        expires_at: Some(TimestampMillis(2000)),
+        schema_version: 1,
+    };
+    let file_identity = SemanticFileFingerprintIdentity {
+        workspace_id: WorkspaceId(11),
+        file_id: FileId(33),
+        canonical_path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+        file_content_version: FileContentVersion(44),
+        workspace_generation: WorkspaceGeneration(77),
+        content_hash: fingerprint("content"),
+        disk_fingerprint: Some(fingerprint("disk")),
+        byte_len: Some(1234),
+        modified_at: Some(TimestampMillis(9876)),
+        privacy_scope: SemanticPrivacyScope::Workspace,
+        schema_version: 1,
+    };
+    let symbol_map = SymbolFileMapRecord {
+        symbol_id: SemanticSymbolId("symbol:main".to_string()),
+        symbol_name_hash: fingerprint("symbol-main"),
+        display_name: Some("main".to_string()),
+        kind: "Function".to_string(),
+        workspace_id: WorkspaceId(11),
+        file_id: FileId(33),
+        path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+        language_id: LanguageId("rust".to_string()),
+        declaration_range: Some(protocol_range()),
+        reference_ranges: vec![protocol_range()],
+        invalidation_key: semantic_invalidation_key(),
+        provenance: semantic_provenance(SemanticRecordSource::Lexical),
+        schema_version: 1,
+    };
+    let graph_record = SemanticGraphRecord {
+        record_id: SemanticRecordId("record:call:main:println".to_string()),
+        kind: SemanticGraphRecordKind::CallEdge,
+        workspace_id: WorkspaceId(11),
+        source: SemanticGraphEndpoint {
+            record_id: Some(SemanticRecordId("record:symbol:main".to_string())),
+            symbol_id: Some(SemanticSymbolId("symbol:main".to_string())),
+            file_id: Some(FileId(33)),
+            range: Some(protocol_range()),
+        },
+        target: Some(SemanticGraphEndpoint {
+            record_id: Some(SemanticRecordId("record:symbol:println".to_string())),
+            symbol_id: Some(SemanticSymbolId("symbol:println".to_string())),
+            file_id: Some(FileId(33)),
+            range: Some(protocol_range()),
+        }),
+        label: "calls".to_string(),
+        properties: vec![SemanticProperty {
+            key: "receiver".to_string(),
+            value: "metadata-only".to_string(),
+            redaction: RedactionHint::MetadataOnly,
+        }],
+        invalidation_key: semantic_invalidation_key(),
+        provenance: semantic_provenance(SemanticRecordSource::TreeSitter),
+        freshness: SemanticFreshnessState::Fresh,
+        schema_version: 1,
+    };
+
+    let value = serde_json::to_value((&token, &file_identity, &symbol_map, &graph_record))
+        .expect("serialize semantic records");
+    assert_eq!(value[0]["token_id"], "34343434-3434-3434-3434-343434343434");
+    assert_eq!(value[0]["reason"], "SnapshotSuperseded");
+    assert_eq!(value[1]["content_hash"]["value"], "content");
+    assert_eq!(value[1]["disk_fingerprint"]["value"], "disk");
+    assert_eq!(value[2]["symbol_id"], "symbol:main");
+    assert_eq!(
+        value[2]["invalidation_key"]["grammar_version"],
+        "tree-sitter-rust@1"
+    );
+    assert_eq!(value[2]["invalidation_key"]["model_version"], "ranker@0");
+    assert_eq!(value[2]["invalidation_key"]["privacy_scope"], "Workspace");
+    assert_eq!(value[3]["kind"], "CallEdge");
+    assert_eq!(value[3]["properties"][0]["redaction"], "MetadataOnly");
+    assert_eq!(value[3]["provenance"]["source"], "TreeSitter");
+
+    let roundtrip: (
+        SemanticCancellationToken,
+        SemanticFileFingerprintIdentity,
+        SymbolFileMapRecord,
+        SemanticGraphRecord,
+    ) = serde_json::from_value(value).expect("deserialize semantic records");
+    assert!(matches!(
+        roundtrip.0.reason,
+        Some(SemanticCancellationReason::SnapshotSuperseded)
+    ));
+    assert_eq!(roundtrip.1.file_id, FileId(33));
+    assert_eq!(
+        roundtrip.2.symbol_id,
+        SemanticSymbolId("symbol:main".to_string())
+    );
+    assert!(matches!(
+        roundtrip.3.kind,
+        SemanticGraphRecordKind::CallEdge
+    ));
+
+    let mut missing = serde_json::to_value(semantic_invalidation_key()).expect("serialize key");
+    remove_required_field::<SemanticInvalidationKey>(&mut missing, "content_hash");
+}
+
+#[test]
+fn dto_contracts_semantic_query_request_response_golden() {
+    let request = SemanticQueryRequest {
+        query_id: semantic_query_id(),
+        kind: SemanticQueryKind::RefactoringPreview,
+        scope: SemanticQueryScope {
+            workspace_id: WorkspaceId(11),
+            file_ids: vec![FileId(33)],
+            paths: vec![CanonicalPath("C:/repo/src/main.rs".to_string())],
+            language_ids: vec![LanguageId("rust".to_string())],
+            privacy_scope: SemanticPrivacyScope::Workspace,
+        },
+        position: Some(TextCoordinate {
+            line: 1,
+            character: 4,
+            byte_offset: Some(12),
+            utf16_offset: Some(10),
+        }),
+        text_query_hash: Some(fingerprint("query")),
+        limit: 25,
+        cancellation_token: cancellation_token_id(),
+        freshness_policy: SemanticQueryFreshnessPolicy::AllowStale,
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        schema_version: 1,
+    };
+    let response = SemanticQueryResponse {
+        query_id: semantic_query_id(),
+        workspace_id: WorkspaceId(11),
+        status: SemanticQueryStatus::Degraded,
+        results: vec![SemanticQueryResult {
+            result_id: SemanticRecordId("result:refactor:rename".to_string()),
+            kind: SemanticQueryResultKind::ProposalPreview,
+            label: "Rename main to renamed".to_string(),
+            file_id: Some(FileId(33)),
+            path: Some(CanonicalPath("C:/repo/src/main.rs".to_string())),
+            range: Some(protocol_range()),
+            score_basis_points: 8750,
+            freshness: semantic_freshness(SemanticFreshnessState::Stale),
+            provenance: semantic_provenance(SemanticRecordSource::Lsp),
+            related_record_ids: vec![SemanticRecordId("record:symbol:main".to_string())],
+            proposal_preview: Some(payload_summary()),
+        }],
+        diagnostics: vec![diagnostic("semantic-query")],
+        next_page_token: Some("page-2".to_string()),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        schema_version: 1,
+    };
+
+    let value = serde_json::to_value((&request, &response)).expect("serialize semantic query dtos");
+    let expected = json!([
+        {
+            "query_id": "56565656-5656-5656-5656-565656565656",
+            "kind": "RefactoringPreview",
+            "scope": {
+                "workspace_id": 11,
+                "file_ids": [33],
+                "paths": ["C:/repo/src/main.rs"],
+                "language_ids": ["rust"],
+                "privacy_scope": "Workspace"
+            },
+            "position": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
+            "text_query_hash": {"algorithm": "sha256", "value": "query"},
+            "limit": 25,
+            "cancellation_token": "34343434-3434-3434-3434-343434343434",
+            "freshness_policy": "AllowStale",
+            "correlation_id": 901,
+            "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "schema_version": 1
+        },
+        {
+            "query_id": "56565656-5656-5656-5656-565656565656",
+            "workspace_id": 11,
+            "status": "Degraded",
+            "results": [{
+                "result_id": "result:refactor:rename",
+                "kind": "ProposalPreview",
+                "label": "Rename main to renamed",
+                "file_id": 33,
+                "path": "C:/repo/src/main.rs",
+                "range": {
+                    "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+                    "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+                },
+                "score_basis_points": 8750,
+                "freshness": {
+                    "state": "Stale",
+                    "key": {
+                        "workspace_id": 11,
+                        "file_id": 33,
+                        "snapshot_id": 66,
+                        "file_content_version": 44,
+                        "workspace_generation": 77,
+                        "content_hash": {"algorithm": "sha256", "value": "content"},
+                        "grammar_version": "tree-sitter-rust@1",
+                        "model_version": "ranker@0",
+                        "privacy_scope": "Workspace",
+                        "schema_version": 1
+                    },
+                    "degraded_reasons": ["lsp_unavailable"],
+                    "observed_at": 2222
+                },
+                "provenance": {
+                    "source": "Lsp",
+                    "server_id": 7,
+                    "extraction_version": "phase3-contract-v1",
+                    "confidence_basis_points": 9000
+                },
+                "related_record_ids": ["record:symbol:main"],
+                "proposal_preview": {
+                    "kind": "SaveFile",
+                    "affected_files": [33],
+                    "title": "save main.rs",
+                    "byte_count": 1234
+                }
+            }],
+            "diagnostics": [{
+                "code": "semantic-query",
+                "message": "diagnostic semantic-query",
+                "severity": "Warning",
+                "path": "C:/repo/src/main.rs",
+                "range": {
+                    "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+                    "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+                }
+            }],
+            "next_page_token": "page-2",
+            "correlation_id": 901,
+            "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "schema_version": 1
+        }
+    ]);
+    assert_eq!(value, expected);
+
+    let roundtrip: (SemanticQueryRequest, SemanticQueryResponse) =
+        serde_json::from_value(value.clone()).expect("deserialize semantic query dtos");
+    assert!(matches!(
+        roundtrip.0.kind,
+        SemanticQueryKind::RefactoringPreview
+    ));
+    assert!(matches!(roundtrip.1.status, SemanticQueryStatus::Degraded));
+    assert!(matches!(
+        roundtrip.1.results[0].kind,
+        SemanticQueryResultKind::ProposalPreview
+    ));
+    assert!(matches!(
+        roundtrip.1.results[0].freshness.state,
+        SemanticFreshnessState::Stale
+    ));
+
+    let mut missing = value[0].clone();
+    remove_required_field::<SemanticQueryRequest>(&mut missing, "cancellation_token");
+}
+
+#[test]
 fn dto_contracts_save_proposal_golden_with_all_preconditions() {
     let proposal = SaveFileProposal {
         file: file_identity(),
@@ -588,6 +1438,190 @@ fn dto_contracts_save_proposal_golden_with_all_preconditions() {
     let mut stale_context = version_context();
     stale_context.fingerprint = Some(fingerprint("disk"));
     assert!(preconditions.is_stale(stale_context));
+}
+
+#[test]
+fn dto_contracts_batch_proposal_payload_golden_and_required_fields() {
+    let payload = batch_payload();
+    let envelope = ProposalPayload::Batch(payload);
+    let value = serde_json::to_value(&envelope).expect("serialize batch proposal");
+    let expected = json!({
+        "Batch": {
+            "batch_id": "55555555-5555-5555-5555-555555555555",
+            "atomicity": "PrepareAllBeforeMutate",
+            "rollback_policy": "Required",
+            "target_coverage": {
+                "coverage_kind": "Complete",
+                "targets": [
+                    {
+                        "target_id": "target-buffer-main",
+                        "kind": "OpenBuffer",
+                        "workspace_id": 11,
+                        "file_id": 33,
+                        "buffer_id": 22,
+                        "path": "C:/repo/src/main.rs",
+                        "terminal_session_id": null,
+                        "plugin_id": null,
+                        "remote_authority": null,
+                        "collaboration_session_id": null,
+                        "byte_ranges": [{"start": 10, "end": 14}],
+                        "redaction_hints": ["MetadataOnly"]
+                    },
+                    {
+                        "target_id": "target-file-lib",
+                        "kind": "PathOnly",
+                        "workspace_id": 11,
+                        "file_id": null,
+                        "buffer_id": null,
+                        "path": "C:/repo/src/lib.rs",
+                        "terminal_session_id": null,
+                        "plugin_id": null,
+                        "remote_authority": null,
+                        "collaboration_session_id": null,
+                        "byte_ranges": [],
+                        "redaction_hints": ["MetadataOnly"]
+                    }
+                ],
+                "omitted_target_count": 0,
+                "redaction_hints": ["MetadataOnly"]
+            },
+            "items": [
+                {
+                    "order": 0,
+                    "item_id": "item-edit-main",
+                    "payload": {
+                        "TextEdit": {
+                            "file_id": 33,
+                            "edits": {
+                                "edits": [{
+                                    "range": {
+                                        "start": {"value": 10, "encoding": "Byte"},
+                                        "end": {"value": 14, "encoding": "Byte"}
+                                    },
+                                    "replacement": "main"
+                                }]
+                            }
+                        }
+                    },
+                    "target_ids": ["target-buffer-main"],
+                    "required_capability": "editor.write",
+                    "rollback_step_ids": ["rollback-edit-main"]
+                },
+                {
+                    "order": 1,
+                    "item_id": "item-create-lib",
+                    "payload": {
+                        "CreateFile": {
+                            "path": "C:/repo/src/lib.rs",
+                            "initial_content": null
+                        }
+                    },
+                    "target_ids": ["target-file-lib"],
+                    "required_capability": "fs.write",
+                    "rollback_step_ids": ["rollback-create-lib"]
+                }
+            ],
+            "dependency_edges": [{
+                "prerequisite_item_id": "item-edit-main",
+                "dependent_item_id": "item-create-lib",
+                "kind": "RequiresValidation"
+            }],
+            "rollback_steps": [
+                {
+                    "order": 0,
+                    "step_id": "rollback-create-lib",
+                    "item_id": "item-create-lib",
+                    "target_id": "target-file-lib",
+                    "action": "DeleteCreatedFile",
+                    "expected_preconditions": {
+                        "file_version": null,
+                        "buffer_version": null,
+                        "snapshot_id": null,
+                        "generation": null,
+                        "file_content_version": null,
+                        "workspace_generation": null,
+                        "expected_fingerprint": null,
+                        "expected_file_length": null,
+                        "expected_modified_at": null
+                    },
+                    "diagnostics": []
+                },
+                {
+                    "order": 1,
+                    "step_id": "rollback-edit-main",
+                    "item_id": "item-edit-main",
+                    "target_id": "target-buffer-main",
+                    "action": "EditorUndoGroup",
+                    "expected_preconditions": {
+                        "file_version": 44,
+                        "buffer_version": 55,
+                        "snapshot_id": 66,
+                        "generation": 77,
+                        "file_content_version": 44,
+                        "workspace_generation": 77,
+                        "expected_fingerprint": {"algorithm": "sha256", "value": "expected"},
+                        "expected_file_length": 1234,
+                        "expected_modified_at": 9876
+                    },
+                    "diagnostics": [{
+                        "code": "rollback",
+                        "message": "diagnostic rollback",
+                        "severity": "Warning",
+                        "path": "C:/repo/src/main.rs",
+                        "range": {
+                            "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+                            "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+                        }
+                    }]
+                }
+            ],
+            "partial_failures": [{
+                "item_id": "item-create-lib",
+                "target_id": "target-file-lib",
+                "reason": "ApplyFailed",
+                "disposition": "RolledBack",
+                "diagnostics": [{
+                    "code": "partial",
+                    "message": "diagnostic partial",
+                    "severity": "Warning",
+                    "path": "C:/repo/src/main.rs",
+                    "range": {
+                        "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+                        "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+                    }
+                }]
+            }],
+            "preview_warnings": [{
+                "code": "proposal.preview.rollback_required",
+                "kind": "RollbackBestEffort",
+                "message": "batch includes rollback metadata",
+                "target_id": "target-file-lib",
+                "redaction_hints": ["MetadataOnly"]
+            }],
+            "schema_version": 1
+        }
+    });
+    assert_eq!(value, expected);
+
+    let roundtrip: ProposalPayload =
+        serde_json::from_value(value.clone()).expect("deserialize batch proposal payload");
+    match roundtrip {
+        ProposalPayload::Batch(batch) => {
+            assert_eq!(batch.items[0].order, 0);
+            assert_eq!(batch.items[1].order, 1);
+            assert!(matches!(
+                batch.atomicity,
+                ProposalBatchAtomicity::PrepareAllBeforeMutate
+            ));
+            assert_eq!(batch.target_coverage.targets.len(), 2);
+            assert_eq!(batch.rollback_steps.len(), 2);
+            assert_eq!(batch.partial_failures.len(), 1);
+        }
+        _ => panic!("unexpected payload"),
+    }
+
+    let mut missing = value["Batch"].clone();
+    remove_required_field::<BatchProposalPayload>(&mut missing, "schema_version");
 }
 
 #[test]
@@ -724,6 +1758,10 @@ fn dto_contracts_each_proposal_lifecycle_response_golden() {
             transition: transition(ProposalLifecycleState::Conflict),
             conflict: conflict_state(FileConflictLifecycleState::ConflictDirty),
         },
+        ProposalResponse::Cancelled {
+            transition: transition(ProposalLifecycleState::Cancelled),
+            reason: ProposalCancellationReason::UserCancelled,
+        },
     ];
 
     let value = serde_json::to_value(&responses).expect("serialize lifecycle responses");
@@ -739,6 +1777,7 @@ fn dto_contracts_each_proposal_lifecycle_response_golden() {
         "RolledBack",
         "Stale",
         "Conflict",
+        "Cancelled",
     ];
 
     for (item, expected_variant) in value
@@ -756,11 +1795,162 @@ fn dto_contracts_each_proposal_lifecycle_response_golden() {
     assert_eq!(value[6]["Denied"]["reason"], "CapabilityDenied");
     assert_eq!(value[9]["Stale"]["stale"]["reason"], "FingerprintMismatch");
     assert_eq!(value[10]["Conflict"]["conflict"]["state"], "ConflictDirty");
+    assert_eq!(value[11]["Cancelled"]["reason"], "UserCancelled");
 
     let roundtrip: Vec<ProposalResponse> =
         serde_json::from_value(value).expect("deserialize lifecycle responses");
     assert!(matches!(roundtrip[0], ProposalResponse::Created(_)));
     assert!(matches!(roundtrip[10], ProposalResponse::Conflict { .. }));
+    assert!(matches!(roundtrip[11], ProposalResponse::Cancelled { .. }));
+}
+
+#[test]
+fn dto_contracts_proposal_lifecycle_commands_golden_and_required_fields() {
+    let commands = vec![
+        ProposalRequest::Approve(ProposalLifecycleCommand {
+            proposal_id: devil_protocol::ProposalId(700),
+            action: ProposalLifecycleAction::Approve,
+            principal: PrincipalId("principal-1".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(901),
+            causality_id: causality_id(),
+            reason: None,
+            diagnostics: vec![],
+            requested_at: TimestampMillis(1700),
+            schema_version: 1,
+        }),
+        ProposalRequest::Reject(ProposalLifecycleCommand {
+            proposal_id: devil_protocol::ProposalId(700),
+            action: ProposalLifecycleAction::Reject,
+            principal: PrincipalId("principal-1".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(901),
+            causality_id: causality_id(),
+            reason: Some(ProposalLifecycleCommandReason::Rejection(
+                ProposalRejectionReason::UserRejected,
+            )),
+            diagnostics: vec![diagnostic("reject")],
+            requested_at: TimestampMillis(1701),
+            schema_version: 1,
+        }),
+        ProposalRequest::Cancel(ProposalLifecycleCommand {
+            proposal_id: devil_protocol::ProposalId(700),
+            action: ProposalLifecycleAction::Cancel,
+            principal: PrincipalId("principal-1".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(901),
+            causality_id: causality_id(),
+            reason: Some(ProposalLifecycleCommandReason::Cancellation(
+                ProposalCancellationReason::Superseded,
+            )),
+            diagnostics: vec![],
+            requested_at: TimestampMillis(1702),
+            schema_version: 1,
+        }),
+        ProposalRequest::Rollback(ProposalLifecycleCommand {
+            proposal_id: devil_protocol::ProposalId(700),
+            action: ProposalLifecycleAction::Rollback,
+            principal: PrincipalId("principal-1".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(901),
+            causality_id: causality_id(),
+            reason: Some(ProposalLifecycleCommandReason::Rollback(
+                ProposalRollbackReason::UserRequested,
+            )),
+            diagnostics: vec![diagnostic("rollback")],
+            requested_at: TimestampMillis(1703),
+            schema_version: 1,
+        }),
+    ];
+
+    let value = serde_json::to_value(&commands).expect("serialize lifecycle commands");
+    let expected = json!([
+        {
+            "Approve": {
+                "proposal_id": 700,
+                "action": "Approve",
+                "principal": "principal-1",
+                "capability": "fs.write",
+                "correlation_id": 901,
+                "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "reason": null,
+                "diagnostics": [],
+                "requested_at": 1700,
+                "schema_version": 1
+            }
+        },
+        {
+            "Reject": {
+                "proposal_id": 700,
+                "action": "Reject",
+                "principal": "principal-1",
+                "capability": "fs.write",
+                "correlation_id": 901,
+                "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "reason": {"Rejection": "UserRejected"},
+                "diagnostics": [{
+                    "code": "reject",
+                    "message": "diagnostic reject",
+                    "severity": "Warning",
+                    "path": "C:/repo/src/main.rs",
+                    "range": {
+                        "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+                        "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+                    }
+                }],
+                "requested_at": 1701,
+                "schema_version": 1
+            }
+        },
+        {
+            "Cancel": {
+                "proposal_id": 700,
+                "action": "Cancel",
+                "principal": "principal-1",
+                "capability": "fs.write",
+                "correlation_id": 901,
+                "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "reason": {"Cancellation": "Superseded"},
+                "diagnostics": [],
+                "requested_at": 1702,
+                "schema_version": 1
+            }
+        },
+        {
+            "Rollback": {
+                "proposal_id": 700,
+                "action": "Rollback",
+                "principal": "principal-1",
+                "capability": "fs.write",
+                "correlation_id": 901,
+                "causality_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "reason": {"Rollback": "UserRequested"},
+                "diagnostics": [{
+                    "code": "rollback",
+                    "message": "diagnostic rollback",
+                    "severity": "Warning",
+                    "path": "C:/repo/src/main.rs",
+                    "range": {
+                        "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+                        "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+                    }
+                }],
+                "requested_at": 1703,
+                "schema_version": 1
+            }
+        }
+    ]);
+    assert_eq!(value, expected);
+
+    let roundtrip: Vec<ProposalRequest> =
+        serde_json::from_value(value.clone()).expect("deserialize lifecycle commands");
+    assert!(matches!(roundtrip[0], ProposalRequest::Approve(_)));
+    assert!(matches!(roundtrip[1], ProposalRequest::Reject(_)));
+    assert!(matches!(roundtrip[2], ProposalRequest::Cancel(_)));
+    assert!(matches!(roundtrip[3], ProposalRequest::Rollback(_)));
+
+    let mut missing = value[0]["Approve"].clone();
+    remove_required_field::<ProposalLifecycleCommand>(&mut missing, "schema_version");
 }
 
 #[test]

@@ -20,13 +20,17 @@ use devil_protocol::{
     EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
     FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
     FileFingerprint, FileId, FileIdentity, FileTreeNode, PreviewSummary, PrincipalId,
-    ProposalDenialReason, ProposalFailureReason, ProposalId, ProposalLifecycleState,
-    ProposalLifecycleTransition, ProposalPayload, ProposalPort, ProposalRequest, ProposalResponse,
+    ProposalAffectedTarget, ProposalCancellationReason, ProposalDenialReason,
+    ProposalFailureReason, ProposalId, ProposalLifecycleCommand, ProposalLifecycleCommandReason,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPayload, ProposalPort,
+    ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackReason,
+    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
     ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
-    ProtocolResult, SaveConflictPolicy, SaveFileProposal, SaveIntent, StorageRepositoryPort,
-    StorageRepositoryRequest, TextTransactionDescriptor, TimestampMillis, TransactionSource,
-    TrustDecisionContext, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened,
-    WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
+    ProtocolResult, RedactionHint, SaveConflictPolicy, SaveFileProposal, SaveIntent,
+    StorageRepositoryPort, StorageRepositoryRequest, TextTransactionDescriptor, TimestampMillis,
+    TransactionSource, TrustDecisionContext, WorkspaceGeneration, WorkspaceId,
+    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
@@ -116,15 +120,85 @@ impl EventContext {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProposalExecutionRoute {
+    SaveFile,
+    EditorBuffer,
+    WorkspaceFile,
+    Terminal,
+    Batch,
+    MetadataOnly,
+    Mixed,
+    Unsupported,
+}
+
+impl ProposalExecutionRoute {
+    fn for_payload(payload: &ProposalPayload, coverage: &ProposalTargetCoverage) -> Self {
+        match payload {
+            ProposalPayload::SaveFile(_) => Self::SaveFile,
+            ProposalPayload::Batch(_) => Self::Batch,
+            _ if coverage.targets.is_empty() => Self::Unsupported,
+            _ => {
+                let mut has_editor = false;
+                let mut has_workspace = false;
+                let mut has_terminal = false;
+                let mut has_metadata = false;
+                let mut has_other = false;
+
+                for target in &coverage.targets {
+                    match target.kind {
+                        ProposalTargetKind::OpenBuffer => has_editor = true,
+                        ProposalTargetKind::ClosedFile | ProposalTargetKind::PathOnly => {
+                            has_workspace = true;
+                        }
+                        ProposalTargetKind::TerminalSession => has_terminal = true,
+                        ProposalTargetKind::MetadataOnly => has_metadata = true,
+                        ProposalTargetKind::RemoteWorkspace
+                        | ProposalTargetKind::CollaborationSession
+                        | ProposalTargetKind::Plugin => has_other = true,
+                    }
+                }
+
+                let route_count = [
+                    has_editor,
+                    has_workspace,
+                    has_terminal,
+                    has_metadata,
+                    has_other,
+                ]
+                .into_iter()
+                .filter(|present| *present)
+                .count();
+
+                match (
+                    route_count,
+                    has_editor,
+                    has_workspace,
+                    has_terminal,
+                    has_metadata,
+                    has_other,
+                ) {
+                    (1, true, false, false, false, false) => Self::EditorBuffer,
+                    (1, false, true, false, false, false) => Self::WorkspaceFile,
+                    (1, false, false, true, false, false) => Self::Terminal,
+                    (1, false, false, false, true, false) => Self::MetadataOnly,
+                    (_, _, _, _, _, true) => Self::Unsupported,
+                    _ => Self::Mixed,
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
-struct SaveProposalCoordinator {
+struct AppProposalCoordinator {
     next_proposal_id: u64,
     event_sink: SharedEventSink,
     next_event_sequence: u64,
     proposal_contexts: HashMap<ProposalId, EventContext>,
 }
 
-impl SaveProposalCoordinator {
+impl AppProposalCoordinator {
     fn new(event_sink: SharedEventSink) -> Self {
         Self {
             next_proposal_id: 0,
@@ -273,9 +347,238 @@ impl SaveProposalCoordinator {
         }
     }
 
+    fn affected_target_coverage(proposal: &WorkspaceProposal) -> ProposalTargetCoverage {
+        Self::affected_target_coverage_for_payload(&proposal.payload)
+    }
+
+    fn affected_target_coverage_for_payload(payload: &ProposalPayload) -> ProposalTargetCoverage {
+        if let ProposalPayload::Batch(batch) = payload
+            && (!batch.target_coverage.targets.is_empty()
+                || batch.target_coverage.omitted_target_count > 0
+                || batch.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete)
+        {
+            return batch.target_coverage.clone();
+        }
+
+        let mut targets = Vec::new();
+        Self::visit_payload_targets(payload, &mut |target| targets.push(target));
+        ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets,
+            omitted_target_count: 0,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }
+    }
+
+    fn visit_payload_targets(
+        payload: &ProposalPayload,
+        visitor: &mut impl FnMut(ProposalAffectedTarget),
+    ) {
+        match payload {
+            ProposalPayload::TextEdit(payload) => {
+                let byte_ranges = payload
+                    .edits
+                    .edits
+                    .iter()
+                    .filter_map(|edit| edit.range.as_byte_range())
+                    .collect();
+                visitor(ProposalAffectedTarget {
+                    target_id: format!("text-edit:file:{}", payload.file_id.0),
+                    kind: ProposalTargetKind::ClosedFile,
+                    workspace_id: None,
+                    file_id: Some(payload.file_id),
+                    buffer_id: None,
+                    path: None,
+                    terminal_session_id: None,
+                    plugin_id: None,
+                    remote_authority: None,
+                    collaboration_session_id: None,
+                    byte_ranges,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                });
+            }
+            ProposalPayload::CreateFile(payload) => visitor(Self::path_target(
+                format!("create-file:path:{}", payload.path.0),
+                ProposalTargetKind::PathOnly,
+                payload.path.clone(),
+                Vec::new(),
+            )),
+            ProposalPayload::DeleteFile(payload) => visitor(Self::file_identity_target(
+                format!("delete-file:file:{}", payload.file.file_id.0),
+                ProposalTargetKind::ClosedFile,
+                &payload.file,
+                None,
+                Vec::new(),
+            )),
+            ProposalPayload::RenameFile(payload) => {
+                visitor(Self::file_identity_target(
+                    format!("rename-file:source:{}", payload.file.file_id.0),
+                    ProposalTargetKind::ClosedFile,
+                    &payload.file,
+                    None,
+                    Vec::new(),
+                ));
+                visitor(Self::path_target(
+                    format!("rename-file:destination:{}", payload.destination.0),
+                    ProposalTargetKind::PathOnly,
+                    payload.destination.clone(),
+                    Vec::new(),
+                ));
+            }
+            ProposalPayload::SaveFile(payload) => visitor(Self::file_identity_target(
+                format!(
+                    "save-file:file:{}:buffer:{}",
+                    payload.file.file_id.0, payload.buffer_id.0
+                ),
+                ProposalTargetKind::OpenBuffer,
+                &payload.file,
+                Some(payload.buffer_id),
+                Vec::new(),
+            )),
+            ProposalPayload::FormatFile(payload) => visitor(Self::file_identity_target(
+                format!("format-file:file:{}", payload.file.file_id.0),
+                ProposalTargetKind::ClosedFile,
+                &payload.file,
+                None,
+                Vec::new(),
+            )),
+            ProposalPayload::CodeAction(payload) => {
+                let byte_ranges = payload
+                    .edits
+                    .iter()
+                    .filter_map(|edit| edit.range.as_byte_range())
+                    .collect();
+                visitor(Self::file_identity_target(
+                    format!("code-action:file:{}", payload.file.file_id.0),
+                    ProposalTargetKind::ClosedFile,
+                    &payload.file,
+                    None,
+                    byte_ranges,
+                ));
+            }
+            ProposalPayload::TerminalCommand(payload) => visitor(ProposalAffectedTarget {
+                target_id: payload
+                    .session_id
+                    .map(|session_id| format!("terminal:{}", session_id.0))
+                    .unwrap_or_else(|| "terminal:new".to_string()),
+                kind: ProposalTargetKind::TerminalSession,
+                workspace_id: None,
+                file_id: None,
+                buffer_id: None,
+                path: payload.cwd.clone(),
+                terminal_session_id: payload.session_id,
+                plugin_id: None,
+                remote_authority: None,
+                collaboration_session_id: None,
+                byte_ranges: Vec::new(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            }),
+            ProposalPayload::WorkspaceEdit(payload) => {
+                for target in &payload.target_coverage.targets {
+                    visitor(target.clone());
+                }
+            }
+            ProposalPayload::Batch(payload) => {
+                if !payload.target_coverage.targets.is_empty()
+                    || payload.target_coverage.omitted_target_count > 0
+                    || payload.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
+                {
+                    for target in &payload.target_coverage.targets {
+                        visitor(target.clone());
+                    }
+                    return;
+                }
+
+                let mut items = payload.items.iter().collect::<Vec<_>>();
+                items.sort_by(|left, right| {
+                    left.order
+                        .cmp(&right.order)
+                        .then_with(|| left.item_id.cmp(&right.item_id))
+                });
+                for item in items {
+                    Self::visit_payload_targets(item.payload.as_ref(), visitor);
+                }
+            }
+        }
+    }
+
+    fn file_identity_target(
+        target_id: String,
+        kind: ProposalTargetKind,
+        file: &FileIdentity,
+        buffer_id: Option<BufferId>,
+        byte_ranges: Vec<devil_protocol::ByteRange>,
+    ) -> ProposalAffectedTarget {
+        ProposalAffectedTarget {
+            target_id,
+            kind,
+            workspace_id: Some(file.workspace_id),
+            file_id: Some(file.file_id),
+            buffer_id,
+            path: Some(file.canonical_path.clone()),
+            terminal_session_id: None,
+            plugin_id: None,
+            remote_authority: None,
+            collaboration_session_id: None,
+            byte_ranges,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }
+    }
+
+    fn path_target(
+        target_id: String,
+        kind: ProposalTargetKind,
+        path: CanonicalPath,
+        byte_ranges: Vec<devil_protocol::ByteRange>,
+    ) -> ProposalAffectedTarget {
+        ProposalAffectedTarget {
+            target_id,
+            kind,
+            workspace_id: None,
+            file_id: None,
+            buffer_id: None,
+            path: Some(path),
+            terminal_session_id: None,
+            plugin_id: None,
+            remote_authority: None,
+            collaboration_session_id: None,
+            byte_ranges,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }
+    }
+
+    fn unsupported_response(&self, proposal: &WorkspaceProposal, action: &str) -> ProposalResponse {
+        let coverage = Self::affected_target_coverage(proposal);
+        let route = ProposalExecutionRoute::for_payload(&proposal.payload, &coverage);
+        let first_path = coverage
+            .targets
+            .iter()
+            .find_map(|target| target.path.clone());
+        let mut diagnostic = Self::diagnostic(
+            "proposal.unsupported_execution",
+            format!(
+                "proposal {action} for route {route:?} over {} affected target(s) is denied until generalized execution is implemented",
+                coverage.targets.len()
+            ),
+        );
+        diagnostic.path = first_path;
+
+        ProposalResponse::Rejected {
+            transition: self.transition(
+                proposal,
+                ProposalLifecycleState::Rejected,
+                vec![diagnostic],
+            ),
+            reason: ProposalRejectionReason::Unsupported,
+        }
+    }
+
     fn validate_proposal(&self, proposal: &WorkspaceProposal) -> ProposalResponse {
-        match &proposal.payload {
-            ProposalPayload::SaveFile(save) => {
+        let coverage = Self::affected_target_coverage(proposal);
+        let route = ProposalExecutionRoute::for_payload(&proposal.payload, &coverage);
+
+        match (&proposal.payload, route) {
+            (ProposalPayload::SaveFile(save), ProposalExecutionRoute::SaveFile) => {
                 let mut diagnostics = Vec::new();
                 if save.expected_fingerprint.is_none()
                     || proposal.preconditions.expected_fingerprint.is_none()
@@ -327,22 +630,50 @@ impl SaveProposalCoordinator {
                     }
                 }
             }
-            _ => ProposalResponse::Failed {
-                transition: self.transition(
-                    proposal,
-                    ProposalLifecycleState::Failed,
-                    vec![Self::diagnostic(
-                        "proposal.unsupported",
-                        "only save proposals are supported by Track 2 coordinator",
-                    )],
-                ),
-                reason: ProposalFailureReason::InternalError,
-            },
+            _ => self.unsupported_response(proposal, "validate"),
+        }
+    }
+
+    fn transition_for_command(
+        command: &ProposalLifecycleCommand,
+        lifecycle_state: ProposalLifecycleState,
+        diagnostics: Vec<ProtocolDiagnostic>,
+    ) -> ProposalLifecycleTransition {
+        ProposalLifecycleTransition {
+            proposal_id: command.proposal_id,
+            lifecycle_state,
+            timestamp: TimestampMillis::now(),
+            principal: command.principal.clone(),
+            capability: command.capability.clone(),
+            correlation_id: command.correlation_id,
+            causality_id: command.causality_id,
+            diagnostics,
+        }
+    }
+
+    fn rejection_reason(command: &ProposalLifecycleCommand) -> ProposalRejectionReason {
+        match command.reason.as_ref() {
+            Some(ProposalLifecycleCommandReason::Rejection(reason)) => *reason,
+            _ => ProposalRejectionReason::UserRejected,
+        }
+    }
+
+    fn cancellation_reason(command: &ProposalLifecycleCommand) -> ProposalCancellationReason {
+        match command.reason.as_ref() {
+            Some(ProposalLifecycleCommandReason::Cancellation(reason)) => *reason,
+            _ => ProposalCancellationReason::UserCancelled,
+        }
+    }
+
+    fn rollback_reason(command: &ProposalLifecycleCommand) -> ProposalRollbackReason {
+        match command.reason.as_ref() {
+            Some(ProposalLifecycleCommandReason::Rollback(reason)) => *reason,
+            _ => ProposalRollbackReason::UserRequested,
         }
     }
 }
 
-impl ProposalPort for SaveProposalCoordinator {
+impl ProposalPort for AppProposalCoordinator {
     fn handle(&self, request: ProposalRequest) -> ProtocolResult<ProposalResponse> {
         match request {
             ProposalRequest::Validate(proposal) => Ok(self.validate_proposal(&proposal)),
@@ -354,12 +685,37 @@ impl ProposalPort for SaveProposalCoordinator {
                 ),
                 proposal: Box::new(proposal),
             }),
-            ProposalRequest::Apply(proposal) => Err(ProtocolError {
-                code: "unsupported".to_string(),
-                message: format!(
-                    "proposal {} apply is owned by AppComposition save orchestration",
-                    proposal.proposal_id.0
+            ProposalRequest::Apply(proposal) => Ok(self.unsupported_response(&proposal, "apply")),
+            ProposalRequest::Approve(command) => {
+                Ok(ProposalResponse::Approved(Self::transition_for_command(
+                    &command,
+                    ProposalLifecycleState::Approved,
+                    command.diagnostics.clone(),
+                )))
+            }
+            ProposalRequest::Reject(command) => Ok(ProposalResponse::Rejected {
+                transition: Self::transition_for_command(
+                    &command,
+                    ProposalLifecycleState::Rejected,
+                    command.diagnostics.clone(),
                 ),
+                reason: Self::rejection_reason(&command),
+            }),
+            ProposalRequest::Cancel(command) => Ok(ProposalResponse::Cancelled {
+                transition: Self::transition_for_command(
+                    &command,
+                    ProposalLifecycleState::Cancelled,
+                    command.diagnostics.clone(),
+                ),
+                reason: Self::cancellation_reason(&command),
+            }),
+            ProposalRequest::Rollback(command) => Ok(ProposalResponse::RolledBack {
+                transition: Self::transition_for_command(
+                    &command,
+                    ProposalLifecycleState::RolledBack,
+                    command.diagnostics.clone(),
+                ),
+                reason: Self::rollback_reason(&command),
             }),
         }
     }
@@ -896,6 +1252,8 @@ impl ProjectionBuilder {
             .as_ref()
             .is_some_and(|vp| vp.large_file_status.is_some());
 
+        let dirty = editor.is_dirty(buffer_id)?;
+
         Ok(ActiveBufferProjection {
             workspace_id: active.workspace_id(),
             buffer_id: Some(buffer_id),
@@ -911,7 +1269,7 @@ impl ProjectionBuilder {
             } else {
                 editor.text(buffer_id).ok().map(|s| s.to_string())
             },
-            dirty: editor.is_dirty(buffer_id).unwrap_or(false),
+            dirty,
         })
     }
 
@@ -963,7 +1321,7 @@ impl SaveWorkflowService {
     fn save_active_buffer(
         editor: &mut EditorEngine,
         workspace: &WorkspaceActor,
-        proposal_coordinator: &mut SaveProposalCoordinator,
+        proposal_coordinator: &mut AppProposalCoordinator,
         storage: &dyn StorageRepositoryPort,
         context: ActiveSaveContext,
         event_context: EventContext,
@@ -1071,7 +1429,7 @@ impl SaveWorkflowService {
     }
 
     fn observe_proposal_response(
-        proposal_coordinator: &mut SaveProposalCoordinator,
+        proposal_coordinator: &mut AppProposalCoordinator,
         storage: &dyn StorageRepositoryPort,
         proposal: &WorkspaceProposal,
         response: &ProposalResponse,
@@ -1094,7 +1452,7 @@ impl SaveWorkflowService {
     }
 
     fn events_for_response(
-        proposal_coordinator: &mut SaveProposalCoordinator,
+        proposal_coordinator: &mut AppProposalCoordinator,
         proposal: &WorkspaceProposal,
         response: &ProposalResponse,
     ) -> Vec<EventEnvelope> {
@@ -1120,30 +1478,33 @@ impl SaveWorkflowService {
                 proposal_coordinator.next_sequence(),
             )],
             ProposalResponse::Denied { transition, reason } => {
-                let file = proposal_file_identity(proposal);
-                vec![
-                    proposal_rejected_event(
-                        proposal,
-                        transition,
-                        match reason {
-                            ProposalDenialReason::CapabilityDenied
-                            | ProposalDenialReason::WorkspaceUntrusted
-                            | ProposalDenialReason::PrincipalUnauthorized
-                            | ProposalDenialReason::PolicyDenied => {
-                                devil_protocol::ProposalRejectionReason::ValidationFailed
-                            }
-                        },
-                        proposal_coordinator.next_sequence(),
-                    ),
-                    save_denied_event(
-                        file.workspace_id,
-                        file.file_id,
+                let save_target = save_event_target(proposal);
+                let generic_event = proposal_rejected_event(
+                    proposal,
+                    transition,
+                    match reason {
+                        ProposalDenialReason::CapabilityDenied
+                        | ProposalDenialReason::WorkspaceUntrusted
+                        | ProposalDenialReason::PrincipalUnauthorized
+                        | ProposalDenialReason::PolicyDenied => {
+                            devil_protocol::ProposalRejectionReason::ValidationFailed
+                        }
+                    },
+                    proposal_coordinator.next_sequence(),
+                );
+
+                let mut events = vec![generic_event];
+                if let Some(save_target) = save_target {
+                    events.push(save_denied_event(
+                        save_target.workspace_id,
+                        save_target.file_id,
                         transition.correlation_id,
                         transition.causality_id,
                         proposal_coordinator.next_sequence(),
                         format!("{reason:?}"),
-                    ),
-                ]
+                    ));
+                }
+                events
             }
             ProposalResponse::Failed { transition, reason } => vec![proposal_failed_event(
                 proposal,
@@ -1160,10 +1521,17 @@ impl SaveWorkflowService {
                 )]
             }
             ProposalResponse::Stale { transition, stale } => {
-                let file = proposal_file_identity(proposal);
+                let Some(save_target) = save_event_target(proposal) else {
+                    return vec![proposal_rejected_event(
+                        proposal,
+                        transition,
+                        devil_protocol::ProposalRejectionReason::ValidationFailed,
+                        proposal_coordinator.next_sequence(),
+                    )];
+                };
                 vec![stale_proposal_rejected_event(
-                    file.workspace_id,
-                    file.file_id,
+                    save_target.workspace_id,
+                    save_target.file_id,
                     transition.correlation_id,
                     transition.causality_id,
                     proposal_coordinator.next_sequence(),
@@ -1188,6 +1556,12 @@ impl SaveWorkflowService {
                 transition,
                 proposal_coordinator.next_sequence(),
             )],
+            ProposalResponse::Cancelled { transition, .. } => vec![proposal_rejected_event(
+                proposal,
+                transition,
+                devil_protocol::ProposalRejectionReason::Cancelled,
+                proposal_coordinator.next_sequence(),
+            )],
         }
     }
 
@@ -1205,7 +1579,8 @@ impl SaveWorkflowService {
             | ProposalResponse::Failed { transition, .. }
             | ProposalResponse::RolledBack { transition, .. }
             | ProposalResponse::Stale { transition, .. }
-            | ProposalResponse::Conflict { transition, .. } => Some(transition),
+            | ProposalResponse::Conflict { transition, .. }
+            | ProposalResponse::Cancelled { transition, .. } => Some(transition),
         }
     }
 
@@ -1339,6 +1714,9 @@ fn acknowledgement_for_response(response: &ProposalResponse) -> SaveAcknowledgem
         ProposalResponse::RolledBack { transition, .. } => SaveAcknowledgement::Failed {
             diagnostics: transition.diagnostics.clone(),
         },
+        ProposalResponse::Cancelled { transition, .. } => SaveAcknowledgement::Failed {
+            diagnostics: transition.diagnostics.clone(),
+        },
         ProposalResponse::Created(_)
         | ProposalResponse::Validated(_)
         | ProposalResponse::Previewed { .. }
@@ -1354,18 +1732,27 @@ fn acknowledgement_for_response(response: &ProposalResponse) -> SaveAcknowledgem
     }
 }
 
-fn proposal_file_identity(proposal: &WorkspaceProposal) -> &FileIdentity {
+#[derive(Debug, Clone, Copy)]
+struct SaveEventTarget {
+    workspace_id: WorkspaceId,
+    file_id: FileId,
+}
+
+fn save_event_target(proposal: &WorkspaceProposal) -> Option<SaveEventTarget> {
     match &proposal.payload {
-        ProposalPayload::SaveFile(payload) => &payload.file,
-        ProposalPayload::DeleteFile(payload) => &payload.file,
-        ProposalPayload::RenameFile(payload) => &payload.file,
-        ProposalPayload::FormatFile(payload) => &payload.file,
-        ProposalPayload::CodeAction(payload) => &payload.file,
-        ProposalPayload::TextEdit(_)
-        | ProposalPayload::CreateFile(_)
-        | ProposalPayload::TerminalCommand(_) => {
-            panic!("Track 5 save workflow only routes file-backed proposal payloads")
-        }
+        ProposalPayload::SaveFile(payload) => Some(SaveEventTarget {
+            workspace_id: payload.file.workspace_id,
+            file_id: payload.file.file_id,
+        }),
+        _ => AppProposalCoordinator::affected_target_coverage(proposal)
+            .targets
+            .into_iter()
+            .find_map(|target| {
+                Some(SaveEventTarget {
+                    workspace_id: target.workspace_id?,
+                    file_id: target.file_id?,
+                })
+            }),
     }
 }
 
@@ -1390,7 +1777,7 @@ pub enum AppCommandOutcome {
 pub struct AppComposition {
     workspace: WorkspaceActor,
     editor: EditorEngine,
-    proposal_coordinator: SaveProposalCoordinator,
+    proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
     correlation_generator: CorrelationGenerator,
     event_sequence_generator: EventSequenceGenerator,
@@ -1421,7 +1808,7 @@ impl AppComposition {
                 Box::new(event_sink.clone()),
             ),
             editor: EditorEngine::new(),
-            proposal_coordinator: SaveProposalCoordinator::new(event_sink.clone()),
+            proposal_coordinator: AppProposalCoordinator::new(event_sink.clone()),
             active_documents: ActiveDocumentController::new(),
             correlation_generator: CorrelationGenerator::default(),
             event_sequence_generator: EventSequenceGenerator::default(),
@@ -1678,6 +2065,21 @@ impl AppComposition {
     /// Expose event publisher port placeholder for integration validation and future wiring.
     pub fn event_publisher(&self) -> &dyn EventSinkPort {
         &self.event_sink
+    }
+
+    /// Route an explicit proposal request through the app-level proposal coordinator.
+    pub fn handle_proposal_request(
+        &self,
+        request: ProposalRequest,
+    ) -> Result<ProposalResponse, AppCompositionError> {
+        self.proposal_coordinator
+            .handle(request)
+            .map_err(AppCompositionError::Protocol)
+    }
+
+    /// Build deterministic affected-target coverage for a proposal without executing it.
+    pub fn proposal_target_coverage(&self, proposal: &WorkspaceProposal) -> ProposalTargetCoverage {
+        AppProposalCoordinator::affected_target_coverage(proposal)
     }
 
     fn apply_edit_to_buffer_with_correlation(

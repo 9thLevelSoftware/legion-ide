@@ -15,10 +15,15 @@ use devil_editor::{TextEdit, TextPosition};
 use devil_observability::{InMemoryEventSink, SharedEventSink};
 use devil_project::OpenedFileText;
 use devil_protocol::{
-    BufferId, BufferVersion, CanonicalPath, CausalityId, ChangedTextRange, EventEnvelope,
-    FileConflictLifecycleState, FileContentVersion, FileId, FileIdentity, FileMetadata,
-    FileTreeNode, PrincipalId, SnapshotId, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, ViewportProjectionMode, WorkspaceId, WorkspaceTrustState,
+    BatchProposalPayload, BufferId, BufferVersion, CanonicalPath, CapabilityId, CausalityId,
+    ChangedTextRange, CorrelationId, EditBatch, EventEnvelope, FileConflictLifecycleState,
+    FileContentVersion, FileId, FileIdentity, FileMetadata, FileTreeNode, PreviewSummary,
+    PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
+    ProposalBatchRollbackPolicy, ProposalPayload, ProposalRejectionReason, ProposalRequest,
+    ProposalResponse, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
+    ProposalVersionPreconditions, SnapshotId, TextOffset, TextRange, TextTransactionDescriptor,
+    TimestampMillis, TransactionSource, ViewportProjectionMode, WorkspaceId, WorkspaceProposal,
+    WorkspaceTrustState,
 };
 use devil_ui::{CommandDispatchIntent, ShellLayoutProjection};
 use uuid::Uuid;
@@ -81,6 +86,71 @@ fn deterministic_large_text(byte_len: usize) -> String {
         text.push('z');
     }
     text
+}
+
+fn empty_preconditions() -> ProposalVersionPreconditions {
+    ProposalVersionPreconditions {
+        file_version: None,
+        buffer_version: None,
+        snapshot_id: None,
+        generation: None,
+        file_content_version: None,
+        workspace_generation: None,
+        expected_fingerprint: None,
+        expected_file_length: None,
+        expected_modified_at: None,
+    }
+}
+
+fn proposal_envelope(payload: ProposalPayload) -> WorkspaceProposal {
+    WorkspaceProposal {
+        proposal_id: devil_protocol::ProposalId(700),
+        principal: PrincipalId("trusted".to_string()),
+        capability: CapabilityId("editor.write".to_string()),
+        correlation_id: CorrelationId(42),
+        payload,
+        preconditions: empty_preconditions(),
+        preview: PreviewSummary {
+            summary: "test proposal".to_string(),
+            details: Vec::new(),
+        },
+        expires_at: None,
+        created_at: TimestampMillis(1),
+    }
+}
+
+fn target(
+    target_id: &str,
+    order_file_id: u128,
+    path: &str,
+    kind: ProposalTargetKind,
+) -> ProposalAffectedTarget {
+    ProposalAffectedTarget {
+        target_id: target_id.to_string(),
+        kind,
+        workspace_id: Some(WorkspaceId(11)),
+        file_id: Some(FileId(order_file_id)),
+        buffer_id: None,
+        path: Some(CanonicalPath(path.to_string())),
+        terminal_session_id: None,
+        plugin_id: None,
+        remote_authority: None,
+        collaboration_session_id: None,
+        byte_ranges: Vec::new(),
+        redaction_hints: Vec::new(),
+    }
+}
+
+fn text_edit_payload(file_id: FileId, start: u64, end: u64) -> ProposalPayload {
+    ProposalPayload::TextEdit(devil_protocol::TextEditProposal {
+        file_id,
+        edits: EditBatch {
+            edits: vec![devil_protocol::TextEdit {
+                range: TextRange::new(TextOffset::byte(start), TextOffset::byte(end)),
+                replacement: "replacement".to_string(),
+            }],
+        },
+    })
 }
 
 #[test]
@@ -352,7 +422,10 @@ fn workspace_vfs_integration_external_overwrite_between_open_and_save_yields_con
     let save_err = app
         .save_active_buffer()
         .expect("external overwrite should return save outcome");
-    assert!(matches!(save_err, AppSaveOutcome::Rejected(_)));
+    assert!(matches!(
+        &save_err,
+        AppSaveOutcome::Rejected(response) if matches!(response.as_ref(), ProposalResponse::Stale { .. })
+    ));
 
     assert_eq!(
         std::fs::read_to_string(&target).expect("disk content preserved"),
@@ -393,6 +466,189 @@ fn workspace_vfs_integration_external_overwrite_between_open_and_save_yields_con
 
     let _ = save_err;
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_non_save_proposals_are_structurally_rejected_without_panic() {
+    let app = AppComposition::new();
+    let payloads = vec![
+        text_edit_payload(FileId(9), 0, 4),
+        ProposalPayload::CreateFile(devil_protocol::CreateFileProposal {
+            path: CanonicalPath("C:/repo/new.rs".to_string()),
+            initial_content: Some("fn main() {}".to_string()),
+        }),
+        ProposalPayload::TerminalCommand(devil_protocol::TerminalCommandProposal {
+            session_id: None,
+            command: "cargo test".to_string(),
+            cwd: Some(CanonicalPath("C:/repo".to_string())),
+            env: std::collections::HashMap::new(),
+        }),
+    ];
+
+    for payload in payloads {
+        let proposal = proposal_envelope(payload.clone());
+        let validation = app
+            .handle_proposal_request(ProposalRequest::Validate(proposal.clone()))
+            .expect("validate non-save proposal");
+        assert!(matches!(
+            validation,
+            ProposalResponse::Rejected {
+                reason: ProposalRejectionReason::Unsupported,
+                ..
+            }
+        ));
+
+        let apply = app
+            .handle_proposal_request(ProposalRequest::Apply(proposal))
+            .expect("apply non-save proposal");
+        assert!(matches!(
+            apply,
+            ProposalResponse::Rejected {
+                reason: ProposalRejectionReason::Unsupported,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn workspace_vfs_integration_batch_affected_targets_are_visited_in_item_order() {
+    let app = AppComposition::new();
+    let batch = BatchProposalPayload {
+        batch_id: Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap(),
+        atomicity: ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        rollback_policy: ProposalBatchRollbackPolicy::Required,
+        target_coverage: ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets: Vec::new(),
+            omitted_target_count: 0,
+            redaction_hints: Vec::new(),
+        },
+        items: vec![
+            ProposalBatchItem {
+                order: 2,
+                item_id: "item-third".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath("C:/repo/third.rs".to_string()),
+                        initial_content: None,
+                    },
+                )),
+                target_ids: Vec::new(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 0,
+                item_id: "item-first".to_string(),
+                payload: Box::new(text_edit_payload(FileId(101), 10, 14)),
+                target_ids: Vec::new(),
+                required_capability: CapabilityId("editor.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 1,
+                item_id: "item-second".to_string(),
+                payload: Box::new(ProposalPayload::DeleteFile(
+                    devil_protocol::DeleteFileProposal {
+                        file: FileIdentity {
+                            file_id: FileId(202),
+                            workspace_id: WorkspaceId(11),
+                            canonical_path: CanonicalPath("C:/repo/second.rs".to_string()),
+                            content_version: FileContentVersion(1),
+                            content_hash: None,
+                        },
+                    },
+                )),
+                target_ids: Vec::new(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+        ],
+        dependency_edges: Vec::new(),
+        rollback_steps: Vec::new(),
+        partial_failures: Vec::new(),
+        preview_warnings: Vec::new(),
+        schema_version: 1,
+    };
+    let proposal = proposal_envelope(ProposalPayload::Batch(batch));
+
+    let coverage = app.proposal_target_coverage(&proposal);
+    let target_ids = coverage
+        .targets
+        .iter()
+        .map(|target| target.target_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        target_ids,
+        vec![
+            "text-edit:file:101",
+            "delete-file:file:202",
+            "create-file:path:C:/repo/third.rs"
+        ]
+    );
+    assert_eq!(coverage.targets[0].byte_ranges.len(), 1);
+    assert!(matches!(
+        coverage.targets[2].kind,
+        ProposalTargetKind::PathOnly
+    ));
+}
+
+#[test]
+fn workspace_vfs_integration_batch_uses_explicit_target_coverage_order() {
+    let app = AppComposition::new();
+    let explicit_targets = vec![
+        target(
+            "target-explicit-z",
+            303,
+            "C:/repo/z.rs",
+            ProposalTargetKind::ClosedFile,
+        ),
+        target(
+            "target-explicit-a",
+            101,
+            "C:/repo/a.rs",
+            ProposalTargetKind::OpenBuffer,
+        ),
+    ];
+    let batch = BatchProposalPayload {
+        batch_id: Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap(),
+        atomicity: ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        rollback_policy: ProposalBatchRollbackPolicy::NotRequired,
+        target_coverage: ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets: explicit_targets,
+            omitted_target_count: 0,
+            redaction_hints: Vec::new(),
+        },
+        items: vec![ProposalBatchItem {
+            order: 0,
+            item_id: "item-unused-for-order".to_string(),
+            payload: Box::new(text_edit_payload(FileId(404), 0, 1)),
+            target_ids: vec![
+                "target-explicit-z".to_string(),
+                "target-explicit-a".to_string(),
+            ],
+            required_capability: CapabilityId("editor.write".to_string()),
+            rollback_step_ids: Vec::new(),
+        }],
+        dependency_edges: Vec::new(),
+        rollback_steps: Vec::new(),
+        partial_failures: Vec::new(),
+        preview_warnings: Vec::new(),
+        schema_version: 1,
+    };
+    let proposal = proposal_envelope(ProposalPayload::Batch(batch));
+
+    let coverage = app.proposal_target_coverage(&proposal);
+    let target_ids = coverage
+        .targets
+        .iter()
+        .map(|target| target.target_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(target_ids, vec!["target-explicit-z", "target-explicit-a"]);
 }
 
 #[test]

@@ -8,5 +8,5 @@ publish.workspace = true
 [dependencies]
 devil-protocol = { workspace = true }
 devil-text = { workspace = true }
-devil-storage = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }

@@ -77,6 +77,31 @@ pub struct CorrelationId(pub u64);
 #[serde(transparent)]
 pub struct LanguageServerId(pub u64);
 
+/// Language-server request identifier used for supervised operation tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LspRequestId(pub Uuid);
+
+/// Cross-domain cancellation token identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CancellationTokenId(pub Uuid);
+
+/// Semantic query identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SemanticQueryId(pub Uuid);
+
+/// Semantic graph or cache record identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SemanticRecordId(pub String);
+
+/// Semantic symbol identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SemanticSymbolId(pub String);
+
 /// Plugin identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -212,6 +237,33 @@ pub struct FileFingerprint {
     pub algorithm: String,
     /// Fingerprint value emitted by the producing subsystem.
     pub value: String,
+}
+
+/// Grammar version used to invalidate parser-derived semantic records.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SemanticGrammarVersion(pub String);
+
+/// Model version used to invalidate learned ranking or enrichment records.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SemanticModelVersion(pub String);
+
+/// Privacy scope attached to semantic and LSP-derived records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SemanticPrivacyScope {
+    /// Public or intentionally shareable metadata.
+    Public,
+    /// Workspace-private data.
+    Workspace,
+    /// Project-private data.
+    Project,
+    /// Single-file scoped data.
+    File,
+    /// Metadata-only data that must not carry source excerpts.
+    MetadataOnly,
+    /// Redacted data whose details cannot be disclosed to the caller.
+    Redacted,
 }
 
 /// Coordinate encoding.
@@ -1221,6 +1273,85 @@ pub struct WorkspaceEditProposal {
     pub edits: EditBatch,
 }
 
+/// Source feature that produced a proposal-ready workspace edit payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceEditSourceKind {
+    /// LSP rename operation.
+    LspRename,
+    /// LSP formatting operation.
+    LspFormatting,
+    /// LSP code action operation.
+    LspCodeAction,
+    /// Semantic refactoring preview.
+    SemanticRefactor,
+    /// Plugin-produced proposal.
+    Plugin,
+    /// User-authored proposal.
+    User,
+}
+
+/// File-scoped text edits inside a proposal-ready workspace edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceTextEdit {
+    /// Target file identity.
+    pub file: FileIdentity,
+    /// Open buffer affected by the edit, when known.
+    pub buffer_id: Option<BufferId>,
+    /// Ordered edit batch for this file.
+    pub edits: EditBatch,
+    /// Version preconditions required before this file edit may apply.
+    pub preconditions: ProposalVersionPreconditions,
+}
+
+/// File operation inside a proposal-ready workspace edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WorkspaceFileOperation {
+    /// Create a file without embedding full source content in the operation descriptor.
+    Create {
+        /// Destination path.
+        path: CanonicalPath,
+        /// Optional hash of the initial content supplied out-of-band.
+        initial_content_hash: Option<FileFingerprint>,
+    },
+    /// Delete an existing file.
+    Delete {
+        /// File to delete.
+        file: FileIdentity,
+    },
+    /// Rename or move an existing file.
+    Rename {
+        /// File to rename.
+        file: FileIdentity,
+        /// Destination path.
+        destination: CanonicalPath,
+    },
+}
+
+/// Proposal-ready workspace edit payload for LSP and semantic mutation producers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceEditProposalPayload {
+    /// Workspace receiving the proposal.
+    pub workspace_id: WorkspaceId,
+    /// Stable edit identifier for this payload.
+    pub edit_id: Uuid,
+    /// User-visible title.
+    pub title: String,
+    /// Feature source for audit and preview routing.
+    pub source: WorkspaceEditSourceKind,
+    /// Deterministic affected-target coverage.
+    pub target_coverage: ProposalTargetCoverage,
+    /// File text edits grouped by target file.
+    pub file_edits: Vec<WorkspaceTextEdit>,
+    /// File create/delete/rename operations.
+    pub file_operations: Vec<WorkspaceFileOperation>,
+    /// Capability required before any mutation may apply.
+    pub required_capability: CapabilityId,
+    /// Diagnostics explaining proposal translation decisions.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Workspace edit payload schema version.
+    pub schema_version: u16,
+}
+
 // -----------------------------------------------------------------------------
 // Proposal contracts
 // -----------------------------------------------------------------------------
@@ -1390,8 +1521,278 @@ pub enum ProposalPayload {
     FormatFile(FormatFileProposal),
     /// Code action.
     CodeAction(CodeActionProposal),
+    /// Proposal-ready workspace edit produced by LSP or semantic tooling.
+    WorkspaceEdit(WorkspaceEditProposalPayload),
     /// Terminal command.
     TerminalCommand(TerminalCommandProposal),
+    /// Ordered batch or multi-target proposal.
+    Batch(BatchProposalPayload),
+}
+
+/// Atomicity boundary promised by a batch proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalBatchAtomicity {
+    /// Every item must prepare and apply as one logical unit or none may commit.
+    AllOrNothing,
+    /// Every item must prepare successfully before any mutation starts.
+    PrepareAllBeforeMutate,
+    /// Items apply in deterministic order and partial-failure records are mandatory on failure.
+    OrderedNonAtomic,
+}
+
+/// Rollback expectation for a batch proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalBatchRollbackPolicy {
+    /// Rollback is required for every mutation item that can commit.
+    Required,
+    /// Rollback is attempted but may produce explicit failure records.
+    BestEffort,
+    /// Rollback is not supported and apply must fail closed unless explicitly allowed.
+    NotSupported,
+    /// No rollback is required because the batch is metadata-only or preflight-only.
+    NotRequired,
+}
+
+/// Target class affected by a proposal payload or batch item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalTargetKind {
+    /// Open editor buffer target.
+    OpenBuffer,
+    /// Closed or disk-backed file target.
+    ClosedFile,
+    /// Path-only target without a resolved file identity.
+    PathOnly,
+    /// Terminal session target.
+    TerminalSession,
+    /// Remote workspace target.
+    RemoteWorkspace,
+    /// Collaboration session target.
+    CollaborationSession,
+    /// Plugin-owned target.
+    Plugin,
+    /// Metadata-only target with no durable state mutation.
+    MetadataOnly,
+}
+
+/// Deterministic affected-target descriptor for proposal previews and audit records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalAffectedTarget {
+    /// Stable target identifier within the proposal or batch.
+    pub target_id: String,
+    /// Target class.
+    pub kind: ProposalTargetKind,
+    /// Workspace identifier when known.
+    pub workspace_id: Option<WorkspaceId>,
+    /// File identifier when known.
+    pub file_id: Option<FileId>,
+    /// Buffer identifier when known.
+    pub buffer_id: Option<BufferId>,
+    /// Canonical path when a path can be disclosed.
+    pub path: Option<CanonicalPath>,
+    /// Terminal session identifier when the target is terminal-scoped.
+    pub terminal_session_id: Option<TerminalSessionId>,
+    /// Plugin identifier when the target is plugin-scoped.
+    pub plugin_id: Option<PluginId>,
+    /// Redacted remote authority label or hash.
+    pub remote_authority: Option<String>,
+    /// Collaboration session label or hash.
+    pub collaboration_session_id: Option<String>,
+    /// Affected byte ranges when metadata can disclose ranges.
+    pub byte_ranges: Vec<ByteRange>,
+    /// Redaction hints that apply to this target descriptor.
+    pub redaction_hints: Vec<RedactionHint>,
+}
+
+/// Completeness of affected-target coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalTargetCoverageKind {
+    /// All affected targets are represented.
+    Complete,
+    /// Some affected targets are represented and omissions are counted.
+    Partial,
+    /// Target metadata exists but was redacted for policy or privacy reasons.
+    Redacted,
+}
+
+/// Deterministic affected-target coverage for a proposal or batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalTargetCoverage {
+    /// Coverage completeness.
+    pub coverage_kind: ProposalTargetCoverageKind,
+    /// Targets in deterministic display and audit order.
+    pub targets: Vec<ProposalAffectedTarget>,
+    /// Number of omitted targets when coverage is partial or redacted.
+    pub omitted_target_count: u32,
+    /// Redaction hints that apply to the coverage record.
+    pub redaction_hints: Vec<RedactionHint>,
+}
+
+/// Ordered batch proposal payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchProposalPayload {
+    /// Stable batch identifier.
+    pub batch_id: Uuid,
+    /// Batch atomicity boundary.
+    pub atomicity: ProposalBatchAtomicity,
+    /// Rollback policy for committed steps.
+    pub rollback_policy: ProposalBatchRollbackPolicy,
+    /// Affected target coverage for the whole batch.
+    pub target_coverage: ProposalTargetCoverage,
+    /// Ordered proposal items. The `order` field is the authoritative application order.
+    pub items: Vec<ProposalBatchItem>,
+    /// Deterministic dependency edges between item identifiers.
+    pub dependency_edges: Vec<ProposalBatchDependency>,
+    /// Deterministic rollback plan records.
+    pub rollback_steps: Vec<ProposalRollbackStep>,
+    /// Partial-failure records captured during planning or apply.
+    pub partial_failures: Vec<ProposalPartialFailureRecord>,
+    /// Bounded preview warnings for the batch.
+    pub preview_warnings: Vec<ProposalPreviewWarning>,
+    /// Batch DTO schema version.
+    pub schema_version: u16,
+}
+
+/// One ordered item inside a batch proposal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalBatchItem {
+    /// Zero-based deterministic application order.
+    pub order: u32,
+    /// Stable item identifier unique within the batch.
+    pub item_id: String,
+    /// Item payload.
+    pub payload: Box<ProposalPayload>,
+    /// Target identifiers from the batch coverage record affected by this item.
+    pub target_ids: Vec<String>,
+    /// Capability required by this item.
+    pub required_capability: CapabilityId,
+    /// Rollback step identifiers associated with this item.
+    pub rollback_step_ids: Vec<String>,
+}
+
+/// Dependency semantics between batch items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalBatchDependencyKind {
+    /// The dependent item requires the prerequisite item to validate successfully.
+    RequiresValidation,
+    /// The dependent item requires the prerequisite item to apply successfully.
+    RequiresApply,
+    /// The two items conflict and cannot both be applied.
+    ConflictsWith,
+}
+
+/// Deterministic dependency edge between batch items.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalBatchDependency {
+    /// Prerequisite item identifier.
+    pub prerequisite_item_id: String,
+    /// Dependent item identifier.
+    pub dependent_item_id: String,
+    /// Dependency semantics.
+    pub kind: ProposalBatchDependencyKind,
+}
+
+/// Rollback action kind for a committed mutation item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalRollbackAction {
+    /// Undo through an editor undo group.
+    EditorUndoGroup,
+    /// Restore a file snapshot or backup.
+    RestoreFileSnapshot,
+    /// Delete a file created by the proposal.
+    DeleteCreatedFile,
+    /// Recreate a file deleted by the proposal.
+    RecreateDeletedFile,
+    /// Rename a path back to its prior identity.
+    RenamePathBack,
+    /// Cancel or compensate terminal-side work.
+    CancelTerminalCommand,
+    /// Emit metadata only; no state rollback is needed.
+    MetadataOnlyRecord,
+    /// Rollback is unsupported and must be recorded explicitly.
+    Unsupported,
+}
+
+/// Deterministic rollback step descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalRollbackStep {
+    /// Zero-based rollback order.
+    pub order: u32,
+    /// Stable rollback step identifier.
+    pub step_id: String,
+    /// Batch item identifier that owns this rollback step.
+    pub item_id: String,
+    /// Target identifier covered by this rollback step.
+    pub target_id: String,
+    /// Rollback action.
+    pub action: ProposalRollbackAction,
+    /// Preconditions expected before rollback when known.
+    pub expected_preconditions: ProposalVersionPreconditions,
+    /// Diagnostics associated with the rollback step.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Disposition of an item after a batch partial failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalPartialFailureDisposition {
+    /// Item was not started.
+    NotStarted,
+    /// Item failed before mutating state.
+    FailedBeforeMutation,
+    /// Item mutation committed and remains present.
+    MutationCommitted,
+    /// Item mutation committed and was rolled back.
+    RolledBack,
+    /// Rollback failed for the item.
+    RollbackFailed,
+    /// Dirty editor buffer was preserved rather than discarded.
+    PreservedDirtyBuffer,
+}
+
+/// Partial-failure record for a batch item or target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalPartialFailureRecord {
+    /// Batch item identifier.
+    pub item_id: String,
+    /// Target identifier.
+    pub target_id: String,
+    /// Failure reason.
+    pub reason: ProposalFailureReason,
+    /// Item disposition after the failure.
+    pub disposition: ProposalPartialFailureDisposition,
+    /// Diagnostics associated with the failure.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Preview warning kind for generalized proposals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalPreviewWarningKind {
+    /// Atomicity cannot be guaranteed by the current target set.
+    AtomicityUnavailable,
+    /// Rollback is best-effort rather than exact.
+    RollbackBestEffort,
+    /// Target coverage is partial or redacted.
+    TargetCoveragePartial,
+    /// Policy is expected to deny apply.
+    PolicyWillDenyApply,
+    /// Raw source content was redacted from the preview.
+    RawSourceRedacted,
+    /// Runtime implementation is intentionally unsupported in this phase.
+    UnsupportedRuntime,
+}
+
+/// Bounded warning emitted during proposal preview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalPreviewWarning {
+    /// Stable warning code.
+    pub code: String,
+    /// Warning kind.
+    pub kind: ProposalPreviewWarningKind,
+    /// Human-readable warning message.
+    pub message: String,
+    /// Optional target identifier.
+    pub target_id: Option<String>,
+    /// Redaction hints for this warning.
+    pub redaction_hints: Vec<RedactionHint>,
 }
 
 /// Text edit proposal.
@@ -1556,8 +1957,12 @@ pub enum ProposalPayloadKind {
     FormatFile,
     /// Code-action payload.
     CodeAction,
+    /// Workspace-edit payload.
+    WorkspaceEdit,
     /// Terminal-command payload.
     TerminalCommand,
+    /// Batch payload.
+    Batch,
 }
 
 /// Proposal lifecycle state suitable for response and audit records.
@@ -1585,6 +1990,8 @@ pub enum ProposalLifecycleState {
     Stale,
     /// Proposal encountered a file conflict.
     Conflict,
+    /// Proposal was cancelled before apply completed.
+    Cancelled,
 }
 
 /// Typed reason for proposal rejection.
@@ -1641,6 +2048,21 @@ pub enum ProposalRollbackReason {
     SystemRequested,
 }
 
+/// Typed reason for proposal cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalCancellationReason {
+    /// User cancelled the proposal.
+    UserCancelled,
+    /// Proposal was superseded by a newer proposal.
+    Superseded,
+    /// Proposal expired before completion.
+    Expired,
+    /// Proposal was cancelled during shutdown or workspace close.
+    SystemShutdown,
+    /// Proposal was cancelled by policy.
+    PolicyCancelled,
+}
+
 /// Typed reason for proposal staleness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalStaleReason {
@@ -1679,6 +2101,65 @@ pub struct ProposalLifecycleTransition {
     pub causality_id: CausalityId,
     /// Transition diagnostics.
     pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Lifecycle action represented by proposal request commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalLifecycleAction {
+    /// Validate action.
+    Validate,
+    /// Preview action.
+    Preview,
+    /// Approve action.
+    Approve,
+    /// Reject action.
+    Reject,
+    /// Apply action.
+    Apply,
+    /// Cancel action.
+    Cancel,
+    /// Rollback action.
+    Rollback,
+}
+
+/// Typed reason attached to a proposal lifecycle command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProposalLifecycleCommandReason {
+    /// Rejection reason.
+    Rejection(ProposalRejectionReason),
+    /// Cancellation reason.
+    Cancellation(ProposalCancellationReason),
+    /// Rollback reason.
+    Rollback(ProposalRollbackReason),
+    /// Failure reason.
+    Failure(ProposalFailureReason),
+    /// Metadata-only free-form note.
+    Note(String),
+}
+
+/// Explicit proposal lifecycle command for approve, reject, cancel, and rollback intents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalLifecycleCommand {
+    /// Proposal identifier.
+    pub proposal_id: ProposalId,
+    /// Lifecycle action requested.
+    pub action: ProposalLifecycleAction,
+    /// Principal requesting the lifecycle command.
+    pub principal: PrincipalId,
+    /// Capability associated with the proposal lifecycle command.
+    pub capability: CapabilityId,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Optional typed reason for the command.
+    pub reason: Option<ProposalLifecycleCommandReason>,
+    /// Command diagnostics.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Request timestamp.
+    pub requested_at: TimestampMillis,
+    /// Command DTO schema version.
+    pub schema_version: u16,
 }
 
 /// Structured context for stale proposal responses.
@@ -1735,6 +2216,365 @@ pub struct ProposalAuditRecord {
 // -----------------------------------------------------------------------------
 // LSP contracts
 // -----------------------------------------------------------------------------
+
+/// Supervised LSP operation status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LspResultStatus {
+    /// Result is fresh for the requested snapshot and content identity.
+    Fresh,
+    /// Result is stale and must not overwrite newer state.
+    Stale,
+    /// Result is partial but usable for degraded UI or semantic enrichment.
+    Partial,
+    /// Operation was cancelled before completion.
+    Cancelled,
+    /// Operation timed out.
+    Timeout,
+    /// Server or feature was unavailable.
+    Unavailable,
+    /// Result was produced under degraded runtime conditions.
+    Degraded,
+}
+
+/// Shared request context for cancellable supervised LSP operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspOperationContext {
+    /// Stable request identifier.
+    pub request_id: LspRequestId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Buffer identifier for the synced document.
+    pub buffer_id: BufferId,
+    /// Snapshot used by the request.
+    pub snapshot_id: SnapshotId,
+    /// Buffer version used by the request.
+    pub buffer_version: BufferVersion,
+    /// Language identifier.
+    pub language_id: LanguageId,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Timeout budget in milliseconds.
+    pub timeout_ms: u64,
+    /// Cancellation token for this operation.
+    pub cancellation_token: CancellationTokenId,
+    /// Content hash used to discard stale responses.
+    pub content_hash: Option<FileFingerprint>,
+    /// Privacy scope of request metadata and response payloads.
+    pub privacy_scope: SemanticPrivacyScope,
+    /// LSP operation context schema version.
+    pub schema_version: u16,
+}
+
+/// Shared metadata for supervised LSP responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspResultMetadata {
+    /// Request identifier this response resolves.
+    pub request_id: LspRequestId,
+    /// Language server that produced the response.
+    pub server_id: LanguageServerId,
+    /// Snapshot the result claims to describe.
+    pub snapshot_id: SnapshotId,
+    /// Buffer version the result claims to describe.
+    pub buffer_version: BufferVersion,
+    /// Content hash the result claims to describe.
+    pub content_hash: Option<FileFingerprint>,
+    /// Supervised result status.
+    pub status: LspResultStatus,
+    /// Response generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Metadata-only diagnostics produced while handling the response.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// LSP result metadata schema version.
+    pub schema_version: u16,
+}
+
+/// Normalized LSP target location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspLocation {
+    /// Workspace containing the location.
+    pub workspace_id: WorkspaceId,
+    /// File containing the location.
+    pub file_id: FileId,
+    /// Canonical path when disclosure is allowed.
+    pub path: CanonicalPath,
+    /// Full location range.
+    pub range: ProtocolTextRange,
+    /// Narrow target selection range when supplied by the server.
+    pub target_selection_range: Option<ProtocolTextRange>,
+    /// Bounded symbol display name when available.
+    pub symbol_name: Option<String>,
+    /// Server-provided symbol kind when available.
+    pub symbol_kind: Option<String>,
+}
+
+/// Definition lookup request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspDefinitionRequest {
+    /// Shared supervised operation context.
+    pub context: LspOperationContext,
+    /// Lookup position.
+    pub position: TextCoordinate,
+    /// Whether declaration-like fallback locations may be returned.
+    pub include_declaration: bool,
+}
+
+/// Definition lookup response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspDefinitionResponse {
+    /// Response metadata.
+    pub metadata: LspResultMetadata,
+    /// Definition target locations.
+    pub locations: Vec<LspLocation>,
+}
+
+/// Scope for an LSP reference lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LspReferenceScope {
+    /// Current document only.
+    Document,
+    /// Current workspace.
+    Workspace,
+    /// Repository-wide lookup when supported by policy and server capability.
+    Repository,
+}
+
+/// Reference lookup request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspReferenceRequest {
+    /// Shared supervised operation context.
+    pub context: LspOperationContext,
+    /// Lookup position.
+    pub position: TextCoordinate,
+    /// Whether declaration locations should be included with references.
+    pub include_declaration: bool,
+    /// Requested lookup scope.
+    pub scope: LspReferenceScope,
+}
+
+/// Reference lookup response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspReferenceResponse {
+    /// Response metadata.
+    pub metadata: LspResultMetadata,
+    /// Reference locations.
+    pub references: Vec<LspLocation>,
+}
+
+/// Command descriptor for command-only or mixed LSP code actions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspCommandDescriptor {
+    /// Server command identifier.
+    pub command_id: String,
+    /// User-visible command title.
+    pub title: String,
+    /// Redacted command argument descriptors.
+    pub argument_hints: Vec<String>,
+}
+
+/// Proposal routing result for mutation-producing LSP operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LspMutationProposalResult {
+    /// A complete workspace proposal is ready for validation and preview.
+    Proposal(Box<WorkspaceProposal>),
+    /// The operation completed without producing any mutation.
+    NoChanges {
+        /// Diagnostics explaining why no mutation is needed.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+    /// The operation could not be safely represented as a proposal.
+    Rejected {
+        /// Metadata-only rejection reason.
+        reason: String,
+        /// Diagnostics explaining the rejection.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+    /// A command-only action was denied or deferred because it is not an edit proposal.
+    CommandOnlyDenied {
+        /// Command descriptor that was not executed.
+        command: LspCommandDescriptor,
+        /// Diagnostics explaining the denial or deferral.
+        diagnostics: Vec<ProtocolDiagnostic>,
+    },
+}
+
+/// Rename request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspRenameRequest {
+    /// Shared supervised operation context.
+    pub context: LspOperationContext,
+    /// Rename position.
+    pub position: TextCoordinate,
+    /// Requested replacement symbol name.
+    pub new_name: String,
+    /// Whether this request only prepares rename metadata.
+    pub prepare_only: bool,
+}
+
+/// Prepare-rename response payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspPrepareRenameResult {
+    /// Range that may be renamed.
+    pub range: ProtocolTextRange,
+    /// Placeholder displayed to the user.
+    pub placeholder: Option<String>,
+    /// Whether rename is allowed at the requested position.
+    pub allowed: bool,
+}
+
+/// Rename response represented as proposal-ready output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspRenameResponse {
+    /// Response metadata.
+    pub metadata: LspResultMetadata,
+    /// Prepare-rename metadata when requested or available.
+    pub prepare: Option<LspPrepareRenameResult>,
+    /// Proposal routing result for edit-producing rename output.
+    pub proposal: Option<LspMutationProposalResult>,
+}
+
+/// Formatting mode requested from an LSP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LspFormattingMode {
+    /// Whole-document formatting.
+    Document,
+    /// Range formatting.
+    Range,
+    /// On-type formatting.
+    OnType,
+}
+
+/// Deterministic formatting options for LSP requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspFormattingOptions {
+    /// Tab size in columns.
+    pub tab_size: u16,
+    /// Whether spaces should be inserted instead of tab characters.
+    pub insert_spaces: bool,
+    /// Whether trailing whitespace should be trimmed by the formatter.
+    pub trim_trailing_whitespace: bool,
+    /// Whether a final newline should be inserted.
+    pub insert_final_newline: bool,
+    /// Deterministic custom option key-value pairs.
+    pub custom_options: Vec<(String, String)>,
+}
+
+/// Formatting request that requires proposal-mediated output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspFormattingProposalRequest {
+    /// Shared supervised operation context.
+    pub context: LspOperationContext,
+    /// Formatting mode.
+    pub mode: LspFormattingMode,
+    /// Optional range for range or on-type formatting.
+    pub range: Option<ProtocolTextRange>,
+    /// Formatting options.
+    pub options: LspFormattingOptions,
+}
+
+/// Formatting response represented as proposal-ready output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspFormattingProposalResponse {
+    /// Response metadata.
+    pub metadata: LspResultMetadata,
+    /// Proposal routing result for edit-producing formatting output.
+    pub proposal: LspMutationProposalResult,
+}
+
+/// Code-action request that separates edit and command payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspCodeActionProposalRequest {
+    /// Shared supervised operation context.
+    pub context: LspOperationContext,
+    /// Requested range.
+    pub range: ProtocolTextRange,
+    /// Diagnostics supplied as context for quick fixes.
+    pub diagnostics: Vec<LspDiagnostic>,
+    /// Requested code-action kinds.
+    pub only: Vec<String>,
+}
+
+/// Normalized code-action payload category.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LspCodeActionPayload {
+    /// Command-only actions are not direct mutations and require separate policy routing.
+    CommandOnly {
+        /// Command descriptor.
+        command: LspCommandDescriptor,
+    },
+    /// Edit-only actions are represented as proposal-ready workspace edits.
+    EditOnly {
+        /// Workspace edit payload.
+        workspace_edit: WorkspaceEditProposalPayload,
+    },
+    /// Mixed actions carry an edit proposal and a command descriptor for policy routing.
+    EditAndCommand {
+        /// Workspace edit payload.
+        workspace_edit: WorkspaceEditProposalPayload,
+        /// Command descriptor.
+        command: LspCommandDescriptor,
+    },
+    /// Disabled action with metadata-only reason.
+    Disabled {
+        /// Disabled reason.
+        reason: String,
+    },
+}
+
+/// Normalized LSP code-action candidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspCodeActionCandidate {
+    /// User-visible title.
+    pub title: String,
+    /// Server-provided action kind.
+    pub kind: Option<String>,
+    /// Preferred action marker.
+    pub is_preferred: bool,
+    /// Normalized action payload.
+    pub payload: LspCodeActionPayload,
+    /// Diagnostics associated with action translation.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Code-action response with proposal-ready edit payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspCodeActionProposalResponse {
+    /// Response metadata.
+    pub metadata: LspResultMetadata,
+    /// Code-action candidates in deterministic display order.
+    pub actions: Vec<LspCodeActionCandidate>,
+}
+
+/// LSP cancellation request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspCancellationRequest {
+    /// Request being cancelled.
+    pub request_id: LspRequestId,
+    /// Cancellation token to propagate.
+    pub cancellation_token: CancellationTokenId,
+    /// Metadata-only cancellation reason.
+    pub reason: String,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+}
+
+/// LSP cancellation acknowledgement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspCancellationAck {
+    /// Request that was marked cancelled locally.
+    pub request_id: LspRequestId,
+    /// Cancellation token acknowledged locally.
+    pub cancellation_token: CancellationTokenId,
+    /// Whether cancellation was propagated to the server.
+    pub propagated_to_server: bool,
+    /// Acknowledgement timestamp.
+    pub acknowledged_at: TimestampMillis,
+}
 
 /// Language server status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1887,7 +2727,7 @@ pub struct LspFormattingRequest {
 pub struct LspFormattingResponse {
     /// Correlation id.
     pub correlation_id: CorrelationId,
-    /// Edit batch.
+    /// Legacy edit batch; callers must route edits through proposal mediation before mutation.
     pub edits: EditBatch,
 }
 
@@ -1952,7 +2792,7 @@ pub struct LspCodeActionRequest {
 pub struct LspCodeAction {
     /// Title.
     pub title: String,
-    /// Edits.
+    /// Legacy edits; callers must convert edit-producing actions into proposal payloads.
     pub edits: Vec<TextEdit>,
 }
 
@@ -1963,6 +2803,437 @@ pub struct LspCodeActionResponse {
     pub correlation_id: CorrelationId,
     /// Actions.
     pub actions: Vec<LspCodeAction>,
+}
+
+// -----------------------------------------------------------------------------
+// Semantic fabric contracts
+// -----------------------------------------------------------------------------
+
+/// Reason semantic work was cancelled or marked obsolete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticCancellationReason {
+    /// User requested cancellation.
+    UserCancelled,
+    /// A newer snapshot superseded the work.
+    SnapshotSuperseded,
+    /// Content hash no longer matches.
+    ContentHashMismatch,
+    /// Grammar version changed.
+    GrammarVersionChanged,
+    /// Model version changed.
+    ModelVersionChanged,
+    /// Privacy scope was reduced.
+    PrivacyScopeReduced,
+    /// Queue pressure cancelled or downgraded work.
+    QueuePressure,
+    /// Workspace or runtime shutdown began.
+    Shutdown,
+    /// Timeout budget expired.
+    Timeout,
+}
+
+/// Cancellable semantic work token descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticCancellationToken {
+    /// Token identifier.
+    pub token_id: CancellationTokenId,
+    /// Workspace scope.
+    pub workspace_id: WorkspaceId,
+    /// Optional file scope.
+    pub file_id: Option<FileId>,
+    /// Optional snapshot scope.
+    pub snapshot_id: Option<SnapshotId>,
+    /// Optional content hash scope.
+    pub content_hash: Option<FileFingerprint>,
+    /// Workspace generation scope.
+    pub workspace_generation: Option<WorkspaceGeneration>,
+    /// Privacy scope guarded by this token.
+    pub privacy_scope: SemanticPrivacyScope,
+    /// Cancellation reason when known.
+    pub reason: Option<SemanticCancellationReason>,
+    /// Token issue timestamp.
+    pub issued_at: TimestampMillis,
+    /// Optional expiration timestamp.
+    pub expires_at: Option<TimestampMillis>,
+    /// Cancellation token schema version.
+    pub schema_version: u16,
+}
+
+/// File content and fingerprint identity for semantic cache keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticFileFingerprintIdentity {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Canonical file path.
+    pub canonical_path: CanonicalPath,
+    /// File content version observed by workspace authority.
+    pub file_content_version: FileContentVersion,
+    /// Workspace generation associated with the identity.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Content hash used for semantic invalidation.
+    pub content_hash: FileFingerprint,
+    /// Disk fingerprint used by workspace persistence authority, when known.
+    pub disk_fingerprint: Option<FileFingerprint>,
+    /// File byte length when known.
+    pub byte_len: Option<u64>,
+    /// Modified timestamp when known.
+    pub modified_at: Option<TimestampMillis>,
+    /// Privacy scope for this identity.
+    pub privacy_scope: SemanticPrivacyScope,
+    /// Fingerprint identity schema version.
+    pub schema_version: u16,
+}
+
+/// Complete invalidation key for semantic cache records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticInvalidationKey {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Snapshot identifier when record is snapshot-bound.
+    pub snapshot_id: Option<SnapshotId>,
+    /// File content version.
+    pub file_content_version: FileContentVersion,
+    /// Workspace generation.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Content hash.
+    pub content_hash: FileFingerprint,
+    /// Grammar version for parser-derived records.
+    pub grammar_version: Option<SemanticGrammarVersion>,
+    /// Model version for learned or ranked records.
+    pub model_version: Option<SemanticModelVersion>,
+    /// Privacy scope for storage and query exposure.
+    pub privacy_scope: SemanticPrivacyScope,
+    /// Invalidation key schema version.
+    pub schema_version: u16,
+}
+
+/// Freshness state for semantic records and query results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticFreshnessState {
+    /// Record is fresh for its invalidation key.
+    Fresh,
+    /// Record is stale and must be labelled as such.
+    Stale,
+    /// Record is partial due to bounded or degraded processing.
+    Partial,
+    /// Record is unavailable.
+    Unavailable,
+}
+
+/// Semantic freshness metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticFreshness {
+    /// Freshness state.
+    pub state: SemanticFreshnessState,
+    /// Invalidation key used to compute freshness.
+    pub key: SemanticInvalidationKey,
+    /// User-visible degraded reasons.
+    pub degraded_reasons: Vec<String>,
+    /// Freshness observation timestamp.
+    pub observed_at: TimestampMillis,
+}
+
+/// Source that produced a semantic record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticRecordSource {
+    /// Shallow lexical extraction.
+    Lexical,
+    /// Tree-sitter parser extraction.
+    TreeSitter,
+    /// Language-server enrichment.
+    Lsp,
+    /// Workspace metadata.
+    WorkspaceMetadata,
+    /// Model metadata without vector activation.
+    ModelMetadata,
+    /// User-provided metadata.
+    User,
+}
+
+/// Provenance for semantic records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticRecordProvenance {
+    /// Record source.
+    pub source: SemanticRecordSource,
+    /// Language server that enriched the record, when applicable.
+    pub server_id: Option<LanguageServerId>,
+    /// Extraction contract version.
+    pub extraction_version: String,
+    /// Confidence in basis points, from 0 to 10_000.
+    pub confidence_basis_points: u16,
+}
+
+/// Lexical or semantic symbol-to-file map record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolFileMapRecord {
+    /// Stable symbol identifier.
+    pub symbol_id: SemanticSymbolId,
+    /// Hash of the symbol name for metadata-only lookup.
+    pub symbol_name_hash: FileFingerprint,
+    /// Optional bounded display name.
+    pub display_name: Option<String>,
+    /// Symbol kind label.
+    pub kind: String,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Canonical path.
+    pub path: CanonicalPath,
+    /// Language identifier.
+    pub language_id: LanguageId,
+    /// Declaration range when known.
+    pub declaration_range: Option<ProtocolTextRange>,
+    /// Reference ranges known from the shallow map.
+    pub reference_ranges: Vec<ProtocolTextRange>,
+    /// Invalidation key.
+    pub invalidation_key: SemanticInvalidationKey,
+    /// Record provenance.
+    pub provenance: SemanticRecordProvenance,
+    /// Symbol map schema version.
+    pub schema_version: u16,
+}
+
+/// Normalized semantic graph record kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticGraphRecordKind {
+    /// Symbol declaration or definition record.
+    Symbol,
+    /// Symbol reference record.
+    Reference,
+    /// Import relationship.
+    Import,
+    /// Export relationship.
+    Export,
+    /// Call edge relationship.
+    CallEdge,
+    /// Type relationship.
+    TypeRelation,
+    /// Test-to-target relationship.
+    TestLink,
+    /// Diagnostic-to-symbol or diagnostic-to-location relationship.
+    DiagnosticLink,
+    /// Ownership or code-owner metadata.
+    OwnershipMetadata,
+}
+
+/// Endpoint for normalized semantic graph records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticGraphEndpoint {
+    /// Related record identifier when known.
+    pub record_id: Option<SemanticRecordId>,
+    /// Related symbol identifier when known.
+    pub symbol_id: Option<SemanticSymbolId>,
+    /// Related file identifier when known.
+    pub file_id: Option<FileId>,
+    /// Related text range when known.
+    pub range: Option<ProtocolTextRange>,
+}
+
+/// Metadata property for normalized graph records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticProperty {
+    /// Property key.
+    pub key: String,
+    /// Metadata-only property value or bounded excerpt.
+    pub value: String,
+    /// Redaction hint for the property.
+    pub redaction: RedactionHint,
+}
+
+/// Normalized semantic graph record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticGraphRecord {
+    /// Stable record identifier.
+    pub record_id: SemanticRecordId,
+    /// Record kind.
+    pub kind: SemanticGraphRecordKind,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Source endpoint.
+    pub source: SemanticGraphEndpoint,
+    /// Optional target endpoint.
+    pub target: Option<SemanticGraphEndpoint>,
+    /// Relationship label.
+    pub label: String,
+    /// Deterministic metadata properties.
+    pub properties: Vec<SemanticProperty>,
+    /// Invalidation key.
+    pub invalidation_key: SemanticInvalidationKey,
+    /// Record provenance.
+    pub provenance: SemanticRecordProvenance,
+    /// Freshness state.
+    pub freshness: SemanticFreshnessState,
+    /// Graph record schema version.
+    pub schema_version: u16,
+}
+
+/// Semantic query kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticQueryKind {
+    /// Symbol lookup query.
+    SymbolLookup,
+    /// Definition lookup query.
+    Definition,
+    /// Reference lookup query.
+    References,
+    /// Hover enrichment query.
+    HoverEnrichment,
+    /// Completion ranking query.
+    CompletionRanking,
+    /// AI context selection query.
+    AiContextSelection,
+    /// Agent planning query.
+    AgentPlanning,
+    /// Test impact query.
+    TestImpact,
+    /// Refactoring preview query.
+    RefactoringPreview,
+}
+
+/// Scope for a semantic query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticQueryScope {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifiers to include.
+    pub file_ids: Vec<FileId>,
+    /// Paths to include when file ids are unavailable.
+    pub paths: Vec<CanonicalPath>,
+    /// Language identifiers to include.
+    pub language_ids: Vec<LanguageId>,
+    /// Privacy scope requested by the caller.
+    pub privacy_scope: SemanticPrivacyScope,
+}
+
+/// Freshness policy for semantic queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticQueryFreshnessPolicy {
+    /// Fresh results are required.
+    RequireFresh,
+    /// Stale results are allowed when labelled.
+    AllowStale,
+    /// Metadata-only results are allowed.
+    MetadataOnly,
+    /// Best-effort result quality is allowed under pressure.
+    BestEffort,
+}
+
+/// Semantic query request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticQueryRequest {
+    /// Query identifier.
+    pub query_id: SemanticQueryId,
+    /// Query kind.
+    pub kind: SemanticQueryKind,
+    /// Query scope.
+    pub scope: SemanticQueryScope,
+    /// Optional position for navigation-like queries.
+    pub position: Option<TextCoordinate>,
+    /// Optional metadata-only hash of the text query.
+    pub text_query_hash: Option<FileFingerprint>,
+    /// Maximum number of results to return.
+    pub limit: u32,
+    /// Cancellation token identity.
+    pub cancellation_token: CancellationTokenId,
+    /// Freshness policy.
+    pub freshness_policy: SemanticQueryFreshnessPolicy,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Query request schema version.
+    pub schema_version: u16,
+}
+
+/// Semantic query response status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticQueryStatus {
+    /// Query returned fresh results.
+    Fresh,
+    /// Query returned stale results.
+    Stale,
+    /// Query returned partial results.
+    Partial,
+    /// Query was cancelled.
+    Cancelled,
+    /// Query timed out.
+    Timeout,
+    /// Query was unavailable.
+    Unavailable,
+    /// Query returned degraded results.
+    Degraded,
+}
+
+/// Semantic query result kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticQueryResultKind {
+    /// Symbol result.
+    Symbol,
+    /// Location result.
+    Location,
+    /// Graph-record result.
+    GraphRecord,
+    /// Proposal-preview result.
+    ProposalPreview,
+    /// Diagnostic result.
+    Diagnostic,
+    /// Metadata result.
+    Metadata,
+}
+
+/// Semantic query result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticQueryResult {
+    /// Result identifier.
+    pub result_id: SemanticRecordId,
+    /// Result kind.
+    pub kind: SemanticQueryResultKind,
+    /// Display label or metadata-only title.
+    pub label: String,
+    /// File identifier when applicable.
+    pub file_id: Option<FileId>,
+    /// Canonical path when disclosure is allowed.
+    pub path: Option<CanonicalPath>,
+    /// Text range when applicable.
+    pub range: Option<ProtocolTextRange>,
+    /// Ranking score in basis points.
+    pub score_basis_points: u16,
+    /// Freshness metadata.
+    pub freshness: SemanticFreshness,
+    /// Result provenance.
+    pub provenance: SemanticRecordProvenance,
+    /// Related semantic record identifiers.
+    pub related_record_ids: Vec<SemanticRecordId>,
+    /// Optional proposal preview summary for mutation-producing suggestions.
+    pub proposal_preview: Option<ProposalPayloadSummary>,
+}
+
+/// Semantic query response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticQueryResponse {
+    /// Query identifier.
+    pub query_id: SemanticQueryId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Query response status.
+    pub status: SemanticQueryStatus,
+    /// Results in deterministic ranking order.
+    pub results: Vec<SemanticQueryResult>,
+    /// Diagnostics emitted while serving the query.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Optional token for retrieving a subsequent page.
+    pub next_page_token: Option<String>,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Query response schema version.
+    pub schema_version: u16,
 }
 
 // -----------------------------------------------------------------------------
@@ -2460,8 +3731,16 @@ pub enum ProposalRequest {
     Validate(WorkspaceProposal),
     /// Preview proposal.
     Preview(WorkspaceProposal),
+    /// Approve proposal.
+    Approve(ProposalLifecycleCommand),
+    /// Reject proposal.
+    Reject(ProposalLifecycleCommand),
     /// Apply proposal.
     Apply(WorkspaceProposal),
+    /// Cancel proposal.
+    Cancel(ProposalLifecycleCommand),
+    /// Roll back an already applied or partially applied proposal.
+    Rollback(ProposalLifecycleCommand),
 }
 
 /// Proposal response envelope.
@@ -2524,6 +3803,13 @@ pub enum ProposalResponse {
         /// Conflict context.
         conflict: FileConflictState,
     },
+    /// Proposal-cancelled result.
+    Cancelled {
+        /// Lifecycle transition metadata.
+        transition: ProposalLifecycleTransition,
+        /// Typed cancellation reason.
+        reason: ProposalCancellationReason,
+    },
 }
 
 /// Terminal request envelope.
@@ -2564,6 +3850,12 @@ pub enum LspRequest {
     UpdateDocument(DocumentSyncState),
     /// Completion.
     Completion(LspCompletionRequest),
+    /// Definition lookup.
+    Definition(LspDefinitionRequest),
+    /// Reference lookup.
+    References(LspReferenceRequest),
+    /// Rename operation.
+    Rename(LspRenameRequest),
     /// Hover.
     Hover {
         /// Language server to resolve hover from.
@@ -2573,6 +3865,8 @@ pub enum LspRequest {
     },
     /// Formatting.
     Formatting(LspFormattingRequest),
+    /// Formatting operation that must return proposal-mediated output.
+    FormattingProposal(LspFormattingProposalRequest),
     /// Symbol.
     Symbol {
         /// File id for which to request symbols.
@@ -2580,6 +3874,10 @@ pub enum LspRequest {
     },
     /// Code action.
     CodeAction(LspCodeActionRequest),
+    /// Code action operation with separated edit and command payloads.
+    CodeActionProposal(LspCodeActionProposalRequest),
+    /// Cancel an in-flight LSP operation.
+    Cancel(LspCancellationRequest),
 }
 
 /// LSP response envelope.
@@ -2592,10 +3890,18 @@ pub enum LspResponse {
     },
     /// Completion.
     Completion(LspCompletionResponse),
+    /// Definition lookup response.
+    Definition(LspDefinitionResponse),
+    /// Reference lookup response.
+    References(LspReferenceResponse),
+    /// Rename response.
+    Rename(LspRenameResponse),
     /// Hover.
     Hover(Hover),
     /// Formatting.
     Formatting(LspFormattingResponse),
+    /// Formatting response with proposal-mediated output.
+    FormattingProposal(LspFormattingProposalResponse),
     /// Diagnostics.
     Diagnostics(DiagnosticSet),
     /// Semantic tokens.
@@ -2604,6 +3910,10 @@ pub enum LspResponse {
     Symbols(Vec<SymbolLocation>),
     /// Actions.
     CodeActions(LspCodeActionResponse),
+    /// Code-action response with separated edit and command payloads.
+    CodeActionProposals(LspCodeActionProposalResponse),
+    /// Cancellation acknowledgement.
+    Cancelled(LspCancellationAck),
     /// Status.
     Status(LspServerStatus),
 }
@@ -3595,6 +4905,18 @@ mod tests {
                     },
                     expires_at: None,
                     created_at: TimestampMillis(1),
+                })),
+                p.handle(ProposalRequest::Approve(ProposalLifecycleCommand {
+                    proposal_id: ProposalId(1),
+                    action: ProposalLifecycleAction::Approve,
+                    principal: PrincipalId("x".to_string()),
+                    capability: CapabilityId("fs.write".to_string()),
+                    correlation_id: CorrelationId(1),
+                    causality_id: CausalityId(Uuid::now_v7()),
+                    reason: None,
+                    diagnostics: vec![],
+                    requested_at: TimestampMillis(1),
+                    schema_version: 1,
                 })),
                 t.handle(TerminalRequest::Close {
                     session_id: TerminalSessionId(1),

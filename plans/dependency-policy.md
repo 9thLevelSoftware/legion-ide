@@ -90,6 +90,8 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `devil-storage`
   - `devil-text`
 
+Phase 3 semantic fabric activation for `crates/devil-index/Cargo.toml` is limited to the three internal dependencies listed above. No other internal crate edge is authorized for `crates/devil-index/Cargo.toml` while activating actor-owned indexing, lexical maps, tree-sitter syntax caches, normalized graph records, semantic query APIs, and LSP fusion. Repository, editor, workspace, app, and UI facts must cross through protocol DTOs, text snapshot contracts, storage metadata, or proposal-mediated workflows rather than direct crate coupling. This policy entry does not authorize vector indexing, embeddings, model-provider dependencies, or direct mutation of buffers and workspaces.
+
 - `devil-tracker` may depend on:
   - `devil-protocol`
   - `devil-storage`
@@ -307,14 +309,18 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
 
 ### 4. Runtime Surface Activation Gates
 
-- `devil-index`, `devil-agent`, `devil-tracker`, `devil-memory`, `devil-plugin`, `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated.
-- Runtime behavior for those crates or surfaces must not land until the same change also includes:
+- Phase 3 activates `devil-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
+- `devil-agent`, `devil-tracker`, `devil-memory`, `devil-plugin`, `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated
   - an explicit dependency-policy entry in this document
+  - an active phase gate recorded in the implementation plan or phase evidence
   - required protocol contracts in `crates/devil-protocol/src/lib.rs`
+  - contract tests for the newly activated protocol and runtime behavior
   - architecture-gate tests proving the new surface preserves ownership and mutation rules
-  - an owner and phase gate recorded in the active implementation plan
-- Existing ADRs for tracker or memory do not waive the other activation gates. Placeholder crates remain inert until the full gate is satisfied.
+  - an owner recorded in the active implementation plan or evidence
+- Existing ADRs for tracker or memory do not waive the other activation gates. Placeholder crates remain inert unless they have an accepted ADR, dependency-policy entry, phase gate, required protocol contracts, contract tests, ownership tests, and evidence.
+- Vector indexing remains deferred until a later accepted ADR, dependency-policy update, syntax-aware chunking contract, provenance contract, privacy-scope contract, model-identity contract, invalidation contract, storage-retention decision, and contract-test suite exist.
 
 ### 5. Enforcement
 

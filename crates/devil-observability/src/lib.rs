@@ -480,6 +480,32 @@ pub fn proposal_payload_summary(proposal: &WorkspaceProposal) -> ProposalPayload
             title: Some(format!("command_hash={}", metadata_hash(&payload.command))),
             byte_count: None,
         },
+        ProposalPayload::Batch(payload) => ProposalPayloadSummary {
+            kind: ProposalPayloadKind::Batch,
+            affected_files: payload
+                .target_coverage
+                .targets
+                .iter()
+                .filter_map(|target| target.file_id)
+                .collect(),
+            title: Some(format!(
+                "batch_items={} atomicity={:?}",
+                payload.items.len(),
+                payload.atomicity
+            )),
+            byte_count: None,
+        },
+        ProposalPayload::WorkspaceEdit(payload) => ProposalPayloadSummary {
+            kind: ProposalPayloadKind::WorkspaceEdit,
+            affected_files: payload
+                .target_coverage
+                .targets
+                .iter()
+                .filter_map(|target| target.file_id)
+                .collect(),
+            title: Some(format!("source={:?}", payload.source)),
+            byte_count: None,
+        },
     }
 }
 
@@ -996,6 +1022,12 @@ fn proposal_workspace_id(proposal: &WorkspaceProposal) -> Option<WorkspaceId> {
         ProposalPayload::SaveFile(payload) => Some(payload.file.workspace_id),
         ProposalPayload::FormatFile(payload) => Some(payload.file.workspace_id),
         ProposalPayload::CodeAction(payload) => Some(payload.file.workspace_id),
+        ProposalPayload::Batch(payload) => payload
+            .target_coverage
+            .targets
+            .iter()
+            .find_map(|target| target.workspace_id),
+        ProposalPayload::WorkspaceEdit(payload) => Some(payload.workspace_id),
         ProposalPayload::TextEdit(_)
         | ProposalPayload::CreateFile(_)
         | ProposalPayload::TerminalCommand(_) => None,
