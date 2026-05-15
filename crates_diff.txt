@@ -1,0 +1,4186 @@
+diff --git a/crates/devil-app/src/lib.rs b/crates/devil-app/src/lib.rs
+index 0b4c78f..4a4a8a8 100644
+--- a/crates/devil-app/src/lib.rs
++++ b/crates/devil-app/src/lib.rs
+@@ -219,7 +219,7 @@ impl SaveProposalCoordinator {
+             diagnostics: Vec::new(),
+         };
+ 
+-        let proposal = WorkspaceProposal {
++        WorkspaceProposal {
+             proposal_id,
+             principal,
+             capability,
+@@ -229,8 +229,7 @@ impl SaveProposalCoordinator {
+             preview,
+             expires_at: None,
+             created_at: TimestampMillis::now(),
+-        };
+-        proposal
++        }
+     }
+ 
+     fn created_response(&self, proposal: &WorkspaceProposal) -> ProposalResponse {
+@@ -873,11 +872,30 @@ impl ProjectionBuilder {
+     fn active_buffer_projection(
+         active: &ActiveDocumentController,
+         editor: &EditorEngine,
++        layout: &ShellLayoutProjection,
+     ) -> Result<ActiveBufferProjection, AppCompositionError> {
+         let Some(buffer_id) = active.active_buffer_id else {
+             return Ok(ActiveBufferProjection::empty());
+         };
+ 
++        // Construct default viewport request
++        let request = devil_protocol::EditorViewportRequest {
++            buffer_id,
++            scroll: devil_protocol::ViewportScroll {
++                top_line: 0,
++                left_column: 0,
++            },
++            dimensions: devil_protocol::ViewportDimensions {
++                width_px: layout.layout.width as u32 * 8, // Approximate
++                height_px: layout.layout.height as u32 * 16,
++            },
++        };
++
++        let viewport = editor.viewport_projection(request).ok();
++        let degraded = viewport
++            .as_ref()
++            .is_some_and(|vp| vp.large_file_status.is_some());
++
+         Ok(ActiveBufferProjection {
+             workspace_id: active.workspace_id(),
+             buffer_id: Some(buffer_id),
+@@ -886,8 +904,14 @@ impl ProjectionBuilder {
+                 .active_file_path
+                 .as_ref()
+                 .map(|path| CanonicalPath(path.clone())),
+-            text: editor.text(buffer_id)?.to_string(),
+-            dirty: editor.is_dirty(buffer_id)?,
++            viewport,
++            degraded,
++            small_buffer_preview: if degraded {
++                None
++            } else {
++                editor.text(buffer_id).ok().map(|s| s.to_string())
++            },
++            dirty: editor.is_dirty(buffer_id).unwrap_or(false),
+         })
+     }
+ 
+@@ -935,6 +959,7 @@ struct SaveWorkflowFailure {
+ struct SaveWorkflowService;
+ 
+ impl SaveWorkflowService {
++    #[allow(clippy::result_large_err)]
+     fn save_active_buffer(
+         editor: &mut EditorEngine,
+         workspace: &WorkspaceActor,
+@@ -1581,8 +1606,11 @@ impl AppComposition {
+     }
+ 
+     /// Build active-buffer projection from editor-engine state.
+-    pub fn active_buffer_projection(&self) -> Result<ActiveBufferProjection, AppCompositionError> {
+-        ProjectionBuilder::active_buffer_projection(&self.active_documents, &self.editor)
++    pub fn active_buffer_projection(
++        &self,
++        layout: &ShellLayoutProjection,
++    ) -> Result<ActiveBufferProjection, AppCompositionError> {
++        ProjectionBuilder::active_buffer_projection(&self.active_documents, &self.editor, layout)
+     }
+ 
+     /// Build the complete projection snapshot consumed by the UI shell.
+@@ -1590,10 +1618,11 @@ impl AppComposition {
+         &self,
+         title: impl Into<String>,
+     ) -> Result<ShellProjectionSnapshot, AppCompositionError> {
++        let layout_projection = ShellLayoutProjection::plain(title);
+         Ok(ShellProjectionSnapshot {
+-            layout_projection: ShellLayoutProjection::plain(title),
++            active_buffer_projection: self.active_buffer_projection(&layout_projection)?,
++            layout_projection,
+             explorer_projection: self.explorer_projection()?,
+-            active_buffer_projection: self.active_buffer_projection()?,
+             status_messages: Vec::new(),
+         })
+     }
+diff --git a/crates/devil-app/tests/workspace_vfs_integration.rs b/crates/devil-app/tests/workspace_vfs_integration.rs
+index c7fc776..2d4666b 100644
+--- a/crates/devil-app/tests/workspace_vfs_integration.rs
++++ b/crates/devil-app/tests/workspace_vfs_integration.rs
+@@ -4,6 +4,7 @@ use std::{
+ };
+ 
+ static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
++const FULL_CACHE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
+ 
+ use devil_app::{
+     AppCommandExecutionState, AppCommandOutcome, AppCommandRequest, AppComposition,
+@@ -17,9 +18,9 @@ use devil_protocol::{
+     BufferId, BufferVersion, CanonicalPath, CausalityId, ChangedTextRange, EventEnvelope,
+     FileConflictLifecycleState, FileContentVersion, FileId, FileIdentity, FileMetadata,
+     FileTreeNode, PrincipalId, SnapshotId, TextTransactionDescriptor, TimestampMillis,
+-    TransactionSource, WorkspaceId, WorkspaceTrustState,
++    TransactionSource, ViewportProjectionMode, WorkspaceId, WorkspaceTrustState,
+ };
+-use devil_ui::CommandDispatchIntent;
++use devil_ui::{CommandDispatchIntent, ShellLayoutProjection};
+ use uuid::Uuid;
+ 
+ fn create_root() -> std::path::PathBuf {
+@@ -70,6 +71,18 @@ fn assert_events_include_order(events: &[EventEnvelope], expected: &[&str]) {
+     );
+ }
+ 
++fn deterministic_large_text(byte_len: usize) -> String {
++    let line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
++    let mut text = String::with_capacity(byte_len);
++    while text.len() + line.len() <= byte_len {
++        text.push_str(line);
++    }
++    while text.len() < byte_len {
++        text.push('z');
++    }
++    text
++}
++
+ #[test]
+ fn workspace_vfs_integration_untrusted_save_is_denied_without_disk_mutation() {
+     let root = create_root();
+@@ -276,6 +289,45 @@ fn workspace_vfs_integration_open_edit_save_use_engine_and_workspace_ids() {
+     let _ = std::fs::remove_dir_all(&root);
+ }
+ 
++#[test]
++fn workspace_vfs_integration_large_file_projection_omits_full_source_text() {
++    let root = create_root();
++    let target = root.join("large.txt");
++    let text = deterministic_large_text(FULL_CACHE_BUDGET_BYTES + 128 * 1024);
++    std::fs::write(&target, text).expect("large file");
++
++    let (mut app, _sink) = app_with_events();
++    app.open_workspace(
++        &root,
++        WorkspaceTrustState::Trusted,
++        PrincipalId("trusted".to_string()),
++    )
++    .expect("open workspace");
++    app.open_file(target.to_string_lossy())
++        .expect("open large target file");
++
++    let projection = app
++        .active_buffer_projection(&ShellLayoutProjection::plain("large"))
++        .expect("active projection");
++    let viewport = projection.viewport.as_ref().expect("viewport projection");
++    let payload_bytes = viewport
++        .line_slices
++        .iter()
++        .map(|slice| slice.visible_text.len())
++        .sum::<usize>();
++
++    assert!(projection.degraded);
++    assert!(projection.small_buffer_text().is_none());
++    assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
++    assert!(viewport.large_file_status.is_some());
++    assert!(payload_bytes < FULL_CACHE_BUDGET_BYTES / 32);
++    assert!(viewport.decoration_spans.is_empty());
++    assert!(viewport.fold_ranges.is_empty());
++    assert!(viewport.semantic_token_overlays.is_empty());
++
++    let _ = std::fs::remove_dir_all(&root);
++}
++
+ #[test]
+ fn workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict() {
+     let root = create_root();
+@@ -424,6 +476,56 @@ fn workspace_vfs_integration_ui_command_intent_routes_to_engine_apply_edit() {
+     let _ = std::fs::remove_dir_all(&root);
+ }
+ 
++#[test]
++fn workspace_vfs_integration_large_buffer_projection_does_not_populate_full_text() {
++    let root = create_root();
++    let target = root.join("large.txt");
++
++    // Create a 6MB file to force degraded mode
++    let mut large_content = String::with_capacity(6 * 1024 * 1024);
++    let line = "padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding\n";
++    while large_content.len() < 6 * 1024 * 1024 {
++        large_content.push_str(line);
++    }
++    std::fs::write(&target, &large_content).expect("large seed file");
++
++    let (mut app, _sink) = app_with_events();
++    app.open_workspace(
++        &root,
++        WorkspaceTrustState::Trusted,
++        PrincipalId("trusted".to_string()),
++    )
++    .expect("open workspace");
++
++    app.open_file(target.to_string_lossy())
++        .expect("open target large file");
++
++    let snapshot = app
++        .shell_projection_snapshot("title")
++        .expect("get projection");
++    let active = snapshot.active_buffer_projection;
++
++    // Proving large-buffer projection does not call/populate full-source projection
++    assert!(active.degraded, "should be degraded");
++    assert!(
++        active.small_buffer_text().is_none(),
++        "should not have unbounded full text"
++    );
++
++    let viewport = active.viewport.expect("should have viewport projection");
++    assert!(
++        !viewport.line_slices.is_empty(),
++        "viewport should have line slices"
++    );
++    // Ensure viewport is bounded (e.g. only 24 lines based on default height)
++    assert!(
++        viewport.line_slices.len() <= 100,
++        "viewport slices should be bounded, not unbounded"
++    );
++
++    let _ = std::fs::remove_dir_all(&root);
++}
++
+ #[derive(Debug, Default)]
+ struct MockEditorPort {
+     applied: Vec<(BufferId, TextEdit)>,
+diff --git a/crates/devil-editor/src/lib.rs b/crates/devil-editor/src/lib.rs
+index ecd181a..f91d2ec 100644
+--- a/crates/devil-editor/src/lib.rs
++++ b/crates/devil-editor/src/lib.rs
+@@ -11,10 +11,14 @@ use devil_protocol::{
+     CorrelationId, EditorApplyTransactionRequest, EditorBufferMetadata, EditorOpenBufferRequest,
+     EditorPort, EditorRequest, EditorResponse, EditorSaveAcknowledgement, EditorSaveOutcome,
+     EditorSaveRequest, EditorViewportRequest, EventSequence, EventSinkPort, EventSinkRequest,
+-    FileConflictLifecycleState, FileConflictState, FileId, ProtocolDiagnostic, ProtocolError,
+-    ProtocolResult, ProtocolTextRange, SnapshotId, TextCoordinate, TextTransactionDescriptor,
+-    TimestampMillis, TransactionSource, Utf16Position, Utf16Range as ProtocolUtf16Range,
+-    ViewportProjection, WorkspaceId,
++    FileConflictLifecycleState, FileConflictState, FileFingerprint, FileId, LargeFileStatus,
++    LineIndexRange, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
++    ProtocolTextRange, SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId,
++    SnapshotLeaseDescriptor, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
++    TransactionSource, Utf16Position as ProtocolUtf16Position, Utf16Range as ProtocolUtf16Range,
++    ViewportDecorationSpan, ViewportFoldRange, ViewportLineMetric, ViewportLineSlice,
++    ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
++    ViewportSemanticTokenOverlay, WorkspaceId,
+ };
+ use devil_text::{
+     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
+@@ -46,6 +50,11 @@ pub enum EditorError {
+     /// Redo stack empty.
+     #[error("nothing to redo")]
+     NothingToRedo,
++    /// Save requires a full-source payload that Phase 1 degraded mode does not provide.
++    #[error(
++        "buffer {0:?} is in degraded mode; phase 1 save requests fail closed until chunked save support is available"
++    )]
++    DegradedSaveUnavailable(BufferId),
+ }
+ 
+ /// Cursor state for a single caret.
+@@ -134,11 +143,11 @@ impl TransactionRecord {
+                 .map(|delta| ChangedTextRange {
+                     byte_range: delta.byte_range,
+                     utf16_range: ProtocolUtf16Range {
+-                        start: Utf16Position {
++                        start: ProtocolUtf16Position {
+                             line: delta.utf16_range.start.line as u32,
+                             character: delta.utf16_range.start.character as u32,
+                         },
+-                        end: Utf16Position {
++                        end: ProtocolUtf16Position {
+                             line: delta.utf16_range.end.line as u32,
+                             character: delta.utf16_range.end.character as u32,
+                         },
+@@ -237,6 +246,21 @@ struct SaveSnapshotPayload {
+     dto: SaveRequestDto,
+ }
+ 
++#[derive(Debug, Clone)]
++struct SnapshotLeaseRecord {
++    snapshot: devil_text::TextSnapshot,
++    descriptor: SnapshotLeaseDescriptor,
++}
++
++/// Drained metadata-only transaction events captured by the editor.
++#[derive(Debug, Clone, Default)]
++pub struct DrainedTransactionEvents {
++    /// Transaction descriptors produced since the previous drain.
++    pub descriptors: Vec<TextTransactionDescriptor>,
++    /// Number of older descriptors dropped before this drain because the queue was full.
++    pub dropped_before_drain: u64,
++}
++
+ #[derive(Debug, Clone)]
+ struct RetainedSnapshotDescriptor {
+     buffer_id: BufferId,
+@@ -273,7 +297,11 @@ impl EditorBufferState {
+         initial_text: impl Into<String>,
+         mode: BufferMode,
+     ) -> Result<Self, EditorError> {
+-        let mut buffer = TextBuffer::try_with_version(initial_text.into(), BufferVersion(0))?;
++        let mut buffer = TextBuffer::try_with_version_and_cache_policy(
++            initial_text.into(),
++            BufferVersion(0),
++            matches!(mode, BufferMode::Normal),
++        )?;
+         buffer.set_version(BufferVersion(0));
+         let current_snapshot =
+             buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
+@@ -308,13 +336,17 @@ enum SnapshotStackKind {
+ }
+ 
+ /// Production multi-buffer editor engine.
+-#[derive(Debug, Default)]
++#[derive(Debug)]
+ pub struct EditorEngine {
+     next_buffer_id: u128,
+     buffers: HashMap<BufferId, EditorBufferState>,
+     file_to_buffer: HashMap<(WorkspaceId, FileId), BufferId>,
+     transaction_log: Vec<TransactionRecord>,
++    transaction_events: VecDeque<TextTransactionDescriptor>,
++    transaction_event_queue_capacity: usize,
++    dropped_transaction_event_count: u64,
+     pending_save_requests: Vec<SaveRequestDto>,
++    snapshot_leases: HashMap<Uuid, SnapshotLeaseRecord>,
+     pinned_snapshot_ids: HashSet<SnapshotId>,
+     thresholds: EditorThresholds,
+     snapshot_retention_policy: SnapshotRetentionPolicy,
+@@ -389,6 +421,8 @@ impl Default for EditorEnginePort {
+ 
+ const DEFAULT_RETENTION_BUDGET_SNAPSHOTS: usize = 256;
+ const DEFAULT_RETENTION_BUDGET_BYTES: usize = DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES * 4;
++const DEFAULT_TRANSACTION_EVENT_QUEUE_CAPACITY: usize = 256;
++const DEFAULT_SNAPSHOT_LEASE_TTL_MILLIS: u64 = 60_000;
+ 
+ /// Buffer operating mode selected by size-based degradation gate.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -447,16 +481,31 @@ impl Default for SnapshotRetentionPolicy {
+     }
+ }
+ 
+-impl EditorEngine {
+-    /// Create a new empty engine.
+-    pub fn new() -> Self {
++impl Default for EditorEngine {
++    fn default() -> Self {
+         Self {
+             next_buffer_id: 1,
++            buffers: HashMap::new(),
++            file_to_buffer: HashMap::new(),
++            transaction_log: Vec::new(),
++            transaction_events: VecDeque::with_capacity(DEFAULT_TRANSACTION_EVENT_QUEUE_CAPACITY),
++            transaction_event_queue_capacity: DEFAULT_TRANSACTION_EVENT_QUEUE_CAPACITY,
++            dropped_transaction_event_count: 0,
++            pending_save_requests: Vec::new(),
++            snapshot_leases: HashMap::new(),
++            pinned_snapshot_ids: HashSet::new(),
+             thresholds: EditorThresholds::default(),
+             snapshot_retention_policy: SnapshotRetentionPolicy::default(),
+-            ..Self::default()
++            retained_snapshots: VecDeque::new(),
+         }
+     }
++}
++
++impl EditorEngine {
++    /// Create a new empty engine.
++    pub fn new() -> Self {
++        Self::default()
++    }
+ 
+     /// Create an engine with explicit threshold tuning for degraded mode and retention controls.
+     pub fn with_thresholds(thresholds: EditorThresholds) -> Self {
+@@ -474,6 +523,15 @@ impl EditorEngine {
+         }
+     }
+ 
++    /// Create an engine with an explicit bounded transaction event queue capacity.
++    pub fn with_transaction_event_queue_capacity(capacity: usize) -> Self {
++        let mut engine = Self::new();
++        engine.transaction_event_queue_capacity = capacity.max(1);
++        engine.transaction_events =
++            VecDeque::with_capacity(engine.transaction_event_queue_capacity.max(1));
++        engine
++    }
++
+     /// Returns the threshold configuration currently active for this editor.
+     pub fn thresholds(&self) -> EditorThresholds {
+         self.thresholds
+@@ -499,11 +557,7 @@ impl EditorEngine {
+         self.next_buffer_id += 1;
+ 
+         let initial_text = initial_text.into();
+-        let mode = if initial_text.len() > self.thresholds.large_file_threshold_bytes {
+-            BufferMode::Degraded
+-        } else {
+-            BufferMode::Normal
+-        };
++        let mode = self.mode_for_byte_len(initial_text.len());
+         let state = EditorBufferState::new(
+             workspace_id,
+             buffer_id,
+@@ -527,21 +581,21 @@ impl EditorEngine {
+             .ok_or(EditorError::BufferNotFound(buffer_id))?;
+         self.file_to_buffer
+             .remove(&(state.workspace_id, state.file_id));
+-        self.remove_snapshot_descriptor(state.current_snapshot.snapshot_id());
++        self.release_snapshot_descriptor_if_unreferenced(state.current_snapshot.snapshot_id());
+         for entry in state.undo_stack.iter().chain(state.redo_stack.iter()) {
+-            self.remove_snapshot_descriptor(entry.snapshot.snapshot_id());
++            self.release_snapshot_descriptor_if_unreferenced(entry.snapshot.snapshot_id());
+         }
+         Ok(())
+     }
+ 
+     /// Get immutable text for a buffer.
+     pub fn text(&self, buffer_id: BufferId) -> Result<&str, EditorError> {
+-        Ok(self
+-            .buffers
++        self.buffers
+             .get(&buffer_id)
+             .ok_or(EditorError::BufferNotFound(buffer_id))?
+             .buffer
+-            .text())
++            .try_full_text()
++            .map_err(EditorError::from)
+     }
+ 
+     /// Get file path for a buffer.
+@@ -594,6 +648,57 @@ impl EditorEngine {
+             .descriptor())
+     }
+ 
++    /// Return protocol chunk descriptors for the current snapshot of a buffer.
++    pub fn snapshot_chunk_descriptors(
++        &self,
++        buffer_id: BufferId,
++    ) -> Result<Vec<SnapshotChunkDescriptor>, EditorError> {
++        let state = self
++            .buffers
++            .get(&buffer_id)
++            .ok_or(EditorError::BufferNotFound(buffer_id))?;
++        Ok(Self::protocol_snapshot_chunk_descriptors(
++            &state.current_snapshot,
++        ))
++    }
++
++    /// Acquire a descriptor-only lease over the current snapshot for a downstream consumer.
++    pub fn lease_snapshot(
++        &mut self,
++        buffer_id: BufferId,
++        consumer_kind: SnapshotConsumerKind,
++    ) -> Result<SnapshotLeaseDescriptor, EditorError> {
++        let state = self
++            .buffers
++            .get(&buffer_id)
++            .ok_or(EditorError::BufferNotFound(buffer_id))?;
++        let snapshot = state.current_snapshot.clone();
++        let now = TimestampMillis::now();
++        let descriptor = SnapshotLeaseDescriptor {
++            lease_id: Uuid::now_v7(),
++            snapshot_id: snapshot.snapshot_id(),
++            consumer_kind,
++            expires_at: TimestampMillis(now.0.saturating_add(DEFAULT_SNAPSHOT_LEASE_TTL_MILLIS)),
++            chunk_count: snapshot.chunk_descriptors().len() as u32,
++            schema_version: 1,
++        };
++        self.snapshot_leases.insert(
++            descriptor.lease_id,
++            SnapshotLeaseRecord {
++                snapshot,
++                descriptor: descriptor.clone(),
++            },
++        );
++        Ok(descriptor)
++    }
++
++    /// Release a previously acquired snapshot lease.
++    pub fn release_snapshot_lease(&mut self, lease_id: Uuid) -> Option<SnapshotLeaseDescriptor> {
++        let lease = self.snapshot_leases.remove(&lease_id)?;
++        self.release_snapshot_descriptor_if_unreferenced(lease.snapshot.snapshot_id());
++        Some(lease.descriptor)
++    }
++
+     /// Return the workspace id and file id for a buffer.
+     pub fn buffer_identity(
+         &self,
+@@ -649,6 +754,59 @@ impl EditorEngine {
+         let top_line = (request.scroll.top_line as usize).min(line_count.saturating_sub(1));
+         let approx_visible_lines = ((request.dimensions.height_px / 16).max(1)) as usize;
+         let end_line = (top_line + approx_visible_lines).min(line_count);
++        let visible_line_slices = state
++            .current_snapshot
++            .visible_line_slices(top_line, end_line)?;
++        let line_metrics = visible_line_slices
++            .iter()
++            .map(|slice| {
++                Ok(ViewportLineMetric {
++                    byte_length: state
++                        .current_snapshot
++                        .line_index()
++                        .line_byte_len(slice.line)? as u64,
++                    utf16_length: state
++                        .current_snapshot
++                        .line_index()
++                        .line_utf16_len(slice.line)? as u64,
++                    line_ending_width: state
++                        .current_snapshot
++                        .line_index()
++                        .line_ending_bytes(slice.line)?
++                        as u8,
++                    exact: true,
++                })
++            })
++            .collect::<Result<Vec<_>, EditorError>>()?;
++        let line_slices = visible_line_slices
++            .iter()
++            .map(|slice| {
++                Ok(ViewportLineSlice {
++                    line_number: slice.line as u32,
++                    visible_text: slice.text.clone(),
++                    byte_range: ByteRange::new(
++                        slice.line_start_byte as u64,
++                        slice.slice_end_byte as u64,
++                    ),
++                    utf16_range: Self::protocol_utf16_range(
++                        state
++                            .current_snapshot
++                            .line_index()
++                            .utf16_position(slice.line_start_byte)?,
++                        state
++                            .current_snapshot
++                            .line_index()
++                            .utf16_position(slice.slice_end_byte)?,
++                    ),
++                    chunk_hash: Self::chunk_hash_for_line(&state.current_snapshot, slice.line),
++                    truncation_state: if slice.truncated {
++                        ViewportLineTruncationState::Trailing
++                    } else {
++                        ViewportLineTruncationState::None
++                    },
++                })
++            })
++            .collect::<Result<Vec<_>, EditorError>>()?;
+         let start = state
+             .buffer
+             .try_byte_offset(TextPosition::new(top_line, 0))?;
+@@ -664,6 +822,10 @@ impl EditorEngine {
+             .first()
+             .map(|cursor| cursor.position)
+             .unwrap_or_else(TextPosition::zero);
++        let mode = match state.mode {
++            BufferMode::Normal => ViewportProjectionMode::Normal,
++            BufferMode::Degraded => ViewportProjectionMode::DegradedLargeFile,
++        };
+ 
+         Ok(ViewportProjection {
+             workspace_id: state.workspace_id,
+@@ -680,14 +842,30 @@ impl EditorEngine {
+                 .iter()
+                 .map(|selection| Self::protocol_range(&state.buffer, selection.range))
+                 .collect::<Result<Vec<_>, _>>()?,
+-            cursor: Self::protocol_coordinate(
+-                &state.buffer,
+-                cursor.line,
+-                state.buffer.try_byte_offset(cursor)?,
+-            )?,
++            cursor: Self::protocol_coordinate_from_offset(&state.buffer, state.buffer.try_byte_offset(cursor)?)?,
+             scroll: request.scroll,
+             dimensions: request.dimensions,
+-            schema_version: 1,
++            mode,
++            line_slices,
++            line_metrics,
++            decoration_spans: Vec::<ViewportDecorationSpan>::new(),
++            fold_ranges: Vec::<ViewportFoldRange>::new(),
++            semantic_token_overlays: Vec::<ViewportSemanticTokenOverlay>::new(),
++            large_file_status: matches!(state.mode, BufferMode::Degraded).then(|| LargeFileStatus {
++                threshold_bytes: self.thresholds.large_file_threshold_bytes as u64,
++                byte_len: descriptor.byte_len as u64,
++                disabled_overlay_reasons: vec![
++                    "decorations deferred in degraded large-file mode".to_string(),
++                    "fold computation deferred in degraded large-file mode".to_string(),
++                    "semantic token overlays deferred in degraded large-file mode".to_string(),
++                ],
++                bounded_search_enabled: true,
++                message: format!(
++                    "Large file degraded mode is active for {} bytes; viewport payloads are chunked and Phase 1 saves fail closed.",
++                    descriptor.byte_len
++                ),
++            }),
++            schema_version: 2,
+         })
+     }
+ 
+@@ -719,16 +897,13 @@ impl EditorEngine {
+ 
+     fn protocol_coordinate(
+         buffer: &TextBuffer,
+-        line: usize,
++        _line: usize,
+         byte_offset: usize,
+     ) -> Result<TextCoordinate, EditorError> {
+         let position = buffer.try_position(byte_offset)?;
+-        let utf16_offset = buffer
+-            .text()
+-            .get(..byte_offset)
+-            .map(|prefix| prefix.encode_utf16().count() as u64);
++        let utf16_offset = Some(Self::absolute_utf16_offset(buffer, byte_offset)?);
+         Ok(TextCoordinate {
+-            line: line as u32,
++            line: position.line as u32,
+             character: position.column as u32,
+             byte_offset: Some(byte_offset as u64),
+             utf16_offset,
+@@ -760,6 +935,8 @@ impl EditorEngine {
+             return Err(EditorError::InvalidEdit("edit batch cannot be empty"));
+         }
+ 
++        let thresholds = self.thresholds;
++
+         let state = self
+             .buffers
+             .get(&buffer_id)
+@@ -784,6 +961,8 @@ impl EditorEngine {
+ 
+         let next_version = BufferVersion(plan.pre_version.0 + 1);
+         staged_buffer.set_version(next_version);
++        let next_mode = Self::mode_for_byte_len_with_thresholds(thresholds, staged_buffer.len());
++        staged_buffer.set_full_cache_policy(matches!(next_mode, BufferMode::Normal))?;
+         let post_snapshot =
+             staged_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
+         let post_descriptor = post_snapshot.descriptor().clone();
+@@ -811,6 +990,7 @@ impl EditorEngine {
+             });
+             state.redo_stack.clear();
+             state.buffer = staged_buffer;
++            state.mode = next_mode;
+             state.current_snapshot = post_snapshot;
+             state.dirty = true;
+             state.save_state = if state.conflict_state.is_some() {
+@@ -828,9 +1008,9 @@ impl EditorEngine {
+         };
+ 
+         for snapshot_id in redo_snapshot_ids {
+-            self.remove_snapshot_descriptor(snapshot_id);
++            self.release_snapshot_descriptor_if_unreferenced(snapshot_id);
+         }
+-        self.remove_snapshot_descriptor(old_current_snapshot_id);
++        self.release_snapshot_descriptor_if_unreferenced(old_current_snapshot_id);
+         let mut undo_descriptor = plan.pre_snapshot.descriptor().clone();
+         undo_descriptor.retention_pin_reason = RetentionPinReason::UndoHistory;
+         self.retain_snapshot_descriptor(buffer_id, &undo_descriptor);
+@@ -854,6 +1034,7 @@ impl EditorEngine {
+         };
+ 
+         self.transaction_log.push(tx.clone());
++        self.enqueue_transaction_event(&tx);
+         Ok(tx)
+     }
+ 
+@@ -959,7 +1140,7 @@ impl EditorEngine {
+                     }
+                 }
+             }
+-            self.remove_snapshot_descriptor(snapshot_id);
++            self.release_snapshot_descriptor_if_unreferenced(snapshot_id);
+         }
+     }
+ 
+@@ -1004,6 +1185,10 @@ impl EditorEngine {
+         self.pending_save_requests
+             .iter()
+             .any(|request| request.snapshot_id == snapshot_id)
++            || self
++                .snapshot_leases
++                .values()
++                .any(|lease| lease.snapshot.snapshot_id() == snapshot_id)
+             || self
+                 .buffers
+                 .values()
+@@ -1016,6 +1201,7 @@ impl EditorEngine {
+         buffer_id: BufferId,
+         correlation_id: Option<CorrelationId>,
+     ) -> Result<TransactionRecord, EditorError> {
++        let thresholds = self.thresholds;
+         let (
+             workspace_id,
+             file_id,
+@@ -1025,6 +1211,7 @@ impl EditorEngine {
+             post_snapshot_descriptor,
+             undo_snapshot_id,
+             delta,
++            restored_mode,
+         ) = {
+             let state = self
+                 .buffers
+@@ -1037,8 +1224,13 @@ impl EditorEngine {
+                 .ok_or(EditorError::NothingToUndo)?;
+             let pre_snapshot = state.current_snapshot.clone();
+             let next_version = BufferVersion(state.buffer.version().0 + 1);
+-            let mut restored_buffer =
+-                TextBuffer::try_with_version(undo_entry.snapshot.text().to_string(), next_version)?;
++            let restored_mode =
++                Self::mode_for_byte_len_with_thresholds(thresholds, undo_entry.snapshot.len());
++            let mut restored_buffer = TextBuffer::try_from_rope_with_cache_policy(
++                undo_entry.snapshot.rope(),
++                next_version,
++                matches!(restored_mode, BufferMode::Normal),
++            )?;
+             restored_buffer.set_version(next_version);
+             let restored_snapshot =
+                 restored_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
+@@ -1060,6 +1252,7 @@ impl EditorEngine {
+                 undo_group_id: undo_entry.undo_group_id,
+             });
+             state.buffer = restored_buffer;
++            state.mode = restored_mode;
+             state.current_snapshot = restored_snapshot;
+             state.dirty = true;
+             state.save_state = if state.conflict_state.is_some() {
+@@ -1077,9 +1270,10 @@ impl EditorEngine {
+                 restored_snapshot_descriptor,
+                 undo_snapshot_id,
+                 delta,
++                restored_mode,
+             )
+         };
+-        self.remove_snapshot_descriptor(undo_snapshot_id);
++        self.release_snapshot_descriptor_if_unreferenced(undo_snapshot_id);
+         self.retain_snapshot_descriptor(buffer_id, &redo_snapshot_descriptor);
+         self.retain_snapshot_descriptor(buffer_id, &post_snapshot_descriptor);
+         self.enforce_snapshot_retention_policy();
+@@ -1098,7 +1292,9 @@ impl EditorEngine {
+             occurred_at: TimestampMillis::now(),
+             correlation_id,
+         };
++        let _ = restored_mode;
+         self.transaction_log.push(tx.clone());
++        self.enqueue_transaction_event(&tx);
+         Ok(tx)
+     }
+ 
+@@ -1108,6 +1304,7 @@ impl EditorEngine {
+         buffer_id: BufferId,
+         correlation_id: Option<CorrelationId>,
+     ) -> Result<TransactionRecord, EditorError> {
++        let thresholds = self.thresholds;
+         let (
+             workspace_id,
+             file_id,
+@@ -1117,6 +1314,7 @@ impl EditorEngine {
+             post_snapshot_descriptor,
+             redo_snapshot_id,
+             delta,
++            restored_mode,
+         ) = {
+             let state = self
+                 .buffers
+@@ -1129,8 +1327,13 @@ impl EditorEngine {
+                 .ok_or(EditorError::NothingToRedo)?;
+             let pre_snapshot = state.current_snapshot.clone();
+             let next_version = BufferVersion(state.buffer.version().0 + 1);
+-            let mut restored_buffer =
+-                TextBuffer::try_with_version(redo_entry.snapshot.text().to_string(), next_version)?;
++            let restored_mode =
++                Self::mode_for_byte_len_with_thresholds(thresholds, redo_entry.snapshot.len());
++            let mut restored_buffer = TextBuffer::try_from_rope_with_cache_policy(
++                redo_entry.snapshot.rope(),
++                next_version,
++                matches!(restored_mode, BufferMode::Normal),
++            )?;
+             restored_buffer.set_version(next_version);
+             let restored_snapshot =
+                 restored_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
+@@ -1152,6 +1355,7 @@ impl EditorEngine {
+                 undo_group_id: redo_entry.undo_group_id,
+             });
+             state.buffer = restored_buffer;
++            state.mode = restored_mode;
+             state.current_snapshot = restored_snapshot;
+             state.dirty = true;
+             state.save_state = if state.conflict_state.is_some() {
+@@ -1169,9 +1373,10 @@ impl EditorEngine {
+                 restored_snapshot_descriptor,
+                 redo_snapshot_id,
+                 delta,
++                restored_mode,
+             )
+         };
+-        self.remove_snapshot_descriptor(redo_snapshot_id);
++        self.release_snapshot_descriptor_if_unreferenced(redo_snapshot_id);
+         self.retain_snapshot_descriptor(buffer_id, &undo_snapshot_descriptor);
+         self.retain_snapshot_descriptor(buffer_id, &post_snapshot_descriptor);
+         self.enforce_snapshot_retention_policy();
+@@ -1190,7 +1395,9 @@ impl EditorEngine {
+             occurred_at: TimestampMillis::now(),
+             correlation_id,
+         };
++        let _ = restored_mode;
+         self.transaction_log.push(tx.clone());
++        self.enqueue_transaction_event(&tx);
+         Ok(tx)
+     }
+ 
+@@ -1203,11 +1410,26 @@ impl EditorEngine {
+         let payload = {
+             let state = self
+                 .buffers
+-                .get(&buffer_id)
++                .get_mut(&buffer_id)
+                 .ok_or(EditorError::BufferNotFound(buffer_id))?;
++            if matches!(state.mode, BufferMode::Degraded) {
++                state.save_state = FileConflictLifecycleState::SaveFailed;
++                state.save_diagnostics = vec![ProtocolDiagnostic {
++                    code: "editor.degraded_save_unavailable".to_string(),
++                    message: format!(
++                        "phase 1 degraded mode for '{}' does not expose a full-source save payload",
++                        state.file_path
++                    ),
++                    severity: ProtocolDiagnosticSeverity::Error,
++                    path: Some(CanonicalPath(state.file_path.clone())),
++                    range: None,
++                }];
++                return Err(EditorError::DegradedSaveUnavailable(buffer_id));
++            }
+             let snapshot = state
+                 .buffer
+                 .try_snapshot_with_retention(RetentionPinReason::BackgroundSave)?;
++            let full_text = snapshot.try_full_text()?;
+             let dto = SaveRequestDto {
+                 request_id: Uuid::now_v7(),
+                 workspace_id: state.workspace_id,
+@@ -1216,8 +1438,8 @@ impl EditorEngine {
+                 snapshot_id: snapshot.snapshot_id(),
+                 buffer_version: snapshot.buffer_version(),
+                 content_hash: snapshot.content_hash().to_string(),
+-                payload_byte_len: snapshot.text().len() as u64,
+-                text: snapshot.text().to_string(),
++                payload_byte_len: full_text.len() as u64,
++                text: full_text.to_string(),
+                 requested_at: TimestampMillis::now(),
+                 correlation_id: correlation_id
+                     .unwrap_or_else(|| CorrelationId(TimestampMillis::now().0)),
+@@ -1300,24 +1522,7 @@ impl EditorEngine {
+     }
+ 
+     fn release_save_snapshot_if_unreferenced(&mut self, snapshot_id: SnapshotId) {
+-        if self
+-            .pending_save_requests
+-            .iter()
+-            .all(|pending| pending.snapshot_id != snapshot_id)
+-            && self.buffers.values().all(|state| {
+-                state.current_snapshot.snapshot_id() != snapshot_id
+-                    && state
+-                        .undo_stack
+-                        .iter()
+-                        .all(|entry| entry.snapshot.snapshot_id() != snapshot_id)
+-                    && state
+-                        .redo_stack
+-                        .iter()
+-                        .all(|entry| entry.snapshot.snapshot_id() != snapshot_id)
+-            })
+-        {
+-            self.remove_snapshot_descriptor(snapshot_id);
+-        }
++        self.release_snapshot_descriptor_if_unreferenced(snapshot_id);
+     }
+ 
+     /// Read-only transaction log.
+@@ -1325,6 +1530,16 @@ impl EditorEngine {
+         &self.transaction_log
+     }
+ 
++    /// Drain already-produced metadata-only transaction descriptors from the bounded event queue.
++    pub fn drain_transaction_events(&mut self) -> DrainedTransactionEvents {
++        let descriptors = self.transaction_events.drain(..).collect();
++        let dropped_before_drain = std::mem::take(&mut self.dropped_transaction_event_count);
++        DrainedTransactionEvents {
++            descriptors,
++            dropped_before_drain,
++        }
++    }
++
+     /// Read-only pending save queue.
+     pub fn pending_save_requests(&self) -> &[SaveRequestDto] {
+         &self.pending_save_requests
+@@ -1443,6 +1658,121 @@ impl EditorEngine {
+         state.overlays = overlays;
+         Ok(())
+     }
++
++    fn mode_for_byte_len(&self, len: usize) -> BufferMode {
++        Self::mode_for_byte_len_with_thresholds(self.thresholds, len)
++    }
++
++    fn mode_for_byte_len_with_thresholds(thresholds: EditorThresholds, len: usize) -> BufferMode {
++        if len > thresholds.large_file_threshold_bytes || len > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
++        {
++            BufferMode::Degraded
++        } else {
++            BufferMode::Normal
++        }
++    }
++
++    fn protocol_snapshot_chunk_descriptors(
++        snapshot: &devil_text::TextSnapshot,
++    ) -> Vec<SnapshotChunkDescriptor> {
++        let snapshot_id = snapshot.snapshot_id();
++        snapshot
++            .chunk_descriptors()
++            .iter()
++            .map(|chunk| SnapshotChunkDescriptor {
++                snapshot_id,
++                chunk_index: chunk.ordinal as u32,
++                byte_range: ByteRange::new(chunk.start_byte as u64, chunk.end_byte as u64),
++                line_range: LineIndexRange {
++                    start: chunk.start_line as u32,
++                    end: chunk.end_line.saturating_add(1) as u32,
++                },
++                byte_len: chunk.byte_len as u64,
++                chunk_hash: Self::protocol_fingerprint(&chunk.hash),
++                schema_version: 1,
++            })
++            .collect()
++    }
++
++    fn protocol_utf16_range(
++        start: devil_text::Utf16Position,
++        end: devil_text::Utf16Position,
++    ) -> ProtocolUtf16Range {
++        ProtocolUtf16Range {
++            start: ProtocolUtf16Position {
++                line: start.line as u32,
++                character: start.character as u32,
++            },
++            end: ProtocolUtf16Position {
++                line: end.line as u32,
++                character: end.character as u32,
++            },
++        }
++    }
++
++    fn chunk_hash_for_line(snapshot: &devil_text::TextSnapshot, line: usize) -> FileFingerprint {
++        snapshot
++            .chunk_descriptors()
++            .iter()
++            .find(|chunk| chunk.start_line <= line && line <= chunk.end_line)
++            .map(|chunk| Self::protocol_fingerprint(&chunk.hash))
++            .unwrap_or_else(|| Self::protocol_fingerprint(snapshot.content_hash()))
++    }
++
++    fn protocol_fingerprint(hash: &str) -> FileFingerprint {
++        FileFingerprint {
++            algorithm: "sha256".to_string(),
++            value: hash.strip_prefix("sha256:").unwrap_or(hash).to_string(),
++        }
++    }
++
++    fn absolute_utf16_offset(buffer: &TextBuffer, byte_offset: usize) -> Result<u64, EditorError> {
++        let utf16_position = buffer.utf16_position(byte_offset)?;
++        let mut total = utf16_position.character as u64;
++        for line in 0..utf16_position.line {
++            total = total
++                .saturating_add(buffer.line_index().line_utf16_len(line)? as u64)
++                .saturating_add(buffer.line_index().line_ending_bytes(line)? as u64);
++        }
++        Ok(total)
++    }
++
++    fn enqueue_transaction_event(&mut self, record: &TransactionRecord) {
++        if self.transaction_events.len() >= self.transaction_event_queue_capacity {
++            self.transaction_events.pop_front();
++            self.dropped_transaction_event_count =
++                self.dropped_transaction_event_count.saturating_add(1);
++        }
++        self.transaction_events
++            .push_back(record.to_protocol_descriptor());
++    }
++
++    fn release_snapshot_descriptor_if_unreferenced(&mut self, snapshot_id: SnapshotId) {
++        if !self.snapshot_is_referenced(snapshot_id) {
++            self.remove_snapshot_descriptor(snapshot_id);
++        }
++    }
++
++    fn snapshot_is_referenced(&self, snapshot_id: SnapshotId) -> bool {
++        self.pending_save_requests
++            .iter()
++            .any(|request| request.snapshot_id == snapshot_id)
++            || self
++                .snapshot_leases
++                .values()
++                .any(|lease| lease.snapshot.snapshot_id() == snapshot_id)
++            || self.buffers.values().any(|state| {
++                state.current_snapshot.snapshot_id() == snapshot_id
++                    || state
++                        .undo_stack
++                        .iter()
++                        .any(|entry| entry.snapshot.snapshot_id() == snapshot_id)
++                    || state
++                        .redo_stack
++                        .iter()
++                        .any(|entry| entry.snapshot.snapshot_id() == snapshot_id)
++            })
++    }
+ }
+ 
+ impl From<SaveRequestDto> for EditorSaveRequest {
+@@ -1885,8 +2215,9 @@ mod tests {
+     use super::*;
+     use devil_observability::{InMemoryEventSink, SharedEventSink};
+     use devil_protocol::{
+-        EditBatch, ProjectId, ProjectInfo, TextEdit as ProtocolTextEdit,
+-        TextRange as ProtocolTextRange,
++        EditBatch, EditorViewportRequest, ProjectId, ProjectInfo, ProtocolDiagnosticSeverity,
++        SnapshotConsumerKind, TextEdit as ProtocolTextEdit, TextRange as ProtocolTextRange,
++        ViewportDimensions, ViewportProjectionMode, ViewportScroll,
+     };
+ 
+     fn project(file_id: u128) -> ProjectInfo {
+@@ -2046,4 +2377,264 @@ mod tests {
+         assert_ne!(event.causality_id.0, Uuid::nil());
+         assert_ne!(event.sequence.0, 0);
+     }
++
++    #[test]
++    fn degraded_viewport_projection_is_bounded_and_metadata_only() {
++        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
++            large_file_threshold_bytes: 32,
++            retention_budget_snapshots: 8,
++        });
++        let text = format!("line zero\ncursor🙂line\n{}\ntail\n", "x".repeat(128));
++        let buffer = engine
++            .open_buffer(WorkspaceId(1), FileId(40), "big.rs", text)
++            .expect("open degraded buffer");
++
++        assert_eq!(
++            engine.buffer_mode(buffer).expect("mode"),
++            BufferMode::Degraded
++        );
++        assert!(matches!(
++            engine.text(buffer),
++            Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
++        ));
++
++        engine
++            .set_cursors(
++                buffer,
++                vec![Cursor {
++                    position: TextPosition::new(1, 10),
++                }],
++            )
++            .expect("set cursor");
++        engine
++            .set_selections(
++                buffer,
++                vec![Selection {
++                    range: TextRange::new(TextPosition::new(1, 0), TextPosition::new(1, 10)),
++                }],
++            )
++            .expect("set selection");
++
++        let projection = engine
++            .viewport_projection(EditorViewportRequest {
++                buffer_id: buffer,
++                scroll: ViewportScroll {
++                    top_line: 1,
++                    left_column: 0,
++                },
++                dimensions: ViewportDimensions {
++                    width_px: 800,
++                    height_px: 32,
++                },
++            })
++            .expect("viewport projection");
++
++        assert_eq!(projection.mode, ViewportProjectionMode::DegradedLargeFile);
++        assert_eq!(
++            projection.snapshot_id,
++            engine
++                .current_snapshot(buffer)
++                .expect("snapshot")
++                .snapshot_id
++        );
++        assert_eq!(projection.visible_range.start.line, 1);
++        assert_eq!(projection.cursor.line, 1);
++        assert_eq!(projection.cursor.character, 10);
++        assert!(projection.cursor.utf16_offset.is_some());
++        assert_eq!(projection.selections.len(), 1);
++        assert_eq!(projection.line_slices.len(), projection.line_metrics.len());
++        assert!(!projection.line_slices.is_empty());
++        assert!(
++            projection
++                .line_slices
++                .iter()
++                .all(|slice| slice.chunk_hash.algorithm == "sha256"
++                    && !slice.chunk_hash.value.is_empty())
++        );
++        assert!(projection.line_metrics.iter().all(|metric| metric.exact));
++        assert!(projection.decoration_spans.is_empty());
++        assert!(projection.fold_ranges.is_empty());
++        assert!(projection.semantic_token_overlays.is_empty());
++
++        let status = projection.large_file_status.expect("large-file status");
++        assert_eq!(status.threshold_bytes, 32);
++        assert!(status.message.contains("degraded mode"));
++
++        let chunks = engine
++            .snapshot_chunk_descriptors(buffer)
++            .expect("chunk descriptors");
++        assert!(!chunks.is_empty());
++        assert_eq!(chunks[0].snapshot_id, projection.snapshot_id);
++    }
++
++    #[test]
++    fn coordinate_conversion_avoids_full_text_for_degraded_buffers() {
++        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
++            large_file_threshold_bytes: 8,
++            retention_budget_snapshots: 8,
++        });
++        let buffer = engine
++            .open_buffer(WorkspaceId(1), FileId(41), "emoji.txt", "a🦀b\nrest")
++            .expect("open degraded buffer");
++        engine
++            .set_cursors(
++                buffer,
++                vec![Cursor {
++                    position: TextPosition::new(0, 5),
++                }],
++            )
++            .expect("set cursor");
++
++        assert!(matches!(
++            engine.text(buffer),
++            Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
++        ));
++
++        let projection = engine
++            .viewport_projection(EditorViewportRequest {
++                buffer_id: buffer,
++                scroll: ViewportScroll {
++                    top_line: 0,
++                    left_column: 0,
++                },
++                dimensions: ViewportDimensions {
++                    width_px: 800,
++                    height_px: 16,
++                },
++            })
++            .expect("viewport projection");
++
++        assert_eq!(projection.cursor.line, 0);
++        assert_eq!(projection.cursor.character, 5);
++        assert_eq!(projection.cursor.utf16_offset, Some(3));
++    }
++
++    #[test]
++    fn snapshot_leases_are_descriptor_only_for_all_consumer_kinds() {
++        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
++            large_file_threshold_bytes: 16,
++            retention_budget_snapshots: 8,
++        });
++        let buffer = engine
++            .open_buffer(
++                WorkspaceId(1),
++                FileId(42),
++                "leases.txt",
++                "0123456789abcdef0123456789",
++            )
++            .expect("open buffer");
++        let snapshot_id = engine
++            .current_snapshot(buffer)
++            .expect("snapshot")
++            .snapshot_id;
++        let consumers = [
++            SnapshotConsumerKind::Editor,
++            SnapshotConsumerKind::Ui,
++            SnapshotConsumerKind::Lsp,
++            SnapshotConsumerKind::Index,
++            SnapshotConsumerKind::Plugin,
++            SnapshotConsumerKind::Ai,
++            SnapshotConsumerKind::Collaboration,
++            SnapshotConsumerKind::Storage,
++            SnapshotConsumerKind::Observability,
++        ];
++        let leases = consumers
++            .into_iter()
++            .map(|consumer_kind| {
++                let lease = engine
++                    .lease_snapshot(buffer, consumer_kind)
++                    .expect("lease snapshot");
++                assert_eq!(lease.snapshot_id, snapshot_id);
++                assert_eq!(lease.consumer_kind, consumer_kind);
++                assert!(lease.chunk_count >= 1);
++                assert_eq!(lease.schema_version, 1);
++                lease
++            })
++            .collect::<Vec<_>>();
++
++        let retained_before_edit = engine.retained_snapshot_count();
++        engine
++            .apply_edit(
++                buffer,
++                TextEdit::insert(TextPosition::new(0, 0), "!"),
++                TransactionSource::User,
++                None,
++                None,
++            )
++            .expect("edit while leased");
++        assert!(engine.retained_snapshot_count() >= retained_before_edit);
++
++        for lease in leases {
++            let released = engine
++                .release_snapshot_lease(lease.lease_id)
++                .expect("release lease");
++            assert_eq!(released.lease_id, lease.lease_id);
++            assert_eq!(released.snapshot_id, snapshot_id);
++        }
++    }
++
++    #[test]
++    fn draining_transaction_events_is_bounded_and_non_blocking() {
++        let mut engine = EditorEngine::with_transaction_event_queue_capacity(2);
++        let buffer = engine
++            .open_buffer(WorkspaceId(1), FileId(43), "events.txt", "seed")
++            .expect("open buffer");
++
++        for _ in 0..3 {
++            engine
++                .apply_edit(
++                    buffer,
++                    TextEdit::insert(TextPosition::new(0, 0), "x"),
++                    TransactionSource::User,
++                    None,
++                    None,
++                )
++                .expect("apply edit");
++        }
++
++        let drained = engine.drain_transaction_events();
++        assert_eq!(drained.descriptors.len(), 2);
++        assert_eq!(drained.dropped_before_drain, 1);
++        assert_eq!(drained.descriptors[0].post_buffer_version, BufferVersion(2));
++        assert_eq!(drained.descriptors[1].post_buffer_version, BufferVersion(3));
++
++        let empty = engine.drain_transaction_events();
++        assert!(empty.descriptors.is_empty());
++        assert_eq!(empty.dropped_before_drain, 0);
++    }
++
++    #[test]
++    fn degraded_save_fails_explicitly_without_materializing_full_text() {
++        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
++            large_file_threshold_bytes: 8,
++            retention_budget_snapshots: 8,
++        });
++        let buffer = engine
++            .open_buffer(WorkspaceId(1), FileId(44), "save.txt", "0123456789abcdef")
++            .expect("open degraded buffer");
++        engine
++            .apply_edit(
++                buffer,
++                TextEdit::insert(TextPosition::new(0, 0), "!"),
++                TransactionSource::User,
++                None,
++                None,
++            )
++            .expect("edit");
++
++        let error = engine
++            .request_save(buffer, None)
++            .expect_err("save must fail closed");
++        assert!(matches!(error, EditorError::DegradedSaveUnavailable(id) if id == buffer));
++        assert_eq!(
++            engine.buffer_save_state(buffer).expect("save state"),
++            FileConflictLifecycleState::SaveFailed
++        );
++        assert!(engine.is_dirty(buffer).expect("dirty"));
++        assert!(engine.pending_save_requests().is_empty());
++        let diagnostics = engine.save_diagnostics(buffer).expect("diagnostics");
++        assert_eq!(diagnostics.len(), 1);
++        assert_eq!(diagnostics[0].code, "editor.degraded_save_unavailable");
++        assert_eq!(diagnostics[0].severity, ProtocolDiagnosticSeverity::Error);
++    }
+ }
+diff --git a/crates/devil-editor/tests/atomicity_and_retention.rs b/crates/devil-editor/tests/atomicity_and_retention.rs
+index 7d8a49b..e01f2f4 100644
+--- a/crates/devil-editor/tests/atomicity_and_retention.rs
++++ b/crates/devil-editor/tests/atomicity_and_retention.rs
+@@ -1,7 +1,11 @@
+ use devil_editor::{
+-    EditorEngine, EditorError, SnapshotEvictionPreference, SnapshotRetentionPolicy, TextPosition,
++    BufferMode, EditorEngine, EditorError, EditorThresholds, SnapshotEvictionPreference,
++    SnapshotRetentionPolicy, TextPosition,
++};
++use devil_protocol::{
++    EditorViewportRequest, FileId, TransactionSource, ViewportDimensions, ViewportScroll,
++    WorkspaceId,
+ };
+-use devil_protocol::{FileId, TransactionSource, WorkspaceId};
+ use devil_text::{TextEdit, TextError, TextRange};
+ 
+ fn small_policy(max_snapshot_count: usize) -> SnapshotRetentionPolicy {
+@@ -52,7 +56,7 @@ fn invalid_batch_rolls_back_live_text_version_dirty_and_side_effects() {
+ }
+ 
+ #[test]
+-fn failed_oversize_batch_preserves_undo_stack_and_transaction_log() {
++fn oversize_edit_transitions_buffer_into_degraded_mode_without_losing_undo_history() {
+     let mut engine = EditorEngine::new();
+     let buffer = engine
+         .open_buffer(WorkspaceId(1), FileId(2), "oversize.txt", "seed")
+@@ -70,24 +74,38 @@ fn failed_oversize_batch_preserves_undo_stack_and_transaction_log() {
+     let log_len = engine.transaction_log().len();
+     let before = engine.text(buffer).expect("text").to_string();
+ 
+-    let result = engine.apply_edit(
+-        buffer,
+-        TextEdit::insert(
+-            TextPosition::new(0, before.len()),
+-            "x".repeat(devil_text::DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES),
+-        ),
+-        TransactionSource::User,
+-        None,
+-        None,
+-    );
++    engine
++        .apply_edit(
++            buffer,
++            TextEdit::insert(
++                TextPosition::new(0, before.len()),
++                "x".repeat(devil_text::DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES),
++            ),
++            TransactionSource::User,
++            None,
++            None,
++        )
++        .expect("oversize edit should degrade instead of failing");
+ 
++    assert_eq!(
++        engine.buffer_mode(buffer).expect("mode"),
++        BufferMode::Degraded
++    );
+     assert!(matches!(
+-        result,
++        engine.text(buffer),
+         Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
+     ));
+-    assert_eq!(engine.text(buffer).expect("text"), before);
+-    assert_eq!(engine.undo_len(buffer).expect("undo len"), undo_len);
+-    assert_eq!(engine.transaction_log().len(), log_len);
++    assert_eq!(engine.undo_len(buffer).expect("undo len"), undo_len + 1);
++    assert_eq!(engine.transaction_log().len(), log_len + 1);
++
++    engine
++        .undo(buffer, None)
++        .expect("undo back to small buffer");
++    assert_eq!(
++        engine.buffer_mode(buffer).expect("mode after undo"),
++        BufferMode::Normal
++    );
++    assert_eq!(engine.text(buffer).expect("text after undo"), before);
+ }
+ 
+ #[test]
+@@ -202,3 +220,113 @@ fn protocol_descriptor_preserves_utf16_ranges_for_surrogate_pairs() {
+     assert_eq!(descriptor.causality_id.0, tx.causality_trace_id);
+     assert_ne!(descriptor.causality_id.0, tx.transaction_id);
+ }
++
++#[test]
++fn large_buffers_open_in_degraded_mode_instead_of_failing() {
++    let mut engine = EditorEngine::with_thresholds(EditorThresholds {
++        large_file_threshold_bytes: 64,
++        retention_budget_snapshots: 8,
++    });
++    let text = (0..32)
++        .map(|line| format!("line-{line:02}-{}\n", "x".repeat(16)))
++        .collect::<String>();
++
++    let buffer = engine
++        .open_buffer(WorkspaceId(1), FileId(6), "large.txt", text)
++        .expect("open degraded buffer");
++
++    assert_eq!(
++        engine.buffer_mode(buffer).expect("mode"),
++        BufferMode::Degraded
++    );
++    assert!(matches!(
++        engine.text(buffer),
++        Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
++    ));
++}
++
++#[test]
++fn undo_redo_remains_correct_for_degraded_chunk_boundary_edits() {
++    let mut engine = EditorEngine::with_thresholds(EditorThresholds {
++        large_file_threshold_bytes: 64,
++        retention_budget_snapshots: 16,
++    });
++    let line_body = "a".repeat(2048);
++    let text = (0..96)
++        .map(|line| format!("{line:03}:{line_body}\n"))
++        .collect::<String>();
++    let buffer = engine
++        .open_buffer(WorkspaceId(1), FileId(7), "chunked.txt", text)
++        .expect("open degraded buffer");
++
++    let chunk = engine
++        .snapshot_chunk_descriptors(buffer)
++        .expect("chunk descriptors")
++        .into_iter()
++        .find(|chunk| chunk.line_range.start <= 48 && chunk.line_range.end > 48)
++        .expect("chunk for target line");
++    assert!(
++        chunk.chunk_index > 0,
++        "target line should land beyond the first chunk"
++    );
++
++    let line_before = format!("{:03}:{}", 48, line_body);
++    let expected_after = format!("{}!{}", &line_before[..10], &line_before[10..]);
++
++    engine
++        .apply_edit(
++            buffer,
++            TextEdit::insert(TextPosition::new(48, 10), "!"),
++            TransactionSource::User,
++            None,
++            None,
++        )
++        .expect("apply chunk edit");
++
++    let after = engine
++        .viewport_projection(EditorViewportRequest {
++            buffer_id: buffer,
++            scroll: ViewportScroll {
++                top_line: 48,
++                left_column: 0,
++            },
++            dimensions: ViewportDimensions {
++                width_px: 800,
++                height_px: 16,
++            },
++        })
++        .expect("viewport after edit");
++    assert_eq!(after.line_slices[0].visible_text, expected_after);
++
++    engine.undo(buffer, None).expect("undo");
++    let undone = engine
++        .viewport_projection(EditorViewportRequest {
++            buffer_id: buffer,
++            scroll: ViewportScroll {
++                top_line: 48,
++                left_column: 0,
++            },
++            dimensions: ViewportDimensions {
++                width_px: 800,
++                height_px: 16,
++            },
++        })
++        .expect("viewport after undo");
++    assert_eq!(undone.line_slices[0].visible_text, line_before);
++
++    engine.redo(buffer, None).expect("redo");
++    let redone = engine
++        .viewport_projection(EditorViewportRequest {
++            buffer_id: buffer,
++            scroll: ViewportScroll {
++                top_line: 48,
++                left_column: 0,
++            },
++            dimensions: ViewportDimensions {
++                width_px: 800,
++                height_px: 16,
++            },
++        })
++        .expect("viewport after redo");
++    assert_eq!(redone.line_slices[0].visible_text, expected_after);
++}
+diff --git a/crates/devil-editor/tests/performance_suite.rs b/crates/devil-editor/tests/performance_suite.rs
+index 9df3611..5b6cd4b 100644
+--- a/crates/devil-editor/tests/performance_suite.rs
++++ b/crates/devil-editor/tests/performance_suite.rs
+@@ -1,10 +1,18 @@
+ use std::time::{Duration, Instant};
+ 
+ use devil_editor::{
+-    EditorEngine, SnapshotEvictionPreference, SnapshotRetentionPolicy, TextPosition,
++    BufferMode, EditorEngine, EditorThresholds, SnapshotEvictionPreference,
++    SnapshotRetentionPolicy, TextPosition,
+ };
+-use devil_protocol::{FileId, TransactionSource, WorkspaceId};
+-use devil_text::{TextEdit, TextRange};
++use devil_protocol::{
++    BufferId, EditorViewportRequest, FileId, SnapshotConsumerKind, TextTransactionDescriptor,
++    TransactionSource, ViewportDimensions, ViewportProjection, ViewportProjectionMode,
++    ViewportScroll, WorkspaceId,
++};
++use devil_text::{DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, TextEdit, TextRange};
++
++const CI_LARGE_FILE_BYTES: usize = DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + (128 * 1024);
++const LARGE_TEXT_LINE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
+ 
+ fn percentile(durations: &mut [Duration], pct: f64) -> Duration {
+     durations.sort();
+@@ -20,6 +28,97 @@ fn deterministic_retention_policy(max_snapshot_count: usize) -> SnapshotRetentio
+     }
+ }
+ 
++fn deterministic_large_text(byte_len: usize) -> String {
++    let mut text = String::with_capacity(byte_len);
++    while text.len() + LARGE_TEXT_LINE.len() <= byte_len {
++        text.push_str(LARGE_TEXT_LINE);
++    }
++    while text.len() < byte_len {
++        text.push('z');
++    }
++    text
++}
++
++fn viewport_request(
++    buffer_id: BufferId,
++    top_line: u32,
++    visible_lines: u32,
++) -> EditorViewportRequest {
++    EditorViewportRequest {
++        buffer_id,
++        scroll: ViewportScroll {
++            top_line,
++            left_column: 0,
++        },
++        dimensions: ViewportDimensions {
++            width_px: 1_200,
++            height_px: visible_lines.saturating_mul(16),
++        },
++    }
++}
++
++fn viewport_payload_bytes(viewport: &ViewportProjection) -> usize {
++    viewport
++        .line_slices
++        .iter()
++        .map(|slice| slice.visible_text.len())
++        .sum()
++}
++
++#[derive(Debug)]
++struct FakeBackgroundConsumer {
++    kind: SnapshotConsumerKind,
++    queue_capacity: usize,
++    queued_events: usize,
++    accepted_events: usize,
++    dropped_events: usize,
++    stale_events: usize,
++    skipped_versions: u64,
++    last_post_version: Option<u64>,
++}
++
++impl FakeBackgroundConsumer {
++    fn new(kind: SnapshotConsumerKind, queue_capacity: usize) -> Self {
++        Self {
++            kind,
++            queue_capacity,
++            queued_events: 0,
++            accepted_events: 0,
++            dropped_events: 0,
++            stale_events: 0,
++            skipped_versions: 0,
++            last_post_version: None,
++        }
++    }
++
++    fn offer_events(&mut self, descriptors: &[TextTransactionDescriptor]) {
++        for descriptor in descriptors {
++            let post_version = descriptor.post_buffer_version.0;
++            if let Some(last_post_version) = self.last_post_version {
++                if post_version <= last_post_version {
++                    self.stale_events += 1;
++                    continue;
++                }
++                self.skipped_versions = self
++                    .skipped_versions
++                    .saturating_add(post_version.saturating_sub(last_post_version + 1));
++            }
++            self.last_post_version = Some(post_version);
++
++            if self.queued_events >= self.queue_capacity {
++                self.dropped_events += 1;
++            } else {
++                self.queued_events += 1;
++                self.accepted_events += 1;
++            }
++        }
++    }
++
++    fn drain_one(&mut self) {
++        self.queued_events = self.queued_events.saturating_sub(1);
++    }
++}
++
+ #[test]
+ fn ci_typical_edit_latency_on_budget_sized_file() {
+     let mut engine = EditorEngine::new();
+@@ -46,8 +145,9 @@ fn ci_typical_edit_latency_on_budget_sized_file() {
+     }
+ 
+     let mut sorted = samples.clone();
++    let p50 = percentile(&mut sorted, 0.50);
+     let p95 = percentile(&mut sorted, 0.95);
+-    eprintln!("ci budget edit latency p95={p95:?}");
++    eprintln!("ci budget edit latency p50={p50:?} p95={p95:?}");
+     assert!(p95 < Duration::from_millis(250));
+ }
+ 
+@@ -112,18 +212,99 @@ fn ci_undo_redo_burst_small_deterministic_sample() {
+ }
+ 
+ #[test]
+-#[ignore = "performance suite: 100MB+ workload"]
+-fn large_file_100mb_keystroke_latency() {
++fn ci_large_file_degraded_open_and_viewport_are_bounded() {
++    let mut engine = EditorEngine::new();
++    let text = deterministic_large_text(CI_LARGE_FILE_BYTES);
++
++    let open_start = Instant::now();
++    let buffer = engine
++        .open_buffer(WorkspaceId(1), FileId(100), "ci-large.txt", text)
++        .expect("open large buffer in degraded mode");
++    let open_elapsed = open_start.elapsed();
++
++    assert_eq!(
++        engine.buffer_mode(buffer).expect("buffer mode"),
++        BufferMode::Degraded
++    );
++    assert!(
++        engine.text(buffer).is_err(),
++        "large buffers must not expose full-source text through compatibility access"
++    );
++
++    let chunks = engine
++        .snapshot_chunk_descriptors(buffer)
++        .expect("snapshot chunk descriptors");
++    assert!(chunks.len() > 1, "large snapshot should be chunked");
++
++    let viewport_start = Instant::now();
++    let viewport = engine
++        .viewport_projection(viewport_request(buffer, 128, 12))
++        .expect("viewport projection");
++    let viewport_elapsed = viewport_start.elapsed();
++    let payload_bytes = viewport_payload_bytes(&viewport);
++    let status = viewport
++        .large_file_status
++        .as_ref()
++        .expect("large file status");
++
++    eprintln!(
++        "ci degraded open={open_elapsed:?} viewport={viewport_elapsed:?} payload_bytes={payload_bytes} chunk_count={} threshold_bytes={} byte_len={} overlay_reasons={}",
++        chunks.len(),
++        status.threshold_bytes,
++        status.byte_len,
++        status.disabled_overlay_reasons.len()
++    );
++
++    assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
++    assert!(viewport.line_slices.len() <= 12);
++    assert_eq!(viewport.line_slices.len(), viewport.line_metrics.len());
++    assert!(payload_bytes < DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES / 32);
++    assert_eq!(
++        status.threshold_bytes as usize,
++        DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
++    );
++    assert!(status.byte_len as usize > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES);
++    assert_eq!(status.byte_len as usize, CI_LARGE_FILE_BYTES);
++    assert!(status.disabled_overlay_reasons.len() >= 3);
++    assert!(viewport.decoration_spans.is_empty());
++    assert!(viewport.fold_ranges.is_empty());
++    assert!(viewport.semantic_token_overlays.is_empty());
++    assert!(open_elapsed < Duration::from_secs(5));
++    assert!(viewport_elapsed < Duration::from_millis(250));
++}
++
++#[test]
++#[ignore = "performance suite: 100MB degraded-mode measurement"]
++fn large_file_100mb_degraded_mode_measurement() {
+     let mut engine = EditorEngine::new();
+     let size = 100 * 1024 * 1024;
+-    let text = "a".repeat(size);
++    let text = deterministic_large_text(size);
++
++    let open_start = Instant::now();
+     let buffer = engine
+-        .open_buffer(WorkspaceId(1), FileId(100), "big.txt", text)
+-        .expect("open large buffer");
++        .open_buffer(WorkspaceId(1), FileId(103), "big-degraded.txt", text)
++        .expect("open 100MB degraded buffer");
++    let open_elapsed = open_start.elapsed();
++
++    assert_eq!(
++        engine.buffer_mode(buffer).expect("buffer mode"),
++        BufferMode::Degraded
++    );
++    assert!(engine.text(buffer).is_err());
++
++    let chunks = engine
++        .snapshot_chunk_descriptors(buffer)
++        .expect("snapshot chunk descriptors");
++    let viewport_start = Instant::now();
++    let viewport = engine
++        .viewport_projection(viewport_request(buffer, 10_000, 24))
++        .expect("viewport projection");
++    let viewport_elapsed = viewport_start.elapsed();
++    let payload_bytes = viewport_payload_bytes(&viewport);
+ 
+-    let at = TextPosition::new(0, size / 2);
+     let mut samples = Vec::new();
+-    for _ in 0..64 {
++    for i in 0..16 {
++        let at = TextPosition::new(1_000 + i, 8);
+         let start = Instant::now();
+         engine
+             .apply_edit(
+@@ -136,20 +317,149 @@ fn large_file_100mb_keystroke_latency() {
+             .expect("insert edit");
+         samples.push(start.elapsed());
+ 
+-        // delete inserted byte to keep cursor position stable
+         let delete = TextEdit::delete(TextRange::new(
+             at,
+             TextPosition::new(at.line, at.column + 1),
+         ));
+-        let _ = engine.apply_edit(buffer, delete, TransactionSource::User, None, None);
++        engine
++            .apply_edit(buffer, delete, TransactionSource::User, None, None)
++            .expect("delete inserted byte");
+     }
+ 
+     let mut sorted = samples.clone();
+     let p50 = percentile(&mut sorted, 0.50);
+     let p95 = percentile(&mut sorted, 0.95);
++    let status = viewport
++        .large_file_status
++        .as_ref()
++        .expect("large file status");
++
++    eprintln!(
++        "100MB degraded open={open_elapsed:?} viewport={viewport_elapsed:?} edit_p50={p50:?} edit_p95={p95:?} payload_bytes={payload_bytes} chunk_count={} threshold_bytes={} byte_len={} overlay_reasons={}",
++        chunks.len(),
++        status.threshold_bytes,
++        status.byte_len,
++        status.disabled_overlay_reasons.len()
++    );
++
++    assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
++    assert!(payload_bytes < DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES / 32);
++    assert!(chunks.len() > 1);
++}
++
++#[test]
++fn ci_mixed_fake_consumers_do_not_block_user_edits() {
++    let mut engine = EditorEngine::with_transaction_event_queue_capacity(8);
++    let buffer = engine
++        .open_buffer(
++            WorkspaceId(1),
++            FileId(104),
++            "ci-fake-consumers.txt",
++            deterministic_large_text(256 * 1024),
++        )
++        .expect("open bounded small buffer");
++    assert_eq!(
++        engine.buffer_mode(buffer).expect("buffer mode"),
++        BufferMode::Normal
++    );
++
++    let simulated_large_thresholds = EditorThresholds::default();
++    assert_eq!(
++        simulated_large_thresholds.large_file_threshold_bytes,
++        DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
++    );
++
++    let mut consumers = [
++        FakeBackgroundConsumer::new(SnapshotConsumerKind::Lsp, 5),
++        FakeBackgroundConsumer::new(SnapshotConsumerKind::Index, 5),
++        FakeBackgroundConsumer::new(SnapshotConsumerKind::Ai, 5),
++        FakeBackgroundConsumer::new(SnapshotConsumerKind::Collaboration, 5),
++    ];
++
++    let leases = consumers
++        .iter()
++        .map(|consumer| {
++            let lease = engine
++                .lease_snapshot(buffer, consumer.kind)
++                .expect("lease snapshot for fake consumer");
++            assert_eq!(lease.consumer_kind, consumer.kind);
++            assert!(lease.chunk_count > 1);
++            lease.lease_id
++        })
++        .collect::<Vec<_>>();
++
++    let mut total_drained_events = 0usize;
++    let mut total_engine_dropped_events = 0u64;
++    let mut edit_samples = Vec::new();
++
++    for cycle in 0..3 {
++        for edit_idx in 0..12 {
++            let at = TextPosition::new(256 + cycle * 16 + edit_idx, 8);
++            let start = Instant::now();
++            engine
++                .apply_edit(
++                    buffer,
++                    TextEdit::insert(at, "u"),
++                    TransactionSource::User,
++                    None,
++                    None,
++                )
++                .expect("user edit should not wait on fake consumers");
++            edit_samples.push(start.elapsed());
++        }
++
++        let drained = engine.drain_transaction_events();
++        total_drained_events += drained.descriptors.len();
++        total_engine_dropped_events =
++            total_engine_dropped_events.saturating_add(drained.dropped_before_drain);
++
++        for consumer in &mut consumers {
++            consumer.offer_events(&drained.descriptors);
++            consumer.drain_one();
++        }
++    }
++
++    for lease_id in leases {
++        assert!(engine.release_snapshot_lease(lease_id).is_some());
++    }
++
++    let mut sorted = edit_samples.clone();
++    let p50 = percentile(&mut sorted, 0.50);
++    let p95 = percentile(&mut sorted, 0.95);
++    let consumer_summary = consumers
++        .iter()
++        .map(|consumer| {
++            format!(
++                "{:?}:accepted={} dropped={} stale={} skipped_versions={} queued={}",
++                consumer.kind,
++                consumer.accepted_events,
++                consumer.dropped_events,
++                consumer.stale_events,
++                consumer.skipped_versions,
++                consumer.queued_events
++            )
++        })
++        .collect::<Vec<_>>()
++        .join(", ");
++
++    eprintln!(
++        "fake consumer edit latency p50={p50:?} p95={p95:?} drained_events={total_drained_events} engine_dropped_events={total_engine_dropped_events} consumers=[{consumer_summary}]"
++    );
+ 
+-    eprintln!("100MB keystroke latency p50={p50:?} p95={p95:?}");
+-    assert!(p95 < Duration::from_secs(2));
++    assert_eq!(edit_samples.len(), 36);
++    assert_eq!(total_drained_events, 24);
++    assert_eq!(total_engine_dropped_events, 12);
++    assert!(p95 < Duration::from_secs(1));
++    assert!(
++        consumers
++            .iter()
++            .all(|consumer| consumer.accepted_events > 0 && consumer.dropped_events > 0)
++    );
++    assert!(
++        consumers
++            .iter()
++            .all(|consumer| consumer.skipped_versions > 0 && consumer.stale_events == 0)
++    );
+ }
+ 
+ #[test]
+diff --git a/crates/devil-observability/src/lib.rs b/crates/devil-observability/src/lib.rs
+index 8549d19..c5b8424 100644
+--- a/crates/devil-observability/src/lib.rs
++++ b/crates/devil-observability/src/lib.rs
+@@ -822,6 +822,7 @@ pub fn fallback_applied_event(
+ }
+ 
+ /// Build an editor snapshot-retention degradation event.
++#[allow(clippy::too_many_arguments)]
+ pub fn editor_retention_degradation_event(
+     workspace_id: WorkspaceId,
+     buffer_id: BufferId,
+@@ -851,6 +852,7 @@ pub fn editor_retention_degradation_event(
+ }
+ 
+ /// Build a security-denial event with path and reason redacted to metadata hashes.
++#[allow(clippy::too_many_arguments)]
+ pub fn security_denial_event(
+     workspace_id: WorkspaceId,
+     file_id: Option<FileId>,
+@@ -1000,6 +1002,7 @@ fn proposal_workspace_id(proposal: &WorkspaceProposal) -> Option<WorkspaceId> {
+     }
+ }
+ 
++#[allow(clippy::too_many_arguments)]
+ fn fallback_event(
+     event: &'static str,
+     severity: EventSeverity,
+@@ -1061,7 +1064,7 @@ fn redacted_diagnostics(diagnostics: &[ProtocolDiagnostic]) -> Vec<ProtocolDiagn
+             path: diagnostic.path.as_ref().map(|path| {
+                 devil_protocol::CanonicalPath(format!("hash:{}", metadata_hash(&path.0)))
+             }),
+-            range: diagnostic.range.clone(),
++            range: diagnostic.range,
+         })
+         .collect()
+ }
+diff --git a/crates/devil-platform/src/lib.rs b/crates/devil-platform/src/lib.rs
+index c4f1dac..217fd3c 100644
+--- a/crates/devil-platform/src/lib.rs
++++ b/crates/devil-platform/src/lib.rs
+@@ -393,8 +393,7 @@ fn atomic_temp_path(parent: &Path, target: &Path) -> PathBuf {
+         .file_name()
+         .and_then(|value| value.to_str())
+         .unwrap_or("file")
+-        .replace('\n', "_")
+-        .replace('\r', "_");
++        .replace(['\n', '\r'], "_");
+     let suffix = ATOMIC_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+     parent.join(format!(".{stem}.{}.{}.tmp", std::process::id(), suffix))
+ }
+diff --git a/crates/devil-project/src/lib.rs b/crates/devil-project/src/lib.rs
+index 3379ab8..0e4c638 100644
+--- a/crates/devil-project/src/lib.rs
++++ b/crates/devil-project/src/lib.rs
+@@ -198,6 +198,7 @@ pub struct WorkspaceSaveApplied {
+ }
+ 
+ /// Workspace save result preserving typed stale/conflict/denial/failure responses.
++#[allow(clippy::result_large_err)]
+ pub type WorkspaceSaveResult = Result<WorkspaceSaveApplied, ProposalResponse>;
+ 
+ #[derive(Debug, Clone)]
+@@ -1617,6 +1618,7 @@ impl WorkspaceActor {
+     }
+ 
+     /// Apply a save through mandatory proposal context and fail-closed fingerprint preconditions.
++    #[allow(clippy::result_large_err)]
+     pub fn save_file_with_proposal(&self, request: WorkspaceSaveRequest) -> WorkspaceSaveResult {
+         let mut state_guard = match self.state.lock() {
+             Ok(guard) => guard,
+@@ -2399,6 +2401,7 @@ mod tests {
+         )
+     }
+ 
++    #[allow(clippy::result_large_err)]
+     fn save_new_file_for_tests(
+         actor: &WorkspaceActor,
+         workspace_id: WorkspaceId,
+diff --git a/crates/devil-project/tests/path_boundary.rs b/crates/devil-project/tests/path_boundary.rs
+index b31418c..c90645d 100644
+--- a/crates/devil-project/tests/path_boundary.rs
++++ b/crates/devil-project/tests/path_boundary.rs
+@@ -55,6 +55,7 @@ fn create_temp_workspace() -> PathBuf {
+     std::fs::canonicalize(root).expect("canonicalize temp workspace")
+ }
+ 
++#[allow(clippy::result_large_err)]
+ fn save_new_file(
+     actor: &WorkspaceActor,
+     workspace_id: devil_protocol::WorkspaceId,
+diff --git a/crates/devil-protocol/src/lib.rs b/crates/devil-protocol/src/lib.rs
+index a243fd1..55feba3 100644
+--- a/crates/devil-protocol/src/lib.rs
++++ b/crates/devil-protocol/src/lib.rs
+@@ -346,8 +346,90 @@ pub struct ViewportScroll {
+     pub left_column: u32,
+ }
+ 
++/// Viewport projection operating mode.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
++pub enum ViewportProjectionMode {
++    /// Standard projection mode for normal buffers.
++    #[default]
++    Normal,
++    /// Compatibility mode where explicitly bounded small-buffer payloads are allowed.
++    BoundedSmallBuffer,
++    /// Degraded projection mode for large files where overlays may be deferred.
++    DegradedLargeFile,
++}
++
++/// Truncation state for a visible viewport line slice.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
++pub enum ViewportLineTruncationState {
++    /// Slice contains the full logical line.
++    None,
++    /// Slice omits leading content from the logical line.
++    Leading,
++    /// Slice omits trailing content from the logical line.
++    Trailing,
++    /// Slice omits both leading and trailing content from the logical line.
++    Both,
++}
++
++/// Visible viewport slice for a logical line.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ViewportLineSlice {
++    /// Zero-based logical line number represented by the slice.
++    pub line_number: u32,
++    /// Visible text rendered for this line slice.
++    pub visible_text: String,
++    /// Visible byte range in snapshot coordinates.
++    pub byte_range: ByteRange,
++    /// Visible UTF-16 range in snapshot coordinates.
++    pub utf16_range: Utf16Range,
++    /// Hash for the chunk backing this slice.
++    pub chunk_hash: FileFingerprint,
++    /// Whether the slice omits leading and/or trailing content.
++    pub truncation_state: ViewportLineTruncationState,
++}
++
++/// Line metric aligned with [`ViewportProjection::line_slices`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ViewportLineMetric {
++    /// Total byte length for the logical line.
++    pub byte_length: u64,
++    /// Total UTF-16 code-unit length for the logical line.
++    pub utf16_length: u64,
++    /// Width of the line ending in bytes.
++    pub line_ending_width: u8,
++    /// Whether the metric is exact rather than estimated.
++    pub exact: bool,
++}
++
++/// Placeholder decoration span for future overlay phases.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
++pub struct ViewportDecorationSpan {}
++
++/// Placeholder fold range for future overlay phases.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
++pub struct ViewportFoldRange {}
++
++/// Placeholder semantic token overlay for future overlay phases.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
++pub struct ViewportSemanticTokenOverlay {}
++
++/// Large-file projection status for degraded viewport rendering.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LargeFileStatus {
++    /// Large-file threshold in bytes that triggered compatibility behavior.
++    pub threshold_bytes: u64,
++    /// Current snapshot byte length.
++    pub byte_len: u64,
++    /// User-visible reasons why overlays are disabled or deferred.
++    pub disabled_overlay_reasons: Vec<String>,
++    /// Whether bounded search remains available in the current mode.
++    pub bounded_search_enabled: bool,
++    /// User-visible large-file status message.
++    pub message: String,
++}
++
+ /// Protocol-level viewport projection for later UI rendering contracts.
+-#[derive(Debug, Clone, Serialize, Deserialize)]
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct ViewportProjection {
+     /// Owning workspace identifier.
+     pub workspace_id: WorkspaceId,
+@@ -369,6 +451,27 @@ pub struct ViewportProjection {
+     pub scroll: ViewportScroll,
+     /// Viewport dimensions.
+     pub dimensions: ViewportDimensions,
++    /// Projection mode used to produce the viewport payload.
++    #[serde(default)]
++    pub mode: ViewportProjectionMode,
++    /// Visible line slices in render order.
++    #[serde(default)]
++    pub line_slices: Vec<ViewportLineSlice>,
++    /// Per-line metrics aligned with [`ViewportProjection::line_slices`].
++    #[serde(default)]
++    pub line_metrics: Vec<ViewportLineMetric>,
++    /// Decoration placeholders reserved for later phases.
++    #[serde(default)]
++    pub decoration_spans: Vec<ViewportDecorationSpan>,
++    /// Fold placeholders reserved for later phases.
++    #[serde(default)]
++    pub fold_ranges: Vec<ViewportFoldRange>,
++    /// Semantic overlay placeholders reserved for later phases.
++    #[serde(default)]
++    pub semantic_token_overlays: Vec<ViewportSemanticTokenOverlay>,
++    /// Large-file compatibility status when projection behavior is constrained.
++    #[serde(default)]
++    pub large_file_status: Option<LargeFileStatus>,
+     /// Viewport projection schema version.
+     pub schema_version: u16,
+ }
+@@ -899,6 +1002,77 @@ pub struct SnapshotDescriptor {
+     pub created_at: TimestampMillis,
+ }
+ 
++/// Zero-based line index range.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
++pub struct LineIndexRange {
++    /// Inclusive start line index.
++    pub start: u32,
++    /// Exclusive end line index.
++    pub end: u32,
++}
++
++/// Snapshot chunk descriptor.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct SnapshotChunkDescriptor {
++    /// Snapshot identifier owning the chunk.
++    pub snapshot_id: SnapshotId,
++    /// Zero-based chunk ordinal within the snapshot.
++    pub chunk_index: u32,
++    /// Absolute byte range covered by the chunk.
++    pub byte_range: ByteRange,
++    /// Zero-based logical line range covered by the chunk.
++    pub line_range: LineIndexRange,
++    /// Chunk byte length.
++    pub byte_len: u64,
++    /// Algorithm-tagged hash for the chunk contents.
++    pub chunk_hash: FileFingerprint,
++    /// Chunk descriptor schema version.
++    pub schema_version: u16,
++}
++
++/// Snapshot lease consumer kind.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
++pub enum SnapshotConsumerKind {
++    /// Core editor runtime.
++    Editor,
++    /// Projection-only UI renderer.
++    #[serde(rename = "UI")]
++    Ui,
++    /// Language-server consumer.
++    #[serde(rename = "LSP")]
++    Lsp,
++    /// Future indexing consumer.
++    Index,
++    /// Future plugin consumer.
++    Plugin,
++    /// Future AI consumer.
++    #[serde(rename = "AI")]
++    Ai,
++    /// Future collaboration consumer.
++    Collaboration,
++    /// Storage or persistence observer.
++    Storage,
++    /// Observability and audit sink.
++    Observability,
++}
++
++/// Snapshot lease descriptor.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct SnapshotLeaseDescriptor {
++    /// Stable lease identifier.
++    pub lease_id: Uuid,
++    /// Snapshot identifier guarded by the lease.
++    pub snapshot_id: SnapshotId,
++    /// Consumer category holding the lease.
++    pub consumer_kind: SnapshotConsumerKind,
++    /// Lease expiration time.
++    pub expires_at: TimestampMillis,
++    /// Number of chunks pinned by the lease.
++    pub chunk_count: u32,
++    /// Lease descriptor schema version.
++    pub schema_version: u16,
++}
++
+ /// Transaction source.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub enum TransactionSource {
+diff --git a/crates/devil-protocol/tests/dto_contracts.rs b/crates/devil-protocol/tests/dto_contracts.rs
+index 5ffa81c..f8e81df 100644
+--- a/crates/devil-protocol/tests/dto_contracts.rs
++++ b/crates/devil-protocol/tests/dto_contracts.rs
+@@ -4,18 +4,20 @@ use devil_protocol::{
+     ChangedTextRange, CorrelationId, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
+     EventSeverity, FileConflictContext, FileConflictLifecycleState, FileConflictReason,
+     FileConflictState, FileContentVersion, FileFingerprint, FileId, FileIdentity, FileKind,
+-    FileMetadata, NetworkTarget, PrincipalId, ProposalAuditRecord, ProposalDenialReason,
+-    ProposalFailureReason, ProposalLifecycleState, ProposalLifecycleTransition, ProposalPayload,
+-    ProposalPayloadKind, ProposalPayloadSummary, ProposalRejectionReason, ProposalResponse,
+-    ProposalRollbackReason, ProposalStaleContext, ProposalStaleReason,
+-    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity,
+-    ProtocolTextRange, RedactionHint, RetentionLabel, SaveConflictPolicy, SaveFileProposal,
+-    SaveIntent, SessionDirtyIndicator, SessionLayoutSplit, SessionPanelState,
+-    SessionSplitOrientation, SessionTab, SessionTabGroup, SnapshotId, StorageRepositoryRequest,
+-    StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
+-    TransactionSource, TrustDecisionContext, TrustRecord, Utf16Position, Utf16Range,
+-    VersionContext, ViewportDimensions, ViewportProjection, ViewportScroll, WorkspaceGeneration,
+-    WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
++    FileMetadata, LargeFileStatus, LineIndexRange, NetworkTarget, PrincipalId, ProposalAuditRecord,
++    ProposalDenialReason, ProposalFailureReason, ProposalLifecycleState,
++    ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
++    ProposalRejectionReason, ProposalResponse, ProposalRollbackReason, ProposalStaleContext,
++    ProposalStaleReason, ProposalVersionPreconditions, ProtocolDiagnostic,
++    ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, RetentionLabel,
++    SaveConflictPolicy, SaveFileProposal, SaveIntent, SessionDirtyIndicator, SessionLayoutSplit,
++    SessionPanelState, SessionSplitOrientation, SessionTab, SessionTabGroup,
++    SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId, SnapshotLeaseDescriptor,
++    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor,
++    TimestampMillis, TransactionSource, TrustDecisionContext, TrustRecord, Utf16Position,
++    Utf16Range, VersionContext, ViewportDimensions, ViewportLineMetric, ViewportLineSlice,
++    ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode, ViewportScroll,
++    WorkspaceGeneration, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
+ };
+ use serde::de::DeserializeOwned;
+ use serde_json::{Value, json};
+@@ -69,6 +71,13 @@ fn fingerprint(value: &str) -> FileFingerprint {
+     }
+ }
+ 
++fn chunk_hash(value: &str) -> FileFingerprint {
++    FileFingerprint {
++        algorithm: "blake3-devil-text-chunk".to_string(),
++        value: value.to_string(),
++    }
++}
++
+ fn diagnostic(code: &str) -> ProtocolDiagnostic {
+     ProtocolDiagnostic {
+         code: code.to_string(),
+@@ -241,6 +250,255 @@ fn dto_contracts_text_transaction_descriptor_golden_and_required_fields() {
+     remove_required_field::<TextTransactionDescriptor>(&mut missing, "causality_id");
+ }
+ 
++#[test]
++fn dto_contracts_viewport_projection_golden_and_required_fields() {
++    let dto = ViewportProjection {
++        workspace_id: WorkspaceId(11),
++        buffer_id: BufferId(22),
++        file_id: Some(FileId(33)),
++        snapshot_id: SnapshotId(66),
++        buffer_version: BufferVersion(77),
++        visible_range: protocol_range(),
++        selections: vec![protocol_range()],
++        cursor: TextCoordinate {
++            line: 1,
++            character: 4,
++            byte_offset: Some(12),
++            utf16_offset: Some(10),
++        },
++        scroll: ViewportScroll {
++            top_line: 120,
++            left_column: 4,
++        },
++        dimensions: ViewportDimensions {
++            width_px: 1280,
++            height_px: 720,
++        },
++        mode: ViewportProjectionMode::DegradedLargeFile,
++        line_slices: vec![ViewportLineSlice {
++            line_number: 120,
++            visible_text: "fn main() {".to_string(),
++            byte_range: devil_protocol::ByteRange::new(4096, 4107),
++            utf16_range: Utf16Range {
++                start: Utf16Position {
++                    line: 120,
++                    character: 0,
++                },
++                end: Utf16Position {
++                    line: 120,
++                    character: 11,
++                },
++            },
++            chunk_hash: chunk_hash("chunk-0"),
++            truncation_state: ViewportLineTruncationState::Trailing,
++        }],
++        line_metrics: vec![ViewportLineMetric {
++            byte_length: 8192,
++            utf16_length: 8192,
++            line_ending_width: 1,
++            exact: false,
++        }],
++        decoration_spans: vec![],
++        fold_ranges: vec![],
++        semantic_token_overlays: vec![],
++        large_file_status: Some(LargeFileStatus {
++            threshold_bytes: 5_242_880,
++            byte_len: 9_437_184,
++            disabled_overlay_reasons: vec![
++                "semantic_tokens_deferred".to_string(),
++                "fold_ranges_deferred".to_string(),
++            ],
++            bounded_search_enabled: true,
++            message: "Large file mode active; overlays deferred.".to_string(),
++        }),
++        schema_version: 2,
++    };
++
++    let value = serde_json::to_value(&dto).expect("serialize viewport projection");
++    let expected = json!({
++        "workspace_id": 11,
++        "buffer_id": 22,
++        "file_id": 33,
++        "snapshot_id": 66,
++        "buffer_version": 77,
++        "visible_range": {
++            "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
++            "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
++        },
++        "selections": [
++            {
++                "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
++                "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
++            }
++        ],
++        "cursor": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
++        "scroll": {"top_line": 120, "left_column": 4},
++        "dimensions": {"width_px": 1280, "height_px": 720},
++        "mode": "DegradedLargeFile",
++        "line_slices": [
++            {
++                "line_number": 120,
++                "visible_text": "fn main() {",
++                "byte_range": {"start": 4096, "end": 4107},
++                "utf16_range": {
++                    "start": {"line": 120, "character": 0},
++                    "end": {"line": 120, "character": 11}
++                },
++                "chunk_hash": {
++                    "algorithm": "blake3-devil-text-chunk",
++                    "value": "chunk-0"
++                },
++                "truncation_state": "Trailing"
++            }
++        ],
++        "line_metrics": [
++            {
++                "byte_length": 8192,
++                "utf16_length": 8192,
++                "line_ending_width": 1,
++                "exact": false
++            }
++        ],
++        "decoration_spans": [],
++        "fold_ranges": [],
++        "semantic_token_overlays": [],
++        "large_file_status": {
++            "threshold_bytes": 5242880,
++            "byte_len": 9437184,
++            "disabled_overlay_reasons": [
++                "semantic_tokens_deferred",
++                "fold_ranges_deferred"
++            ],
++            "bounded_search_enabled": true,
++            "message": "Large file mode active; overlays deferred."
++        },
++        "schema_version": 2
++    });
++    assert_eq!(value, expected);
++
++    let roundtrip: ViewportProjection =
++        serde_json::from_value(value.clone()).expect("deserialize viewport projection");
++    assert_eq!(roundtrip.schema_version, 2);
++    assert_eq!(roundtrip.line_slices.len(), 1);
++    assert!(matches!(
++        roundtrip.mode,
++        ViewportProjectionMode::DegradedLargeFile
++    ));
++    assert_eq!(
++        roundtrip
++            .large_file_status
++            .expect("large file status")
++            .byte_len,
++        9_437_184
++    );
++
++    let mut legacy = value.clone();
++    let legacy_map = legacy
++        .as_object_mut()
++        .expect("legacy viewport payload must be JSON object");
++    legacy_map.remove("mode");
++    legacy_map.remove("line_slices");
++    legacy_map.remove("line_metrics");
++    legacy_map.remove("decoration_spans");
++    legacy_map.remove("fold_ranges");
++    legacy_map.remove("semantic_token_overlays");
++    legacy_map.remove("large_file_status");
++    let legacy_roundtrip: ViewportProjection =
++        serde_json::from_value(legacy).expect("deserialize legacy viewport projection");
++    assert!(matches!(
++        legacy_roundtrip.mode,
++        ViewportProjectionMode::Normal
++    ));
++    assert!(legacy_roundtrip.line_slices.is_empty());
++    assert!(legacy_roundtrip.line_metrics.is_empty());
++    assert!(legacy_roundtrip.large_file_status.is_none());
++
++    let mut missing_workspace = value.clone();
++    remove_required_field::<ViewportProjection>(&mut missing_workspace, "workspace_id");
++
++    let mut missing_schema = value;
++    remove_required_field::<ViewportProjection>(&mut missing_schema, "schema_version");
++}
++
++#[test]
++fn dto_contracts_snapshot_chunk_descriptor_golden_and_required_fields() {
++    let dto = SnapshotChunkDescriptor {
++        snapshot_id: SnapshotId(66),
++        chunk_index: 7,
++        byte_range: devil_protocol::ByteRange::new(4096, 8192),
++        line_range: LineIndexRange {
++            start: 120,
++            end: 144,
++        },
++        byte_len: 4096,
++        chunk_hash: chunk_hash("chunk-7"),
++        schema_version: 1,
++    };
++
++    let value = serde_json::to_value(&dto).expect("serialize snapshot chunk descriptor");
++    let expected = json!({
++        "snapshot_id": 66,
++        "chunk_index": 7,
++        "byte_range": {"start": 4096, "end": 8192},
++        "line_range": {"start": 120, "end": 144},
++        "byte_len": 4096,
++        "chunk_hash": {
++            "algorithm": "blake3-devil-text-chunk",
++            "value": "chunk-7"
++        },
++        "schema_version": 1
++    });
++    assert_eq!(value, expected);
++
++    let roundtrip: SnapshotChunkDescriptor =
++        serde_json::from_value(value.clone()).expect("deserialize snapshot chunk descriptor");
++    assert_eq!(roundtrip.chunk_index, 7);
++    assert_eq!(roundtrip.line_range.end, 144);
++    assert_eq!(roundtrip.schema_version, 1);
++
++    let mut missing_snapshot = value.clone();
++    remove_required_field::<SnapshotChunkDescriptor>(&mut missing_snapshot, "snapshot_id");
++
++    let mut missing_schema = value;
++    remove_required_field::<SnapshotChunkDescriptor>(&mut missing_schema, "schema_version");
++}
++
++#[test]
++fn dto_contracts_snapshot_lease_descriptor_golden_and_required_fields() {
++    let lease_id = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
++    let dto = SnapshotLeaseDescriptor {
++        lease_id,
++        snapshot_id: SnapshotId(66),
++        consumer_kind: SnapshotConsumerKind::Ui,
++        expires_at: TimestampMillis(12_345),
++        chunk_count: 2,
++        schema_version: 1,
++    };
++
++    let value = serde_json::to_value(&dto).expect("serialize snapshot lease descriptor");
++    let expected = json!({
++        "lease_id": "44444444-4444-4444-4444-444444444444",
++        "snapshot_id": 66,
++        "consumer_kind": "UI",
++        "expires_at": 12345,
++        "chunk_count": 2,
++        "schema_version": 1
++    });
++    assert_eq!(value, expected);
++
++    let roundtrip: SnapshotLeaseDescriptor =
++        serde_json::from_value(value.clone()).expect("deserialize snapshot lease descriptor");
++    assert_eq!(roundtrip.lease_id, lease_id);
++    assert!(matches!(roundtrip.consumer_kind, SnapshotConsumerKind::Ui));
++    assert_eq!(roundtrip.schema_version, 1);
++
++    let mut missing_lease = value.clone();
++    remove_required_field::<SnapshotLeaseDescriptor>(&mut missing_lease, "lease_id");
++
++    let mut missing_schema = value;
++    remove_required_field::<SnapshotLeaseDescriptor>(&mut missing_schema, "schema_version");
++}
++
+ #[test]
+ fn dto_contracts_save_proposal_golden_with_all_preconditions() {
+     let proposal = SaveFileProposal {
+@@ -892,7 +1150,14 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
+             width_px: 1280,
+             height_px: 720,
+         },
+-        schema_version: 1,
++        mode: ViewportProjectionMode::Normal,
++        line_slices: vec![],
++        line_metrics: vec![],
++        decoration_spans: vec![],
++        fold_ranges: vec![],
++        semantic_token_overlays: vec![],
++        large_file_status: None,
++        schema_version: 2,
+     };
+ 
+     let value = serde_json::to_value(&projection).expect("serialize viewport projection");
+@@ -913,11 +1178,19 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
+         "cursor": {"line": 2, "character": 4, "byte_offset": 20, "utf16_offset": 18},
+         "scroll": {"top_line": 1, "left_column": 0},
+         "dimensions": {"width_px": 1280, "height_px": 720},
+-        "schema_version": 1
++        "mode": "Normal",
++        "line_slices": [],
++        "line_metrics": [],
++        "decoration_spans": [],
++        "fold_ranges": [],
++        "semantic_token_overlays": [],
++        "large_file_status": null,
++        "schema_version": 2
+     });
+     assert_eq!(value, expected);
+ 
+     let roundtrip: ViewportProjection =
+         serde_json::from_value(value).expect("deserialize viewport projection");
+     assert_eq!(roundtrip.cursor.line, 2);
++    assert!(matches!(roundtrip.mode, ViewportProjectionMode::Normal));
+ }
+diff --git a/crates/devil-text/src/lib.rs b/crates/devil-text/src/lib.rs
+index 1aa301e..07b600b 100644
+--- a/crates/devil-text/src/lib.rs
++++ b/crates/devil-text/src/lib.rs
+@@ -2,9 +2,10 @@
+ 
+ #![warn(missing_docs)]
+ 
++use std::cmp::Ordering;
+ use std::fmt;
+ use std::sync::Arc;
+-use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+ 
+ use devil_protocol::{BufferVersion, SnapshotId};
+ use ropey::Rope;
+@@ -14,11 +15,15 @@ use thiserror::Error;
+ static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
+ 
+ const DEFAULT_LEAF_TARGET_BYTES: usize = 1024;
+-/// Maximum UTF-8 bytes allowed in the full text cache used by the text model.
++const DEFAULT_CHUNK_TARGET_BYTES: usize = 64 * 1024;
++const DEFAULT_CHUNK_BOUNDARY_WINDOW_BYTES: usize = 8 * 1024;
++const DEFAULT_CHUNK_FORCE_MAX_BYTES: usize = 96 * 1024;
++const DEFAULT_LINE_SLICE_MAX_BYTES: usize = DEFAULT_CHUNK_FORCE_MAX_BYTES;
++
++/// Maximum UTF-8 bytes allowed in the optional full text cache used by the text model.
+ ///
+-/// This aligns with the workspace large-file exclusion threshold so buffers that need a larger
+-/// payload can be routed through degraded/streaming editor paths instead of materializing a full
+-/// cache and line index.
++/// Buffers larger than this threshold remain rope-backed, chunk-indexed, and sliceable, but they
++/// do not retain a compatibility full-source cache.
+ pub const DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
+ 
+ /// A position in text expressed as zero-indexed line and UTF-8 column within that line.
+@@ -173,7 +178,7 @@ pub struct TextSnapshotDescriptor {
+     pub snapshot_id: SnapshotId,
+     /// Buffer version captured by the snapshot.
+     pub buffer_version: BufferVersion,
+-    /// SHA-256 hash of UTF-8 content, hex encoded.
++    /// SHA-256 hash of snapshot chunk metadata, hex encoded.
+     pub content_hash: String,
+     /// Total byte length.
+     pub byte_len: usize,
+@@ -185,20 +190,63 @@ pub struct TextSnapshotDescriptor {
+     pub retention_pin_reason: RetentionPinReason,
+ }
+ 
++/// Metadata describing a stable UTF-8 chunk within a buffer or snapshot.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TextChunkDescriptor {
++    /// Zero-based chunk ordinal within the snapshot or buffer.
++    pub ordinal: usize,
++    /// Inclusive absolute start byte.
++    pub start_byte: usize,
++    /// Exclusive absolute end byte.
++    pub end_byte: usize,
++    /// Chunk byte length.
++    pub byte_len: usize,
++    /// Logical line containing the first byte of the chunk.
++    pub start_line: usize,
++    /// Logical line containing the last byte of the chunk.
++    pub end_line: usize,
++    /// Domain-separated SHA-256 hash of the exact chunk bytes.
++    pub hash: String,
++}
++
++/// A bounded line slice suitable for viewport-style rendering.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TextLineSlice {
++    /// Zero-based logical line number.
++    pub line: usize,
++    /// Absolute byte offset for the start of the logical line.
++    pub line_start_byte: usize,
++    /// Exclusive absolute byte offset for the returned slice text.
++    pub slice_end_byte: usize,
++    /// Full logical line byte length excluding the line ending.
++    pub line_content_byte_len: usize,
++    /// Returned slice UTF-8 byte length.
++    pub utf8_byte_len: usize,
++    /// Returned slice UTF-16 code-unit length.
++    pub utf16_len: usize,
++    /// Logical line ending byte width: `0`, `1`, or `2`.
++    pub line_ending_bytes: usize,
++    /// `true` when the logical line exceeded the slice budget and was clipped.
++    pub truncated: bool,
++    /// Returned bounded line text.
++    pub text: String,
++}
++
+ /// Immutable snapshot of buffer contents.
+ ///
+-/// Snapshots are cheap to clone because rope nodes are shared through [`Arc`].
++/// Snapshots are cheap to clone because rope nodes are shared through [`Arc`]. Full-source text is
++/// retained only when the snapshot remains within [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`].
+ #[derive(Debug, Clone)]
+ pub struct TextSnapshot {
+     rope: Arc<Rope>,
+-    text_cache: Arc<String>,
++    full_text_cache: Option<Arc<String>>,
+     line_index: Arc<LineIndex>,
+     descriptor: TextSnapshotDescriptor,
+ }
+ 
+ impl PartialEq for TextSnapshot {
+     fn eq(&self, other: &Self) -> bool {
+-        self.descriptor == other.descriptor && self.text() == other.text()
++        self.descriptor == other.descriptor
+     }
+ }
+ 
+@@ -206,38 +254,35 @@ impl Eq for TextSnapshot {}
+ 
+ impl TextSnapshot {
+     /// Create a snapshot from a string with an automatically assigned ID and version 0.
+-    ///
+-    /// This compatibility constructor panics when the text exceeds the default full-cache budget.
+-    /// Prefer [`TextSnapshot::try_new`] or [`TextSnapshot::try_from_rope`] on fallible paths.
+     pub fn new(text: impl Into<String>) -> Self {
+-        Self::try_from_rope(
+-            Rope::from_str(&text.into()),
+-            BufferVersion(0),
+-            RetentionPinReason::Explicit("standalone snapshot".to_string()),
+-        )
+-        .expect("standalone snapshot text must fit the full-cache budget")
++        Self::try_new(text).expect("snapshot construction should not fail")
+     }
+ 
+     /// Try to create a snapshot from a string with an automatically assigned ID and version 0.
+     pub fn try_new(text: impl Into<String>) -> TextResult<Self> {
+-        Self::try_from_rope(
+-            Rope::from_str(&text.into()),
++        let text = text.into();
++        let rope = Rope::from_str(&text);
++        let full_text_cache = if text.len() <= DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
++            Some(Arc::new(text))
++        } else {
++            None
++        };
++        Self::from_rope_parts(
++            Arc::new(rope),
+             BufferVersion(0),
+             RetentionPinReason::Explicit("standalone snapshot".to_string()),
++            full_text_cache,
+         )
+     }
+ 
+     /// Create a snapshot from a rope, version, and retention reason.
+-    ///
+-    /// This compatibility constructor panics when the rope exceeds the default full-cache budget.
+-    /// Prefer [`TextSnapshot::try_from_rope`] on fallible paths.
+     pub fn from_rope(
+         rope: Rope,
+         buffer_version: BufferVersion,
+         retention_pin_reason: RetentionPinReason,
+     ) -> Self {
+         Self::try_from_rope(rope, buffer_version, retention_pin_reason)
+-            .expect("snapshot rope must fit the full-cache budget")
++            .expect("snapshot construction should not fail")
+     }
+ 
+     /// Try to create a snapshot from a rope, version, and retention reason.
+@@ -246,36 +291,111 @@ impl TextSnapshot {
+         buffer_version: BufferVersion,
+         retention_pin_reason: RetentionPinReason,
+     ) -> TextResult<Self> {
+-        enforce_full_cache_budget(rope.len_bytes())?;
+-        let text = rope.to_string();
+-        enforce_full_cache_budget(text.len())?;
+-        let line_index = LineIndex::new(&text);
+-        let content_hash = content_hash(&text);
++        let rope = Arc::new(rope);
++        let full_text_cache = maybe_full_text_cache(rope.as_ref())?.map(Arc::new);
++        Self::from_rope_parts(rope, buffer_version, retention_pin_reason, full_text_cache)
++    }
++
++    fn from_rope_parts(
++        rope: Arc<Rope>,
++        buffer_version: BufferVersion,
++        retention_pin_reason: RetentionPinReason,
++        full_text_cache: Option<Arc<String>>,
++    ) -> TextResult<Self> {
++        let line_index = Arc::new(LineIndex::from_rope(rope.clone()));
+         let descriptor = TextSnapshotDescriptor {
+-            snapshot_id: SnapshotId(NEXT_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed) as u128),
++            snapshot_id: SnapshotId(NEXT_SNAPSHOT_ID.fetch_add(1, AtomicOrdering::Relaxed) as u128),
+             buffer_version,
+-            content_hash,
+-            byte_len: text.len(),
++            content_hash: snapshot_content_hash(line_index.chunk_descriptors()),
++            byte_len: rope.len_bytes(),
+             line_count: line_index.line_count(),
+             memory_footprint_bytes: estimate_rope_memory(
+-                &rope,
+-                text.len(),
+-                line_index.memory_footprint_bytes(),
++                rope.as_ref(),
++                full_text_cache.as_ref().map_or(0, |text| text.len()),
++                line_index.as_ref(),
+             ),
+             retention_pin_reason,
+         };
+ 
+         Ok(Self {
+-            rope: Arc::new(rope),
+-            text_cache: Arc::new(text),
+-            line_index: Arc::new(line_index),
++            rope,
++            full_text_cache,
++            line_index,
+             descriptor,
+         })
+     }
+ 
+     /// Return the full text.
++    ///
++    /// # Panics
++    ///
++    /// Panics when the snapshot does not retain a bounded compatibility full-text cache. Prefer
++    /// [`TextSnapshot::try_full_text`] for large or degraded snapshots.
+     pub fn text(&self) -> &str {
+-        &self.text_cache
++        self.try_full_text().expect(
++            "full text cache unavailable; use try_full_text(), line_slice(), or chunk_text()",
++        )
++    }
++
++    /// Return the cached full text when the snapshot remains within the full-cache budget.
++    pub fn try_full_text(&self) -> TextResult<&str> {
++        self.full_text_cache
++            .as_ref()
++            .map(|text| text.as_str())
++            .ok_or(TextError::FullCacheBudgetExceeded {
++                byte_len: self.len(),
++                budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
++            })
++    }
++
++    /// Return the chunk descriptors backing this snapshot.
++    pub fn chunk_descriptors(&self) -> &[TextChunkDescriptor] {
++        self.line_index.chunk_descriptors()
++    }
++
++    /// Materialize a single bounded chunk by ordinal.
++    pub fn chunk_text(&self, ordinal: usize) -> TextResult<String> {
++        self.line_index.chunk_text(ordinal)
++    }
++
++    /// Return a bounded slice for a single logical line.
++    pub fn line_slice(&self, line: usize) -> TextResult<TextLineSlice> {
++        self.line_slice_with_limit(line, DEFAULT_LINE_SLICE_MAX_BYTES)
++    }
++
++    /// Return a bounded slice for a single logical line with an explicit byte budget.
++    pub fn line_slice_with_limit(
++        &self,
++        line: usize,
++        max_bytes: usize,
++    ) -> TextResult<TextLineSlice> {
++        self.line_index.line_slice(line, max_bytes)
++    }
++
++    /// Return the exact logical line range requested by a viewport using the default per-line
++    /// slice budget.
++    pub fn visible_line_slices(
++        &self,
++        start_line: usize,
++        end_line_exclusive: usize,
++    ) -> TextResult<Vec<TextLineSlice>> {
++        self.visible_line_slices_with_limit(
++            start_line,
++            end_line_exclusive,
++            DEFAULT_LINE_SLICE_MAX_BYTES,
++        )
++    }
++
++    /// Return the exact logical line range requested by a viewport with an explicit per-line
++    /// slice budget.
++    pub fn visible_line_slices_with_limit(
++        &self,
++        start_line: usize,
++        end_line_exclusive: usize,
++        max_bytes_per_line: usize,
++    ) -> TextResult<Vec<TextLineSlice>> {
++        self.line_index
++            .visible_line_slices(start_line, end_line_exclusive, max_bytes_per_line)
+     }
+ 
+     /// Return the immutable descriptor.
+@@ -298,7 +418,7 @@ impl TextSnapshot {
+         &self.descriptor.content_hash
+     }
+ 
+-    /// Return the line index for offset conversion.
++    /// Return the line index for offset conversion and chunk metadata.
+     pub fn line_index(&self) -> &LineIndex {
+         &self.line_index
+     }
+@@ -354,6 +474,14 @@ pub enum TextError {
+         /// Total line count.
+         line_count: usize,
+     },
++    /// A chunk index was outside the chunk table.
++    #[error("chunk {chunk} is outside chunk count {chunk_count}")]
++    ChunkOutOfBounds {
++        /// Requested chunk ordinal.
++        chunk: usize,
++        /// Total chunk count.
++        chunk_count: usize,
++    },
+     /// A column was outside its line.
+     #[error("{unit} column {column} is outside line {line} length {line_len}")]
+     ColumnOutOfBounds {
+@@ -382,12 +510,12 @@ pub enum TextError {
+         /// End offset.
+         end: usize,
+     },
+-    /// A full-cache operation exceeded the text model byte budget and must use degraded mode.
++    /// A full-text compatibility operation exceeded the text-model byte budget.
+     #[error(
+         "text byte length {byte_len} exceeds full-cache budget {budget}; degraded large-file mode required"
+     )]
+     FullCacheBudgetExceeded {
+-        /// Requested post-operation text length in bytes.
++        /// Requested text length in bytes.
+         byte_len: usize,
+         /// Maximum allowed full-cache text length in bytes.
+         budget: usize,
+@@ -449,82 +577,89 @@ impl LineMetric {
+     }
+ }
+ 
+-/// Line index supporting byte, UTF-8, and UTF-16 coordinate conversion.
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct ChunkedLineIndex {
++    rope: Arc<Rope>,
++    lines: Vec<LineMetric>,
++    chunks: Vec<TextChunkDescriptor>,
++}
++
++/// Line index supporting byte, UTF-8, UTF-16, and chunk-aware coordinate conversion.
+ ///
+ /// The index treats CRLF (`\r\n`) as a single line ending for LSP mapping and excludes line-ending
+ /// bytes from column lengths. UTF-16 conversions reject offsets inside surrogate pairs.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct LineIndex {
+-    text: Arc<String>,
+-    lines: Vec<LineMetric>,
++    inner: ChunkedLineIndex,
+ }
+ 
+ impl LineIndex {
+     /// Build a line index for the provided UTF-8 text.
+     pub fn new(text: &str) -> Self {
+-        let mut lines = Vec::new();
+-        let mut start = 0usize;
+-        let bytes = text.as_bytes();
+-        let mut i = 0usize;
++        Self::from_rope(Arc::new(Rope::from_str(text)))
++    }
+ 
+-        while i < bytes.len() {
+-            match bytes[i] {
+-                b'\r' if i + 1 < bytes.len() && bytes[i + 1] == b'\n' => {
+-                    Self::push_line(text, &mut lines, start, i, i + 2, 2);
+-                    i += 2;
+-                    start = i;
+-                }
+-                b'\n' => {
+-                    Self::push_line(text, &mut lines, start, i, i + 1, 1);
+-                    i += 1;
+-                    start = i;
+-                }
+-                _ => {
+-                    i += 1;
+-                }
+-            }
++    fn from_rope(rope: Arc<Rope>) -> Self {
++        let lines = scan_line_metrics_from_byte(rope.as_ref(), 0);
++        let chunks = build_chunk_descriptors(rope.as_ref(), &lines, 0, 0);
++        Self {
++            inner: ChunkedLineIndex {
++                rope,
++                lines,
++                chunks,
++            },
+         }
++    }
+ 
+-        Self::push_line(text, &mut lines, start, text.len(), text.len(), 0);
++    fn rebuild_from_chunk(&self, rope: Arc<Rope>, start_chunk_index: usize) -> Self {
++        if self.inner.chunks.is_empty() || start_chunk_index == 0 {
++            return Self::from_rope(rope);
++        }
++
++        let rebuild_chunk = self
++            .inner
++            .chunks
++            .get(start_chunk_index)
++            .unwrap_or_else(|| self.inner.chunks.last().expect("chunk list is non-empty"));
++        let rebuild_start_line = self.line_for_offset_context(rebuild_chunk.start_byte);
++        let rebuild_line_start_byte = self.inner.lines[rebuild_start_line].start_byte;
++
++        let mut lines = self.inner.lines[..rebuild_start_line].to_vec();
++        lines.extend(scan_line_metrics_from_byte(
++            rope.as_ref(),
++            rebuild_line_start_byte,
++        ));
++
++        let mut chunks = self.inner.chunks[..start_chunk_index].to_vec();
++        chunks.extend(build_chunk_descriptors(
++            rope.as_ref(),
++            &lines,
++            rebuild_chunk.start_byte,
++            start_chunk_index,
++        ));
+ 
+         Self {
+-            text: Arc::new(text.to_string()),
+-            lines,
++            inner: ChunkedLineIndex {
++                rope,
++                lines,
++                chunks,
++            },
+         }
+     }
+ 
+-    fn push_line(
+-        text: &str,
+-        lines: &mut Vec<LineMetric>,
+-        start_byte: usize,
+-        content_end_byte: usize,
+-        end_byte: usize,
+-        line_ending_bytes: usize,
+-    ) {
+-        let slice = &text[start_byte..content_end_byte];
+-        lines.push(LineMetric {
+-            start_byte,
+-            content_end_byte,
+-            end_byte,
+-            byte_len: content_end_byte.saturating_sub(start_byte),
+-            utf16_len: slice.encode_utf16().count(),
+-            line_ending_bytes,
+-        });
+-    }
+-
+     /// Return the number of logical lines. Empty text has one line.
+     pub fn line_count(&self) -> usize {
+-        self.lines.len()
++        self.inner.lines.len()
+     }
+ 
+     /// Return the full document byte length.
+     pub fn len(&self) -> usize {
+-        self.text.len()
++        self.inner.rope.len_bytes()
+     }
+ 
+     /// Returns `true` when the indexed text is empty.
+     pub fn is_empty(&self) -> bool {
+-        self.text.is_empty()
++        self.inner.rope.len_bytes() == 0
+     }
+ 
+     /// Return the byte length of a logical line excluding CRLF/LF line endings.
+@@ -537,11 +672,54 @@ impl LineIndex {
+         Ok(self.line(line)?.utf16_len)
+     }
+ 
+-    /// Return the line-ending byte length for a line: 0, 1, or 2.
++    /// Return the line-ending byte length for a line: `0`, `1`, or `2`.
+     pub fn line_ending_bytes(&self, line: usize) -> TextResult<usize> {
+         Ok(self.line(line)?.line_ending_bytes)
+     }
+ 
++    /// Return the chunk descriptors derived from the rope-backed text substrate.
++    pub fn chunk_descriptors(&self) -> &[TextChunkDescriptor] {
++        &self.inner.chunks
++    }
++
++    /// Materialize a bounded chunk by ordinal.
++    pub fn chunk_text(&self, ordinal: usize) -> TextResult<String> {
++        let chunk = self.chunk(ordinal)?;
++        Ok(rope_string_from_byte_range(
++            self.inner.rope.as_ref(),
++            chunk.start_byte,
++            chunk.end_byte,
++        ))
++    }
++
++    /// Return a bounded slice for a logical line using an explicit byte budget.
++    pub fn line_slice(&self, line: usize, max_bytes: usize) -> TextResult<TextLineSlice> {
++        let metric = self.line(line)?;
++        build_line_slice(self.inner.rope.as_ref(), metric, line, max_bytes)
++    }
++
++    /// Return the exact logical line range requested by a viewport using an explicit per-line
++    /// byte budget.
++    pub fn visible_line_slices(
++        &self,
++        start_line: usize,
++        end_line_exclusive: usize,
++        max_bytes_per_line: usize,
++    ) -> TextResult<Vec<TextLineSlice>> {
++        if start_line > end_line_exclusive {
++            return Err(TextError::InvalidRange {
++                start: start_line,
++                end: end_line_exclusive,
++            });
++        }
++
++        let mut slices = Vec::with_capacity(end_line_exclusive.saturating_sub(start_line));
++        for line in start_line..end_line_exclusive {
++            slices.push(self.line_slice(line, max_bytes_per_line)?);
++        }
++        Ok(slices)
++    }
++
+     /// Convert line + UTF-8 byte column to absolute byte offset.
+     pub fn byte_offset(&self, pos: TextPosition) -> TextResult<usize> {
+         let line = self.line(pos.line)?;
+@@ -575,10 +753,9 @@ impl LineIndex {
+         let line_index = self.line_for_offset(offset)?;
+         let line = self.line(line_index)?;
+         let column_end = offset.min(line.content_end_byte);
+-        let prefix = &self.text[line.start_byte..column_end];
+         Ok(Utf16Position::new(
+             line_index,
+-            prefix.encode_utf16().count(),
++            utf16_len_for_byte_range(self.inner.rope.as_ref(), line.start_byte, column_end),
+         ))
+     }
+ 
+@@ -594,19 +771,27 @@ impl LineIndex {
+             });
+         }
+ 
+-        let slice = &self.text[line.start_byte..line.content_end_byte];
++        let start_char = self.inner.rope.byte_to_char(line.start_byte);
++        let end_char = self.inner.rope.byte_to_char(line.content_end_byte);
++        let slice = self.inner.rope.slice(start_char..end_char);
++
+         let mut utf16 = 0usize;
+-        for (byte, ch) in slice.char_indices() {
++        let mut byte_offset = line.start_byte;
++        for ch in slice.chars() {
+             if utf16 == pos.character {
+-                return Ok(line.start_byte + byte);
++                return Ok(byte_offset);
+             }
+-            utf16 += ch.len_utf16();
+-            if utf16 > pos.character {
++
++            let next_utf16 = utf16 + ch.len_utf16();
++            if next_utf16 > pos.character {
+                 return Err(TextError::Utf16InsideSurrogatePair {
+                     line: pos.line,
+                     column: pos.character,
+                 });
+             }
++
++            utf16 = next_utf16;
++            byte_offset += ch.len_utf8();
+         }
+ 
+         if utf16 == pos.character {
+@@ -632,54 +817,82 @@ impl LineIndex {
+         ))
+     }
+ 
+-    /// Return an estimated memory footprint in bytes.
++    /// Return an estimated memory footprint in bytes excluding rope storage.
+     pub fn memory_footprint_bytes(&self) -> usize {
+-        self.text.len() + self.lines.len() * std::mem::size_of::<LineMetric>()
++        self.inner.lines.len() * std::mem::size_of::<LineMetric>()
++            + self.inner.chunks.len() * std::mem::size_of::<TextChunkDescriptor>()
++            + self
++                .inner
++                .chunks
++                .iter()
++                .map(|chunk| chunk.hash.len())
++                .sum::<usize>()
+     }
+ 
+     fn line(&self, line: usize) -> TextResult<&LineMetric> {
+-        self.lines.get(line).ok_or(TextError::LineOutOfBounds {
+-            line,
+-            line_count: self.lines.len(),
+-        })
++        self.inner
++            .lines
++            .get(line)
++            .ok_or(TextError::LineOutOfBounds {
++                line,
++                line_count: self.inner.lines.len(),
++            })
++    }
++
++    fn chunk(&self, chunk: usize) -> TextResult<&TextChunkDescriptor> {
++        self.inner
++            .chunks
++            .get(chunk)
++            .ok_or(TextError::ChunkOutOfBounds {
++                chunk,
++                chunk_count: self.inner.chunks.len(),
++            })
+     }
+ 
+     fn line_for_offset(&self, offset: usize) -> TextResult<usize> {
+         self.ensure_valid_offset(offset)?;
+-        match self.lines.binary_search_by(|line| {
+-            if offset < line.start_byte {
+-                std::cmp::Ordering::Greater
+-            } else if offset > line.end_byte {
+-                std::cmp::Ordering::Less
+-            } else {
+-                std::cmp::Ordering::Equal
+-            }
+-        }) {
+-            Ok(mut idx) => {
+-                while idx + 1 < self.lines.len() && !self.lines[idx].contains_offset(offset, false)
+-                {
+-                    idx += 1;
+-                }
+-                Ok(idx)
+-            }
+-            Err(idx) if idx > 0 => Ok(idx - 1),
+-            Err(_) => Ok(0),
++        line_index_for_offset(&self.inner.lines, offset).ok_or(TextError::LineOutOfBounds {
++            line: 0,
++            line_count: 0,
++        })
++    }
++
++    fn line_for_offset_context(&self, offset: usize) -> usize {
++        let len = self.len();
++        if len == 0 {
++            return 0;
+         }
++        let clamped = offset.min(len.saturating_sub(1));
++        line_index_for_offset(&self.inner.lines, clamped).unwrap_or(0)
++    }
++
++    fn rebuild_start_chunk_index(&self, edit_start: usize) -> usize {
++        if self.inner.chunks.is_empty() {
++            return 0;
++        }
++
++        let context_offset = if self.is_empty() {
++            0
++        } else {
++            edit_start
++                .saturating_sub(1)
++                .min(self.len().saturating_sub(1))
++        };
++
++        chunk_index_for_offset(&self.inner.chunks, context_offset).unwrap_or(0)
+     }
+ 
+     fn ensure_valid_offset(&self, offset: usize) -> TextResult<()> {
+-        if offset > self.text.len() {
+-            Err(TextError::ByteOffsetOutOfBounds {
+-                offset,
+-                len: self.text.len(),
+-            })
++        let len = self.len();
++        if offset > len {
++            Err(TextError::ByteOffsetOutOfBounds { offset, len })
+         } else {
+             Ok(())
+         }
+     }
+ 
+     fn ensure_char_boundary(&self, offset: usize) -> TextResult<()> {
+-        if self.text.is_char_boundary(offset) {
++        if is_char_boundary(self.inner.rope.as_ref(), offset) {
+             Ok(())
+         } else {
+             Err(TextError::NotUtf8Boundary { offset })
+@@ -690,14 +903,16 @@ impl LineIndex {
+ /// A mutable text buffer backed by a [`Rope`].
+ ///
+ /// Rope-backed edits are logarithmic in document size and avoid whole-buffer copies for typical
+-/// insertions and deletions. Compatibility helper methods retain the previous `Option` API while
+-/// richer `try_*` methods report detailed conversion failures.
++/// insertions and deletions. Full-source access remains available only while the buffer stays under
++/// [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`]; large buffers remain rope-backed, chunked, and
++/// line-sliceable without materializing the entire document.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct TextBuffer {
+     rope: Rope,
+     line_index: LineIndex,
+     version: BufferVersion,
+-    text_cache: String,
++    full_text_cache: Option<String>,
++    allow_full_cache: bool,
+ }
+ 
+ impl TextBuffer {
+@@ -708,27 +923,146 @@ impl TextBuffer {
+ 
+     /// Create a new buffer with an explicit buffer version.
+     pub fn with_version(text: impl Into<String>, version: BufferVersion) -> Self {
+-        Self::try_with_version(text, version)
+-            .expect("text buffer must fit the full-cache budget; use degraded large-file mode")
++        Self::try_with_version(text, version).expect("text buffer construction should not fail")
+     }
+ 
+     /// Try to create a new buffer with an explicit buffer version.
+     pub fn try_with_version(text: impl Into<String>, version: BufferVersion) -> TextResult<Self> {
++        Self::try_with_version_and_cache_policy(text, version, true)
++    }
++
++    /// Try to create a new buffer with an explicit buffer version and full-cache policy.
++    pub fn try_with_version_and_cache_policy(
++        text: impl Into<String>,
++        version: BufferVersion,
++        allow_full_cache: bool,
++    ) -> TextResult<Self> {
+         let text = text.into();
+-        enforce_full_cache_budget(text.len())?;
+         let rope = Rope::from_str(&text);
+-        let line_index = LineIndex::new(&text);
++        Self::try_from_rope_with_cache_policy_and_text(rope, version, allow_full_cache, Some(text))
++    }
++
++    /// Try to create a new buffer from an existing rope with budget-aware full-cache retention.
++    pub fn try_from_rope(rope: Rope, version: BufferVersion) -> TextResult<Self> {
++        Self::try_from_rope_with_cache_policy(rope, version, true)
++    }
++
++    /// Try to create a new buffer from an existing rope with an explicit full-cache policy.
++    pub fn try_from_rope_with_cache_policy(
++        rope: Rope,
++        version: BufferVersion,
++        allow_full_cache: bool,
++    ) -> TextResult<Self> {
++        Self::try_from_rope_with_cache_policy_and_text(rope, version, allow_full_cache, None)
++    }
++
++    fn try_from_rope_with_cache_policy_and_text(
++        rope: Rope,
++        version: BufferVersion,
++        allow_full_cache: bool,
++        source_text: Option<String>,
++    ) -> TextResult<Self> {
++        let line_index = LineIndex::from_rope(Arc::new(rope.clone()));
++        let full_text_cache = if allow_full_cache {
++            match source_text {
++                Some(text) if text.len() <= DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES => Some(text),
++                Some(_) => None,
++                None => maybe_full_text_cache(&rope)?,
++            }
++        } else {
++            None
++        };
++
+         Ok(Self {
+             rope,
+             line_index,
+             version,
+-            text_cache: text,
++            full_text_cache,
++            allow_full_cache,
+         })
+     }
+ 
++    /// Update whether this buffer may retain a bounded full-text compatibility cache.
++    pub fn set_full_cache_policy(&mut self, allow_full_cache: bool) -> TextResult<()> {
++        self.allow_full_cache = allow_full_cache;
++        self.full_text_cache = if allow_full_cache {
++            maybe_full_text_cache(&self.rope)?
++        } else {
++            None
++        };
++        Ok(())
++    }
++
+     /// Return the full text.
++    ///
++    /// # Panics
++    ///
++    /// Panics when the buffer does not retain a bounded compatibility full-text cache. Prefer
++    /// [`TextBuffer::try_full_text`] for large or degraded buffers.
+     pub fn text(&self) -> &str {
+-        &self.text_cache
++        self.try_full_text().expect(
++            "full text cache unavailable; use try_full_text(), line_slice(), or chunk_text()",
++        )
++    }
++
++    /// Return the cached full text when the buffer remains within the full-cache budget.
++    pub fn try_full_text(&self) -> TextResult<&str> {
++        self.full_text_cache
++            .as_deref()
++            .ok_or(TextError::FullCacheBudgetExceeded {
++                byte_len: self.len(),
++                budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
++            })
++    }
++
++    /// Return the chunk descriptors backing the current rope state.
++    pub fn chunk_descriptors(&self) -> &[TextChunkDescriptor] {
++        self.line_index.chunk_descriptors()
++    }
++
++    /// Materialize a single bounded chunk by ordinal.
++    pub fn chunk_text(&self, ordinal: usize) -> TextResult<String> {
++        self.line_index.chunk_text(ordinal)
++    }
++
++    /// Return a bounded slice for a single logical line.
++    pub fn line_slice(&self, line: usize) -> TextResult<TextLineSlice> {
++        self.line_slice_with_limit(line, DEFAULT_LINE_SLICE_MAX_BYTES)
++    }
++
++    /// Return a bounded slice for a single logical line with an explicit byte budget.
++    pub fn line_slice_with_limit(
++        &self,
++        line: usize,
++        max_bytes: usize,
++    ) -> TextResult<TextLineSlice> {
++        self.line_index.line_slice(line, max_bytes)
++    }
++
++    /// Return the exact logical line range requested by a viewport using the default per-line
++    /// slice budget.
++    pub fn visible_line_slices(
++        &self,
++        start_line: usize,
++        end_line_exclusive: usize,
++    ) -> TextResult<Vec<TextLineSlice>> {
++        self.visible_line_slices_with_limit(
++            start_line,
++            end_line_exclusive,
++            DEFAULT_LINE_SLICE_MAX_BYTES,
++        )
++    }
++
++    /// Return the exact logical line range requested by a viewport with an explicit per-line
++    /// slice budget.
++    pub fn visible_line_slices_with_limit(
++        &self,
++        start_line: usize,
++        end_line_exclusive: usize,
++        max_bytes_per_line: usize,
++    ) -> TextResult<Vec<TextLineSlice>> {
++        self.line_index
++            .visible_line_slices(start_line, end_line_exclusive, max_bytes_per_line)
+     }
+ 
+     /// Return the current buffer version.
+@@ -743,12 +1077,12 @@ impl TextBuffer {
+ 
+     /// Return the byte length of the text.
+     pub fn len(&self) -> usize {
+-        self.text_cache.len()
++        self.rope.len_bytes()
+     }
+ 
+     /// Returns `true` if the buffer contains no text.
+     pub fn is_empty(&self) -> bool {
+-        self.text_cache.is_empty()
++        self.rope.len_bytes() == 0
+     }
+ 
+     /// Return the number of logical lines. Empty buffers have one line.
+@@ -819,18 +1153,27 @@ impl TextBuffer {
+     /// Replace the byte range `[start, end)` with `text` and return detailed errors.
+     pub fn try_replace_range(&mut self, start: usize, end: usize, text: &str) -> TextResult<()> {
+         self.validate_range(start, end)?;
+-        let removed_len = end.saturating_sub(start);
+-        let post_edit_len = self
+-            .text_cache
++        let rebuild_chunk_index = self.line_index.rebuild_start_chunk_index(start);
++        let new_len = self
+             .len()
+-            .saturating_sub(removed_len)
++            .saturating_sub(end.saturating_sub(start))
+             .saturating_add(text.len());
+-        enforce_full_cache_budget(post_edit_len)?;
++
+         let start_char = self.rope.byte_to_char(start);
+         let end_char = self.rope.byte_to_char(end);
+         self.rope.remove(start_char..end_char);
+         self.rope.insert(start_char, text);
+-        self.refresh_cache_and_index()?;
++
++        if self.allow_full_cache && new_len <= DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
++            match self.full_text_cache.as_mut() {
++                Some(cache) => cache.replace_range(start..end, text),
++                None => self.full_text_cache = Some(self.rope.to_string()),
++            }
++        } else {
++            self.full_text_cache = None;
++        }
++
++        self.refresh_cache_and_index(rebuild_chunk_index)?;
+         Ok(())
+     }
+ 
+@@ -859,7 +1202,7 @@ impl TextBuffer {
+     /// Create an immutable [`TextSnapshot`] with an explicit retention reason.
+     pub fn snapshot_with_retention(&self, reason: RetentionPinReason) -> TextSnapshot {
+         self.try_snapshot_with_retention(reason)
+-            .expect("text buffer snapshot must fit the full-cache budget")
++            .expect("text buffer snapshot construction should not fail")
+     }
+ 
+     /// Try to create an immutable [`TextSnapshot`] with an explicit retention reason.
+@@ -867,15 +1210,21 @@ impl TextBuffer {
+         &self,
+         reason: RetentionPinReason,
+     ) -> TextResult<TextSnapshot> {
+-        TextSnapshot::try_from_rope(self.rope.clone(), self.version, reason)
++        let full_text_cache = self.full_text_cache.clone().map(Arc::new);
++        TextSnapshot::from_rope_parts(
++            Arc::new(self.rope.clone()),
++            self.version,
++            reason,
++            full_text_cache,
++        )
+     }
+ 
+     /// Return the estimated memory footprint of the buffer.
+     pub fn memory_footprint_bytes(&self) -> usize {
+         estimate_rope_memory(
+             &self.rope,
+-            self.text_cache.len(),
+-            self.line_index.memory_footprint_bytes(),
++            self.full_text_cache.as_ref().map_or(0, String::len),
++            &self.line_index,
+         )
+     }
+ 
+@@ -890,11 +1239,10 @@ impl TextBuffer {
+         Ok(())
+     }
+ 
+-    fn refresh_cache_and_index(&mut self) -> TextResult<()> {
+-        let refreshed = self.rope.to_string();
+-        enforce_full_cache_budget(refreshed.len())?;
+-        self.text_cache = refreshed;
+-        self.line_index = LineIndex::new(&self.text_cache);
++    fn refresh_cache_and_index(&mut self, rebuild_chunk_index: usize) -> TextResult<()> {
++        self.line_index = self
++            .line_index
++            .rebuild_from_chunk(Arc::new(self.rope.clone()), rebuild_chunk_index);
+         Ok(())
+     }
+ }
+@@ -917,27 +1265,359 @@ impl From<&str> for TextBuffer {
+     }
+ }
+ 
++fn build_line_slice(
++    rope: &Rope,
++    metric: &LineMetric,
++    line: usize,
++    max_bytes: usize,
++) -> TextResult<TextLineSlice> {
++    let slice_end_byte = bounded_slice_end_byte(rope, metric, max_bytes);
++    let text = rope_string_from_byte_range(rope, metric.start_byte, slice_end_byte);
++    Ok(TextLineSlice {
++        line,
++        line_start_byte: metric.start_byte,
++        slice_end_byte,
++        line_content_byte_len: metric.byte_len,
++        utf8_byte_len: text.len(),
++        utf16_len: text.encode_utf16().count(),
++        line_ending_bytes: metric.line_ending_bytes,
++        truncated: slice_end_byte < metric.content_end_byte,
++        text,
++    })
++}
++
++fn bounded_slice_end_byte(rope: &Rope, metric: &LineMetric, max_bytes: usize) -> usize {
++    if max_bytes >= metric.byte_len {
++        return metric.content_end_byte;
++    }
++
++    let candidate = floor_char_boundary(rope, metric.start_byte.saturating_add(max_bytes))
++        .min(metric.content_end_byte)
++        .max(metric.start_byte);
++
++    if candidate > metric.start_byte {
++        candidate
++    } else if metric.content_end_byte > metric.start_byte && max_bytes > 0 {
++        next_char_boundary_after(rope, metric.start_byte).min(metric.content_end_byte)
++    } else {
++        metric.start_byte
++    }
++}
++
++fn scan_line_metrics_from_byte(rope: &Rope, start_byte: usize) -> Vec<LineMetric> {
++    let total_bytes = rope.len_bytes();
++    let start_char = rope.byte_to_char(start_byte.min(total_bytes));
++    let slice = rope.slice(start_char..rope.len_chars());
++
++    let mut lines = Vec::new();
++    let mut line_start = start_byte.min(total_bytes);
++    let mut absolute = start_byte.min(total_bytes);
++    let mut pending_cr: Option<usize> = None;
++
++    for chunk in slice.chunks() {
++        let bytes = chunk.as_bytes();
++        let mut i = 0usize;
++        while i < bytes.len() {
++            let byte = bytes[i];
++            let offset = absolute + i;
++
++            if let Some(cr_offset) = pending_cr {
++                if byte == b'\n' {
++                    push_line_metric(rope, &mut lines, line_start, cr_offset, offset + 1, 2);
++                    line_start = offset + 1;
++                    pending_cr = None;
++                    i += 1;
++                    continue;
++                }
++
++                push_line_metric(rope, &mut lines, line_start, cr_offset, cr_offset + 1, 1);
++                line_start = cr_offset + 1;
++                pending_cr = None;
++            }
++
++            match byte {
++                b'\r' => {
++                    pending_cr = Some(offset);
++                    i += 1;
++                }
++                b'\n' => {
++                    push_line_metric(rope, &mut lines, line_start, offset, offset + 1, 1);
++                    line_start = offset + 1;
++                    i += 1;
++                }
++                _ => {
++                    i += 1;
++                }
++            }
++        }
++
++        absolute += bytes.len();
++    }
++
++    if let Some(cr_offset) = pending_cr {
++        push_line_metric(rope, &mut lines, line_start, cr_offset, cr_offset + 1, 1);
++        line_start = cr_offset + 1;
++    }
++
++    push_line_metric(rope, &mut lines, line_start, total_bytes, total_bytes, 0);
++    lines
++}
++
++fn push_line_metric(
++    rope: &Rope,
++    lines: &mut Vec<LineMetric>,
++    start_byte: usize,
++    content_end_byte: usize,
++    end_byte: usize,
++    line_ending_bytes: usize,
++) {
++    lines.push(LineMetric {
++        start_byte,
++        content_end_byte,
++        end_byte,
++        byte_len: content_end_byte.saturating_sub(start_byte),
++        utf16_len: utf16_len_for_byte_range(rope, start_byte, content_end_byte),
++        line_ending_bytes,
++    });
++}
++
++fn build_chunk_descriptors(
++    rope: &Rope,
++    lines: &[LineMetric],
++    start_byte: usize,
++    start_ordinal: usize,
++) -> Vec<TextChunkDescriptor> {
++    let total_bytes = rope.len_bytes();
++    if total_bytes == 0 || lines.is_empty() || start_byte >= total_bytes {
++        return Vec::new();
++    }
++
++    let mut descriptors = Vec::new();
++    let mut chunk_start = start_byte;
++    let mut ordinal = start_ordinal;
++
++    while chunk_start < total_bytes {
++        let start_line =
++            line_index_for_offset(lines, chunk_start).unwrap_or_else(|| lines.len() - 1);
++        let min_preferred = chunk_start.saturating_add(
++            DEFAULT_CHUNK_TARGET_BYTES.saturating_sub(DEFAULT_CHUNK_BOUNDARY_WINDOW_BYTES),
++        );
++        let target = chunk_start.saturating_add(DEFAULT_CHUNK_TARGET_BYTES);
++        let force_max = chunk_start
++            .saturating_add(DEFAULT_CHUNK_FORCE_MAX_BYTES)
++            .min(total_bytes);
++
++        let mut preferred_boundary: Option<(usize, usize)> = None;
++        let mut fallback_boundary: Option<(usize, usize)> = None;
++        let mut line_idx = start_line;
++
++        while line_idx < lines.len() {
++            let boundary = lines[line_idx].end_byte;
++            if boundary <= chunk_start {
++                line_idx += 1;
++                continue;
++            }
++            if boundary > force_max {
++                break;
++            }
++
++            if boundary >= min_preferred && boundary <= target {
++                preferred_boundary = Some((boundary, line_idx));
++            } else if boundary > target {
++                fallback_boundary = Some((boundary, line_idx));
++                break;
++            }
++
++            line_idx += 1;
++        }
++
++        let (chunk_end, end_line) = if let Some(boundary) = preferred_boundary {
++            boundary
++        } else if let Some(boundary) = fallback_boundary {
++            boundary
++        } else {
++            let mut forced_end = floor_char_boundary(rope, force_max);
++            if forced_end <= chunk_start {
++                forced_end = next_char_boundary_after(rope, chunk_start).min(total_bytes);
++            }
++            let context = forced_end
++                .saturating_sub(1)
++                .min(total_bytes.saturating_sub(1));
++            let end_line = line_index_for_offset(lines, context).unwrap_or(start_line);
++            (forced_end, end_line)
++        };
++
++        let text = rope_string_from_byte_range(rope, chunk_start, chunk_end);
++        descriptors.push(TextChunkDescriptor {
++            ordinal,
++            start_byte: chunk_start,
++            end_byte: chunk_end,
++            byte_len: chunk_end.saturating_sub(chunk_start),
++            start_line,
++            end_line,
++            hash: chunk_hash(&text),
++        });
++
++        chunk_start = chunk_end;
++        ordinal += 1;
++    }
++
++    descriptors
++}
++
++fn line_index_for_offset(lines: &[LineMetric], offset: usize) -> Option<usize> {
++    if lines.is_empty() {
++        return None;
++    }
++
++    match lines.binary_search_by(|line| {
++        if offset < line.start_byte {
++            Ordering::Greater
++        } else if offset > line.end_byte {
++            Ordering::Less
++        } else {
++            Ordering::Equal
++        }
++    }) {
++        Ok(mut idx) => {
++            while idx + 1 < lines.len()
++                && !lines[idx].contains_offset(offset, idx + 1 == lines.len())
++            {
++                idx += 1;
++            }
++            Some(idx)
++        }
++        Err(idx) if idx > 0 => Some(idx - 1),
++        Err(_) => Some(0),
++    }
++}
++
++fn chunk_index_for_offset(chunks: &[TextChunkDescriptor], offset: usize) -> Option<usize> {
++    if chunks.is_empty() {
++        return None;
++    }
++
++    match chunks.binary_search_by(|chunk| {
++        if offset < chunk.start_byte {
++            Ordering::Greater
++        } else if offset >= chunk.end_byte {
++            Ordering::Less
++        } else {
++            Ordering::Equal
++        }
++    }) {
++        Ok(idx) => Some(idx),
++        Err(idx) if idx > 0 => Some(idx - 1),
++        Err(_) => Some(0),
++    }
++}
++
++fn utf16_len_for_byte_range(rope: &Rope, start_byte: usize, end_byte: usize) -> usize {
++    if start_byte >= end_byte {
++        return 0;
++    }
++
++    let start_char = rope.byte_to_char(start_byte);
++    let end_char = rope.byte_to_char(end_byte);
++    rope.slice(start_char..end_char)
++        .chars()
++        .map(char::len_utf16)
++        .sum()
++}
++
++fn rope_string_from_byte_range(rope: &Rope, start_byte: usize, end_byte: usize) -> String {
++    if start_byte >= end_byte {
++        return String::new();
++    }
++
++    let start_char = rope.byte_to_char(start_byte);
++    let end_char = rope.byte_to_char(end_byte);
++    rope.slice(start_char..end_char).to_string()
++}
++
++fn floor_char_boundary(rope: &Rope, offset: usize) -> usize {
++    if offset >= rope.len_bytes() {
++        return rope.len_bytes();
++    }
++
++    let char_idx = rope.byte_to_char(offset);
++    let boundary = rope.char_to_byte(char_idx);
++    if boundary == offset { offset } else { boundary }
++}
++
++fn next_char_boundary_after(rope: &Rope, offset: usize) -> usize {
++    let char_idx = rope.byte_to_char(offset);
++    rope.char_to_byte((char_idx + 1).min(rope.len_chars()))
++}
++
++fn is_char_boundary(rope: &Rope, offset: usize) -> bool {
++    if offset > rope.len_bytes() {
++        return false;
++    }
++    let char_idx = rope.byte_to_char(offset);
++    rope.char_to_byte(char_idx) == offset
++}
++
++#[allow(dead_code)]
+ fn content_hash(text: &str) -> String {
++    hash_with_domain(b"devil-text:content:v1\0", text.as_bytes())
++}
++
++fn chunk_hash(text: &str) -> String {
++    hash_with_domain(b"devil-text:chunk:v1\0", text.as_bytes())
++}
++
++fn snapshot_content_hash(chunks: &[TextChunkDescriptor]) -> String {
++    use std::fmt::Write as _;
++
++    let mut serialized = String::new();
++    for chunk in chunks {
++        let _ = write!(
++            serialized,
++            "{}:{}:{}:{}:{}:{};",
++            chunk.ordinal,
++            chunk.start_byte,
++            chunk.end_byte,
++            chunk.start_line,
++            chunk.end_line,
++            chunk.hash,
++        );
++    }
++    hash_with_domain(b"devil-text:snapshot:v1\0", serialized.as_bytes())
++}
++
++fn hash_with_domain(domain: &[u8], bytes: &[u8]) -> String {
+     let mut hasher = Sha256::new();
+-    hasher.update(text.as_bytes());
++    hasher.update(domain);
++    hasher.update(bytes);
+     format!("sha256:{}", hex::encode(hasher.finalize()))
+ }
+ 
+-fn estimate_rope_memory(rope: &Rope, byte_len: usize, line_index_bytes: usize) -> usize {
+-    byte_len
+-        + line_index_bytes
++fn estimate_rope_memory(
++    rope: &Rope,
++    full_cache_bytes: usize,
++    line_index_bytes: &LineIndex,
++) -> usize {
++    rope.len_bytes()
++        + full_cache_bytes
++        + line_index_bytes.memory_footprint_bytes()
+         + rope.len_lines() * std::mem::size_of::<usize>() * 4
+         + DEFAULT_LEAF_TARGET_BYTES
+ }
+ 
+-fn enforce_full_cache_budget(byte_len: usize) -> TextResult<()> {
+-    if byte_len > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
+-        Err(TextError::FullCacheBudgetExceeded {
+-            byte_len,
+-            budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
+-        })
++fn maybe_full_text_cache(rope: &Rope) -> TextResult<Option<String>> {
++    if rope.len_bytes() > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
++        Ok(None)
+     } else {
+-        Ok(())
++        let text = rope.to_string();
++        if text.len() > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
++            Err(TextError::FullCacheBudgetExceeded {
++                byte_len: text.len(),
++                budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
++            })
++        } else {
++            Ok(Some(text))
++        }
+     }
+ }
+ 
+@@ -973,7 +1653,13 @@ mod tests {
+         let snap = buf.snapshot();
+         let clone = snap.clone();
+         assert_eq!(clone.text(), "original");
+-        assert!(Arc::ptr_eq(&snap.text_cache, &clone.text_cache));
++        assert!(Arc::ptr_eq(
++            snap.full_text_cache.as_ref().expect("small snapshot cache"),
++            clone
++                .full_text_cache
++                .as_ref()
++                .expect("small snapshot cache"),
++        ));
+         buf.insert(8, " changed").unwrap();
+         assert_eq!(snap.text(), "original");
+         assert_eq!(buf.text(), "original changed");
+@@ -1081,6 +1767,150 @@ mod tests {
+         quickcheck(prop as fn(String, String, u8, u8) -> bool);
+     }
+ 
++    #[test]
++    fn opening_larger_than_budget_uses_degraded_cache_free_mode() {
++        let text = "x".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1);
++        let buf = TextBuffer::try_with_version(text, BufferVersion(7)).unwrap();
++        assert_eq!(buf.version(), BufferVersion(7));
++        assert!(matches!(
++            buf.try_full_text(),
++            Err(TextError::FullCacheBudgetExceeded { .. })
++        ));
++        assert!(buf.chunk_descriptors().len() > 1);
++
++        let snapshot = buf.try_snapshot().unwrap();
++        assert!(matches!(
++            snapshot.try_full_text(),
++            Err(TextError::FullCacheBudgetExceeded { .. })
++        ));
++        assert_eq!(snapshot.len(), DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1);
++    }
++
++    #[test]
++    fn line_slice_can_span_multiple_chunks() {
++        let long_line = format!("{}🦀tail", "a".repeat(DEFAULT_CHUNK_TARGET_BYTES + 128));
++        let buf = TextBuffer::new(format!("head\n{long_line}\nend"));
++        let slice = buf.line_slice_with_limit(1, usize::MAX).unwrap();
++        assert_eq!(slice.text, long_line);
++        assert!(!slice.truncated);
++        assert!(buf.chunk_descriptors().len() >= 2);
++    }
++
++    #[test]
++    fn huge_single_line_files_are_bounded_without_full_text_materialization() {
++        let text = "é".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES / 2 + 1024);
++        let buf = TextBuffer::try_with_version(text, BufferVersion(0)).unwrap();
++        assert_eq!(buf.line_count(), 1);
++        let slice = buf.line_slice(0).unwrap();
++        assert!(slice.truncated);
++        assert!(slice.utf8_byte_len <= DEFAULT_LINE_SLICE_MAX_BYTES + 4);
++        assert!(matches!(
++            buf.try_full_text(),
++            Err(TextError::FullCacheBudgetExceeded { .. })
++        ));
++    }
++
++    #[test]
++    fn crlf_pair_is_not_split_when_near_chunk_boundary() {
++        let first = "a".repeat(DEFAULT_CHUNK_TARGET_BYTES - 1);
++        let second = "b".repeat(DEFAULT_CHUNK_TARGET_BYTES);
++        let buf = TextBuffer::new(format!("{first}\r\n{second}\nend"));
++        let cr_offset = first.len();
++        assert!(
++            buf.chunk_descriptors()
++                .iter()
++                .all(|chunk| chunk.end_byte != cr_offset + 1)
++        );
++    }
++
++    #[test]
++    fn utf8_and_utf16_conversion_work_across_chunk_boundaries() {
++        let crab_count = DEFAULT_CHUNK_TARGET_BYTES / 4 + 32;
++        let text = format!("{}\nend", "🦀".repeat(crab_count));
++        let buf = TextBuffer::new(text);
++
++        let crab_index = DEFAULT_CHUNK_TARGET_BYTES / 4 + 1;
++        let byte_offset = crab_index * 4;
++        let utf16 = buf.utf16_position(byte_offset).unwrap();
++        assert_eq!(utf16, Utf16Position::new(0, crab_index * 2));
++        assert_eq!(
++            buf.byte_offset_from_utf16(Utf16Position::new(0, crab_index * 2))
++                .unwrap(),
++            byte_offset
++        );
++        assert_eq!(
++            buf.position(byte_offset).unwrap(),
++            TextPosition::new(0, byte_offset)
++        );
++    }
++
++    #[test]
++    fn chunk_hashes_change_only_for_edited_chunk_when_boundaries_stay_stable() {
++        let line_a = "a".repeat(60_000);
++        let line_b = "b".repeat(60_000);
++        let line_c = "c".repeat(60_000);
++        let mut buf = TextBuffer::new(format!("{line_a}\n{line_b}\n{line_c}\n"));
++
++        let before = buf.chunk_descriptors().to_vec();
++        assert!(before.len() >= 3);
++
++        let edit_start = before[1].start_byte + 128;
++        buf.try_replace_range(edit_start, edit_start + 5, "BBBBB")
++            .unwrap();
++
++        let after = buf.chunk_descriptors();
++        assert_eq!(before.len(), after.len());
++        assert_eq!(before[0].hash, after[0].hash);
++        assert_ne!(before[1].hash, after[1].hash);
++        assert_eq!(before[2].hash, after[2].hash);
++    }
++
++    #[test]
++    fn explicit_full_text_access_fails_for_uncached_snapshot_and_buffer() {
++        let text = "z".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 32);
++        let buf = TextBuffer::new(text);
++        let snap = buf.snapshot();
++
++        assert!(matches!(
++            buf.try_full_text(),
++            Err(TextError::FullCacheBudgetExceeded { .. })
++        ));
++        assert!(matches!(
++            snap.try_full_text(),
++            Err(TextError::FullCacheBudgetExceeded { .. })
++        ));
++    }
++
++    #[test]
++    fn edits_can_shrink_below_and_grow_above_full_cache_budget() {
++        let mut buf = TextBuffer::new("x".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 10));
++        assert!(buf.try_full_text().is_err());
++
++        buf.try_delete_range(
++            DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
++            DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 10,
++        )
++        .unwrap();
++        assert_eq!(
++            buf.try_full_text().unwrap().len(),
++            DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
++        );
++
++        buf.try_insert(buf.len(), "overflow!").unwrap();
++        assert!(buf.try_full_text().is_err());
++    }
++
++    #[test]
++    fn visible_line_slices_return_exact_requested_range() {
++        let buf = TextBuffer::new("zero\none\ntwo\nthree\nfour");
++        let slices = buf.visible_line_slices(1, 4).unwrap();
++        assert_eq!(slices.len(), 3);
++        assert_eq!(slices[0].line, 1);
++        assert_eq!(slices[0].text, "one");
++        assert_eq!(slices[2].line, 3);
++        assert_eq!(slices[2].text, "three");
++    }
++
+     #[test]
+     fn large_file_typical_keystroke_edit_smoke() {
+         let text = "a".repeat(1024 * 1024);
+@@ -1090,4 +1920,9 @@ mod tests {
+         assert_eq!(buf.len(), 1024 * 1024 + 1);
+         assert!(buf.memory_footprint_bytes() >= before);
+     }
++
++    #[test]
++    fn content_hash_has_expected_prefix() {
++        assert!(content_hash("hello").starts_with("sha256:"));
++    }
+ }
+diff --git a/crates/devil-ui/src/ui.rs b/crates/devil-ui/src/ui.rs
+index 5953b84..ffbe166 100644
+--- a/crates/devil-ui/src/ui.rs
++++ b/crates/devil-ui/src/ui.rs
+@@ -82,7 +82,7 @@ impl ShellLayoutProjection {
+ }
+ 
+ /// Active editor-buffer projection received by the UI from application state.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq)]
+ pub struct ActiveBufferProjection {
+     /// Owning workspace identifier if a workspace is open.
+     pub workspace_id: Option<WorkspaceId>,
+@@ -92,8 +92,12 @@ pub struct ActiveBufferProjection {
+     pub file_id: Option<FileId>,
+     /// Canonical path for display only.
+     pub file_path: Option<CanonicalPath>,
+-    /// Projected text snapshot for rendering.
+-    pub text: String,
++    /// Bounded viewport projection instead of unbounded text.
++    pub viewport: Option<devil_protocol::ViewportProjection>,
++    /// Degraded status from the application layer.
++    pub degraded: bool,
++    /// Bounded small-buffer preview, requested explicitly.
++    pub small_buffer_preview: Option<String>,
+     /// Dirty indicator projected from the editor engine.
+     pub dirty: bool,
+ }
+@@ -106,10 +110,17 @@ impl ActiveBufferProjection {
+             buffer_id: None,
+             file_id: None,
+             file_path: None,
+-            text: String::new(),
++            viewport: None,
++            degraded: false,
++            small_buffer_preview: None,
+             dirty: false,
+         }
+     }
++
++    /// Return a bounded small-buffer preview if available.
++    pub fn small_buffer_text(&self) -> Option<&str> {
++        self.small_buffer_preview.as_deref()
++    }
+ }
+ 
+ impl Default for ActiveBufferProjection {
+@@ -200,7 +211,7 @@ pub enum CommandDispatchIntent {
+ }
+ 
+ /// Projection snapshot provided to the shell by the application layer.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq)]
+ pub struct ShellProjectionSnapshot {
+     /// Layout projection.
+     pub layout_projection: ShellLayoutProjection,
+@@ -300,7 +311,21 @@ impl Shell {
+             "{}",
+             "-".repeat(self.layout_projection.layout.width as usize)
+         );
+-        println!("{}", self.active_buffer_projection.text);
++
++        if self.active_buffer_projection.degraded {
++            println!("<Degraded Mode: Large File>");
++        }
++
++        if let Some(text) = self.active_buffer_projection.small_buffer_text() {
++            println!("{}", text);
++        } else if let Some(viewport) = &self.active_buffer_projection.viewport {
++            for slice in &viewport.line_slices {
++                println!("{}", slice.visible_text);
++            }
++        } else {
++            println!("<no active buffer>");
++        }
++
+         println!(
+             "{}",
+             "-".repeat(self.layout_projection.layout.width as usize)
+@@ -402,16 +427,32 @@ impl Shell {
+     }
+ 
+     fn parse_pos(&self, byte_offset: usize) -> TextPosition {
+-        self.active_buffer_projection
+-            .text
+-            .as_bytes()
+-            .get(..byte_offset)
+-            .map(|prefix| {
+-                let line = prefix.iter().filter(|b| **b == b'\n').count();
+-                let column = prefix.iter().rev().take_while(|b| **b != b'\n').count();
+-                TextPosition::new(line, column)
+-            })
+-            .unwrap_or_else(|| TextPosition::new(0, 0))
++        if let Some(text) = self.active_buffer_projection.small_buffer_text() {
++            return text
++                .as_bytes()
++                .get(..byte_offset)
++                .map(|prefix| {
++                    let line = prefix.iter().filter(|b| **b == b'\n').count();
++                    let column = prefix.iter().rev().take_while(|b| **b != b'\n').count();
++                    TextPosition::new(line, column)
++                })
++                .unwrap_or_else(|| TextPosition::new(0, 0));
++        }
++
++        if let Some(viewport) = &self.active_buffer_projection.viewport {
++            let mut current_offset = 0;
++            for (i, slice) in viewport.line_slices.iter().enumerate() {
++                let slice_len = slice.visible_text.len() + 1; // +1 for newline
++                if current_offset + slice_len > byte_offset {
++                    let column = byte_offset - current_offset;
++                    let line = viewport.scroll.top_line as usize + i;
++                    return TextPosition::new(line, column);
++                }
++                current_offset += slice_len;
++            }
++        }
++
++        TextPosition::new(0, 0)
+     }
+ }
+ 
+@@ -433,7 +474,9 @@ mod tests {
+                 buffer_id: Some(BufferId(2)),
+                 file_id: Some(FileId(9)),
+                 file_path: Some(CanonicalPath("a.md".to_string())),
+-                text: "first".to_string(),
++                viewport: None,
++                degraded: false,
++                small_buffer_preview: Some("first".to_string()),
+                 dirty: false,
+             },
+             status_messages: Vec::new(),
+@@ -452,7 +495,10 @@ mod tests {
+                 text: "\\n".to_string(),
+             }
+         );
+-        assert_eq!(shell.active_buffer_projection.text, "first");
++        assert_eq!(
++            shell.active_buffer_projection.small_buffer_text(),
++            Some("first")
++        );
+         assert_eq!(shell.command_dispatch_intents.len(), 1);
+     }
+ 

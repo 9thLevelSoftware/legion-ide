@@ -4,18 +4,20 @@ use devil_protocol::{
     ChangedTextRange, CorrelationId, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
     EventSeverity, FileConflictContext, FileConflictLifecycleState, FileConflictReason,
     FileConflictState, FileContentVersion, FileFingerprint, FileId, FileIdentity, FileKind,
-    FileMetadata, NetworkTarget, PrincipalId, ProposalAuditRecord, ProposalDenialReason,
-    ProposalFailureReason, ProposalLifecycleState, ProposalLifecycleTransition, ProposalPayload,
-    ProposalPayloadKind, ProposalPayloadSummary, ProposalRejectionReason, ProposalResponse,
-    ProposalRollbackReason, ProposalStaleContext, ProposalStaleReason,
-    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity,
-    ProtocolTextRange, RedactionHint, RetentionLabel, SaveConflictPolicy, SaveFileProposal,
-    SaveIntent, SessionDirtyIndicator, SessionLayoutSplit, SessionPanelState,
-    SessionSplitOrientation, SessionTab, SessionTabGroup, SnapshotId, StorageRepositoryRequest,
-    StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, TrustDecisionContext, TrustRecord, Utf16Position, Utf16Range,
-    VersionContext, ViewportDimensions, ViewportProjection, ViewportScroll, WorkspaceGeneration,
-    WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
+    FileMetadata, LargeFileStatus, LineIndexRange, NetworkTarget, PrincipalId, ProposalAuditRecord,
+    ProposalDenialReason, ProposalFailureReason, ProposalLifecycleState,
+    ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
+    ProposalRejectionReason, ProposalResponse, ProposalRollbackReason, ProposalStaleContext,
+    ProposalStaleReason, ProposalVersionPreconditions, ProtocolDiagnostic,
+    ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, RetentionLabel,
+    SaveConflictPolicy, SaveFileProposal, SaveIntent, SessionDirtyIndicator, SessionLayoutSplit,
+    SessionPanelState, SessionSplitOrientation, SessionTab, SessionTabGroup,
+    SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId, SnapshotLeaseDescriptor,
+    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor,
+    TimestampMillis, TransactionSource, TrustDecisionContext, TrustRecord, Utf16Position,
+    Utf16Range, VersionContext, ViewportDimensions, ViewportLineMetric, ViewportLineSlice,
+    ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode, ViewportScroll,
+    WorkspaceGeneration, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -65,6 +67,13 @@ fn file_identity() -> FileIdentity {
 fn fingerprint(value: &str) -> FileFingerprint {
     FileFingerprint {
         algorithm: "sha256".to_string(),
+        value: value.to_string(),
+    }
+}
+
+fn chunk_hash(value: &str) -> FileFingerprint {
+    FileFingerprint {
+        algorithm: "blake3-devil-text-chunk".to_string(),
         value: value.to_string(),
     }
 }
@@ -239,6 +248,255 @@ fn dto_contracts_text_transaction_descriptor_golden_and_required_fields() {
 
     let mut missing = value;
     remove_required_field::<TextTransactionDescriptor>(&mut missing, "causality_id");
+}
+
+#[test]
+fn dto_contracts_viewport_projection_golden_and_required_fields() {
+    let dto = ViewportProjection {
+        workspace_id: WorkspaceId(11),
+        buffer_id: BufferId(22),
+        file_id: Some(FileId(33)),
+        snapshot_id: SnapshotId(66),
+        buffer_version: BufferVersion(77),
+        visible_range: protocol_range(),
+        selections: vec![protocol_range()],
+        cursor: TextCoordinate {
+            line: 1,
+            character: 4,
+            byte_offset: Some(12),
+            utf16_offset: Some(10),
+        },
+        scroll: ViewportScroll {
+            top_line: 120,
+            left_column: 4,
+        },
+        dimensions: ViewportDimensions {
+            width_px: 1280,
+            height_px: 720,
+        },
+        mode: ViewportProjectionMode::DegradedLargeFile,
+        line_slices: vec![ViewportLineSlice {
+            line_number: 120,
+            visible_text: "fn main() {".to_string(),
+            byte_range: devil_protocol::ByteRange::new(4096, 4107),
+            utf16_range: Utf16Range {
+                start: Utf16Position {
+                    line: 120,
+                    character: 0,
+                },
+                end: Utf16Position {
+                    line: 120,
+                    character: 11,
+                },
+            },
+            chunk_hash: chunk_hash("chunk-0"),
+            truncation_state: ViewportLineTruncationState::Trailing,
+        }],
+        line_metrics: vec![ViewportLineMetric {
+            byte_length: 8192,
+            utf16_length: 8192,
+            line_ending_width: 1,
+            exact: false,
+        }],
+        decoration_spans: vec![],
+        fold_ranges: vec![],
+        semantic_token_overlays: vec![],
+        large_file_status: Some(LargeFileStatus {
+            threshold_bytes: 5_242_880,
+            byte_len: 9_437_184,
+            disabled_overlay_reasons: vec![
+                "semantic_tokens_deferred".to_string(),
+                "fold_ranges_deferred".to_string(),
+            ],
+            bounded_search_enabled: true,
+            message: "Large file mode active; overlays deferred.".to_string(),
+        }),
+        schema_version: 2,
+    };
+
+    let value = serde_json::to_value(&dto).expect("serialize viewport projection");
+    let expected = json!({
+        "workspace_id": 11,
+        "buffer_id": 22,
+        "file_id": 33,
+        "snapshot_id": 66,
+        "buffer_version": 77,
+        "visible_range": {
+            "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+            "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+        },
+        "selections": [
+            {
+                "start": {"line": 1, "character": 2, "byte_offset": 10, "utf16_offset": 8},
+                "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
+            }
+        ],
+        "cursor": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
+        "scroll": {"top_line": 120, "left_column": 4},
+        "dimensions": {"width_px": 1280, "height_px": 720},
+        "mode": "DegradedLargeFile",
+        "line_slices": [
+            {
+                "line_number": 120,
+                "visible_text": "fn main() {",
+                "byte_range": {"start": 4096, "end": 4107},
+                "utf16_range": {
+                    "start": {"line": 120, "character": 0},
+                    "end": {"line": 120, "character": 11}
+                },
+                "chunk_hash": {
+                    "algorithm": "blake3-devil-text-chunk",
+                    "value": "chunk-0"
+                },
+                "truncation_state": "Trailing"
+            }
+        ],
+        "line_metrics": [
+            {
+                "byte_length": 8192,
+                "utf16_length": 8192,
+                "line_ending_width": 1,
+                "exact": false
+            }
+        ],
+        "decoration_spans": [],
+        "fold_ranges": [],
+        "semantic_token_overlays": [],
+        "large_file_status": {
+            "threshold_bytes": 5242880,
+            "byte_len": 9437184,
+            "disabled_overlay_reasons": [
+                "semantic_tokens_deferred",
+                "fold_ranges_deferred"
+            ],
+            "bounded_search_enabled": true,
+            "message": "Large file mode active; overlays deferred."
+        },
+        "schema_version": 2
+    });
+    assert_eq!(value, expected);
+
+    let roundtrip: ViewportProjection =
+        serde_json::from_value(value.clone()).expect("deserialize viewport projection");
+    assert_eq!(roundtrip.schema_version, 2);
+    assert_eq!(roundtrip.line_slices.len(), 1);
+    assert!(matches!(
+        roundtrip.mode,
+        ViewportProjectionMode::DegradedLargeFile
+    ));
+    assert_eq!(
+        roundtrip
+            .large_file_status
+            .expect("large file status")
+            .byte_len,
+        9_437_184
+    );
+
+    let mut legacy = value.clone();
+    let legacy_map = legacy
+        .as_object_mut()
+        .expect("legacy viewport payload must be JSON object");
+    legacy_map.remove("mode");
+    legacy_map.remove("line_slices");
+    legacy_map.remove("line_metrics");
+    legacy_map.remove("decoration_spans");
+    legacy_map.remove("fold_ranges");
+    legacy_map.remove("semantic_token_overlays");
+    legacy_map.remove("large_file_status");
+    let legacy_roundtrip: ViewportProjection =
+        serde_json::from_value(legacy).expect("deserialize legacy viewport projection");
+    assert!(matches!(
+        legacy_roundtrip.mode,
+        ViewportProjectionMode::Normal
+    ));
+    assert!(legacy_roundtrip.line_slices.is_empty());
+    assert!(legacy_roundtrip.line_metrics.is_empty());
+    assert!(legacy_roundtrip.large_file_status.is_none());
+
+    let mut missing_workspace = value.clone();
+    remove_required_field::<ViewportProjection>(&mut missing_workspace, "workspace_id");
+
+    let mut missing_schema = value;
+    remove_required_field::<ViewportProjection>(&mut missing_schema, "schema_version");
+}
+
+#[test]
+fn dto_contracts_snapshot_chunk_descriptor_golden_and_required_fields() {
+    let dto = SnapshotChunkDescriptor {
+        snapshot_id: SnapshotId(66),
+        chunk_index: 7,
+        byte_range: devil_protocol::ByteRange::new(4096, 8192),
+        line_range: LineIndexRange {
+            start: 120,
+            end: 144,
+        },
+        byte_len: 4096,
+        chunk_hash: chunk_hash("chunk-7"),
+        schema_version: 1,
+    };
+
+    let value = serde_json::to_value(&dto).expect("serialize snapshot chunk descriptor");
+    let expected = json!({
+        "snapshot_id": 66,
+        "chunk_index": 7,
+        "byte_range": {"start": 4096, "end": 8192},
+        "line_range": {"start": 120, "end": 144},
+        "byte_len": 4096,
+        "chunk_hash": {
+            "algorithm": "blake3-devil-text-chunk",
+            "value": "chunk-7"
+        },
+        "schema_version": 1
+    });
+    assert_eq!(value, expected);
+
+    let roundtrip: SnapshotChunkDescriptor =
+        serde_json::from_value(value.clone()).expect("deserialize snapshot chunk descriptor");
+    assert_eq!(roundtrip.chunk_index, 7);
+    assert_eq!(roundtrip.line_range.end, 144);
+    assert_eq!(roundtrip.schema_version, 1);
+
+    let mut missing_snapshot = value.clone();
+    remove_required_field::<SnapshotChunkDescriptor>(&mut missing_snapshot, "snapshot_id");
+
+    let mut missing_schema = value;
+    remove_required_field::<SnapshotChunkDescriptor>(&mut missing_schema, "schema_version");
+}
+
+#[test]
+fn dto_contracts_snapshot_lease_descriptor_golden_and_required_fields() {
+    let lease_id = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+    let dto = SnapshotLeaseDescriptor {
+        lease_id,
+        snapshot_id: SnapshotId(66),
+        consumer_kind: SnapshotConsumerKind::Ui,
+        expires_at: TimestampMillis(12_345),
+        chunk_count: 2,
+        schema_version: 1,
+    };
+
+    let value = serde_json::to_value(&dto).expect("serialize snapshot lease descriptor");
+    let expected = json!({
+        "lease_id": "44444444-4444-4444-4444-444444444444",
+        "snapshot_id": 66,
+        "consumer_kind": "UI",
+        "expires_at": 12345,
+        "chunk_count": 2,
+        "schema_version": 1
+    });
+    assert_eq!(value, expected);
+
+    let roundtrip: SnapshotLeaseDescriptor =
+        serde_json::from_value(value.clone()).expect("deserialize snapshot lease descriptor");
+    assert_eq!(roundtrip.lease_id, lease_id);
+    assert!(matches!(roundtrip.consumer_kind, SnapshotConsumerKind::Ui));
+    assert_eq!(roundtrip.schema_version, 1);
+
+    let mut missing_lease = value.clone();
+    remove_required_field::<SnapshotLeaseDescriptor>(&mut missing_lease, "lease_id");
+
+    let mut missing_schema = value;
+    remove_required_field::<SnapshotLeaseDescriptor>(&mut missing_schema, "schema_version");
 }
 
 #[test]
@@ -892,7 +1150,14 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
             width_px: 1280,
             height_px: 720,
         },
-        schema_version: 1,
+        mode: ViewportProjectionMode::Normal,
+        line_slices: vec![],
+        line_metrics: vec![],
+        decoration_spans: vec![],
+        fold_ranges: vec![],
+        semantic_token_overlays: vec![],
+        large_file_status: None,
+        schema_version: 2,
     };
 
     let value = serde_json::to_value(&projection).expect("serialize viewport projection");
@@ -913,11 +1178,19 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
         "cursor": {"line": 2, "character": 4, "byte_offset": 20, "utf16_offset": 18},
         "scroll": {"top_line": 1, "left_column": 0},
         "dimensions": {"width_px": 1280, "height_px": 720},
-        "schema_version": 1
+        "mode": "Normal",
+        "line_slices": [],
+        "line_metrics": [],
+        "decoration_spans": [],
+        "fold_ranges": [],
+        "semantic_token_overlays": [],
+        "large_file_status": null,
+        "schema_version": 2
     });
     assert_eq!(value, expected);
 
     let roundtrip: ViewportProjection =
         serde_json::from_value(value).expect("deserialize viewport projection");
     assert_eq!(roundtrip.cursor.line, 2);
+    assert!(matches!(roundtrip.mode, ViewportProjectionMode::Normal));
 }

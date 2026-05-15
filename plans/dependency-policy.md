@@ -2,26 +2,52 @@
 
 ## Scope
 
-This document defines the required crate dependency direction used by `cargo run -p xtask -- check-deps` during milestone-gate validation.
+This document defines the required internal crate dependency direction and runtime-surface activation gates used by `cargo run -p xtask -- check-deps` during milestone-gate validation.
 
 ## Rules
 
 ### 1. Directional Intent
 
-- `devil-ai` may depend on:
+Every current workspace crate must have an explicit internal dependency policy entry, even when the allowed internal dependency set is empty.
+
+- `xtask` may depend on:
+
+- `devil-protocol` may depend on:
+
+- `devil-observability` may depend on:
+  - `devil-protocol`
+
+- `devil-security` may depend on:
+  - `devil-protocol`
+
+- `devil-text` may depend on:
+  - `devil-protocol`
+
+- `devil-platform` may depend on:
+  - `devil-protocol`
+
+- `devil-platform` MUST directly depend on:
+  - `devil-protocol`
+
+- `devil-storage` may depend on:
+  - `devil-observability`
   - `devil-protocol`
   - `devil-security`
-  - `serde`, `serde_json`, `thiserror`
-- `devil-ai` MUST NOT depend on `devil-ai-providers`.
 
-- `devil-ai-providers` may depend on:
-  - `devil-ai`
+- `devil-project` may depend on:
+  - `devil-observability`
+  - `devil-platform`
   - `devil-protocol`
   - `devil-security`
 
 - `devil-editor` may depend on:
-  - `devil-text`
+  - `devil-observability`
   - `devil-protocol`
+  - `devil-text`
+
+- `devil-editor` MUST directly depend on:
+  - `devil-protocol`
+  - `devil-text`
 
 - `devil-editor` MUST NOT depend on `devil-project`.
 
@@ -29,9 +55,93 @@ This document defines the required crate dependency direction used by `cargo run
   - `devil-editor`
   - `devil-protocol`
 
-- `devil-platform` may depend on:
+- `devil-ui` MUST directly depend on:
+  - `devil-editor`
   - `devil-protocol`
-  - `thiserror`
+
+- `devil-app` may depend on:
+  - `devil-editor`
+  - `devil-observability`
+  - `devil-platform`
+  - `devil-project`
+  - `devil-protocol`
+  - `devil-security`
+  - `devil-storage`
+  - `devil-ui`
+
+- `devil-ai` may depend on:
+  - `devil-protocol`
+  - `devil-security`
+
+- `devil-ai` MUST directly depend on:
+  - `devil-protocol`
+  - `devil-security`
+
+- `devil-ai-providers` may depend on:
+  - `devil-ai`
+  - `devil-protocol`
+  - `devil-security`
+
+- `devil-ai-providers` MUST directly depend on:
+  - `devil-ai`
+
+- `devil-index` may depend on:
+  - `devil-protocol`
+  - `devil-storage`
+  - `devil-text`
+
+- `devil-tracker` may depend on:
+  - `devil-protocol`
+  - `devil-storage`
+
+- `devil-memory` may depend on:
+  - `devil-protocol`
+  - `devil-storage`
+
+- `devil-agent` may depend on:
+  - `devil-ai`
+  - `devil-protocol`
+  - `devil-tracker`
+
+- `devil-cli` may depend on:
+  - `devil-index`
+  - `devil-protocol`
+  - `devil-storage`
+
+The planned runtime surfaces below are policy placeholders only. They do not authorize activation, crate creation, or runtime behavior before the activation gates in section 4 are satisfied.
+
+- `devil-lsp` may depend on:
+  - `devil-observability`
+  - `devil-platform`
+  - `devil-protocol`
+  - `devil-security`
+  - `devil-storage`
+
+- `devil-plugin` may depend on:
+  - `devil-observability`
+  - `devil-platform`
+  - `devil-protocol`
+  - `devil-security`
+  - `devil-storage`
+
+- `devil-terminal` may depend on:
+  - `devil-observability`
+  - `devil-platform`
+  - `devil-protocol`
+  - `devil-security`
+
+- `devil-collaboration` may depend on:
+  - `devil-observability`
+  - `devil-protocol`
+  - `devil-security`
+  - `devil-storage`
+
+- `devil-remote` may depend on:
+  - `devil-observability`
+  - `devil-platform`
+  - `devil-protocol`
+  - `devil-security`
+  - `devil-storage`
 
 ### 2. Shared Contracts Boundary
 
@@ -185,14 +295,30 @@ This document defines the required crate dependency direction used by `cargo run
   - `StorageRepositoryPort`
   - `ProjectInfoPort`
 
-### 3. Forbidden/Deferred Edges (Milestone 0)
+### 3. Forbidden/Deferred Edges
 
 - Do not add hard edges from:
   - `devil-editor` -> `devil-project`
   - `devil-ui` -> feature crates beyond declared contracts
   - `devil-tracker` -> feature crates that are not storage-protocol mediated
   - `devil-memory` -> non-storage non-protocol feature domains without explicit planning
+  - `devil-agent` -> `devil-app` or `devil-ui`
+  - planned runtime surfaces -> `devil-app` internals without protocol-port mediation
 
-### 4. Enforcement
+### 4. Runtime Surface Activation Gates
 
-`xtask check-deps` reads this policy and fails when forbidden edges are detected.
+- `devil-index`, `devil-agent`, `devil-tracker`, `devil-memory`, `devil-plugin`, `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated.
+- Runtime behavior for those crates or surfaces must not land until the same change also includes:
+  - an accepted ADR for the surface being activated
+  - an explicit dependency-policy entry in this document
+  - required protocol contracts in `crates/devil-protocol/src/lib.rs`
+  - architecture-gate tests proving the new surface preserves ownership and mutation rules
+  - an owner and phase gate recorded in the active implementation plan
+- Existing ADRs for tracker or memory do not waive the other activation gates. Placeholder crates remain inert until the full gate is satisfied.
+
+### 5. Enforcement
+
+- `xtask check-deps` reads this policy and fails when a workspace crate lacks policy coverage.
+- `xtask check-deps` fails when forbidden edges are detected.
+- `xtask check-deps` fails when required internal dependencies are missing.
+- `xtask check-deps` fails when required protocol symbols are absent from `crates/devil-protocol/src/lib.rs`.

@@ -198,6 +198,7 @@ pub struct WorkspaceSaveApplied {
 }
 
 /// Workspace save result preserving typed stale/conflict/denial/failure responses.
+#[allow(clippy::result_large_err)]
 pub type WorkspaceSaveResult = Result<WorkspaceSaveApplied, ProposalResponse>;
 
 #[derive(Debug, Clone)]
@@ -1617,6 +1618,7 @@ impl WorkspaceActor {
     }
 
     /// Apply a save through mandatory proposal context and fail-closed fingerprint preconditions.
+    #[allow(clippy::result_large_err)]
     pub fn save_file_with_proposal(&self, request: WorkspaceSaveRequest) -> WorkspaceSaveResult {
         let mut state_guard = match self.state.lock() {
             Ok(guard) => guard,
@@ -2399,6 +2401,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::result_large_err)]
     fn save_new_file_for_tests(
         actor: &WorkspaceActor,
         workspace_id: WorkspaceId,

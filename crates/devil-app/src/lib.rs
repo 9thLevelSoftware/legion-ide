@@ -219,7 +219,7 @@ impl SaveProposalCoordinator {
             diagnostics: Vec::new(),
         };
 
-        let proposal = WorkspaceProposal {
+        WorkspaceProposal {
             proposal_id,
             principal,
             capability,
@@ -229,8 +229,7 @@ impl SaveProposalCoordinator {
             preview,
             expires_at: None,
             created_at: TimestampMillis::now(),
-        };
-        proposal
+        }
     }
 
     fn created_response(&self, proposal: &WorkspaceProposal) -> ProposalResponse {
@@ -873,10 +872,29 @@ impl ProjectionBuilder {
     fn active_buffer_projection(
         active: &ActiveDocumentController,
         editor: &EditorEngine,
+        layout: &ShellLayoutProjection,
     ) -> Result<ActiveBufferProjection, AppCompositionError> {
         let Some(buffer_id) = active.active_buffer_id else {
             return Ok(ActiveBufferProjection::empty());
         };
+
+        // Construct default viewport request
+        let request = devil_protocol::EditorViewportRequest {
+            buffer_id,
+            scroll: devil_protocol::ViewportScroll {
+                top_line: 0,
+                left_column: 0,
+            },
+            dimensions: devil_protocol::ViewportDimensions {
+                width_px: layout.layout.width as u32 * 8, // Approximate
+                height_px: layout.layout.height as u32 * 16,
+            },
+        };
+
+        let viewport = editor.viewport_projection(request).ok();
+        let degraded = viewport
+            .as_ref()
+            .is_some_and(|vp| vp.large_file_status.is_some());
 
         Ok(ActiveBufferProjection {
             workspace_id: active.workspace_id(),
@@ -886,8 +904,14 @@ impl ProjectionBuilder {
                 .active_file_path
                 .as_ref()
                 .map(|path| CanonicalPath(path.clone())),
-            text: editor.text(buffer_id)?.to_string(),
-            dirty: editor.is_dirty(buffer_id)?,
+            viewport,
+            degraded,
+            small_buffer_preview: if degraded {
+                None
+            } else {
+                editor.text(buffer_id).ok().map(|s| s.to_string())
+            },
+            dirty: editor.is_dirty(buffer_id).unwrap_or(false),
         })
     }
 
@@ -935,6 +959,7 @@ struct SaveWorkflowFailure {
 struct SaveWorkflowService;
 
 impl SaveWorkflowService {
+    #[allow(clippy::result_large_err)]
     fn save_active_buffer(
         editor: &mut EditorEngine,
         workspace: &WorkspaceActor,
@@ -1581,8 +1606,11 @@ impl AppComposition {
     }
 
     /// Build active-buffer projection from editor-engine state.
-    pub fn active_buffer_projection(&self) -> Result<ActiveBufferProjection, AppCompositionError> {
-        ProjectionBuilder::active_buffer_projection(&self.active_documents, &self.editor)
+    pub fn active_buffer_projection(
+        &self,
+        layout: &ShellLayoutProjection,
+    ) -> Result<ActiveBufferProjection, AppCompositionError> {
+        ProjectionBuilder::active_buffer_projection(&self.active_documents, &self.editor, layout)
     }
 
     /// Build the complete projection snapshot consumed by the UI shell.
@@ -1590,10 +1618,11 @@ impl AppComposition {
         &self,
         title: impl Into<String>,
     ) -> Result<ShellProjectionSnapshot, AppCompositionError> {
+        let layout_projection = ShellLayoutProjection::plain(title);
         Ok(ShellProjectionSnapshot {
-            layout_projection: ShellLayoutProjection::plain(title),
+            active_buffer_projection: self.active_buffer_projection(&layout_projection)?,
+            layout_projection,
             explorer_projection: self.explorer_projection()?,
-            active_buffer_projection: self.active_buffer_projection()?,
             status_messages: Vec::new(),
         })
     }

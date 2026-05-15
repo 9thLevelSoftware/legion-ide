@@ -822,6 +822,7 @@ pub fn fallback_applied_event(
 }
 
 /// Build an editor snapshot-retention degradation event.
+#[allow(clippy::too_many_arguments)]
 pub fn editor_retention_degradation_event(
     workspace_id: WorkspaceId,
     buffer_id: BufferId,
@@ -851,6 +852,7 @@ pub fn editor_retention_degradation_event(
 }
 
 /// Build a security-denial event with path and reason redacted to metadata hashes.
+#[allow(clippy::too_many_arguments)]
 pub fn security_denial_event(
     workspace_id: WorkspaceId,
     file_id: Option<FileId>,
@@ -1000,6 +1002,7 @@ fn proposal_workspace_id(proposal: &WorkspaceProposal) -> Option<WorkspaceId> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fallback_event(
     event: &'static str,
     severity: EventSeverity,
@@ -1061,7 +1064,7 @@ fn redacted_diagnostics(diagnostics: &[ProtocolDiagnostic]) -> Vec<ProtocolDiagn
             path: diagnostic.path.as_ref().map(|path| {
                 devil_protocol::CanonicalPath(format!("hash:{}", metadata_hash(&path.0)))
             }),
-            range: diagnostic.range.clone(),
+            range: diagnostic.range,
         })
         .collect()
 }

@@ -1,0 +1,10 @@
+C:\Users\dasbl\RustroverProjects\devil-ide\target-clippy-stable\debug\deps\env_logger-fb8d80241b8f2bd8.d: C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\lib.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\logger.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\mod.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\buffer.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\target.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\fmt\mod.rs
+
+C:\Users\dasbl\RustroverProjects\devil-ide\target-clippy-stable\debug\deps\libenv_logger-fb8d80241b8f2bd8.rmeta: C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\lib.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\logger.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\mod.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\buffer.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\target.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\fmt\mod.rs
+
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\lib.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\logger.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\mod.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\buffer.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\writer\target.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\env_logger-0.11.10\src\fmt\mod.rs:

@@ -1,0 +1,9 @@
+C:\Users\dasbl\RustroverProjects\devil-ide\target-clippy-stable\debug\deps\cargo_metadata-e47ac656c0fb9460.d: C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\lib.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\dependency.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\diagnostic.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\errors.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\messages.rs
+
+C:\Users\dasbl\RustroverProjects\devil-ide\target-clippy-stable\debug\deps\libcargo_metadata-e47ac656c0fb9460.rmeta: C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\lib.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\dependency.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\diagnostic.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\errors.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\messages.rs
+
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\lib.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\dependency.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\diagnostic.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\errors.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cargo_metadata-0.18.1\src\messages.rs:

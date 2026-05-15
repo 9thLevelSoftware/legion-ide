@@ -11,10 +11,14 @@ use devil_protocol::{
     CorrelationId, EditorApplyTransactionRequest, EditorBufferMetadata, EditorOpenBufferRequest,
     EditorPort, EditorRequest, EditorResponse, EditorSaveAcknowledgement, EditorSaveOutcome,
     EditorSaveRequest, EditorViewportRequest, EventSequence, EventSinkPort, EventSinkRequest,
-    FileConflictLifecycleState, FileConflictState, FileId, ProtocolDiagnostic, ProtocolError,
-    ProtocolResult, ProtocolTextRange, SnapshotId, TextCoordinate, TextTransactionDescriptor,
-    TimestampMillis, TransactionSource, Utf16Position, Utf16Range as ProtocolUtf16Range,
-    ViewportProjection, WorkspaceId,
+    FileConflictLifecycleState, FileConflictState, FileFingerprint, FileId, LargeFileStatus,
+    LineIndexRange, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
+    ProtocolTextRange, SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId,
+    SnapshotLeaseDescriptor, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
+    TransactionSource, Utf16Position as ProtocolUtf16Position, Utf16Range as ProtocolUtf16Range,
+    ViewportDecorationSpan, ViewportFoldRange, ViewportLineMetric, ViewportLineSlice,
+    ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
+    ViewportSemanticTokenOverlay, WorkspaceId,
 };
 use devil_text::{
     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
@@ -46,6 +50,11 @@ pub enum EditorError {
     /// Redo stack empty.
     #[error("nothing to redo")]
     NothingToRedo,
+    /// Save requires a full-source payload that Phase 1 degraded mode does not provide.
+    #[error(
+        "buffer {0:?} is in degraded mode; phase 1 save requests fail closed until chunked save support is available"
+    )]
+    DegradedSaveUnavailable(BufferId),
 }
 
 /// Cursor state for a single caret.
@@ -134,11 +143,11 @@ impl TransactionRecord {
                 .map(|delta| ChangedTextRange {
                     byte_range: delta.byte_range,
                     utf16_range: ProtocolUtf16Range {
-                        start: Utf16Position {
+                        start: ProtocolUtf16Position {
                             line: delta.utf16_range.start.line as u32,
                             character: delta.utf16_range.start.character as u32,
                         },
-                        end: Utf16Position {
+                        end: ProtocolUtf16Position {
                             line: delta.utf16_range.end.line as u32,
                             character: delta.utf16_range.end.character as u32,
                         },
@@ -238,6 +247,21 @@ struct SaveSnapshotPayload {
 }
 
 #[derive(Debug, Clone)]
+struct SnapshotLeaseRecord {
+    snapshot: devil_text::TextSnapshot,
+    descriptor: SnapshotLeaseDescriptor,
+}
+
+/// Drained metadata-only transaction events captured by the editor.
+#[derive(Debug, Clone, Default)]
+pub struct DrainedTransactionEvents {
+    /// Transaction descriptors produced since the previous drain.
+    pub descriptors: Vec<TextTransactionDescriptor>,
+    /// Number of older descriptors dropped before this drain because the queue was full.
+    pub dropped_before_drain: u64,
+}
+
+#[derive(Debug, Clone)]
 struct RetainedSnapshotDescriptor {
     buffer_id: BufferId,
     reason: RetentionPinReason,
@@ -273,7 +297,11 @@ impl EditorBufferState {
         initial_text: impl Into<String>,
         mode: BufferMode,
     ) -> Result<Self, EditorError> {
-        let mut buffer = TextBuffer::try_with_version(initial_text.into(), BufferVersion(0))?;
+        let mut buffer = TextBuffer::try_with_version_and_cache_policy(
+            initial_text.into(),
+            BufferVersion(0),
+            matches!(mode, BufferMode::Normal),
+        )?;
         buffer.set_version(BufferVersion(0));
         let current_snapshot =
             buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
@@ -308,13 +336,17 @@ enum SnapshotStackKind {
 }
 
 /// Production multi-buffer editor engine.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct EditorEngine {
     next_buffer_id: u128,
     buffers: HashMap<BufferId, EditorBufferState>,
     file_to_buffer: HashMap<(WorkspaceId, FileId), BufferId>,
     transaction_log: Vec<TransactionRecord>,
+    transaction_events: VecDeque<TextTransactionDescriptor>,
+    transaction_event_queue_capacity: usize,
+    dropped_transaction_event_count: u64,
     pending_save_requests: Vec<SaveRequestDto>,
+    snapshot_leases: HashMap<Uuid, SnapshotLeaseRecord>,
     pinned_snapshot_ids: HashSet<SnapshotId>,
     thresholds: EditorThresholds,
     snapshot_retention_policy: SnapshotRetentionPolicy,
@@ -389,6 +421,8 @@ impl Default for EditorEnginePort {
 
 const DEFAULT_RETENTION_BUDGET_SNAPSHOTS: usize = 256;
 const DEFAULT_RETENTION_BUDGET_BYTES: usize = DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES * 4;
+const DEFAULT_TRANSACTION_EVENT_QUEUE_CAPACITY: usize = 256;
+const DEFAULT_SNAPSHOT_LEASE_TTL_MILLIS: u64 = 60_000;
 
 /// Buffer operating mode selected by size-based degradation gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,15 +481,30 @@ impl Default for SnapshotRetentionPolicy {
     }
 }
 
+impl Default for EditorEngine {
+    fn default() -> Self {
+        Self {
+            next_buffer_id: 1,
+            buffers: HashMap::new(),
+            file_to_buffer: HashMap::new(),
+            transaction_log: Vec::new(),
+            transaction_events: VecDeque::with_capacity(DEFAULT_TRANSACTION_EVENT_QUEUE_CAPACITY),
+            transaction_event_queue_capacity: DEFAULT_TRANSACTION_EVENT_QUEUE_CAPACITY,
+            dropped_transaction_event_count: 0,
+            pending_save_requests: Vec::new(),
+            snapshot_leases: HashMap::new(),
+            pinned_snapshot_ids: HashSet::new(),
+            thresholds: EditorThresholds::default(),
+            snapshot_retention_policy: SnapshotRetentionPolicy::default(),
+            retained_snapshots: VecDeque::new(),
+        }
+    }
+}
+
 impl EditorEngine {
     /// Create a new empty engine.
     pub fn new() -> Self {
-        Self {
-            next_buffer_id: 1,
-            thresholds: EditorThresholds::default(),
-            snapshot_retention_policy: SnapshotRetentionPolicy::default(),
-            ..Self::default()
-        }
+        Self::default()
     }
 
     /// Create an engine with explicit threshold tuning for degraded mode and retention controls.
@@ -472,6 +521,15 @@ impl EditorEngine {
             snapshot_retention_policy: policy,
             ..Self::new()
         }
+    }
+
+    /// Create an engine with an explicit bounded transaction event queue capacity.
+    pub fn with_transaction_event_queue_capacity(capacity: usize) -> Self {
+        let mut engine = Self::new();
+        engine.transaction_event_queue_capacity = capacity.max(1);
+        engine.transaction_events =
+            VecDeque::with_capacity(engine.transaction_event_queue_capacity.max(1));
+        engine
     }
 
     /// Returns the threshold configuration currently active for this editor.
@@ -499,11 +557,7 @@ impl EditorEngine {
         self.next_buffer_id += 1;
 
         let initial_text = initial_text.into();
-        let mode = if initial_text.len() > self.thresholds.large_file_threshold_bytes {
-            BufferMode::Degraded
-        } else {
-            BufferMode::Normal
-        };
+        let mode = self.mode_for_byte_len(initial_text.len());
         let state = EditorBufferState::new(
             workspace_id,
             buffer_id,
@@ -527,21 +581,21 @@ impl EditorEngine {
             .ok_or(EditorError::BufferNotFound(buffer_id))?;
         self.file_to_buffer
             .remove(&(state.workspace_id, state.file_id));
-        self.remove_snapshot_descriptor(state.current_snapshot.snapshot_id());
+        self.release_snapshot_descriptor_if_unreferenced(state.current_snapshot.snapshot_id());
         for entry in state.undo_stack.iter().chain(state.redo_stack.iter()) {
-            self.remove_snapshot_descriptor(entry.snapshot.snapshot_id());
+            self.release_snapshot_descriptor_if_unreferenced(entry.snapshot.snapshot_id());
         }
         Ok(())
     }
 
     /// Get immutable text for a buffer.
     pub fn text(&self, buffer_id: BufferId) -> Result<&str, EditorError> {
-        Ok(self
-            .buffers
+        self.buffers
             .get(&buffer_id)
             .ok_or(EditorError::BufferNotFound(buffer_id))?
             .buffer
-            .text())
+            .try_full_text()
+            .map_err(EditorError::from)
     }
 
     /// Get file path for a buffer.
@@ -592,6 +646,57 @@ impl EditorEngine {
             .ok_or(EditorError::BufferNotFound(buffer_id))?
             .current_snapshot
             .descriptor())
+    }
+
+    /// Return protocol chunk descriptors for the current snapshot of a buffer.
+    pub fn snapshot_chunk_descriptors(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<Vec<SnapshotChunkDescriptor>, EditorError> {
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        Ok(Self::protocol_snapshot_chunk_descriptors(
+            &state.current_snapshot,
+        ))
+    }
+
+    /// Acquire a descriptor-only lease over the current snapshot for a downstream consumer.
+    pub fn lease_snapshot(
+        &mut self,
+        buffer_id: BufferId,
+        consumer_kind: SnapshotConsumerKind,
+    ) -> Result<SnapshotLeaseDescriptor, EditorError> {
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        let snapshot = state.current_snapshot.clone();
+        let now = TimestampMillis::now();
+        let descriptor = SnapshotLeaseDescriptor {
+            lease_id: Uuid::now_v7(),
+            snapshot_id: snapshot.snapshot_id(),
+            consumer_kind,
+            expires_at: TimestampMillis(now.0.saturating_add(DEFAULT_SNAPSHOT_LEASE_TTL_MILLIS)),
+            chunk_count: snapshot.chunk_descriptors().len() as u32,
+            schema_version: 1,
+        };
+        self.snapshot_leases.insert(
+            descriptor.lease_id,
+            SnapshotLeaseRecord {
+                snapshot,
+                descriptor: descriptor.clone(),
+            },
+        );
+        Ok(descriptor)
+    }
+
+    /// Release a previously acquired snapshot lease.
+    pub fn release_snapshot_lease(&mut self, lease_id: Uuid) -> Option<SnapshotLeaseDescriptor> {
+        let lease = self.snapshot_leases.remove(&lease_id)?;
+        self.release_snapshot_descriptor_if_unreferenced(lease.snapshot.snapshot_id());
+        Some(lease.descriptor)
     }
 
     /// Return the workspace id and file id for a buffer.
@@ -649,6 +754,59 @@ impl EditorEngine {
         let top_line = (request.scroll.top_line as usize).min(line_count.saturating_sub(1));
         let approx_visible_lines = ((request.dimensions.height_px / 16).max(1)) as usize;
         let end_line = (top_line + approx_visible_lines).min(line_count);
+        let visible_line_slices = state
+            .current_snapshot
+            .visible_line_slices(top_line, end_line)?;
+        let line_metrics = visible_line_slices
+            .iter()
+            .map(|slice| {
+                Ok(ViewportLineMetric {
+                    byte_length: state
+                        .current_snapshot
+                        .line_index()
+                        .line_byte_len(slice.line)? as u64,
+                    utf16_length: state
+                        .current_snapshot
+                        .line_index()
+                        .line_utf16_len(slice.line)? as u64,
+                    line_ending_width: state
+                        .current_snapshot
+                        .line_index()
+                        .line_ending_bytes(slice.line)?
+                        as u8,
+                    exact: true,
+                })
+            })
+            .collect::<Result<Vec<_>, EditorError>>()?;
+        let line_slices = visible_line_slices
+            .iter()
+            .map(|slice| {
+                Ok(ViewportLineSlice {
+                    line_number: slice.line as u32,
+                    visible_text: slice.text.clone(),
+                    byte_range: ByteRange::new(
+                        slice.line_start_byte as u64,
+                        slice.slice_end_byte as u64,
+                    ),
+                    utf16_range: Self::protocol_utf16_range(
+                        state
+                            .current_snapshot
+                            .line_index()
+                            .utf16_position(slice.line_start_byte)?,
+                        state
+                            .current_snapshot
+                            .line_index()
+                            .utf16_position(slice.slice_end_byte)?,
+                    ),
+                    chunk_hash: Self::chunk_hash_for_line(&state.current_snapshot, slice.line),
+                    truncation_state: if slice.truncated {
+                        ViewportLineTruncationState::Trailing
+                    } else {
+                        ViewportLineTruncationState::None
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, EditorError>>()?;
         let start = state
             .buffer
             .try_byte_offset(TextPosition::new(top_line, 0))?;
@@ -664,6 +822,10 @@ impl EditorEngine {
             .first()
             .map(|cursor| cursor.position)
             .unwrap_or_else(TextPosition::zero);
+        let mode = match state.mode {
+            BufferMode::Normal => ViewportProjectionMode::Normal,
+            BufferMode::Degraded => ViewportProjectionMode::DegradedLargeFile,
+        };
 
         Ok(ViewportProjection {
             workspace_id: state.workspace_id,
@@ -680,14 +842,30 @@ impl EditorEngine {
                 .iter()
                 .map(|selection| Self::protocol_range(&state.buffer, selection.range))
                 .collect::<Result<Vec<_>, _>>()?,
-            cursor: Self::protocol_coordinate(
-                &state.buffer,
-                cursor.line,
-                state.buffer.try_byte_offset(cursor)?,
-            )?,
+            cursor: Self::protocol_coordinate_from_offset(&state.buffer, state.buffer.try_byte_offset(cursor)?)?,
             scroll: request.scroll,
             dimensions: request.dimensions,
-            schema_version: 1,
+            mode,
+            line_slices,
+            line_metrics,
+            decoration_spans: Vec::<ViewportDecorationSpan>::new(),
+            fold_ranges: Vec::<ViewportFoldRange>::new(),
+            semantic_token_overlays: Vec::<ViewportSemanticTokenOverlay>::new(),
+            large_file_status: matches!(state.mode, BufferMode::Degraded).then(|| LargeFileStatus {
+                threshold_bytes: self.thresholds.large_file_threshold_bytes as u64,
+                byte_len: descriptor.byte_len as u64,
+                disabled_overlay_reasons: vec![
+                    "decorations deferred in degraded large-file mode".to_string(),
+                    "fold computation deferred in degraded large-file mode".to_string(),
+                    "semantic token overlays deferred in degraded large-file mode".to_string(),
+                ],
+                bounded_search_enabled: true,
+                message: format!(
+                    "Large file degraded mode is active for {} bytes; viewport payloads are chunked and Phase 1 saves fail closed.",
+                    descriptor.byte_len
+                ),
+            }),
+            schema_version: 2,
         })
     }
 
@@ -719,16 +897,13 @@ impl EditorEngine {
 
     fn protocol_coordinate(
         buffer: &TextBuffer,
-        line: usize,
+        _line: usize,
         byte_offset: usize,
     ) -> Result<TextCoordinate, EditorError> {
         let position = buffer.try_position(byte_offset)?;
-        let utf16_offset = buffer
-            .text()
-            .get(..byte_offset)
-            .map(|prefix| prefix.encode_utf16().count() as u64);
+        let utf16_offset = Some(Self::absolute_utf16_offset(buffer, byte_offset)?);
         Ok(TextCoordinate {
-            line: line as u32,
+            line: position.line as u32,
             character: position.column as u32,
             byte_offset: Some(byte_offset as u64),
             utf16_offset,
@@ -760,6 +935,8 @@ impl EditorEngine {
             return Err(EditorError::InvalidEdit("edit batch cannot be empty"));
         }
 
+        let thresholds = self.thresholds;
+
         let state = self
             .buffers
             .get(&buffer_id)
@@ -784,6 +961,8 @@ impl EditorEngine {
 
         let next_version = BufferVersion(plan.pre_version.0 + 1);
         staged_buffer.set_version(next_version);
+        let next_mode = Self::mode_for_byte_len_with_thresholds(thresholds, staged_buffer.len());
+        staged_buffer.set_full_cache_policy(matches!(next_mode, BufferMode::Normal))?;
         let post_snapshot =
             staged_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
         let post_descriptor = post_snapshot.descriptor().clone();
@@ -811,6 +990,7 @@ impl EditorEngine {
             });
             state.redo_stack.clear();
             state.buffer = staged_buffer;
+            state.mode = next_mode;
             state.current_snapshot = post_snapshot;
             state.dirty = true;
             state.save_state = if state.conflict_state.is_some() {
@@ -828,9 +1008,9 @@ impl EditorEngine {
         };
 
         for snapshot_id in redo_snapshot_ids {
-            self.remove_snapshot_descriptor(snapshot_id);
+            self.release_snapshot_descriptor_if_unreferenced(snapshot_id);
         }
-        self.remove_snapshot_descriptor(old_current_snapshot_id);
+        self.release_snapshot_descriptor_if_unreferenced(old_current_snapshot_id);
         let mut undo_descriptor = plan.pre_snapshot.descriptor().clone();
         undo_descriptor.retention_pin_reason = RetentionPinReason::UndoHistory;
         self.retain_snapshot_descriptor(buffer_id, &undo_descriptor);
@@ -854,6 +1034,7 @@ impl EditorEngine {
         };
 
         self.transaction_log.push(tx.clone());
+        self.enqueue_transaction_event(&tx);
         Ok(tx)
     }
 
@@ -959,7 +1140,7 @@ impl EditorEngine {
                     }
                 }
             }
-            self.remove_snapshot_descriptor(snapshot_id);
+            self.release_snapshot_descriptor_if_unreferenced(snapshot_id);
         }
     }
 
@@ -1005,6 +1186,10 @@ impl EditorEngine {
             .iter()
             .any(|request| request.snapshot_id == snapshot_id)
             || self
+                .snapshot_leases
+                .values()
+                .any(|lease| lease.snapshot.snapshot_id() == snapshot_id)
+            || self
                 .buffers
                 .values()
                 .any(|state| state.current_snapshot.snapshot_id() == snapshot_id)
@@ -1016,6 +1201,7 @@ impl EditorEngine {
         buffer_id: BufferId,
         correlation_id: Option<CorrelationId>,
     ) -> Result<TransactionRecord, EditorError> {
+        let thresholds = self.thresholds;
         let (
             workspace_id,
             file_id,
@@ -1025,6 +1211,7 @@ impl EditorEngine {
             post_snapshot_descriptor,
             undo_snapshot_id,
             delta,
+            restored_mode,
         ) = {
             let state = self
                 .buffers
@@ -1037,8 +1224,13 @@ impl EditorEngine {
                 .ok_or(EditorError::NothingToUndo)?;
             let pre_snapshot = state.current_snapshot.clone();
             let next_version = BufferVersion(state.buffer.version().0 + 1);
-            let mut restored_buffer =
-                TextBuffer::try_with_version(undo_entry.snapshot.text().to_string(), next_version)?;
+            let restored_mode =
+                Self::mode_for_byte_len_with_thresholds(thresholds, undo_entry.snapshot.len());
+            let mut restored_buffer = TextBuffer::try_from_rope_with_cache_policy(
+                undo_entry.snapshot.rope(),
+                next_version,
+                matches!(restored_mode, BufferMode::Normal),
+            )?;
             restored_buffer.set_version(next_version);
             let restored_snapshot =
                 restored_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
@@ -1060,6 +1252,7 @@ impl EditorEngine {
                 undo_group_id: undo_entry.undo_group_id,
             });
             state.buffer = restored_buffer;
+            state.mode = restored_mode;
             state.current_snapshot = restored_snapshot;
             state.dirty = true;
             state.save_state = if state.conflict_state.is_some() {
@@ -1077,9 +1270,10 @@ impl EditorEngine {
                 restored_snapshot_descriptor,
                 undo_snapshot_id,
                 delta,
+                restored_mode,
             )
         };
-        self.remove_snapshot_descriptor(undo_snapshot_id);
+        self.release_snapshot_descriptor_if_unreferenced(undo_snapshot_id);
         self.retain_snapshot_descriptor(buffer_id, &redo_snapshot_descriptor);
         self.retain_snapshot_descriptor(buffer_id, &post_snapshot_descriptor);
         self.enforce_snapshot_retention_policy();
@@ -1098,7 +1292,9 @@ impl EditorEngine {
             occurred_at: TimestampMillis::now(),
             correlation_id,
         };
+        let _ = restored_mode;
         self.transaction_log.push(tx.clone());
+        self.enqueue_transaction_event(&tx);
         Ok(tx)
     }
 
@@ -1108,6 +1304,7 @@ impl EditorEngine {
         buffer_id: BufferId,
         correlation_id: Option<CorrelationId>,
     ) -> Result<TransactionRecord, EditorError> {
+        let thresholds = self.thresholds;
         let (
             workspace_id,
             file_id,
@@ -1117,6 +1314,7 @@ impl EditorEngine {
             post_snapshot_descriptor,
             redo_snapshot_id,
             delta,
+            restored_mode,
         ) = {
             let state = self
                 .buffers
@@ -1129,8 +1327,13 @@ impl EditorEngine {
                 .ok_or(EditorError::NothingToRedo)?;
             let pre_snapshot = state.current_snapshot.clone();
             let next_version = BufferVersion(state.buffer.version().0 + 1);
-            let mut restored_buffer =
-                TextBuffer::try_with_version(redo_entry.snapshot.text().to_string(), next_version)?;
+            let restored_mode =
+                Self::mode_for_byte_len_with_thresholds(thresholds, redo_entry.snapshot.len());
+            let mut restored_buffer = TextBuffer::try_from_rope_with_cache_policy(
+                redo_entry.snapshot.rope(),
+                next_version,
+                matches!(restored_mode, BufferMode::Normal),
+            )?;
             restored_buffer.set_version(next_version);
             let restored_snapshot =
                 restored_buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
@@ -1152,6 +1355,7 @@ impl EditorEngine {
                 undo_group_id: redo_entry.undo_group_id,
             });
             state.buffer = restored_buffer;
+            state.mode = restored_mode;
             state.current_snapshot = restored_snapshot;
             state.dirty = true;
             state.save_state = if state.conflict_state.is_some() {
@@ -1169,9 +1373,10 @@ impl EditorEngine {
                 restored_snapshot_descriptor,
                 redo_snapshot_id,
                 delta,
+                restored_mode,
             )
         };
-        self.remove_snapshot_descriptor(redo_snapshot_id);
+        self.release_snapshot_descriptor_if_unreferenced(redo_snapshot_id);
         self.retain_snapshot_descriptor(buffer_id, &undo_snapshot_descriptor);
         self.retain_snapshot_descriptor(buffer_id, &post_snapshot_descriptor);
         self.enforce_snapshot_retention_policy();
@@ -1190,7 +1395,9 @@ impl EditorEngine {
             occurred_at: TimestampMillis::now(),
             correlation_id,
         };
+        let _ = restored_mode;
         self.transaction_log.push(tx.clone());
+        self.enqueue_transaction_event(&tx);
         Ok(tx)
     }
 
@@ -1203,11 +1410,26 @@ impl EditorEngine {
         let payload = {
             let state = self
                 .buffers
-                .get(&buffer_id)
+                .get_mut(&buffer_id)
                 .ok_or(EditorError::BufferNotFound(buffer_id))?;
+            if matches!(state.mode, BufferMode::Degraded) {
+                state.save_state = FileConflictLifecycleState::SaveFailed;
+                state.save_diagnostics = vec![ProtocolDiagnostic {
+                    code: "editor.degraded_save_unavailable".to_string(),
+                    message: format!(
+                        "phase 1 degraded mode for '{}' does not expose a full-source save payload",
+                        state.file_path
+                    ),
+                    severity: ProtocolDiagnosticSeverity::Error,
+                    path: Some(CanonicalPath(state.file_path.clone())),
+                    range: None,
+                }];
+                return Err(EditorError::DegradedSaveUnavailable(buffer_id));
+            }
             let snapshot = state
                 .buffer
                 .try_snapshot_with_retention(RetentionPinReason::BackgroundSave)?;
+            let full_text = snapshot.try_full_text()?;
             let dto = SaveRequestDto {
                 request_id: Uuid::now_v7(),
                 workspace_id: state.workspace_id,
@@ -1216,8 +1438,8 @@ impl EditorEngine {
                 snapshot_id: snapshot.snapshot_id(),
                 buffer_version: snapshot.buffer_version(),
                 content_hash: snapshot.content_hash().to_string(),
-                payload_byte_len: snapshot.text().len() as u64,
-                text: snapshot.text().to_string(),
+                payload_byte_len: full_text.len() as u64,
+                text: full_text.to_string(),
                 requested_at: TimestampMillis::now(),
                 correlation_id: correlation_id
                     .unwrap_or_else(|| CorrelationId(TimestampMillis::now().0)),
@@ -1300,29 +1522,22 @@ impl EditorEngine {
     }
 
     fn release_save_snapshot_if_unreferenced(&mut self, snapshot_id: SnapshotId) {
-        if self
-            .pending_save_requests
-            .iter()
-            .all(|pending| pending.snapshot_id != snapshot_id)
-            && self.buffers.values().all(|state| {
-                state.current_snapshot.snapshot_id() != snapshot_id
-                    && state
-                        .undo_stack
-                        .iter()
-                        .all(|entry| entry.snapshot.snapshot_id() != snapshot_id)
-                    && state
-                        .redo_stack
-                        .iter()
-                        .all(|entry| entry.snapshot.snapshot_id() != snapshot_id)
-            })
-        {
-            self.remove_snapshot_descriptor(snapshot_id);
-        }
+        self.release_snapshot_descriptor_if_unreferenced(snapshot_id);
     }
 
     /// Read-only transaction log.
     pub fn transaction_log(&self) -> &[TransactionRecord] {
         &self.transaction_log
+    }
+
+    /// Drain already-produced metadata-only transaction descriptors from the bounded event queue.
+    pub fn drain_transaction_events(&mut self) -> DrainedTransactionEvents {
+        let descriptors = self.transaction_events.drain(..).collect();
+        let dropped_before_drain = std::mem::take(&mut self.dropped_transaction_event_count);
+        DrainedTransactionEvents {
+            descriptors,
+            dropped_before_drain,
+        }
     }
 
     /// Read-only pending save queue.
@@ -1442,6 +1657,121 @@ impl EditorEngine {
             .ok_or(EditorError::BufferNotFound(buffer_id))?;
         state.overlays = overlays;
         Ok(())
+    }
+
+    fn mode_for_byte_len(&self, len: usize) -> BufferMode {
+        Self::mode_for_byte_len_with_thresholds(self.thresholds, len)
+    }
+
+    fn mode_for_byte_len_with_thresholds(thresholds: EditorThresholds, len: usize) -> BufferMode {
+        if len > thresholds.large_file_threshold_bytes || len > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
+        {
+            BufferMode::Degraded
+        } else {
+            BufferMode::Normal
+        }
+    }
+
+    fn protocol_snapshot_chunk_descriptors(
+        snapshot: &devil_text::TextSnapshot,
+    ) -> Vec<SnapshotChunkDescriptor> {
+        let snapshot_id = snapshot.snapshot_id();
+        snapshot
+            .chunk_descriptors()
+            .iter()
+            .map(|chunk| SnapshotChunkDescriptor {
+                snapshot_id,
+                chunk_index: chunk.ordinal as u32,
+                byte_range: ByteRange::new(chunk.start_byte as u64, chunk.end_byte as u64),
+                line_range: LineIndexRange {
+                    start: chunk.start_line as u32,
+                    end: chunk.end_line.saturating_add(1) as u32,
+                },
+                byte_len: chunk.byte_len as u64,
+                chunk_hash: Self::protocol_fingerprint(&chunk.hash),
+                schema_version: 1,
+            })
+            .collect()
+    }
+
+    fn protocol_utf16_range(
+        start: devil_text::Utf16Position,
+        end: devil_text::Utf16Position,
+    ) -> ProtocolUtf16Range {
+        ProtocolUtf16Range {
+            start: ProtocolUtf16Position {
+                line: start.line as u32,
+                character: start.character as u32,
+            },
+            end: ProtocolUtf16Position {
+                line: end.line as u32,
+                character: end.character as u32,
+            },
+        }
+    }
+
+    fn chunk_hash_for_line(snapshot: &devil_text::TextSnapshot, line: usize) -> FileFingerprint {
+        snapshot
+            .chunk_descriptors()
+            .iter()
+            .find(|chunk| chunk.start_line <= line && line <= chunk.end_line)
+            .map(|chunk| Self::protocol_fingerprint(&chunk.hash))
+            .unwrap_or_else(|| Self::protocol_fingerprint(snapshot.content_hash()))
+    }
+
+    fn protocol_fingerprint(hash: &str) -> FileFingerprint {
+        FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: hash.strip_prefix("sha256:").unwrap_or(hash).to_string(),
+        }
+    }
+
+    fn absolute_utf16_offset(buffer: &TextBuffer, byte_offset: usize) -> Result<u64, EditorError> {
+        let utf16_position = buffer.utf16_position(byte_offset)?;
+        let mut total = utf16_position.character as u64;
+        for line in 0..utf16_position.line {
+            total = total
+                .saturating_add(buffer.line_index().line_utf16_len(line)? as u64)
+                .saturating_add(buffer.line_index().line_ending_bytes(line)? as u64);
+        }
+        Ok(total)
+    }
+
+    fn enqueue_transaction_event(&mut self, record: &TransactionRecord) {
+        if self.transaction_events.len() >= self.transaction_event_queue_capacity {
+            self.transaction_events.pop_front();
+            self.dropped_transaction_event_count =
+                self.dropped_transaction_event_count.saturating_add(1);
+        }
+        self.transaction_events
+            .push_back(record.to_protocol_descriptor());
+    }
+
+    fn release_snapshot_descriptor_if_unreferenced(&mut self, snapshot_id: SnapshotId) {
+        if !self.snapshot_is_referenced(snapshot_id) {
+            self.remove_snapshot_descriptor(snapshot_id);
+        }
+    }
+
+    fn snapshot_is_referenced(&self, snapshot_id: SnapshotId) -> bool {
+        self.pending_save_requests
+            .iter()
+            .any(|request| request.snapshot_id == snapshot_id)
+            || self
+                .snapshot_leases
+                .values()
+                .any(|lease| lease.snapshot.snapshot_id() == snapshot_id)
+            || self.buffers.values().any(|state| {
+                state.current_snapshot.snapshot_id() == snapshot_id
+                    || state
+                        .undo_stack
+                        .iter()
+                        .any(|entry| entry.snapshot.snapshot_id() == snapshot_id)
+                    || state
+                        .redo_stack
+                        .iter()
+                        .any(|entry| entry.snapshot.snapshot_id() == snapshot_id)
+            })
     }
 }
 
@@ -1885,8 +2215,9 @@ mod tests {
     use super::*;
     use devil_observability::{InMemoryEventSink, SharedEventSink};
     use devil_protocol::{
-        EditBatch, ProjectId, ProjectInfo, TextEdit as ProtocolTextEdit,
-        TextRange as ProtocolTextRange,
+        EditBatch, EditorViewportRequest, ProjectId, ProjectInfo, ProtocolDiagnosticSeverity,
+        SnapshotConsumerKind, TextEdit as ProtocolTextEdit, TextRange as ProtocolTextRange,
+        ViewportDimensions, ViewportProjectionMode, ViewportScroll,
     };
 
     fn project(file_id: u128) -> ProjectInfo {
@@ -2045,5 +2376,265 @@ mod tests {
         assert_ne!(event.correlation_id.0, 0);
         assert_ne!(event.causality_id.0, Uuid::nil());
         assert_ne!(event.sequence.0, 0);
+    }
+
+    #[test]
+    fn degraded_viewport_projection_is_bounded_and_metadata_only() {
+        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
+            large_file_threshold_bytes: 32,
+            retention_budget_snapshots: 8,
+        });
+        let text = format!("line zero\ncursor🙂line\n{}\ntail\n", "x".repeat(128));
+        let buffer = engine
+            .open_buffer(WorkspaceId(1), FileId(40), "big.rs", text)
+            .expect("open degraded buffer");
+
+        assert_eq!(
+            engine.buffer_mode(buffer).expect("mode"),
+            BufferMode::Degraded
+        );
+        assert!(matches!(
+            engine.text(buffer),
+            Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
+        ));
+
+        engine
+            .set_cursors(
+                buffer,
+                vec![Cursor {
+                    position: TextPosition::new(1, 10),
+                }],
+            )
+            .expect("set cursor");
+        engine
+            .set_selections(
+                buffer,
+                vec![Selection {
+                    range: TextRange::new(TextPosition::new(1, 0), TextPosition::new(1, 10)),
+                }],
+            )
+            .expect("set selection");
+
+        let projection = engine
+            .viewport_projection(EditorViewportRequest {
+                buffer_id: buffer,
+                scroll: ViewportScroll {
+                    top_line: 1,
+                    left_column: 0,
+                },
+                dimensions: ViewportDimensions {
+                    width_px: 800,
+                    height_px: 32,
+                },
+            })
+            .expect("viewport projection");
+
+        assert_eq!(projection.mode, ViewportProjectionMode::DegradedLargeFile);
+        assert_eq!(
+            projection.snapshot_id,
+            engine
+                .current_snapshot(buffer)
+                .expect("snapshot")
+                .snapshot_id
+        );
+        assert_eq!(projection.visible_range.start.line, 1);
+        assert_eq!(projection.cursor.line, 1);
+        assert_eq!(projection.cursor.character, 10);
+        assert!(projection.cursor.utf16_offset.is_some());
+        assert_eq!(projection.selections.len(), 1);
+        assert_eq!(projection.line_slices.len(), projection.line_metrics.len());
+        assert!(!projection.line_slices.is_empty());
+        assert!(
+            projection
+                .line_slices
+                .iter()
+                .all(|slice| slice.chunk_hash.algorithm == "sha256"
+                    && !slice.chunk_hash.value.is_empty())
+        );
+        assert!(projection.line_metrics.iter().all(|metric| metric.exact));
+        assert!(projection.decoration_spans.is_empty());
+        assert!(projection.fold_ranges.is_empty());
+        assert!(projection.semantic_token_overlays.is_empty());
+
+        let status = projection.large_file_status.expect("large-file status");
+        assert_eq!(status.threshold_bytes, 32);
+        assert!(status.message.contains("degraded mode"));
+
+        let chunks = engine
+            .snapshot_chunk_descriptors(buffer)
+            .expect("chunk descriptors");
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].snapshot_id, projection.snapshot_id);
+    }
+
+    #[test]
+    fn coordinate_conversion_avoids_full_text_for_degraded_buffers() {
+        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
+            large_file_threshold_bytes: 8,
+            retention_budget_snapshots: 8,
+        });
+        let buffer = engine
+            .open_buffer(WorkspaceId(1), FileId(41), "emoji.txt", "a🦀b\nrest")
+            .expect("open degraded buffer");
+        engine
+            .set_cursors(
+                buffer,
+                vec![Cursor {
+                    position: TextPosition::new(0, 5),
+                }],
+            )
+            .expect("set cursor");
+
+        assert!(matches!(
+            engine.text(buffer),
+            Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
+        ));
+
+        let projection = engine
+            .viewport_projection(EditorViewportRequest {
+                buffer_id: buffer,
+                scroll: ViewportScroll {
+                    top_line: 0,
+                    left_column: 0,
+                },
+                dimensions: ViewportDimensions {
+                    width_px: 800,
+                    height_px: 16,
+                },
+            })
+            .expect("viewport projection");
+
+        assert_eq!(projection.cursor.line, 0);
+        assert_eq!(projection.cursor.character, 5);
+        assert_eq!(projection.cursor.utf16_offset, Some(3));
+    }
+
+    #[test]
+    fn snapshot_leases_are_descriptor_only_for_all_consumer_kinds() {
+        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
+            large_file_threshold_bytes: 16,
+            retention_budget_snapshots: 8,
+        });
+        let buffer = engine
+            .open_buffer(
+                WorkspaceId(1),
+                FileId(42),
+                "leases.txt",
+                "0123456789abcdef0123456789",
+            )
+            .expect("open buffer");
+        let snapshot_id = engine
+            .current_snapshot(buffer)
+            .expect("snapshot")
+            .snapshot_id;
+        let consumers = [
+            SnapshotConsumerKind::Editor,
+            SnapshotConsumerKind::Ui,
+            SnapshotConsumerKind::Lsp,
+            SnapshotConsumerKind::Index,
+            SnapshotConsumerKind::Plugin,
+            SnapshotConsumerKind::Ai,
+            SnapshotConsumerKind::Collaboration,
+            SnapshotConsumerKind::Storage,
+            SnapshotConsumerKind::Observability,
+        ];
+        let leases = consumers
+            .into_iter()
+            .map(|consumer_kind| {
+                let lease = engine
+                    .lease_snapshot(buffer, consumer_kind)
+                    .expect("lease snapshot");
+                assert_eq!(lease.snapshot_id, snapshot_id);
+                assert_eq!(lease.consumer_kind, consumer_kind);
+                assert!(lease.chunk_count >= 1);
+                assert_eq!(lease.schema_version, 1);
+                lease
+            })
+            .collect::<Vec<_>>();
+
+        let retained_before_edit = engine.retained_snapshot_count();
+        engine
+            .apply_edit(
+                buffer,
+                TextEdit::insert(TextPosition::new(0, 0), "!"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("edit while leased");
+        assert!(engine.retained_snapshot_count() >= retained_before_edit);
+
+        for lease in leases {
+            let released = engine
+                .release_snapshot_lease(lease.lease_id)
+                .expect("release lease");
+            assert_eq!(released.lease_id, lease.lease_id);
+            assert_eq!(released.snapshot_id, snapshot_id);
+        }
+    }
+
+    #[test]
+    fn draining_transaction_events_is_bounded_and_non_blocking() {
+        let mut engine = EditorEngine::with_transaction_event_queue_capacity(2);
+        let buffer = engine
+            .open_buffer(WorkspaceId(1), FileId(43), "events.txt", "seed")
+            .expect("open buffer");
+
+        for _ in 0..3 {
+            engine
+                .apply_edit(
+                    buffer,
+                    TextEdit::insert(TextPosition::new(0, 0), "x"),
+                    TransactionSource::User,
+                    None,
+                    None,
+                )
+                .expect("apply edit");
+        }
+
+        let drained = engine.drain_transaction_events();
+        assert_eq!(drained.descriptors.len(), 2);
+        assert_eq!(drained.dropped_before_drain, 1);
+        assert_eq!(drained.descriptors[0].post_buffer_version, BufferVersion(2));
+        assert_eq!(drained.descriptors[1].post_buffer_version, BufferVersion(3));
+
+        let empty = engine.drain_transaction_events();
+        assert!(empty.descriptors.is_empty());
+        assert_eq!(empty.dropped_before_drain, 0);
+    }
+
+    #[test]
+    fn degraded_save_fails_explicitly_without_materializing_full_text() {
+        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
+            large_file_threshold_bytes: 8,
+            retention_budget_snapshots: 8,
+        });
+        let buffer = engine
+            .open_buffer(WorkspaceId(1), FileId(44), "save.txt", "0123456789abcdef")
+            .expect("open degraded buffer");
+        engine
+            .apply_edit(
+                buffer,
+                TextEdit::insert(TextPosition::new(0, 0), "!"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("edit");
+
+        let error = engine
+            .request_save(buffer, None)
+            .expect_err("save must fail closed");
+        assert!(matches!(error, EditorError::DegradedSaveUnavailable(id) if id == buffer));
+        assert_eq!(
+            engine.buffer_save_state(buffer).expect("save state"),
+            FileConflictLifecycleState::SaveFailed
+        );
+        assert!(engine.is_dirty(buffer).expect("dirty"));
+        assert!(engine.pending_save_requests().is_empty());
+        let diagnostics = engine.save_diagnostics(buffer).expect("diagnostics");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "editor.degraded_save_unavailable");
+        assert_eq!(diagnostics[0].severity, ProtocolDiagnosticSeverity::Error);
     }
 }

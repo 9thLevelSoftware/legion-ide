@@ -19,11 +19,13 @@ The review covers:
 
 The repository has successfully moved beyond the earliest spike hazards: the UI is now projection-only through [`Shell`](crates/devil-ui/src/ui.rs:228), editor and project do not have a direct crate dependency under [`dependency-policy.md`](plans/dependency-policy.md:22), application-level integration tests exercise workspace/editor routing in [`workspace_vfs_integration.rs`](crates/devil-app/tests/workspace_vfs_integration.rs:32), and the accepted phase zero gates passed in [`architecture-freeze-v0.1.md`](plans/architecture-freeze-v0.1.md:13).
 
+> Historical rebaseline note (2026-05-15): the direct save-bypass concerns captured in this review describe the pre-rebaseline implementation. Current manual saves route through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) and then through [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021), while the shell remains projection-only through [`Shell`](crates/devil-ui/src/ui.rs:228). Treat the save-bypass language below as historical context unless it is explicitly discussing proposal generalization beyond save.
+
 However, the current implementation is not yet structurally aligned with the full target architecture. The most serious drift is concentrated around durable mutation safety, service-port mediation, observability integration, storage/session integration, security-policy completeness, and large-file scalability. These are architectural issues, not isolated bugs, because they affect ownership boundaries, data-flow invariants, and future feature scaling.
 
 ### Highest-impact issues
 
-1. Durable file saving still bypasses the proposal lifecycle, stale fingerprint checks, audit lifecycle, and conflict state required by [`foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:150).
+1. Historical finding, now resolved for the manual save path: durable file saving previously bypassed the proposal lifecycle, stale fingerprint checks, audit lifecycle, and conflict state required by [`foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:150).
 2. Protocol service ports exist, but core concrete services are mostly invoked directly rather than through implemented ports such as [`EditorPort`](crates/devil-protocol/src/lib.rs:1841), [`ProposalPort`](crates/devil-protocol/src/lib.rs:1847), and [`StorageRepositoryPort`](crates/devil-protocol/src/lib.rs:1877).
 3. Observability has usable sink and envelope helpers through [`InMemoryEventSink`](crates/devil-observability/src/lib.rs:51) and [`EventEnvelopeBuilder`](crates/devil-observability/src/lib.rs:177), but the core app, editor, and workspace flows do not emit those events.
 4. The text model still rebuilds a full text cache and line index after edits through [`TextBuffer::try_replace_range()`](crates/devil-text/src/lib.rs:820), so the large-file architecture remains intentionally incomplete.
@@ -45,7 +47,7 @@ flowchart TD
     Workspace -. weak .-> Storage
 ```
 
-The current flow is acceptably simple for phase zero, but it is structurally unsafe for phase six and beyond because the app can execute a save by directly collecting editor text and writing through the workspace without a proposal state machine, expected fingerprint, conflict state transition, or event/audit trail.
+The diagram above is historical for the save path. The current phase-zero baseline is safer because manual saves now flow through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938), proposal validation/preview, and [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021). The remaining architecture gap is that proposal mediation is still save-focused rather than universal across future LSP, plugin, terminal, AI, collaboration, or remote mutation sources.
 
 ## Severity model
 
@@ -59,6 +61,8 @@ The current flow is acceptably simple for phase zero, but it is structurally uns
 ## Detailed findings
 
 ### Finding 1 — Save pipeline bypasses proposal, conflict, and audit requirements
+
+> Historical note (rebaselined 2026-05-15): this finding captured the pre-Track-5 save path. Current application saves no longer jump directly from app code to a raw workspace write. They route through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938), emit proposal lifecycle events via [`SaveWorkflowService::observe_proposal_response()`](crates/devil-app/src/lib.rs:1048), and apply disk mutations through [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021). The remaining follow-on work is to generalize the same proposal discipline beyond manual save.
 
 | Field | Assessment |
 |---|---|
@@ -279,6 +283,8 @@ The current flow is acceptably simple for phase zero, but it is structurally uns
 | AI provider inversion | [`ModelProvider`](crates/devil-ai/src/lib.rs:215) and [`make_stub_registry()`](crates/devil-ai-providers/src/lib.rs:16) | Core AI abstractions do not depend on provider adapters. |
 
 ## Refactoring sequence
+
+> Rebaseline note: step 1 below is historically resolved for the current manual save flow via [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938). Keep it as a template for broadening proposal mediation, conflict handling, and auditability to non-save mutation sources.
 
 1. **Close durable mutation safety first.** Implement proposal-mediated save, expected fingerprint checks, typed conflict states, fail-closed atomic fallback, and save/proposal tests around [`AppComposition::save_active_buffer()`](crates/devil-app/src/lib.rs:214), [`WorkspaceActor::write_file_text()`](crates/devil-project/src/lib.rs:1083), [`WorkspaceProposal`](crates/devil-protocol/src/lib.rs:783), and [`FileConflictState`](crates/devil-protocol/src/lib.rs:502).
 2. **Introduce real port adapters.** Implement [`EditorPort`](crates/devil-protocol/src/lib.rs:1841), [`ProposalPort`](crates/devil-protocol/src/lib.rs:1847), and [`StorageRepositoryPort`](crates/devil-protocol/src/lib.rs:1877), then narrow application orchestration to command routing and lifecycle wiring.

@@ -123,16 +123,26 @@ fn validate_dependency_policy(
     // Structural rule set defined by the policy.
     let forbidden_pairs = policy.forbidden_pairs();
 
-    for (source, deps) in packages {
-        let Some(allowed_deps) = policy.allowed_internal(source) else {
+    let mut sources = packages.keys().cloned().collect::<Vec<_>>();
+    sources.sort();
+
+    for source in sources {
+        let deps = packages
+            .get(&source)
+            .expect("sorted package source must exist in package map");
+        let Some(allowed_deps) = policy.allowed_internal(&source) else {
+            issues.push(format!(
+                "`{source}` lacks dependency policy coverage in `plans/dependency-policy.md`"
+            ));
             continue;
         };
 
-        let unexpected: Vec<String> = deps
+        let mut unexpected: Vec<String> = deps
             .iter()
             .filter(|dep| !allowed_deps.contains(*dep))
             .cloned()
             .collect();
+        unexpected.sort();
         for unexpected_dep in unexpected {
             issues.push(format!(
                 "`{source}` depends on `{unexpected_dep}`, which is not in the allowed policy set"
@@ -140,9 +150,11 @@ fn validate_dependency_policy(
         }
     }
 
-    for (source, destination) in forbidden_pairs {
-        if let Some(deps) = packages.get(source)
-            && deps.contains(destination)
+    let mut forbidden = forbidden_pairs.iter().cloned().collect::<Vec<_>>();
+    forbidden.sort();
+    for (source, destination) in forbidden {
+        if let Some(deps) = packages.get(&source)
+            && deps.contains(&destination)
         {
             issues.push(format!(
                 "forbidden dependency `{source}` -> `{destination}` detected"
@@ -150,18 +162,23 @@ fn validate_dependency_policy(
         }
     }
 
-    for (source, required_targets) in policy.required_dependencies() {
+    let mut required = policy.required_dependencies().iter().collect::<Vec<_>>();
+    required.sort_by_key(|(source, _)| *source);
+    for (source, required_targets) in required {
         let Some(deps) = packages.get(source) else {
             continue;
         };
 
+        let mut required_targets = required_targets.iter().cloned().collect::<Vec<_>>();
+        required_targets.sort();
         for required in required_targets {
-            if !deps.contains(required) {
+            if !deps.contains(&required) {
                 issues.push(format!("`{source}` is required to depend on `{required}`"));
             }
         }
     }
 
+    issues.sort();
     issues
 }
 
@@ -191,6 +208,7 @@ fn protocol_contains_symbol(text: &str, symbol: &str) -> bool {
         if protocol_definition_has_token(line, "struct", symbol)
             || protocol_definition_has_token(line, "enum", symbol)
             || protocol_definition_has_token(line, "trait", symbol)
+            || protocol_definition_has_token(line, "type", symbol)
         {
             return true;
         }
@@ -240,12 +258,19 @@ struct Policy {
     protocol_symbols: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectionalList {
+    Allowed,
+    Required,
+}
+
 impl Policy {
     fn from_markdown(source: &str) -> Result<Self, String> {
         let mut policy = Self::default();
 
         let mut section = String::new();
         let mut active_crate: Option<String> = None;
+        let mut active_list = DirectionalList::Allowed;
 
         for raw_line in source.lines() {
             let line = raw_line.trim();
@@ -275,12 +300,23 @@ impl Policy {
                                 .forbidden
                                 .insert((items[0].clone(), items[1].clone()));
                         }
+                        active_crate = None;
+                        continue;
+                    }
+
+                    if line.contains("MUST directly depend on") || line.contains("MUST depend on") {
+                        if let Some(crate_name) = items.first() {
+                            active_crate = Some(crate_name.clone());
+                            active_list = DirectionalList::Required;
+                            policy.required.entry(crate_name.clone()).or_default();
+                        }
                         continue;
                     }
 
                     if line.contains("may depend on") {
                         if let Some(crate_name) = items.first() {
                             active_crate = Some(crate_name.clone());
+                            active_list = DirectionalList::Allowed;
                             policy.allowed.entry(crate_name.clone()).or_default();
                         }
                         continue;
@@ -291,17 +327,28 @@ impl Policy {
                     {
                         for dep in items {
                             if dep.starts_with("devil-") {
-                                policy
-                                    .allowed
-                                    .entry(source.clone())
-                                    .or_default()
-                                    .insert(dep);
+                                match active_list {
+                                    DirectionalList::Allowed => {
+                                        policy
+                                            .allowed
+                                            .entry(source.clone())
+                                            .or_default()
+                                            .insert(dep);
+                                    }
+                                    DirectionalList::Required => {
+                                        policy
+                                            .required
+                                            .entry(source.clone())
+                                            .or_default()
+                                            .insert(dep);
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                "contracts" if line.starts_with("  -") => {
+                "contracts" if raw_line.starts_with("  -") => {
                     for item in items {
                         policy.protocol_symbols.insert(item);
                     }
@@ -309,42 +356,6 @@ impl Policy {
                 _ => {}
             }
         }
-
-        // Enforce explicit hard constraints used by the milestone-0 freeze.
-        policy.required.insert(
-            "devil-ai".to_string(),
-            ["devil-protocol", "devil-security"]
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        );
-        policy.required.insert(
-            "devil-ai-providers".to_string(),
-            ["devil-ai"].iter().map(ToString::to_string).collect(),
-        );
-        policy.required.insert(
-            "devil-editor".to_string(),
-            ["devil-text", "devil-protocol"]
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        );
-        policy.required.insert(
-            "devil-platform".to_string(),
-            ["devil-protocol"].iter().map(ToString::to_string).collect(),
-        );
-        policy.required.insert(
-            "devil-ui".to_string(),
-            ["devil-editor", "devil-protocol"]
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        );
-
-        // Explicitly forbidden dependency required by the milestone-0 boundary.
-        policy
-            .forbidden
-            .insert(("devil-editor".to_string(), "devil-project".to_string()));
 
         Ok(policy)
     }
@@ -381,4 +392,146 @@ fn extract_backticked_items(line: &str) -> Vec<String> {
     }
 
     values
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask manifest must live under workspace root")
+            .to_path_buf()
+    }
+
+    fn read_workspace_file(relative_path: &str) -> String {
+        fs::read_to_string(workspace_root().join(relative_path))
+            .unwrap_or_else(|err| panic!("unable to read `{relative_path}`: {err}"))
+    }
+
+    fn source_block(text: &str, marker: &str) -> String {
+        let start = text
+            .find(marker)
+            .unwrap_or_else(|| panic!("marker `{marker}` should exist"));
+        let tail = &text[start..];
+        let end = tail
+            .find("\n}")
+            .unwrap_or_else(|| panic!("marker `{marker}` should terminate with a block"));
+        tail[..end + 2].to_string()
+    }
+
+    fn assert_placeholder_docs_only(relative_path: &str) {
+        let source = read_workspace_file(relative_path);
+        let code_lines = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .filter(|line| !line.starts_with("//!"))
+            .filter(|line| !line.starts_with("#!["))
+            .collect::<Vec<_>>();
+
+        assert!(
+            code_lines.is_empty(),
+            "placeholder crate `{relative_path}` must remain docs-only, found code lines: {code_lines:?}"
+        );
+    }
+
+    #[test]
+    fn missing_workspace_crate_policy_is_reported() {
+        let packages = HashMap::from([(
+            "devil-ui".to_string(),
+            HashSet::from(["devil-editor".to_string(), "devil-protocol".to_string()]),
+        )]);
+
+        let issues = validate_dependency_policy(&packages, &Policy::default());
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains(
+                "`devil-ui` lacks dependency policy coverage in `plans/dependency-policy.md`",
+            )
+        }));
+    }
+
+    #[test]
+    fn policy_parses_required_dependencies_from_markdown() {
+        let markdown = r#"
+### 1. Directional Intent
+- `devil-ui` may depend on:
+  - `devil-editor`
+  - `devil-protocol`
+- `devil-ui` MUST directly depend on:
+  - `devil-editor`
+- `devil-ui` MUST NOT depend on `devil-project`.
+
+### 2. Shared Contracts Boundary
+  - `WorkspaceId`
+"#;
+
+        let policy = Policy::from_markdown(markdown).expect("policy should parse");
+
+        assert_eq!(
+            policy.allowed_internal("devil-ui"),
+            Some(&HashSet::from([
+                "devil-editor".to_string(),
+                "devil-protocol".to_string()
+            ]))
+        );
+        assert_eq!(
+            policy.required_dependencies().get("devil-ui"),
+            Some(&HashSet::from(["devil-editor".to_string()]))
+        );
+        assert!(
+            policy
+                .forbidden_pairs()
+                .contains(&("devil-ui".to_string(), "devil-project".to_string()))
+        );
+        assert!(policy.protocol_symbols().contains("WorkspaceId"));
+    }
+
+    #[test]
+    fn ui_shell_remains_projection_only() {
+        let source = read_workspace_file("crates/devil-ui/src/ui.rs");
+
+        assert!(source.contains("pub struct Shell"));
+        assert!(source.contains("CommandDispatchIntent"));
+        assert!(source.contains("without mutating editor or workspace state"));
+        assert!(!source.contains("EditorSession"));
+        assert!(!source.contains("WorkspaceActor"));
+    }
+
+    #[test]
+    fn save_active_buffer_remains_proposal_mediated() {
+        let source = read_workspace_file("crates/devil-app/src/lib.rs");
+
+        assert!(source.contains("struct SaveWorkflowService;"));
+        assert!(source.contains("SaveWorkflowService::save_active_buffer("));
+        assert!(source.contains("workspace.save_file_with_proposal(workspace_save)"));
+        assert!(source.contains("AppSaveOutcome::Rejected"));
+    }
+
+    #[test]
+    fn source_snapshots_are_not_persisted_by_default() {
+        let source = read_workspace_file("crates/devil-storage/src/lib.rs");
+        let session_record = source_block(&source, "pub struct SessionRecord");
+        let persisted_state = source_block(&source, "struct PersistedState");
+
+        assert!(!session_record.contains("SnapshotId"));
+        assert!(!session_record.contains("text:"));
+        assert!(!persisted_state.contains("SnapshotId"));
+        assert!(!persisted_state.contains("text:"));
+    }
+
+    #[test]
+    fn placeholder_crates_remain_inert_until_activation_gates_land() {
+        for path in [
+            "crates/devil-index/src/lib.rs",
+            "crates/devil-agent/src/lib.rs",
+            "crates/devil-tracker/src/lib.rs",
+            "crates/devil-memory/src/lib.rs",
+        ] {
+            assert_placeholder_docs_only(path);
+        }
+    }
 }

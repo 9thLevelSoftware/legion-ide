@@ -82,7 +82,7 @@ impl ShellLayoutProjection {
 }
 
 /// Active editor-buffer projection received by the UI from application state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ActiveBufferProjection {
     /// Owning workspace identifier if a workspace is open.
     pub workspace_id: Option<WorkspaceId>,
@@ -92,8 +92,12 @@ pub struct ActiveBufferProjection {
     pub file_id: Option<FileId>,
     /// Canonical path for display only.
     pub file_path: Option<CanonicalPath>,
-    /// Projected text snapshot for rendering.
-    pub text: String,
+    /// Bounded viewport projection instead of unbounded text.
+    pub viewport: Option<devil_protocol::ViewportProjection>,
+    /// Degraded status from the application layer.
+    pub degraded: bool,
+    /// Bounded small-buffer preview, requested explicitly.
+    pub small_buffer_preview: Option<String>,
     /// Dirty indicator projected from the editor engine.
     pub dirty: bool,
 }
@@ -106,9 +110,16 @@ impl ActiveBufferProjection {
             buffer_id: None,
             file_id: None,
             file_path: None,
-            text: String::new(),
+            viewport: None,
+            degraded: false,
+            small_buffer_preview: None,
             dirty: false,
         }
+    }
+
+    /// Return a bounded small-buffer preview if available.
+    pub fn small_buffer_text(&self) -> Option<&str> {
+        self.small_buffer_preview.as_deref()
     }
 }
 
@@ -200,7 +211,7 @@ pub enum CommandDispatchIntent {
 }
 
 /// Projection snapshot provided to the shell by the application layer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShellProjectionSnapshot {
     /// Layout projection.
     pub layout_projection: ShellLayoutProjection,
@@ -300,7 +311,21 @@ impl Shell {
             "{}",
             "-".repeat(self.layout_projection.layout.width as usize)
         );
-        println!("{}", self.active_buffer_projection.text);
+
+        if self.active_buffer_projection.degraded {
+            println!("<Degraded Mode: Large File>");
+        }
+
+        if let Some(text) = self.active_buffer_projection.small_buffer_text() {
+            println!("{}", text);
+        } else if let Some(viewport) = &self.active_buffer_projection.viewport {
+            for slice in &viewport.line_slices {
+                println!("{}", slice.visible_text);
+            }
+        } else {
+            println!("<no active buffer>");
+        }
+
         println!(
             "{}",
             "-".repeat(self.layout_projection.layout.width as usize)
@@ -402,16 +427,32 @@ impl Shell {
     }
 
     fn parse_pos(&self, byte_offset: usize) -> TextPosition {
-        self.active_buffer_projection
-            .text
-            .as_bytes()
-            .get(..byte_offset)
-            .map(|prefix| {
-                let line = prefix.iter().filter(|b| **b == b'\n').count();
-                let column = prefix.iter().rev().take_while(|b| **b != b'\n').count();
-                TextPosition::new(line, column)
-            })
-            .unwrap_or_else(|| TextPosition::new(0, 0))
+        if let Some(text) = self.active_buffer_projection.small_buffer_text() {
+            return text
+                .as_bytes()
+                .get(..byte_offset)
+                .map(|prefix| {
+                    let line = prefix.iter().filter(|b| **b == b'\n').count();
+                    let column = prefix.iter().rev().take_while(|b| **b != b'\n').count();
+                    TextPosition::new(line, column)
+                })
+                .unwrap_or_else(|| TextPosition::new(0, 0));
+        }
+
+        if let Some(viewport) = &self.active_buffer_projection.viewport {
+            let mut current_offset = 0;
+            for (i, slice) in viewport.line_slices.iter().enumerate() {
+                let slice_len = slice.visible_text.len() + 1; // +1 for newline
+                if current_offset + slice_len > byte_offset {
+                    let column = byte_offset - current_offset;
+                    let line = viewport.scroll.top_line as usize + i;
+                    return TextPosition::new(line, column);
+                }
+                current_offset += slice_len;
+            }
+        }
+
+        TextPosition::new(0, 0)
     }
 }
 
@@ -433,7 +474,9 @@ mod tests {
                 buffer_id: Some(BufferId(2)),
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("a.md".to_string())),
-                text: "first".to_string(),
+                viewport: None,
+                degraded: false,
+                small_buffer_preview: Some("first".to_string()),
                 dirty: false,
             },
             status_messages: Vec::new(),
@@ -452,7 +495,10 @@ mod tests {
                 text: "\\n".to_string(),
             }
         );
-        assert_eq!(shell.active_buffer_projection.text, "first");
+        assert_eq!(
+            shell.active_buffer_projection.small_buffer_text(),
+            Some("first")
+        );
         assert_eq!(shell.command_dispatch_intents.len(), 1);
     }
 

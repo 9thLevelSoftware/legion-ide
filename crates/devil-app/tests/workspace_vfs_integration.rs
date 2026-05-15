@@ -4,6 +4,7 @@ use std::{
 };
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+const FULL_CACHE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 use devil_app::{
     AppCommandExecutionState, AppCommandOutcome, AppCommandRequest, AppComposition,
@@ -17,9 +18,9 @@ use devil_protocol::{
     BufferId, BufferVersion, CanonicalPath, CausalityId, ChangedTextRange, EventEnvelope,
     FileConflictLifecycleState, FileContentVersion, FileId, FileIdentity, FileMetadata,
     FileTreeNode, PrincipalId, SnapshotId, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, WorkspaceId, WorkspaceTrustState,
+    TransactionSource, ViewportProjectionMode, WorkspaceId, WorkspaceTrustState,
 };
-use devil_ui::CommandDispatchIntent;
+use devil_ui::{CommandDispatchIntent, ShellLayoutProjection};
 use uuid::Uuid;
 
 fn create_root() -> std::path::PathBuf {
@@ -68,6 +69,18 @@ fn assert_events_include_order(events: &[EventEnvelope], expected: &[&str]) {
         "expected event order {expected:?}, got {:?}",
         event_names(events)
     );
+}
+
+fn deterministic_large_text(byte_len: usize) -> String {
+    let line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
+    let mut text = String::with_capacity(byte_len);
+    while text.len() + line.len() <= byte_len {
+        text.push_str(line);
+    }
+    while text.len() < byte_len {
+        text.push('z');
+    }
+    text
 }
 
 #[test]
@@ -277,6 +290,45 @@ fn workspace_vfs_integration_open_edit_save_use_engine_and_workspace_ids() {
 }
 
 #[test]
+fn workspace_vfs_integration_large_file_projection_omits_full_source_text() {
+    let root = create_root();
+    let target = root.join("large.txt");
+    let text = deterministic_large_text(FULL_CACHE_BUDGET_BYTES + 128 * 1024);
+    std::fs::write(&target, text).expect("large file");
+
+    let (mut app, _sink) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(target.to_string_lossy())
+        .expect("open large target file");
+
+    let projection = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("large"))
+        .expect("active projection");
+    let viewport = projection.viewport.as_ref().expect("viewport projection");
+    let payload_bytes = viewport
+        .line_slices
+        .iter()
+        .map(|slice| slice.visible_text.len())
+        .sum::<usize>();
+
+    assert!(projection.degraded);
+    assert!(projection.small_buffer_text().is_none());
+    assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
+    assert!(viewport.large_file_status.is_some());
+    assert!(payload_bytes < FULL_CACHE_BUDGET_BYTES / 32);
+    assert!(viewport.decoration_spans.is_empty());
+    assert!(viewport.fold_ranges.is_empty());
+    assert!(viewport.semantic_token_overlays.is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict() {
     let root = create_root();
     let target = root.join("stale.txt");
@@ -420,6 +472,56 @@ fn workspace_vfs_integration_ui_command_intent_routes_to_engine_apply_edit() {
     let events = sink.events().expect("captured UI edit events");
     assert_eq!(event_names(&events), vec!["editor.transaction_applied"]);
     assert_non_zero_core_ids(&events[0]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_large_buffer_projection_does_not_populate_full_text() {
+    let root = create_root();
+    let target = root.join("large.txt");
+
+    // Create a 6MB file to force degraded mode
+    let mut large_content = String::with_capacity(6 * 1024 * 1024);
+    let line = "padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding\n";
+    while large_content.len() < 6 * 1024 * 1024 {
+        large_content.push_str(line);
+    }
+    std::fs::write(&target, &large_content).expect("large seed file");
+
+    let (mut app, _sink) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".to_string()),
+    )
+    .expect("open workspace");
+
+    app.open_file(target.to_string_lossy())
+        .expect("open target large file");
+
+    let snapshot = app
+        .shell_projection_snapshot("title")
+        .expect("get projection");
+    let active = snapshot.active_buffer_projection;
+
+    // Proving large-buffer projection does not call/populate full-source projection
+    assert!(active.degraded, "should be degraded");
+    assert!(
+        active.small_buffer_text().is_none(),
+        "should not have unbounded full text"
+    );
+
+    let viewport = active.viewport.expect("should have viewport projection");
+    assert!(
+        !viewport.line_slices.is_empty(),
+        "viewport should have line slices"
+    );
+    // Ensure viewport is bounded (e.g. only 24 lines based on default height)
+    assert!(
+        viewport.line_slices.len() <= 100,
+        "viewport slices should be bounded, not unbounded"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

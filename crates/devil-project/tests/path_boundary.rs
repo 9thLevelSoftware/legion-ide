@@ -55,6 +55,7 @@ fn create_temp_workspace() -> PathBuf {
     std::fs::canonicalize(root).expect("canonicalize temp workspace")
 }
 
+#[allow(clippy::result_large_err)]
 fn save_new_file(
     actor: &WorkspaceActor,
     workspace_id: devil_protocol::WorkspaceId,

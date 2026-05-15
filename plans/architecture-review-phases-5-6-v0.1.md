@@ -22,8 +22,10 @@ Primary source artifacts reviewed:
 
 The phase 5 and phase 6 direction is architecturally correct, but the plan is not implementation-ready without stronger contract and sequencing guards.
 
-- **Phase 5 can proceed only as a replacement of spike UI ownership**, not as incremental extension of the current shell. Current [`Shell`](crates/devil-ui/src/ui.rs:66) owns [`EditorSession`](crates/devil-editor/src/lib.rs:1065) and directly mutates text through [`Shell::handle_command()`](crates/devil-ui/src/ui.rs:101), which contradicts the phase 5 requirement that commands dispatch through protocol ports and never mutate text directly in [`plans/foundational-core-ide-platform-roadmap-v0.1.md`](plans/foundational-core-ide-platform-roadmap-v0.1.md:175).
-- **Phase 6 must be blocked until the save and proposal contracts are tightened.** Current [`AppComposition::save_active_buffer()`](crates/devil-app/src/lib.rs:119) requests a save DTO and immediately calls [`WorkspaceActor::write_file_text()`](crates/devil-project/src/lib.rs:1064), bypassing proposal validation, preview, conflict state, and audit lifecycle expected by [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:154).
+> Historical rebaseline note (2026-05-15): the first two bullets below, phase 5 current-state gaps 1-2, and phase 6 current-state gap 1 describe superseded spike behavior. The current shell is projection-only through [`Shell`](crates/devil-ui/src/ui.rs:228), and current manual saves route through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) into [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021).
+
+- **Historical (superseded by the current shell): Phase 5 had to begin as a replacement of spike UI ownership**, not as incremental extension of the earlier shell. The current [`Shell`](crates/devil-ui/src/ui.rs:228) no longer owns `EditorSession` and now emits [`CommandDispatchIntent`](crates/devil-ui/src/ui.rs:141) without mutating editor or workspace state.
+- **Historical (superseded by the current manual save workflow): Phase 6 was blocked until the save path became proposal-mediated.** Current [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) performs save request, proposal creation, validation, preview, event/audit observation, and then applies the write through [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021).
 - **The phase 5-to-6 gate should be treated as hard.** The documented stop condition says phase 6 must not start when UI directly mutates text or workspace state in [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:258).
 - **The phase 6-to-7 gate should be treated as hard.** The documented stop condition says phase 7 must not start when a stale proposal can apply or an external overwrite can clobber data in [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:259).
 
@@ -35,13 +37,15 @@ The intended phase 5 architecture is sound: the UI should own view projection, f
 
 ### Current-state gaps
 
-1. **UI owns an editor session instead of projections.** [`Shell`](crates/devil-ui/src/ui.rs:66) stores [`EditorSession`](crates/devil-editor/src/lib.rs:1065), causing the UI shell to hold editor state directly.
-2. **UI commands mutate text directly.** [`Shell::handle_command()`](crates/devil-ui/src/ui.rs:101) invokes editor mutation methods directly, while phase 5 requires protocol-port dispatch for open, close, save, split, reveal, and search in [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:141).
+1. **Historical (resolved): UI owned an editor session instead of projections.** The current [`Shell`](crates/devil-ui/src/ui.rs:228) stores layout, explorer, active-buffer, and status projections only.
+2. **Historical (resolved): UI commands mutated text directly.** The current [`Shell::handle_command()`](crates/devil-ui/src/ui.rs:319) emits typed [`CommandDispatchIntent`](crates/devil-ui/src/ui.rs:141) values without mutating editor or workspace state.
 3. **No production tab model exists.** The current UI surface exposes an explorer projection only, while phase 5 requires tab groups, file-buffer binding, dirty indicators, pinned and preview flags, active tab, split metadata, and close-save prompts in [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:140).
 4. **Session persistence is too narrow.** [`SessionRecord`](crates/devil-storage/src/lib.rs:43) persists workspace id, workspace path, and trust state only. It does not persist open tabs, active buffer, layout, explorer expansion, panel state, or last workspace as required by [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:142).
 5. **The storage protocol does not expose session restore operations.** [`StorageRepositoryRequest`](crates/devil-protocol/src/lib.rs:1803) supports workspace config and file metadata only, which leaves phase 5 session restore outside the stable service-port boundary.
 
 ### Required phase 5 changes
+
+> Historical note: items 1-2 below are already satisfied by the current shell baseline and remain here as traceability for why the phase 5 gate existed.
 
 1. Replace [`Shell`](crates/devil-ui/src/ui.rs:66) with projection-only shell state that contains layout, explorer projection, tab groups, panel state, command palette state, focus target, and status projection.
 2. Remove direct text mutation from [`Shell::handle_command()`](crates/devil-ui/src/ui.rs:101). UI command handling should emit typed command requests to app-level protocol ports or command-dispatch services.
@@ -58,7 +62,7 @@ The intended phase 6 architecture is essential and correctly sequenced. It enfor
 
 ### Current-state gaps
 
-1. **The app save flow bypasses proposals.** [`AppComposition::save_active_buffer()`](crates/devil-app/src/lib.rs:119) calls [`EditorEngine::request_save()`](crates/devil-editor/src/lib.rs:904), then directly calls [`WorkspaceActor::write_file_text()`](crates/devil-project/src/lib.rs:1064). This bypasses [`ProposalRequest`](crates/devil-protocol/src/lib.rs:1557), preview, approval, stale rejection, diagnostics, and audit state.
+1. **Historical (resolved for manual saves): the app save flow bypassed proposals.** Current manual saves now pass through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938), which builds a [`WorkspaceProposal`](crates/devil-protocol/src/lib.rs:1169), validates and previews it, and then applies it through [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021).
 2. **Workspace writes do not compare against an explicit last-read or last-save fingerprint.** [`WorkspaceActor::write_file_text()`](crates/devil-project/src/lib.rs:1064) enforces path and capability checks, then performs atomic write with fallback through [`write_file_text_atomic`](crates/devil-project/src/lib.rs:1080), but it does not reject stale disk content before writing.
 3. **Fallback semantics are too permissive.** [`WorkspaceActor::write_file_text()`](crates/devil-project/src/lib.rs:1080) falls back to non-atomic write when atomic write fails. Phase 6 needs explicit fallback policy because external overwrite must never be silently clobbered in [`plans/foundational-core-ide-platform-roadmap-v0.1.md`](plans/foundational-core-ide-platform-roadmap-v0.1.md:188).
 4. **Conflict state is under-modeled.** [`FileConflictState`](crates/devil-protocol/src/lib.rs:502) has a generic reason string, but phase 6 requires clean, dirty, saving, save failed, disk changed clean, conflict dirty, reload available, keep-both pending, and compare pending states in [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:156).
@@ -69,6 +73,8 @@ The intended phase 6 architecture is essential and correctly sequenced. It enfor
 9. **Filesystem and workspace ADRs are not accepted artifacts.** The core architecture requires ADR decisions for file system abstraction, atomic save, conflict detection, path policy, workspace state, trust policy, watcher behavior, and identity strategy in [`plans/ide-core-architecture-spec-v0.1.md`](plans/ide-core-architecture-spec-v0.1.md:962). Phase 6 should not finalize save semantics without those decisions.
 
 ### Required phase 6 changes
+
+> Historical note: items 2, 4, and 5 below are already satisfied for the current manual save path and remain here as review traceability. The remaining work is to extend the same guarantees to broader proposal sources.
 
 1. Create a proposal service in app or workspace composition that implements [`ProposalPort`](crates/devil-protocol/src/lib.rs:1847) and mediates validation, preview, approval, application, rollback, conflict, and audit outcomes.
 2. Replace direct save dispatch in [`AppComposition::save_active_buffer()`](crates/devil-app/src/lib.rs:119) with creation of a [`WorkspaceProposal`](crates/devil-protocol/src/lib.rs:783) whose payload is [`SaveFileProposal`](crates/devil-protocol/src/lib.rs:873) and whose preconditions include buffer version, file content version, snapshot id, workspace generation, and expected disk fingerprint.

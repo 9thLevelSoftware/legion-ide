@@ -2,9 +2,10 @@
 
 #![warn(missing_docs)]
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use devil_protocol::{BufferVersion, SnapshotId};
 use ropey::Rope;
@@ -14,11 +15,15 @@ use thiserror::Error;
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
 
 const DEFAULT_LEAF_TARGET_BYTES: usize = 1024;
-/// Maximum UTF-8 bytes allowed in the full text cache used by the text model.
+const DEFAULT_CHUNK_TARGET_BYTES: usize = 64 * 1024;
+const DEFAULT_CHUNK_BOUNDARY_WINDOW_BYTES: usize = 8 * 1024;
+const DEFAULT_CHUNK_FORCE_MAX_BYTES: usize = 96 * 1024;
+const DEFAULT_LINE_SLICE_MAX_BYTES: usize = DEFAULT_CHUNK_FORCE_MAX_BYTES;
+
+/// Maximum UTF-8 bytes allowed in the optional full text cache used by the text model.
 ///
-/// This aligns with the workspace large-file exclusion threshold so buffers that need a larger
-/// payload can be routed through degraded/streaming editor paths instead of materializing a full
-/// cache and line index.
+/// Buffers larger than this threshold remain rope-backed, chunk-indexed, and sliceable, but they
+/// do not retain a compatibility full-source cache.
 pub const DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 /// A position in text expressed as zero-indexed line and UTF-8 column within that line.
@@ -173,7 +178,7 @@ pub struct TextSnapshotDescriptor {
     pub snapshot_id: SnapshotId,
     /// Buffer version captured by the snapshot.
     pub buffer_version: BufferVersion,
-    /// SHA-256 hash of UTF-8 content, hex encoded.
+    /// SHA-256 hash of snapshot chunk metadata, hex encoded.
     pub content_hash: String,
     /// Total byte length.
     pub byte_len: usize,
@@ -185,20 +190,63 @@ pub struct TextSnapshotDescriptor {
     pub retention_pin_reason: RetentionPinReason,
 }
 
+/// Metadata describing a stable UTF-8 chunk within a buffer or snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextChunkDescriptor {
+    /// Zero-based chunk ordinal within the snapshot or buffer.
+    pub ordinal: usize,
+    /// Inclusive absolute start byte.
+    pub start_byte: usize,
+    /// Exclusive absolute end byte.
+    pub end_byte: usize,
+    /// Chunk byte length.
+    pub byte_len: usize,
+    /// Logical line containing the first byte of the chunk.
+    pub start_line: usize,
+    /// Logical line containing the last byte of the chunk.
+    pub end_line: usize,
+    /// Domain-separated SHA-256 hash of the exact chunk bytes.
+    pub hash: String,
+}
+
+/// A bounded line slice suitable for viewport-style rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextLineSlice {
+    /// Zero-based logical line number.
+    pub line: usize,
+    /// Absolute byte offset for the start of the logical line.
+    pub line_start_byte: usize,
+    /// Exclusive absolute byte offset for the returned slice text.
+    pub slice_end_byte: usize,
+    /// Full logical line byte length excluding the line ending.
+    pub line_content_byte_len: usize,
+    /// Returned slice UTF-8 byte length.
+    pub utf8_byte_len: usize,
+    /// Returned slice UTF-16 code-unit length.
+    pub utf16_len: usize,
+    /// Logical line ending byte width: `0`, `1`, or `2`.
+    pub line_ending_bytes: usize,
+    /// `true` when the logical line exceeded the slice budget and was clipped.
+    pub truncated: bool,
+    /// Returned bounded line text.
+    pub text: String,
+}
+
 /// Immutable snapshot of buffer contents.
 ///
-/// Snapshots are cheap to clone because rope nodes are shared through [`Arc`].
+/// Snapshots are cheap to clone because rope nodes are shared through [`Arc`]. Full-source text is
+/// retained only when the snapshot remains within [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`].
 #[derive(Debug, Clone)]
 pub struct TextSnapshot {
     rope: Arc<Rope>,
-    text_cache: Arc<String>,
+    full_text_cache: Option<Arc<String>>,
     line_index: Arc<LineIndex>,
     descriptor: TextSnapshotDescriptor,
 }
 
 impl PartialEq for TextSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        self.descriptor == other.descriptor && self.text() == other.text()
+        self.descriptor == other.descriptor
     }
 }
 
@@ -206,38 +254,35 @@ impl Eq for TextSnapshot {}
 
 impl TextSnapshot {
     /// Create a snapshot from a string with an automatically assigned ID and version 0.
-    ///
-    /// This compatibility constructor panics when the text exceeds the default full-cache budget.
-    /// Prefer [`TextSnapshot::try_new`] or [`TextSnapshot::try_from_rope`] on fallible paths.
     pub fn new(text: impl Into<String>) -> Self {
-        Self::try_from_rope(
-            Rope::from_str(&text.into()),
-            BufferVersion(0),
-            RetentionPinReason::Explicit("standalone snapshot".to_string()),
-        )
-        .expect("standalone snapshot text must fit the full-cache budget")
+        Self::try_new(text).expect("snapshot construction should not fail")
     }
 
     /// Try to create a snapshot from a string with an automatically assigned ID and version 0.
     pub fn try_new(text: impl Into<String>) -> TextResult<Self> {
-        Self::try_from_rope(
-            Rope::from_str(&text.into()),
+        let text = text.into();
+        let rope = Rope::from_str(&text);
+        let full_text_cache = if text.len() <= DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
+            Some(Arc::new(text))
+        } else {
+            None
+        };
+        Self::from_rope_parts(
+            Arc::new(rope),
             BufferVersion(0),
             RetentionPinReason::Explicit("standalone snapshot".to_string()),
+            full_text_cache,
         )
     }
 
     /// Create a snapshot from a rope, version, and retention reason.
-    ///
-    /// This compatibility constructor panics when the rope exceeds the default full-cache budget.
-    /// Prefer [`TextSnapshot::try_from_rope`] on fallible paths.
     pub fn from_rope(
         rope: Rope,
         buffer_version: BufferVersion,
         retention_pin_reason: RetentionPinReason,
     ) -> Self {
         Self::try_from_rope(rope, buffer_version, retention_pin_reason)
-            .expect("snapshot rope must fit the full-cache budget")
+            .expect("snapshot construction should not fail")
     }
 
     /// Try to create a snapshot from a rope, version, and retention reason.
@@ -246,36 +291,111 @@ impl TextSnapshot {
         buffer_version: BufferVersion,
         retention_pin_reason: RetentionPinReason,
     ) -> TextResult<Self> {
-        enforce_full_cache_budget(rope.len_bytes())?;
-        let text = rope.to_string();
-        enforce_full_cache_budget(text.len())?;
-        let line_index = LineIndex::new(&text);
-        let content_hash = content_hash(&text);
+        let rope = Arc::new(rope);
+        let full_text_cache = maybe_full_text_cache(rope.as_ref())?.map(Arc::new);
+        Self::from_rope_parts(rope, buffer_version, retention_pin_reason, full_text_cache)
+    }
+
+    fn from_rope_parts(
+        rope: Arc<Rope>,
+        buffer_version: BufferVersion,
+        retention_pin_reason: RetentionPinReason,
+        full_text_cache: Option<Arc<String>>,
+    ) -> TextResult<Self> {
+        let line_index = Arc::new(LineIndex::from_rope(rope.clone()));
         let descriptor = TextSnapshotDescriptor {
-            snapshot_id: SnapshotId(NEXT_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed) as u128),
+            snapshot_id: SnapshotId(NEXT_SNAPSHOT_ID.fetch_add(1, AtomicOrdering::Relaxed) as u128),
             buffer_version,
-            content_hash,
-            byte_len: text.len(),
+            content_hash: snapshot_content_hash(line_index.chunk_descriptors()),
+            byte_len: rope.len_bytes(),
             line_count: line_index.line_count(),
             memory_footprint_bytes: estimate_rope_memory(
-                &rope,
-                text.len(),
-                line_index.memory_footprint_bytes(),
+                rope.as_ref(),
+                full_text_cache.as_ref().map_or(0, |text| text.len()),
+                line_index.as_ref(),
             ),
             retention_pin_reason,
         };
 
         Ok(Self {
-            rope: Arc::new(rope),
-            text_cache: Arc::new(text),
-            line_index: Arc::new(line_index),
+            rope,
+            full_text_cache,
+            line_index,
             descriptor,
         })
     }
 
     /// Return the full text.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the snapshot does not retain a bounded compatibility full-text cache. Prefer
+    /// [`TextSnapshot::try_full_text`] for large or degraded snapshots.
     pub fn text(&self) -> &str {
-        &self.text_cache
+        self.try_full_text().expect(
+            "full text cache unavailable; use try_full_text(), line_slice(), or chunk_text()",
+        )
+    }
+
+    /// Return the cached full text when the snapshot remains within the full-cache budget.
+    pub fn try_full_text(&self) -> TextResult<&str> {
+        self.full_text_cache
+            .as_ref()
+            .map(|text| text.as_str())
+            .ok_or(TextError::FullCacheBudgetExceeded {
+                byte_len: self.len(),
+                budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
+            })
+    }
+
+    /// Return the chunk descriptors backing this snapshot.
+    pub fn chunk_descriptors(&self) -> &[TextChunkDescriptor] {
+        self.line_index.chunk_descriptors()
+    }
+
+    /// Materialize a single bounded chunk by ordinal.
+    pub fn chunk_text(&self, ordinal: usize) -> TextResult<String> {
+        self.line_index.chunk_text(ordinal)
+    }
+
+    /// Return a bounded slice for a single logical line.
+    pub fn line_slice(&self, line: usize) -> TextResult<TextLineSlice> {
+        self.line_slice_with_limit(line, DEFAULT_LINE_SLICE_MAX_BYTES)
+    }
+
+    /// Return a bounded slice for a single logical line with an explicit byte budget.
+    pub fn line_slice_with_limit(
+        &self,
+        line: usize,
+        max_bytes: usize,
+    ) -> TextResult<TextLineSlice> {
+        self.line_index.line_slice(line, max_bytes)
+    }
+
+    /// Return the exact logical line range requested by a viewport using the default per-line
+    /// slice budget.
+    pub fn visible_line_slices(
+        &self,
+        start_line: usize,
+        end_line_exclusive: usize,
+    ) -> TextResult<Vec<TextLineSlice>> {
+        self.visible_line_slices_with_limit(
+            start_line,
+            end_line_exclusive,
+            DEFAULT_LINE_SLICE_MAX_BYTES,
+        )
+    }
+
+    /// Return the exact logical line range requested by a viewport with an explicit per-line
+    /// slice budget.
+    pub fn visible_line_slices_with_limit(
+        &self,
+        start_line: usize,
+        end_line_exclusive: usize,
+        max_bytes_per_line: usize,
+    ) -> TextResult<Vec<TextLineSlice>> {
+        self.line_index
+            .visible_line_slices(start_line, end_line_exclusive, max_bytes_per_line)
     }
 
     /// Return the immutable descriptor.
@@ -298,7 +418,7 @@ impl TextSnapshot {
         &self.descriptor.content_hash
     }
 
-    /// Return the line index for offset conversion.
+    /// Return the line index for offset conversion and chunk metadata.
     pub fn line_index(&self) -> &LineIndex {
         &self.line_index
     }
@@ -354,6 +474,14 @@ pub enum TextError {
         /// Total line count.
         line_count: usize,
     },
+    /// A chunk index was outside the chunk table.
+    #[error("chunk {chunk} is outside chunk count {chunk_count}")]
+    ChunkOutOfBounds {
+        /// Requested chunk ordinal.
+        chunk: usize,
+        /// Total chunk count.
+        chunk_count: usize,
+    },
     /// A column was outside its line.
     #[error("{unit} column {column} is outside line {line} length {line_len}")]
     ColumnOutOfBounds {
@@ -382,12 +510,12 @@ pub enum TextError {
         /// End offset.
         end: usize,
     },
-    /// A full-cache operation exceeded the text model byte budget and must use degraded mode.
+    /// A full-text compatibility operation exceeded the text-model byte budget.
     #[error(
         "text byte length {byte_len} exceeds full-cache budget {budget}; degraded large-file mode required"
     )]
     FullCacheBudgetExceeded {
-        /// Requested post-operation text length in bytes.
+        /// Requested text length in bytes.
         byte_len: usize,
         /// Maximum allowed full-cache text length in bytes.
         budget: usize,
@@ -449,82 +577,89 @@ impl LineMetric {
     }
 }
 
-/// Line index supporting byte, UTF-8, and UTF-16 coordinate conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChunkedLineIndex {
+    rope: Arc<Rope>,
+    lines: Vec<LineMetric>,
+    chunks: Vec<TextChunkDescriptor>,
+}
+
+/// Line index supporting byte, UTF-8, UTF-16, and chunk-aware coordinate conversion.
 ///
 /// The index treats CRLF (`\r\n`) as a single line ending for LSP mapping and excludes line-ending
 /// bytes from column lengths. UTF-16 conversions reject offsets inside surrogate pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineIndex {
-    text: Arc<String>,
-    lines: Vec<LineMetric>,
+    inner: ChunkedLineIndex,
 }
 
 impl LineIndex {
     /// Build a line index for the provided UTF-8 text.
     pub fn new(text: &str) -> Self {
-        let mut lines = Vec::new();
-        let mut start = 0usize;
-        let bytes = text.as_bytes();
-        let mut i = 0usize;
+        Self::from_rope(Arc::new(Rope::from_str(text)))
+    }
 
-        while i < bytes.len() {
-            match bytes[i] {
-                b'\r' if i + 1 < bytes.len() && bytes[i + 1] == b'\n' => {
-                    Self::push_line(text, &mut lines, start, i, i + 2, 2);
-                    i += 2;
-                    start = i;
-                }
-                b'\n' => {
-                    Self::push_line(text, &mut lines, start, i, i + 1, 1);
-                    i += 1;
-                    start = i;
-                }
-                _ => {
-                    i += 1;
-                }
-            }
-        }
-
-        Self::push_line(text, &mut lines, start, text.len(), text.len(), 0);
-
+    fn from_rope(rope: Arc<Rope>) -> Self {
+        let lines = scan_line_metrics_from_byte(rope.as_ref(), 0);
+        let chunks = build_chunk_descriptors(rope.as_ref(), &lines, 0, 0);
         Self {
-            text: Arc::new(text.to_string()),
-            lines,
+            inner: ChunkedLineIndex {
+                rope,
+                lines,
+                chunks,
+            },
         }
     }
 
-    fn push_line(
-        text: &str,
-        lines: &mut Vec<LineMetric>,
-        start_byte: usize,
-        content_end_byte: usize,
-        end_byte: usize,
-        line_ending_bytes: usize,
-    ) {
-        let slice = &text[start_byte..content_end_byte];
-        lines.push(LineMetric {
-            start_byte,
-            content_end_byte,
-            end_byte,
-            byte_len: content_end_byte.saturating_sub(start_byte),
-            utf16_len: slice.encode_utf16().count(),
-            line_ending_bytes,
-        });
+    fn rebuild_from_chunk(&self, rope: Arc<Rope>, start_chunk_index: usize) -> Self {
+        if self.inner.chunks.is_empty() || start_chunk_index == 0 {
+            return Self::from_rope(rope);
+        }
+
+        let rebuild_chunk = self
+            .inner
+            .chunks
+            .get(start_chunk_index)
+            .unwrap_or_else(|| self.inner.chunks.last().expect("chunk list is non-empty"));
+        let rebuild_start_line = self.line_for_offset_context(rebuild_chunk.start_byte);
+        let rebuild_line_start_byte = self.inner.lines[rebuild_start_line].start_byte;
+
+        let mut lines = self.inner.lines[..rebuild_start_line].to_vec();
+        lines.extend(scan_line_metrics_from_byte(
+            rope.as_ref(),
+            rebuild_line_start_byte,
+        ));
+
+        let mut chunks = self.inner.chunks[..start_chunk_index].to_vec();
+        chunks.extend(build_chunk_descriptors(
+            rope.as_ref(),
+            &lines,
+            rebuild_chunk.start_byte,
+            start_chunk_index,
+        ));
+
+        Self {
+            inner: ChunkedLineIndex {
+                rope,
+                lines,
+                chunks,
+            },
+        }
     }
 
     /// Return the number of logical lines. Empty text has one line.
     pub fn line_count(&self) -> usize {
-        self.lines.len()
+        self.inner.lines.len()
     }
 
     /// Return the full document byte length.
     pub fn len(&self) -> usize {
-        self.text.len()
+        self.inner.rope.len_bytes()
     }
 
     /// Returns `true` when the indexed text is empty.
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.inner.rope.len_bytes() == 0
     }
 
     /// Return the byte length of a logical line excluding CRLF/LF line endings.
@@ -537,9 +672,52 @@ impl LineIndex {
         Ok(self.line(line)?.utf16_len)
     }
 
-    /// Return the line-ending byte length for a line: 0, 1, or 2.
+    /// Return the line-ending byte length for a line: `0`, `1`, or `2`.
     pub fn line_ending_bytes(&self, line: usize) -> TextResult<usize> {
         Ok(self.line(line)?.line_ending_bytes)
+    }
+
+    /// Return the chunk descriptors derived from the rope-backed text substrate.
+    pub fn chunk_descriptors(&self) -> &[TextChunkDescriptor] {
+        &self.inner.chunks
+    }
+
+    /// Materialize a bounded chunk by ordinal.
+    pub fn chunk_text(&self, ordinal: usize) -> TextResult<String> {
+        let chunk = self.chunk(ordinal)?;
+        Ok(rope_string_from_byte_range(
+            self.inner.rope.as_ref(),
+            chunk.start_byte,
+            chunk.end_byte,
+        ))
+    }
+
+    /// Return a bounded slice for a logical line using an explicit byte budget.
+    pub fn line_slice(&self, line: usize, max_bytes: usize) -> TextResult<TextLineSlice> {
+        let metric = self.line(line)?;
+        build_line_slice(self.inner.rope.as_ref(), metric, line, max_bytes)
+    }
+
+    /// Return the exact logical line range requested by a viewport using an explicit per-line
+    /// byte budget.
+    pub fn visible_line_slices(
+        &self,
+        start_line: usize,
+        end_line_exclusive: usize,
+        max_bytes_per_line: usize,
+    ) -> TextResult<Vec<TextLineSlice>> {
+        if start_line > end_line_exclusive {
+            return Err(TextError::InvalidRange {
+                start: start_line,
+                end: end_line_exclusive,
+            });
+        }
+
+        let mut slices = Vec::with_capacity(end_line_exclusive.saturating_sub(start_line));
+        for line in start_line..end_line_exclusive {
+            slices.push(self.line_slice(line, max_bytes_per_line)?);
+        }
+        Ok(slices)
     }
 
     /// Convert line + UTF-8 byte column to absolute byte offset.
@@ -575,10 +753,9 @@ impl LineIndex {
         let line_index = self.line_for_offset(offset)?;
         let line = self.line(line_index)?;
         let column_end = offset.min(line.content_end_byte);
-        let prefix = &self.text[line.start_byte..column_end];
         Ok(Utf16Position::new(
             line_index,
-            prefix.encode_utf16().count(),
+            utf16_len_for_byte_range(self.inner.rope.as_ref(), line.start_byte, column_end),
         ))
     }
 
@@ -594,19 +771,27 @@ impl LineIndex {
             });
         }
 
-        let slice = &self.text[line.start_byte..line.content_end_byte];
+        let start_char = self.inner.rope.byte_to_char(line.start_byte);
+        let end_char = self.inner.rope.byte_to_char(line.content_end_byte);
+        let slice = self.inner.rope.slice(start_char..end_char);
+
         let mut utf16 = 0usize;
-        for (byte, ch) in slice.char_indices() {
+        let mut byte_offset = line.start_byte;
+        for ch in slice.chars() {
             if utf16 == pos.character {
-                return Ok(line.start_byte + byte);
+                return Ok(byte_offset);
             }
-            utf16 += ch.len_utf16();
-            if utf16 > pos.character {
+
+            let next_utf16 = utf16 + ch.len_utf16();
+            if next_utf16 > pos.character {
                 return Err(TextError::Utf16InsideSurrogatePair {
                     line: pos.line,
                     column: pos.character,
                 });
             }
+
+            utf16 = next_utf16;
+            byte_offset += ch.len_utf8();
         }
 
         if utf16 == pos.character {
@@ -632,54 +817,82 @@ impl LineIndex {
         ))
     }
 
-    /// Return an estimated memory footprint in bytes.
+    /// Return an estimated memory footprint in bytes excluding rope storage.
     pub fn memory_footprint_bytes(&self) -> usize {
-        self.text.len() + self.lines.len() * std::mem::size_of::<LineMetric>()
+        self.inner.lines.len() * std::mem::size_of::<LineMetric>()
+            + self.inner.chunks.len() * std::mem::size_of::<TextChunkDescriptor>()
+            + self
+                .inner
+                .chunks
+                .iter()
+                .map(|chunk| chunk.hash.len())
+                .sum::<usize>()
     }
 
     fn line(&self, line: usize) -> TextResult<&LineMetric> {
-        self.lines.get(line).ok_or(TextError::LineOutOfBounds {
-            line,
-            line_count: self.lines.len(),
-        })
+        self.inner
+            .lines
+            .get(line)
+            .ok_or(TextError::LineOutOfBounds {
+                line,
+                line_count: self.inner.lines.len(),
+            })
+    }
+
+    fn chunk(&self, chunk: usize) -> TextResult<&TextChunkDescriptor> {
+        self.inner
+            .chunks
+            .get(chunk)
+            .ok_or(TextError::ChunkOutOfBounds {
+                chunk,
+                chunk_count: self.inner.chunks.len(),
+            })
     }
 
     fn line_for_offset(&self, offset: usize) -> TextResult<usize> {
         self.ensure_valid_offset(offset)?;
-        match self.lines.binary_search_by(|line| {
-            if offset < line.start_byte {
-                std::cmp::Ordering::Greater
-            } else if offset > line.end_byte {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        }) {
-            Ok(mut idx) => {
-                while idx + 1 < self.lines.len() && !self.lines[idx].contains_offset(offset, false)
-                {
-                    idx += 1;
-                }
-                Ok(idx)
-            }
-            Err(idx) if idx > 0 => Ok(idx - 1),
-            Err(_) => Ok(0),
+        line_index_for_offset(&self.inner.lines, offset).ok_or(TextError::LineOutOfBounds {
+            line: 0,
+            line_count: 0,
+        })
+    }
+
+    fn line_for_offset_context(&self, offset: usize) -> usize {
+        let len = self.len();
+        if len == 0 {
+            return 0;
         }
+        let clamped = offset.min(len.saturating_sub(1));
+        line_index_for_offset(&self.inner.lines, clamped).unwrap_or(0)
+    }
+
+    fn rebuild_start_chunk_index(&self, edit_start: usize) -> usize {
+        if self.inner.chunks.is_empty() {
+            return 0;
+        }
+
+        let context_offset = if self.is_empty() {
+            0
+        } else {
+            edit_start
+                .saturating_sub(1)
+                .min(self.len().saturating_sub(1))
+        };
+
+        chunk_index_for_offset(&self.inner.chunks, context_offset).unwrap_or(0)
     }
 
     fn ensure_valid_offset(&self, offset: usize) -> TextResult<()> {
-        if offset > self.text.len() {
-            Err(TextError::ByteOffsetOutOfBounds {
-                offset,
-                len: self.text.len(),
-            })
+        let len = self.len();
+        if offset > len {
+            Err(TextError::ByteOffsetOutOfBounds { offset, len })
         } else {
             Ok(())
         }
     }
 
     fn ensure_char_boundary(&self, offset: usize) -> TextResult<()> {
-        if self.text.is_char_boundary(offset) {
+        if is_char_boundary(self.inner.rope.as_ref(), offset) {
             Ok(())
         } else {
             Err(TextError::NotUtf8Boundary { offset })
@@ -690,14 +903,16 @@ impl LineIndex {
 /// A mutable text buffer backed by a [`Rope`].
 ///
 /// Rope-backed edits are logarithmic in document size and avoid whole-buffer copies for typical
-/// insertions and deletions. Compatibility helper methods retain the previous `Option` API while
-/// richer `try_*` methods report detailed conversion failures.
+/// insertions and deletions. Full-source access remains available only while the buffer stays under
+/// [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`]; large buffers remain rope-backed, chunked, and
+/// line-sliceable without materializing the entire document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextBuffer {
     rope: Rope,
     line_index: LineIndex,
     version: BufferVersion,
-    text_cache: String,
+    full_text_cache: Option<String>,
+    allow_full_cache: bool,
 }
 
 impl TextBuffer {
@@ -708,27 +923,146 @@ impl TextBuffer {
 
     /// Create a new buffer with an explicit buffer version.
     pub fn with_version(text: impl Into<String>, version: BufferVersion) -> Self {
-        Self::try_with_version(text, version)
-            .expect("text buffer must fit the full-cache budget; use degraded large-file mode")
+        Self::try_with_version(text, version).expect("text buffer construction should not fail")
     }
 
     /// Try to create a new buffer with an explicit buffer version.
     pub fn try_with_version(text: impl Into<String>, version: BufferVersion) -> TextResult<Self> {
+        Self::try_with_version_and_cache_policy(text, version, true)
+    }
+
+    /// Try to create a new buffer with an explicit buffer version and full-cache policy.
+    pub fn try_with_version_and_cache_policy(
+        text: impl Into<String>,
+        version: BufferVersion,
+        allow_full_cache: bool,
+    ) -> TextResult<Self> {
         let text = text.into();
-        enforce_full_cache_budget(text.len())?;
         let rope = Rope::from_str(&text);
-        let line_index = LineIndex::new(&text);
+        Self::try_from_rope_with_cache_policy_and_text(rope, version, allow_full_cache, Some(text))
+    }
+
+    /// Try to create a new buffer from an existing rope with budget-aware full-cache retention.
+    pub fn try_from_rope(rope: Rope, version: BufferVersion) -> TextResult<Self> {
+        Self::try_from_rope_with_cache_policy(rope, version, true)
+    }
+
+    /// Try to create a new buffer from an existing rope with an explicit full-cache policy.
+    pub fn try_from_rope_with_cache_policy(
+        rope: Rope,
+        version: BufferVersion,
+        allow_full_cache: bool,
+    ) -> TextResult<Self> {
+        Self::try_from_rope_with_cache_policy_and_text(rope, version, allow_full_cache, None)
+    }
+
+    fn try_from_rope_with_cache_policy_and_text(
+        rope: Rope,
+        version: BufferVersion,
+        allow_full_cache: bool,
+        source_text: Option<String>,
+    ) -> TextResult<Self> {
+        let line_index = LineIndex::from_rope(Arc::new(rope.clone()));
+        let full_text_cache = if allow_full_cache {
+            match source_text {
+                Some(text) if text.len() <= DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES => Some(text),
+                Some(_) => None,
+                None => maybe_full_text_cache(&rope)?,
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             rope,
             line_index,
             version,
-            text_cache: text,
+            full_text_cache,
+            allow_full_cache,
         })
     }
 
+    /// Update whether this buffer may retain a bounded full-text compatibility cache.
+    pub fn set_full_cache_policy(&mut self, allow_full_cache: bool) -> TextResult<()> {
+        self.allow_full_cache = allow_full_cache;
+        self.full_text_cache = if allow_full_cache {
+            maybe_full_text_cache(&self.rope)?
+        } else {
+            None
+        };
+        Ok(())
+    }
+
     /// Return the full text.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the buffer does not retain a bounded compatibility full-text cache. Prefer
+    /// [`TextBuffer::try_full_text`] for large or degraded buffers.
     pub fn text(&self) -> &str {
-        &self.text_cache
+        self.try_full_text().expect(
+            "full text cache unavailable; use try_full_text(), line_slice(), or chunk_text()",
+        )
+    }
+
+    /// Return the cached full text when the buffer remains within the full-cache budget.
+    pub fn try_full_text(&self) -> TextResult<&str> {
+        self.full_text_cache
+            .as_deref()
+            .ok_or(TextError::FullCacheBudgetExceeded {
+                byte_len: self.len(),
+                budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
+            })
+    }
+
+    /// Return the chunk descriptors backing the current rope state.
+    pub fn chunk_descriptors(&self) -> &[TextChunkDescriptor] {
+        self.line_index.chunk_descriptors()
+    }
+
+    /// Materialize a single bounded chunk by ordinal.
+    pub fn chunk_text(&self, ordinal: usize) -> TextResult<String> {
+        self.line_index.chunk_text(ordinal)
+    }
+
+    /// Return a bounded slice for a single logical line.
+    pub fn line_slice(&self, line: usize) -> TextResult<TextLineSlice> {
+        self.line_slice_with_limit(line, DEFAULT_LINE_SLICE_MAX_BYTES)
+    }
+
+    /// Return a bounded slice for a single logical line with an explicit byte budget.
+    pub fn line_slice_with_limit(
+        &self,
+        line: usize,
+        max_bytes: usize,
+    ) -> TextResult<TextLineSlice> {
+        self.line_index.line_slice(line, max_bytes)
+    }
+
+    /// Return the exact logical line range requested by a viewport using the default per-line
+    /// slice budget.
+    pub fn visible_line_slices(
+        &self,
+        start_line: usize,
+        end_line_exclusive: usize,
+    ) -> TextResult<Vec<TextLineSlice>> {
+        self.visible_line_slices_with_limit(
+            start_line,
+            end_line_exclusive,
+            DEFAULT_LINE_SLICE_MAX_BYTES,
+        )
+    }
+
+    /// Return the exact logical line range requested by a viewport with an explicit per-line
+    /// slice budget.
+    pub fn visible_line_slices_with_limit(
+        &self,
+        start_line: usize,
+        end_line_exclusive: usize,
+        max_bytes_per_line: usize,
+    ) -> TextResult<Vec<TextLineSlice>> {
+        self.line_index
+            .visible_line_slices(start_line, end_line_exclusive, max_bytes_per_line)
     }
 
     /// Return the current buffer version.
@@ -743,12 +1077,12 @@ impl TextBuffer {
 
     /// Return the byte length of the text.
     pub fn len(&self) -> usize {
-        self.text_cache.len()
+        self.rope.len_bytes()
     }
 
     /// Returns `true` if the buffer contains no text.
     pub fn is_empty(&self) -> bool {
-        self.text_cache.is_empty()
+        self.rope.len_bytes() == 0
     }
 
     /// Return the number of logical lines. Empty buffers have one line.
@@ -819,18 +1153,27 @@ impl TextBuffer {
     /// Replace the byte range `[start, end)` with `text` and return detailed errors.
     pub fn try_replace_range(&mut self, start: usize, end: usize, text: &str) -> TextResult<()> {
         self.validate_range(start, end)?;
-        let removed_len = end.saturating_sub(start);
-        let post_edit_len = self
-            .text_cache
+        let rebuild_chunk_index = self.line_index.rebuild_start_chunk_index(start);
+        let new_len = self
             .len()
-            .saturating_sub(removed_len)
+            .saturating_sub(end.saturating_sub(start))
             .saturating_add(text.len());
-        enforce_full_cache_budget(post_edit_len)?;
+
         let start_char = self.rope.byte_to_char(start);
         let end_char = self.rope.byte_to_char(end);
         self.rope.remove(start_char..end_char);
         self.rope.insert(start_char, text);
-        self.refresh_cache_and_index()?;
+
+        if self.allow_full_cache && new_len <= DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
+            match self.full_text_cache.as_mut() {
+                Some(cache) => cache.replace_range(start..end, text),
+                None => self.full_text_cache = Some(self.rope.to_string()),
+            }
+        } else {
+            self.full_text_cache = None;
+        }
+
+        self.refresh_cache_and_index(rebuild_chunk_index)?;
         Ok(())
     }
 
@@ -859,7 +1202,7 @@ impl TextBuffer {
     /// Create an immutable [`TextSnapshot`] with an explicit retention reason.
     pub fn snapshot_with_retention(&self, reason: RetentionPinReason) -> TextSnapshot {
         self.try_snapshot_with_retention(reason)
-            .expect("text buffer snapshot must fit the full-cache budget")
+            .expect("text buffer snapshot construction should not fail")
     }
 
     /// Try to create an immutable [`TextSnapshot`] with an explicit retention reason.
@@ -867,15 +1210,21 @@ impl TextBuffer {
         &self,
         reason: RetentionPinReason,
     ) -> TextResult<TextSnapshot> {
-        TextSnapshot::try_from_rope(self.rope.clone(), self.version, reason)
+        let full_text_cache = self.full_text_cache.clone().map(Arc::new);
+        TextSnapshot::from_rope_parts(
+            Arc::new(self.rope.clone()),
+            self.version,
+            reason,
+            full_text_cache,
+        )
     }
 
     /// Return the estimated memory footprint of the buffer.
     pub fn memory_footprint_bytes(&self) -> usize {
         estimate_rope_memory(
             &self.rope,
-            self.text_cache.len(),
-            self.line_index.memory_footprint_bytes(),
+            self.full_text_cache.as_ref().map_or(0, String::len),
+            &self.line_index,
         )
     }
 
@@ -890,11 +1239,10 @@ impl TextBuffer {
         Ok(())
     }
 
-    fn refresh_cache_and_index(&mut self) -> TextResult<()> {
-        let refreshed = self.rope.to_string();
-        enforce_full_cache_budget(refreshed.len())?;
-        self.text_cache = refreshed;
-        self.line_index = LineIndex::new(&self.text_cache);
+    fn refresh_cache_and_index(&mut self, rebuild_chunk_index: usize) -> TextResult<()> {
+        self.line_index = self
+            .line_index
+            .rebuild_from_chunk(Arc::new(self.rope.clone()), rebuild_chunk_index);
         Ok(())
     }
 }
@@ -917,27 +1265,359 @@ impl From<&str> for TextBuffer {
     }
 }
 
+fn build_line_slice(
+    rope: &Rope,
+    metric: &LineMetric,
+    line: usize,
+    max_bytes: usize,
+) -> TextResult<TextLineSlice> {
+    let slice_end_byte = bounded_slice_end_byte(rope, metric, max_bytes);
+    let text = rope_string_from_byte_range(rope, metric.start_byte, slice_end_byte);
+    Ok(TextLineSlice {
+        line,
+        line_start_byte: metric.start_byte,
+        slice_end_byte,
+        line_content_byte_len: metric.byte_len,
+        utf8_byte_len: text.len(),
+        utf16_len: text.encode_utf16().count(),
+        line_ending_bytes: metric.line_ending_bytes,
+        truncated: slice_end_byte < metric.content_end_byte,
+        text,
+    })
+}
+
+fn bounded_slice_end_byte(rope: &Rope, metric: &LineMetric, max_bytes: usize) -> usize {
+    if max_bytes >= metric.byte_len {
+        return metric.content_end_byte;
+    }
+
+    let candidate = floor_char_boundary(rope, metric.start_byte.saturating_add(max_bytes))
+        .min(metric.content_end_byte)
+        .max(metric.start_byte);
+
+    if candidate > metric.start_byte {
+        candidate
+    } else if metric.content_end_byte > metric.start_byte && max_bytes > 0 {
+        next_char_boundary_after(rope, metric.start_byte).min(metric.content_end_byte)
+    } else {
+        metric.start_byte
+    }
+}
+
+fn scan_line_metrics_from_byte(rope: &Rope, start_byte: usize) -> Vec<LineMetric> {
+    let total_bytes = rope.len_bytes();
+    let start_char = rope.byte_to_char(start_byte.min(total_bytes));
+    let slice = rope.slice(start_char..rope.len_chars());
+
+    let mut lines = Vec::new();
+    let mut line_start = start_byte.min(total_bytes);
+    let mut absolute = start_byte.min(total_bytes);
+    let mut pending_cr: Option<usize> = None;
+
+    for chunk in slice.chunks() {
+        let bytes = chunk.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let byte = bytes[i];
+            let offset = absolute + i;
+
+            if let Some(cr_offset) = pending_cr {
+                if byte == b'\n' {
+                    push_line_metric(rope, &mut lines, line_start, cr_offset, offset + 1, 2);
+                    line_start = offset + 1;
+                    pending_cr = None;
+                    i += 1;
+                    continue;
+                }
+
+                push_line_metric(rope, &mut lines, line_start, cr_offset, cr_offset + 1, 1);
+                line_start = cr_offset + 1;
+                pending_cr = None;
+            }
+
+            match byte {
+                b'\r' => {
+                    pending_cr = Some(offset);
+                    i += 1;
+                }
+                b'\n' => {
+                    push_line_metric(rope, &mut lines, line_start, offset, offset + 1, 1);
+                    line_start = offset + 1;
+                    i += 1;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        absolute += bytes.len();
+    }
+
+    if let Some(cr_offset) = pending_cr {
+        push_line_metric(rope, &mut lines, line_start, cr_offset, cr_offset + 1, 1);
+        line_start = cr_offset + 1;
+    }
+
+    push_line_metric(rope, &mut lines, line_start, total_bytes, total_bytes, 0);
+    lines
+}
+
+fn push_line_metric(
+    rope: &Rope,
+    lines: &mut Vec<LineMetric>,
+    start_byte: usize,
+    content_end_byte: usize,
+    end_byte: usize,
+    line_ending_bytes: usize,
+) {
+    lines.push(LineMetric {
+        start_byte,
+        content_end_byte,
+        end_byte,
+        byte_len: content_end_byte.saturating_sub(start_byte),
+        utf16_len: utf16_len_for_byte_range(rope, start_byte, content_end_byte),
+        line_ending_bytes,
+    });
+}
+
+fn build_chunk_descriptors(
+    rope: &Rope,
+    lines: &[LineMetric],
+    start_byte: usize,
+    start_ordinal: usize,
+) -> Vec<TextChunkDescriptor> {
+    let total_bytes = rope.len_bytes();
+    if total_bytes == 0 || lines.is_empty() || start_byte >= total_bytes {
+        return Vec::new();
+    }
+
+    let mut descriptors = Vec::new();
+    let mut chunk_start = start_byte;
+    let mut ordinal = start_ordinal;
+
+    while chunk_start < total_bytes {
+        let start_line =
+            line_index_for_offset(lines, chunk_start).unwrap_or_else(|| lines.len() - 1);
+        let min_preferred = chunk_start.saturating_add(
+            DEFAULT_CHUNK_TARGET_BYTES.saturating_sub(DEFAULT_CHUNK_BOUNDARY_WINDOW_BYTES),
+        );
+        let target = chunk_start.saturating_add(DEFAULT_CHUNK_TARGET_BYTES);
+        let force_max = chunk_start
+            .saturating_add(DEFAULT_CHUNK_FORCE_MAX_BYTES)
+            .min(total_bytes);
+
+        let mut preferred_boundary: Option<(usize, usize)> = None;
+        let mut fallback_boundary: Option<(usize, usize)> = None;
+        let mut line_idx = start_line;
+
+        while line_idx < lines.len() {
+            let boundary = lines[line_idx].end_byte;
+            if boundary <= chunk_start {
+                line_idx += 1;
+                continue;
+            }
+            if boundary > force_max {
+                break;
+            }
+
+            if boundary >= min_preferred && boundary <= target {
+                preferred_boundary = Some((boundary, line_idx));
+            } else if boundary > target {
+                fallback_boundary = Some((boundary, line_idx));
+                break;
+            }
+
+            line_idx += 1;
+        }
+
+        let (chunk_end, end_line) = if let Some(boundary) = preferred_boundary {
+            boundary
+        } else if let Some(boundary) = fallback_boundary {
+            boundary
+        } else {
+            let mut forced_end = floor_char_boundary(rope, force_max);
+            if forced_end <= chunk_start {
+                forced_end = next_char_boundary_after(rope, chunk_start).min(total_bytes);
+            }
+            let context = forced_end
+                .saturating_sub(1)
+                .min(total_bytes.saturating_sub(1));
+            let end_line = line_index_for_offset(lines, context).unwrap_or(start_line);
+            (forced_end, end_line)
+        };
+
+        let text = rope_string_from_byte_range(rope, chunk_start, chunk_end);
+        descriptors.push(TextChunkDescriptor {
+            ordinal,
+            start_byte: chunk_start,
+            end_byte: chunk_end,
+            byte_len: chunk_end.saturating_sub(chunk_start),
+            start_line,
+            end_line,
+            hash: chunk_hash(&text),
+        });
+
+        chunk_start = chunk_end;
+        ordinal += 1;
+    }
+
+    descriptors
+}
+
+fn line_index_for_offset(lines: &[LineMetric], offset: usize) -> Option<usize> {
+    if lines.is_empty() {
+        return None;
+    }
+
+    match lines.binary_search_by(|line| {
+        if offset < line.start_byte {
+            Ordering::Greater
+        } else if offset > line.end_byte {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        }
+    }) {
+        Ok(mut idx) => {
+            while idx + 1 < lines.len()
+                && !lines[idx].contains_offset(offset, idx + 1 == lines.len())
+            {
+                idx += 1;
+            }
+            Some(idx)
+        }
+        Err(idx) if idx > 0 => Some(idx - 1),
+        Err(_) => Some(0),
+    }
+}
+
+fn chunk_index_for_offset(chunks: &[TextChunkDescriptor], offset: usize) -> Option<usize> {
+    if chunks.is_empty() {
+        return None;
+    }
+
+    match chunks.binary_search_by(|chunk| {
+        if offset < chunk.start_byte {
+            Ordering::Greater
+        } else if offset >= chunk.end_byte {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        }
+    }) {
+        Ok(idx) => Some(idx),
+        Err(idx) if idx > 0 => Some(idx - 1),
+        Err(_) => Some(0),
+    }
+}
+
+fn utf16_len_for_byte_range(rope: &Rope, start_byte: usize, end_byte: usize) -> usize {
+    if start_byte >= end_byte {
+        return 0;
+    }
+
+    let start_char = rope.byte_to_char(start_byte);
+    let end_char = rope.byte_to_char(end_byte);
+    rope.slice(start_char..end_char)
+        .chars()
+        .map(char::len_utf16)
+        .sum()
+}
+
+fn rope_string_from_byte_range(rope: &Rope, start_byte: usize, end_byte: usize) -> String {
+    if start_byte >= end_byte {
+        return String::new();
+    }
+
+    let start_char = rope.byte_to_char(start_byte);
+    let end_char = rope.byte_to_char(end_byte);
+    rope.slice(start_char..end_char).to_string()
+}
+
+fn floor_char_boundary(rope: &Rope, offset: usize) -> usize {
+    if offset >= rope.len_bytes() {
+        return rope.len_bytes();
+    }
+
+    let char_idx = rope.byte_to_char(offset);
+    let boundary = rope.char_to_byte(char_idx);
+    if boundary == offset { offset } else { boundary }
+}
+
+fn next_char_boundary_after(rope: &Rope, offset: usize) -> usize {
+    let char_idx = rope.byte_to_char(offset);
+    rope.char_to_byte((char_idx + 1).min(rope.len_chars()))
+}
+
+fn is_char_boundary(rope: &Rope, offset: usize) -> bool {
+    if offset > rope.len_bytes() {
+        return false;
+    }
+    let char_idx = rope.byte_to_char(offset);
+    rope.char_to_byte(char_idx) == offset
+}
+
+#[allow(dead_code)]
 fn content_hash(text: &str) -> String {
+    hash_with_domain(b"devil-text:content:v1\0", text.as_bytes())
+}
+
+fn chunk_hash(text: &str) -> String {
+    hash_with_domain(b"devil-text:chunk:v1\0", text.as_bytes())
+}
+
+fn snapshot_content_hash(chunks: &[TextChunkDescriptor]) -> String {
+    use std::fmt::Write as _;
+
+    let mut serialized = String::new();
+    for chunk in chunks {
+        let _ = write!(
+            serialized,
+            "{}:{}:{}:{}:{}:{};",
+            chunk.ordinal,
+            chunk.start_byte,
+            chunk.end_byte,
+            chunk.start_line,
+            chunk.end_line,
+            chunk.hash,
+        );
+    }
+    hash_with_domain(b"devil-text:snapshot:v1\0", serialized.as_bytes())
+}
+
+fn hash_with_domain(domain: &[u8], bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
+    hasher.update(domain);
+    hasher.update(bytes);
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
-fn estimate_rope_memory(rope: &Rope, byte_len: usize, line_index_bytes: usize) -> usize {
-    byte_len
-        + line_index_bytes
+fn estimate_rope_memory(
+    rope: &Rope,
+    full_cache_bytes: usize,
+    line_index_bytes: &LineIndex,
+) -> usize {
+    rope.len_bytes()
+        + full_cache_bytes
+        + line_index_bytes.memory_footprint_bytes()
         + rope.len_lines() * std::mem::size_of::<usize>() * 4
         + DEFAULT_LEAF_TARGET_BYTES
 }
 
-fn enforce_full_cache_budget(byte_len: usize) -> TextResult<()> {
-    if byte_len > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
-        Err(TextError::FullCacheBudgetExceeded {
-            byte_len,
-            budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
-        })
+fn maybe_full_text_cache(rope: &Rope) -> TextResult<Option<String>> {
+    if rope.len_bytes() > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
+        Ok(None)
     } else {
-        Ok(())
+        let text = rope.to_string();
+        if text.len() > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES {
+            Err(TextError::FullCacheBudgetExceeded {
+                byte_len: text.len(),
+                budget: DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
+            })
+        } else {
+            Ok(Some(text))
+        }
     }
 }
 
@@ -973,7 +1653,13 @@ mod tests {
         let snap = buf.snapshot();
         let clone = snap.clone();
         assert_eq!(clone.text(), "original");
-        assert!(Arc::ptr_eq(&snap.text_cache, &clone.text_cache));
+        assert!(Arc::ptr_eq(
+            snap.full_text_cache.as_ref().expect("small snapshot cache"),
+            clone
+                .full_text_cache
+                .as_ref()
+                .expect("small snapshot cache"),
+        ));
         buf.insert(8, " changed").unwrap();
         assert_eq!(snap.text(), "original");
         assert_eq!(buf.text(), "original changed");
@@ -1082,6 +1768,150 @@ mod tests {
     }
 
     #[test]
+    fn opening_larger_than_budget_uses_degraded_cache_free_mode() {
+        let text = "x".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1);
+        let buf = TextBuffer::try_with_version(text, BufferVersion(7)).unwrap();
+        assert_eq!(buf.version(), BufferVersion(7));
+        assert!(matches!(
+            buf.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+        assert!(buf.chunk_descriptors().len() > 1);
+
+        let snapshot = buf.try_snapshot().unwrap();
+        assert!(matches!(
+            snapshot.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+        assert_eq!(snapshot.len(), DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1);
+    }
+
+    #[test]
+    fn line_slice_can_span_multiple_chunks() {
+        let long_line = format!("{}🦀tail", "a".repeat(DEFAULT_CHUNK_TARGET_BYTES + 128));
+        let buf = TextBuffer::new(format!("head\n{long_line}\nend"));
+        let slice = buf.line_slice_with_limit(1, usize::MAX).unwrap();
+        assert_eq!(slice.text, long_line);
+        assert!(!slice.truncated);
+        assert!(buf.chunk_descriptors().len() >= 2);
+    }
+
+    #[test]
+    fn huge_single_line_files_are_bounded_without_full_text_materialization() {
+        let text = "é".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES / 2 + 1024);
+        let buf = TextBuffer::try_with_version(text, BufferVersion(0)).unwrap();
+        assert_eq!(buf.line_count(), 1);
+        let slice = buf.line_slice(0).unwrap();
+        assert!(slice.truncated);
+        assert!(slice.utf8_byte_len <= DEFAULT_LINE_SLICE_MAX_BYTES + 4);
+        assert!(matches!(
+            buf.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn crlf_pair_is_not_split_when_near_chunk_boundary() {
+        let first = "a".repeat(DEFAULT_CHUNK_TARGET_BYTES - 1);
+        let second = "b".repeat(DEFAULT_CHUNK_TARGET_BYTES);
+        let buf = TextBuffer::new(format!("{first}\r\n{second}\nend"));
+        let cr_offset = first.len();
+        assert!(
+            buf.chunk_descriptors()
+                .iter()
+                .all(|chunk| chunk.end_byte != cr_offset + 1)
+        );
+    }
+
+    #[test]
+    fn utf8_and_utf16_conversion_work_across_chunk_boundaries() {
+        let crab_count = DEFAULT_CHUNK_TARGET_BYTES / 4 + 32;
+        let text = format!("{}\nend", "🦀".repeat(crab_count));
+        let buf = TextBuffer::new(text);
+
+        let crab_index = DEFAULT_CHUNK_TARGET_BYTES / 4 + 1;
+        let byte_offset = crab_index * 4;
+        let utf16 = buf.utf16_position(byte_offset).unwrap();
+        assert_eq!(utf16, Utf16Position::new(0, crab_index * 2));
+        assert_eq!(
+            buf.byte_offset_from_utf16(Utf16Position::new(0, crab_index * 2))
+                .unwrap(),
+            byte_offset
+        );
+        assert_eq!(
+            buf.position(byte_offset).unwrap(),
+            TextPosition::new(0, byte_offset)
+        );
+    }
+
+    #[test]
+    fn chunk_hashes_change_only_for_edited_chunk_when_boundaries_stay_stable() {
+        let line_a = "a".repeat(60_000);
+        let line_b = "b".repeat(60_000);
+        let line_c = "c".repeat(60_000);
+        let mut buf = TextBuffer::new(format!("{line_a}\n{line_b}\n{line_c}\n"));
+
+        let before = buf.chunk_descriptors().to_vec();
+        assert!(before.len() >= 3);
+
+        let edit_start = before[1].start_byte + 128;
+        buf.try_replace_range(edit_start, edit_start + 5, "BBBBB")
+            .unwrap();
+
+        let after = buf.chunk_descriptors();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before[0].hash, after[0].hash);
+        assert_ne!(before[1].hash, after[1].hash);
+        assert_eq!(before[2].hash, after[2].hash);
+    }
+
+    #[test]
+    fn explicit_full_text_access_fails_for_uncached_snapshot_and_buffer() {
+        let text = "z".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 32);
+        let buf = TextBuffer::new(text);
+        let snap = buf.snapshot();
+
+        assert!(matches!(
+            buf.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+        assert!(matches!(
+            snap.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn edits_can_shrink_below_and_grow_above_full_cache_budget() {
+        let mut buf = TextBuffer::new("x".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 10));
+        assert!(buf.try_full_text().is_err());
+
+        buf.try_delete_range(
+            DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES,
+            DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 10,
+        )
+        .unwrap();
+        assert_eq!(
+            buf.try_full_text().unwrap().len(),
+            DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
+        );
+
+        buf.try_insert(buf.len(), "overflow!").unwrap();
+        assert!(buf.try_full_text().is_err());
+    }
+
+    #[test]
+    fn visible_line_slices_return_exact_requested_range() {
+        let buf = TextBuffer::new("zero\none\ntwo\nthree\nfour");
+        let slices = buf.visible_line_slices(1, 4).unwrap();
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices[0].line, 1);
+        assert_eq!(slices[0].text, "one");
+        assert_eq!(slices[2].line, 3);
+        assert_eq!(slices[2].text, "three");
+    }
+
+    #[test]
     fn large_file_typical_keystroke_edit_smoke() {
         let text = "a".repeat(1024 * 1024);
         let mut buf = TextBuffer::new(text);
@@ -1089,5 +1919,10 @@ mod tests {
         buf.insert(512 * 1024, "x").unwrap();
         assert_eq!(buf.len(), 1024 * 1024 + 1);
         assert!(buf.memory_footprint_bytes() >= before);
+    }
+
+    #[test]
+    fn content_hash_has_expected_prefix() {
+        assert!(content_hash("hello").starts_with("sha256:"));
     }
 }

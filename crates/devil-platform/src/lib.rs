@@ -393,8 +393,7 @@ fn atomic_temp_path(parent: &Path, target: &Path) -> PathBuf {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("file")
-        .replace('\n', "_")
-        .replace('\r', "_");
+        .replace(['\n', '\r'], "_");
     let suffix = ATOMIC_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     parent.join(format!(".{stem}.{}.{}.tmp", std::process::id(), suffix))
 }

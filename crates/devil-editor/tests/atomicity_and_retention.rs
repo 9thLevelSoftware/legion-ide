@@ -1,7 +1,11 @@
 use devil_editor::{
-    EditorEngine, EditorError, SnapshotEvictionPreference, SnapshotRetentionPolicy, TextPosition,
+    BufferMode, EditorEngine, EditorError, EditorThresholds, SnapshotEvictionPreference,
+    SnapshotRetentionPolicy, TextPosition,
 };
-use devil_protocol::{FileId, TransactionSource, WorkspaceId};
+use devil_protocol::{
+    EditorViewportRequest, FileId, TransactionSource, ViewportDimensions, ViewportScroll,
+    WorkspaceId,
+};
 use devil_text::{TextEdit, TextError, TextRange};
 
 fn small_policy(max_snapshot_count: usize) -> SnapshotRetentionPolicy {
@@ -52,7 +56,7 @@ fn invalid_batch_rolls_back_live_text_version_dirty_and_side_effects() {
 }
 
 #[test]
-fn failed_oversize_batch_preserves_undo_stack_and_transaction_log() {
+fn oversize_edit_transitions_buffer_into_degraded_mode_without_losing_undo_history() {
     let mut engine = EditorEngine::new();
     let buffer = engine
         .open_buffer(WorkspaceId(1), FileId(2), "oversize.txt", "seed")
@@ -70,24 +74,38 @@ fn failed_oversize_batch_preserves_undo_stack_and_transaction_log() {
     let log_len = engine.transaction_log().len();
     let before = engine.text(buffer).expect("text").to_string();
 
-    let result = engine.apply_edit(
-        buffer,
-        TextEdit::insert(
-            TextPosition::new(0, before.len()),
-            "x".repeat(devil_text::DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES),
-        ),
-        TransactionSource::User,
-        None,
-        None,
-    );
+    engine
+        .apply_edit(
+            buffer,
+            TextEdit::insert(
+                TextPosition::new(0, before.len()),
+                "x".repeat(devil_text::DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES),
+            ),
+            TransactionSource::User,
+            None,
+            None,
+        )
+        .expect("oversize edit should degrade instead of failing");
 
+    assert_eq!(
+        engine.buffer_mode(buffer).expect("mode"),
+        BufferMode::Degraded
+    );
     assert!(matches!(
-        result,
+        engine.text(buffer),
         Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
     ));
-    assert_eq!(engine.text(buffer).expect("text"), before);
-    assert_eq!(engine.undo_len(buffer).expect("undo len"), undo_len);
-    assert_eq!(engine.transaction_log().len(), log_len);
+    assert_eq!(engine.undo_len(buffer).expect("undo len"), undo_len + 1);
+    assert_eq!(engine.transaction_log().len(), log_len + 1);
+
+    engine
+        .undo(buffer, None)
+        .expect("undo back to small buffer");
+    assert_eq!(
+        engine.buffer_mode(buffer).expect("mode after undo"),
+        BufferMode::Normal
+    );
+    assert_eq!(engine.text(buffer).expect("text after undo"), before);
 }
 
 #[test]
@@ -201,4 +219,114 @@ fn protocol_descriptor_preserves_utf16_ranges_for_surrogate_pairs() {
     assert_eq!(changed.utf16_range.end.character, 3);
     assert_eq!(descriptor.causality_id.0, tx.causality_trace_id);
     assert_ne!(descriptor.causality_id.0, tx.transaction_id);
+}
+
+#[test]
+fn large_buffers_open_in_degraded_mode_instead_of_failing() {
+    let mut engine = EditorEngine::with_thresholds(EditorThresholds {
+        large_file_threshold_bytes: 64,
+        retention_budget_snapshots: 8,
+    });
+    let text = (0..32)
+        .map(|line| format!("line-{line:02}-{}\n", "x".repeat(16)))
+        .collect::<String>();
+
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(6), "large.txt", text)
+        .expect("open degraded buffer");
+
+    assert_eq!(
+        engine.buffer_mode(buffer).expect("mode"),
+        BufferMode::Degraded
+    );
+    assert!(matches!(
+        engine.text(buffer),
+        Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
+    ));
+}
+
+#[test]
+fn undo_redo_remains_correct_for_degraded_chunk_boundary_edits() {
+    let mut engine = EditorEngine::with_thresholds(EditorThresholds {
+        large_file_threshold_bytes: 64,
+        retention_budget_snapshots: 16,
+    });
+    let line_body = "a".repeat(2048);
+    let text = (0..96)
+        .map(|line| format!("{line:03}:{line_body}\n"))
+        .collect::<String>();
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(7), "chunked.txt", text)
+        .expect("open degraded buffer");
+
+    let chunk = engine
+        .snapshot_chunk_descriptors(buffer)
+        .expect("chunk descriptors")
+        .into_iter()
+        .find(|chunk| chunk.line_range.start <= 48 && chunk.line_range.end > 48)
+        .expect("chunk for target line");
+    assert!(
+        chunk.chunk_index > 0,
+        "target line should land beyond the first chunk"
+    );
+
+    let line_before = format!("{:03}:{}", 48, line_body);
+    let expected_after = format!("{}!{}", &line_before[..10], &line_before[10..]);
+
+    engine
+        .apply_edit(
+            buffer,
+            TextEdit::insert(TextPosition::new(48, 10), "!"),
+            TransactionSource::User,
+            None,
+            None,
+        )
+        .expect("apply chunk edit");
+
+    let after = engine
+        .viewport_projection(EditorViewportRequest {
+            buffer_id: buffer,
+            scroll: ViewportScroll {
+                top_line: 48,
+                left_column: 0,
+            },
+            dimensions: ViewportDimensions {
+                width_px: 800,
+                height_px: 16,
+            },
+        })
+        .expect("viewport after edit");
+    assert_eq!(after.line_slices[0].visible_text, expected_after);
+
+    engine.undo(buffer, None).expect("undo");
+    let undone = engine
+        .viewport_projection(EditorViewportRequest {
+            buffer_id: buffer,
+            scroll: ViewportScroll {
+                top_line: 48,
+                left_column: 0,
+            },
+            dimensions: ViewportDimensions {
+                width_px: 800,
+                height_px: 16,
+            },
+        })
+        .expect("viewport after undo");
+    assert_eq!(undone.line_slices[0].visible_text, line_before);
+
+    engine.redo(buffer, None).expect("redo");
+    let redone = engine
+        .viewport_projection(EditorViewportRequest {
+            buffer_id: buffer,
+            scroll: ViewportScroll {
+                top_line: 48,
+                left_column: 0,
+            },
+            dimensions: ViewportDimensions {
+                width_px: 800,
+                height_px: 16,
+            },
+        })
+        .expect("viewport after redo");
+    assert_eq!(redone.line_slices[0].visible_text, expected_after);
 }

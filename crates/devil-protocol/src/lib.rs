@@ -346,8 +346,90 @@ pub struct ViewportScroll {
     pub left_column: u32,
 }
 
+/// Viewport projection operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ViewportProjectionMode {
+    /// Standard projection mode for normal buffers.
+    #[default]
+    Normal,
+    /// Compatibility mode where explicitly bounded small-buffer payloads are allowed.
+    BoundedSmallBuffer,
+    /// Degraded projection mode for large files where overlays may be deferred.
+    DegradedLargeFile,
+}
+
+/// Truncation state for a visible viewport line slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ViewportLineTruncationState {
+    /// Slice contains the full logical line.
+    None,
+    /// Slice omits leading content from the logical line.
+    Leading,
+    /// Slice omits trailing content from the logical line.
+    Trailing,
+    /// Slice omits both leading and trailing content from the logical line.
+    Both,
+}
+
+/// Visible viewport slice for a logical line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewportLineSlice {
+    /// Zero-based logical line number represented by the slice.
+    pub line_number: u32,
+    /// Visible text rendered for this line slice.
+    pub visible_text: String,
+    /// Visible byte range in snapshot coordinates.
+    pub byte_range: ByteRange,
+    /// Visible UTF-16 range in snapshot coordinates.
+    pub utf16_range: Utf16Range,
+    /// Hash for the chunk backing this slice.
+    pub chunk_hash: FileFingerprint,
+    /// Whether the slice omits leading and/or trailing content.
+    pub truncation_state: ViewportLineTruncationState,
+}
+
+/// Line metric aligned with [`ViewportProjection::line_slices`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewportLineMetric {
+    /// Total byte length for the logical line.
+    pub byte_length: u64,
+    /// Total UTF-16 code-unit length for the logical line.
+    pub utf16_length: u64,
+    /// Width of the line ending in bytes.
+    pub line_ending_width: u8,
+    /// Whether the metric is exact rather than estimated.
+    pub exact: bool,
+}
+
+/// Placeholder decoration span for future overlay phases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ViewportDecorationSpan {}
+
+/// Placeholder fold range for future overlay phases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ViewportFoldRange {}
+
+/// Placeholder semantic token overlay for future overlay phases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ViewportSemanticTokenOverlay {}
+
+/// Large-file projection status for degraded viewport rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LargeFileStatus {
+    /// Large-file threshold in bytes that triggered compatibility behavior.
+    pub threshold_bytes: u64,
+    /// Current snapshot byte length.
+    pub byte_len: u64,
+    /// User-visible reasons why overlays are disabled or deferred.
+    pub disabled_overlay_reasons: Vec<String>,
+    /// Whether bounded search remains available in the current mode.
+    pub bounded_search_enabled: bool,
+    /// User-visible large-file status message.
+    pub message: String,
+}
+
 /// Protocol-level viewport projection for later UI rendering contracts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewportProjection {
     /// Owning workspace identifier.
     pub workspace_id: WorkspaceId,
@@ -369,6 +451,27 @@ pub struct ViewportProjection {
     pub scroll: ViewportScroll,
     /// Viewport dimensions.
     pub dimensions: ViewportDimensions,
+    /// Projection mode used to produce the viewport payload.
+    #[serde(default)]
+    pub mode: ViewportProjectionMode,
+    /// Visible line slices in render order.
+    #[serde(default)]
+    pub line_slices: Vec<ViewportLineSlice>,
+    /// Per-line metrics aligned with [`ViewportProjection::line_slices`].
+    #[serde(default)]
+    pub line_metrics: Vec<ViewportLineMetric>,
+    /// Decoration placeholders reserved for later phases.
+    #[serde(default)]
+    pub decoration_spans: Vec<ViewportDecorationSpan>,
+    /// Fold placeholders reserved for later phases.
+    #[serde(default)]
+    pub fold_ranges: Vec<ViewportFoldRange>,
+    /// Semantic overlay placeholders reserved for later phases.
+    #[serde(default)]
+    pub semantic_token_overlays: Vec<ViewportSemanticTokenOverlay>,
+    /// Large-file compatibility status when projection behavior is constrained.
+    #[serde(default)]
+    pub large_file_status: Option<LargeFileStatus>,
     /// Viewport projection schema version.
     pub schema_version: u16,
 }
@@ -897,6 +1000,77 @@ pub struct SnapshotDescriptor {
     pub content_hash: Option<String>,
     /// Creation time.
     pub created_at: TimestampMillis,
+}
+
+/// Zero-based line index range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LineIndexRange {
+    /// Inclusive start line index.
+    pub start: u32,
+    /// Exclusive end line index.
+    pub end: u32,
+}
+
+/// Snapshot chunk descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotChunkDescriptor {
+    /// Snapshot identifier owning the chunk.
+    pub snapshot_id: SnapshotId,
+    /// Zero-based chunk ordinal within the snapshot.
+    pub chunk_index: u32,
+    /// Absolute byte range covered by the chunk.
+    pub byte_range: ByteRange,
+    /// Zero-based logical line range covered by the chunk.
+    pub line_range: LineIndexRange,
+    /// Chunk byte length.
+    pub byte_len: u64,
+    /// Algorithm-tagged hash for the chunk contents.
+    pub chunk_hash: FileFingerprint,
+    /// Chunk descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Snapshot lease consumer kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SnapshotConsumerKind {
+    /// Core editor runtime.
+    Editor,
+    /// Projection-only UI renderer.
+    #[serde(rename = "UI")]
+    Ui,
+    /// Language-server consumer.
+    #[serde(rename = "LSP")]
+    Lsp,
+    /// Future indexing consumer.
+    Index,
+    /// Future plugin consumer.
+    Plugin,
+    /// Future AI consumer.
+    #[serde(rename = "AI")]
+    Ai,
+    /// Future collaboration consumer.
+    Collaboration,
+    /// Storage or persistence observer.
+    Storage,
+    /// Observability and audit sink.
+    Observability,
+}
+
+/// Snapshot lease descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotLeaseDescriptor {
+    /// Stable lease identifier.
+    pub lease_id: Uuid,
+    /// Snapshot identifier guarded by the lease.
+    pub snapshot_id: SnapshotId,
+    /// Consumer category holding the lease.
+    pub consumer_kind: SnapshotConsumerKind,
+    /// Lease expiration time.
+    pub expires_at: TimestampMillis,
+    /// Number of chunks pinned by the lease.
+    pub chunk_count: u32,
+    /// Lease descriptor schema version.
+    pub schema_version: u16,
 }
 
 /// Transaction source.

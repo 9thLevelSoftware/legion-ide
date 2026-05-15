@@ -1,0 +1,12 @@
+C:\Users\dasbl\RustroverProjects\devil-ide\target-clippy-stable\debug\deps\semver-2da730bf5f7354e4.d: C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\lib.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\display.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\error.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\eval.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\identifier.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\impls.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\parse.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\serde.rs
+
+C:\Users\dasbl\RustroverProjects\devil-ide\target-clippy-stable\debug\deps\libsemver-2da730bf5f7354e4.rmeta: C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\lib.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\display.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\error.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\eval.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\identifier.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\impls.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\parse.rs C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\serde.rs
+
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\lib.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\display.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\error.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\eval.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\identifier.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\impls.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\parse.rs:
+C:\Users\dasbl\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\semver-1.0.28\src\serde.rs:
