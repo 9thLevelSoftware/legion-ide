@@ -163,6 +163,100 @@ pub struct WorkspaceSaveRequest {
     pub text: String,
 }
 
+/// Proposal-context create-file request accepted by workspace VFS authority.
+#[derive(Debug, Clone)]
+pub struct WorkspaceCreateFileRequest {
+    /// Workspace being mutated.
+    pub workspace_id: WorkspaceId,
+    /// Proposal authorizing this mutation.
+    pub proposal_id: ProposalId,
+    /// Principal requesting the mutation.
+    pub principal: PrincipalId,
+    /// Required capability.
+    pub required_capability: CapabilityId,
+    /// Destination path.
+    pub path: CanonicalPath,
+    /// Expected workspace generation.
+    pub expected_workspace_generation: WorkspaceGeneration,
+    /// Initial UTF-8 file content.
+    pub initial_content: String,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id linking proposal/workspace events.
+    pub causality_id: CausalityId,
+}
+
+/// Proposal-context delete-file request accepted by workspace VFS authority.
+#[derive(Debug, Clone)]
+pub struct WorkspaceDeleteFileRequest {
+    /// Workspace being mutated.
+    pub workspace_id: WorkspaceId,
+    /// Proposal authorizing this mutation.
+    pub proposal_id: ProposalId,
+    /// Principal requesting the mutation.
+    pub principal: PrincipalId,
+    /// Required capability.
+    pub required_capability: CapabilityId,
+    /// File identity being deleted.
+    pub file: FileIdentity,
+    /// Expected disk fingerprint.
+    pub expected_fingerprint: ProtocolFileFingerprint,
+    /// Expected file content version.
+    pub expected_file_content_version: FileContentVersion,
+    /// Expected workspace generation.
+    pub expected_workspace_generation: WorkspaceGeneration,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id linking proposal/workspace events.
+    pub causality_id: CausalityId,
+}
+
+/// Proposal-context rename-file request accepted by workspace VFS authority.
+#[derive(Debug, Clone)]
+pub struct WorkspaceRenameFileRequest {
+    /// Workspace being mutated.
+    pub workspace_id: WorkspaceId,
+    /// Proposal authorizing this mutation.
+    pub proposal_id: ProposalId,
+    /// Principal requesting the mutation.
+    pub principal: PrincipalId,
+    /// Required capability.
+    pub required_capability: CapabilityId,
+    /// File identity being renamed.
+    pub file: FileIdentity,
+    /// Destination path.
+    pub destination: CanonicalPath,
+    /// Expected disk fingerprint.
+    pub expected_fingerprint: ProtocolFileFingerprint,
+    /// Expected file content version.
+    pub expected_file_content_version: FileContentVersion,
+    /// Expected workspace generation.
+    pub expected_workspace_generation: WorkspaceGeneration,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id linking proposal/workspace events.
+    pub causality_id: CausalityId,
+}
+
+/// Successful closed-file workspace mutation metadata.
+#[derive(Debug, Clone)]
+pub struct WorkspaceFileMutationApplied {
+    /// Updated or affected file identity.
+    pub identity: FileIdentity,
+    /// Disk fingerprint after mutation, when the file still exists.
+    pub fingerprint: Option<ProtocolFileFingerprint>,
+    /// Updated or affected file content version.
+    pub file_content_version: FileContentVersion,
+    /// Updated workspace generation.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Proposal response for applied lifecycle.
+    pub response: ProposalResponse,
+}
+
+/// Closed-file workspace mutation result preserving typed proposal responses.
+#[allow(clippy::result_large_err)]
+pub type WorkspaceFileMutationResult = Result<WorkspaceFileMutationApplied, ProposalResponse>;
+
 /// Non-atomic fallback policy for workspace saves.
 ///
 /// Track 3 intentionally exposes only the fail-closed policy. Any future fallback variant must add
@@ -745,6 +839,47 @@ impl WorkspaceActor {
         state.file_metadata.get(&file_id).cloned()
     }
 
+    fn upsert_tree_node(
+        state: &mut WorkspaceState,
+        identity: FileIdentity,
+        metadata: FileMetadata,
+    ) {
+        let key = identity.canonical_path.0.clone();
+        if let Some(node) = state
+            .tree
+            .iter_mut()
+            .find(|node| node.identity.file_id == identity.file_id)
+        {
+            node.identity = identity;
+            node.name = key
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
+            node.metadata = Some(metadata);
+        } else {
+            state.tree.push(FileTreeNode {
+                identity,
+                name: key
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                children: Vec::new(),
+                metadata: Some(metadata),
+            });
+        }
+    }
+
+    fn remove_file_from_state(state: &mut WorkspaceState, file_id: FileId, path: &CanonicalPath) {
+        state.file_metadata.remove(&file_id);
+        state.file_path_by_id.remove(&file_id);
+        state.file_id_by_path.remove(&path.0);
+        state.last_scan.remove(&path.0);
+        state.active_sessions.remove(&file_id);
+        state.tree.retain(|node| node.identity.file_id != file_id);
+    }
+
     fn open_existing_file_text_internal(
         &self,
         state: &mut WorkspaceState,
@@ -1140,6 +1275,107 @@ impl WorkspaceActor {
             correlation_id: request.correlation_id,
             causality_id: request.causality_id,
             diagnostics,
+        }
+    }
+
+    fn mutation_transition(
+        proposal_id: ProposalId,
+        principal: &PrincipalId,
+        capability: &CapabilityId,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+        state: ProposalLifecycleState,
+        diagnostics: Vec<ProtocolDiagnostic>,
+    ) -> ProposalLifecycleTransition {
+        ProposalLifecycleTransition {
+            proposal_id,
+            lifecycle_state: state,
+            timestamp: TimestampMillis::now(),
+            principal: principal.clone(),
+            capability: capability.clone(),
+            correlation_id,
+            causality_id,
+            diagnostics,
+        }
+    }
+
+    fn failed_mutation_response(
+        proposal_id: ProposalId,
+        principal: &PrincipalId,
+        capability: &CapabilityId,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+        path: CanonicalPath,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = Self::diagnostic("proposal.failed", message, Some(path));
+        ProposalResponse::Failed {
+            transition: Self::mutation_transition(
+                proposal_id,
+                principal,
+                capability,
+                correlation_id,
+                causality_id,
+                ProposalLifecycleState::Failed,
+                vec![diagnostic],
+            ),
+            reason: ProposalFailureReason::ApplyFailed,
+        }
+    }
+
+    fn denied_mutation_response(
+        proposal_id: ProposalId,
+        principal: &PrincipalId,
+        capability: &CapabilityId,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+        path: CanonicalPath,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = Self::diagnostic("proposal.denied", message, Some(path));
+        ProposalResponse::Denied {
+            transition: Self::mutation_transition(
+                proposal_id,
+                principal,
+                capability,
+                correlation_id,
+                causality_id,
+                ProposalLifecycleState::Denied,
+                vec![diagnostic],
+            ),
+            reason: ProposalDenialReason::PolicyDenied,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stale_mutation_response(
+        proposal_id: ProposalId,
+        principal: &PrincipalId,
+        capability: &CapabilityId,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+        path: CanonicalPath,
+        reason: ProposalStaleReason,
+        expected: ProposalVersionPreconditions,
+        actual: Option<devil_protocol::VersionContext>,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = Self::diagnostic("proposal.stale", message, Some(path));
+        ProposalResponse::Stale {
+            transition: Self::mutation_transition(
+                proposal_id,
+                principal,
+                capability,
+                correlation_id,
+                causality_id,
+                ProposalLifecycleState::Stale,
+                vec![diagnostic],
+            ),
+            stale: ProposalStaleContext {
+                reason,
+                expected,
+                actual,
+            },
         }
     }
 
@@ -1631,6 +1867,622 @@ impl WorkspaceActor {
             return Err(WorkspaceError::WorkspaceMissing { workspace_id });
         }
         self.open_new_file_text_internal(state, path.as_ref())
+    }
+
+    /// Create a closed file through workspace VFS authority and proposal lifecycle context.
+    #[allow(clippy::result_large_err)]
+    pub fn create_file_with_proposal(
+        &self,
+        request: WorkspaceCreateFileRequest,
+    ) -> WorkspaceFileMutationResult {
+        let mut state_guard = self.state.lock().map_err(|_| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                "workspace state lock poisoned",
+            )
+        })?;
+        let Some(state) = state_guard.as_mut() else {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                "workspace is not open",
+            ));
+        };
+        if state.workspace_id != request.workspace_id {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                "workspace id does not match opened workspace",
+            ));
+        }
+        let canonical = match self.canonicalize_candidate(state, &request.path.0) {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(Self::denied_mutation_response(
+                    request.proposal_id,
+                    &request.principal,
+                    &request.required_capability,
+                    request.correlation_id,
+                    request.causality_id,
+                    request.path.clone(),
+                    err.to_string(),
+                ));
+            }
+        };
+        if let Err(err) = self.decision_for_workspace_with_context(
+            state,
+            &request.required_capability.0,
+            Some(&canonical.to_string_lossy()),
+            CapabilityRequestContext {
+                write_byte_count: Some(request.initial_content.len() as u64),
+                ..CapabilityRequestContext::default()
+            },
+        ) {
+            return Err(Self::denied_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                err.to_string(),
+            ));
+        }
+        if state.generation != request.expected_workspace_generation {
+            return Err(Self::stale_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                ProposalStaleReason::WorkspaceGenerationMismatch,
+                ProposalVersionPreconditions {
+                    file_version: None,
+                    buffer_version: None,
+                    snapshot_id: None,
+                    generation: Some(request.expected_workspace_generation),
+                    file_content_version: None,
+                    workspace_generation: Some(request.expected_workspace_generation),
+                    expected_fingerprint: None,
+                    expected_file_length: None,
+                    expected_modified_at: None,
+                },
+                None,
+                "workspace generation changed before create",
+            ));
+        }
+        if self.fs.read_metadata(&canonical).is_ok() {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                "create destination already exists",
+            ));
+        }
+        if let Err(err) = self
+            .fs
+            .create_text_file_new(&canonical, &request.initial_content)
+        {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                err.to_string(),
+            ));
+        }
+        let metadata = self.fs.read_metadata(&canonical).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let fingerprint = FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata)
+            .map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let identity =
+            self.file_identity_from_platform_metadata(state, &canonical, &fingerprint, &metadata);
+        let metadata = self
+            .metadata_for_identity(state, identity.file_id)
+            .expect("metadata inserted");
+        let key = identity.canonical_path.0.clone();
+        state.last_scan.insert(key, fingerprint.clone());
+        Self::upsert_tree_node(state, identity.clone(), metadata);
+        state.generation = WorkspaceGeneration(state.generation.0.saturating_add(1));
+        state.config.captured_at = TimestampMillis(now_millis());
+        let transition = Self::mutation_transition(
+            request.proposal_id,
+            &request.principal,
+            &request.required_capability,
+            request.correlation_id,
+            request.causality_id,
+            ProposalLifecycleState::Applied,
+            Vec::new(),
+        );
+        Ok(WorkspaceFileMutationApplied {
+            identity: identity.clone(),
+            fingerprint: Some(fingerprint.to_protocol()),
+            file_content_version: identity.content_version,
+            workspace_generation: state.generation,
+            response: ProposalResponse::Applied(transition),
+        })
+    }
+
+    /// Delete a closed file through workspace VFS authority and proposal lifecycle context.
+    #[allow(clippy::result_large_err)]
+    pub fn delete_file_with_proposal(
+        &self,
+        request: WorkspaceDeleteFileRequest,
+    ) -> WorkspaceFileMutationResult {
+        let mut state_guard = self.state.lock().map_err(|_| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                "workspace state lock poisoned",
+            )
+        })?;
+        let Some(state) = state_guard.as_mut() else {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                "workspace is not open",
+            ));
+        };
+        if state.workspace_id != request.workspace_id {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                "workspace id does not match opened workspace",
+            ));
+        }
+        let canonical = match self.canonicalize_candidate(state, &request.file.canonical_path.0) {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(Self::denied_mutation_response(
+                    request.proposal_id,
+                    &request.principal,
+                    &request.required_capability,
+                    request.correlation_id,
+                    request.causality_id,
+                    request.file.canonical_path.clone(),
+                    err.to_string(),
+                ));
+            }
+        };
+        if let Err(err) = self.decision_for_workspace_with_context(
+            state,
+            &request.required_capability.0,
+            Some(&canonical.to_string_lossy()),
+            CapabilityRequestContext::default(),
+        ) {
+            return Err(Self::denied_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                err.to_string(),
+            ));
+        }
+        if state.generation != request.expected_workspace_generation {
+            return Err(Self::stale_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                ProposalStaleReason::WorkspaceGenerationMismatch,
+                ProposalVersionPreconditions {
+                    file_version: Some(request.expected_file_content_version),
+                    buffer_version: None,
+                    snapshot_id: None,
+                    generation: Some(request.expected_workspace_generation),
+                    file_content_version: Some(request.expected_file_content_version),
+                    workspace_generation: Some(request.expected_workspace_generation),
+                    expected_fingerprint: Some(request.expected_fingerprint.clone()),
+                    expected_file_length: None,
+                    expected_modified_at: None,
+                },
+                None,
+                "workspace generation changed before delete",
+            ));
+        }
+        let metadata = self.fs.read_metadata(&canonical).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let fingerprint = FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata)
+            .map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let actual_identity =
+            self.file_identity_from_platform_metadata(state, &canonical, &fingerprint, &metadata);
+        if actual_identity.file_id != request.file.file_id
+            || actual_identity.content_version != request.expected_file_content_version
+            || fingerprint.to_protocol() != request.expected_fingerprint
+        {
+            return Err(Self::stale_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                ProposalStaleReason::FingerprintMismatch,
+                ProposalVersionPreconditions {
+                    file_version: Some(request.expected_file_content_version),
+                    buffer_version: None,
+                    snapshot_id: None,
+                    generation: Some(request.expected_workspace_generation),
+                    file_content_version: Some(request.expected_file_content_version),
+                    workspace_generation: Some(request.expected_workspace_generation),
+                    expected_fingerprint: Some(request.expected_fingerprint.clone()),
+                    expected_file_length: None,
+                    expected_modified_at: None,
+                },
+                Some(devil_protocol::VersionContext {
+                    file_version: actual_identity.content_version,
+                    buffer_version: BufferVersion(0),
+                    snapshot_id: SnapshotId(0),
+                    generation: state.generation,
+                    file_content_version: actual_identity.content_version,
+                    workspace_generation: state.generation,
+                    fingerprint: Some(fingerprint.to_protocol()),
+                    file_length: fingerprint.size,
+                    modified_at: fingerprint.modified,
+                }),
+                "file changed before delete",
+            ));
+        }
+        self.fs.remove_file(&canonical).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        Self::remove_file_from_state(state, request.file.file_id, &request.file.canonical_path);
+        state.generation = WorkspaceGeneration(state.generation.0.saturating_add(1));
+        state.config.captured_at = TimestampMillis(now_millis());
+        let transition = Self::mutation_transition(
+            request.proposal_id,
+            &request.principal,
+            &request.required_capability,
+            request.correlation_id,
+            request.causality_id,
+            ProposalLifecycleState::Applied,
+            Vec::new(),
+        );
+        Ok(WorkspaceFileMutationApplied {
+            identity: request.file.clone(),
+            fingerprint: None,
+            file_content_version: request.expected_file_content_version,
+            workspace_generation: state.generation,
+            response: ProposalResponse::Applied(transition),
+        })
+    }
+
+    /// Rename a closed file through workspace VFS authority and proposal lifecycle context.
+    #[allow(clippy::result_large_err)]
+    pub fn rename_file_with_proposal(
+        &self,
+        request: WorkspaceRenameFileRequest,
+    ) -> WorkspaceFileMutationResult {
+        let mut state_guard = self.state.lock().map_err(|_| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                "workspace state lock poisoned",
+            )
+        })?;
+        let Some(state) = state_guard.as_mut() else {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                "workspace is not open",
+            ));
+        };
+        if state.workspace_id != request.workspace_id {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                "workspace id does not match opened workspace",
+            ));
+        }
+        let source = match self.canonicalize_candidate(state, &request.file.canonical_path.0) {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(Self::denied_mutation_response(
+                    request.proposal_id,
+                    &request.principal,
+                    &request.required_capability,
+                    request.correlation_id,
+                    request.causality_id,
+                    request.file.canonical_path.clone(),
+                    err.to_string(),
+                ));
+            }
+        };
+        let destination = match self.canonicalize_candidate(state, &request.destination.0) {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(Self::denied_mutation_response(
+                    request.proposal_id,
+                    &request.principal,
+                    &request.required_capability,
+                    request.correlation_id,
+                    request.causality_id,
+                    request.destination.clone(),
+                    err.to_string(),
+                ));
+            }
+        };
+        if let Err(err) = self.decision_for_workspace_with_context(
+            state,
+            &request.required_capability.0,
+            Some(&source.to_string_lossy()),
+            CapabilityRequestContext::default(),
+        ) {
+            return Err(Self::denied_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                err.to_string(),
+            ));
+        }
+        if state.generation != request.expected_workspace_generation {
+            return Err(Self::stale_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                ProposalStaleReason::WorkspaceGenerationMismatch,
+                ProposalVersionPreconditions {
+                    file_version: Some(request.expected_file_content_version),
+                    buffer_version: None,
+                    snapshot_id: None,
+                    generation: Some(request.expected_workspace_generation),
+                    file_content_version: Some(request.expected_file_content_version),
+                    workspace_generation: Some(request.expected_workspace_generation),
+                    expected_fingerprint: Some(request.expected_fingerprint.clone()),
+                    expected_file_length: None,
+                    expected_modified_at: None,
+                },
+                None,
+                "workspace generation changed before rename",
+            ));
+        }
+        if self.fs.read_metadata(&destination).is_ok() {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.destination.clone(),
+                "rename destination already exists",
+            ));
+        }
+        let metadata = self.fs.read_metadata(&source).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let fingerprint = FileFingerprint::from_metadata(&source, self.fs.as_ref(), &metadata)
+            .map_err(|err| {
+                Self::failed_mutation_response(
+                    request.proposal_id,
+                    &request.principal,
+                    &request.required_capability,
+                    request.correlation_id,
+                    request.causality_id,
+                    request.file.canonical_path.clone(),
+                    err.to_string(),
+                )
+            })?;
+        let actual_identity =
+            self.file_identity_from_platform_metadata(state, &source, &fingerprint, &metadata);
+        if actual_identity.file_id != request.file.file_id
+            || actual_identity.content_version != request.expected_file_content_version
+            || fingerprint.to_protocol() != request.expected_fingerprint
+        {
+            return Err(Self::stale_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                ProposalStaleReason::FingerprintMismatch,
+                ProposalVersionPreconditions {
+                    file_version: Some(request.expected_file_content_version),
+                    buffer_version: None,
+                    snapshot_id: None,
+                    generation: Some(request.expected_workspace_generation),
+                    file_content_version: Some(request.expected_file_content_version),
+                    workspace_generation: Some(request.expected_workspace_generation),
+                    expected_fingerprint: Some(request.expected_fingerprint.clone()),
+                    expected_file_length: None,
+                    expected_modified_at: None,
+                },
+                Some(devil_protocol::VersionContext {
+                    file_version: actual_identity.content_version,
+                    buffer_version: BufferVersion(0),
+                    snapshot_id: SnapshotId(0),
+                    generation: state.generation,
+                    file_content_version: actual_identity.content_version,
+                    workspace_generation: state.generation,
+                    fingerprint: Some(fingerprint.to_protocol()),
+                    file_length: fingerprint.size,
+                    modified_at: fingerprint.modified,
+                }),
+                "file changed before rename",
+            ));
+        }
+        self.fs.rename_path(&source, &destination).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let old_key = request.file.canonical_path.0.clone();
+        let new_key = destination.to_string_lossy().into_owned();
+        state.file_id_by_path.remove(&old_key);
+        state
+            .file_id_by_path
+            .insert(new_key.clone(), request.file.file_id);
+        state
+            .file_path_by_id
+            .insert(request.file.file_id, new_key.clone());
+        state.last_scan.remove(&old_key);
+        let metadata = self.fs.read_metadata(&destination).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.destination.clone(),
+                err.to_string(),
+            )
+        })?;
+        let new_fingerprint =
+            FileFingerprint::from_metadata(&destination, self.fs.as_ref(), &metadata).map_err(
+                |err| {
+                    Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        request.destination.clone(),
+                        err.to_string(),
+                    )
+                },
+            )?;
+        let new_identity = self.file_identity_from_platform_metadata(
+            state,
+            &destination,
+            &new_fingerprint,
+            &metadata,
+        );
+        let metadata = self
+            .metadata_for_identity(state, new_identity.file_id)
+            .expect("metadata inserted");
+        state.last_scan.insert(new_key, new_fingerprint.clone());
+        Self::upsert_tree_node(state, new_identity.clone(), metadata);
+        state.generation = WorkspaceGeneration(state.generation.0.saturating_add(1));
+        state.config.captured_at = TimestampMillis(now_millis());
+        let transition = Self::mutation_transition(
+            request.proposal_id,
+            &request.principal,
+            &request.required_capability,
+            request.correlation_id,
+            request.causality_id,
+            ProposalLifecycleState::Applied,
+            Vec::new(),
+        );
+        Ok(WorkspaceFileMutationApplied {
+            identity: new_identity.clone(),
+            fingerprint: Some(new_fingerprint.to_protocol()),
+            file_content_version: new_identity.content_version,
+            workspace_generation: state.generation,
+            response: ProposalResponse::Applied(transition),
+        })
     }
 
     /// Apply a save through mandatory proposal context and fail-closed fingerprint preconditions.

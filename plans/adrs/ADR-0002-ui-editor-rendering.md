@@ -1,7 +1,7 @@
 # ADR-0002: Select Primary UI/Editor Rendering Architecture
 
 ## Status
-Provisional — pending Spike 1 validation
+Accepted with reservations — Spike 1A validated projection-only shell behavior; renderer-backed p50/p95 input-to-paint, IME, clipboard, focus, and accessibility evidence remain follow-ups.
 
 ## Context
 The UI decision is the highest-risk strategic choice. Devil IDE's brand promise depends on sub-16ms frame times, low input latency, and native editor control. Browser-based shells risk recreating VS Code architecture; experimental Rust UI libraries risk platform edge cases.

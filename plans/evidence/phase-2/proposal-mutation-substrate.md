@@ -4,7 +4,7 @@ Date: 2026-05-15
 
 ## Scope
 
-This evidence records the Phase 2 protocol-contract, architecture-documentation, and app-orchestration substrate work for generalized proposal-mediated mutation. Runtime execution remains deny-by-default for non-save mutation classes, and placeholder runtime crates remain inactive.
+This evidence records the Phase 2 protocol-contract, architecture-documentation, and app-orchestration substrate work for generalized proposal-mediated mutation. Stage 1C enables registered open-buffer text edits and closed-file create/delete/rename execution through existing editor/workspace authorities; unsupported mutation classes remain deny-by-default, and placeholder runtime crates remain inactive.
 
 ## Architecture decision
 
@@ -43,6 +43,50 @@ Updated [`lib.rs`](../../../crates/devil-app/src/lib.rs) with an app-level propo
 - Stale/conflict/denied saves continue to return rejected app save outcomes rather than thrown errors, and dirty editor text remains preserved.
 - External overwrite protection remains covered by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:402), including an assertion that the rejected response is stale.
 
+## Stage 1A lifecycle service update
+
+Date: 2026-05-15
+
+- `AppProposalCoordinator` now stores app-created lifecycle context and proposal lifecycle state keyed by `ProposalId` instead of accepting successful stateless lifecycle helper calls.
+- Registered proposals enforce ordered lifecycle transitions for created, validated, previewed, approved, applied, rejected, denied, failed, rolled back, stale, conflict, and cancelled outcomes.
+- Stateless preview and lifecycle command requests reject with `proposal.missing_lifecycle_context`; invalid ordering rejects with `proposal.invalid_lifecycle_transition`.
+- Generic `ProposalPayload::SaveFile` apply remains denied with an explicit migration rationale. The save proposal DTO does not carry source text, so safe execution must continue through `AppComposition::save_active_buffer()` -> `SaveWorkflowService` -> `WorkspaceActor::save_file_with_proposal()` until a generic app-level executor can reuse the same editor/workspace/storage context without weakening preconditions.
+- Focused tests added:
+  - `proposal_coordinator_enforces_preview_after_validation`
+  - `proposal_coordinator_rejects_command_without_lifecycle_context`
+  - `proposal_coordinator_documents_generic_save_apply_denial`
+  - `workspace_vfs_integration_unknown_lifecycle_context_preview_is_rejected`
+
+## Stage 1B deny-by-default validation update
+
+Date: 2026-05-15
+
+- `AppProposalCoordinator::validate_proposal()` now evaluates every current `ProposalPayload` family rather than treating non-save validation as a panic-safe placeholder.
+- Common validation now rejects missing principal, missing capability, zero correlation id, missing preview summary, incomplete target coverage, and missing affected targets before any apply path can be considered.
+- Payload-specific validation now covers text edits, create/delete/rename, save, format, code action, workspace edit, terminal command, and batch payloads.
+- Terminal, unsupported, and mixed routes still return structured `ProposalRejectionReason::Unsupported` before side effects.
+- Registered non-save proposals with missing preconditions deny with `ProposalDenialReason::PolicyDenied`; stateless non-save proposals still reject with `proposal.missing_lifecycle_context`.
+- Batch validation now checks schema version, items, complete target coverage, rollback policy/atomicity compatibility, required rollback steps, item ids, and item capabilities. Runtime batch apply remains denied.
+- Focused tests added or updated:
+  - `proposal_coordinator_denies_registered_text_edit_missing_preconditions`
+  - `workspace_vfs_integration_non_save_proposals_are_structurally_rejected_without_panic`
+
+## Stage 1C proposal apply execution update
+
+Date: 2026-05-16
+
+- `AppComposition::handle_proposal_request()` now routes registered `ProposalRequest::Apply` calls through app-owned executors after the proposal reaches `Previewed` or `Approved` lifecycle state.
+- Open-buffer `ProposalPayload::TextEdit` applies through `EditorEngine::apply_protocol_edits()` using byte-coordinate protocol ranges, required buffer version, required snapshot id, editor-owned transactions, and `editor.transaction_applied` emission.
+- Closed-file `CreateFile`, `DeleteFile`, and `RenameFile` apply through `WorkspaceActor::{create,delete,rename}_file_with_proposal()` and the platform filesystem port rather than direct app-level `std::fs` mutation.
+- Workspace mutations require proposal lifecycle context, trusted `fs.write` capability, expected workspace generation, and file content/fingerprint preconditions where applicable. Open-file delete/rename is denied with `proposal.open_file_workspace_mutation_denied`.
+- Batch apply remains fail-closed with structured `ProposalRejectionReason::Unsupported`; generic save apply still remains denied in favor of `AppComposition::save_active_buffer()`.
+- Focused tests added:
+  - `workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer`
+  - `workspace_vfs_integration_stale_text_edit_precondition_does_not_apply`
+  - `workspace_vfs_integration_closed_file_create_delete_rename_apply_through_workspace`
+  - `workspace_vfs_integration_open_file_delete_and_rename_are_denied`
+  - `workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview`
+
 ## Integration tests
 
 Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspace_vfs_integration.rs) with app-level Phase 2 regression coverage:
@@ -50,6 +94,7 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 - [`workspace_vfs_integration_non_save_proposals_are_structurally_rejected_without_panic()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:472) covers text edit, create-file, and terminal-command proposals through validate/apply requests and asserts structured unsupported rejections.
 - [`workspace_vfs_integration_batch_affected_targets_are_visited_in_item_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:515) verifies deterministic batch target derivation when explicit coverage is absent.
 - [`workspace_vfs_integration_batch_uses_explicit_target_coverage_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:599) verifies explicit batch target coverage order is preserved.
+- Stage 1C apply tests verify registered text-edit apply/stale behavior, closed-file workspace mutations, open-file mutation denial, and batch apply fail-closed behavior.
 - Existing stale/conflict, denial, failed-save, and dirty-buffer preservation tests remain in the same integration suite.
 
 ## Placeholder and dependency boundaries
@@ -61,28 +106,29 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 
 ## Remaining Phase 2 gaps
 
-- Runtime apply planning beyond saves remains denied until follow-on work separates validation, preview, approval, preflight, apply, commit, rollback, and audit emission for each mutation class.
-- Open-buffer edit execution through editor-owned transactions and closed-file mutation execution through workspace VFS authority remain future implementation work.
+- Runtime apply planning beyond manual saves, registered open-buffer text edits, and closed-file create/delete/rename remains denied until follow-on work separates validation, preview, approval, preflight, apply, commit, rollback, and audit emission for each mutation class.
+- Generic save apply remains intentionally denied until it can reuse the manual save workflow's editor text extraction, workspace preconditions, audit-before-success storage, and dirty-buffer preservation semantics.
+- Batch rollback, multi-file atomicity, workspace-edit execution, format/code-action execution, and generic save execution remain future implementation work after the Stage 1C single-mutation paths.
 - Future AI, plugin, LSP, collaboration, terminal, and remote runtime apply paths remain denied until their ADR, dependency-policy, and contract-test gates exist.
 
 ## Validation
 
-Completed targeted validation retained from earlier Phase 2 subtasks:
+Completed targeted validation retained from earlier Phase 2 subtasks and Stage 1C:
 
 - `cargo check -p devil-app --all-targets` — passed.
-- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 15 tests; 0 failed; 0 ignored.
+- `cargo test -p devil-app --all-targets` — passed with 4 unit tests and 22 integration tests; 0 failed; 0 ignored.
 - `cargo fmt --all` — passed.
 - `cargo test -p devil-protocol --test dto_contracts` — passed with 14 tests; 0 failed; 0 ignored.
 - `cargo check -p devil-app -p devil-observability --all-targets` — passed.
 
-Completed full repository phase gates on 2026-05-15 from the workspace root:
+Completed full repository phase gates on 2026-05-16 from the workspace root with `C:/Users/dasbl/.cargo/bin` first in `PATH`:
 
 | Gate | Command | Result |
 | --- | --- | --- |
 | Dependency policy | `cargo run -p xtask -- check-deps` | Passed; `dependency policy checks passed`. |
 | Formatting | `cargo fmt --all --check` | Passed. |
 | Workspace check | `cargo check --workspace --all-targets` | Passed. |
-| Workspace tests | `cargo test --workspace --all-targets` | Passed; observed test binaries reported 152 passed, 0 failed, and 3 ignored performance-suite measurements. |
-| Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Initial required-command attempt failed for a non-Phase-2 environment reason: `cargo` and `rustc` resolved to Chocolatey toolchain 1.93.1 while `cargo-clippy` resolved to toolchain 1.95.0, producing E0514 incompatible-compiler metadata errors before Phase 2 code was linted. After forcing a consistent 1.95.0 toolchain with `set "PATH=C:\Users\dasbl\.cargo\bin;%PATH%"`, using isolated target directory `target-clippy-rustc195`, and cleaning that target, the same clippy arguments passed. |
+| Workspace tests | `cargo test --workspace --all-targets` | Passed; observed test binaries reported 187 passed, 0 failed, and 3 ignored performance-suite measurements. |
+| Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed. |
 
-No source remediation was required. The only remediation performed was build-environment cleanup/toolchain-path normalization for clippy; no runtime apply behavior was broadened, and no placeholder crates were activated.
+No placeholder crates were activated, and no runtime behavior was added for AI, plugins, collaboration, remote workspaces, terminal runtime, LSP execution, or batch rollback.

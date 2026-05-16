@@ -1,7 +1,7 @@
 # ADR-0005: Select Local Metadata, Lexical Index, and Vector Store Backends
 
 ## Status
-Provisional — pending Spike 3 validation
+Accepted with reservations — SQLite/Tantivy metadata baseline accepted; vector-store selection and durable semantic/tracker/memory/plugin/collaboration/replay storage require follow-up ADR.
 
 ## Context
 The IDE must store tracker state, search indexes, embedding vectors, and parse artifacts locally. The storage choices affect query latency, incremental update performance, and memory footprint on large repositories.

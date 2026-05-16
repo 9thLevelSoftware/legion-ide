@@ -711,6 +711,19 @@ impl EditorEngine {
         Ok((state.workspace_id, state.file_id))
     }
 
+    /// Return the open buffer for a workspace file when it is already editor-owned.
+    pub fn buffer_for_file(&self, workspace_id: WorkspaceId, file_id: FileId) -> Option<BufferId> {
+        self.file_to_buffer.get(&(workspace_id, file_id)).copied()
+    }
+
+    /// Return the open buffer for a workspace path when it is already editor-owned.
+    pub fn buffer_for_path(&self, workspace_id: WorkspaceId, file_path: &str) -> Option<BufferId> {
+        self.buffers
+            .values()
+            .find(|state| state.workspace_id == workspace_id && state.file_path == file_path)
+            .map(|state| state.buffer_id)
+    }
+
     /// Return protocol metadata for a buffer.
     pub fn buffer_metadata(
         &self,
@@ -1036,6 +1049,56 @@ impl EditorEngine {
         self.transaction_log.push(tx.clone());
         self.enqueue_transaction_event(&tx);
         Ok(tx)
+    }
+
+    /// Apply protocol byte-coordinate edits after checking the target buffer identity.
+    pub fn apply_protocol_edits(
+        &mut self,
+        request: EditorApplyTransactionRequest,
+    ) -> Result<TransactionRecord, EditorError> {
+        let EditorApplyTransactionRequest {
+            workspace_id,
+            buffer_id,
+            file_id,
+            edits,
+            source,
+            undo_group_id,
+            correlation_id,
+        } = request;
+        let (actual_workspace_id, actual_file_id) = self.buffer_identity(buffer_id)?;
+        if actual_workspace_id != workspace_id {
+            return Err(EditorError::InvalidEdit(
+                "workspace id does not match buffer",
+            ));
+        }
+        if actual_file_id != file_id {
+            return Err(EditorError::InvalidEdit("file id does not match buffer"));
+        }
+
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        let edits = edits
+            .edits
+            .into_iter()
+            .map(|edit| {
+                let range = edit.range.as_byte_range().ok_or(EditorError::InvalidEdit(
+                    "editor apply requires byte-coordinate ranges",
+                ))?;
+                let start = state.buffer.try_position(range.start as usize)?;
+                let end = state.buffer.try_position(range.end as usize)?;
+                Ok(TextEdit::new(TextRange::new(start, end), edit.replacement))
+            })
+            .collect::<Result<Vec<_>, EditorError>>()?;
+
+        self.apply_edits(
+            buffer_id,
+            edits,
+            source,
+            undo_group_id,
+            Some(correlation_id),
+        )
     }
 
     fn prepare_batch_edit_plan(

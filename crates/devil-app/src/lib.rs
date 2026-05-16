@@ -2,6 +2,7 @@
 
 #![warn(missing_docs)]
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,21 +15,24 @@ use devil_observability::{
     save_denied_event, stale_proposal_rejected_event, transaction_event,
 };
 use devil_platform::{NativeFileSystem, NativeWatcherService};
-use devil_project::{OpenedFileText, WorkspaceActor, WorkspaceError, WorkspaceSaveRequest};
+use devil_project::{
+    OpenedFileText, WorkspaceActor, WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest,
+    WorkspaceError, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
+};
 use devil_protocol::{
     BufferId, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId, CorrelationId,
-    EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
-    FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
-    FileFingerprint, FileId, FileIdentity, FileTreeNode, PreviewSummary, PrincipalId,
-    ProposalAffectedTarget, ProposalCancellationReason, ProposalDenialReason,
+    EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest,
+    FileConflictContext, FileConflictLifecycleState, FileConflictReason, FileConflictState,
+    FileContentVersion, FileFingerprint, FileId, FileIdentity, FileTreeNode, PreviewSummary,
+    PrincipalId, ProposalAffectedTarget, ProposalCancellationReason, ProposalDenialReason,
     ProposalFailureReason, ProposalId, ProposalLifecycleCommand, ProposalLifecycleCommandReason,
     ProposalLifecycleState, ProposalLifecycleTransition, ProposalPayload, ProposalPort,
     ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackReason,
-    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
+    ProposalStaleReason, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
     ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
     ProtocolResult, RedactionHint, SaveConflictPolicy, SaveFileProposal, SaveIntent,
     StorageRepositoryPort, StorageRepositoryRequest, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, TrustDecisionContext, WorkspaceGeneration, WorkspaceId,
+    TransactionSource, TrustDecisionContext, VersionContext, WorkspaceGeneration, WorkspaceId,
     WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
     WorkspaceResponse, WorkspaceTrustState,
 };
@@ -192,30 +196,34 @@ impl ProposalExecutionRoute {
 
 #[derive(Debug)]
 struct AppProposalCoordinator {
-    next_proposal_id: u64,
+    next_proposal_id: Cell<u64>,
     event_sink: SharedEventSink,
-    next_event_sequence: u64,
-    proposal_contexts: HashMap<ProposalId, EventContext>,
+    next_event_sequence: Cell<u64>,
+    proposal_contexts: RefCell<HashMap<ProposalId, EventContext>>,
+    proposal_states: RefCell<HashMap<ProposalId, ProposalLifecycleState>>,
 }
 
 impl AppProposalCoordinator {
     fn new(event_sink: SharedEventSink) -> Self {
         Self {
-            next_proposal_id: 0,
+            next_proposal_id: Cell::new(0),
             event_sink,
-            next_event_sequence: 0,
-            proposal_contexts: HashMap::new(),
+            next_event_sequence: Cell::new(0),
+            proposal_contexts: RefCell::new(HashMap::new()),
+            proposal_states: RefCell::new(HashMap::new()),
         }
     }
 
-    fn next_id(&mut self) -> devil_protocol::ProposalId {
-        self.next_proposal_id = self.next_proposal_id.saturating_add(1);
-        devil_protocol::ProposalId(self.next_proposal_id)
+    fn next_id(&self) -> devil_protocol::ProposalId {
+        let next = self.next_proposal_id.get().saturating_add(1).max(1);
+        self.next_proposal_id.set(next);
+        devil_protocol::ProposalId(next)
     }
 
-    fn next_sequence(&mut self) -> EventSequence {
-        self.next_event_sequence = self.next_event_sequence.saturating_add(1).max(1);
-        EventSequence(self.next_event_sequence)
+    fn next_sequence(&self) -> EventSequence {
+        let next = self.next_event_sequence.get().saturating_add(1).max(1);
+        self.next_event_sequence.set(next);
+        EventSequence(next)
     }
 
     fn emit(&self, envelope: EventEnvelope) {
@@ -223,7 +231,7 @@ impl AppProposalCoordinator {
     }
 
     fn build_save_proposal(
-        &mut self,
+        &self,
         save: &SaveRequestDto,
         metadata: &ActiveFileMetadata,
         principal: PrincipalId,
@@ -231,7 +239,8 @@ impl AppProposalCoordinator {
         event_context: EventContext,
     ) -> WorkspaceProposal {
         let proposal_id = self.next_id();
-        self.proposal_contexts.insert(proposal_id, event_context);
+        self.register_lifecycle_context(proposal_id, event_context);
+        let _ = self.record_lifecycle_state(proposal_id, ProposalLifecycleState::Created);
         let capability = CapabilityId("fs.write".to_string());
         let preconditions = ProposalVersionPreconditions {
             file_version: Some(metadata.file_content_version),
@@ -307,11 +316,138 @@ impl AppProposalCoordinator {
     }
 
     fn created_response(&self, proposal: &WorkspaceProposal) -> ProposalResponse {
-        ProposalResponse::Created(self.transition(
-            proposal,
-            ProposalLifecycleState::Created,
-            Vec::new(),
-        ))
+        match self.record_transition(proposal, ProposalLifecycleState::Created, "create") {
+            Ok(transition) => ProposalResponse::Created(transition),
+            Err(response) => response,
+        }
+    }
+
+    fn register_lifecycle_context(&self, proposal_id: ProposalId, event_context: EventContext) {
+        self.proposal_contexts
+            .borrow_mut()
+            .insert(proposal_id, event_context);
+    }
+
+    fn has_lifecycle_context(&self, proposal_id: ProposalId) -> bool {
+        self.proposal_contexts.borrow().contains_key(&proposal_id)
+    }
+
+    fn current_lifecycle_state(&self, proposal_id: ProposalId) -> Option<ProposalLifecycleState> {
+        self.proposal_states.borrow().get(&proposal_id).copied()
+    }
+
+    fn record_lifecycle_state(
+        &self,
+        proposal_id: ProposalId,
+        next_state: ProposalLifecycleState,
+    ) -> Result<(), Option<ProposalLifecycleState>> {
+        let mut states = self.proposal_states.borrow_mut();
+        let current = states.get(&proposal_id).copied();
+
+        if Self::lifecycle_transition_allowed(current, next_state) {
+            states.insert(proposal_id, next_state);
+            Ok(())
+        } else {
+            Err(current)
+        }
+    }
+
+    fn lifecycle_transition_allowed(
+        current: Option<ProposalLifecycleState>,
+        next: ProposalLifecycleState,
+    ) -> bool {
+        let Some(current) = current else {
+            return next == ProposalLifecycleState::Created;
+        };
+
+        if current == next {
+            return true;
+        }
+
+        matches!(
+            (current, next),
+            (
+                ProposalLifecycleState::Created,
+                ProposalLifecycleState::Validated
+                    | ProposalLifecycleState::Denied
+                    | ProposalLifecycleState::Rejected
+                    | ProposalLifecycleState::Cancelled
+                    | ProposalLifecycleState::Failed
+            ) | (
+                ProposalLifecycleState::Validated,
+                ProposalLifecycleState::Previewed
+                    | ProposalLifecycleState::Approved
+                    | ProposalLifecycleState::Denied
+                    | ProposalLifecycleState::Rejected
+                    | ProposalLifecycleState::Cancelled
+                    | ProposalLifecycleState::Failed
+            ) | (
+                ProposalLifecycleState::Previewed,
+                ProposalLifecycleState::Approved
+                    | ProposalLifecycleState::Applied
+                    | ProposalLifecycleState::Denied
+                    | ProposalLifecycleState::Rejected
+                    | ProposalLifecycleState::Stale
+                    | ProposalLifecycleState::Conflict
+                    | ProposalLifecycleState::Cancelled
+                    | ProposalLifecycleState::Failed
+            ) | (
+                ProposalLifecycleState::Approved,
+                ProposalLifecycleState::Applied
+                    | ProposalLifecycleState::Denied
+                    | ProposalLifecycleState::Rejected
+                    | ProposalLifecycleState::Stale
+                    | ProposalLifecycleState::Conflict
+                    | ProposalLifecycleState::Cancelled
+                    | ProposalLifecycleState::Failed
+                    | ProposalLifecycleState::RolledBack
+            ) | (
+                ProposalLifecycleState::Applied,
+                ProposalLifecycleState::RolledBack
+            ) | (
+                ProposalLifecycleState::Failed,
+                ProposalLifecycleState::RolledBack
+            )
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn record_transition(
+        &self,
+        proposal: &WorkspaceProposal,
+        lifecycle_state: ProposalLifecycleState,
+        action: &str,
+    ) -> Result<ProposalLifecycleTransition, ProposalResponse> {
+        self.record_transition_with_diagnostics(proposal, lifecycle_state, action, Vec::new())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn record_transition_with_diagnostics(
+        &self,
+        proposal: &WorkspaceProposal,
+        lifecycle_state: ProposalLifecycleState,
+        action: &str,
+        diagnostics: Vec<ProtocolDiagnostic>,
+    ) -> Result<ProposalLifecycleTransition, ProposalResponse> {
+        if !self.has_lifecycle_context(proposal.proposal_id) {
+            return Err(self.missing_lifecycle_context_response(proposal, action));
+        }
+
+        match self.record_lifecycle_state(proposal.proposal_id, lifecycle_state) {
+            Ok(()) => Ok(self.transition(proposal, lifecycle_state, diagnostics)),
+            Err(current) => Err(self.invalid_lifecycle_transition_response(
+                proposal,
+                action,
+                current,
+                lifecycle_state,
+            )),
+        }
+    }
+
+    fn record_observed_transition(&self, transition: &ProposalLifecycleTransition) {
+        if self.has_lifecycle_context(transition.proposal_id) {
+            let _ = self.record_lifecycle_state(transition.proposal_id, transition.lifecycle_state);
+        }
     }
 
     fn transition(
@@ -322,6 +458,7 @@ impl AppProposalCoordinator {
     ) -> ProposalLifecycleTransition {
         let causality_id = self
             .proposal_contexts
+            .borrow()
             .get(&proposal.proposal_id)
             .map(|context| context.causality_id)
             .unwrap_or_else(|| CausalityId(uuid::Uuid::now_v7()));
@@ -344,6 +481,84 @@ impl AppProposalCoordinator {
             severity: ProtocolDiagnosticSeverity::Error,
             path: None,
             range: None,
+        }
+    }
+
+    fn missing_lifecycle_context_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        action: &str,
+    ) -> ProposalResponse {
+        ProposalResponse::Rejected {
+            transition: self.transition(
+                proposal,
+                ProposalLifecycleState::Rejected,
+                vec![Self::diagnostic(
+                    "proposal.missing_lifecycle_context",
+                    format!(
+                        "proposal {action} requires app-created lifecycle context before it can proceed"
+                    ),
+                )],
+            ),
+            reason: ProposalRejectionReason::ValidationFailed,
+        }
+    }
+
+    fn invalid_lifecycle_transition_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        action: &str,
+        current: Option<ProposalLifecycleState>,
+        next: ProposalLifecycleState,
+    ) -> ProposalResponse {
+        ProposalResponse::Rejected {
+            transition: self.transition(
+                proposal,
+                ProposalLifecycleState::Rejected,
+                vec![Self::diagnostic(
+                    "proposal.invalid_lifecycle_transition",
+                    format!("proposal {action} cannot transition from {current:?} to {next:?}"),
+                )],
+            ),
+            reason: ProposalRejectionReason::ValidationFailed,
+        }
+    }
+
+    fn missing_lifecycle_command_response(
+        command: &ProposalLifecycleCommand,
+        action: &str,
+    ) -> ProposalResponse {
+        ProposalResponse::Rejected {
+            transition: Self::transition_for_command(
+                command,
+                ProposalLifecycleState::Rejected,
+                vec![Self::diagnostic(
+                    "proposal.missing_lifecycle_context",
+                    format!(
+                        "proposal {action} requires app-created lifecycle context before it can proceed"
+                    ),
+                )],
+            ),
+            reason: ProposalRejectionReason::ValidationFailed,
+        }
+    }
+
+    fn invalid_lifecycle_command_response(
+        command: &ProposalLifecycleCommand,
+        action: &str,
+        current: Option<ProposalLifecycleState>,
+        next: ProposalLifecycleState,
+    ) -> ProposalResponse {
+        ProposalResponse::Rejected {
+            transition: Self::transition_for_command(
+                command,
+                ProposalLifecycleState::Rejected,
+                vec![Self::diagnostic(
+                    "proposal.invalid_lifecycle_transition",
+                    format!("proposal {action} cannot transition from {current:?} to {next:?}"),
+                )],
+            ),
+            reason: ProposalRejectionReason::ValidationFailed,
         }
     }
 
@@ -554,32 +769,234 @@ impl AppProposalCoordinator {
             .targets
             .iter()
             .find_map(|target| target.path.clone());
-        let mut diagnostic = Self::diagnostic(
-            "proposal.unsupported_execution",
+        let unsupported_message = if matches!(proposal.payload, ProposalPayload::SaveFile(_))
+            && action == "apply"
+        {
+            "generic save apply is denied until it can reuse the app/editor/workspace save workflow context; use AppComposition::save_active_buffer for proposal-mediated saves".to_string()
+        } else {
             format!(
                 "proposal {action} for route {route:?} over {} affected target(s) is denied until generalized execution is implemented",
                 coverage.targets.len()
-            ),
-        );
-        diagnostic.path = first_path;
+            )
+        };
+        let mut diagnostics = vec![Self::diagnostic(
+            "proposal.unsupported_execution",
+            unsupported_message,
+        )];
+        diagnostics[0].path = first_path;
+        if !self.has_lifecycle_context(proposal.proposal_id) {
+            diagnostics.push(Self::diagnostic(
+                "proposal.missing_lifecycle_context",
+                format!(
+                    "proposal {action} has no app-created lifecycle context; unsupported route remains fail-closed"
+                ),
+            ));
+        }
 
-        ProposalResponse::Rejected {
-            transition: self.transition(
+        let transition = if self.has_lifecycle_context(proposal.proposal_id) {
+            match self.record_transition_with_diagnostics(
                 proposal,
                 ProposalLifecycleState::Rejected,
-                vec![diagnostic],
-            ),
+                action,
+                diagnostics,
+            ) {
+                Ok(transition) => transition,
+                Err(response) => return response,
+            }
+        } else {
+            self.transition(proposal, ProposalLifecycleState::Rejected, diagnostics)
+        };
+
+        ProposalResponse::Rejected {
+            transition,
             reason: ProposalRejectionReason::Unsupported,
         }
     }
 
-    fn validate_proposal(&self, proposal: &WorkspaceProposal) -> ProposalResponse {
-        let coverage = Self::affected_target_coverage(proposal);
-        let route = ProposalExecutionRoute::for_payload(&proposal.payload, &coverage);
+    fn push_common_validation_diagnostics(
+        proposal: &WorkspaceProposal,
+        coverage: &ProposalTargetCoverage,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        if proposal.principal.0.trim().is_empty() {
+            diagnostics.push(Self::diagnostic(
+                "proposal.missing_principal",
+                "proposal requires a non-empty principal",
+            ));
+        }
+        if proposal.capability.0.trim().is_empty() {
+            diagnostics.push(Self::diagnostic(
+                "proposal.missing_capability",
+                "proposal requires a non-empty capability",
+            ));
+        }
+        if proposal.correlation_id.0 == 0 {
+            diagnostics.push(Self::diagnostic(
+                "proposal.zero_correlation_id",
+                "proposal requires a non-zero correlation id",
+            ));
+        }
+        if proposal.preview.summary.trim().is_empty() {
+            diagnostics.push(Self::diagnostic(
+                "proposal.missing_preview",
+                "proposal requires a metadata-only preview summary",
+            ));
+        }
+        if coverage.coverage_kind != ProposalTargetCoverageKind::Complete {
+            diagnostics.push(Self::diagnostic(
+                "proposal.incomplete_target_coverage",
+                "proposal validation requires complete affected-target coverage before apply can be considered",
+            ));
+        }
+        if coverage.targets.is_empty() {
+            diagnostics.push(Self::diagnostic(
+                "proposal.missing_targets",
+                "proposal validation requires at least one affected target",
+            ));
+        }
+    }
 
-        match (&proposal.payload, route) {
-            (ProposalPayload::SaveFile(save), ProposalExecutionRoute::SaveFile) => {
-                let mut diagnostics = Vec::new();
+    fn missing_file_version(preconditions: &ProposalVersionPreconditions) -> bool {
+        preconditions.file_content_version.is_none() && preconditions.file_version.is_none()
+    }
+
+    fn missing_workspace_generation(preconditions: &ProposalVersionPreconditions) -> bool {
+        preconditions.workspace_generation.is_none() && preconditions.generation.is_none()
+    }
+
+    fn push_file_precondition_diagnostics(
+        preconditions: &ProposalVersionPreconditions,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+        context: &str,
+        require_buffer_snapshot: bool,
+        require_fingerprint: bool,
+    ) {
+        if Self::missing_file_version(preconditions)
+            || Self::missing_workspace_generation(preconditions)
+            || (require_fingerprint && preconditions.expected_fingerprint.is_none())
+        {
+            diagnostics.push(Self::diagnostic(
+                "proposal.missing_file_precondition",
+                format!(
+                    "{context} requires file content version, workspace generation, and expected fingerprint preconditions"
+                ),
+            ));
+        }
+        if require_buffer_snapshot
+            && (preconditions.buffer_version.is_none() || preconditions.snapshot_id.is_none())
+        {
+            diagnostics.push(Self::diagnostic(
+                "proposal.missing_buffer_precondition",
+                format!("{context} requires buffer version and snapshot preconditions"),
+            ));
+        }
+    }
+
+    fn push_capability_diagnostic(
+        actual: &CapabilityId,
+        expected: &str,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+        context: &str,
+    ) {
+        if actual.0 != expected {
+            diagnostics.push(Self::diagnostic(
+                "proposal.invalid_capability",
+                format!("{context} requires {expected} capability"),
+            ));
+        }
+    }
+
+    fn push_payload_validation_diagnostics(
+        proposal: &WorkspaceProposal,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        match &proposal.payload {
+            ProposalPayload::TextEdit(payload) => {
+                Self::push_capability_diagnostic(
+                    &proposal.capability,
+                    "editor.write",
+                    diagnostics,
+                    "text edit proposal",
+                );
+                if payload.edits.edits.is_empty() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.empty_edit_batch",
+                        "text edit proposal requires at least one edit",
+                    ));
+                }
+                Self::push_file_precondition_diagnostics(
+                    &proposal.preconditions,
+                    diagnostics,
+                    "text edit proposal",
+                    true,
+                    false,
+                );
+            }
+            ProposalPayload::CreateFile(payload) => {
+                Self::push_capability_diagnostic(
+                    &proposal.capability,
+                    "fs.write",
+                    diagnostics,
+                    "create-file proposal",
+                );
+                if payload.path.0.trim().is_empty() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.empty_path",
+                        "create-file proposal requires a destination path",
+                    ));
+                }
+                if Self::missing_workspace_generation(&proposal.preconditions) {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.missing_workspace_precondition",
+                        "create-file proposal requires workspace generation preconditions",
+                    ));
+                }
+            }
+            ProposalPayload::DeleteFile(payload) => {
+                Self::push_capability_diagnostic(
+                    &proposal.capability,
+                    "fs.write",
+                    diagnostics,
+                    "delete-file proposal",
+                );
+                if payload.file.canonical_path.0.trim().is_empty() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.empty_path",
+                        "delete-file proposal requires a file path",
+                    ));
+                }
+                Self::push_file_precondition_diagnostics(
+                    &proposal.preconditions,
+                    diagnostics,
+                    "delete-file proposal",
+                    false,
+                    true,
+                );
+            }
+            ProposalPayload::RenameFile(payload) => {
+                Self::push_capability_diagnostic(
+                    &proposal.capability,
+                    "fs.write",
+                    diagnostics,
+                    "rename-file proposal",
+                );
+                if payload.file.canonical_path.0.trim().is_empty()
+                    || payload.destination.0.trim().is_empty()
+                {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.empty_path",
+                        "rename-file proposal requires source and destination paths",
+                    ));
+                }
+                Self::push_file_precondition_diagnostics(
+                    &proposal.preconditions,
+                    diagnostics,
+                    "rename-file proposal",
+                    false,
+                    true,
+                );
+            }
+            ProposalPayload::SaveFile(save) => {
                 if save.expected_fingerprint.is_none()
                     || proposal.preconditions.expected_fingerprint.is_none()
                 {
@@ -612,25 +1029,192 @@ impl AppProposalCoordinator {
                         "save proposal payload context must match proposal envelope",
                     ));
                 }
-
-                if diagnostics.is_empty() {
-                    ProposalResponse::Validated(self.transition(
-                        proposal,
-                        ProposalLifecycleState::Validated,
-                        Vec::new(),
-                    ))
-                } else {
-                    ProposalResponse::Denied {
-                        transition: self.transition(
-                            proposal,
-                            ProposalLifecycleState::Denied,
-                            diagnostics,
-                        ),
-                        reason: ProposalDenialReason::PolicyDenied,
+            }
+            ProposalPayload::FormatFile(payload) => {
+                Self::push_capability_diagnostic(
+                    &proposal.capability,
+                    "editor.write",
+                    diagnostics,
+                    "format-file proposal",
+                );
+                if payload.snapshot_id.0 == 0 {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.zero_snapshot_id",
+                        "format-file proposal requires a non-zero snapshot id",
+                    ));
+                }
+                Self::push_file_precondition_diagnostics(
+                    &proposal.preconditions,
+                    diagnostics,
+                    "format-file proposal",
+                    true,
+                    false,
+                );
+            }
+            ProposalPayload::CodeAction(payload) => {
+                Self::push_capability_diagnostic(
+                    &proposal.capability,
+                    "editor.write",
+                    diagnostics,
+                    "code-action proposal",
+                );
+                if payload.title.trim().is_empty() || payload.edits.is_empty() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.empty_code_action",
+                        "code-action proposal requires a title and at least one edit",
+                    ));
+                }
+                Self::push_file_precondition_diagnostics(
+                    &proposal.preconditions,
+                    diagnostics,
+                    "code-action proposal",
+                    true,
+                    false,
+                );
+            }
+            ProposalPayload::WorkspaceEdit(payload) => {
+                if payload.schema_version == 0 {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.invalid_schema_version",
+                        "workspace-edit proposal requires a non-zero schema version",
+                    ));
+                }
+                if payload.required_capability != proposal.capability {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.context_mismatch",
+                        "workspace-edit required capability must match the proposal envelope",
+                    ));
+                }
+                if payload.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
+                    || payload.target_coverage.targets.is_empty()
+                {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.incomplete_target_coverage",
+                        "workspace-edit proposal requires complete target coverage",
+                    ));
+                }
+                if payload.file_edits.is_empty() && payload.file_operations.is_empty() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.empty_workspace_edit",
+                        "workspace-edit proposal requires at least one text edit or file operation",
+                    ));
+                }
+                for edit in &payload.file_edits {
+                    Self::push_file_precondition_diagnostics(
+                        &edit.preconditions,
+                        diagnostics,
+                        "workspace text edit",
+                        edit.buffer_id.is_some(),
+                        false,
+                    );
+                }
+                if payload.source == devil_protocol::WorkspaceEditSourceKind::Plugin {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.plugin_source_denied",
+                        "plugin-produced workspace edits remain denied until plugin activation gates exist",
+                    ));
+                }
+            }
+            ProposalPayload::TerminalCommand(_) => {}
+            ProposalPayload::Batch(payload) => {
+                if payload.schema_version == 0 {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.invalid_schema_version",
+                        "batch proposal requires a non-zero schema version",
+                    ));
+                }
+                if payload.items.is_empty() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.empty_batch",
+                        "batch proposal requires at least one item",
+                    ));
+                }
+                if payload.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
+                    || payload.target_coverage.targets.is_empty()
+                {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.incomplete_target_coverage",
+                        "batch proposal requires complete target coverage",
+                    ));
+                }
+                if payload.rollback_policy == devil_protocol::ProposalBatchRollbackPolicy::Required
+                    && payload.rollback_steps.is_empty()
+                {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.missing_rollback_plan",
+                        "batch proposal with required rollback policy needs rollback steps before apply can be considered",
+                    ));
+                }
+                if payload.rollback_policy
+                    == devil_protocol::ProposalBatchRollbackPolicy::NotSupported
+                    && payload.atomicity != devil_protocol::ProposalBatchAtomicity::OrderedNonAtomic
+                {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.unsupported_rollback_policy",
+                        "batch proposal cannot promise atomic execution while rollback is unsupported",
+                    ));
+                }
+                for item in &payload.items {
+                    if item.item_id.trim().is_empty()
+                        || item.required_capability.0.trim().is_empty()
+                    {
+                        diagnostics.push(Self::diagnostic(
+                            "proposal.invalid_batch_item",
+                            "batch items require stable identifiers and capabilities",
+                        ));
+                    }
+                    if payload.rollback_policy
+                        == devil_protocol::ProposalBatchRollbackPolicy::Required
+                        && item.rollback_step_ids.is_empty()
+                    {
+                        diagnostics.push(Self::diagnostic(
+                            "proposal.missing_rollback_plan",
+                            format!(
+                                "batch item {} requires rollback step references",
+                                item.item_id
+                            ),
+                        ));
                     }
                 }
             }
-            _ => self.unsupported_response(proposal, "validate"),
+        }
+    }
+
+    fn validate_proposal(&self, proposal: &WorkspaceProposal) -> ProposalResponse {
+        let coverage = Self::affected_target_coverage(proposal);
+        let route = ProposalExecutionRoute::for_payload(&proposal.payload, &coverage);
+
+        if matches!(
+            route,
+            ProposalExecutionRoute::Terminal
+                | ProposalExecutionRoute::Unsupported
+                | ProposalExecutionRoute::Mixed
+        ) {
+            return self.unsupported_response(proposal, "validate");
+        }
+
+        let mut diagnostics = Vec::new();
+        Self::push_common_validation_diagnostics(proposal, &coverage, &mut diagnostics);
+        Self::push_payload_validation_diagnostics(proposal, &mut diagnostics);
+
+        if diagnostics.is_empty() {
+            match self.record_transition(proposal, ProposalLifecycleState::Validated, "validate") {
+                Ok(transition) => ProposalResponse::Validated(transition),
+                Err(response) => response,
+            }
+        } else {
+            match self.record_transition_with_diagnostics(
+                proposal,
+                ProposalLifecycleState::Denied,
+                "validate",
+                diagnostics,
+            ) {
+                Ok(transition) => ProposalResponse::Denied {
+                    transition,
+                    reason: ProposalDenialReason::PolicyDenied,
+                },
+                Err(response) => response,
+            }
         }
     }
 
@@ -648,6 +1232,33 @@ impl AppProposalCoordinator {
             correlation_id: command.correlation_id,
             causality_id: command.causality_id,
             diagnostics,
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn record_command_transition(
+        &self,
+        command: &ProposalLifecycleCommand,
+        lifecycle_state: ProposalLifecycleState,
+        action: &str,
+    ) -> Result<ProposalLifecycleTransition, ProposalResponse> {
+        let current = self.current_lifecycle_state(command.proposal_id);
+        if current.is_none() {
+            return Err(Self::missing_lifecycle_command_response(command, action));
+        }
+
+        match self.record_lifecycle_state(command.proposal_id, lifecycle_state) {
+            Ok(()) => Ok(Self::transition_for_command(
+                command,
+                lifecycle_state,
+                command.diagnostics.clone(),
+            )),
+            Err(current) => Err(Self::invalid_lifecycle_command_response(
+                command,
+                action,
+                current,
+                lifecycle_state,
+            )),
         }
     }
 
@@ -677,46 +1288,63 @@ impl ProposalPort for AppProposalCoordinator {
     fn handle(&self, request: ProposalRequest) -> ProtocolResult<ProposalResponse> {
         match request {
             ProposalRequest::Validate(proposal) => Ok(self.validate_proposal(&proposal)),
-            ProposalRequest::Preview(proposal) => Ok(ProposalResponse::Previewed {
-                transition: self.transition(
+            ProposalRequest::Preview(proposal) => {
+                match self.record_transition(
                     &proposal,
                     ProposalLifecycleState::Previewed,
-                    Vec::new(),
-                ),
-                proposal: Box::new(proposal),
-            }),
+                    "preview",
+                ) {
+                    Ok(transition) => Ok(ProposalResponse::Previewed {
+                        transition,
+                        proposal: Box::new(proposal),
+                    }),
+                    Err(response) => Ok(response),
+                }
+            }
             ProposalRequest::Apply(proposal) => Ok(self.unsupported_response(&proposal, "apply")),
             ProposalRequest::Approve(command) => {
-                Ok(ProposalResponse::Approved(Self::transition_for_command(
+                match self.record_command_transition(
                     &command,
                     ProposalLifecycleState::Approved,
-                    command.diagnostics.clone(),
-                )))
+                    "approve",
+                ) {
+                    Ok(transition) => Ok(ProposalResponse::Approved(transition)),
+                    Err(response) => Ok(response),
+                }
             }
-            ProposalRequest::Reject(command) => Ok(ProposalResponse::Rejected {
-                transition: Self::transition_for_command(
-                    &command,
-                    ProposalLifecycleState::Rejected,
-                    command.diagnostics.clone(),
-                ),
-                reason: Self::rejection_reason(&command),
-            }),
-            ProposalRequest::Cancel(command) => Ok(ProposalResponse::Cancelled {
-                transition: Self::transition_for_command(
-                    &command,
-                    ProposalLifecycleState::Cancelled,
-                    command.diagnostics.clone(),
-                ),
-                reason: Self::cancellation_reason(&command),
-            }),
-            ProposalRequest::Rollback(command) => Ok(ProposalResponse::RolledBack {
-                transition: Self::transition_for_command(
-                    &command,
-                    ProposalLifecycleState::RolledBack,
-                    command.diagnostics.clone(),
-                ),
-                reason: Self::rollback_reason(&command),
-            }),
+            ProposalRequest::Reject(command) => match self.record_command_transition(
+                &command,
+                ProposalLifecycleState::Rejected,
+                "reject",
+            ) {
+                Ok(transition) => Ok(ProposalResponse::Rejected {
+                    transition,
+                    reason: Self::rejection_reason(&command),
+                }),
+                Err(response) => Ok(response),
+            },
+            ProposalRequest::Cancel(command) => match self.record_command_transition(
+                &command,
+                ProposalLifecycleState::Cancelled,
+                "cancel",
+            ) {
+                Ok(transition) => Ok(ProposalResponse::Cancelled {
+                    transition,
+                    reason: Self::cancellation_reason(&command),
+                }),
+                Err(response) => Ok(response),
+            },
+            ProposalRequest::Rollback(command) => match self.record_command_transition(
+                &command,
+                ProposalLifecycleState::RolledBack,
+                "rollback",
+            ) {
+                Ok(transition) => Ok(ProposalResponse::RolledBack {
+                    transition,
+                    reason: Self::rollback_reason(&command),
+                }),
+                Err(response) => Ok(response),
+            },
         }
     }
 }
@@ -1403,7 +2031,7 @@ impl SaveWorkflowService {
 
         match workspace.save_file_with_proposal(workspace_save) {
             Ok(applied) => {
-                Self::observe_proposal_response(
+                SaveWorkflowService::observe_proposal_response(
                     proposal_coordinator,
                     storage,
                     &proposal,
@@ -1413,7 +2041,7 @@ impl SaveWorkflowService {
                 Ok(SaveWorkflowOutput { save, applied })
             }
             Err(response) => {
-                Self::observe_proposal_response(
+                SaveWorkflowService::observe_proposal_response(
                     proposal_coordinator,
                     storage,
                     &proposal,
@@ -1442,6 +2070,7 @@ impl SaveWorkflowService {
         }
 
         if let Some(transition) = Self::transition_for_response(response) {
+            proposal_coordinator.record_observed_transition(transition);
             let audit = proposal_audit_record(proposal, transition);
             let _ = storage.handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit));
         }
@@ -2069,12 +2698,516 @@ impl AppComposition {
 
     /// Route an explicit proposal request through the app-level proposal coordinator.
     pub fn handle_proposal_request(
-        &self,
+        &mut self,
         request: ProposalRequest,
     ) -> Result<ProposalResponse, AppCompositionError> {
+        match request {
+            ProposalRequest::Validate(proposal) => {
+                let response = self
+                    .proposal_coordinator
+                    .handle(ProposalRequest::Validate(proposal.clone()))
+                    .map_err(AppCompositionError::Protocol)?;
+                SaveWorkflowService::observe_proposal_response(
+                    &mut self.proposal_coordinator,
+                    &self.storage,
+                    &proposal,
+                    &response,
+                    None,
+                );
+                Ok(response)
+            }
+            ProposalRequest::Preview(proposal) => {
+                let response = self
+                    .proposal_coordinator
+                    .handle(ProposalRequest::Preview(proposal.clone()))
+                    .map_err(AppCompositionError::Protocol)?;
+                SaveWorkflowService::observe_proposal_response(
+                    &mut self.proposal_coordinator,
+                    &self.storage,
+                    &proposal,
+                    &response,
+                    None,
+                );
+                Ok(response)
+            }
+            ProposalRequest::Apply(proposal) => self.apply_workspace_proposal(proposal),
+            request => self
+                .proposal_coordinator
+                .handle(request)
+                .map_err(AppCompositionError::Protocol),
+        }
+    }
+
+    /// Register an externally constructed proposal into the app lifecycle before validation.
+    pub fn register_proposal_lifecycle(
+        &mut self,
+        proposal: &WorkspaceProposal,
+    ) -> Result<ProposalResponse, AppCompositionError> {
+        self.proposal_coordinator.register_lifecycle_context(
+            proposal.proposal_id,
+            EventContext::new(proposal.correlation_id),
+        );
+        let response = self.proposal_coordinator.created_response(proposal);
+        SaveWorkflowService::observe_proposal_response(
+            &mut self.proposal_coordinator,
+            &self.storage,
+            proposal,
+            &response,
+            None,
+        );
+        Ok(response)
+    }
+
+    fn apply_workspace_proposal(
+        &mut self,
+        proposal: WorkspaceProposal,
+    ) -> Result<ProposalResponse, AppCompositionError> {
+        if !self
+            .proposal_coordinator
+            .has_lifecycle_context(proposal.proposal_id)
+        {
+            let response = self
+                .proposal_coordinator
+                .missing_lifecycle_context_response(&proposal, "apply");
+            SaveWorkflowService::observe_proposal_response(
+                &mut self.proposal_coordinator,
+                &self.storage,
+                &proposal,
+                &response,
+                None,
+            );
+            return Ok(response);
+        }
+
+        if !matches!(
+            self.proposal_coordinator
+                .current_lifecycle_state(proposal.proposal_id),
+            Some(ProposalLifecycleState::Previewed | ProposalLifecycleState::Approved)
+        ) {
+            let response = self
+                .proposal_coordinator
+                .invalid_lifecycle_transition_response(
+                    &proposal,
+                    "apply",
+                    self.proposal_coordinator
+                        .current_lifecycle_state(proposal.proposal_id),
+                    ProposalLifecycleState::Applied,
+                );
+            SaveWorkflowService::observe_proposal_response(
+                &mut self.proposal_coordinator,
+                &self.storage,
+                &proposal,
+                &response,
+                None,
+            );
+            return Ok(response);
+        }
+
+        let response = match &proposal.payload {
+            ProposalPayload::TextEdit(payload) => self.apply_text_edit_proposal(&proposal, payload),
+            ProposalPayload::CreateFile(payload) => {
+                self.apply_create_file_proposal(&proposal, payload)
+            }
+            ProposalPayload::DeleteFile(payload) => {
+                self.apply_delete_file_proposal(&proposal, payload)
+            }
+            ProposalPayload::RenameFile(payload) => {
+                self.apply_rename_file_proposal(&proposal, payload)
+            }
+            ProposalPayload::Batch(_) => self
+                .proposal_coordinator
+                .unsupported_response(&proposal, "apply"),
+            _ => self
+                .proposal_coordinator
+                .unsupported_response(&proposal, "apply"),
+        };
+
+        SaveWorkflowService::observe_proposal_response(
+            &mut self.proposal_coordinator,
+            &self.storage,
+            &proposal,
+            &response,
+            None,
+        );
+        Ok(response)
+    }
+
+    fn proposal_causality_id(&self, proposal: &WorkspaceProposal) -> CausalityId {
         self.proposal_coordinator
-            .handle(request)
-            .map_err(AppCompositionError::Protocol)
+            .transition(proposal, ProposalLifecycleState::Applied, Vec::new())
+            .causality_id
+    }
+
+    fn applied_response(&self, proposal: &WorkspaceProposal) -> ProposalResponse {
+        match self.proposal_coordinator.record_transition(
+            proposal,
+            ProposalLifecycleState::Applied,
+            "apply",
+        ) {
+            Ok(transition) => ProposalResponse::Applied(transition),
+            Err(response) => response,
+        }
+    }
+
+    fn failed_apply_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        code: &str,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = AppProposalCoordinator::diagnostic(code, message);
+        match self
+            .proposal_coordinator
+            .record_transition_with_diagnostics(
+                proposal,
+                ProposalLifecycleState::Failed,
+                "apply",
+                vec![diagnostic],
+            ) {
+            Ok(transition) => ProposalResponse::Failed {
+                transition,
+                reason: ProposalFailureReason::ApplyFailed,
+            },
+            Err(response) => response,
+        }
+    }
+
+    fn denied_apply_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        code: &str,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = AppProposalCoordinator::diagnostic(code, message);
+        match self
+            .proposal_coordinator
+            .record_transition_with_diagnostics(
+                proposal,
+                ProposalLifecycleState::Denied,
+                "apply",
+                vec![diagnostic],
+            ) {
+            Ok(transition) => ProposalResponse::Denied {
+                transition,
+                reason: ProposalDenialReason::PolicyDenied,
+            },
+            Err(response) => response,
+        }
+    }
+
+    fn stale_apply_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        reason: ProposalStaleReason,
+        actual: Option<VersionContext>,
+        message: impl Into<String>,
+    ) -> ProposalResponse {
+        let diagnostic = AppProposalCoordinator::diagnostic("proposal.stale", message);
+        match self
+            .proposal_coordinator
+            .record_transition_with_diagnostics(
+                proposal,
+                ProposalLifecycleState::Stale,
+                "apply",
+                vec![diagnostic],
+            ) {
+            Ok(transition) => ProposalResponse::Stale {
+                transition,
+                stale: devil_protocol::ProposalStaleContext {
+                    reason,
+                    expected: proposal.preconditions.clone(),
+                    actual,
+                },
+            },
+            Err(response) => response,
+        }
+    }
+
+    fn active_file_version_context(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<VersionContext, AppCompositionError> {
+        let buffer_version = self.editor.buffer_version(buffer_id)?;
+        let snapshot_id = self.editor.current_snapshot(buffer_id)?.snapshot_id;
+        let metadata = self.active_documents.active_file_metadata.as_ref();
+        Ok(VersionContext {
+            file_version: metadata
+                .map(|metadata| metadata.file_content_version)
+                .unwrap_or(FileContentVersion(0)),
+            buffer_version,
+            snapshot_id,
+            generation: metadata
+                .map(|metadata| metadata.workspace_generation)
+                .unwrap_or(WorkspaceGeneration(0)),
+            file_content_version: metadata
+                .map(|metadata| metadata.file_content_version)
+                .unwrap_or(FileContentVersion(0)),
+            workspace_generation: metadata
+                .map(|metadata| metadata.workspace_generation)
+                .unwrap_or(WorkspaceGeneration(0)),
+            fingerprint: metadata.map(|metadata| metadata.fingerprint.clone()),
+            file_length: metadata.and_then(|metadata| metadata.file_length),
+            modified_at: metadata.and_then(|metadata| metadata.modified_at),
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn closed_file_preconditions(
+        &self,
+        proposal: &WorkspaceProposal,
+    ) -> Result<(FileContentVersion, WorkspaceGeneration, FileFingerprint), ProposalResponse> {
+        let Some(file_content_version) = proposal
+            .preconditions
+            .file_content_version
+            .or(proposal.preconditions.file_version)
+        else {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.missing_file_precondition",
+                "apply requires file content version precondition",
+            ));
+        };
+        let Some(workspace_generation) = proposal
+            .preconditions
+            .workspace_generation
+            .or(proposal.preconditions.generation)
+        else {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.missing_workspace_precondition",
+                "apply requires workspace generation precondition",
+            ));
+        };
+        let Some(fingerprint) = proposal.preconditions.expected_fingerprint.clone() else {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.missing_fingerprint",
+                "apply requires expected fingerprint precondition",
+            ));
+        };
+        Ok((file_content_version, workspace_generation, fingerprint))
+    }
+
+    fn reject_open_file_mutation(
+        &self,
+        proposal: &WorkspaceProposal,
+        file: &FileIdentity,
+    ) -> Option<ProposalResponse> {
+        let open_buffer = self
+            .editor
+            .buffer_for_file(file.workspace_id, file.file_id)
+            .or_else(|| {
+                self.editor
+                    .buffer_for_path(file.workspace_id, &file.canonical_path.0)
+            })
+            .or_else(|| {
+                let active_path = self.active_documents.active_file_path.as_deref()?;
+                if self.active_documents.workspace_id() == Some(file.workspace_id)
+                    && Self::paths_equivalent(active_path, &file.canonical_path.0)
+                {
+                    self.active_documents.active_buffer_id
+                } else {
+                    None
+                }
+            });
+
+        open_buffer.map(|_| {
+                self.denied_apply_response(
+                    proposal,
+                    "proposal.open_file_workspace_mutation_denied",
+                    "closed-file workspace mutation is denied while the target file is open in the editor",
+                )
+            })
+    }
+
+    fn paths_equivalent(left: &str, right: &str) -> bool {
+        if left == right || Path::new(left) == Path::new(right) {
+            return true;
+        }
+
+        match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    fn apply_text_edit_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::TextEditProposal,
+    ) -> ProposalResponse {
+        let workspace_id = match self.active_documents.require_workspace_id() {
+            Ok(workspace_id) => workspace_id,
+            Err(err) => {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.workspace_missing",
+                    err.to_string(),
+                );
+            }
+        };
+        let Some(buffer_id) = self.editor.buffer_for_file(workspace_id, payload.file_id) else {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.closed_file_text_edit_denied",
+                "text edit apply requires an open editor buffer in Stage 1C",
+            );
+        };
+        let actual = match self.active_file_version_context(buffer_id) {
+            Ok(actual) => actual,
+            Err(err) => {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.editor_state_unavailable",
+                    err.to_string(),
+                );
+            }
+        };
+        if proposal.preconditions.buffer_version != Some(actual.buffer_version) {
+            return self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::BufferVersionMismatch,
+                Some(actual),
+                "buffer version changed before text edit apply",
+            );
+        }
+        if proposal.preconditions.snapshot_id != Some(actual.snapshot_id) {
+            return self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::SnapshotMismatch,
+                Some(actual),
+                "snapshot changed before text edit apply",
+            );
+        }
+
+        match self
+            .editor
+            .apply_protocol_edits(EditorApplyTransactionRequest {
+                workspace_id,
+                buffer_id,
+                file_id: payload.file_id,
+                edits: payload.edits.clone(),
+                source: TransactionSource::System,
+                undo_group_id: Some(uuid::Uuid::now_v7()),
+                correlation_id: proposal.correlation_id,
+            }) {
+            Ok(record) => {
+                let descriptor = record.to_protocol_descriptor();
+                self.emit_transaction_event(&descriptor);
+                self.applied_response(proposal)
+            }
+            Err(err) => self.failed_apply_response(
+                proposal,
+                "proposal.editor_apply_failed",
+                err.to_string(),
+            ),
+        }
+    }
+
+    fn apply_create_file_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::CreateFileProposal,
+    ) -> ProposalResponse {
+        let workspace_id = match self.active_documents.require_workspace_id() {
+            Ok(workspace_id) => workspace_id,
+            Err(err) => {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.workspace_missing",
+                    err.to_string(),
+                );
+            }
+        };
+        let Some(expected_workspace_generation) = proposal
+            .preconditions
+            .workspace_generation
+            .or(proposal.preconditions.generation)
+        else {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.missing_workspace_precondition",
+                "create-file apply requires workspace generation precondition",
+            );
+        };
+        let request = WorkspaceCreateFileRequest {
+            workspace_id,
+            proposal_id: proposal.proposal_id,
+            principal: proposal.principal.clone(),
+            required_capability: proposal.capability.clone(),
+            path: payload.path.clone(),
+            expected_workspace_generation,
+            initial_content: payload.initial_content.clone().unwrap_or_default(),
+            correlation_id: proposal.correlation_id,
+            causality_id: self.proposal_causality_id(proposal),
+        };
+        match self.workspace.create_file_with_proposal(request) {
+            Ok(applied) => applied.response,
+            Err(response) => response,
+        }
+    }
+
+    fn apply_delete_file_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::DeleteFileProposal,
+    ) -> ProposalResponse {
+        if let Some(response) = self.reject_open_file_mutation(proposal, &payload.file) {
+            return response;
+        }
+        let (file_content_version, workspace_generation, fingerprint) =
+            match self.closed_file_preconditions(proposal) {
+                Ok(values) => values,
+                Err(response) => return response,
+            };
+        let request = WorkspaceDeleteFileRequest {
+            workspace_id: payload.file.workspace_id,
+            proposal_id: proposal.proposal_id,
+            principal: proposal.principal.clone(),
+            required_capability: proposal.capability.clone(),
+            file: payload.file.clone(),
+            expected_fingerprint: fingerprint,
+            expected_file_content_version: file_content_version,
+            expected_workspace_generation: workspace_generation,
+            correlation_id: proposal.correlation_id,
+            causality_id: self.proposal_causality_id(proposal),
+        };
+        match self.workspace.delete_file_with_proposal(request) {
+            Ok(applied) => applied.response,
+            Err(response) => response,
+        }
+    }
+
+    fn apply_rename_file_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::RenameFileProposal,
+    ) -> ProposalResponse {
+        if let Some(response) = self.reject_open_file_mutation(proposal, &payload.file) {
+            return response;
+        }
+        let (file_content_version, workspace_generation, fingerprint) =
+            match self.closed_file_preconditions(proposal) {
+                Ok(values) => values,
+                Err(response) => return response,
+            };
+        let request = WorkspaceRenameFileRequest {
+            workspace_id: payload.file.workspace_id,
+            proposal_id: proposal.proposal_id,
+            principal: proposal.principal.clone(),
+            required_capability: proposal.capability.clone(),
+            file: payload.file.clone(),
+            destination: payload.destination.clone(),
+            expected_fingerprint: fingerprint,
+            expected_file_content_version: file_content_version,
+            expected_workspace_generation: workspace_generation,
+            correlation_id: proposal.correlation_id,
+            causality_id: self.proposal_causality_id(proposal),
+        };
+        match self.workspace.rename_file_with_proposal(request) {
+            Ok(applied) => applied.response,
+            Err(response) => response,
+        }
     }
 
     /// Build deterministic affected-target coverage for a proposal without executing it.
@@ -2110,4 +3243,237 @@ impl Default for AppComposition {
 /// Returns the workspace root fallback used by CLI shell.
 pub fn default_workspace_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn save_proposal(proposal_id: ProposalId) -> WorkspaceProposal {
+        let file = FileIdentity {
+            file_id: FileId(1),
+            workspace_id: WorkspaceId(1),
+            canonical_path: CanonicalPath("C:/repo/file.txt".to_string()),
+            content_version: FileContentVersion(1),
+            content_hash: None,
+        };
+        let fingerprint = FileFingerprint {
+            algorithm: "test".to_string(),
+            value: "hash:test".to_string(),
+        };
+        WorkspaceProposal {
+            proposal_id,
+            principal: PrincipalId("trusted".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(1),
+            payload: ProposalPayload::SaveFile(SaveFileProposal {
+                file: file.clone(),
+                buffer_id: BufferId(1),
+                file_id: file.file_id,
+                snapshot_id: devil_protocol::SnapshotId(1),
+                buffer_version: devil_protocol::BufferVersion(1),
+                file_content_version: FileContentVersion(1),
+                workspace_generation: WorkspaceGeneration(1),
+                expected_fingerprint: Some(fingerprint.clone()),
+                save_intent: SaveIntent::Manual,
+                conflict_policy: SaveConflictPolicy::RejectIfChanged,
+                trust_decision: TrustDecisionContext {
+                    workspace_trust_state: WorkspaceTrustState::Trusted,
+                    decision_id: None,
+                    decided_at: Some(TimestampMillis(1)),
+                },
+                required_capability: CapabilityId("fs.write".to_string()),
+                principal: PrincipalId("trusted".to_string()),
+                correlation_id: CorrelationId(1),
+                diagnostics: Vec::new(),
+            }),
+            preconditions: ProposalVersionPreconditions {
+                file_version: Some(FileContentVersion(1)),
+                buffer_version: Some(devil_protocol::BufferVersion(1)),
+                snapshot_id: Some(devil_protocol::SnapshotId(1)),
+                generation: Some(WorkspaceGeneration(1)),
+                file_content_version: Some(FileContentVersion(1)),
+                workspace_generation: Some(WorkspaceGeneration(1)),
+                expected_fingerprint: Some(fingerprint),
+                expected_file_length: None,
+                expected_modified_at: None,
+            },
+            preview: PreviewSummary {
+                summary: "test save".to_string(),
+                details: Vec::new(),
+            },
+            expires_at: None,
+            created_at: TimestampMillis(1),
+        }
+    }
+
+    fn command(
+        proposal_id: ProposalId,
+        action: devil_protocol::ProposalLifecycleAction,
+    ) -> ProposalLifecycleCommand {
+        ProposalLifecycleCommand {
+            proposal_id,
+            action,
+            principal: PrincipalId("trusted".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(1),
+            causality_id: CausalityId(uuid::Uuid::now_v7()),
+            reason: None,
+            diagnostics: Vec::new(),
+            requested_at: TimestampMillis(1),
+            schema_version: 1,
+        }
+    }
+
+    fn text_edit_proposal(proposal_id: ProposalId) -> WorkspaceProposal {
+        WorkspaceProposal {
+            proposal_id,
+            principal: PrincipalId("trusted".to_string()),
+            capability: CapabilityId("editor.write".to_string()),
+            correlation_id: CorrelationId(1),
+            payload: ProposalPayload::TextEdit(devil_protocol::TextEditProposal {
+                file_id: FileId(1),
+                edits: devil_protocol::EditBatch {
+                    edits: vec![devil_protocol::TextEdit {
+                        range: devil_protocol::TextRange::new(
+                            devil_protocol::TextOffset::byte(0),
+                            devil_protocol::TextOffset::byte(0),
+                        ),
+                        replacement: "replacement".to_string(),
+                    }],
+                },
+            }),
+            preconditions: ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
+            },
+            preview: PreviewSummary {
+                summary: "test text edit".to_string(),
+                details: Vec::new(),
+            },
+            expires_at: None,
+            created_at: TimestampMillis(1),
+        }
+    }
+
+    #[test]
+    fn proposal_coordinator_enforces_preview_after_validation() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = save_proposal(ProposalId(1));
+        coordinator
+            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
+        assert!(matches!(
+            coordinator.created_response(&proposal),
+            ProposalResponse::Created(_)
+        ));
+
+        let preview = coordinator
+            .handle(ProposalRequest::Preview(proposal.clone()))
+            .expect("preview response");
+        let ProposalResponse::Rejected { transition, reason } = preview else {
+            panic!("preview before validation should reject");
+        };
+        assert_eq!(reason, ProposalRejectionReason::ValidationFailed);
+        assert!(
+            transition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "proposal.invalid_lifecycle_transition")
+        );
+
+        let validation = coordinator
+            .handle(ProposalRequest::Validate(proposal.clone()))
+            .expect("validate response");
+        assert!(matches!(validation, ProposalResponse::Validated(_)));
+        let preview = coordinator
+            .handle(ProposalRequest::Preview(proposal))
+            .expect("preview response");
+        assert!(matches!(preview, ProposalResponse::Previewed { .. }));
+    }
+
+    #[test]
+    fn proposal_coordinator_rejects_command_without_lifecycle_context() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let response = coordinator
+            .handle(ProposalRequest::Approve(command(
+                ProposalId(99),
+                devil_protocol::ProposalLifecycleAction::Approve,
+            )))
+            .expect("approve response");
+
+        let ProposalResponse::Rejected { transition, reason } = response else {
+            panic!("unknown lifecycle command should reject");
+        };
+        assert_eq!(reason, ProposalRejectionReason::ValidationFailed);
+        assert!(
+            transition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "proposal.missing_lifecycle_context")
+        );
+    }
+
+    #[test]
+    fn proposal_coordinator_denies_registered_text_edit_missing_preconditions() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = text_edit_proposal(ProposalId(3));
+        coordinator
+            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
+        assert!(matches!(
+            coordinator.created_response(&proposal),
+            ProposalResponse::Created(_)
+        ));
+
+        let response = coordinator
+            .handle(ProposalRequest::Validate(proposal))
+            .expect("validate response");
+        let ProposalResponse::Denied { transition, reason } = response else {
+            panic!("registered text edit with missing preconditions should deny");
+        };
+        assert_eq!(reason, ProposalDenialReason::PolicyDenied);
+        assert!(transition.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "proposal.missing_buffer_precondition"
+                || diagnostic.code == "proposal.missing_file_precondition"
+        }));
+    }
+
+    #[test]
+    fn proposal_coordinator_documents_generic_save_apply_denial() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = save_proposal(ProposalId(2));
+        coordinator
+            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
+        assert!(matches!(
+            coordinator.created_response(&proposal),
+            ProposalResponse::Created(_)
+        ));
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
+            Ok(ProposalResponse::Validated(_))
+        ));
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
+            Ok(ProposalResponse::Previewed { .. })
+        ));
+
+        let response = coordinator
+            .handle(ProposalRequest::Apply(proposal))
+            .expect("apply response");
+        let ProposalResponse::Rejected { transition, reason } = response else {
+            panic!("generic save apply should remain denied");
+        };
+        assert_eq!(reason, ProposalRejectionReason::Unsupported);
+        assert!(transition.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("use AppComposition::save_active_buffer")
+        }));
+    }
 }

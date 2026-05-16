@@ -323,6 +323,36 @@ pub trait FileSystemService: PathNormalizationService {
     /// structured platform error rather than silently degrading to a plain write.
     fn write_text_file_atomic(&self, path: &Path, text: &str) -> Result<(), PlatformError>;
 
+    /// Creates a UTF-8 text file and fails if the destination already exists.
+    fn create_text_file_new(&self, path: &Path, _text: &str) -> Result<(), PlatformError> {
+        Err(PlatformError::UnsupportedOperation {
+            operation: "create new text file".to_string(),
+            path: path.to_path_buf(),
+            reason: "filesystem backend does not implement create-new".to_string(),
+        })
+    }
+
+    /// Removes an existing file.
+    fn remove_file(&self, path: &Path) -> Result<(), PlatformError> {
+        Err(PlatformError::UnsupportedOperation {
+            operation: "remove file".to_string(),
+            path: path.to_path_buf(),
+            reason: "filesystem backend does not implement remove".to_string(),
+        })
+    }
+
+    /// Renames or moves a filesystem path.
+    fn rename_path(&self, source: &Path, destination: &Path) -> Result<(), PlatformError> {
+        Err(PlatformError::UnsupportedOperation {
+            operation: "rename path".to_string(),
+            path: source.to_path_buf(),
+            reason: format!(
+                "filesystem backend does not implement rename to {}",
+                destination.display()
+            ),
+        })
+    }
+
     /// Reads platform-owned metadata for an entry.
     fn read_metadata(&self, path: &Path) -> Result<FileSystemMetadata, PlatformError>;
 
@@ -737,6 +767,51 @@ impl FileSystemService for NativeFileSystem {
         }
 
         result
+    }
+
+    fn create_text_file_new(&self, path: &Path, text: &str) -> Result<(), PlatformError> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|err| {
+                PlatformError::from_io_error("create parent directories", path, err)
+            })?;
+        }
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|err| PlatformError::from_io_error("create new text file", path, err))?;
+        file.write_all(text.as_bytes())
+            .map_err(|err| PlatformError::from_io_error("write new text file", path, err))?;
+        file.flush()
+            .map_err(|err| PlatformError::from_io_error("flush new text file", path, err))?;
+        sync_file_data_when_supported(&file, path, "sync new text file")?;
+        if let Some(parent) = path.parent() {
+            sync_parent_directory_when_supported(parent)?;
+        }
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), PlatformError> {
+        fs::remove_file(path).map_err(|err| PlatformError::from_io_error("remove file", path, err))
+    }
+
+    fn rename_path(&self, source: &Path, destination: &Path) -> Result<(), PlatformError> {
+        if let Some(parent) = destination.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|err| {
+                PlatformError::from_io_error("create rename destination parent", destination, err)
+            })?;
+        }
+        fs::rename(source, destination)
+            .map_err(|err| PlatformError::from_io_error("rename path", source, err))?;
+        if let Some(parent) = destination.parent() {
+            sync_parent_directory_when_supported(parent)?;
+        }
+        Ok(())
     }
 
     fn read_metadata(&self, path: &Path) -> Result<FileSystemMetadata, PlatformError> {
