@@ -87,6 +87,23 @@ Date: 2026-05-16
   - `workspace_vfs_integration_open_file_delete_and_rename_are_denied`
   - `workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview`
 
+## Stage 1D batch preflight/planning update
+
+Date: 2026-05-16
+
+- Added `AppComposition::preflight_batch_proposal()` with documented app-level DTOs for side-effect-free batch planning: `BatchPreflightPlan`, `BatchPreflightItemPlan`, and `BatchPreflightRoute`.
+- The planner validates batch payload shape, deterministic item order, unique item ids, complete non-empty unique target coverage, item target references, dependency edges, dependency cycles, route support, and rollback/atomicity boundaries without calling apply helpers or workspace mutation methods.
+- Supported Stage 1D preflight routes are open-buffer `TextEdit` and closed-file/path `CreateFile`, `DeleteFile`, and `RenameFile`. Nested batch, terminal, save, format, code action, workspace edit, plugin, remote, collaboration, mixed, and unsupported routes remain non-executable and produce diagnostics before side effects.
+- Text edit preflight checks an open editor buffer, buffer version, snapshot id, optional file/workspace/fingerprint preconditions, and byte-coordinate range bounds against the current snapshot descriptor without mutating text.
+- Create/delete/rename preflight reads current workspace tree metadata, checks workspace generation and file/fingerprint preconditions, verifies create/rename paths stay inside the active workspace root, denies open-file closed-file mutation, and rejects existing create/rename destinations from the tree or disk without touching disk.
+- `AllOrNothing` and rollback `Required` require rollback step ids for every item, and those steps must resolve to the same item/target without unsupported actions or step diagnostics. `NotSupported` with stronger-than `OrderedNonAtomic` is rejected. `runtime_apply_disabled` remains true for every plan, so this closes planning/preflight gaps only; runtime batch mutation, commit, and rollback are still denied.
+- Focused tests added:
+  - `workspace_vfs_integration_batch_preflight_plans_supported_routes_without_side_effects`
+  - `workspace_vfs_integration_batch_preflight_rejects_dependency_errors_without_mutation`
+  - `workspace_vfs_integration_batch_preflight_rejects_missing_and_unknown_targets`
+  - `workspace_vfs_integration_batch_preflight_rejects_unproven_rollback_boundaries`
+  - `workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview` now preflights before apply and still verifies fail-closed runtime behavior.
+
 ## Integration tests
 
 Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspace_vfs_integration.rs) with app-level Phase 2 regression coverage:
@@ -95,6 +112,7 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 - [`workspace_vfs_integration_batch_affected_targets_are_visited_in_item_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:515) verifies deterministic batch target derivation when explicit coverage is absent.
 - [`workspace_vfs_integration_batch_uses_explicit_target_coverage_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:599) verifies explicit batch target coverage order is preserved.
 - Stage 1C apply tests verify registered text-edit apply/stale behavior, closed-file workspace mutations, open-file mutation denial, and batch apply fail-closed behavior.
+- Stage 1D preflight tests verify supported-route batch planning metadata, dependency and cycle diagnostics, missing/unknown target diagnostics, rollback/atomicity boundary rejection, partial-failure records for planning failures, and no disk/editor mutation during planning.
 - Existing stale/conflict, denial, failed-save, and dirty-buffer preservation tests remain in the same integration suite.
 
 ## Placeholder and dependency boundaries
@@ -106,18 +124,19 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 
 ## Remaining Phase 2 gaps
 
-- Runtime apply planning beyond manual saves, registered open-buffer text edits, and closed-file create/delete/rename remains denied until follow-on work separates validation, preview, approval, preflight, apply, commit, rollback, and audit emission for each mutation class.
+- Runtime apply planning beyond manual saves, registered open-buffer text edits, closed-file create/delete/rename, and side-effect-free batch preflight remains denied until follow-on work separates apply, commit, rollback, and audit emission for each mutation class.
 - Generic save apply remains intentionally denied until it can reuse the manual save workflow's editor text extraction, workspace preconditions, audit-before-success storage, and dirty-buffer preservation semantics.
-- Batch rollback, multi-file atomicity, workspace-edit execution, format/code-action execution, and generic save execution remain future implementation work after the Stage 1C single-mutation paths.
+- Runtime batch mutation, batch rollback, multi-file atomicity, workspace-edit execution, format/code-action execution, and generic save execution remain future implementation work after the Stage 1D planning paths.
 - Future AI, plugin, LSP, collaboration, terminal, and remote runtime apply paths remain denied until their ADR, dependency-policy, and contract-test gates exist.
 
 ## Validation
 
-Completed targeted validation retained from earlier Phase 2 subtasks and Stage 1C:
+Completed targeted validation retained from earlier Phase 2 subtasks plus Stage 1D:
 
+- `cargo fmt --all` — passed on 2026-05-16 after Stage 1D edits.
+- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 26 integration tests; 0 failed; 0 ignored.
 - `cargo check -p devil-app --all-targets` — passed.
-- `cargo test -p devil-app --all-targets` — passed with 4 unit tests and 22 integration tests; 0 failed; 0 ignored.
-- `cargo fmt --all` — passed.
+- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed.
 - `cargo test -p devil-protocol --test dto_contracts` — passed with 14 tests; 0 failed; 0 ignored.
 - `cargo check -p devil-app -p devil-observability --all-targets` — passed.
 

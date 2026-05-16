@@ -3,8 +3,8 @@
 #![warn(missing_docs)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use devil_editor::{EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, TextEdit};
@@ -20,21 +20,24 @@ use devil_project::{
     WorkspaceError, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
 };
 use devil_protocol::{
-    BufferId, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId, CorrelationId,
-    EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest,
-    FileConflictContext, FileConflictLifecycleState, FileConflictReason, FileConflictState,
-    FileContentVersion, FileFingerprint, FileId, FileIdentity, FileTreeNode, PreviewSummary,
-    PrincipalId, ProposalAffectedTarget, ProposalCancellationReason, ProposalDenialReason,
+    BatchProposalPayload, BufferId, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId,
+    CorrelationId, EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort,
+    EventSinkRequest, FileConflictContext, FileConflictLifecycleState, FileConflictReason,
+    FileConflictState, FileContentVersion, FileFingerprint, FileId, FileIdentity, FileTreeNode,
+    PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
+    ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
     ProposalFailureReason, ProposalId, ProposalLifecycleCommand, ProposalLifecycleCommandReason,
-    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPayload, ProposalPort,
-    ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackReason,
-    ProposalStaleReason, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
-    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
-    ProtocolResult, RedactionHint, SaveConflictPolicy, SaveFileProposal, SaveIntent,
-    StorageRepositoryPort, StorageRepositoryRequest, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, TrustDecisionContext, VersionContext, WorkspaceGeneration, WorkspaceId,
-    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
-    WorkspaceResponse, WorkspaceTrustState,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPartialFailureDisposition,
+    ProposalPartialFailureRecord, ProposalPayload, ProposalPort, ProposalPreviewWarning,
+    ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest, ProposalResponse,
+    ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
+    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, RedactionHint,
+    SaveConflictPolicy, SaveFileProposal, SaveIntent, StorageRepositoryPort,
+    StorageRepositoryRequest, TextTransactionDescriptor, TimestampMillis, TransactionSource,
+    TrustDecisionContext, VersionContext, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
+    WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
+    WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
@@ -113,6 +116,77 @@ pub struct EventContext {
     pub correlation_id: CorrelationId,
     /// Non-nil causality identifier linking emitted audit events.
     pub causality_id: CausalityId,
+}
+
+/// Side-effect-free app-level preflight result for a batch proposal.
+#[derive(Debug, Clone)]
+pub struct BatchPreflightPlan {
+    /// Proposal id that was planned.
+    pub proposal_id: ProposalId,
+    /// Batch id when the proposal payload is a batch.
+    pub batch_id: Option<uuid::Uuid>,
+    /// True when every structural, route, precondition, and rollback-boundary check passed.
+    pub preflight_ok: bool,
+    /// True because Stage 1D intentionally keeps runtime batch mutation fail-closed.
+    pub runtime_apply_disabled: bool,
+    /// Batch atomicity promise, when available.
+    pub atomicity: Option<ProposalBatchAtomicity>,
+    /// Batch rollback policy, when available.
+    pub rollback_policy: Option<ProposalBatchRollbackPolicy>,
+    /// Deterministic item planning records sorted by `order`, then `item_id`.
+    pub items: Vec<BatchPreflightItemPlan>,
+    /// Proposal-level diagnostics collected without mutating editor or workspace state.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Preview warnings collected during planning.
+    pub preview_warnings: Vec<ProposalPreviewWarning>,
+    /// Planning/preflight failure records. These never imply mutation happened.
+    pub partial_failures: Vec<ProposalPartialFailureRecord>,
+}
+
+/// Side-effect-free preflight record for one batch item.
+#[derive(Debug, Clone)]
+pub struct BatchPreflightItemPlan {
+    /// Stable item id from the batch payload.
+    pub item_id: String,
+    /// Application order from the batch item.
+    pub order: u32,
+    /// App-level route selected for the item payload.
+    pub route: BatchPreflightRoute,
+    /// Whether Stage 1D can preflight this route.
+    pub supported: bool,
+    /// Whether this item passed preflight checks.
+    pub preflight_ok: bool,
+    /// Target ids referenced by this item.
+    pub target_ids: Vec<String>,
+    /// Diagnostics scoped to this item.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Route classification used by the Stage 1D batch preflight planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchPreflightRoute {
+    /// Open-buffer text edit.
+    TextEdit,
+    /// Closed workspace create-file operation.
+    CreateFile,
+    /// Closed workspace delete-file operation.
+    DeleteFile,
+    /// Closed workspace rename-file operation.
+    RenameFile,
+    /// Nested batch, intentionally denied.
+    Batch,
+    /// Terminal command, intentionally denied.
+    Terminal,
+    /// Save proposal, intentionally denied inside batch planning.
+    Save,
+    /// Format proposal, intentionally denied in Stage 1D batch planning.
+    Format,
+    /// Code action proposal, intentionally denied in Stage 1D batch planning.
+    CodeAction,
+    /// Workspace edit proposal, intentionally denied in Stage 1D batch planning.
+    WorkspaceEdit,
+    /// Plugin, remote, collaboration, metadata-only, mixed, or otherwise unsupported route.
+    Unsupported,
 }
 
 impl EventContext {
@@ -1376,24 +1450,28 @@ impl EventSequenceGenerator {
 #[derive(Debug)]
 struct ActiveDocumentController {
     opened_workspace: Option<WorkspaceOpened>,
+    workspace_root_path: Option<String>,
     active_principal_id: Option<PrincipalId>,
     active_workspace_trust: Option<WorkspaceTrustState>,
     active_file_id: Option<FileId>,
     active_file_path: Option<String>,
     active_buffer_id: Option<BufferId>,
     active_file_metadata: Option<ActiveFileMetadata>,
+    buffer_file_metadata: HashMap<BufferId, ActiveFileMetadata>,
 }
 
 impl ActiveDocumentController {
     fn new() -> Self {
         Self {
             opened_workspace: None,
+            workspace_root_path: None,
             active_principal_id: None,
             active_workspace_trust: None,
             active_file_id: None,
             active_file_path: None,
             active_buffer_id: None,
             active_file_metadata: None,
+            buffer_file_metadata: HashMap::new(),
         }
     }
 
@@ -1406,10 +1484,12 @@ impl ActiveDocumentController {
     fn bind_workspace(
         &mut self,
         opened: WorkspaceOpened,
+        root_path: CanonicalPath,
         principal: PrincipalId,
         trust: WorkspaceTrustState,
     ) {
         self.opened_workspace = Some(opened);
+        self.workspace_root_path = Some(root_path.0);
         self.active_principal_id = Some(principal);
         self.active_workspace_trust = Some(trust);
         self.clear_active_file();
@@ -1420,34 +1500,51 @@ impl ActiveDocumentController {
         self.active_file_path = None;
         self.active_buffer_id = None;
         self.active_file_metadata = None;
+        self.buffer_file_metadata.clear();
     }
 
     fn bind_opened_file(&mut self, opened: &OpenedFileText, buffer_id: BufferId) {
         let identity = opened.identity.clone();
-        self.active_file_id = Some(identity.file_id);
-        self.active_file_path = Some(identity.canonical_path.0.clone());
-        self.active_buffer_id = Some(buffer_id);
-        self.active_file_metadata = Some(ActiveFileMetadata {
-            identity,
+        let metadata = ActiveFileMetadata {
+            identity: identity.clone(),
             fingerprint: opened.fingerprint.clone(),
             file_content_version: opened.file_content_version,
             workspace_generation: opened.workspace_generation,
             modified_at: opened.modified_at,
             file_length: opened.file_length,
-        });
+        };
+        self.active_file_id = Some(identity.file_id);
+        self.active_file_path = Some(identity.canonical_path.0.clone());
+        self.active_buffer_id = Some(buffer_id);
+        self.active_file_metadata = Some(metadata.clone());
+        self.buffer_file_metadata.insert(buffer_id, metadata);
     }
 
     fn bind_saved_file(&mut self, applied: devil_project::WorkspaceSaveApplied) {
-        self.active_file_id = Some(applied.identity.file_id);
-        self.active_file_path = Some(applied.identity.canonical_path.0.clone());
-        self.active_file_metadata = Some(ActiveFileMetadata {
-            identity: applied.identity,
+        let metadata = ActiveFileMetadata {
+            identity: applied.identity.clone(),
             fingerprint: applied.fingerprint,
             file_content_version: applied.file_content_version,
             workspace_generation: applied.workspace_generation,
             modified_at: applied.modified_at,
             file_length: applied.file_length,
-        });
+        };
+        self.active_file_id = Some(applied.identity.file_id);
+        self.active_file_path = Some(applied.identity.canonical_path.0.clone());
+        self.active_file_metadata = Some(metadata.clone());
+        if let Some(buffer_id) = self.active_buffer_id {
+            self.buffer_file_metadata.insert(buffer_id, metadata);
+        }
+    }
+
+    fn metadata_for_buffer(&self, buffer_id: BufferId) -> Option<&ActiveFileMetadata> {
+        self.buffer_file_metadata.get(&buffer_id).or_else(|| {
+            if self.active_buffer_id == Some(buffer_id) {
+                self.active_file_metadata.as_ref()
+            } else {
+                None
+            }
+        })
     }
 
     fn ensure_active_buffer(&self, target: BufferId) -> Result<(), AppCompositionError> {
@@ -2467,10 +2564,11 @@ impl AppComposition {
         trust: WorkspaceTrustState,
         principal: PrincipalId,
     ) -> Result<WorkspaceOpened, AppCompositionError> {
+        let root_path = CanonicalPath(root.as_ref().to_string_lossy().into_owned());
         let request = WorkspaceOpenRequest {
             correlation_id: self.correlation_generator.next(),
             principal_id: principal.clone(),
-            root_path: CanonicalPath(root.as_ref().to_string_lossy().into_owned()),
+            root_path: root_path.clone(),
             trust: Some(trust.clone()),
         };
 
@@ -2488,7 +2586,7 @@ impl AppComposition {
             }
         };
         self.active_documents
-            .bind_workspace(opened.clone(), principal, trust);
+            .bind_workspace(opened.clone(), root_path, principal, trust);
         Ok(opened)
     }
 
@@ -2684,6 +2782,104 @@ impl AppComposition {
     /// Expose active workspace id.
     pub fn workspace_id(&self) -> Option<WorkspaceId> {
         self.active_documents.workspace_id()
+    }
+
+    /// Plan and preflight a batch proposal without mutating editor buffers or workspace state.
+    ///
+    /// Stage 1D deliberately separates planning from runtime mutation: this API validates batch
+    /// shape, target coverage, dependency graph, rollback/atomicity boundaries, route support, and
+    /// current editor/workspace preconditions. It does not call apply helpers or workspace mutation
+    /// methods, and `runtime_apply_disabled` remains true until batch commit/rollback contracts are
+    /// proven by a later stage.
+    pub fn preflight_batch_proposal(&self, proposal: &WorkspaceProposal) -> BatchPreflightPlan {
+        let mut plan = BatchPreflightPlan {
+            proposal_id: proposal.proposal_id,
+            batch_id: None,
+            preflight_ok: false,
+            runtime_apply_disabled: true,
+            atomicity: None,
+            rollback_policy: None,
+            items: Vec::new(),
+            diagnostics: Vec::new(),
+            preview_warnings: vec![Self::batch_warning(
+                "proposal.batch_runtime_apply_disabled",
+                ProposalPreviewWarningKind::UnsupportedRuntime,
+                "batch runtime mutation remains fail-closed in Stage 1D",
+                None,
+            )],
+            partial_failures: Vec::new(),
+        };
+
+        let ProposalPayload::Batch(batch) = &proposal.payload else {
+            plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.batch_preflight_non_batch",
+                "batch preflight requires ProposalPayload::Batch",
+            ));
+            return plan;
+        };
+
+        plan.batch_id = Some(batch.batch_id);
+        plan.atomicity = Some(batch.atomicity);
+        plan.rollback_policy = Some(batch.rollback_policy);
+        plan.preview_warnings
+            .extend(batch.preview_warnings.iter().cloned());
+        plan.partial_failures
+            .extend(batch.partial_failures.iter().cloned());
+
+        let coverage = AppProposalCoordinator::affected_target_coverage(proposal);
+        AppProposalCoordinator::push_common_validation_diagnostics(
+            proposal,
+            &coverage,
+            &mut plan.diagnostics,
+        );
+        AppProposalCoordinator::push_payload_validation_diagnostics(
+            proposal,
+            &mut plan.diagnostics,
+        );
+
+        let workspace_tree = self.read_workspace_tree_for_preflight(&mut plan.diagnostics);
+        self.preflight_batch_structure(batch, &mut plan);
+
+        let coverage_ids = batch
+            .target_coverage
+            .targets
+            .iter()
+            .map(|target| target.target_id.as_str())
+            .collect::<HashSet<_>>();
+        let mut items = batch.items.iter().collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.item_id.cmp(&right.item_id))
+        });
+
+        for item in items {
+            let item_plan = self.preflight_batch_item(
+                proposal,
+                batch,
+                item,
+                &coverage_ids,
+                workspace_tree.as_deref(),
+            );
+            if !item_plan.preflight_ok {
+                for diagnostic in &item_plan.diagnostics {
+                    plan.partial_failures.push(Self::planning_failure(
+                        &item.item_id,
+                        item.target_ids.first().map_or("", String::as_str),
+                        diagnostic.clone(),
+                    ));
+                }
+            }
+            plan.items.push(item_plan);
+        }
+
+        plan.preflight_ok = plan.diagnostics.is_empty()
+            && plan.items.iter().all(|item| item.preflight_ok)
+            && plan
+                .partial_failures
+                .iter()
+                .all(|failure| failure.diagnostics.is_empty());
+        plan
     }
 
     /// Expose storage repository port for integration validation and future wiring.
@@ -2929,7 +3125,7 @@ impl AppComposition {
     ) -> Result<VersionContext, AppCompositionError> {
         let buffer_version = self.editor.buffer_version(buffer_id)?;
         let snapshot_id = self.editor.current_snapshot(buffer_id)?.snapshot_id;
-        let metadata = self.active_documents.active_file_metadata.as_ref();
+        let metadata = self.active_documents.metadata_for_buffer(buffer_id);
         Ok(VersionContext {
             file_version: metadata
                 .map(|metadata| metadata.file_content_version)
@@ -3213,6 +3409,790 @@ impl AppComposition {
     /// Build deterministic affected-target coverage for a proposal without executing it.
     pub fn proposal_target_coverage(&self, proposal: &WorkspaceProposal) -> ProposalTargetCoverage {
         AppProposalCoordinator::affected_target_coverage(proposal)
+    }
+
+    fn preflight_batch_structure(
+        &self,
+        batch: &BatchProposalPayload,
+        plan: &mut BatchPreflightPlan,
+    ) {
+        if batch.items.is_empty() {
+            plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.empty_batch",
+                "batch preflight requires at least one item",
+            ));
+        }
+        if batch.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
+            || batch.target_coverage.targets.is_empty()
+            || batch.target_coverage.omitted_target_count != 0
+        {
+            plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.incomplete_target_coverage",
+                "batch preflight requires complete non-empty target coverage with no omissions",
+            ));
+        }
+
+        let mut item_ids = HashSet::new();
+        for item in &batch.items {
+            if item.item_id.trim().is_empty() || !item_ids.insert(item.item_id.as_str()) {
+                plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.invalid_batch_item_id",
+                    format!("batch item id '{}' is empty or duplicated", item.item_id),
+                ));
+            }
+        }
+
+        let mut target_ids = HashSet::new();
+        for target in &batch.target_coverage.targets {
+            if target.target_id.trim().is_empty() || !target_ids.insert(target.target_id.as_str()) {
+                plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.invalid_batch_target_id",
+                    format!(
+                        "batch target id '{}' is empty or duplicated",
+                        target.target_id
+                    ),
+                ));
+            }
+            if !matches!(
+                target.kind,
+                ProposalTargetKind::OpenBuffer
+                    | ProposalTargetKind::ClosedFile
+                    | ProposalTargetKind::PathOnly
+            ) {
+                plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.unsupported_batch_target_kind",
+                    format!(
+                        "batch target {} kind {:?} is not executable in Stage 1D preflight",
+                        target.target_id, target.kind
+                    ),
+                ));
+            }
+        }
+
+        for edge in &batch.dependency_edges {
+            if !item_ids.contains(edge.prerequisite_item_id.as_str())
+                || !item_ids.contains(edge.dependent_item_id.as_str())
+            {
+                plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.unknown_batch_dependency",
+                    format!(
+                        "dependency edge {} -> {} references an unknown item id",
+                        edge.prerequisite_item_id, edge.dependent_item_id
+                    ),
+                ));
+            }
+        }
+        if Self::batch_has_dependency_cycle(batch, &item_ids) {
+            plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.batch_dependency_cycle",
+                "batch dependency graph contains a cycle",
+            ));
+        }
+
+        if batch.atomicity == ProposalBatchAtomicity::AllOrNothing
+            || batch.rollback_policy == ProposalBatchRollbackPolicy::Required
+        {
+            let rollback_steps = batch
+                .rollback_steps
+                .iter()
+                .map(|step| (step.step_id.as_str(), step))
+                .collect::<HashMap<_, _>>();
+            for item in &batch.items {
+                if item.rollback_step_ids.is_empty()
+                    || item
+                        .rollback_step_ids
+                        .iter()
+                        .any(|step_id| !rollback_steps.contains_key(step_id.as_str()))
+                {
+                    plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                        "proposal.missing_rollback_proof",
+                        format!(
+                            "batch item {} lacks resolvable rollback step ids required by atomicity/rollback policy",
+                            item.item_id
+                        ),
+                    ));
+                }
+                for step_id in &item.rollback_step_ids {
+                    if let Some(step) = rollback_steps.get(step_id.as_str())
+                        && (step.item_id != item.item_id
+                            || !item
+                                .target_ids
+                                .iter()
+                                .any(|target_id| target_id == &step.target_id)
+                            || matches!(
+                                step.action,
+                                devil_protocol::ProposalRollbackAction::Unsupported
+                            )
+                            || !step.diagnostics.is_empty())
+                    {
+                        plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                            "proposal.unresolved_rollback_step",
+                            format!(
+                                "rollback step {} does not exactly resolve for batch item {}",
+                                step.step_id, item.item_id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if batch.rollback_policy == ProposalBatchRollbackPolicy::NotSupported
+            && batch.atomicity != ProposalBatchAtomicity::OrderedNonAtomic
+        {
+            plan.diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.unsupported_rollback_policy",
+                "rollback NotSupported cannot be combined with stronger-than OrderedNonAtomic atomicity",
+            ));
+        }
+    }
+
+    fn batch_has_dependency_cycle(batch: &BatchProposalPayload, item_ids: &HashSet<&str>) -> bool {
+        fn visit<'a>(
+            node: &'a str,
+            edges: &HashMap<&'a str, Vec<&'a str>>,
+            visiting: &mut HashSet<&'a str>,
+            visited: &mut HashSet<&'a str>,
+        ) -> bool {
+            if visited.contains(node) {
+                return false;
+            }
+            if !visiting.insert(node) {
+                return true;
+            }
+            if let Some(next) = edges.get(node) {
+                for child in next {
+                    if visit(child, edges, visiting, visited) {
+                        return true;
+                    }
+                }
+            }
+            visiting.remove(node);
+            visited.insert(node);
+            false
+        }
+
+        let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+        for edge in &batch.dependency_edges {
+            if item_ids.contains(edge.prerequisite_item_id.as_str())
+                && item_ids.contains(edge.dependent_item_id.as_str())
+            {
+                edges
+                    .entry(edge.prerequisite_item_id.as_str())
+                    .or_default()
+                    .push(edge.dependent_item_id.as_str());
+            }
+        }
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        item_ids
+            .iter()
+            .any(|item_id| visit(item_id, &edges, &mut visiting, &mut visited))
+    }
+
+    fn preflight_batch_item(
+        &self,
+        proposal: &WorkspaceProposal,
+        batch: &BatchProposalPayload,
+        item: &ProposalBatchItem,
+        coverage_ids: &HashSet<&str>,
+        workspace_tree: Option<&[FileTreeNode]>,
+    ) -> BatchPreflightItemPlan {
+        let route = Self::batch_item_route(item.payload.as_ref());
+        let supported = matches!(
+            route,
+            BatchPreflightRoute::TextEdit
+                | BatchPreflightRoute::CreateFile
+                | BatchPreflightRoute::DeleteFile
+                | BatchPreflightRoute::RenameFile
+        );
+        let mut diagnostics = Vec::new();
+
+        if item.target_ids.is_empty() {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_batch_item_targets",
+                format!(
+                    "batch item {} requires at least one target id",
+                    item.item_id
+                ),
+            ));
+        }
+        for target_id in &item.target_ids {
+            if !coverage_ids.contains(target_id.as_str()) {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.unknown_batch_target",
+                    format!(
+                        "batch item {} references unknown target id {}",
+                        item.item_id, target_id
+                    ),
+                ));
+            }
+        }
+        if !supported {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.unsupported_batch_item_route",
+                format!(
+                    "batch item {} route {:?} is not executable in Stage 1D preflight",
+                    item.item_id, route
+                ),
+            ));
+        }
+        if item.required_capability.0.trim().is_empty() {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_batch_item_capability",
+                format!(
+                    "batch item {} requires a non-empty capability",
+                    item.item_id
+                ),
+            ));
+        }
+        if let Some(expected) = Self::batch_item_required_capability(route)
+            && item.required_capability.0 != expected
+        {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.invalid_batch_item_capability",
+                format!(
+                    "batch item {} route {:?} requires {expected} capability",
+                    item.item_id, route
+                ),
+            ));
+        }
+
+        match item.payload.as_ref() {
+            ProposalPayload::TextEdit(payload) => {
+                self.preflight_text_edit_item(proposal, payload, &mut diagnostics)
+            }
+            ProposalPayload::CreateFile(payload) => {
+                self.preflight_create_file_item(proposal, payload, workspace_tree, &mut diagnostics)
+            }
+            ProposalPayload::DeleteFile(payload) => {
+                self.preflight_delete_file_item(proposal, payload, workspace_tree, &mut diagnostics)
+            }
+            ProposalPayload::RenameFile(payload) => {
+                self.preflight_rename_file_item(proposal, payload, workspace_tree, &mut diagnostics)
+            }
+            ProposalPayload::Batch(_)
+            | ProposalPayload::TerminalCommand(_)
+            | ProposalPayload::SaveFile(_)
+            | ProposalPayload::FormatFile(_)
+            | ProposalPayload::CodeAction(_)
+            | ProposalPayload::WorkspaceEdit(_) => {}
+        }
+
+        if batch.atomicity == ProposalBatchAtomicity::AllOrNothing
+            || batch.rollback_policy == ProposalBatchRollbackPolicy::Required
+        {
+            let rollback_steps = batch
+                .rollback_steps
+                .iter()
+                .map(|step| (step.step_id.as_str(), step))
+                .collect::<HashMap<_, _>>();
+            if item.rollback_step_ids.is_empty()
+                || item
+                    .rollback_step_ids
+                    .iter()
+                    .any(|step_id| !rollback_steps.contains_key(step_id.as_str()))
+            {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.missing_rollback_proof",
+                    format!("batch item {} has no exact rollback proof", item.item_id),
+                ));
+            }
+            for step_id in &item.rollback_step_ids {
+                if let Some(step) = rollback_steps.get(step_id.as_str())
+                    && (step.item_id != item.item_id
+                        || !item
+                            .target_ids
+                            .iter()
+                            .any(|target_id| target_id == &step.target_id)
+                        || matches!(
+                            step.action,
+                            devil_protocol::ProposalRollbackAction::Unsupported
+                        )
+                        || !step.diagnostics.is_empty())
+                {
+                    diagnostics.push(AppProposalCoordinator::diagnostic(
+                        "proposal.unresolved_rollback_step",
+                        format!(
+                            "rollback step {} does not exactly resolve for batch item {}",
+                            step.step_id, item.item_id
+                        ),
+                    ));
+                }
+            }
+        }
+
+        BatchPreflightItemPlan {
+            item_id: item.item_id.clone(),
+            order: item.order,
+            route,
+            supported,
+            preflight_ok: diagnostics.is_empty(),
+            target_ids: item.target_ids.clone(),
+            diagnostics,
+        }
+    }
+
+    fn batch_item_route(payload: &ProposalPayload) -> BatchPreflightRoute {
+        match payload {
+            ProposalPayload::TextEdit(_) => BatchPreflightRoute::TextEdit,
+            ProposalPayload::CreateFile(_) => BatchPreflightRoute::CreateFile,
+            ProposalPayload::DeleteFile(_) => BatchPreflightRoute::DeleteFile,
+            ProposalPayload::RenameFile(_) => BatchPreflightRoute::RenameFile,
+            ProposalPayload::Batch(_) => BatchPreflightRoute::Batch,
+            ProposalPayload::TerminalCommand(_) => BatchPreflightRoute::Terminal,
+            ProposalPayload::SaveFile(_) => BatchPreflightRoute::Save,
+            ProposalPayload::FormatFile(_) => BatchPreflightRoute::Format,
+            ProposalPayload::CodeAction(_) => BatchPreflightRoute::CodeAction,
+            ProposalPayload::WorkspaceEdit(_) => BatchPreflightRoute::WorkspaceEdit,
+        }
+    }
+
+    fn batch_item_required_capability(route: BatchPreflightRoute) -> Option<&'static str> {
+        match route {
+            BatchPreflightRoute::TextEdit => Some("editor.write"),
+            BatchPreflightRoute::CreateFile
+            | BatchPreflightRoute::DeleteFile
+            | BatchPreflightRoute::RenameFile => Some("fs.write"),
+            BatchPreflightRoute::Batch
+            | BatchPreflightRoute::Terminal
+            | BatchPreflightRoute::Save
+            | BatchPreflightRoute::Format
+            | BatchPreflightRoute::CodeAction
+            | BatchPreflightRoute::WorkspaceEdit
+            | BatchPreflightRoute::Unsupported => None,
+        }
+    }
+
+    fn read_workspace_tree_for_preflight(
+        &self,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) -> Option<Vec<FileTreeNode>> {
+        let workspace_id = self.active_documents.workspace_id()?;
+        match self
+            .workspace
+            .handle(WorkspaceRequest::ReadTree(workspace_id))
+        {
+            Ok(WorkspaceResponse::Tree(tree)) => Some(tree),
+            Ok(other) => {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.workspace_tree_unavailable",
+                    format!("expected workspace tree during preflight, got {other:?}"),
+                ));
+                None
+            }
+            Err(err) => {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.workspace_tree_unavailable",
+                    format!("workspace tree unavailable during preflight: {err:?}"),
+                ));
+                None
+            }
+        }
+    }
+
+    fn preflight_text_edit_item(
+        &self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::TextEditProposal,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        let Some(workspace_id) = self.active_documents.workspace_id() else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.workspace_missing",
+                "text-edit preflight requires an open workspace",
+            ));
+            return;
+        };
+        let Some(buffer_id) = self.editor.buffer_for_file(workspace_id, payload.file_id) else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.closed_file_text_edit_denied",
+                "text-edit preflight requires an open editor buffer",
+            ));
+            return;
+        };
+        let Ok(actual) = self.active_file_version_context(buffer_id) else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.editor_state_unavailable",
+                "text-edit preflight could not read editor version context",
+            ));
+            return;
+        };
+        if proposal.preconditions.buffer_version != Some(actual.buffer_version) {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.stale_buffer_version",
+                "text-edit preflight buffer version does not match current editor state",
+            ));
+        }
+        if proposal.preconditions.snapshot_id != Some(actual.snapshot_id) {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.stale_snapshot",
+                "text-edit preflight snapshot id does not match current editor state",
+            ));
+        }
+        self.preflight_optional_file_preconditions(proposal, &actual, diagnostics);
+
+        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.editor_state_unavailable",
+                "text-edit preflight could not read current snapshot descriptor",
+            ));
+            return;
+        };
+        for edit in &payload.edits.edits {
+            let Some(range) = edit.range.as_byte_range() else {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.invalid_text_edit_range",
+                    "text-edit preflight requires byte-coordinate ranges",
+                ));
+                continue;
+            };
+            if !range.is_valid() || range.end as usize > snapshot.byte_len {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.invalid_text_edit_range",
+                    "text-edit preflight range is outside the current snapshot byte length",
+                ));
+            }
+        }
+    }
+
+    fn preflight_optional_file_preconditions(
+        &self,
+        proposal: &WorkspaceProposal,
+        actual: &VersionContext,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        let preconditions = &proposal.preconditions;
+        if let Some(expected) = preconditions
+            .file_content_version
+            .or(preconditions.file_version)
+            && expected != actual.file_content_version
+        {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.stale_file_content_version",
+                "proposal file content version does not match current app context",
+            ));
+        }
+        if let Some(expected) = preconditions
+            .workspace_generation
+            .or(preconditions.generation)
+            && expected != actual.workspace_generation
+        {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.stale_workspace_generation",
+                "proposal workspace generation does not match current app context",
+            ));
+        }
+        if let Some(expected) = &preconditions.expected_fingerprint
+            && actual.fingerprint.as_ref() != Some(expected)
+        {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.stale_fingerprint",
+                "proposal expected fingerprint does not match current app context",
+            ));
+        }
+    }
+
+    fn preflight_create_file_item(
+        &self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::CreateFileProposal,
+        workspace_tree: Option<&[FileTreeNode]>,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        self.preflight_workspace_generation(proposal, diagnostics);
+        self.preflight_path_inside_workspace(&payload.path, "create-file", diagnostics);
+        if payload.path.0.trim().is_empty() {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_path_target",
+                "create-file preflight requires a destination path",
+            ));
+        }
+        if let Some(tree) = workspace_tree
+            && Self::tree_contains_path(tree, &payload.path)
+        {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.destination_exists",
+                "create-file preflight destination already exists in the workspace tree",
+            ));
+        }
+        if Path::new(&payload.path.0).exists() {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.destination_exists",
+                "create-file preflight destination already exists on disk",
+            ));
+        }
+    }
+
+    fn preflight_delete_file_item(
+        &self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::DeleteFileProposal,
+        workspace_tree: Option<&[FileTreeNode]>,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        self.preflight_closed_file_item(proposal, &payload.file, workspace_tree, diagnostics);
+    }
+
+    fn preflight_rename_file_item(
+        &self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::RenameFileProposal,
+        workspace_tree: Option<&[FileTreeNode]>,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        self.preflight_closed_file_item(proposal, &payload.file, workspace_tree, diagnostics);
+        self.preflight_path_inside_workspace(&payload.destination, "rename-file", diagnostics);
+        if payload.destination.0.trim().is_empty() {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_path_target",
+                "rename-file preflight requires a destination path",
+            ));
+        }
+        if let Some(tree) = workspace_tree
+            && Self::tree_contains_path(tree, &payload.destination)
+        {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.destination_exists",
+                "rename-file preflight destination already exists in the workspace tree",
+            ));
+        }
+        if Path::new(&payload.destination.0).exists() {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.destination_exists",
+                "rename-file preflight destination already exists on disk",
+            ));
+        }
+    }
+
+    fn preflight_closed_file_item(
+        &self,
+        proposal: &WorkspaceProposal,
+        file: &FileIdentity,
+        workspace_tree: Option<&[FileTreeNode]>,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        if self.reject_open_file_preflight(file) {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.open_file_workspace_mutation_denied",
+                "closed-file preflight denies mutation while the target file is open in the editor",
+            ));
+        }
+        let Some(node) = workspace_tree.and_then(|tree| Self::tree_node_for_file(tree, file))
+        else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.file_metadata_missing",
+                "closed-file preflight requires current workspace tree metadata for the target",
+            ));
+            return;
+        };
+        self.preflight_required_closed_file_preconditions(proposal, node, diagnostics);
+    }
+
+    fn preflight_workspace_generation(
+        &self,
+        proposal: &WorkspaceProposal,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        let Some(expected) = proposal
+            .preconditions
+            .workspace_generation
+            .or(proposal.preconditions.generation)
+        else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_workspace_precondition",
+                "preflight requires workspace generation precondition",
+            ));
+            return;
+        };
+        let Some(opened) = &self.active_documents.opened_workspace else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.workspace_missing",
+                "preflight requires an open workspace",
+            ));
+            return;
+        };
+        if expected != opened.generation {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.stale_workspace_generation",
+                "workspace generation precondition does not match current workspace",
+            ));
+        }
+    }
+
+    fn preflight_path_inside_workspace(
+        &self,
+        path: &CanonicalPath,
+        operation: &str,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        if path.0.trim().is_empty() {
+            return;
+        }
+        let Some(root) = self.active_documents.workspace_root_path.as_deref() else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.workspace_missing",
+                format!("{operation} preflight requires an open workspace root"),
+            ));
+            return;
+        };
+        if !Self::path_is_inside_root(&path.0, root) {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.path_outside_workspace",
+                format!("{operation} preflight path is outside the active workspace"),
+            ));
+        }
+    }
+
+    fn path_is_inside_root(path: &str, root: &str) -> bool {
+        let path = Path::new(path);
+        let root = Path::new(root);
+        if path == root {
+            return true;
+        }
+
+        if let (Ok(path), Ok(root)) = (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
+            return path.starts_with(root);
+        }
+
+        let path = Self::normalize_path_components(path);
+        let root = Self::normalize_path_components(root);
+        path.starts_with(root)
+    }
+
+    fn normalize_path_components(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+                Component::RootDir => normalized.push(component.as_os_str()),
+                Component::CurDir => {}
+                Component::Normal(part) => normalized.push(part),
+                Component::ParentDir => {
+                    if !normalized.pop() {
+                        normalized.push(Component::ParentDir.as_os_str());
+                    }
+                }
+            }
+        }
+        normalized
+    }
+
+    fn preflight_required_closed_file_preconditions(
+        &self,
+        proposal: &WorkspaceProposal,
+        node: &FileTreeNode,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        let Some(expected_file_version) = proposal
+            .preconditions
+            .file_content_version
+            .or(proposal.preconditions.file_version)
+        else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_file_precondition",
+                "closed-file preflight requires file content version precondition",
+            ));
+            return;
+        };
+        let Some(expected_generation) = proposal
+            .preconditions
+            .workspace_generation
+            .or(proposal.preconditions.generation)
+        else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_workspace_precondition",
+                "closed-file preflight requires workspace generation precondition",
+            ));
+            return;
+        };
+        let Some(expected_fingerprint) = &proposal.preconditions.expected_fingerprint else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.missing_fingerprint",
+                "closed-file preflight requires expected fingerprint precondition",
+            ));
+            return;
+        };
+
+        if expected_file_version != node.identity.content_version {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.stale_file_content_version",
+                "closed-file preflight file content version does not match workspace tree",
+            ));
+        }
+        if let Some(metadata) = &node.metadata {
+            if metadata.workspace_generation != Some(expected_generation) {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.stale_workspace_generation",
+                    "closed-file preflight workspace generation does not match workspace tree",
+                ));
+            }
+            if metadata.fingerprint.as_ref() != Some(expected_fingerprint) {
+                diagnostics.push(AppProposalCoordinator::diagnostic(
+                    "proposal.stale_fingerprint",
+                    "closed-file preflight fingerprint does not match workspace tree",
+                ));
+            }
+        } else {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.file_metadata_missing",
+                "closed-file preflight requires fingerprint metadata",
+            ));
+        }
+    }
+
+    fn reject_open_file_preflight(&self, file: &FileIdentity) -> bool {
+        self.editor
+            .buffer_for_file(file.workspace_id, file.file_id)
+            .or_else(|| {
+                self.editor
+                    .buffer_for_path(file.workspace_id, &file.canonical_path.0)
+            })
+            .is_some()
+    }
+
+    fn tree_node_for_file<'a>(
+        tree: &'a [FileTreeNode],
+        file: &FileIdentity,
+    ) -> Option<&'a FileTreeNode> {
+        tree.iter().find(|node| {
+            node.identity.file_id == file.file_id
+                || Self::paths_equivalent(&node.identity.canonical_path.0, &file.canonical_path.0)
+        })
+    }
+
+    fn tree_contains_path(tree: &[FileTreeNode], path: &CanonicalPath) -> bool {
+        tree.iter()
+            .any(|node| Self::paths_equivalent(&node.identity.canonical_path.0, &path.0))
+    }
+
+    fn batch_warning(
+        code: &str,
+        kind: ProposalPreviewWarningKind,
+        message: &str,
+        target_id: Option<String>,
+    ) -> ProposalPreviewWarning {
+        ProposalPreviewWarning {
+            code: code.to_string(),
+            kind,
+            message: message.to_string(),
+            target_id,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }
+    }
+
+    fn planning_failure(
+        item_id: &str,
+        target_id: &str,
+        diagnostic: ProtocolDiagnostic,
+    ) -> ProposalPartialFailureRecord {
+        ProposalPartialFailureRecord {
+            item_id: item_id.to_string(),
+            target_id: target_id.to_string(),
+            reason: ProposalFailureReason::ApplyFailed,
+            disposition: ProposalPartialFailureDisposition::FailedBeforeMutation,
+            diagnostics: vec![diagnostic],
+        }
     }
 
     fn apply_edit_to_buffer_with_correlation(

@@ -8,8 +8,8 @@ const FULL_CACHE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 use devil_app::{
     AppCommandExecutionState, AppCommandOutcome, AppCommandRequest, AppComposition,
-    AppEditorCommandPort, AppSaveOutcome, AppWorkspaceCommandPort, CommandDispatcher,
-    CommandExecutionService, OpenFileIntent,
+    AppEditorCommandPort, AppSaveOutcome, AppWorkspaceCommandPort, BatchPreflightRoute,
+    CommandDispatcher, CommandExecutionService, OpenFileIntent,
 };
 use devil_editor::{TextEdit, TextPosition};
 use devil_observability::{InMemoryEventSink, SharedEventSink};
@@ -18,9 +18,10 @@ use devil_protocol::{
     BatchProposalPayload, BufferId, BufferVersion, CanonicalPath, CapabilityId, CausalityId,
     ChangedTextRange, CorrelationId, EditBatch, EventEnvelope, FileConflictLifecycleState,
     FileContentVersion, FileId, FileIdentity, FileMetadata, FileTreeNode, PreviewSummary,
-    PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
-    ProposalBatchRollbackPolicy, ProposalDenialReason, ProposalId, ProposalPayload,
-    ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalStaleReason,
+    PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchDependency,
+    ProposalBatchDependencyKind, ProposalBatchItem, ProposalBatchRollbackPolicy,
+    ProposalDenialReason, ProposalId, ProposalPayload, ProposalRejectionReason, ProposalRequest,
+    ProposalResponse, ProposalRollbackAction, ProposalRollbackStep, ProposalStaleReason,
     ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
     ProposalVersionPreconditions, SnapshotId, TextOffset, TextRange, TextTransactionDescriptor,
     TimestampMillis, TransactionSource, ViewportProjectionMode, WorkspaceGeneration, WorkspaceId,
@@ -244,6 +245,54 @@ fn text_edit_payload(file_id: FileId, start: u64, end: u64) -> ProposalPayload {
             }],
         },
     })
+}
+
+fn preflight_target(
+    target_id: &str,
+    workspace_id: Option<WorkspaceId>,
+    file_id: Option<FileId>,
+    path: &Path,
+    kind: ProposalTargetKind,
+) -> ProposalAffectedTarget {
+    ProposalAffectedTarget {
+        target_id: target_id.to_string(),
+        kind,
+        workspace_id,
+        file_id,
+        buffer_id: None,
+        path: Some(CanonicalPath(path.to_string_lossy().into_owned())),
+        terminal_session_id: None,
+        plugin_id: None,
+        remote_authority: None,
+        collaboration_session_id: None,
+        byte_ranges: Vec::new(),
+        redaction_hints: Vec::new(),
+    }
+}
+
+fn batch_payload_for_test(
+    atomicity: ProposalBatchAtomicity,
+    rollback_policy: ProposalBatchRollbackPolicy,
+    targets: Vec<ProposalAffectedTarget>,
+    items: Vec<ProposalBatchItem>,
+) -> BatchProposalPayload {
+    BatchProposalPayload {
+        batch_id: Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap(),
+        atomicity,
+        rollback_policy,
+        target_coverage: ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets,
+            omitted_target_count: 0,
+            redaction_hints: Vec::new(),
+        },
+        items,
+        dependency_edges: Vec::new(),
+        rollback_steps: Vec::new(),
+        partial_failures: Vec::new(),
+        preview_warnings: Vec::new(),
+        schema_version: 1,
+    }
 }
 
 #[test]
@@ -993,6 +1042,663 @@ fn workspace_vfs_integration_open_file_delete_and_rename_are_denied() {
 }
 
 #[test]
+fn workspace_vfs_integration_batch_preflight_plans_supported_routes_without_side_effects() {
+    let root = create_root();
+    let open_path = root.join("open.txt");
+    let delete_path = root.join("delete.txt");
+    let rename_path = root.join("rename.txt");
+    let rename_destination = root.join("renamed.txt");
+    let create_path = root.join("created.txt");
+    std::fs::write(&open_path, "seed").expect("seed open");
+    std::fs::write(&delete_path, "seed").expect("seed delete");
+    std::fs::write(&rename_path, "seed").expect("seed rename");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let open_file_id = app
+        .open_file(open_path.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    let snapshot = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("current snapshot")
+        .clone();
+    let delete_node = workspace_node_by_name(&app, opened.workspace_id, "delete.txt");
+    let rename_node = workspace_node_by_name(&app, opened.workspace_id, "rename.txt");
+    let mut preconditions = file_preconditions(&delete_node, opened.generation);
+    preconditions.buffer_version = Some(snapshot.buffer_version);
+    preconditions.snapshot_id = Some(snapshot.snapshot_id);
+
+    let targets = vec![
+        preflight_target(
+            "target-create",
+            Some(opened.workspace_id),
+            None,
+            &create_path,
+            ProposalTargetKind::PathOnly,
+        ),
+        preflight_target(
+            "target-delete",
+            Some(opened.workspace_id),
+            Some(delete_node.identity.file_id),
+            &delete_path,
+            ProposalTargetKind::ClosedFile,
+        ),
+        preflight_target(
+            "target-rename",
+            Some(opened.workspace_id),
+            Some(rename_node.identity.file_id),
+            &rename_path,
+            ProposalTargetKind::ClosedFile,
+        ),
+        preflight_target(
+            "target-text",
+            Some(opened.workspace_id),
+            Some(open_file_id),
+            &open_path,
+            ProposalTargetKind::OpenBuffer,
+        ),
+    ];
+    let batch = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotRequired,
+        targets,
+        vec![
+            ProposalBatchItem {
+                order: 3,
+                item_id: "text".to_string(),
+                payload: Box::new(text_edit_payload(open_file_id, 0, 4)),
+                target_ids: vec!["target-text".to_string()],
+                required_capability: CapabilityId("editor.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 0,
+                item_id: "create".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath(create_path.to_string_lossy().into_owned()),
+                        initial_content: Some("new".to_string()),
+                    },
+                )),
+                target_ids: vec!["target-create".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 1,
+                item_id: "delete".to_string(),
+                payload: Box::new(ProposalPayload::DeleteFile(
+                    devil_protocol::DeleteFileProposal {
+                        file: delete_node.identity.clone(),
+                    },
+                )),
+                target_ids: vec!["target-delete".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 2,
+                item_id: "rename".to_string(),
+                payload: Box::new(ProposalPayload::RenameFile(
+                    devil_protocol::RenameFileProposal {
+                        file: rename_node.identity.clone(),
+                        destination: CanonicalPath(
+                            rename_destination.to_string_lossy().into_owned(),
+                        ),
+                    },
+                )),
+                target_ids: vec!["target-rename".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+        ],
+    );
+    let proposal = proposal_envelope_with(
+        ProposalId(731),
+        "fs.write",
+        ProposalPayload::Batch(batch),
+        preconditions,
+    );
+
+    let plan = app.preflight_batch_proposal(&proposal);
+
+    assert!(
+        plan.diagnostics.is_empty(),
+        "diagnostics: {:?}",
+        plan.diagnostics
+    );
+    assert!(plan.runtime_apply_disabled);
+    assert_eq!(
+        plan.items
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["create", "delete", "rename", "text"]
+    );
+    assert_eq!(plan.items[0].route, BatchPreflightRoute::CreateFile);
+    assert_eq!(plan.items[3].route, BatchPreflightRoute::TextEdit);
+    assert!(plan.items.iter().all(|item| item.supported));
+    assert!(!create_path.exists());
+    assert!(delete_path.exists());
+    assert!(rename_path.exists());
+    assert!(!rename_destination.exists());
+    assert_eq!(app.editor().text(buffer_id).expect("buffer text"), "seed");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_batch_preflight_rejects_unresolved_parent_traversal_without_mutation()
+{
+    let root = create_root();
+    let inside_path = root.join("new").join("deep").join("file.txt");
+    let outside_file_name = format!(
+        "devil-outside-{}.txt",
+        TEMP_ROOT_COUNTER.load(Ordering::Relaxed)
+    );
+    let outside_normalized = root.parent().expect("root parent").join(&outside_file_name);
+    let outside_path = root
+        .join("new")
+        .join("..")
+        .join("..")
+        .join(&outside_file_name);
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let batch = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotRequired,
+        vec![
+            preflight_target(
+                "target-inside",
+                Some(opened.workspace_id),
+                None,
+                &inside_path,
+                ProposalTargetKind::PathOnly,
+            ),
+            preflight_target(
+                "target-outside",
+                Some(opened.workspace_id),
+                None,
+                &outside_path,
+                ProposalTargetKind::PathOnly,
+            ),
+        ],
+        vec![
+            ProposalBatchItem {
+                order: 0,
+                item_id: "inside".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath(inside_path.to_string_lossy().into_owned()),
+                        initial_content: Some("inside".to_string()),
+                    },
+                )),
+                target_ids: vec!["target-inside".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 1,
+                item_id: "outside".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath(outside_path.to_string_lossy().into_owned()),
+                        initial_content: Some("outside".to_string()),
+                    },
+                )),
+                target_ids: vec!["target-outside".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+        ],
+    );
+    let proposal = proposal_envelope_with(
+        ProposalId(732),
+        "fs.write",
+        ProposalPayload::Batch(batch),
+        workspace_preconditions(opened.generation),
+    );
+
+    let plan = app.preflight_batch_proposal(&proposal);
+
+    assert!(!plan.preflight_ok);
+    assert!(
+        plan.items
+            .iter()
+            .any(|item| item.item_id == "inside" && item.preflight_ok)
+    );
+    assert!(plan.items.iter().any(|item| {
+        item.item_id == "outside"
+            && item
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "proposal.path_outside_workspace")
+    }));
+    assert!(!inside_path.exists());
+    assert!(!outside_normalized.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&outside_normalized);
+}
+
+#[test]
+fn workspace_vfs_integration_batch_preflight_rejects_invalid_envelope_and_item_capability() {
+    let root = create_root();
+    let target = root.join("created.txt");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let batch = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotRequired,
+        vec![preflight_target(
+            "target-create",
+            Some(opened.workspace_id),
+            None,
+            &target,
+            ProposalTargetKind::PathOnly,
+        )],
+        vec![ProposalBatchItem {
+            order: 0,
+            item_id: "create".to_string(),
+            payload: Box::new(ProposalPayload::CreateFile(
+                devil_protocol::CreateFileProposal {
+                    path: CanonicalPath(target.to_string_lossy().into_owned()),
+                    initial_content: Some("new".to_string()),
+                },
+            )),
+            target_ids: vec!["target-create".to_string()],
+            required_capability: CapabilityId("editor.write".to_string()),
+            rollback_step_ids: Vec::new(),
+        }],
+    );
+    let mut proposal = proposal_envelope_with(
+        ProposalId(733),
+        "",
+        ProposalPayload::Batch(batch),
+        workspace_preconditions(opened.generation),
+    );
+    proposal.principal = PrincipalId("   ".to_string());
+    proposal.correlation_id = CorrelationId(0);
+    proposal.preview.summary.clear();
+
+    let plan = app.preflight_batch_proposal(&proposal);
+
+    assert!(!plan.preflight_ok);
+    for expected in [
+        "proposal.missing_principal",
+        "proposal.missing_capability",
+        "proposal.zero_correlation_id",
+        "proposal.missing_preview",
+    ] {
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected),
+            "missing diagnostic {expected}: {:?}",
+            plan.diagnostics
+        );
+    }
+    assert!(plan.items.iter().any(|item| {
+        item.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.invalid_batch_item_capability")
+    }));
+    assert!(!target.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_batch_preflight_uses_non_active_buffer_metadata_for_text_edit() {
+    let root = create_root();
+    let first_path = root.join("first.txt");
+    let second_path = root.join("second.txt");
+    std::fs::write(&first_path, "first").expect("seed first");
+    std::fs::write(&second_path, "second").expect("seed second");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let first_file_id = app
+        .open_file(first_path.to_string_lossy())
+        .expect("open first file");
+    let first_buffer_id = app.active_buffer_id().expect("first buffer");
+    let first_snapshot = app
+        .editor()
+        .current_snapshot(first_buffer_id)
+        .expect("first snapshot")
+        .clone();
+    let first_node = workspace_node_by_name(&app, opened.workspace_id, "first.txt");
+    let mut preconditions = file_preconditions(&first_node, opened.generation);
+    preconditions.buffer_version = Some(first_snapshot.buffer_version);
+    preconditions.snapshot_id = Some(first_snapshot.snapshot_id);
+
+    app.open_file(second_path.to_string_lossy())
+        .expect("open second file");
+    assert_ne!(app.active_buffer_id(), Some(first_buffer_id));
+
+    let batch = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotRequired,
+        vec![preflight_target(
+            "target-first",
+            Some(opened.workspace_id),
+            Some(first_file_id),
+            &first_path,
+            ProposalTargetKind::OpenBuffer,
+        )],
+        vec![ProposalBatchItem {
+            order: 0,
+            item_id: "edit-first".to_string(),
+            payload: Box::new(ProposalPayload::TextEdit(
+                devil_protocol::TextEditProposal {
+                    file_id: first_file_id,
+                    edits: EditBatch {
+                        edits: vec![devil_protocol::TextEdit {
+                            range: TextRange::new(TextOffset::byte(0), TextOffset::byte(5)),
+                            replacement: "FIRST".to_string(),
+                        }],
+                    },
+                },
+            )),
+            target_ids: vec!["target-first".to_string()],
+            required_capability: CapabilityId("editor.write".to_string()),
+            rollback_step_ids: Vec::new(),
+        }],
+    );
+    let proposal = proposal_envelope_with(
+        ProposalId(734),
+        "editor.write",
+        ProposalPayload::Batch(batch),
+        preconditions,
+    );
+
+    let plan = app.preflight_batch_proposal(&proposal);
+
+    assert!(plan.preflight_ok, "plan diagnostics: {:?}", plan);
+    assert_eq!(
+        app.editor().text(first_buffer_id).expect("first text"),
+        "first"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_batch_preflight_rejects_dependency_errors_without_mutation() {
+    let app = AppComposition::new();
+    let target_path = Path::new("C:/repo/new.txt");
+    let targets = vec![preflight_target(
+        "target-create",
+        Some(WorkspaceId(11)),
+        None,
+        target_path,
+        ProposalTargetKind::PathOnly,
+    )];
+    let item = ProposalBatchItem {
+        order: 0,
+        item_id: "create".to_string(),
+        payload: Box::new(ProposalPayload::CreateFile(
+            devil_protocol::CreateFileProposal {
+                path: CanonicalPath(target_path.to_string_lossy().into_owned()),
+                initial_content: None,
+            },
+        )),
+        target_ids: vec!["target-create".to_string()],
+        required_capability: CapabilityId("fs.write".to_string()),
+        rollback_step_ids: Vec::new(),
+    };
+    let mut unknown = batch_payload_for_test(
+        ProposalBatchAtomicity::OrderedNonAtomic,
+        ProposalBatchRollbackPolicy::NotSupported,
+        targets.clone(),
+        vec![item.clone()],
+    );
+    unknown.dependency_edges.push(ProposalBatchDependency {
+        prerequisite_item_id: "missing".to_string(),
+        dependent_item_id: "create".to_string(),
+        kind: ProposalBatchDependencyKind::RequiresValidation,
+    });
+    let unknown_plan =
+        app.preflight_batch_proposal(&proposal_envelope(ProposalPayload::Batch(unknown)));
+    assert!(!unknown_plan.preflight_ok);
+    assert!(
+        unknown_plan
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.unknown_batch_dependency")
+    );
+
+    let mut cycle = batch_payload_for_test(
+        ProposalBatchAtomicity::OrderedNonAtomic,
+        ProposalBatchRollbackPolicy::NotSupported,
+        targets,
+        vec![
+            item,
+            ProposalBatchItem {
+                order: 1,
+                item_id: "second".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath("C:/repo/second.txt".to_string()),
+                        initial_content: None,
+                    },
+                )),
+                target_ids: vec!["target-create".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+        ],
+    );
+    cycle.dependency_edges = vec![
+        ProposalBatchDependency {
+            prerequisite_item_id: "create".to_string(),
+            dependent_item_id: "second".to_string(),
+            kind: ProposalBatchDependencyKind::RequiresValidation,
+        },
+        ProposalBatchDependency {
+            prerequisite_item_id: "second".to_string(),
+            dependent_item_id: "create".to_string(),
+            kind: ProposalBatchDependencyKind::RequiresValidation,
+        },
+    ];
+    let cycle_plan =
+        app.preflight_batch_proposal(&proposal_envelope(ProposalPayload::Batch(cycle)));
+    assert!(!cycle_plan.preflight_ok);
+    assert!(
+        cycle_plan
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.batch_dependency_cycle")
+    );
+    assert!(cycle_plan.partial_failures.iter().all(|failure| matches!(
+        failure.disposition,
+        devil_protocol::ProposalPartialFailureDisposition::FailedBeforeMutation
+    )));
+}
+
+#[test]
+fn workspace_vfs_integration_batch_preflight_rejects_missing_and_unknown_targets() {
+    let app = AppComposition::new();
+    let mut batch = batch_payload_for_test(
+        ProposalBatchAtomicity::OrderedNonAtomic,
+        ProposalBatchRollbackPolicy::NotSupported,
+        vec![preflight_target(
+            "known",
+            Some(WorkspaceId(11)),
+            None,
+            Path::new("C:/repo/new.txt"),
+            ProposalTargetKind::PathOnly,
+        )],
+        vec![
+            ProposalBatchItem {
+                order: 0,
+                item_id: "missing-targets".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath("C:/repo/new.txt".to_string()),
+                        initial_content: None,
+                    },
+                )),
+                target_ids: Vec::new(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 1,
+                item_id: "unknown-target".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath("C:/repo/other.txt".to_string()),
+                        initial_content: None,
+                    },
+                )),
+                target_ids: vec!["unknown".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+        ],
+    );
+    batch.target_coverage.omitted_target_count = 0;
+    let plan = app.preflight_batch_proposal(&proposal_envelope(ProposalPayload::Batch(batch)));
+
+    assert!(!plan.preflight_ok);
+    assert!(plan.items.iter().any(|item| {
+        item.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.missing_batch_item_targets")
+    }));
+    assert!(plan.items.iter().any(|item| {
+        item.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.unknown_batch_target")
+    }));
+    assert!(!plan.partial_failures.is_empty());
+}
+
+#[test]
+fn workspace_vfs_integration_batch_preflight_rejects_unproven_rollback_boundaries() {
+    let app = AppComposition::new();
+    let target_path = Path::new("C:/repo/new.txt");
+    let targets = vec![preflight_target(
+        "target-create",
+        Some(WorkspaceId(11)),
+        None,
+        target_path,
+        ProposalTargetKind::PathOnly,
+    )];
+    let item = ProposalBatchItem {
+        order: 0,
+        item_id: "create".to_string(),
+        payload: Box::new(ProposalPayload::CreateFile(
+            devil_protocol::CreateFileProposal {
+                path: CanonicalPath(target_path.to_string_lossy().into_owned()),
+                initial_content: None,
+            },
+        )),
+        target_ids: vec!["target-create".to_string()],
+        required_capability: CapabilityId("fs.write".to_string()),
+        rollback_step_ids: Vec::new(),
+    };
+    let all_or_nothing = batch_payload_for_test(
+        ProposalBatchAtomicity::AllOrNothing,
+        ProposalBatchRollbackPolicy::Required,
+        targets.clone(),
+        vec![item.clone()],
+    );
+    let plan =
+        app.preflight_batch_proposal(&proposal_envelope(ProposalPayload::Batch(all_or_nothing)));
+    assert!(!plan.preflight_ok);
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.missing_rollback_proof")
+    );
+
+    let not_supported_strong = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotSupported,
+        targets,
+        vec![ProposalBatchItem {
+            rollback_step_ids: vec!["rollback-create".to_string()],
+            ..item
+        }],
+    );
+    let plan = app.preflight_batch_proposal(&proposal_envelope(ProposalPayload::Batch(
+        not_supported_strong,
+    )));
+    assert!(!plan.preflight_ok);
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.unsupported_rollback_policy")
+    );
+
+    let mut proven = batch_payload_for_test(
+        ProposalBatchAtomicity::AllOrNothing,
+        ProposalBatchRollbackPolicy::Required,
+        vec![preflight_target(
+            "target-create",
+            Some(WorkspaceId(11)),
+            None,
+            target_path,
+            ProposalTargetKind::PathOnly,
+        )],
+        vec![ProposalBatchItem {
+            order: 0,
+            item_id: "create".to_string(),
+            payload: Box::new(ProposalPayload::CreateFile(
+                devil_protocol::CreateFileProposal {
+                    path: CanonicalPath(target_path.to_string_lossy().into_owned()),
+                    initial_content: None,
+                },
+            )),
+            target_ids: vec!["target-create".to_string()],
+            required_capability: CapabilityId("fs.write".to_string()),
+            rollback_step_ids: vec!["rollback-create".to_string()],
+        }],
+    );
+    proven.rollback_steps = vec![ProposalRollbackStep {
+        order: 0,
+        step_id: "rollback-create".to_string(),
+        item_id: "create".to_string(),
+        target_id: "target-create".to_string(),
+        action: ProposalRollbackAction::DeleteCreatedFile,
+        expected_preconditions: empty_preconditions(),
+        diagnostics: Vec::new(),
+    }];
+    let plan = app.preflight_batch_proposal(&proposal_envelope(ProposalPayload::Batch(proven)));
+    assert!(plan.runtime_apply_disabled);
+}
+
+#[test]
 fn workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview() {
     let root = create_root();
     let target = root.join("batch-created.txt");
@@ -1053,6 +1759,8 @@ fn workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview() {
         empty_preconditions(),
     );
 
+    let plan = app.preflight_batch_proposal(&proposal);
+    assert!(plan.runtime_apply_disabled);
     register_validate_preview(&mut app, &proposal);
     let response = app
         .handle_proposal_request(ProposalRequest::Apply(proposal))
