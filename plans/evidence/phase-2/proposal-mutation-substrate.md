@@ -104,6 +104,23 @@ Date: 2026-05-16
   - `workspace_vfs_integration_batch_preflight_rejects_unproven_rollback_boundaries`
   - `workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview` now preflights before apply and still verifies fail-closed runtime behavior.
 
+## Stage 1E batch execution safety contracts
+
+Date: 2026-05-16
+
+- Added `AppComposition::plan_batch_execution_contract()` with documented app-level DTOs for side-effect-free batch execution contracts: `BatchExecutionContract`, `BatchExecutionStageContract`, `BatchExecutionStage`, and `BatchExecutionItemContract`.
+- The contract reuses `preflight_batch_proposal()` and records ordered Prepare, Preflight, Mutate, Commit, Audit, Finalize, and Rollback stages. Mutate, Commit, Audit, Finalize, and Rollback remain blocked because runtime batch mutation is disabled and audit-before-success proof is not yet available.
+- Contract diagnostics and preview warnings explicitly state that Stage 1E planning is not runtime execution, so consumers cannot confuse preflight/contract planning with mutation.
+- Item contracts expose route, item id, target ids, preflight result, exact rollback-proof status, diagnostics, and partial-failure disposition in deterministic item order.
+- Strengthened rollback proof validation for `AllOrNothing` and rollback `Required` batches. Rollback steps must still resolve exactly to the owning item and target, and now the rollback action must match the item route: text edits require `EditorUndoGroup`, create-file requires `DeleteCreatedFile`, delete-file requires `RecreateDeletedFile`, and rename-file requires `RenamePathBack`.
+- Added deterministic dependency-blocked partial-failure records for downstream items that are not started because prerequisite items failed preflight. These records use `NotStarted` and are distinct from direct `FailedBeforeMutation` planning failures.
+- `ProposalPayload::Batch` runtime apply remains fail-closed/unsupported, `BatchPreflightPlan.runtime_apply_disabled` remains true, and no editor/workspace mutation helpers are called from batch contract planning.
+- Focused tests added or updated:
+  - `workspace_vfs_integration_batch_execution_contract_reports_audit_and_commit_barriers`
+  - `workspace_vfs_integration_batch_contract_rejects_mismatched_rollback_action`
+  - `workspace_vfs_integration_batch_contract_records_dependency_blocked_partial_failures`
+  - `workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview` now plans a successful contract first and still verifies unsupported apply leaves disk unchanged.
+
 ## Integration tests
 
 Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspace_vfs_integration.rs) with app-level Phase 2 regression coverage:
@@ -112,7 +129,7 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 - [`workspace_vfs_integration_batch_affected_targets_are_visited_in_item_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:515) verifies deterministic batch target derivation when explicit coverage is absent.
 - [`workspace_vfs_integration_batch_uses_explicit_target_coverage_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:599) verifies explicit batch target coverage order is preserved.
 - Stage 1C apply tests verify registered text-edit apply/stale behavior, closed-file workspace mutations, open-file mutation denial, and batch apply fail-closed behavior.
-- Stage 1D preflight tests verify supported-route batch planning metadata, dependency and cycle diagnostics, missing/unknown target diagnostics, rollback/atomicity boundary rejection, partial-failure records for planning failures, and no disk/editor mutation during planning.
+- Stage 1D/1E batch tests verify supported-route planning metadata, dependency and cycle diagnostics, missing/unknown target diagnostics, route-compatible rollback proof, audit-before-success/commit/finalize barriers, deterministic direct and dependency-blocked partial-failure records, and no disk/editor mutation during planning.
 - Existing stale/conflict, denial, failed-save, and dirty-buffer preservation tests remain in the same integration suite.
 
 ## Placeholder and dependency boundaries
@@ -124,19 +141,19 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 
 ## Remaining Phase 2 gaps
 
-- Runtime apply planning beyond manual saves, registered open-buffer text edits, closed-file create/delete/rename, and side-effect-free batch preflight remains denied until follow-on work separates apply, commit, rollback, and audit emission for each mutation class.
+- Runtime apply planning beyond manual saves, registered open-buffer text edits, closed-file create/delete/rename, and side-effect-free batch preflight/contract planning remains denied until follow-on work implements apply, commit, rollback, and audit emission for each mutation class.
 - Generic save apply remains intentionally denied until it can reuse the manual save workflow's editor text extraction, workspace preconditions, audit-before-success storage, and dirty-buffer preservation semantics.
-- Runtime batch mutation, batch rollback, multi-file atomicity, workspace-edit execution, format/code-action execution, and generic save execution remain future implementation work after the Stage 1D planning paths.
+- Runtime batch mutation, batch rollback, multi-file atomicity, workspace-edit execution, format/code-action execution, and generic save execution remain future implementation work after the Stage 1E contract paths.
 - Future AI, plugin, LSP, collaboration, terminal, and remote runtime apply paths remain denied until their ADR, dependency-policy, and contract-test gates exist.
 
 ## Validation
 
 Completed targeted validation retained from earlier Phase 2 subtasks plus Stage 1D:
 
-- `cargo fmt --all` — passed on 2026-05-16 after Stage 1D edits.
-- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 26 integration tests; 0 failed; 0 ignored.
-- `cargo check -p devil-app --all-targets` — passed.
-- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed.
+- `cargo fmt --all` — passed on 2026-05-16 after Stage 1E edits.
+- `cargo check -p devil-app --all-targets` — passed after Stage 1E edits.
+- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 32 integration tests; 0 failed; 0 ignored.
+- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed after Stage 1E edits.
 - `cargo test -p devil-protocol --test dto_contracts` — passed with 14 tests; 0 failed; 0 ignored.
 - `cargo check -p devil-app -p devil-observability --all-targets` — passed.
 

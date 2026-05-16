@@ -162,6 +162,88 @@ pub struct BatchPreflightItemPlan {
     pub diagnostics: Vec<ProtocolDiagnostic>,
 }
 
+/// Inspectable Stage 1E batch execution contract assembled without mutating app state.
+#[derive(Debug, Clone)]
+pub struct BatchExecutionContract {
+    /// Proposal id that was planned.
+    pub proposal_id: ProposalId,
+    /// Batch id when the proposal payload is a batch.
+    pub batch_id: Option<uuid::Uuid>,
+    /// The Stage 1D preflight plan reused as the contract's prepare/preflight basis.
+    pub preflight: BatchPreflightPlan,
+    /// Ordered execution stages and their current safety gates.
+    pub stages: Vec<BatchExecutionStageContract>,
+    /// True because Stage 1E still denies runtime batch mutation.
+    pub runtime_apply_disabled: bool,
+    /// True until a future mutator can prove safe commit semantics.
+    pub commit_blocked: bool,
+    /// True until mutation, commit, and audit proof are available.
+    pub finalize_blocked: bool,
+    /// True because future success responses must be preceded by durable audit proof.
+    pub audit_before_success_required: bool,
+    /// Per-item execution contracts derived from deterministic preflight item order.
+    pub items: Vec<BatchExecutionItemContract>,
+    /// Contract-level diagnostics that prevent interpreting planning as execution.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Contract-level preview warnings that prevent interpreting planning as execution.
+    pub preview_warnings: Vec<ProposalPreviewWarning>,
+    /// Deterministic partial-failure records for planning failures and blocked dependents.
+    pub partial_failures: Vec<ProposalPartialFailureRecord>,
+}
+
+/// One ordered Stage 1E execution stage gate.
+#[derive(Debug, Clone)]
+pub struct BatchExecutionStageContract {
+    /// Stage name in deterministic execution order.
+    pub stage: BatchExecutionStage,
+    /// Whether this stage is required before any future batch success response.
+    pub required: bool,
+    /// Whether the current implementation blocks this stage.
+    pub blocked: bool,
+    /// Diagnostics explaining why the stage is blocked or required.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// Stage 1E batch execution stages, ordered by contract evaluation sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchExecutionStage {
+    /// Build a deterministic execution plan from immutable proposal data.
+    Prepare,
+    /// Validate structure, routes, preconditions, dependencies, and rollback proof.
+    Preflight,
+    /// Mutate editor/workspace state. Disabled in Stage 1E.
+    Mutate,
+    /// Commit successful mutation results. Blocked while mutation is disabled.
+    Commit,
+    /// Persist audit evidence before success is observable.
+    Audit,
+    /// Return a future success/final state only after audit proof exists.
+    Finalize,
+    /// Roll back committed mutations exactly when required. Disabled in Stage 1E.
+    Rollback,
+}
+
+/// Per-item Stage 1E execution safety contract.
+#[derive(Debug, Clone)]
+pub struct BatchExecutionItemContract {
+    /// Stable item id from the batch payload.
+    pub item_id: String,
+    /// Application order from the batch item.
+    pub order: u32,
+    /// App-level route selected for the item payload.
+    pub route: BatchPreflightRoute,
+    /// Target ids referenced by this item.
+    pub target_ids: Vec<String>,
+    /// Whether preflight accepts the item before any mutation.
+    pub preflight_ok: bool,
+    /// Whether required rollback proof resolves exactly and is route-compatible.
+    pub exact_rollback_proof: bool,
+    /// The item's planning/blocked disposition when it cannot execute.
+    pub partial_failure_disposition: Option<ProposalPartialFailureDisposition>,
+    /// Diagnostics scoped to this item contract.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
 /// Route classification used by the Stage 1D batch preflight planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchPreflightRoute {
@@ -2873,6 +2955,8 @@ impl AppComposition {
             plan.items.push(item_plan);
         }
 
+        Self::append_dependency_blocked_failures(batch, &mut plan);
+
         plan.preflight_ok = plan.diagnostics.is_empty()
             && plan.items.iter().all(|item| item.preflight_ok)
             && plan
@@ -2880,6 +2964,78 @@ impl AppComposition {
                 .iter()
                 .all(|failure| failure.diagnostics.is_empty());
         plan
+    }
+
+    /// Build the Stage 1E batch execution safety contract without executing the batch.
+    ///
+    /// The contract deliberately reuses `preflight_batch_proposal()` and records the missing
+    /// mutation, commit, audit, finalize, and rollback proofs as data. It must not call editor or
+    /// workspace mutation helpers, and it must not be interpreted as permission to apply a batch.
+    pub fn plan_batch_execution_contract(
+        &self,
+        proposal: &WorkspaceProposal,
+    ) -> BatchExecutionContract {
+        let preflight = self.preflight_batch_proposal(proposal);
+        let batch = match &proposal.payload {
+            ProposalPayload::Batch(batch) => Some(batch),
+            _ => None,
+        };
+        let mut diagnostics = preflight.diagnostics.clone();
+        diagnostics.push(AppProposalCoordinator::diagnostic(
+            "proposal.batch_contract_runtime_apply_disabled",
+            "Stage 1E batch execution contract is preflight-only; runtime batch mutation remains disabled",
+        ));
+        diagnostics.push(AppProposalCoordinator::diagnostic(
+            "proposal.batch_contract_audit_before_success_required",
+            "future batch success requires audit proof before finalize or success response",
+        ));
+
+        let mut preview_warnings = preflight.preview_warnings.clone();
+        preview_warnings.push(Self::batch_warning(
+            "proposal.batch_contract_not_runtime_execution",
+            ProposalPreviewWarningKind::UnsupportedRuntime,
+            "Stage 1E contract planning is not runtime execution and cannot mutate editor or disk state",
+            None,
+        ));
+
+        let items = preflight
+            .items
+            .iter()
+            .map(|item| {
+                let exact_rollback_proof =
+                    batch.is_some_and(|batch| Self::item_has_exact_rollback_proof(batch, item));
+                let partial_failure_disposition = preflight
+                    .partial_failures
+                    .iter()
+                    .find(|failure| failure.item_id == item.item_id)
+                    .map(|failure| failure.disposition);
+                BatchExecutionItemContract {
+                    item_id: item.item_id.clone(),
+                    order: item.order,
+                    route: item.route,
+                    target_ids: item.target_ids.clone(),
+                    preflight_ok: item.preflight_ok,
+                    exact_rollback_proof,
+                    partial_failure_disposition,
+                    diagnostics: item.diagnostics.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        BatchExecutionContract {
+            proposal_id: preflight.proposal_id,
+            batch_id: preflight.batch_id,
+            stages: Self::batch_execution_stages(preflight.preflight_ok),
+            runtime_apply_disabled: preflight.runtime_apply_disabled,
+            commit_blocked: true,
+            finalize_blocked: true,
+            audit_before_success_required: true,
+            items,
+            partial_failures: preflight.partial_failures.clone(),
+            diagnostics,
+            preview_warnings,
+            preflight,
+        }
     }
 
     /// Expose storage repository port for integration validation and future wiring.
@@ -3519,9 +3675,9 @@ impl AppComposition {
                                 .target_ids
                                 .iter()
                                 .any(|target_id| target_id == &step.target_id)
-                            || matches!(
+                            || !Self::rollback_action_matches_route(
+                                Self::batch_item_route(item.payload.as_ref()),
                                 step.action,
-                                devil_protocol::ProposalRollbackAction::Unsupported
                             )
                             || !step.diagnostics.is_empty())
                     {
@@ -3545,6 +3701,214 @@ impl AppComposition {
                 "rollback NotSupported cannot be combined with stronger-than OrderedNonAtomic atomicity",
             ));
         }
+    }
+
+    fn batch_execution_stages(preflight_ok: bool) -> Vec<BatchExecutionStageContract> {
+        vec![
+            BatchExecutionStageContract {
+                stage: BatchExecutionStage::Prepare,
+                required: true,
+                blocked: false,
+                diagnostics: Vec::new(),
+            },
+            BatchExecutionStageContract {
+                stage: BatchExecutionStage::Preflight,
+                required: true,
+                blocked: !preflight_ok,
+                diagnostics: if preflight_ok {
+                    Vec::new()
+                } else {
+                    vec![AppProposalCoordinator::diagnostic(
+                        "proposal.batch_contract_preflight_failed",
+                        "batch execution cannot proceed because preflight did not pass",
+                    )]
+                },
+            },
+            BatchExecutionStageContract {
+                stage: BatchExecutionStage::Mutate,
+                required: true,
+                blocked: true,
+                diagnostics: vec![AppProposalCoordinator::diagnostic(
+                    "proposal.batch_runtime_apply_disabled",
+                    "runtime batch mutation remains disabled in Stage 1E",
+                )],
+            },
+            BatchExecutionStageContract {
+                stage: BatchExecutionStage::Commit,
+                required: true,
+                blocked: true,
+                diagnostics: vec![AppProposalCoordinator::diagnostic(
+                    "proposal.batch_commit_blocked",
+                    "batch commit is blocked until mutation results and rollback boundaries are proven",
+                )],
+            },
+            BatchExecutionStageContract {
+                stage: BatchExecutionStage::Audit,
+                required: true,
+                blocked: true,
+                diagnostics: vec![AppProposalCoordinator::diagnostic(
+                    "proposal.batch_audit_before_success_required",
+                    "batch success must be blocked until durable audit proof exists",
+                )],
+            },
+            BatchExecutionStageContract {
+                stage: BatchExecutionStage::Finalize,
+                required: true,
+                blocked: true,
+                diagnostics: vec![AppProposalCoordinator::diagnostic(
+                    "proposal.batch_finalize_blocked",
+                    "batch finalize is blocked until mutation, commit, and audit proof exist",
+                )],
+            },
+            BatchExecutionStageContract {
+                stage: BatchExecutionStage::Rollback,
+                required: true,
+                blocked: true,
+                diagnostics: vec![AppProposalCoordinator::diagnostic(
+                    "proposal.batch_rollback_runtime_disabled",
+                    "runtime batch rollback remains disabled while exact rollback is only contract-validated",
+                )],
+            },
+        ]
+    }
+
+    fn append_dependency_blocked_failures(
+        batch: &BatchProposalPayload,
+        plan: &mut BatchPreflightPlan,
+    ) {
+        let item_order = plan
+            .items
+            .iter()
+            .map(|item| (item.item_id.as_str(), item.order))
+            .collect::<HashMap<_, _>>();
+        let item_targets = plan
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.item_id.as_str(),
+                    item.target_ids.first().cloned().unwrap_or_default(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut blocked = plan
+            .items
+            .iter()
+            .filter(|item| !item.preflight_ok)
+            .map(|item| item.item_id.clone())
+            .collect::<HashSet<_>>();
+        let mut records = Vec::new();
+
+        loop {
+            let mut added = Vec::new();
+            for edge in &batch.dependency_edges {
+                if !matches!(
+                    edge.kind,
+                    devil_protocol::ProposalBatchDependencyKind::RequiresValidation
+                        | devil_protocol::ProposalBatchDependencyKind::RequiresApply
+                ) || !blocked.contains(&edge.prerequisite_item_id)
+                    || blocked.contains(&edge.dependent_item_id)
+                {
+                    continue;
+                }
+                added.push(edge.dependent_item_id.clone());
+                records.push(ProposalPartialFailureRecord {
+                    item_id: edge.dependent_item_id.clone(),
+                    target_id: item_targets
+                        .get(edge.dependent_item_id.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
+                    reason: ProposalFailureReason::ApplyFailed,
+                    disposition: ProposalPartialFailureDisposition::NotStarted,
+                    diagnostics: vec![AppProposalCoordinator::diagnostic(
+                        "proposal.batch_dependency_blocked",
+                        format!(
+                            "batch item {} was not started because prerequisite item {} failed preflight",
+                            edge.dependent_item_id, edge.prerequisite_item_id
+                        ),
+                    )],
+                });
+            }
+            if added.is_empty() {
+                break;
+            }
+            blocked.extend(added);
+        }
+
+        records.sort_by(|left, right| {
+            item_order
+                .get(left.item_id.as_str())
+                .copied()
+                .unwrap_or(u32::MAX)
+                .cmp(
+                    &item_order
+                        .get(right.item_id.as_str())
+                        .copied()
+                        .unwrap_or(u32::MAX),
+                )
+                .then_with(|| left.item_id.cmp(&right.item_id))
+                .then_with(|| left.target_id.cmp(&right.target_id))
+        });
+        plan.partial_failures.extend(records);
+    }
+
+    fn item_has_exact_rollback_proof(
+        batch: &BatchProposalPayload,
+        item_plan: &BatchPreflightItemPlan,
+    ) -> bool {
+        if batch.atomicity != ProposalBatchAtomicity::AllOrNothing
+            && batch.rollback_policy != ProposalBatchRollbackPolicy::Required
+        {
+            return false;
+        }
+        let Some(item) = batch
+            .items
+            .iter()
+            .find(|item| item.item_id == item_plan.item_id)
+        else {
+            return false;
+        };
+        if item.rollback_step_ids.is_empty() {
+            return false;
+        }
+        let rollback_steps = batch
+            .rollback_steps
+            .iter()
+            .map(|step| (step.step_id.as_str(), step))
+            .collect::<HashMap<_, _>>();
+        item.rollback_step_ids.iter().all(|step_id| {
+            rollback_steps.get(step_id.as_str()).is_some_and(|step| {
+                step.item_id == item.item_id
+                    && item
+                        .target_ids
+                        .iter()
+                        .any(|target_id| target_id == &step.target_id)
+                    && Self::rollback_action_matches_route(item_plan.route, step.action)
+                    && step.diagnostics.is_empty()
+            })
+        })
+    }
+
+    fn rollback_action_matches_route(
+        route: BatchPreflightRoute,
+        action: devil_protocol::ProposalRollbackAction,
+    ) -> bool {
+        matches!(
+            (route, action),
+            (
+                BatchPreflightRoute::TextEdit,
+                devil_protocol::ProposalRollbackAction::EditorUndoGroup
+            ) | (
+                BatchPreflightRoute::CreateFile,
+                devil_protocol::ProposalRollbackAction::DeleteCreatedFile
+            ) | (
+                BatchPreflightRoute::DeleteFile,
+                devil_protocol::ProposalRollbackAction::RecreateDeletedFile
+            ) | (
+                BatchPreflightRoute::RenameFile,
+                devil_protocol::ProposalRollbackAction::RenamePathBack
+            )
+        )
     }
 
     fn batch_has_dependency_cycle(batch: &BatchProposalPayload, item_ids: &HashSet<&str>) -> bool {
@@ -3705,10 +4069,7 @@ impl AppComposition {
                             .target_ids
                             .iter()
                             .any(|target_id| target_id == &step.target_id)
-                        || matches!(
-                            step.action,
-                            devil_protocol::ProposalRollbackAction::Unsupported
-                        )
+                        || !Self::rollback_action_matches_route(route, step.action)
                         || !step.diagnostics.is_empty())
                 {
                     diagnostics.push(AppProposalCoordinator::diagnostic(

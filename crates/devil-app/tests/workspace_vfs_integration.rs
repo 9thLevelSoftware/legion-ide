@@ -8,8 +8,8 @@ const FULL_CACHE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 use devil_app::{
     AppCommandExecutionState, AppCommandOutcome, AppCommandRequest, AppComposition,
-    AppEditorCommandPort, AppSaveOutcome, AppWorkspaceCommandPort, BatchPreflightRoute,
-    CommandDispatcher, CommandExecutionService, OpenFileIntent,
+    AppEditorCommandPort, AppSaveOutcome, AppWorkspaceCommandPort, BatchExecutionStage,
+    BatchPreflightRoute, CommandDispatcher, CommandExecutionService, OpenFileIntent,
 };
 use devil_editor::{TextEdit, TextPosition};
 use devil_observability::{InMemoryEventSink, SharedEventSink};
@@ -1699,17 +1699,304 @@ fn workspace_vfs_integration_batch_preflight_rejects_unproven_rollback_boundarie
 }
 
 #[test]
+fn workspace_vfs_integration_batch_execution_contract_reports_audit_and_commit_barriers() {
+    let root = create_root();
+    let target = root.join("contract-created.txt");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let batch = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotRequired,
+        vec![preflight_target(
+            "target-create",
+            Some(opened.workspace_id),
+            None,
+            &target,
+            ProposalTargetKind::PathOnly,
+        )],
+        vec![ProposalBatchItem {
+            order: 0,
+            item_id: "create".to_string(),
+            payload: Box::new(ProposalPayload::CreateFile(
+                devil_protocol::CreateFileProposal {
+                    path: CanonicalPath(target.to_string_lossy().into_owned()),
+                    initial_content: Some("contract".to_string()),
+                },
+            )),
+            target_ids: vec!["target-create".to_string()],
+            required_capability: CapabilityId("fs.write".to_string()),
+            rollback_step_ids: Vec::new(),
+        }],
+    );
+    let proposal = proposal_envelope_with(
+        ProposalId(736),
+        "fs.write",
+        ProposalPayload::Batch(batch),
+        workspace_preconditions(opened.generation),
+    );
+
+    let contract = app.plan_batch_execution_contract(&proposal);
+
+    assert!(contract.preflight.preflight_ok, "contract: {contract:?}");
+    assert!(contract.runtime_apply_disabled);
+    assert!(contract.audit_before_success_required);
+    assert!(contract.commit_blocked);
+    assert!(contract.finalize_blocked);
+    assert_eq!(contract.proposal_id, ProposalId(736));
+    assert_eq!(
+        contract.batch_id,
+        Some(Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap())
+    );
+    assert_eq!(contract.items.len(), 1);
+    assert!(contract.items[0].preflight_ok);
+    assert_eq!(contract.items[0].route, BatchPreflightRoute::CreateFile);
+    assert!(
+        contract
+            .preview_warnings
+            .iter()
+            .any(|warning| warning.code == "proposal.batch_contract_not_runtime_execution")
+    );
+    assert_eq!(
+        contract
+            .stages
+            .iter()
+            .map(|stage| stage.stage)
+            .collect::<Vec<_>>(),
+        vec![
+            BatchExecutionStage::Prepare,
+            BatchExecutionStage::Preflight,
+            BatchExecutionStage::Mutate,
+            BatchExecutionStage::Commit,
+            BatchExecutionStage::Audit,
+            BatchExecutionStage::Finalize,
+            BatchExecutionStage::Rollback,
+        ]
+    );
+    for required_blocked_stage in [
+        BatchExecutionStage::Mutate,
+        BatchExecutionStage::Commit,
+        BatchExecutionStage::Audit,
+        BatchExecutionStage::Finalize,
+        BatchExecutionStage::Rollback,
+    ] {
+        let stage = contract
+            .stages
+            .iter()
+            .find(|stage| stage.stage == required_blocked_stage)
+            .expect("stage present");
+        assert!(stage.required);
+        assert!(stage.blocked);
+        assert!(!stage.diagnostics.is_empty());
+    }
+    assert!(!target.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_batch_contract_rejects_mismatched_rollback_action() {
+    let root = create_root();
+    let target = root.join("rollback-created.txt");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let mut batch = batch_payload_for_test(
+        ProposalBatchAtomicity::AllOrNothing,
+        ProposalBatchRollbackPolicy::Required,
+        vec![preflight_target(
+            "target-create",
+            Some(opened.workspace_id),
+            None,
+            &target,
+            ProposalTargetKind::PathOnly,
+        )],
+        vec![ProposalBatchItem {
+            order: 0,
+            item_id: "create".to_string(),
+            payload: Box::new(ProposalPayload::CreateFile(
+                devil_protocol::CreateFileProposal {
+                    path: CanonicalPath(target.to_string_lossy().into_owned()),
+                    initial_content: Some("rollback".to_string()),
+                },
+            )),
+            target_ids: vec!["target-create".to_string()],
+            required_capability: CapabilityId("fs.write".to_string()),
+            rollback_step_ids: vec!["rollback-create".to_string()],
+        }],
+    );
+    batch.rollback_steps = vec![ProposalRollbackStep {
+        order: 0,
+        step_id: "rollback-create".to_string(),
+        item_id: "create".to_string(),
+        target_id: "target-create".to_string(),
+        action: ProposalRollbackAction::RestoreFileSnapshot,
+        expected_preconditions: empty_preconditions(),
+        diagnostics: Vec::new(),
+    }];
+    let proposal = proposal_envelope_with(
+        ProposalId(737),
+        "fs.write",
+        ProposalPayload::Batch(batch),
+        workspace_preconditions(opened.generation),
+    );
+
+    let contract = app.plan_batch_execution_contract(&proposal);
+
+    assert!(!contract.preflight.preflight_ok);
+    assert!(!contract.items[0].exact_rollback_proof);
+    assert!(
+        contract
+            .preflight
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "proposal.unresolved_rollback_step" })
+    );
+    assert!(
+        contract.items[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "proposal.unresolved_rollback_step" })
+    );
+    assert!(!target.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_batch_contract_records_dependency_blocked_partial_failures() {
+    let root = create_root();
+    let outside = root.join("..").join("contract-outside.txt");
+    let outside_normalized = root
+        .parent()
+        .expect("root parent")
+        .join("contract-outside.txt");
+    let dependent = root.join("dependent.txt");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let mut batch = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotRequired,
+        vec![
+            preflight_target(
+                "target-outside",
+                Some(opened.workspace_id),
+                None,
+                &outside,
+                ProposalTargetKind::PathOnly,
+            ),
+            preflight_target(
+                "target-dependent",
+                Some(opened.workspace_id),
+                None,
+                &dependent,
+                ProposalTargetKind::PathOnly,
+            ),
+        ],
+        vec![
+            ProposalBatchItem {
+                order: 0,
+                item_id: "outside".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath(outside.to_string_lossy().into_owned()),
+                        initial_content: Some("outside".to_string()),
+                    },
+                )),
+                target_ids: vec!["target-outside".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+            ProposalBatchItem {
+                order: 1,
+                item_id: "dependent".to_string(),
+                payload: Box::new(ProposalPayload::CreateFile(
+                    devil_protocol::CreateFileProposal {
+                        path: CanonicalPath(dependent.to_string_lossy().into_owned()),
+                        initial_content: Some("dependent".to_string()),
+                    },
+                )),
+                target_ids: vec!["target-dependent".to_string()],
+                required_capability: CapabilityId("fs.write".to_string()),
+                rollback_step_ids: Vec::new(),
+            },
+        ],
+    );
+    batch.dependency_edges.push(ProposalBatchDependency {
+        prerequisite_item_id: "outside".to_string(),
+        dependent_item_id: "dependent".to_string(),
+        kind: ProposalBatchDependencyKind::RequiresValidation,
+    });
+    let proposal = proposal_envelope_with(
+        ProposalId(738),
+        "fs.write",
+        ProposalPayload::Batch(batch),
+        workspace_preconditions(opened.generation),
+    );
+
+    let contract = app.plan_batch_execution_contract(&proposal);
+
+    assert!(!contract.preflight.preflight_ok);
+    assert_eq!(
+        contract
+            .partial_failures
+            .iter()
+            .map(|failure| (failure.item_id.as_str(), failure.disposition))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "outside",
+                devil_protocol::ProposalPartialFailureDisposition::FailedBeforeMutation,
+            ),
+            (
+                "dependent",
+                devil_protocol::ProposalPartialFailureDisposition::NotStarted,
+            ),
+        ]
+    );
+    assert_eq!(
+        contract.items[1].partial_failure_disposition,
+        Some(devil_protocol::ProposalPartialFailureDisposition::NotStarted)
+    );
+    assert!(!outside_normalized.exists());
+    assert!(!dependent.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&outside_normalized);
+}
+
+#[test]
 fn workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview() {
     let root = create_root();
     let target = root.join("batch-created.txt");
 
     let mut app = AppComposition::new();
-    app.open_workspace(
-        &root,
-        WorkspaceTrustState::Trusted,
-        PrincipalId("trusted".to_string()),
-    )
-    .expect("open workspace");
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
     let batch = BatchProposalPayload {
         batch_id: Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap(),
         atomicity: ProposalBatchAtomicity::OrderedNonAtomic,
@@ -1756,11 +2043,13 @@ fn workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview() {
         ProposalId(730),
         "fs.write",
         ProposalPayload::Batch(batch),
-        empty_preconditions(),
+        workspace_preconditions(opened.generation),
     );
 
-    let plan = app.preflight_batch_proposal(&proposal);
-    assert!(plan.runtime_apply_disabled);
+    let contract = app.plan_batch_execution_contract(&proposal);
+    assert!(contract.preflight.preflight_ok, "contract: {contract:?}");
+    assert!(contract.runtime_apply_disabled);
+    assert!(contract.audit_before_success_required);
     register_validate_preview(&mut app, &proposal);
     let response = app
         .handle_proposal_request(ProposalRequest::Apply(proposal))
