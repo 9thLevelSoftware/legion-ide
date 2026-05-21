@@ -7,5 +7,4 @@ publish.workspace = true
 
 [dependencies]
 devil-protocol = { workspace = true }
-devil-editor = { workspace = true }
 thiserror = { workspace = true }

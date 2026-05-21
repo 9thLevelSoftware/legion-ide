@@ -365,7 +365,6 @@ dependencies = [
 name = "devil-ui"
 version = "0.1.0"
 dependencies = [
- "devil-editor",
  "devil-protocol",
  "thiserror 2.0.18",
 ]

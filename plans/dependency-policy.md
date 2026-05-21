@@ -52,12 +52,15 @@ Every current workspace crate must have an explicit internal dependency policy e
 - `devil-editor` MUST NOT depend on `devil-project`.
 
 - `devil-ui` may depend on:
-  - `devil-editor`
   - `devil-protocol`
 
 - `devil-ui` MUST directly depend on:
-  - `devil-editor`
   - `devil-protocol`
+
+- `devil-ui` MUST NOT depend on `devil-app`.
+- `devil-ui` MUST NOT depend on `devil-editor`.
+- `devil-ui` MUST NOT depend on `devil-project`.
+- `devil-ui` MUST NOT depend on `devil-storage`.
 
 - `devil-app` may depend on:
   - `devil-editor`
@@ -148,6 +151,7 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
 ### 2. Shared Contracts Boundary
 
 - Cross-domain project/editor/indexer/tracker interactions should flow through `devil-protocol` types and traits.
+- UI shell code is projection-only: `devil-ui` consumes protocol projections, emits `CommandDispatchIntent`, and may not depend on editor, project, storage, or app crates for text ownership, command execution, save orchestration, or file authority.
 - The following boundary API symbols are authoritative in `devil-protocol`:
   - `ProjectId`
   - `WorkspaceId`
@@ -301,6 +305,10 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
 
 - Do not add hard edges from:
   - `devil-editor` -> `devil-project`
+  - `devil-ui` -> `devil-app`
+  - `devil-ui` -> `devil-editor`
+  - `devil-ui` -> `devil-project`
+  - `devil-ui` -> `devil-storage`
   - `devil-ui` -> feature crates beyond declared contracts
   - `devil-tracker` -> feature crates that are not storage-protocol mediated
   - `devil-memory` -> non-storage non-protocol feature domains without explicit planning

@@ -7,7 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use devil_editor::{EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, TextEdit};
+use devil_editor::{
+    EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, TextEdit, TextPosition,
+    TextRange as EditorTextRange,
+};
 use devil_observability::{
     SharedEventSink, event_metadata_record, proposal_applied_event, proposal_approved_event,
     proposal_audit_record, proposal_created_event, proposal_failed_event, proposal_previewed_event,
@@ -34,10 +37,10 @@ use devil_protocol::{
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
     ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, RedactionHint,
     SaveConflictPolicy, SaveFileProposal, SaveIntent, StorageRepositoryPort,
-    StorageRepositoryRequest, TextTransactionDescriptor, TimestampMillis, TransactionSource,
-    TrustDecisionContext, VersionContext, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
-    WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
-    WorkspaceTrustState,
+    StorageRepositoryRequest, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
+    TransactionSource, TrustDecisionContext, VersionContext, WorkspaceGeneration, WorkspaceId,
+    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
@@ -274,9 +277,13 @@ pub enum BatchPreflightRoute {
 impl EventContext {
     fn new(correlation_id: CorrelationId) -> Self {
         Self {
-            correlation_id,
+            correlation_id: Self::non_zero_correlation_id(correlation_id),
             causality_id: CausalityId(uuid::Uuid::now_v7()),
         }
+    }
+
+    fn non_zero_correlation_id(correlation_id: CorrelationId) -> CorrelationId {
+        CorrelationId(correlation_id.0.max(1))
     }
 }
 
@@ -532,7 +539,6 @@ impl AppProposalCoordinator {
             ) | (
                 ProposalLifecycleState::Validated,
                 ProposalLifecycleState::Previewed
-                    | ProposalLifecycleState::Approved
                     | ProposalLifecycleState::Denied
                     | ProposalLifecycleState::Rejected
                     | ProposalLifecycleState::Cancelled
@@ -556,7 +562,6 @@ impl AppProposalCoordinator {
                     | ProposalLifecycleState::Conflict
                     | ProposalLifecycleState::Cancelled
                     | ProposalLifecycleState::Failed
-                    | ProposalLifecycleState::RolledBack
             ) | (
                 ProposalLifecycleState::Applied,
                 ProposalLifecycleState::RolledBack
@@ -589,6 +594,21 @@ impl AppProposalCoordinator {
             return Err(self.missing_lifecycle_context_response(proposal, action));
         }
 
+        let context_diagnostics = self.lifecycle_context_diagnostics(proposal);
+        if !context_diagnostics.is_empty() {
+            return Err(self.invalid_lifecycle_context_response(
+                proposal,
+                action,
+                context_diagnostics,
+            ));
+        }
+
+        if proposal.is_expired(TimestampMillis::now())
+            && !Self::allows_expired_transition(lifecycle_state)
+        {
+            return Err(self.expired_lifecycle_response(proposal, action, diagnostics));
+        }
+
         match self.record_lifecycle_state(proposal.proposal_id, lifecycle_state) {
             Ok(()) => Ok(self.transition(proposal, lifecycle_state, diagnostics)),
             Err(current) => Err(self.invalid_lifecycle_transition_response(
@@ -598,6 +618,48 @@ impl AppProposalCoordinator {
                 lifecycle_state,
             )),
         }
+    }
+
+    fn allows_expired_transition(lifecycle_state: ProposalLifecycleState) -> bool {
+        matches!(
+            lifecycle_state,
+            ProposalLifecycleState::Created
+                | ProposalLifecycleState::Rejected
+                | ProposalLifecycleState::Denied
+                | ProposalLifecycleState::Failed
+                | ProposalLifecycleState::RolledBack
+                | ProposalLifecycleState::Stale
+                | ProposalLifecycleState::Conflict
+                | ProposalLifecycleState::Cancelled
+        )
+    }
+
+    fn lifecycle_context_diagnostics(
+        &self,
+        proposal: &WorkspaceProposal,
+    ) -> Vec<ProtocolDiagnostic> {
+        let mut diagnostics = Vec::new();
+        if proposal.correlation_id.0 == 0 {
+            diagnostics.push(Self::diagnostic(
+                "proposal.zero_correlation_id",
+                "proposal lifecycle transition requires a non-zero proposal correlation id",
+            ));
+        }
+        if let Some(context) = self.proposal_contexts.borrow().get(&proposal.proposal_id) {
+            if context.correlation_id.0 == 0 {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.lifecycle_context_zero_correlation_id",
+                    "proposal lifecycle context requires a non-zero correlation id",
+                ));
+            }
+            if context.causality_id.0.is_nil() {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.lifecycle_context_nil_causality_id",
+                    "proposal lifecycle context requires a non-nil causality id",
+                ));
+            }
+        }
+        diagnostics
     }
 
     fn record_observed_transition(&self, transition: &ProposalLifecycleTransition) {
@@ -612,11 +674,19 @@ impl AppProposalCoordinator {
         lifecycle_state: ProposalLifecycleState,
         diagnostics: Vec<ProtocolDiagnostic>,
     ) -> ProposalLifecycleTransition {
-        let causality_id = self
+        let context = self
             .proposal_contexts
             .borrow()
             .get(&proposal.proposal_id)
+            .copied();
+        let correlation_id = context
+            .map(|context| context.correlation_id)
+            .filter(|correlation_id| correlation_id.0 != 0)
+            .or_else(|| (proposal.correlation_id.0 != 0).then_some(proposal.correlation_id))
+            .unwrap_or(CorrelationId(1));
+        let causality_id = context
             .map(|context| context.causality_id)
+            .filter(|causality_id| !causality_id.0.is_nil())
             .unwrap_or_else(|| CausalityId(uuid::Uuid::now_v7()));
         ProposalLifecycleTransition {
             proposal_id: proposal.proposal_id,
@@ -624,7 +694,7 @@ impl AppProposalCoordinator {
             timestamp: TimestampMillis::now(),
             principal: proposal.principal.clone(),
             capability: proposal.capability.clone(),
-            correlation_id: proposal.correlation_id,
+            correlation_id,
             causality_id,
             diagnostics,
         }
@@ -680,12 +750,65 @@ impl AppProposalCoordinator {
         }
     }
 
+    fn invalid_lifecycle_context_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        action: &str,
+        mut diagnostics: Vec<ProtocolDiagnostic>,
+    ) -> ProposalResponse {
+        diagnostics.insert(
+            0,
+            Self::diagnostic(
+                "proposal.invalid_lifecycle_context",
+                format!(
+                    "proposal {action} requires non-zero correlation and non-nil causality lifecycle context"
+                ),
+            ),
+        );
+        ProposalResponse::Rejected {
+            transition: self.transition(proposal, ProposalLifecycleState::Rejected, diagnostics),
+            reason: ProposalRejectionReason::ValidationFailed,
+        }
+    }
+
+    fn expired_lifecycle_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        action: &str,
+        mut diagnostics: Vec<ProtocolDiagnostic>,
+    ) -> ProposalResponse {
+        diagnostics.insert(
+            0,
+            Self::diagnostic(
+                "proposal.expired",
+                format!("proposal {action} cannot proceed because the proposal is expired"),
+            ),
+        );
+        match self.record_lifecycle_state(proposal.proposal_id, ProposalLifecycleState::Rejected) {
+            Ok(()) => ProposalResponse::Rejected {
+                transition: self.transition(
+                    proposal,
+                    ProposalLifecycleState::Rejected,
+                    diagnostics,
+                ),
+                reason: ProposalRejectionReason::Expired,
+            },
+            Err(current) => self.invalid_lifecycle_transition_response(
+                proposal,
+                action,
+                current,
+                ProposalLifecycleState::Rejected,
+            ),
+        }
+    }
+
     fn missing_lifecycle_command_response(
+        &self,
         command: &ProposalLifecycleCommand,
         action: &str,
     ) -> ProposalResponse {
         ProposalResponse::Rejected {
-            transition: Self::transition_for_command(
+            transition: self.transition_for_command(
                 command,
                 ProposalLifecycleState::Rejected,
                 vec![Self::diagnostic(
@@ -700,13 +823,14 @@ impl AppProposalCoordinator {
     }
 
     fn invalid_lifecycle_command_response(
+        &self,
         command: &ProposalLifecycleCommand,
         action: &str,
         current: Option<ProposalLifecycleState>,
         next: ProposalLifecycleState,
     ) -> ProposalResponse {
         ProposalResponse::Rejected {
-            transition: Self::transition_for_command(
+            transition: self.transition_for_command(
                 command,
                 ProposalLifecycleState::Rejected,
                 vec![Self::diagnostic(
@@ -724,15 +848,18 @@ impl AppProposalCoordinator {
 
     fn affected_target_coverage_for_payload(payload: &ProposalPayload) -> ProposalTargetCoverage {
         if let ProposalPayload::Batch(batch) = payload
-            && (!batch.target_coverage.targets.is_empty()
-                || batch.target_coverage.omitted_target_count > 0
-                || batch.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete)
+            && Self::coverage_is_declared(&batch.target_coverage)
         {
             return batch.target_coverage.clone();
         }
+        if let ProposalPayload::WorkspaceEdit(workspace_edit) = payload
+            && Self::coverage_is_declared(&workspace_edit.target_coverage)
+        {
+            return workspace_edit.target_coverage.clone();
+        }
 
         let mut targets = Vec::new();
-        Self::visit_payload_targets(payload, &mut |target| targets.push(target));
+        Self::visit_inferred_payload_targets(payload, &mut |target| targets.push(target));
         ProposalTargetCoverage {
             coverage_kind: ProposalTargetCoverageKind::Complete,
             targets,
@@ -741,7 +868,19 @@ impl AppProposalCoordinator {
         }
     }
 
-    fn visit_payload_targets(
+    fn coverage_is_declared(coverage: &ProposalTargetCoverage) -> bool {
+        !coverage.targets.is_empty()
+            || coverage.omitted_target_count > 0
+            || coverage.coverage_kind != ProposalTargetCoverageKind::Complete
+    }
+
+    fn inferred_targets(payload: &ProposalPayload) -> Vec<ProposalAffectedTarget> {
+        let mut targets = Vec::new();
+        Self::visit_inferred_payload_targets(payload, &mut |target| targets.push(target));
+        targets
+    }
+
+    fn visit_inferred_payload_targets(
         payload: &ProposalPayload,
         visitor: &mut impl FnMut(ProposalAffectedTarget),
     ) {
@@ -755,7 +894,7 @@ impl AppProposalCoordinator {
                     .collect();
                 visitor(ProposalAffectedTarget {
                     target_id: format!("text-edit:file:{}", payload.file_id.0),
-                    kind: ProposalTargetKind::ClosedFile,
+                    kind: ProposalTargetKind::OpenBuffer,
                     workspace_id: None,
                     file_id: Some(payload.file_id),
                     buffer_id: None,
@@ -845,21 +984,73 @@ impl AppProposalCoordinator {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
             }),
             ProposalPayload::WorkspaceEdit(payload) => {
-                for target in &payload.target_coverage.targets {
-                    visitor(target.clone());
+                for edit in &payload.file_edits {
+                    let byte_ranges = edit
+                        .edits
+                        .edits
+                        .iter()
+                        .filter_map(|edit| edit.range.as_byte_range())
+                        .collect();
+                    visitor(Self::file_identity_target(
+                        format!("workspace-edit:text:file:{}", edit.file.file_id.0),
+                        if edit.buffer_id.is_some() {
+                            ProposalTargetKind::OpenBuffer
+                        } else {
+                            ProposalTargetKind::ClosedFile
+                        },
+                        &edit.file,
+                        edit.buffer_id,
+                        byte_ranges,
+                    ));
+                }
+                for operation in &payload.file_operations {
+                    match operation {
+                        devil_protocol::WorkspaceFileOperation::Create { path, .. } => {
+                            visitor(Self::path_target(
+                                format!("workspace-edit:create:path:{}", path.0),
+                                ProposalTargetKind::PathOnly,
+                                path.clone(),
+                                Vec::new(),
+                            ))
+                        }
+                        devil_protocol::WorkspaceFileOperation::Delete { file } => {
+                            visitor(Self::file_identity_target(
+                                format!("workspace-edit:delete:file:{}", file.file_id.0),
+                                ProposalTargetKind::ClosedFile,
+                                file,
+                                None,
+                                Vec::new(),
+                            ))
+                        }
+                        devil_protocol::WorkspaceFileOperation::Rename { file, destination } => {
+                            visitor(Self::file_identity_target(
+                                format!("workspace-edit:rename:source:{}", file.file_id.0),
+                                ProposalTargetKind::ClosedFile,
+                                file,
+                                None,
+                                Vec::new(),
+                            ));
+                            visitor(Self::path_target(
+                                format!("workspace-edit:rename:destination:{}", destination.0),
+                                ProposalTargetKind::PathOnly,
+                                destination.clone(),
+                                Vec::new(),
+                            ));
+                        }
+                    }
+                }
+                if payload.file_edits.is_empty() && payload.file_operations.is_empty() {
+                    for target in payload
+                        .target_coverage
+                        .targets
+                        .iter()
+                        .filter(|target| target.kind == ProposalTargetKind::MetadataOnly)
+                    {
+                        visitor(target.clone());
+                    }
                 }
             }
             ProposalPayload::Batch(payload) => {
-                if !payload.target_coverage.targets.is_empty()
-                    || payload.target_coverage.omitted_target_count > 0
-                    || payload.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
-                {
-                    for target in &payload.target_coverage.targets {
-                        visitor(target.clone());
-                    }
-                    return;
-                }
-
                 let mut items = payload.items.iter().collect::<Vec<_>>();
                 items.sort_by(|left, right| {
                     left.order
@@ -867,7 +1058,17 @@ impl AppProposalCoordinator {
                         .then_with(|| left.item_id.cmp(&right.item_id))
                 });
                 for item in items {
-                    Self::visit_payload_targets(item.payload.as_ref(), visitor);
+                    Self::visit_inferred_payload_targets(item.payload.as_ref(), visitor);
+                }
+                if payload.items.is_empty() {
+                    for target in payload
+                        .target_coverage
+                        .targets
+                        .iter()
+                        .filter(|target| target.kind == ProposalTargetKind::MetadataOnly)
+                    {
+                        visitor(target.clone());
+                    }
                 }
             }
         }
@@ -1004,11 +1205,414 @@ impl AppProposalCoordinator {
                 "proposal validation requires complete affected-target coverage before apply can be considered",
             ));
         }
+        if coverage.omitted_target_count != 0 {
+            diagnostics.push(Self::diagnostic(
+                "proposal.omitted_target_coverage",
+                "proposal validation requires zero omitted affected targets",
+            ));
+        }
         if coverage.targets.is_empty() {
             diagnostics.push(Self::diagnostic(
                 "proposal.missing_targets",
                 "proposal validation requires at least one affected target",
             ));
+        }
+    }
+
+    fn push_target_validation_diagnostics(
+        proposal: &WorkspaceProposal,
+        coverage: &ProposalTargetCoverage,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        let mut target_ids = HashSet::new();
+        let mut resource_keys = HashSet::new();
+        for target in &coverage.targets {
+            Self::push_single_target_validation_diagnostics(target, diagnostics);
+            if !target.target_id.trim().is_empty() && !target_ids.insert(target.target_id.as_str())
+            {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.duplicate_target",
+                    format!("affected target id '{}' is duplicated", target.target_id),
+                ));
+            }
+            if let Some(resource_key) = Self::target_resource_key(target)
+                && !resource_keys.insert(resource_key.clone())
+            {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.duplicate_target",
+                    format!("affected target resource '{resource_key}' is duplicated"),
+                ));
+            }
+        }
+
+        match &proposal.payload {
+            ProposalPayload::WorkspaceEdit(payload) => {
+                Self::push_declared_coverage_matches_payload(
+                    &payload.target_coverage,
+                    &Self::inferred_targets(&proposal.payload),
+                    diagnostics,
+                    "workspace-edit proposal",
+                );
+            }
+            ProposalPayload::Batch(payload) => {
+                Self::push_batch_coverage_validation_diagnostics(payload, coverage, diagnostics);
+            }
+            _ => {}
+        }
+    }
+
+    fn push_single_target_validation_diagnostics(
+        target: &ProposalAffectedTarget,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        if target.target_id.trim().is_empty() {
+            diagnostics.push(Self::diagnostic(
+                "proposal.unknown_target",
+                "affected target requires a stable non-empty target id",
+            ));
+        }
+        if target.workspace_id == Some(WorkspaceId(0)) {
+            diagnostics.push(Self::diagnostic(
+                "proposal.unknown_workspace_target",
+                format!("target {} has an unknown workspace id", target.target_id),
+            ));
+        }
+        if target.file_id == Some(FileId(0)) {
+            diagnostics.push(Self::diagnostic(
+                "proposal.unknown_file_target",
+                format!("target {} has an unknown file id", target.target_id),
+            ));
+        }
+        if target.buffer_id == Some(BufferId(0)) {
+            diagnostics.push(Self::diagnostic(
+                "proposal.unknown_buffer_target",
+                format!("target {} has an unknown buffer id", target.target_id),
+            ));
+        }
+        if target.terminal_session_id == Some(devil_protocol::TerminalSessionId(0)) {
+            diagnostics.push(Self::diagnostic(
+                "proposal.unknown_terminal_target",
+                format!(
+                    "target {} has an unknown terminal session id",
+                    target.target_id
+                ),
+            ));
+        }
+        if target
+            .path
+            .as_ref()
+            .is_some_and(|path| path.0.trim().is_empty())
+        {
+            diagnostics.push(Self::diagnostic(
+                "proposal.unknown_path_target",
+                format!("target {} has an empty path", target.target_id),
+            ));
+        }
+
+        let mut category_fields = 0;
+        category_fields += usize::from(target.file_id.is_some() || target.buffer_id.is_some());
+        category_fields += usize::from(target.terminal_session_id.is_some());
+        category_fields += usize::from(target.plugin_id.is_some());
+        category_fields += usize::from(target.remote_authority.is_some());
+        category_fields += usize::from(target.collaboration_session_id.is_some());
+        if category_fields > 1 {
+            diagnostics.push(Self::diagnostic(
+                "proposal.ambiguous_target",
+                format!(
+                    "target {} mixes multiple target authority categories",
+                    target.target_id
+                ),
+            ));
+        }
+
+        match target.kind {
+            ProposalTargetKind::OpenBuffer => {
+                if target.file_id.is_none() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.unknown_file_target",
+                        format!("open-buffer target {} requires a file id", target.target_id),
+                    ));
+                }
+            }
+            ProposalTargetKind::ClosedFile => {
+                if target.workspace_id.is_none()
+                    || target.file_id.is_none()
+                    || target.path.is_none()
+                {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.missing_file_identity_target",
+                        format!(
+                            "closed-file target {} requires workspace id, file id, and canonical path from file identity",
+                            target.target_id
+                        ),
+                    ));
+                }
+            }
+            ProposalTargetKind::PathOnly => {
+                if target.path.is_none() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.unknown_path_target",
+                        format!(
+                            "path-only target {} requires a canonical path",
+                            target.target_id
+                        ),
+                    ));
+                }
+            }
+            ProposalTargetKind::TerminalSession => {
+                if target.target_id == "terminal:new" && target.path.is_none() {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.unknown_terminal_target",
+                        "new terminal target requires a working-directory path for deterministic validation",
+                    ));
+                }
+            }
+            ProposalTargetKind::MetadataOnly => {
+                if target.file_id.is_some()
+                    || target.buffer_id.is_some()
+                    || target.path.is_some()
+                    || target.terminal_session_id.is_some()
+                    || target.plugin_id.is_some()
+                    || target.remote_authority.is_some()
+                    || target.collaboration_session_id.is_some()
+                {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.ambiguous_target",
+                        format!(
+                            "metadata-only target {} must not carry mutable authority fields",
+                            target.target_id
+                        ),
+                    ));
+                }
+            }
+            ProposalTargetKind::RemoteWorkspace
+            | ProposalTargetKind::CollaborationSession
+            | ProposalTargetKind::Plugin => {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.unsupported_target_kind",
+                    format!(
+                        "target {} kind {:?} is unsupported by app proposal validation",
+                        target.target_id, target.kind
+                    ),
+                ));
+            }
+        }
+    }
+
+    fn target_resource_key(target: &ProposalAffectedTarget) -> Option<String> {
+        match target.kind {
+            ProposalTargetKind::OpenBuffer | ProposalTargetKind::ClosedFile => {
+                target.file_id.map(|file_id| {
+                    format!(
+                        "file:{}:{}",
+                        target.workspace_id.map_or(0, |id| id.0),
+                        file_id.0
+                    )
+                })
+            }
+            ProposalTargetKind::PathOnly => {
+                target.path.as_ref().map(|path| format!("path:{}", path.0))
+            }
+            ProposalTargetKind::TerminalSession => Some(format!(
+                "terminal:{}:{}",
+                target.terminal_session_id.map_or(0, |id| id.0),
+                target.path.as_ref().map_or("", |path| path.0.as_str())
+            )),
+            ProposalTargetKind::MetadataOnly => Some(format!("metadata:{}", target.target_id)),
+            ProposalTargetKind::RemoteWorkspace => target
+                .remote_authority
+                .as_ref()
+                .map(|authority| format!("remote:{authority}")),
+            ProposalTargetKind::CollaborationSession => target
+                .collaboration_session_id
+                .as_ref()
+                .map(|session| format!("collaboration:{session}")),
+            ProposalTargetKind::Plugin => target
+                .plugin_id
+                .map(|plugin_id| format!("plugin:{}", plugin_id.0)),
+        }
+    }
+
+    fn target_resource_keys(targets: &[ProposalAffectedTarget]) -> HashSet<String> {
+        targets
+            .iter()
+            .filter_map(Self::target_resource_key)
+            .collect()
+    }
+
+    fn push_declared_coverage_matches_payload(
+        declared: &ProposalTargetCoverage,
+        inferred: &[ProposalAffectedTarget],
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+        context: &str,
+    ) {
+        if !Self::coverage_is_declared(declared) {
+            return;
+        }
+
+        let declared_keys = Self::target_resource_keys(&declared.targets);
+        let inferred_keys = Self::target_resource_keys(inferred);
+        if declared_keys != inferred_keys
+            && !Self::target_sets_equivalent(&declared.targets, inferred)
+        {
+            diagnostics.push(Self::diagnostic(
+                "proposal.target_coverage_mismatch",
+                format!(
+                    "{context} declared target coverage does not exactly match discovered payload targets"
+                ),
+            ));
+        }
+    }
+
+    fn push_batch_coverage_validation_diagnostics(
+        payload: &BatchProposalPayload,
+        coverage: &ProposalTargetCoverage,
+        diagnostics: &mut Vec<ProtocolDiagnostic>,
+    ) {
+        let inferred = Self::inferred_targets(&ProposalPayload::Batch(payload.clone()));
+        Self::push_declared_coverage_matches_payload(
+            coverage,
+            &inferred,
+            diagnostics,
+            "batch proposal",
+        );
+
+        let coverage_by_id = coverage
+            .targets
+            .iter()
+            .map(|target| (target.target_id.as_str(), target))
+            .collect::<HashMap<_, _>>();
+        let mut item_ids = HashSet::new();
+        for item in &payload.items {
+            if !item.item_id.trim().is_empty() && !item_ids.insert(item.item_id.as_str()) {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.duplicate_batch_item",
+                    format!("batch item id '{}' is duplicated", item.item_id),
+                ));
+            }
+
+            let route = Self::batch_item_validation_route(item.payload.as_ref());
+            if !matches!(
+                route,
+                BatchPreflightRoute::TextEdit
+                    | BatchPreflightRoute::CreateFile
+                    | BatchPreflightRoute::DeleteFile
+                    | BatchPreflightRoute::RenameFile
+            ) {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.unsupported_batch_item_route",
+                    format!(
+                        "batch item {} route {:?} is unsupported and validation fails closed",
+                        item.item_id, route
+                    ),
+                ));
+            }
+
+            let mut item_target_ids = HashSet::new();
+            for target_id in &item.target_ids {
+                if target_id.trim().is_empty() || !item_target_ids.insert(target_id.as_str()) {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.duplicate_batch_item_target",
+                        format!(
+                            "batch item {} has an empty or duplicated target id",
+                            item.item_id
+                        ),
+                    ));
+                }
+                if !coverage_by_id.contains_key(target_id.as_str()) {
+                    diagnostics.push(Self::diagnostic(
+                        "proposal.unknown_batch_target",
+                        format!(
+                            "batch item {} references unknown target id {}",
+                            item.item_id, target_id
+                        ),
+                    ));
+                }
+            }
+
+            let declared_targets = item
+                .target_ids
+                .iter()
+                .filter_map(|target_id| coverage_by_id.get(target_id.as_str()).copied())
+                .cloned()
+                .collect::<Vec<_>>();
+            let inferred_item_targets = Self::inferred_targets(item.payload.as_ref());
+            if Self::target_resource_keys(&declared_targets)
+                != Self::target_resource_keys(&inferred_item_targets)
+                && !Self::target_sets_equivalent(&declared_targets, &inferred_item_targets)
+            {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.batch_item_target_coverage_mismatch",
+                    format!(
+                        "batch item {} target ids do not exactly cover its discovered payload targets",
+                        item.item_id
+                    ),
+                ));
+            }
+        }
+    }
+
+    fn target_sets_equivalent(
+        declared: &[ProposalAffectedTarget],
+        inferred: &[ProposalAffectedTarget],
+    ) -> bool {
+        declared.len() == inferred.len()
+            && inferred.iter().all(|inferred_target| {
+                declared.iter().any(|declared_target| {
+                    Self::targets_equivalent(declared_target, inferred_target)
+                })
+            })
+            && declared.iter().all(|declared_target| {
+                inferred.iter().any(|inferred_target| {
+                    Self::targets_equivalent(declared_target, inferred_target)
+                })
+            })
+    }
+
+    fn targets_equivalent(left: &ProposalAffectedTarget, right: &ProposalAffectedTarget) -> bool {
+        match (left.kind, right.kind) {
+            (
+                ProposalTargetKind::OpenBuffer | ProposalTargetKind::ClosedFile,
+                ProposalTargetKind::OpenBuffer | ProposalTargetKind::ClosedFile,
+            ) => {
+                left.file_id == right.file_id
+                    && (left.workspace_id.is_none()
+                        || right.workspace_id.is_none()
+                        || left.workspace_id == right.workspace_id)
+            }
+            (ProposalTargetKind::PathOnly, ProposalTargetKind::PathOnly) => left.path == right.path,
+            (ProposalTargetKind::TerminalSession, ProposalTargetKind::TerminalSession) => {
+                left.terminal_session_id == right.terminal_session_id && left.path == right.path
+            }
+            (ProposalTargetKind::MetadataOnly, ProposalTargetKind::MetadataOnly) => {
+                left.target_id == right.target_id
+            }
+            (ProposalTargetKind::RemoteWorkspace, ProposalTargetKind::RemoteWorkspace) => {
+                left.remote_authority == right.remote_authority
+            }
+            (
+                ProposalTargetKind::CollaborationSession,
+                ProposalTargetKind::CollaborationSession,
+            ) => left.collaboration_session_id == right.collaboration_session_id,
+            (ProposalTargetKind::Plugin, ProposalTargetKind::Plugin) => {
+                left.plugin_id == right.plugin_id
+            }
+            _ => false,
+        }
+    }
+
+    fn batch_item_validation_route(payload: &ProposalPayload) -> BatchPreflightRoute {
+        match payload {
+            ProposalPayload::TextEdit(_) => BatchPreflightRoute::TextEdit,
+            ProposalPayload::CreateFile(_) => BatchPreflightRoute::CreateFile,
+            ProposalPayload::DeleteFile(_) => BatchPreflightRoute::DeleteFile,
+            ProposalPayload::RenameFile(_) => BatchPreflightRoute::RenameFile,
+            ProposalPayload::Batch(_) => BatchPreflightRoute::Batch,
+            ProposalPayload::TerminalCommand(_) => BatchPreflightRoute::Terminal,
+            ProposalPayload::SaveFile(_) => BatchPreflightRoute::Save,
+            ProposalPayload::FormatFile(_) => BatchPreflightRoute::Format,
+            ProposalPayload::CodeAction(_) => BatchPreflightRoute::CodeAction,
+            ProposalPayload::WorkspaceEdit(_) => BatchPreflightRoute::WorkspaceEdit,
         }
     }
 
@@ -1264,6 +1868,28 @@ impl AppProposalCoordinator {
                         false,
                     );
                 }
+                for operation in &payload.file_operations {
+                    match operation {
+                        devil_protocol::WorkspaceFileOperation::Create { .. } => {
+                            if Self::missing_workspace_generation(&proposal.preconditions) {
+                                diagnostics.push(Self::diagnostic(
+                                    "proposal.missing_workspace_precondition",
+                                    "workspace-edit create operation requires workspace generation precondition",
+                                ));
+                            }
+                        }
+                        devil_protocol::WorkspaceFileOperation::Delete { .. }
+                        | devil_protocol::WorkspaceFileOperation::Rename { .. } => {
+                            Self::push_file_precondition_diagnostics(
+                                &proposal.preconditions,
+                                diagnostics,
+                                "workspace-edit file operation",
+                                false,
+                                true,
+                            );
+                        }
+                    }
+                }
                 if payload.source == devil_protocol::WorkspaceEditSourceKind::Plugin {
                     diagnostics.push(Self::diagnostic(
                         "proposal.plugin_source_denied",
@@ -1340,18 +1966,20 @@ impl AppProposalCoordinator {
         let coverage = Self::affected_target_coverage(proposal);
         let route = ProposalExecutionRoute::for_payload(&proposal.payload, &coverage);
 
+        let mut diagnostics = Vec::new();
+        Self::push_common_validation_diagnostics(proposal, &coverage, &mut diagnostics);
+        Self::push_target_validation_diagnostics(proposal, &coverage, &mut diagnostics);
+        Self::push_payload_validation_diagnostics(proposal, &mut diagnostics);
+
         if matches!(
             route,
             ProposalExecutionRoute::Terminal
                 | ProposalExecutionRoute::Unsupported
                 | ProposalExecutionRoute::Mixed
-        ) {
+        ) && diagnostics.is_empty()
+        {
             return self.unsupported_response(proposal, "validate");
         }
-
-        let mut diagnostics = Vec::new();
-        Self::push_common_validation_diagnostics(proposal, &coverage, &mut diagnostics);
-        Self::push_payload_validation_diagnostics(proposal, &mut diagnostics);
 
         if diagnostics.is_empty() {
             match self.record_transition(proposal, ProposalLifecycleState::Validated, "validate") {
@@ -1375,18 +2003,40 @@ impl AppProposalCoordinator {
     }
 
     fn transition_for_command(
+        &self,
         command: &ProposalLifecycleCommand,
         lifecycle_state: ProposalLifecycleState,
         diagnostics: Vec<ProtocolDiagnostic>,
     ) -> ProposalLifecycleTransition {
+        let context = self
+            .proposal_contexts
+            .borrow()
+            .get(&command.proposal_id)
+            .copied();
+        let correlation_id = (command.correlation_id.0 != 0)
+            .then_some(command.correlation_id)
+            .or_else(|| {
+                context
+                    .map(|context| context.correlation_id)
+                    .filter(|correlation_id| correlation_id.0 != 0)
+            })
+            .unwrap_or(CorrelationId(1));
+        let causality_id = (!command.causality_id.0.is_nil())
+            .then_some(command.causality_id)
+            .or_else(|| {
+                context
+                    .map(|context| context.causality_id)
+                    .filter(|causality_id| !causality_id.0.is_nil())
+            })
+            .unwrap_or_else(|| CausalityId(uuid::Uuid::now_v7()));
         ProposalLifecycleTransition {
             proposal_id: command.proposal_id,
             lifecycle_state,
             timestamp: TimestampMillis::now(),
             principal: command.principal.clone(),
             capability: command.capability.clone(),
-            correlation_id: command.correlation_id,
-            causality_id: command.causality_id,
+            correlation_id,
+            causality_id,
             diagnostics,
         }
     }
@@ -1400,21 +2050,112 @@ impl AppProposalCoordinator {
     ) -> Result<ProposalLifecycleTransition, ProposalResponse> {
         let current = self.current_lifecycle_state(command.proposal_id);
         if current.is_none() {
-            return Err(Self::missing_lifecycle_command_response(command, action));
+            return Err(self.missing_lifecycle_command_response(command, action));
+        }
+
+        let context_diagnostics = self.lifecycle_command_context_diagnostics(command, action);
+        if !context_diagnostics.is_empty() {
+            return Err(self.invalid_lifecycle_command_context_response(
+                command,
+                action,
+                context_diagnostics,
+            ));
         }
 
         match self.record_lifecycle_state(command.proposal_id, lifecycle_state) {
-            Ok(()) => Ok(Self::transition_for_command(
+            Ok(()) => Ok(self.transition_for_command(
                 command,
                 lifecycle_state,
                 command.diagnostics.clone(),
             )),
-            Err(current) => Err(Self::invalid_lifecycle_command_response(
+            Err(current) => Err(self.invalid_lifecycle_command_response(
                 command,
                 action,
                 current,
                 lifecycle_state,
             )),
+        }
+    }
+
+    fn lifecycle_command_context_diagnostics(
+        &self,
+        command: &ProposalLifecycleCommand,
+        action: &str,
+    ) -> Vec<ProtocolDiagnostic> {
+        let mut diagnostics = Vec::new();
+        if command.correlation_id.0 == 0 {
+            diagnostics.push(Self::diagnostic(
+                "proposal.command_zero_correlation_id",
+                "proposal lifecycle command requires a non-zero correlation id",
+            ));
+        }
+        if command.causality_id.0.is_nil() {
+            diagnostics.push(Self::diagnostic(
+                "proposal.command_nil_causality_id",
+                "proposal lifecycle command requires a non-nil causality id",
+            ));
+        }
+        if !Self::command_action_matches_request(command, action) {
+            diagnostics.push(Self::diagnostic(
+                "proposal.lifecycle_command_action_mismatch",
+                format!(
+                    "proposal command action {:?} does not match request action {action}",
+                    command.action
+                ),
+            ));
+        }
+        if let Some(context) = self.proposal_contexts.borrow().get(&command.proposal_id) {
+            if context.correlation_id.0 == 0 {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.lifecycle_context_zero_correlation_id",
+                    "proposal lifecycle context requires a non-zero correlation id",
+                ));
+            }
+            if context.causality_id.0.is_nil() {
+                diagnostics.push(Self::diagnostic(
+                    "proposal.lifecycle_context_nil_causality_id",
+                    "proposal lifecycle context requires a non-nil causality id",
+                ));
+            }
+        }
+        diagnostics
+    }
+
+    fn command_action_matches_request(command: &ProposalLifecycleCommand, action: &str) -> bool {
+        matches!(
+            (command.action, action),
+            (devil_protocol::ProposalLifecycleAction::Approve, "approve")
+                | (devil_protocol::ProposalLifecycleAction::Reject, "reject")
+                | (devil_protocol::ProposalLifecycleAction::Cancel, "cancel")
+                | (
+                    devil_protocol::ProposalLifecycleAction::Rollback,
+                    "rollback"
+                )
+        )
+    }
+
+    fn invalid_lifecycle_command_context_response(
+        &self,
+        command: &ProposalLifecycleCommand,
+        action: &str,
+        mut diagnostics: Vec<ProtocolDiagnostic>,
+    ) -> ProposalResponse {
+        diagnostics.insert(
+            0,
+            Self::diagnostic(
+                "proposal.invalid_lifecycle_context",
+                format!(
+                    "proposal {action} requires non-zero correlation and non-nil causality lifecycle context"
+                ),
+            ),
+        );
+        ProposalResponse::Rejected {
+            transition: self.transition_for_command(
+                command,
+                ProposalLifecycleState::Rejected,
+                diagnostics,
+            ),
+            reason: ProposalRejectionReason::ValidationFailed,
         }
     }
 
@@ -1617,6 +2358,27 @@ impl ActiveDocumentController {
         if let Some(buffer_id) = self.active_buffer_id {
             self.buffer_file_metadata.insert(buffer_id, metadata);
         }
+    }
+
+    fn bind_saved_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        applied: devil_project::WorkspaceSaveApplied,
+    ) {
+        let metadata = ActiveFileMetadata {
+            identity: applied.identity.clone(),
+            fingerprint: applied.fingerprint,
+            file_content_version: applied.file_content_version,
+            workspace_generation: applied.workspace_generation,
+            modified_at: applied.modified_at,
+            file_length: applied.file_length,
+        };
+        if self.active_buffer_id == Some(buffer_id) {
+            self.active_file_id = Some(applied.identity.file_id);
+            self.active_file_path = Some(applied.identity.canonical_path.0.clone());
+            self.active_file_metadata = Some(metadata.clone());
+        }
+        self.buffer_file_metadata.insert(buffer_id, metadata);
     }
 
     fn metadata_for_buffer(&self, buffer_id: BufferId) -> Option<&ActiveFileMetadata> {
@@ -1950,12 +2712,15 @@ impl CommandDispatcher {
             } => Self::edit_request(
                 active,
                 buffer_id,
-                TextEdit::insert(at, text),
+                TextEdit::insert(Self::editor_position(at), text),
                 correlation_id,
             ),
-            CommandDispatchIntent::Delete { buffer_id, range } => {
-                Self::edit_request(active, buffer_id, TextEdit::delete(range), correlation_id)
-            }
+            CommandDispatchIntent::Delete { buffer_id, range } => Self::edit_request(
+                active,
+                buffer_id,
+                TextEdit::delete(Self::editor_range(range)),
+                correlation_id,
+            ),
             CommandDispatchIntent::Replace {
                 buffer_id,
                 range,
@@ -1963,7 +2728,7 @@ impl CommandDispatcher {
             } => Self::edit_request(
                 active,
                 buffer_id,
-                TextEdit::new(range, replacement),
+                TextEdit::new(Self::editor_range(range), replacement),
                 correlation_id,
             ),
             CommandDispatchIntent::Save { buffer_id } => {
@@ -1993,6 +2758,17 @@ impl CommandDispatcher {
             .ok_or(AppCompositionError::ActiveFileMissing)?;
 
         Ok(AppCommandRequest::ApplyEdit { buffer_id, edit })
+    }
+
+    fn editor_position(position: TextCoordinate) -> TextPosition {
+        TextPosition::new(position.line as usize, position.character as usize)
+    }
+
+    fn editor_range(range: devil_protocol::ProtocolTextRange) -> EditorTextRange {
+        EditorTextRange::new(
+            Self::editor_position(range.start),
+            Self::editor_position(range.end),
+        )
     }
 
     fn ensure_active_buffer(
@@ -3166,6 +3942,10 @@ impl AppComposition {
             ProposalPayload::RenameFile(payload) => {
                 self.apply_rename_file_proposal(&proposal, payload)
             }
+            ProposalPayload::SaveFile(payload) => self.apply_save_file_proposal(&proposal, payload),
+            ProposalPayload::WorkspaceEdit(payload) => {
+                self.apply_workspace_edit_proposal(&proposal, payload)
+            }
             ProposalPayload::Batch(_) => self
                 .proposal_coordinator
                 .unsupported_response(&proposal, "apply"),
@@ -3372,6 +4152,35 @@ impl AppComposition {
             })
     }
 
+    fn reject_open_path_mutation(
+        &self,
+        proposal: &WorkspaceProposal,
+        workspace_id: WorkspaceId,
+        path: &CanonicalPath,
+    ) -> Option<ProposalResponse> {
+        let open_buffer = self
+            .editor
+            .buffer_for_path(workspace_id, &path.0)
+            .or_else(|| {
+                let active_path = self.active_documents.active_file_path.as_deref()?;
+                if self.active_documents.workspace_id() == Some(workspace_id)
+                    && Self::paths_equivalent(active_path, &path.0)
+                {
+                    self.active_documents.active_buffer_id
+                } else {
+                    None
+                }
+            });
+
+        open_buffer.map(|_| {
+            self.denied_apply_response(
+                proposal,
+                "proposal.open_file_workspace_mutation_denied",
+                "closed-file workspace mutation is denied while the target path is open in the editor",
+            )
+        })
+    }
+
     fn paths_equivalent(left: &str, right: &str) -> bool {
         if left == right || Path::new(left) == Path::new(right) {
             return true;
@@ -3381,6 +4190,87 @@ impl AppComposition {
             (Ok(left), Ok(right)) => left == right,
             _ => false,
         }
+    }
+
+    fn stale_text_edit_precondition_response(
+        &self,
+        proposal: &WorkspaceProposal,
+        actual: &VersionContext,
+    ) -> Option<ProposalResponse> {
+        if proposal.preconditions.buffer_version != Some(actual.buffer_version) {
+            return Some(self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::BufferVersionMismatch,
+                Some(actual.clone()),
+                "buffer version changed before text edit apply",
+            ));
+        }
+        if proposal.preconditions.snapshot_id != Some(actual.snapshot_id) {
+            return Some(self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::SnapshotMismatch,
+                Some(actual.clone()),
+                "snapshot changed before text edit apply",
+            ));
+        }
+        if let Some(expected) = proposal
+            .preconditions
+            .file_content_version
+            .or(proposal.preconditions.file_version)
+            && expected != actual.file_content_version
+        {
+            return Some(self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::FileContentVersionMismatch,
+                Some(actual.clone()),
+                "file content version changed before text edit apply",
+            ));
+        }
+        if let Some(expected) = proposal
+            .preconditions
+            .workspace_generation
+            .or(proposal.preconditions.generation)
+            && expected != actual.workspace_generation
+        {
+            return Some(self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::WorkspaceGenerationMismatch,
+                Some(actual.clone()),
+                "workspace generation changed before text edit apply",
+            ));
+        }
+        if let Some(expected) = &proposal.preconditions.expected_fingerprint
+            && actual.fingerprint.as_ref() != Some(expected)
+        {
+            return Some(self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::FingerprintMismatch,
+                Some(actual.clone()),
+                "file fingerprint changed before text edit apply",
+            ));
+        }
+        if let Some(expected) = proposal.preconditions.expected_file_length
+            && actual.file_length != Some(expected)
+        {
+            return Some(self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::FileLengthMismatch,
+                Some(actual.clone()),
+                "file length changed before text edit apply",
+            ));
+        }
+        if let Some(expected) = proposal.preconditions.expected_modified_at
+            && actual.modified_at != Some(expected)
+        {
+            return Some(self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::ModifiedTimestampMismatch,
+                Some(actual.clone()),
+                "modified timestamp changed before text edit apply",
+            ));
+        }
+
+        None
     }
 
     fn apply_text_edit_proposal(
@@ -3415,21 +4305,8 @@ impl AppComposition {
                 );
             }
         };
-        if proposal.preconditions.buffer_version != Some(actual.buffer_version) {
-            return self.stale_apply_response(
-                proposal,
-                ProposalStaleReason::BufferVersionMismatch,
-                Some(actual),
-                "buffer version changed before text edit apply",
-            );
-        }
-        if proposal.preconditions.snapshot_id != Some(actual.snapshot_id) {
-            return self.stale_apply_response(
-                proposal,
-                ProposalStaleReason::SnapshotMismatch,
-                Some(actual),
-                "snapshot changed before text edit apply",
-            );
+        if let Some(response) = self.stale_text_edit_precondition_response(proposal, &actual) {
+            return response;
         }
 
         match self
@@ -3482,6 +4359,11 @@ impl AppComposition {
                 "create-file apply requires workspace generation precondition",
             );
         };
+        if let Some(response) =
+            self.reject_open_path_mutation(proposal, workspace_id, &payload.path)
+        {
+            return response;
+        }
         let request = WorkspaceCreateFileRequest {
             workspace_id,
             proposal_id: proposal.proposal_id,
@@ -3559,6 +4441,227 @@ impl AppComposition {
         match self.workspace.rename_file_with_proposal(request) {
             Ok(applied) => applied.response,
             Err(response) => response,
+        }
+    }
+
+    fn apply_save_file_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &SaveFileProposal,
+    ) -> ProposalResponse {
+        let workspace_id = match self.active_documents.require_workspace_id() {
+            Ok(workspace_id) => workspace_id,
+            Err(err) => {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.workspace_missing",
+                    err.to_string(),
+                );
+            }
+        };
+        if workspace_id != payload.file.workspace_id {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.workspace_mismatch",
+                "save-file proposal workspace does not match the active workspace",
+            );
+        }
+        let Some(buffer_id) = self
+            .editor
+            .buffer_for_file(workspace_id, payload.file_id)
+            .or_else(|| {
+                self.editor
+                    .buffer_for_path(workspace_id, &payload.file.canonical_path.0)
+            })
+        else {
+            return self.denied_apply_response(
+                proposal,
+                "proposal.closed_file_save_denied",
+                "save-file apply requires an open editor buffer as the text authority",
+            );
+        };
+        if buffer_id != payload.buffer_id {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.buffer_mismatch",
+                "save-file payload buffer id does not match the open editor buffer",
+            );
+        }
+        let actual = match self.active_file_version_context(buffer_id) {
+            Ok(actual) => actual,
+            Err(err) => {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.editor_state_unavailable",
+                    err.to_string(),
+                );
+            }
+        };
+        if payload.buffer_version != actual.buffer_version
+            || proposal.preconditions.buffer_version != Some(actual.buffer_version)
+        {
+            return self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::BufferVersionMismatch,
+                Some(actual),
+                "buffer version changed before save apply",
+            );
+        }
+        if payload.snapshot_id != actual.snapshot_id
+            || proposal.preconditions.snapshot_id != Some(actual.snapshot_id)
+        {
+            return self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::SnapshotMismatch,
+                Some(actual),
+                "snapshot changed before save apply",
+            );
+        }
+        if payload.file_content_version != actual.file_content_version
+            || proposal
+                .preconditions
+                .file_content_version
+                .or(proposal.preconditions.file_version)
+                != Some(actual.file_content_version)
+        {
+            return self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::FileContentVersionMismatch,
+                Some(actual),
+                "file content version changed before save apply",
+            );
+        }
+        if payload.workspace_generation != actual.workspace_generation
+            || proposal
+                .preconditions
+                .workspace_generation
+                .or(proposal.preconditions.generation)
+                != Some(actual.workspace_generation)
+        {
+            return self.stale_apply_response(
+                proposal,
+                ProposalStaleReason::WorkspaceGenerationMismatch,
+                Some(actual),
+                "workspace generation changed before save apply",
+            );
+        }
+        let Some(expected_fingerprint) = proposal
+            .preconditions
+            .expected_fingerprint
+            .clone()
+            .or_else(|| payload.expected_fingerprint.clone())
+        else {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.missing_fingerprint",
+                "save-file apply requires expected fingerprint precondition",
+            );
+        };
+
+        let save = match self
+            .editor
+            .request_save(buffer_id, Some(proposal.correlation_id))
+        {
+            Ok(save) => save,
+            Err(err) => {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.editor_save_payload_unavailable",
+                    err.to_string(),
+                );
+            }
+        };
+        let request = WorkspaceSaveRequest {
+            workspace_id,
+            proposal_id: proposal.proposal_id,
+            principal: proposal.principal.clone(),
+            required_capability: proposal.capability.clone(),
+            file_id: payload.file.file_id,
+            path: payload.file.canonical_path.clone(),
+            expected_fingerprint,
+            expected_file_content_version: payload.file_content_version,
+            expected_workspace_generation: payload.workspace_generation,
+            buffer_version: payload.buffer_version,
+            snapshot_id: payload.snapshot_id,
+            payload_byte_len: save.payload_byte_len,
+            correlation_id: proposal.correlation_id,
+            causality_id: self.proposal_causality_id(proposal),
+            text: save.text.clone(),
+        };
+
+        match self.workspace.save_file_with_proposal(request) {
+            Ok(applied) => {
+                self.editor
+                    .acknowledge_save_outcome(save.request_id, SaveAcknowledgement::Saved);
+                self.active_documents
+                    .bind_saved_buffer(buffer_id, applied.clone());
+                applied.response
+            }
+            Err(response) => {
+                self.editor.acknowledge_save_outcome(
+                    save.request_id,
+                    acknowledgement_for_response(&response),
+                );
+                response
+            }
+        }
+    }
+
+    fn apply_workspace_edit_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::WorkspaceEditProposalPayload,
+    ) -> ProposalResponse {
+        if !payload.file_edits.is_empty() || payload.file_operations.len() != 1 {
+            return self
+                .proposal_coordinator
+                .unsupported_response(proposal, "apply");
+        }
+        let workspace_id = match self.active_documents.require_workspace_id() {
+            Ok(workspace_id) => workspace_id,
+            Err(err) => {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.workspace_missing",
+                    err.to_string(),
+                );
+            }
+        };
+        if payload.workspace_id != workspace_id {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.workspace_mismatch",
+                "workspace-edit payload workspace does not match the active workspace",
+            );
+        }
+
+        match &payload.file_operations[0] {
+            devil_protocol::WorkspaceFileOperation::Create {
+                path,
+                initial_content_hash,
+            } => {
+                if initial_content_hash.is_some() {
+                    return self
+                        .proposal_coordinator
+                        .unsupported_response(proposal, "apply");
+                }
+                let create = devil_protocol::CreateFileProposal {
+                    path: path.clone(),
+                    initial_content: Some(String::new()),
+                };
+                self.apply_create_file_proposal(proposal, &create)
+            }
+            devil_protocol::WorkspaceFileOperation::Delete { file } => {
+                let delete = devil_protocol::DeleteFileProposal { file: file.clone() };
+                self.apply_delete_file_proposal(proposal, &delete)
+            }
+            devil_protocol::WorkspaceFileOperation::Rename { file, destination } => {
+                let rename = devil_protocol::RenameFileProposal {
+                    file: file.clone(),
+                    destination: destination.clone(),
+                };
+                self.apply_rename_file_proposal(proposal, &rename)
+            }
         }
     }
 
@@ -4666,6 +5769,39 @@ mod tests {
         }
     }
 
+    fn register_created(coordinator: &AppProposalCoordinator, proposal: &WorkspaceProposal) {
+        coordinator
+            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
+        assert!(matches!(
+            coordinator.created_response(proposal),
+            ProposalResponse::Created(_)
+        ));
+    }
+
+    fn assert_transition_diagnostic(response: &ProposalResponse, expected_code: &str) {
+        let diagnostics = match response {
+            ProposalResponse::Created(transition)
+            | ProposalResponse::Validated(transition)
+            | ProposalResponse::Approved(transition)
+            | ProposalResponse::Applied(transition) => &transition.diagnostics,
+            ProposalResponse::Previewed { transition, .. } => &transition.diagnostics,
+            ProposalResponse::Rejected { transition, .. }
+            | ProposalResponse::Denied { transition, .. }
+            | ProposalResponse::Failed { transition, .. }
+            | ProposalResponse::RolledBack { transition, .. }
+            | ProposalResponse::Stale { transition, .. }
+            | ProposalResponse::Conflict { transition, .. }
+            | ProposalResponse::Cancelled { transition, .. } => &transition.diagnostics,
+        };
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected_code),
+            "expected diagnostic {expected_code}, got {diagnostics:?}"
+        );
+    }
+
     fn text_edit_proposal(proposal_id: ProposalId) -> WorkspaceProposal {
         WorkspaceProposal {
             proposal_id,
@@ -4704,16 +5840,97 @@ mod tests {
         }
     }
 
+    fn test_file(file_id: u128, path: &str) -> FileIdentity {
+        FileIdentity {
+            file_id: FileId(file_id),
+            workspace_id: WorkspaceId(1),
+            canonical_path: CanonicalPath(path.to_string()),
+            content_version: FileContentVersion(1),
+            content_hash: None,
+        }
+    }
+
+    fn complete_file_preconditions() -> ProposalVersionPreconditions {
+        ProposalVersionPreconditions {
+            file_version: Some(FileContentVersion(1)),
+            buffer_version: Some(devil_protocol::BufferVersion(1)),
+            snapshot_id: Some(devil_protocol::SnapshotId(1)),
+            generation: Some(WorkspaceGeneration(1)),
+            file_content_version: Some(FileContentVersion(1)),
+            workspace_generation: Some(WorkspaceGeneration(1)),
+            expected_fingerprint: Some(FileFingerprint {
+                algorithm: "test".to_string(),
+                value: "hash:test".to_string(),
+            }),
+            expected_file_length: None,
+            expected_modified_at: None,
+        }
+    }
+
+    fn proposal_with(
+        proposal_id: ProposalId,
+        capability: &str,
+        payload: ProposalPayload,
+    ) -> WorkspaceProposal {
+        WorkspaceProposal {
+            proposal_id,
+            principal: PrincipalId("trusted".to_string()),
+            capability: CapabilityId(capability.to_string()),
+            correlation_id: CorrelationId(1),
+            payload,
+            preconditions: complete_file_preconditions(),
+            preview: PreviewSummary {
+                summary: "test proposal".to_string(),
+                details: Vec::new(),
+            },
+            expires_at: None,
+            created_at: TimestampMillis(1),
+        }
+    }
+
+    fn workspace_edit_payload() -> ProposalPayload {
+        let path = CanonicalPath("C:/repo/workspace-created.rs".to_string());
+        ProposalPayload::WorkspaceEdit(devil_protocol::WorkspaceEditProposalPayload {
+            workspace_id: WorkspaceId(1),
+            edit_id: uuid::Uuid::now_v7(),
+            title: "workspace create".to_string(),
+            source: devil_protocol::WorkspaceEditSourceKind::User,
+            target_coverage: ProposalTargetCoverage {
+                coverage_kind: ProposalTargetCoverageKind::Complete,
+                targets: vec![AppProposalCoordinator::path_target(
+                    "workspace-create".to_string(),
+                    ProposalTargetKind::PathOnly,
+                    path.clone(),
+                    Vec::new(),
+                )],
+                omitted_target_count: 0,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            },
+            file_edits: Vec::new(),
+            file_operations: vec![devil_protocol::WorkspaceFileOperation::Create {
+                path,
+                initial_content_hash: None,
+            }],
+            required_capability: CapabilityId("fs.write".to_string()),
+            diagnostics: Vec::new(),
+            schema_version: 1,
+        })
+    }
+
+    fn terminal_payload() -> ProposalPayload {
+        ProposalPayload::TerminalCommand(devil_protocol::TerminalCommandProposal {
+            session_id: Some(devil_protocol::TerminalSessionId(7)),
+            command: "cargo test".to_string(),
+            cwd: Some(CanonicalPath("C:/repo".to_string())),
+            env: HashMap::new(),
+        })
+    }
+
     #[test]
     fn proposal_coordinator_enforces_preview_after_validation() {
         let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
         let proposal = save_proposal(ProposalId(1));
-        coordinator
-            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
-        assert!(matches!(
-            coordinator.created_response(&proposal),
-            ProposalResponse::Created(_)
-        ));
+        register_created(&coordinator, &proposal);
 
         let preview = coordinator
             .handle(ProposalRequest::Preview(proposal.clone()))
@@ -4737,6 +5954,203 @@ mod tests {
             .handle(ProposalRequest::Preview(proposal))
             .expect("preview response");
         assert!(matches!(preview, ProposalResponse::Previewed { .. }));
+    }
+
+    #[test]
+    fn proposal_coordinator_allows_created_validated_previewed_approved_applied_path() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = save_proposal(ProposalId(10));
+        register_created(&coordinator, &proposal);
+
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
+            Ok(ProposalResponse::Validated(_))
+        ));
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
+            Ok(ProposalResponse::Previewed { .. })
+        ));
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Approve(command(
+                proposal.proposal_id,
+                devil_protocol::ProposalLifecycleAction::Approve,
+            ))),
+            Ok(ProposalResponse::Approved(_))
+        ));
+
+        let transition = coordinator
+            .record_transition(&proposal, ProposalLifecycleState::Applied, "apply")
+            .expect("approved proposal can apply");
+        assert_eq!(transition.lifecycle_state, ProposalLifecycleState::Applied);
+        assert_eq!(
+            coordinator.current_lifecycle_state(proposal.proposal_id),
+            Some(ProposalLifecycleState::Applied)
+        );
+    }
+
+    #[test]
+    fn proposal_coordinator_allows_validated_denied_path() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = save_proposal(ProposalId(11));
+        register_created(&coordinator, &proposal);
+
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
+            Ok(ProposalResponse::Validated(_))
+        ));
+        let transition = coordinator
+            .record_transition_with_diagnostics(
+                &proposal,
+                ProposalLifecycleState::Denied,
+                "validate",
+                vec![AppProposalCoordinator::diagnostic(
+                    "proposal.validation_denied",
+                    "test validation denial",
+                )],
+            )
+            .expect("validated proposal can deny");
+        assert_eq!(transition.lifecycle_state, ProposalLifecycleState::Denied);
+        assert!(
+            transition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "proposal.validation_denied")
+        );
+    }
+
+    #[test]
+    fn proposal_coordinator_allows_approved_stale_conflict_and_failed_paths() {
+        for (proposal_id, terminal_state) in [
+            (ProposalId(12), ProposalLifecycleState::Stale),
+            (ProposalId(13), ProposalLifecycleState::Conflict),
+            (ProposalId(14), ProposalLifecycleState::Failed),
+        ] {
+            let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+            let proposal = save_proposal(proposal_id);
+            register_created(&coordinator, &proposal);
+            assert!(matches!(
+                coordinator.handle(ProposalRequest::Validate(proposal.clone())),
+                Ok(ProposalResponse::Validated(_))
+            ));
+            assert!(matches!(
+                coordinator.handle(ProposalRequest::Preview(proposal.clone())),
+                Ok(ProposalResponse::Previewed { .. })
+            ));
+            assert!(matches!(
+                coordinator.handle(ProposalRequest::Approve(command(
+                    proposal.proposal_id,
+                    devil_protocol::ProposalLifecycleAction::Approve,
+                ))),
+                Ok(ProposalResponse::Approved(_))
+            ));
+
+            let transition = coordinator
+                .record_transition_with_diagnostics(
+                    &proposal,
+                    terminal_state,
+                    "apply",
+                    vec![AppProposalCoordinator::diagnostic(
+                        "proposal.apply_terminal",
+                        format!("test {terminal_state:?} terminal transition"),
+                    )],
+                )
+                .expect("approved proposal can enter terminal apply state");
+            assert_eq!(transition.lifecycle_state, terminal_state);
+            assert!(
+                transition
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "proposal.apply_terminal")
+            );
+        }
+    }
+
+    #[test]
+    fn proposal_coordinator_rejects_created_to_applied_without_state_mutation() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = save_proposal(ProposalId(15));
+        register_created(&coordinator, &proposal);
+
+        let response = coordinator
+            .record_transition(&proposal, ProposalLifecycleState::Applied, "apply")
+            .expect_err("created proposal cannot apply directly");
+        assert_transition_diagnostic(&response, "proposal.invalid_lifecycle_transition");
+        assert_eq!(
+            coordinator.current_lifecycle_state(proposal.proposal_id),
+            Some(ProposalLifecycleState::Created)
+        );
+    }
+
+    #[test]
+    fn proposal_coordinator_rejects_expired_lifecycle_before_validation() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let mut proposal = save_proposal(ProposalId(16));
+        proposal.expires_at = Some(TimestampMillis(1));
+        register_created(&coordinator, &proposal);
+
+        let response = coordinator
+            .handle(ProposalRequest::Validate(proposal.clone()))
+            .expect("expired validate response");
+        let ProposalResponse::Rejected { reason, .. } = &response else {
+            panic!("expired proposal should reject, got {response:?}");
+        };
+        assert_eq!(*reason, ProposalRejectionReason::Expired);
+        assert_transition_diagnostic(&response, "proposal.expired");
+        assert_eq!(
+            coordinator.current_lifecycle_state(proposal.proposal_id),
+            Some(ProposalLifecycleState::Rejected)
+        );
+    }
+
+    #[test]
+    fn proposal_coordinator_rejects_zero_correlation_or_nil_causality_context() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let mut proposal = save_proposal(ProposalId(17));
+        proposal.correlation_id = CorrelationId(0);
+        coordinator.register_lifecycle_context(
+            proposal.proposal_id,
+            EventContext {
+                correlation_id: CorrelationId(0),
+                causality_id: CausalityId(uuid::Uuid::nil()),
+            },
+        );
+
+        let response = coordinator.created_response(&proposal);
+        assert_transition_diagnostic(&response, "proposal.invalid_lifecycle_context");
+        assert_transition_diagnostic(&response, "proposal.zero_correlation_id");
+        assert_transition_diagnostic(&response, "proposal.lifecycle_context_nil_causality_id");
+        assert_eq!(
+            coordinator.current_lifecycle_state(proposal.proposal_id),
+            None
+        );
+
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = save_proposal(ProposalId(18));
+        register_created(&coordinator, &proposal);
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
+            Ok(ProposalResponse::Validated(_))
+        ));
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
+            Ok(ProposalResponse::Previewed { .. })
+        ));
+        let mut approve = command(
+            proposal.proposal_id,
+            devil_protocol::ProposalLifecycleAction::Approve,
+        );
+        approve.correlation_id = CorrelationId(0);
+        approve.causality_id = CausalityId(uuid::Uuid::nil());
+
+        let response = coordinator
+            .handle(ProposalRequest::Approve(approve))
+            .expect("invalid command context response");
+        assert_transition_diagnostic(&response, "proposal.command_zero_correlation_id");
+        assert_transition_diagnostic(&response, "proposal.command_nil_causality_id");
+        assert_eq!(
+            coordinator.current_lifecycle_state(proposal.proposal_id),
+            Some(ProposalLifecycleState::Previewed)
+        );
     }
 
     #[test]
@@ -4816,5 +6230,290 @@ mod tests {
                 .message
                 .contains("use AppComposition::save_active_buffer")
         }));
+    }
+
+    #[test]
+    fn proposal_coordinator_discovers_targets_for_every_payload_variant() {
+        let file = test_file(10, "C:/repo/file.rs");
+        let rename_destination = CanonicalPath("C:/repo/renamed.rs".to_string());
+        let cases = vec![
+            (
+                ProposalPayload::TextEdit(devil_protocol::TextEditProposal {
+                    file_id: FileId(10),
+                    edits: devil_protocol::EditBatch {
+                        edits: vec![devil_protocol::TextEdit {
+                            range: devil_protocol::TextRange::new(
+                                devil_protocol::TextOffset::byte(0),
+                                devil_protocol::TextOffset::byte(4),
+                            ),
+                            replacement: "edit".to_string(),
+                        }],
+                    },
+                }),
+                vec![ProposalTargetKind::OpenBuffer],
+            ),
+            (
+                ProposalPayload::CreateFile(devil_protocol::CreateFileProposal {
+                    path: CanonicalPath("C:/repo/new.rs".to_string()),
+                    initial_content: None,
+                }),
+                vec![ProposalTargetKind::PathOnly],
+            ),
+            (
+                ProposalPayload::DeleteFile(devil_protocol::DeleteFileProposal {
+                    file: file.clone(),
+                }),
+                vec![ProposalTargetKind::ClosedFile],
+            ),
+            (
+                ProposalPayload::RenameFile(devil_protocol::RenameFileProposal {
+                    file: file.clone(),
+                    destination: rename_destination,
+                }),
+                vec![ProposalTargetKind::ClosedFile, ProposalTargetKind::PathOnly],
+            ),
+            (
+                save_proposal(ProposalId(40)).payload,
+                vec![ProposalTargetKind::OpenBuffer],
+            ),
+            (
+                ProposalPayload::FormatFile(devil_protocol::FormatFileProposal {
+                    file: file.clone(),
+                    snapshot_id: devil_protocol::SnapshotId(1),
+                    options: HashMap::new(),
+                }),
+                vec![ProposalTargetKind::ClosedFile],
+            ),
+            (
+                ProposalPayload::CodeAction(devil_protocol::CodeActionProposal {
+                    file: file.clone(),
+                    title: "fix".to_string(),
+                    edits: vec![devil_protocol::TextEdit {
+                        range: devil_protocol::TextRange::new(
+                            devil_protocol::TextOffset::byte(1),
+                            devil_protocol::TextOffset::byte(2),
+                        ),
+                        replacement: "x".to_string(),
+                    }],
+                }),
+                vec![ProposalTargetKind::ClosedFile],
+            ),
+            (workspace_edit_payload(), vec![ProposalTargetKind::PathOnly]),
+            (
+                terminal_payload(),
+                vec![ProposalTargetKind::TerminalSession],
+            ),
+            (
+                ProposalPayload::Batch(BatchProposalPayload {
+                    batch_id: uuid::Uuid::now_v7(),
+                    atomicity: ProposalBatchAtomicity::OrderedNonAtomic,
+                    rollback_policy: ProposalBatchRollbackPolicy::NotSupported,
+                    target_coverage: ProposalTargetCoverage {
+                        coverage_kind: ProposalTargetCoverageKind::Complete,
+                        targets: Vec::new(),
+                        omitted_target_count: 0,
+                        redaction_hints: Vec::new(),
+                    },
+                    items: vec![ProposalBatchItem {
+                        order: 0,
+                        item_id: "create".to_string(),
+                        payload: Box::new(ProposalPayload::CreateFile(
+                            devil_protocol::CreateFileProposal {
+                                path: CanonicalPath("C:/repo/batch.rs".to_string()),
+                                initial_content: None,
+                            },
+                        )),
+                        target_ids: Vec::new(),
+                        required_capability: CapabilityId("fs.write".to_string()),
+                        rollback_step_ids: Vec::new(),
+                    }],
+                    dependency_edges: Vec::new(),
+                    rollback_steps: Vec::new(),
+                    partial_failures: Vec::new(),
+                    preview_warnings: Vec::new(),
+                    schema_version: 1,
+                }),
+                vec![ProposalTargetKind::PathOnly],
+            ),
+        ];
+
+        for (payload, expected_kinds) in cases {
+            let coverage = AppProposalCoordinator::affected_target_coverage_for_payload(&payload);
+            let actual_kinds = coverage
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>();
+            assert_eq!(coverage.coverage_kind, ProposalTargetCoverageKind::Complete);
+            assert_eq!(coverage.omitted_target_count, 0);
+            assert_eq!(actual_kinds, expected_kinds, "payload {payload:?}");
+        }
+    }
+
+    #[test]
+    fn proposal_coordinator_denies_duplicate_ambiguous_and_unsupported_targets() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let file = test_file(20, "C:/repo/dup.rs");
+        let mut proposal = proposal_with(
+            ProposalId(41),
+            "fs.write",
+            ProposalPayload::WorkspaceEdit(devil_protocol::WorkspaceEditProposalPayload {
+                workspace_id: WorkspaceId(1),
+                edit_id: uuid::Uuid::now_v7(),
+                title: "duplicate targets".to_string(),
+                source: devil_protocol::WorkspaceEditSourceKind::User,
+                target_coverage: ProposalTargetCoverage {
+                    coverage_kind: ProposalTargetCoverageKind::Complete,
+                    targets: vec![
+                        AppProposalCoordinator::file_identity_target(
+                            "dup".to_string(),
+                            ProposalTargetKind::ClosedFile,
+                            &file,
+                            None,
+                            Vec::new(),
+                        ),
+                        AppProposalCoordinator::file_identity_target(
+                            "dup".to_string(),
+                            ProposalTargetKind::ClosedFile,
+                            &file,
+                            None,
+                            Vec::new(),
+                        ),
+                    ],
+                    omitted_target_count: 0,
+                    redaction_hints: Vec::new(),
+                },
+                file_edits: vec![devil_protocol::WorkspaceTextEdit {
+                    file,
+                    buffer_id: None,
+                    edits: devil_protocol::EditBatch { edits: Vec::new() },
+                    preconditions: complete_file_preconditions(),
+                }],
+                file_operations: Vec::new(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                diagnostics: Vec::new(),
+                schema_version: 1,
+            }),
+        );
+        register_created(&coordinator, &proposal);
+
+        let response = coordinator
+            .handle(ProposalRequest::Validate(proposal.clone()))
+            .expect("validate duplicate targets");
+        let ProposalResponse::Denied { transition, reason } = response else {
+            panic!("duplicate targets should deny, got {response:?}");
+        };
+        assert_eq!(reason, ProposalDenialReason::PolicyDenied);
+        assert!(
+            transition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "proposal.duplicate_target")
+        );
+
+        proposal.proposal_id = ProposalId(42);
+        let ProposalPayload::WorkspaceEdit(payload) = &mut proposal.payload else {
+            panic!("expected workspace-edit payload");
+        };
+        payload.target_coverage.targets = vec![ProposalAffectedTarget {
+            target_id: "ambiguous".to_string(),
+            kind: ProposalTargetKind::Plugin,
+            workspace_id: Some(WorkspaceId(1)),
+            file_id: Some(FileId(20)),
+            buffer_id: None,
+            path: None,
+            terminal_session_id: None,
+            plugin_id: Some(devil_protocol::PluginId(7)),
+            remote_authority: None,
+            collaboration_session_id: None,
+            byte_ranges: Vec::new(),
+            redaction_hints: Vec::new(),
+        }];
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        register_created(&coordinator, &proposal);
+        let response = coordinator
+            .handle(ProposalRequest::Validate(proposal))
+            .expect("validate ambiguous target");
+        assert_transition_diagnostic(&response, "proposal.ambiguous_target");
+        assert_transition_diagnostic(&response, "proposal.unsupported_target_kind");
+    }
+
+    #[test]
+    fn proposal_coordinator_denies_nested_batch_duplicates_and_unsupported_items() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let create_path = CanonicalPath("C:/repo/batch-create.rs".to_string());
+        let duplicate_target = AppProposalCoordinator::path_target(
+            "target-create".to_string(),
+            ProposalTargetKind::PathOnly,
+            create_path.clone(),
+            Vec::new(),
+        );
+        let proposal = proposal_with(
+            ProposalId(43),
+            "fs.write",
+            ProposalPayload::Batch(BatchProposalPayload {
+                batch_id: uuid::Uuid::now_v7(),
+                atomicity: ProposalBatchAtomicity::OrderedNonAtomic,
+                rollback_policy: ProposalBatchRollbackPolicy::NotSupported,
+                target_coverage: ProposalTargetCoverage {
+                    coverage_kind: ProposalTargetCoverageKind::Complete,
+                    targets: vec![duplicate_target.clone(), duplicate_target],
+                    omitted_target_count: 0,
+                    redaction_hints: Vec::new(),
+                },
+                items: vec![
+                    ProposalBatchItem {
+                        order: 0,
+                        item_id: "create".to_string(),
+                        payload: Box::new(ProposalPayload::CreateFile(
+                            devil_protocol::CreateFileProposal {
+                                path: create_path,
+                                initial_content: None,
+                            },
+                        )),
+                        target_ids: vec!["target-create".to_string(), "target-create".to_string()],
+                        required_capability: CapabilityId("fs.write".to_string()),
+                        rollback_step_ids: Vec::new(),
+                    },
+                    ProposalBatchItem {
+                        order: 1,
+                        item_id: "terminal".to_string(),
+                        payload: Box::new(terminal_payload()),
+                        target_ids: vec!["target-missing".to_string()],
+                        required_capability: CapabilityId("terminal.execute".to_string()),
+                        rollback_step_ids: Vec::new(),
+                    },
+                ],
+                dependency_edges: Vec::new(),
+                rollback_steps: Vec::new(),
+                partial_failures: Vec::new(),
+                preview_warnings: Vec::new(),
+                schema_version: 1,
+            }),
+        );
+        register_created(&coordinator, &proposal);
+
+        let response = coordinator
+            .handle(ProposalRequest::Validate(proposal))
+            .expect("validate batch");
+        let ProposalResponse::Denied { transition, reason } = response else {
+            panic!("invalid batch should deny, got {response:?}");
+        };
+        assert_eq!(reason, ProposalDenialReason::PolicyDenied);
+        for expected in [
+            "proposal.duplicate_target",
+            "proposal.duplicate_batch_item_target",
+            "proposal.unknown_batch_target",
+            "proposal.unsupported_batch_item_route",
+        ] {
+            assert!(
+                transition
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == expected),
+                "missing {expected}: {:?}",
+                transition.diagnostics
+            );
+        }
     }
 }

@@ -23,9 +23,11 @@ use devil_protocol::{
     ProposalDenialReason, ProposalId, ProposalPayload, ProposalRejectionReason, ProposalRequest,
     ProposalResponse, ProposalRollbackAction, ProposalRollbackStep, ProposalStaleReason,
     ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
-    ProposalVersionPreconditions, SnapshotId, TextOffset, TextRange, TextTransactionDescriptor,
-    TimestampMillis, TransactionSource, ViewportProjectionMode, WorkspaceGeneration, WorkspaceId,
-    WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
+    ProposalVersionPreconditions, SaveConflictPolicy, SaveFileProposal, SaveIntent, SnapshotId,
+    TextCoordinate, TextOffset, TextRange, TextTransactionDescriptor, TimestampMillis,
+    TransactionSource, TrustDecisionContext, ViewportProjectionMode, WorkspaceGeneration,
+    WorkspaceId, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
+    WorkspaceTrustState,
 };
 use devil_ui::{CommandDispatchIntent, ShellLayoutProjection};
 use uuid::Uuid;
@@ -41,6 +43,15 @@ fn create_root() -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(&root).expect("create temp root");
     root
+}
+
+fn ui_text_coordinate(line: u32, character: u32) -> TextCoordinate {
+    TextCoordinate {
+        line,
+        character,
+        byte_offset: None,
+        utf16_offset: None,
+    }
 }
 
 fn app_with_events() -> (AppComposition, InMemoryEventSink) {
@@ -270,6 +281,55 @@ fn preflight_target(
     }
 }
 
+fn workspace_edit_path_target(target_id: String, path: &Path) -> ProposalAffectedTarget {
+    ProposalAffectedTarget {
+        target_id,
+        kind: ProposalTargetKind::PathOnly,
+        workspace_id: None,
+        file_id: None,
+        buffer_id: None,
+        path: Some(CanonicalPath(path.to_string_lossy().into_owned())),
+        terminal_session_id: None,
+        plugin_id: None,
+        remote_authority: None,
+        collaboration_session_id: None,
+        byte_ranges: Vec::new(),
+        redaction_hints: Vec::new(),
+    }
+}
+
+fn save_payload_for_open_buffer(
+    file: FileIdentity,
+    editor_file_id: FileId,
+    buffer_id: BufferId,
+    snapshot_id: SnapshotId,
+    buffer_version: BufferVersion,
+    workspace_generation: WorkspaceGeneration,
+    expected_fingerprint: devil_protocol::FileFingerprint,
+) -> ProposalPayload {
+    ProposalPayload::SaveFile(SaveFileProposal {
+        file_id: editor_file_id,
+        file: file.clone(),
+        buffer_id,
+        snapshot_id,
+        buffer_version,
+        file_content_version: file.content_version,
+        workspace_generation,
+        expected_fingerprint: Some(expected_fingerprint),
+        save_intent: SaveIntent::ExternalCommand,
+        conflict_policy: SaveConflictPolicy::RejectIfChanged,
+        trust_decision: TrustDecisionContext {
+            workspace_trust_state: WorkspaceTrustState::Trusted,
+            decision_id: None,
+            decided_at: Some(TimestampMillis(1)),
+        },
+        required_capability: CapabilityId("fs.write".to_string()),
+        principal: PrincipalId("trusted".to_string()),
+        correlation_id: CorrelationId(42),
+        diagnostics: Vec::new(),
+    })
+}
+
 fn batch_payload_for_test(
     atomicity: ProposalBatchAtomicity,
     rollback_policy: ProposalBatchRollbackPolicy,
@@ -323,6 +383,10 @@ fn workspace_vfs_integration_untrusted_save_is_denied_without_disk_mutation() {
     assert_eq!(
         std::fs::read_to_string(&target).expect("read blocked file"),
         "seed"
+    );
+    assert_eq!(
+        app.editor().text(buffer_id).expect("dirty text preserved"),
+        "seed!"
     );
     assert!(app.editor().is_dirty(buffer_id).expect("dirty state"));
     assert_eq!(
@@ -760,7 +824,9 @@ fn workspace_vfs_integration_unknown_lifecycle_context_preview_is_rejected() {
 fn workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer() {
     let root = create_root();
     let target = root.join("edit-apply.txt");
+    let other = root.join("untouched.txt");
     std::fs::write(&target, "seed").expect("seed file");
+    std::fs::write(&other, "untouched").expect("seed untouched file");
 
     let (mut app, sink) = app_with_events();
     let opened = app
@@ -770,6 +836,9 @@ fn workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer() {
             PrincipalId("trusted".to_string()),
         )
         .expect("open workspace");
+    app.open_file(other.to_string_lossy())
+        .expect("open untouched file");
+    let other_buffer_id = app.active_buffer_id().expect("other buffer id");
     let file_id = app
         .open_file(target.to_string_lossy())
         .expect("open target file");
@@ -809,7 +878,14 @@ fn workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer() {
 
     assert!(matches!(response, ProposalResponse::Applied(_)));
     assert_eq!(app.editor().text(buffer_id).expect("buffer text"), "sprout");
+    assert_eq!(
+        app.editor()
+            .text(other_buffer_id)
+            .expect("other buffer text"),
+        "untouched"
+    );
     assert!(app.editor().is_dirty(buffer_id).expect("dirty state"));
+    assert_eq!(app.editor().undo_len(buffer_id).expect("undo len"), 1);
 
     let events = sink.events().expect("captured proposal apply events");
     assert_events_include_order(
@@ -821,6 +897,18 @@ fn workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer() {
             "editor.transaction_applied",
             "proposal.applied",
         ],
+    );
+
+    let undo = app
+        .dispatch_ui_intent(CommandDispatchIntent::Undo { buffer_id })
+        .expect("undo proposal edit");
+    assert!(matches!(undo, AppCommandOutcome::Edited(_)));
+    assert_eq!(app.editor().text(buffer_id).expect("undo text"), "seed");
+    assert_eq!(
+        app.editor()
+            .text(other_buffer_id)
+            .expect("other buffer remains unchanged"),
+        "untouched"
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -884,6 +972,130 @@ fn workspace_vfs_integration_stale_text_edit_precondition_does_not_apply() {
     };
     assert_eq!(stale.reason, ProposalStaleReason::BufferVersionMismatch);
     assert_eq!(app.editor().text(buffer_id).expect("buffer text"), "seed!");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_stale_text_edit_snapshot_does_not_apply() {
+    let root = create_root();
+    let target = root.join("stale-snapshot-edit.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let file_id = app
+        .open_file(target.to_string_lossy())
+        .expect("open target file");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+    let node = workspace_node_by_name(&app, opened.workspace_id, "stale-snapshot-edit.txt");
+    let current_snapshot = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("current snapshot")
+        .clone();
+    let mut preconditions = file_preconditions(&node, opened.generation);
+    preconditions.buffer_version = Some(current_snapshot.buffer_version);
+    preconditions.snapshot_id = Some(SnapshotId(current_snapshot.snapshot_id.0.saturating_add(1)));
+    let proposal = proposal_envelope_with(
+        ProposalId(703),
+        "editor.write",
+        ProposalPayload::TextEdit(devil_protocol::TextEditProposal {
+            file_id,
+            edits: EditBatch {
+                edits: vec![devil_protocol::TextEdit {
+                    range: TextRange::new(TextOffset::byte(0), TextOffset::byte(4)),
+                    replacement: "sprout".to_string(),
+                }],
+            },
+        }),
+        preconditions,
+    );
+
+    register_validate_preview(&mut app, &proposal);
+    let response = app
+        .handle_proposal_request(ProposalRequest::Apply(proposal))
+        .expect("apply stale snapshot text edit proposal");
+
+    let ProposalResponse::Stale { stale, .. } = response else {
+        panic!("expected stale text edit response, got {response:?}");
+    };
+    assert_eq!(stale.reason, ProposalStaleReason::SnapshotMismatch);
+    assert_eq!(app.editor().text(buffer_id).expect("buffer text"), "seed");
+    assert_eq!(app.editor().undo_len(buffer_id).expect("undo len"), 0);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_text_edit_apply_requires_valid_lifecycle() {
+    let root = create_root();
+    let target = root.join("lifecycle-edit.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let file_id = app
+        .open_file(target.to_string_lossy())
+        .expect("open target file");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+    let node = workspace_node_by_name(&app, opened.workspace_id, "lifecycle-edit.txt");
+    let current_snapshot = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("current snapshot")
+        .clone();
+    let mut preconditions = file_preconditions(&node, opened.generation);
+    preconditions.buffer_version = Some(current_snapshot.buffer_version);
+    preconditions.snapshot_id = Some(current_snapshot.snapshot_id);
+    let proposal = proposal_envelope_with(
+        ProposalId(704),
+        "editor.write",
+        ProposalPayload::TextEdit(devil_protocol::TextEditProposal {
+            file_id,
+            edits: EditBatch {
+                edits: vec![devil_protocol::TextEdit {
+                    range: TextRange::new(TextOffset::byte(0), TextOffset::byte(4)),
+                    replacement: "sprout".to_string(),
+                }],
+            },
+        }),
+        preconditions,
+    );
+
+    assert!(matches!(
+        app.register_proposal_lifecycle(&proposal)
+            .expect("register proposal lifecycle"),
+        ProposalResponse::Created(_)
+    ));
+    let response = app
+        .handle_proposal_request(ProposalRequest::Apply(proposal))
+        .expect("apply created text edit proposal");
+
+    let ProposalResponse::Rejected { transition, reason } = response else {
+        panic!("expected lifecycle rejection, got {response:?}");
+    };
+    assert_eq!(reason, ProposalRejectionReason::ValidationFailed);
+    assert!(
+        transition
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "proposal.invalid_lifecycle_transition")
+    );
+    assert_eq!(app.editor().text(buffer_id).expect("buffer text"), "seed");
+    assert_eq!(app.editor().undo_len(buffer_id).expect("undo len"), 0);
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1037,6 +1249,300 @@ fn workspace_vfs_integration_open_file_delete_and_rename_are_denied() {
     ));
     assert!(target.exists());
     assert!(!destination.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_registered_save_apply_routes_through_workspace_actor() {
+    let root = create_root();
+    let target = root.join("generic-save.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let (mut app, sink) = app_with_events();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let file_id = app
+        .open_file(target.to_string_lossy())
+        .expect("open target file");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), "!"))
+        .expect("dirty buffer before generic save");
+    let snapshot = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("current snapshot")
+        .clone();
+    let node = workspace_node_by_name(&app, opened.workspace_id, "generic-save.txt");
+    let mut preconditions = file_preconditions(&node, opened.generation);
+    preconditions.buffer_version = Some(snapshot.buffer_version);
+    preconditions.snapshot_id = Some(snapshot.snapshot_id);
+    let fingerprint = preconditions
+        .expected_fingerprint
+        .clone()
+        .expect("expected fingerprint");
+    let proposal = proposal_envelope_with(
+        ProposalId(740),
+        "fs.write",
+        save_payload_for_open_buffer(
+            node.identity.clone(),
+            file_id,
+            buffer_id,
+            snapshot.snapshot_id,
+            snapshot.buffer_version,
+            opened.generation,
+            fingerprint,
+        ),
+        preconditions,
+    );
+
+    register_validate_preview(&mut app, &proposal);
+    let response = app
+        .handle_proposal_request(ProposalRequest::Apply(proposal))
+        .expect("apply generic save proposal");
+
+    assert!(
+        matches!(response, ProposalResponse::Applied(_)),
+        "expected applied generic save response, got {response:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read saved content"),
+        "seed!"
+    );
+    assert!(!app.editor().is_dirty(buffer_id).expect("dirty cleared"));
+    let events = sink.events().expect("captured generic save events");
+    assert_events_include_order(
+        &events,
+        &[
+            "editor.transaction_applied",
+            "proposal.created",
+            "proposal.validated",
+            "proposal.previewed",
+            "proposal.applied",
+        ],
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_stale_registered_save_preserves_dirty_buffer_and_disk() {
+    let root = create_root();
+    let target = root.join("generic-save-stale.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let file_id = app
+        .open_file(target.to_string_lossy())
+        .expect("open target file");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), "!"))
+        .expect("dirty buffer before proposal");
+    let snapshot = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("current snapshot")
+        .clone();
+    let node = workspace_node_by_name(&app, opened.workspace_id, "generic-save-stale.txt");
+    let mut preconditions = file_preconditions(&node, opened.generation);
+    preconditions.buffer_version = Some(snapshot.buffer_version);
+    preconditions.snapshot_id = Some(snapshot.snapshot_id);
+    let fingerprint = preconditions
+        .expected_fingerprint
+        .clone()
+        .expect("expected fingerprint");
+    let proposal = proposal_envelope_with(
+        ProposalId(741),
+        "fs.write",
+        save_payload_for_open_buffer(
+            node.identity.clone(),
+            file_id,
+            buffer_id,
+            snapshot.snapshot_id,
+            snapshot.buffer_version,
+            opened.generation,
+            fingerprint,
+        ),
+        preconditions,
+    );
+
+    register_validate_preview(&mut app, &proposal);
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 5), "?"))
+        .expect("make save proposal stale");
+    let response = app
+        .handle_proposal_request(ProposalRequest::Apply(proposal))
+        .expect("apply stale generic save proposal");
+
+    let ProposalResponse::Stale { stale, .. } = response else {
+        panic!("expected stale save apply response, got {response:?}");
+    };
+    assert_eq!(stale.reason, ProposalStaleReason::BufferVersionMismatch);
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("disk content preserved"),
+        "seed"
+    );
+    assert_eq!(app.editor().text(buffer_id).expect("dirty text"), "seed!?");
+    assert!(app.editor().is_dirty(buffer_id).expect("dirty preserved"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_closed_file_apply_rejections_do_not_mutate_disk_or_dirty_buffers() {
+    let root = create_root();
+    let dirty = root.join("dirty.txt");
+    let stale_target = root.join("stale-delete.txt");
+    let conflict_target = root.join("conflict-delete.txt");
+    let escape = root.parent().expect("root parent").join(format!(
+        "devil-escape-{}.txt",
+        TEMP_ROOT_COUNTER.load(Ordering::Relaxed)
+    ));
+    std::fs::write(&dirty, "dirty").expect("seed dirty file");
+    std::fs::write(&stale_target, "stale").expect("seed stale target");
+    std::fs::write(&conflict_target, "conflict").expect("seed conflict target");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    app.open_file(dirty.to_string_lossy())
+        .expect("open dirty file");
+    let dirty_buffer = app.active_buffer_id().expect("dirty buffer");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 5), "!"))
+        .expect("make unrelated dirty buffer");
+
+    let stale_node = workspace_node_by_name(&app, opened.workspace_id, "stale-delete.txt");
+    let stale_delete = proposal_envelope_with(
+        ProposalId(742),
+        "fs.write",
+        ProposalPayload::DeleteFile(devil_protocol::DeleteFileProposal {
+            file: stale_node.identity.clone(),
+        }),
+        file_preconditions(&stale_node, WorkspaceGeneration(opened.generation.0 + 1)),
+    );
+    register_validate_preview(&mut app, &stale_delete);
+    let stale_response = app
+        .handle_proposal_request(ProposalRequest::Apply(stale_delete))
+        .expect("apply stale delete proposal");
+    assert!(matches!(stale_response, ProposalResponse::Stale { .. }));
+    assert!(stale_target.exists());
+
+    let conflict_node = workspace_node_by_name(&app, opened.workspace_id, "conflict-delete.txt");
+    let conflict_delete = proposal_envelope_with(
+        ProposalId(743),
+        "fs.write",
+        ProposalPayload::DeleteFile(devil_protocol::DeleteFileProposal {
+            file: conflict_node.identity.clone(),
+        }),
+        file_preconditions(&conflict_node, opened.generation),
+    );
+    register_validate_preview(&mut app, &conflict_delete);
+    std::fs::write(&conflict_target, "external").expect("external overwrite");
+    let conflict_response = app
+        .handle_proposal_request(ProposalRequest::Apply(conflict_delete))
+        .expect("apply conflicted delete proposal");
+    assert!(matches!(conflict_response, ProposalResponse::Stale { .. }));
+    assert_eq!(
+        std::fs::read_to_string(&conflict_target).expect("conflict disk preserved"),
+        "external"
+    );
+
+    let escape_create = proposal_envelope_with(
+        ProposalId(744),
+        "fs.write",
+        ProposalPayload::CreateFile(devil_protocol::CreateFileProposal {
+            path: CanonicalPath(escape.to_string_lossy().into_owned()),
+            initial_content: Some("escape".to_string()),
+        }),
+        workspace_preconditions(opened.generation),
+    );
+    register_validate_preview(&mut app, &escape_create);
+    let escape_response = app
+        .handle_proposal_request(ProposalRequest::Apply(escape_create))
+        .expect("apply path escape create proposal");
+    assert!(matches!(escape_response, ProposalResponse::Denied { .. }));
+    assert!(!escape.exists());
+    assert_eq!(
+        app.editor()
+            .text(dirty_buffer)
+            .expect("dirty buffer preserved"),
+        "dirty!"
+    );
+    assert!(app.editor().is_dirty(dirty_buffer).expect("dirty retained"));
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&escape);
+}
+
+#[test]
+fn workspace_vfs_integration_single_file_workspace_edit_create_applies_closed_file_only() {
+    let root = create_root();
+    let target = root.join("workspace-edit-created.txt");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let target_path = CanonicalPath(target.to_string_lossy().into_owned());
+    let proposal = proposal_envelope_with(
+        ProposalId(745),
+        "fs.write",
+        ProposalPayload::WorkspaceEdit(devil_protocol::WorkspaceEditProposalPayload {
+            workspace_id: opened.workspace_id,
+            edit_id: Uuid::now_v7(),
+            title: "create empty file".to_string(),
+            source: devil_protocol::WorkspaceEditSourceKind::User,
+            target_coverage: ProposalTargetCoverage {
+                coverage_kind: ProposalTargetCoverageKind::Complete,
+                targets: vec![workspace_edit_path_target(
+                    format!("workspace-edit:create:path:{}", target_path.0),
+                    &target,
+                )],
+                omitted_target_count: 0,
+                redaction_hints: Vec::new(),
+            },
+            file_edits: Vec::new(),
+            file_operations: vec![devil_protocol::WorkspaceFileOperation::Create {
+                path: target_path,
+                initial_content_hash: None,
+            }],
+            required_capability: CapabilityId("fs.write".to_string()),
+            diagnostics: Vec::new(),
+            schema_version: 1,
+        }),
+        workspace_preconditions(opened.generation),
+    );
+
+    register_validate_preview(&mut app, &proposal);
+    let response = app
+        .handle_proposal_request(ProposalRequest::Apply(proposal))
+        .expect("apply workspace edit create proposal");
+
+    assert!(matches!(response, ProposalResponse::Applied(_)));
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("workspace edit created file"),
+        ""
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -2268,7 +2774,7 @@ fn workspace_vfs_integration_ui_command_intent_routes_to_engine_apply_edit() {
     let outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::Insert {
             buffer_id,
-            at: TextPosition::new(0, 0),
+            at: ui_text_coordinate(0, 0),
             text: "x".to_string(),
         })
         .expect("dispatch edit intent");
@@ -2452,7 +2958,7 @@ fn workspace_vfs_integration_command_dispatcher_routes_without_concrete_ports() 
     let routed = CommandDispatcher::route_intent(
         CommandDispatchIntent::Insert {
             buffer_id: BufferId(5),
-            at: TextPosition::new(0, 0),
+            at: ui_text_coordinate(0, 0),
             text: "mock".to_string(),
         },
         active,
@@ -2485,7 +2991,7 @@ fn workspace_vfs_integration_command_dispatcher_routes_without_concrete_ports() 
     let wrong_buffer = CommandDispatcher::route_intent(
         CommandDispatchIntent::Insert {
             buffer_id: BufferId(6),
-            at: TextPosition::new(0, 0),
+            at: ui_text_coordinate(0, 0),
             text: "blocked".to_string(),
         },
         active,

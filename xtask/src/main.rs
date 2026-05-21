@@ -618,7 +618,7 @@ mod tests {
     fn missing_workspace_crate_policy_is_reported() {
         let packages = HashMap::from([(
             "devil-ui".to_string(),
-            HashSet::from(["devil-editor".to_string(), "devil-protocol".to_string()]),
+            HashSet::from(["devil-protocol".to_string()]),
         )]);
 
         let issues = validate_dependency_policy(&packages, &Policy::default());
@@ -635,10 +635,10 @@ mod tests {
         let markdown = r#"
 ### 1. Directional Intent
 - `devil-ui` may depend on:
-  - `devil-editor`
   - `devil-protocol`
 - `devil-ui` MUST directly depend on:
-  - `devil-editor`
+  - `devil-protocol`
+- `devil-ui` MUST NOT depend on `devil-editor`.
 - `devil-ui` MUST NOT depend on `devil-project`.
 
 ### 2. Shared Contracts Boundary
@@ -649,14 +649,16 @@ mod tests {
 
         assert_eq!(
             policy.allowed_internal("devil-ui"),
-            Some(&HashSet::from([
-                "devil-editor".to_string(),
-                "devil-protocol".to_string()
-            ]))
+            Some(&HashSet::from(["devil-protocol".to_string()]))
         );
         assert_eq!(
             policy.required_dependencies().get("devil-ui"),
-            Some(&HashSet::from(["devil-editor".to_string()]))
+            Some(&HashSet::from(["devil-protocol".to_string()]))
+        );
+        assert!(
+            policy
+                .forbidden_pairs()
+                .contains(&("devil-ui".to_string(), "devil-editor".to_string()))
         );
         assert!(
             policy
@@ -744,12 +746,19 @@ mod tests {
     #[test]
     fn ui_shell_remains_projection_only() {
         let source = read_workspace_file("crates/devil-ui/src/ui.rs");
+        let manifest = read_workspace_file("crates/devil-ui/Cargo.toml");
 
         assert!(source.contains("pub struct Shell"));
         assert!(source.contains("CommandDispatchIntent"));
         assert!(source.contains("without mutating editor or workspace state"));
         assert!(!source.contains("EditorSession"));
         assert!(!source.contains("WorkspaceActor"));
+        assert!(!source.contains("EditorEngine"));
+        assert!(!source.contains("SaveWorkflowService"));
+        assert!(!manifest.contains("devil-editor"));
+        assert!(!manifest.contains("devil-project"));
+        assert!(!manifest.contains("devil-storage"));
+        assert!(!manifest.contains("devil-app"));
     }
 
     #[test]

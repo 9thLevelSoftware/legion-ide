@@ -1,7 +1,8 @@
 //! Projection-only UI primitives for the native shell.
 
-use devil_editor::{TextPosition, TextRange};
-use devil_protocol::{BufferId, CanonicalPath, FileId, WorkspaceId};
+use devil_protocol::{
+    BufferId, CanonicalPath, FileId, ProtocolTextRange, TextCoordinate, WorkspaceId,
+};
 use thiserror::Error;
 
 /// Render mode for shell projections.
@@ -156,38 +157,38 @@ pub enum CommandDispatchIntent {
     Noop,
     /// Quit the active shell loop.
     Quit,
-    /// Undo through the editor engine for the target buffer.
+    /// Undo through application/editor authority for the target buffer.
     Undo {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
-    /// Redo through the editor engine for the target buffer.
+    /// Redo through application/editor authority for the target buffer.
     Redo {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
-    /// Insert text through the editor engine for the target buffer.
+    /// Insert text through application/editor authority for the target buffer.
     Insert {
         /// Target buffer identifier.
         buffer_id: BufferId,
-        /// Insertion position in projected text coordinates.
-        at: TextPosition,
+        /// Insertion position in projected protocol text coordinates.
+        at: TextCoordinate,
         /// Replacement payload.
         text: String,
     },
-    /// Delete a text range through the editor engine for the target buffer.
+    /// Delete a protocol text range through application/editor authority for the target buffer.
     Delete {
         /// Target buffer identifier.
         buffer_id: BufferId,
         /// Range to delete.
-        range: TextRange,
+        range: ProtocolTextRange,
     },
-    /// Replace a text range through the editor engine for the target buffer.
+    /// Replace a protocol text range through application/editor authority for the target buffer.
     Replace {
         /// Target buffer identifier.
         buffer_id: BufferId,
         /// Range to replace.
-        range: TextRange,
+        range: ProtocolTextRange,
         /// Replacement payload.
         replacement: String,
     },
@@ -370,7 +371,7 @@ impl Shell {
 
         if let Some(payload) = trimmed.strip_prefix(":i ") {
             let buffer_id = self.active_buffer_id()?;
-            let pos = TextPosition::new(0, 0);
+            let pos = protocol_text_coordinate(0, 0, Some(0));
             return Ok(Some(self.push_intent(CommandDispatchIntent::Insert {
                 buffer_id,
                 at: pos,
@@ -390,7 +391,7 @@ impl Shell {
             let end = self.parse_pos(end);
             return Ok(Some(self.push_intent(CommandDispatchIntent::Delete {
                 buffer_id,
-                range: TextRange::new(start, end),
+                range: ProtocolTextRange { start, end },
             })));
         }
 
@@ -407,7 +408,7 @@ impl Shell {
             let end = self.parse_pos(end);
             return Ok(Some(self.push_intent(CommandDispatchIntent::Replace {
                 buffer_id,
-                range: TextRange::new(start, end),
+                range: ProtocolTextRange { start, end },
                 replacement: replacement.to_string(),
             })));
         }
@@ -426,17 +427,17 @@ impl Shell {
         intent
     }
 
-    fn parse_pos(&self, byte_offset: usize) -> TextPosition {
+    fn parse_pos(&self, byte_offset: usize) -> TextCoordinate {
         if let Some(text) = self.active_buffer_projection.small_buffer_text() {
             return text
                 .as_bytes()
                 .get(..byte_offset)
                 .map(|prefix| {
-                    let line = prefix.iter().filter(|b| **b == b'\n').count();
-                    let column = prefix.iter().rev().take_while(|b| **b != b'\n').count();
-                    TextPosition::new(line, column)
+                    let line = prefix.iter().filter(|b| **b == b'\n').count() as u32;
+                    let character = prefix.iter().rev().take_while(|b| **b != b'\n').count() as u32;
+                    protocol_text_coordinate(line, character, Some(byte_offset as u64))
                 })
-                .unwrap_or_else(|| TextPosition::new(0, 0));
+                .unwrap_or_else(|| protocol_text_coordinate(0, 0, Some(0)));
         }
 
         if let Some(viewport) = &self.active_buffer_projection.viewport {
@@ -444,15 +445,24 @@ impl Shell {
             for (i, slice) in viewport.line_slices.iter().enumerate() {
                 let slice_len = slice.visible_text.len() + 1; // +1 for newline
                 if current_offset + slice_len > byte_offset {
-                    let column = byte_offset - current_offset;
-                    let line = viewport.scroll.top_line as usize + i;
-                    return TextPosition::new(line, column);
+                    let character = (byte_offset - current_offset) as u32;
+                    let line = viewport.scroll.top_line + i as u32;
+                    return protocol_text_coordinate(line, character, Some(byte_offset as u64));
                 }
                 current_offset += slice_len;
             }
         }
 
-        TextPosition::new(0, 0)
+        protocol_text_coordinate(0, 0, Some(0))
+    }
+}
+
+fn protocol_text_coordinate(line: u32, character: u32, byte_offset: Option<u64>) -> TextCoordinate {
+    TextCoordinate {
+        line,
+        character,
+        byte_offset,
+        utf16_offset: None,
     }
 }
 
@@ -460,6 +470,15 @@ impl Shell {
 mod tests {
     use super::*;
     use devil_protocol::{BufferId, CanonicalPath, FileId, WorkspaceId};
+
+    fn test_coordinate(line: u32, character: u32) -> TextCoordinate {
+        TextCoordinate {
+            line,
+            character,
+            byte_offset: Some(character as u64),
+            utf16_offset: None,
+        }
+    }
 
     #[test]
     fn shell_parses_commands_into_dispatch_intents_without_editor_ownership() {
@@ -491,7 +510,7 @@ mod tests {
             intent,
             CommandDispatchIntent::Insert {
                 buffer_id: BufferId(2),
-                at: TextPosition::new(0, 0),
+                at: test_coordinate(0, 0),
                 text: "\\n".to_string(),
             }
         );
