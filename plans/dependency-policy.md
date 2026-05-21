@@ -178,6 +178,126 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `ByteRange`
   - `ByteOffset`
   - `Utf16Offset`
+  - `WorkspaceDiscoveryDecision`
+  - `WorkspaceDiscoverySkipReason`
+  - `WorkspaceDiscoveryPathPolicyResult`
+  - `WorkspaceDiscoveryTrustResult`
+  - `WorkspaceDiscoveryChangeKind`
+  - `WorkspaceDiscoveryPolicyDecision`
+  - `WorkspaceDiscoveryRecord`
+  - `WorkspaceDiscoverySnapshot`
+  - `WorkspaceDiscoveryDelta`
+  - `SemanticFabricWorkSourceKind`
+  - `SemanticFabricSchedulingTrigger`
+  - `SemanticFabricPriority`
+  - `SemanticFabricInvalidationCause`
+  - `SemanticFabricSchedulingAction`
+  - `SemanticFabricPrivacyLabel`
+  - `SemanticFabricDependencyHint`
+  - `SemanticFabricDescriptorReference`
+  - `SemanticFabricJobRequest`
+  - `SemanticFabricSchedulingDecision`
+  - `SemanticFabricSchedulePlan`
+  - `ContextManifestPurpose`
+  - `ContextManifestItemKind`
+  - `ContextManifestInclusionState`
+  - `ContextManifestEgressStatus`
+  - `ContextManifestPermissionKind`
+  - `ContextManifestPermissionSummary`
+  - `ContextManifestItemCount`
+  - `ContextManifestFreshnessSummary`
+  - `ContextManifestPreconditionSummary`
+  - `ContextManifestItem`
+  - `ContextManifestRecord`
+  - `ContextManifestProjection`
+  - `PrivacyInspectorSourceKind`
+  - `PrivacyInspectorRedactionState`
+  - `PrivacyInspectorRefusal`
+  - `PrivacyInspectorExposureRecord`
+  - `PrivacyInspectorProjection`
+  - `PrivacyInspectorProposalContext`
+  - `PermissionBudgetActionClass`
+  - `PermissionBudgetState`
+  - `PermissionBudgetResetPolicyLabel`
+  - `PermissionBudgetConsentRequirementLabel`
+  - `PermissionBudgetUsageSummary`
+  - `PermissionBudgetContract`
+  - `PermissionBudgetActionSummary`
+  - `PermissionBudgetEvaluationDisposition`
+  - `PermissionBudgetEvaluation`
+  - `PermissionBudgetProjection`
+  - `ApprovalChecklistGateKind`
+  - `ApprovalChecklistGateStatus`
+  - `ApprovalChecklistReason`
+  - `ApprovalChecklistGateSummary`
+  - `ProposalApprovalChecklistProjection`
+  - `CheckpointRollbackAuditStatus`
+  - `CheckpointRollbackLimitation`
+  - `CheckpointRollbackTargetSummary`
+  - `ProposalCheckpointProjection`
+  - `ProposalRollbackProjection`
+  - `CheckpointRollbackProjection`
+  - `AssistedAiProviderClass`
+  - `AssistedAiOperationClass`
+  - `AssistedAiSupportLabel`
+  - `AssistedAiProviderAvailabilityState`
+  - `AssistedAiConsentState`
+  - `AssistedAiRequestDisposition`
+  - `AssistedAiProviderInvocationState`
+  - `AssistedAiTrustProjectionReference`
+  - `AssistedAiTrustProjectionKind`
+  - `AssistedAiPermissionBudgetEvaluationReference`
+  - `AssistedAiRefusalMetadata`
+  - `AssistedAiProviderCapability`
+  - `AssistedAiConsentBoundary`
+  - `AssistedAiRouteDecision`
+  - `AssistedAiProposalTargetIntent`
+  - `AssistedAiRequestContract`
+  - `AssistedAiEditProposalOutput`
+  - `AssistedAiProposalPreviewReadiness`
+  - `AssistedAiProviderCapabilitySummary`
+  - `AssistedAiRouteDecisionSummary`
+  - `AssistedAiRequestContractSummary`
+  - `AssistedAiProposalPreviewSummary`
+  - `AssistedAiProjection`
+  - `AssistedAiAuditPrivacyDisposition`
+  - `AssistedAiAuditOutcomeCategory`
+  - `AssistedAiAuditRedactionState`
+  - `AssistedAiAuditRecord`
+  - `AssistedAiContractError`
+  - `DelegatedTaskPlanId`
+  - `DelegatedTaskStepId`
+  - `DelegatedTaskOperationClass`
+  - `DelegatedTaskTrustGateKind`
+  - `DelegatedTaskPlanState`
+  - `DelegatedTaskStepState`
+  - `DelegatedTaskRuntimeActivationState`
+  - `DelegatedTaskPlanReadinessStatus`
+  - `DelegatedTaskReadinessClassification`
+  - `DelegatedTaskRequiredTrustGate`
+  - `DelegatedTaskPlanBlocker`
+  - `DelegatedTaskAffectedTargetSummary`
+  - `DelegatedTaskProposalPreviewLink`
+  - `DelegatedTaskPlanStep`
+  - `DelegatedTaskAuditReadinessStatus`
+  - `DelegatedTaskAssistedAiAuditReference`
+  - `DelegatedTaskAuditLinkageRecord`
+  - `DelegatedTaskPlanContract`
+  - `DelegatedTaskPlanningBoundaryInput`
+  - `DelegatedTaskPlanRow`
+  - `DelegatedTaskStepSummary`
+  - `DelegatedTaskProjection`
+  - `FutureSurfaceGateId`
+  - `FutureSurfaceClass`
+  - `FutureSurfaceOperationClass`
+  - `FutureSurfaceRequirementStatus`
+  - `FutureSurfaceRuntimeActivationState`
+  - `FutureSurfaceGateClassification`
+  - `FutureSurfaceBlockerCategory`
+  - `FutureSurfaceGateReason`
+  - `FutureSurfacePlanningGateInput`
+  - `FutureSurfacePlanningGate`
+  - `FutureSurfaceGateProjection`
   - `Utf16Position`
   - `Utf16Range`
   - `ChangedTextRange`
@@ -239,6 +359,20 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `LspCompletionResponse`
   - `LspFormattingRequest`
   - `LspFormattingResponse`
+  - `LspConfiguredServerIdentity`
+  - `LspWorkspaceTrustPosture`
+  - `LspLaunchDisposition`
+  - `LspLaunchPolicyDecision`
+  - `LspSupervisionLifecycleState`
+  - `LspHealthState`
+  - `LspRestartBackoffMetadata`
+  - `LspCapabilitySummary`
+  - `LspDiagnosticSummary`
+  - `LspRequestCorrelation`
+  - `LspSupervisionEventKind`
+  - `LspSupervisionEvent`
+  - `LspContractValidationError`
+  - `LspEditProposalConversionInput`
   - `SemanticToken`
   - `SemanticTokenSet`
   - `SymbolLocation`

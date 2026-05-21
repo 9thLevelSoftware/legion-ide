@@ -20,13 +20,17 @@ use devil_protocol::{
     CorrelationId, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
     FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
     FileFingerprint as ProtocolFileFingerprint, FileId, FileIdentity, FileKind, FileMetadata,
-    FileTreeDelta, FileTreeDeltaOp, FileTreeNode, PrincipalId, ProjectId, ProposalDenialReason,
-    ProposalFailureReason, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
-    ProposalResponse, ProposalStaleContext, ProposalStaleReason, ProposalVersionPreconditions,
-    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, SnapshotId,
-    TimestampMillis, WatcherEvent, WatcherEventKind, WorkspaceCloseRequest, WorkspaceClosed,
-    WorkspaceConfigSnapshot, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
-    WorkspaceOpened, WorkspaceRequest, WorkspaceResponse, WorkspaceRootId, WorkspaceTrustState,
+    FileTreeDelta, FileTreeDeltaOp, FileTreeNode, LanguageId, PrincipalId, ProjectId,
+    ProposalDenialReason, ProposalFailureReason, ProposalId, ProposalLifecycleState,
+    ProposalLifecycleTransition, ProposalResponse, ProposalStaleContext, ProposalStaleReason,
+    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
+    ProtocolResult, SemanticPrivacyScope, SnapshotId, TimestampMillis, WatcherEvent,
+    WatcherEventKind, WorkspaceCloseRequest, WorkspaceClosed, WorkspaceConfigSnapshot,
+    WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision, WorkspaceDiscoveryDelta,
+    WorkspaceDiscoveryPathPolicyResult, WorkspaceDiscoveryPolicyDecision, WorkspaceDiscoveryRecord,
+    WorkspaceDiscoverySkipReason, WorkspaceDiscoverySnapshot, WorkspaceDiscoveryTrustResult,
+    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceRootId, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, TrustState};
 use thiserror::Error;
@@ -50,6 +54,18 @@ const MAX_TREE_CHILDREN_DEPTH: usize = 2;
 const WATCHER_EVENT_BUFFER: usize = 1_024;
 const WATCHER_RENAME_DEBOUNCE_MILLIS: u64 = 64;
 const WATCHER_RECOVERY_MAX_RESCANS: usize = 2;
+
+type WorkspaceScanResult = (
+    Vec<FileTreeNode>,
+    HashMap<String, FileFingerprint>,
+    Vec<WorkspaceDiscoveryRecord>,
+);
+
+struct WorkspaceScanAccumulation {
+    nodes: Vec<FileTreeNode>,
+    fingerprints: HashMap<String, FileFingerprint>,
+    discovery_records: Vec<WorkspaceDiscoveryRecord>,
+}
 
 fn now_millis() -> u64 {
     SystemTime::now()
@@ -409,6 +425,7 @@ struct WorkspaceState {
     file_metadata: HashMap<FileId, FileMetadata>,
     file_path_by_id: HashMap<FileId, String>,
     tree: Vec<FileTreeNode>,
+    discovery_records: Vec<WorkspaceDiscoveryRecord>,
     last_scan: HashMap<String, FileFingerprint>,
     active_sessions: HashSet<FileId>,
     watcher_sequence: u64,
@@ -464,6 +481,7 @@ impl WorkspaceState {
             file_metadata: HashMap::new(),
             file_path_by_id: HashMap::new(),
             tree,
+            discovery_records: Vec::new(),
             last_scan: scan,
             active_sessions: HashSet::new(),
             watcher_sequence: 0,
@@ -674,23 +692,27 @@ impl WorkspaceActor {
         Ok(normalized)
     }
 
-    fn should_skip_entry(&self, entry_name: &str, metadata: Option<&FileSystemMetadata>) -> bool {
+    fn skip_reason_for_entry(
+        &self,
+        entry_name: &str,
+        metadata: Option<&FileSystemMetadata>,
+    ) -> Option<WorkspaceDiscoverySkipReason> {
         if self.discovery.skip_hidden && entry_name.starts_with('.') {
-            return true;
+            return Some(if entry_name == ".gitignore" {
+                WorkspaceDiscoverySkipReason::Ignored
+            } else {
+                WorkspaceDiscoverySkipReason::Hidden
+            });
         }
 
-        let generated = [
-            ".git",
-            "target",
-            "node_modules",
-            ".idea",
-            ".vscode",
-            "out",
-            "dist",
-            "build",
-        ];
+        let generated = [".git", "target", ".idea", ".vscode", "out", "dist", "build"];
         if self.discovery.skip_generated && generated.contains(&entry_name) {
-            return true;
+            return Some(WorkspaceDiscoverySkipReason::Generated);
+        }
+
+        let vendored = ["node_modules", "vendor", "third_party"];
+        if self.discovery.skip_generated && vendored.contains(&entry_name) {
+            return Some(WorkspaceDiscoverySkipReason::Vendored);
         }
 
         let binaries = [
@@ -704,7 +726,7 @@ impl WorkspaceActor {
         {
             let suffix = format!(".{ext}").to_ascii_lowercase();
             if binaries.iter().any(|value| *value == suffix) {
-                return true;
+                return Some(WorkspaceDiscoverySkipReason::Binary);
             }
         }
 
@@ -713,10 +735,141 @@ impl WorkspaceActor {
             && meta.is_file()
             && meta.length > LARGE_FILE_BYTES
         {
-            return true;
+            return Some(WorkspaceDiscoverySkipReason::Oversized);
         }
 
-        false
+        None
+    }
+
+    fn trust_result(state: &WorkspaceState) -> WorkspaceDiscoveryTrustResult {
+        match state.trust {
+            TrustState::Trusted => WorkspaceDiscoveryTrustResult::Trusted,
+            TrustState::Untrusted => WorkspaceDiscoveryTrustResult::Untrusted,
+            TrustState::Unknown => WorkspaceDiscoveryTrustResult::Unknown,
+        }
+    }
+
+    fn language_hint_for_path(path: &Path) -> Option<LanguageId> {
+        let language = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("rs") => "rust",
+            Some("toml") => "toml",
+            Some("md") => "markdown",
+            Some("json") => "json",
+            Some("ts") | Some("tsx") => "typescript",
+            Some("js") | Some("jsx") => "javascript",
+            Some("py") => "python",
+            Some("go") => "go",
+            Some("java") => "java",
+            Some("c") | Some("h") => "c",
+            Some("cpp") | Some("cc") | Some("hpp") => "cpp",
+            _ => return None,
+        };
+        Some(LanguageId(language.to_string()))
+    }
+
+    fn display_path(root: &Path, path: &Path) -> String {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn content_hash_fingerprint(hash: Option<&String>) -> Option<ProtocolFileFingerprint> {
+        hash.map(|value| ProtocolFileFingerprint {
+            algorithm: "workspace-content-hash".to_string(),
+            value: value.clone(),
+        })
+    }
+
+    fn discovery_policy(
+        state: &WorkspaceState,
+        reason: Option<WorkspaceDiscoverySkipReason>,
+    ) -> WorkspaceDiscoveryPolicyDecision {
+        let trust = Self::trust_result(state);
+        let trust_denied = trust != WorkspaceDiscoveryTrustResult::Trusted;
+        let skip_reason = if trust_denied {
+            Some(WorkspaceDiscoverySkipReason::PolicyDenied)
+        } else {
+            reason
+        };
+        let decision = match skip_reason {
+            None => WorkspaceDiscoveryDecision::ContentAllowed,
+            Some(
+                WorkspaceDiscoverySkipReason::Deleted | WorkspaceDiscoverySkipReason::External,
+            ) => WorkspaceDiscoveryDecision::Excluded,
+            Some(_) => WorkspaceDiscoveryDecision::MetadataOnly,
+        };
+        let path_policy = match skip_reason {
+            Some(WorkspaceDiscoverySkipReason::External) => {
+                WorkspaceDiscoveryPathPolicyResult::External
+            }
+            Some(WorkspaceDiscoverySkipReason::PolicyDenied) => {
+                WorkspaceDiscoveryPathPolicyResult::WorkspaceDenied
+            }
+            _ => WorkspaceDiscoveryPathPolicyResult::WorkspaceAllowed,
+        };
+        WorkspaceDiscoveryPolicyDecision {
+            decision,
+            skip_reason,
+            path_policy,
+            trust,
+            generated: matches!(skip_reason, Some(WorkspaceDiscoverySkipReason::Generated)),
+            binary: matches!(skip_reason, Some(WorkspaceDiscoverySkipReason::Binary)),
+            vendored: matches!(skip_reason, Some(WorkspaceDiscoverySkipReason::Vendored)),
+            oversized: matches!(skip_reason, Some(WorkspaceDiscoverySkipReason::Oversized)),
+            metadata_only: decision != WorkspaceDiscoveryDecision::ContentAllowed,
+        }
+    }
+
+    fn discovery_record(
+        &self,
+        state: &WorkspaceState,
+        path: Option<&Path>,
+        identity: Option<FileIdentity>,
+        metadata: Option<FileMetadata>,
+        reason: Option<WorkspaceDiscoverySkipReason>,
+        change_kind: Option<WorkspaceDiscoveryChangeKind>,
+    ) -> WorkspaceDiscoveryRecord {
+        let policy = Self::discovery_policy(state, reason);
+        let path_dto = path.map(|path| CanonicalPath(path.to_string_lossy().into_owned()));
+        let display_path = path.map(|path| Self::display_path(&state.root_path, path));
+        let language_hint = path.and_then(Self::language_hint_for_path);
+        let content_fingerprint = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fingerprint.clone());
+        let content_hash = if policy.decision == WorkspaceDiscoveryDecision::ContentAllowed {
+            metadata
+                .as_ref()
+                .and_then(|metadata| Self::content_hash_fingerprint(metadata.hash.as_ref()))
+                .or_else(|| {
+                    identity.as_ref().and_then(|identity| {
+                        Self::content_hash_fingerprint(identity.content_hash.as_ref())
+                    })
+                })
+        } else {
+            None
+        };
+
+        WorkspaceDiscoveryRecord {
+            schema_version: 1,
+            workspace_id: Some(state.workspace_id),
+            workspace_root_id: Some(state.workspace_root_id),
+            workspace_generation: state.generation,
+            identity,
+            path: path_dto,
+            display_path,
+            metadata,
+            policy,
+            language_hint,
+            privacy_scope: if matches!(state.trust, TrustState::Trusted) {
+                SemanticPrivacyScope::Workspace
+            } else {
+                SemanticPrivacyScope::MetadataOnly
+            },
+            content_fingerprint,
+            content_hash,
+            change_kind,
+        }
     }
 
     fn kind_for_platform_metadata(&self, metadata: &FileSystemMetadata) -> FileKind {
@@ -1017,24 +1170,17 @@ impl WorkspaceActor {
         })
     }
 
-    fn scan_shallow(
-        &self,
-        state: &mut WorkspaceState,
-    ) -> WorkspaceResult<(Vec<FileTreeNode>, HashMap<String, FileFingerprint>)> {
-        let mut nodes = Vec::new();
-        let mut fingerprints = HashMap::new();
+    fn scan_shallow(&self, state: &mut WorkspaceState) -> WorkspaceResult<WorkspaceScanResult> {
+        let mut scan = WorkspaceScanAccumulation {
+            nodes: Vec::new(),
+            fingerprints: HashMap::new(),
+            discovery_records: Vec::new(),
+        };
         let root_path = state.root_path.clone();
 
-        self.collect_tree_nodes(
-            &root_path,
-            &PathBuf::new(),
-            0,
-            state,
-            &mut nodes,
-            &mut fingerprints,
-        )?;
+        self.collect_tree_nodes(&root_path, &PathBuf::new(), 0, state, &mut scan)?;
 
-        Ok((nodes, fingerprints))
+        Ok((scan.nodes, scan.fingerprints, scan.discovery_records))
     }
 
     fn collect_tree_nodes(
@@ -1043,8 +1189,7 @@ impl WorkspaceActor {
         relative: &Path,
         depth: usize,
         state: &mut WorkspaceState,
-        nodes: &mut Vec<FileTreeNode>,
-        fingerprints: &mut HashMap<String, FileFingerprint>,
+        scan: &mut WorkspaceScanAccumulation,
     ) -> WorkspaceResult<()> {
         if depth > MAX_TREE_CHILDREN_DEPTH {
             return Ok(());
@@ -1070,21 +1215,38 @@ impl WorkspaceActor {
             let meta = self.fs.read_metadata(&child).ok();
             let meta_ref = meta.as_ref();
 
-            let entry_skip = if let Some(meta) = meta.as_ref() {
-                self.should_skip_entry(&entry_name, Some(meta))
-            } else {
-                false
-            };
-
-            if entry_skip {
-                continue;
-            }
-
             let canonical = self
                 .fs
                 .normalize_path(&child)
                 .map_err(WorkspaceError::Platform)?;
             self.check_path_within_root(state, &canonical)?;
+
+            if let Some(skip_reason) = self.skip_reason_for_entry(&entry_name, meta.as_ref()) {
+                let skipped_metadata = meta.as_ref().map(|meta| FileMetadata {
+                    canonical_path: CanonicalPath(canonical.to_string_lossy().into_owned()),
+                    file_id: None,
+                    workspace_id: Some(state.workspace_id),
+                    kind: self.kind_for_platform_metadata(meta),
+                    size_bytes: Some(meta.length),
+                    modified_at: meta.modified_at.map(TimestampMillis),
+                    read_only: meta.read_only,
+                    permissions: Some("workspace-discovery-skipped".to_string()),
+                    hash: None,
+                    fingerprint: None,
+                    content_version: None,
+                    workspace_generation: Some(state.generation),
+                    schema_version: 1,
+                });
+                scan.discovery_records.push(self.discovery_record(
+                    state,
+                    Some(&canonical),
+                    None,
+                    skipped_metadata,
+                    Some(skip_reason),
+                    Some(WorkspaceDiscoveryChangeKind::PolicyChanged),
+                ));
+                continue;
+            }
 
             let metadata = match meta_ref {
                 Some(meta) => {
@@ -1138,21 +1300,10 @@ impl WorkspaceActor {
             let mut child_ids = Vec::new();
             let is_dir = meta.as_ref().map(|meta| meta.is_dir()).unwrap_or(false);
             if is_dir && depth < MAX_TREE_CHILDREN_DEPTH {
-                let mut grandchildren: Vec<FileTreeNode> = Vec::new();
-                let mut extra_meta = HashMap::new();
-                self.collect_tree_nodes(
-                    root,
-                    &relative.join(&entry_name),
-                    depth + 1,
-                    state,
-                    &mut grandchildren,
-                    &mut extra_meta,
-                )?;
-                for child_node in &grandchildren {
+                let child_start = scan.nodes.len();
+                self.collect_tree_nodes(root, &relative.join(&entry_name), depth + 1, state, scan)?;
+                for child_node in &scan.nodes[child_start..] {
                     child_ids.push(child_node.identity.file_id);
-                }
-                for (k, v) in extra_meta {
-                    fingerprints.insert(k, v);
                 }
             }
 
@@ -1176,7 +1327,7 @@ impl WorkspaceActor {
                     schema_version: 1,
                 });
 
-            fingerprints.insert(
+            scan.fingerprints.insert(
                 identity.canonical_path.0.clone(),
                 metadata
                     .size_bytes
@@ -1194,7 +1345,16 @@ impl WorkspaceActor {
                     }),
             );
 
-            nodes.push(FileTreeNode {
+            scan.discovery_records.push(self.discovery_record(
+                state,
+                Some(&canonical),
+                Some(identity.clone()),
+                Some(metadata.clone()),
+                None,
+                Some(WorkspaceDiscoveryChangeKind::Added),
+            ));
+
+            scan.nodes.push(FileTreeNode {
                 identity,
                 name: entry_name,
                 children: child_ids,
@@ -1553,9 +1713,10 @@ impl WorkspaceActor {
     }
 
     fn rebuild_tree_from_scan(&self, state: &mut WorkspaceState) -> WorkspaceResult<()> {
-        let (nodes, fingerprints) = self.scan_shallow(state)?;
+        let (nodes, fingerprints, discovery_records) = self.scan_shallow(state)?;
         state.tree = nodes;
         state.last_scan = fingerprints;
+        state.discovery_records = discovery_records;
         Ok(())
     }
 
@@ -2776,6 +2937,204 @@ impl WorkspaceActor {
             fallback_status: Some("atomic-write-only; non-atomic fallback disabled".to_string()),
             response: ProposalResponse::Applied(transition),
         })
+    }
+
+    /// Return a workspace-authored semantic discovery snapshot from cached project authority state.
+    pub fn semantic_discovery_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceResult<WorkspaceDiscoverySnapshot> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state
+            .as_ref()
+            .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+        if state.workspace_id != workspace_id {
+            return Err(WorkspaceError::WorkspaceMissing { workspace_id });
+        }
+
+        Ok(WorkspaceDiscoverySnapshot {
+            schema_version: 1,
+            workspace_id,
+            workspace_root_id: Some(state.workspace_root_id),
+            workspace_generation: state.generation,
+            captured_at: TimestampMillis(now_millis()),
+            records: state.discovery_records.clone(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// Build a workspace-authored semantic discovery delta from watcher events.
+    pub fn semantic_discovery_delta_from_watcher_events(
+        &self,
+        workspace_id: WorkspaceId,
+        events: &[WatcherEvent],
+    ) -> WorkspaceResult<WorkspaceDiscoveryDelta> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state
+            .as_mut()
+            .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+        if state.workspace_id != workspace_id {
+            return Err(WorkspaceError::WorkspaceMissing { workspace_id });
+        }
+
+        let mut records = Vec::new();
+        let mut sequence = EventSequence(0);
+        for event in events {
+            sequence = EventSequence(sequence.0.max(event.sequence.0));
+            records.push(self.discovery_record_for_watcher_event(state, event));
+        }
+
+        Ok(WorkspaceDiscoveryDelta {
+            schema_version: 1,
+            workspace_id,
+            workspace_generation: state.generation,
+            sequence,
+            records,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    fn discovery_record_for_watcher_event(
+        &self,
+        state: &mut WorkspaceState,
+        event: &WatcherEvent,
+    ) -> WorkspaceDiscoveryRecord {
+        let raw_path = PathBuf::from(&event.path.0);
+        let canonical = match self.canonicalize_with_parent_fallback(&raw_path) {
+            Ok(path) => path,
+            Err(_) => {
+                return self.discovery_record(
+                    state,
+                    Some(&raw_path),
+                    None,
+                    None,
+                    Some(WorkspaceDiscoverySkipReason::External),
+                    Some(WorkspaceDiscoveryChangeKind::PolicyChanged),
+                );
+            }
+        };
+
+        let root = match self.canonicalize_root_path(state) {
+            Ok(root) => root,
+            Err(_) => state.root_path.clone(),
+        };
+        if !Self::path_is_within_root(&root, &canonical) {
+            return self.discovery_record(
+                state,
+                Some(&canonical),
+                None,
+                None,
+                Some(WorkspaceDiscoverySkipReason::External),
+                Some(WorkspaceDiscoveryChangeKind::PolicyChanged),
+            );
+        }
+
+        if matches!(event.kind, WatcherEventKind::Deleted) {
+            let key = canonical.to_string_lossy().into_owned();
+            let identity = state.file_id_by_path.get(&key).map(|file_id| FileIdentity {
+                file_id: *file_id,
+                workspace_id: state.workspace_id,
+                canonical_path: CanonicalPath(key.clone()),
+                content_version: state
+                    .file_metadata
+                    .get(file_id)
+                    .and_then(|metadata| metadata.content_version)
+                    .unwrap_or(FileContentVersion(0)),
+                content_hash: state
+                    .file_metadata
+                    .get(file_id)
+                    .and_then(|metadata| metadata.hash.clone()),
+            });
+            let metadata = identity
+                .as_ref()
+                .and_then(|identity| state.file_metadata.get(&identity.file_id).cloned());
+            return self.discovery_record(
+                state,
+                Some(&canonical),
+                identity,
+                metadata,
+                Some(WorkspaceDiscoverySkipReason::Deleted),
+                Some(WorkspaceDiscoveryChangeKind::Deleted),
+            );
+        }
+
+        let metadata = match self.fs.read_metadata(&canonical) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                return self.discovery_record(
+                    state,
+                    Some(&canonical),
+                    None,
+                    None,
+                    Some(WorkspaceDiscoverySkipReason::Deleted),
+                    Some(WorkspaceDiscoveryChangeKind::Deleted),
+                );
+            }
+        };
+        let entry_name = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let skip_reason = self.skip_reason_for_entry(&entry_name, Some(&metadata));
+        let fingerprint = if metadata.is_file() {
+            FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata)
+                .unwrap_or_else(|_| FileFingerprint::from_dir())
+        } else {
+            FileFingerprint::from_dir()
+        };
+        let identity = if skip_reason.is_none() {
+            Some(self.file_identity_from_platform_metadata(
+                state,
+                &canonical,
+                &fingerprint,
+                &metadata,
+            ))
+        } else {
+            None
+        };
+        let metadata = identity
+            .as_ref()
+            .and_then(|identity| state.file_metadata.get(&identity.file_id).cloned())
+            .or_else(|| {
+                Some(FileMetadata {
+                    canonical_path: CanonicalPath(canonical.to_string_lossy().into_owned()),
+                    file_id: None,
+                    workspace_id: Some(state.workspace_id),
+                    kind: self.kind_for_platform_metadata(&metadata),
+                    size_bytes: Some(metadata.length),
+                    modified_at: metadata.modified_at.map(TimestampMillis),
+                    read_only: metadata.read_only,
+                    permissions: Some("workspace-discovery-delta".to_string()),
+                    hash: fingerprint.hash.clone(),
+                    fingerprint: Some(fingerprint.to_protocol()),
+                    content_version: identity.as_ref().map(|identity| identity.content_version),
+                    workspace_generation: Some(state.generation),
+                    schema_version: 1,
+                })
+            });
+        let change_kind = match event.kind {
+            WatcherEventKind::Created | WatcherEventKind::Renamed => {
+                WorkspaceDiscoveryChangeKind::Added
+            }
+            WatcherEventKind::Modified | WatcherEventKind::Overflow => {
+                WorkspaceDiscoveryChangeKind::Changed
+            }
+            WatcherEventKind::Deleted => WorkspaceDiscoveryChangeKind::Deleted,
+        };
+        self.discovery_record(
+            state,
+            Some(&canonical),
+            identity,
+            metadata,
+            skip_reason,
+            Some(change_kind),
+        )
     }
 
     /// Read current cached shallow tree.

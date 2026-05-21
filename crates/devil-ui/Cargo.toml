@@ -8,3 +8,6 @@ publish.workspace = true
 [dependencies]
 devil-protocol = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

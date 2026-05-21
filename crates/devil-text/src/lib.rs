@@ -1776,7 +1776,19 @@ mod tests {
             buf.try_full_text(),
             Err(TextError::FullCacheBudgetExceeded { .. })
         ));
-        assert!(buf.chunk_descriptors().len() > 1);
+        let chunks = buf.chunk_descriptors();
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks[0].start_byte, 0);
+        assert_eq!(chunks.last().unwrap().end_byte, buf.len());
+        for (ordinal, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.ordinal, ordinal);
+            assert_eq!(chunk.byte_len, chunk.end_byte - chunk.start_byte);
+            assert!(chunk.byte_len <= DEFAULT_CHUNK_FORCE_MAX_BYTES);
+            assert!(chunk.hash.starts_with("sha256:"));
+            if ordinal > 0 {
+                assert_eq!(chunk.start_byte, chunks[ordinal - 1].end_byte);
+            }
+        }
 
         let snapshot = buf.try_snapshot().unwrap();
         assert!(matches!(
@@ -1784,6 +1796,37 @@ mod tests {
             Err(TextError::FullCacheBudgetExceeded { .. })
         ));
         assert_eq!(snapshot.len(), DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1);
+        assert_eq!(snapshot.chunk_descriptors().len(), chunks.len());
+    }
+
+    #[test]
+    fn large_snapshot_line_slices_and_chunks_are_bounded_by_default() {
+        let long_line = "m".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1024);
+        let text = format!("head\n{long_line}\ntail\n");
+        let snapshot = TextSnapshot::try_new(text).unwrap();
+
+        assert!(matches!(
+            snapshot.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+        assert!(snapshot.chunk_descriptors().len() > 1);
+
+        let first_chunk = &snapshot.chunk_descriptors()[0];
+        let first_chunk_text = snapshot.chunk_text(first_chunk.ordinal).unwrap();
+        assert_eq!(first_chunk_text.len(), first_chunk.byte_len);
+        assert!(first_chunk_text.len() <= DEFAULT_CHUNK_FORCE_MAX_BYTES);
+
+        let slices = snapshot.visible_line_slices_with_limit(0, 3, 32).unwrap();
+        let payload_bytes = slices.iter().map(|slice| slice.text.len()).sum::<usize>();
+
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices[0].text, "head");
+        assert_eq!(slices[1].line, 1);
+        assert!(slices[1].truncated);
+        assert!(slices[1].utf8_byte_len <= 32);
+        assert_eq!(slices[2].text, "tail");
+        assert!(payload_bytes < 128);
+        assert!(payload_bytes < snapshot.len() / 1024);
     }
 
     #[test]

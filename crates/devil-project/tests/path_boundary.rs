@@ -13,8 +13,9 @@ use devil_platform::{
 use devil_project::{WorkspaceActor, WorkspaceError, WorkspaceSaveRequest};
 use devil_protocol::{
     BufferVersion, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId, CorrelationId,
-    PrincipalId, ProposalId, ProposalResponse, ProposalStaleReason, SnapshotId,
-    WorkspaceOpenRequest, WorkspaceTrustState,
+    EventSequence, PrincipalId, ProposalId, ProposalResponse, ProposalStaleReason, SnapshotId,
+    WatcherEvent, WatcherEventKind, WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision,
+    WorkspaceDiscoverySkipReason, WorkspaceOpenRequest, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use uuid::Uuid;
@@ -199,6 +200,129 @@ fn save_new_file(
         causality_id: CausalityId(Uuid::now_v7()),
         text,
     })
+}
+
+#[test]
+fn semantic_discovery_snapshot_reports_safe_workspace_policy_outcomes() {
+    let root = create_temp_workspace();
+    std::fs::create_dir_all(root.join("src")).expect("create src");
+    std::fs::create_dir_all(root.join("target")).expect("create target");
+    std::fs::create_dir_all(root.join("node_modules")).expect("create vendor dir");
+    std::fs::write(root.join("src/lib.rs"), "pub fn accepted() {}\n").expect("accepted file");
+    std::fs::write(root.join("target/generated.rs"), "pub fn generated() {}\n")
+        .expect("generated file");
+    std::fs::write(
+        root.join("node_modules/vendor.rs"),
+        "pub fn vendored() {}\n",
+    )
+    .expect("vendored file");
+    std::fs::write(root.join("image.png"), [0_u8, 1, 2, 3]).expect("binary file");
+    std::fs::write(root.join(".gitignore"), "target\n").expect("ignore file");
+
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    let snapshot = actor
+        .semantic_discovery_snapshot(opened.workspace_id)
+        .expect("workspace-authored discovery snapshot");
+
+    assert!(snapshot.records.iter().any(|record| {
+        record.display_path.as_deref() == Some("src/lib.rs")
+            && record.policy.decision == WorkspaceDiscoveryDecision::ContentAllowed
+            && record.identity.is_some()
+    }));
+    assert!(snapshot.records.iter().any(|record| {
+        record.display_path.as_deref() == Some("target")
+            && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::Generated)
+            && record.policy.metadata_only
+    }));
+    assert!(snapshot.records.iter().any(|record| {
+        record.display_path.as_deref() == Some("node_modules")
+            && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::Vendored)
+            && record.policy.metadata_only
+    }));
+    assert!(snapshot.records.iter().any(|record| {
+        record.display_path.as_deref() == Some("image.png")
+            && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::Binary)
+            && record.policy.metadata_only
+    }));
+    assert!(snapshot.records.iter().any(|record| {
+        record.display_path.as_deref() == Some(".gitignore")
+            && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::Ignored)
+            && record.policy.metadata_only
+    }));
+
+    let (untrusted_actor, untrusted_opened) = open_workspace(&root, WorkspaceTrustState::Untrusted);
+    let denied_snapshot = untrusted_actor
+        .semantic_discovery_snapshot(untrusted_opened.workspace_id)
+        .expect("untrusted discovery snapshot");
+    assert!(denied_snapshot.records.iter().any(|record| {
+        record.display_path.as_deref() == Some("src/lib.rs")
+            && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::PolicyDenied)
+            && record.policy.metadata_only
+    }));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn semantic_discovery_delta_reports_external_deleted_and_changed_outcomes() {
+    let root = create_temp_workspace();
+    std::fs::create_dir_all(root.join("src")).expect("create src");
+    let changed = root.join("src/lib.rs");
+    let deleted = root.join("src/deleted.rs");
+    std::fs::write(&changed, "pub fn changed() {}\n").expect("changed seed");
+    std::fs::write(&deleted, "pub fn deleted() {}\n").expect("deleted seed");
+
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    std::fs::remove_file(&deleted).expect("delete after open");
+    std::fs::write(&changed, "pub fn changed_again() {}\n").expect("change after open");
+    let outside = root
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("outside-discovery.rs");
+
+    let events = vec![
+        WatcherEvent {
+            workspace_id: opened.workspace_id,
+            kind: WatcherEventKind::Modified,
+            path: CanonicalPath(changed.to_string_lossy().into_owned()),
+            old_path: None,
+            sequence: EventSequence(1),
+        },
+        WatcherEvent {
+            workspace_id: opened.workspace_id,
+            kind: WatcherEventKind::Deleted,
+            path: CanonicalPath(deleted.to_string_lossy().into_owned()),
+            old_path: None,
+            sequence: EventSequence(2),
+        },
+        WatcherEvent {
+            workspace_id: opened.workspace_id,
+            kind: WatcherEventKind::Created,
+            path: CanonicalPath(outside.to_string_lossy().into_owned()),
+            old_path: None,
+            sequence: EventSequence(3),
+        },
+    ];
+    let delta = actor
+        .semantic_discovery_delta_from_watcher_events(opened.workspace_id, &events)
+        .expect("workspace-authored discovery delta");
+
+    assert!(delta.records.iter().any(|record| {
+        record.display_path.as_deref() == Some("src/lib.rs")
+            && record.change_kind == Some(WorkspaceDiscoveryChangeKind::Changed)
+            && record.policy.decision == WorkspaceDiscoveryDecision::ContentAllowed
+    }));
+    assert!(delta.records.iter().any(|record| {
+        record.display_path.as_deref() == Some("src/deleted.rs")
+            && record.change_kind == Some(WorkspaceDiscoveryChangeKind::Deleted)
+            && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::Deleted)
+    }));
+    assert!(delta.records.iter().any(|record| {
+        record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::External)
+            && record.policy.decision == WorkspaceDiscoveryDecision::Excluded
+    }));
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

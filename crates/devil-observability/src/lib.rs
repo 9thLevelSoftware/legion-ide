@@ -10,13 +10,20 @@ use std::{
 };
 
 use devil_protocol::{
-    BufferId, CapabilityId, CausalityId, CorrelationId, EventEnvelope, EventId,
-    EventMetadataRecord, EventSequence, EventSeverity, EventSinkPort, EventSinkRequest, FileId,
-    PrincipalId, ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
-    ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
-    ProposalRejectionReason, ProposalRollbackReason, ProposalStaleReason, ProtocolDiagnostic,
-    ProtocolError, ProtocolResult, RedactionHint, RetentionLabel, TextTransactionDescriptor,
-    TimestampMillis, WorkspaceId, WorkspaceProposal,
+    AssistedAiAuditOutcomeCategory, AssistedAiAuditPrivacyDisposition, AssistedAiAuditRecord,
+    AssistedAiAuditRedactionState, AssistedAiConsentBoundary, AssistedAiContractError,
+    AssistedAiProjection, AssistedAiProposalPreviewSummary, AssistedAiProviderInvocationState,
+    AssistedAiRequestContract, AssistedAiRequestDisposition, BufferId, CapabilityId, CausalityId,
+    CorrelationId, DelegatedTaskAssistedAiAuditReference, DelegatedTaskAuditLinkageRecord,
+    DelegatedTaskPlanContract, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
+    EventSeverity, EventSinkPort, EventSinkRequest, FileFingerprint, FileId,
+    PermissionBudgetEvaluationDisposition, PrincipalId, ProposalAuditRecord, ProposalFailureReason,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind,
+    ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRollbackReason,
+    ProposalStaleReason, ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint,
+    RetentionLabel, TextTransactionDescriptor, TimestampMillis, WorkspaceId, WorkspaceProposal,
+    delegated_task_audit_linkage_record, validate_assisted_ai_audit_record,
+    validate_delegated_task_audit_linkage_record,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -408,6 +415,264 @@ pub fn proposal_audit_record(
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
+}
+
+/// Build an envelope-ready metadata DTO proving that proposal audit storage completed.
+pub fn proposal_audit_recorded_event(
+    proposal: &WorkspaceProposal,
+    transition: &ProposalLifecycleTransition,
+    sequence: EventSequence,
+) -> EventEnvelope {
+    assert_core_ids(transition.causality_id, transition.correlation_id, sequence);
+    let summary = proposal_payload_summary(proposal);
+    let mut builder = EventEnvelopeBuilder::new("proposal.audit_recorded", transition.causality_id)
+        .correlation_id(transition.correlation_id)
+        .sequence(sequence)
+        .principal_id(transition.principal.clone())
+        .severity(EventSeverity::Info)
+        .retention(RetentionLabel::Audit)
+        .metadata("proposal_id", json!(proposal.proposal_id.0))
+        .metadata(
+            "lifecycle_state",
+            format!("{:?}", transition.lifecycle_state),
+        )
+        .metadata("capability", transition.capability.0.clone())
+        .metadata("payload_kind", format!("{:?}", summary.kind))
+        .metadata("affected_file_count", summary.affected_files.len() as u64)
+        .metadata("diagnostics", diagnostics_summary(&transition.diagnostics));
+
+    if let Some(workspace_id) = proposal_workspace_id(proposal) {
+        builder = builder.workspace_id(workspace_id);
+    }
+    for file_id in summary.affected_files.into_iter().take(1) {
+        builder = builder.file_id(file_id);
+    }
+
+    builder.build()
+}
+
+/// Build a metadata-only assisted-AI audit record without provider invocation or mutation authority.
+pub fn assisted_ai_audit_record(
+    request: &AssistedAiRequestContract,
+    projection: Option<&AssistedAiProjection>,
+    preview: Option<&AssistedAiProposalPreviewSummary>,
+    boundary: Option<&AssistedAiConsentBoundary>,
+    outcome_category: AssistedAiAuditOutcomeCategory,
+    event_sequence: EventSequence,
+    schema_version: u16,
+) -> Result<AssistedAiAuditRecord, AssistedAiContractError> {
+    reject_forbidden_assisted_ai_metadata("request", request)?;
+    if let Some(projection) = projection {
+        reject_forbidden_assisted_ai_metadata("projection", projection)?;
+    }
+    if let Some(preview) = preview {
+        reject_forbidden_assisted_ai_metadata("preview", preview)?;
+    }
+
+    let route = &request.route_decision;
+    let refusal_error_category = route
+        .refusal
+        .as_ref()
+        .map(|refusal| refusal.reason_code.clone())
+        .or_else(|| {
+            preview
+                .and_then(|preview| preview.refusal.as_ref())
+                .map(|refusal| refusal.reason_code.clone())
+        });
+    let privacy_disposition = assisted_ai_privacy_disposition(request, preview, boundary);
+    let mut risk_labels = vec![request.proposal_intent.risk_label];
+    let mut privacy_labels = vec![request.proposal_intent.privacy_label];
+    if let Some(refusal) = route.refusal.as_ref() {
+        risk_labels.push(refusal.risk_label);
+    }
+    if let Some(preview) = preview {
+        risk_labels.push(preview.risk_label);
+        privacy_labels.push(preview.privacy_label);
+    }
+
+    let record = AssistedAiAuditRecord {
+        audit_id: format!("assist:audit:{}:{}", request.request_id, event_sequence.0),
+        provider_capability_id: request.provider.provider_id.clone(),
+        provider_capability_hash: metadata_fingerprint(
+            "assisted-ai-provider",
+            &serde_json::to_string(&request.provider).unwrap_or_default(),
+        ),
+        route_decision_id: format!("assist:route:{}", request.request_id),
+        route_decision_hash: metadata_fingerprint(
+            "assisted-ai-route",
+            &serde_json::to_string(&request.route_decision).unwrap_or_default(),
+        ),
+        consent_disposition: boundary.map(|boundary| boundary.consent_state),
+        budget_dispositions: assisted_ai_budget_dispositions(request, boundary),
+        privacy_disposition,
+        request_contract_id: request.request_id.clone(),
+        request_contract_hash: metadata_fingerprint(
+            "assisted-ai-request",
+            &serde_json::to_string(request).unwrap_or_default(),
+        ),
+        projection_id: projection.map(|projection| projection.projection_id.clone()),
+        projection_hash: projection.map(|projection| {
+            metadata_fingerprint(
+                "assisted-ai-projection",
+                &serde_json::to_string(projection).unwrap_or_default(),
+            )
+        }),
+        preview_id: preview.map(|preview| preview.preview_id.clone()),
+        preview_hash: preview.map(|preview| {
+            metadata_fingerprint(
+                "assisted-ai-preview",
+                &serde_json::to_string(preview).unwrap_or_default(),
+            )
+        }),
+        proposal_id: preview.map(|preview| preview.proposal_id),
+        outcome_category,
+        refusal_error_category,
+        correlation_id: request.correlation_id,
+        causality_id: request.causality_id,
+        event_sequence,
+        risk_labels,
+        privacy_labels,
+        redaction_state: AssistedAiAuditRedactionState::MetadataOnly,
+        runtime_invocation_state: AssistedAiProviderInvocationState::NotEncoded,
+        runtime_activation_labels: vec![
+            "provider.invocation.not_encoded".to_string(),
+            "network.not_encoded".to_string(),
+            "tool.disabled".to_string(),
+            "agent.disabled".to_string(),
+            "terminal.disabled".to_string(),
+            "proposal.apply.not_encoded".to_string(),
+        ],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version,
+    };
+    validate_assisted_ai_audit_record(&record)?;
+    Ok(record)
+}
+
+/// Build an envelope-ready event from a validated assisted-AI audit record.
+pub fn assisted_ai_audit_recorded_event(
+    record: &AssistedAiAuditRecord,
+) -> Result<EventEnvelope, AssistedAiContractError> {
+    validate_assisted_ai_audit_record(record)?;
+    assert_core_ids(
+        record.causality_id,
+        record.correlation_id,
+        record.event_sequence,
+    );
+    let mut builder = EventEnvelopeBuilder::new("assisted_ai.audit_recorded", record.causality_id)
+        .correlation_id(record.correlation_id)
+        .sequence(record.event_sequence)
+        .severity(EventSeverity::Info)
+        .retention(RetentionLabel::Audit)
+        .metadata("audit_id", record.audit_id.clone())
+        .metadata(
+            "provider_capability_id",
+            record.provider_capability_id.clone(),
+        )
+        .metadata(
+            "provider_capability_hash",
+            record.provider_capability_hash.value.clone(),
+        )
+        .metadata("route_decision_id", record.route_decision_id.clone())
+        .metadata(
+            "route_decision_hash",
+            record.route_decision_hash.value.clone(),
+        )
+        .metadata("request_contract_id", record.request_contract_id.clone())
+        .metadata(
+            "request_contract_hash",
+            record.request_contract_hash.value.clone(),
+        )
+        .metadata("outcome_category", format!("{:?}", record.outcome_category))
+        .metadata(
+            "runtime_invocation_state",
+            format!("{:?}", record.runtime_invocation_state),
+        )
+        .metadata("risk_label_count", record.risk_labels.len() as u64)
+        .metadata("privacy_label_count", record.privacy_labels.len() as u64)
+        .metadata(
+            "budget_disposition_count",
+            record.budget_dispositions.len() as u64,
+        )
+        .metadata(
+            "runtime_activation_label_count",
+            record.runtime_activation_labels.len() as u64,
+        );
+    if let Some(proposal_id) = record.proposal_id {
+        builder = builder.metadata("proposal_id", json!(proposal_id.0));
+    }
+    if let Some(preview_id) = &record.preview_id {
+        builder = builder.metadata("preview_id", preview_id.clone());
+    }
+    if let Some(refusal) = &record.refusal_error_category {
+        builder = builder.metadata("refusal_error_category", refusal.clone());
+    }
+    Ok(builder.build())
+}
+
+/// Build a metadata-only delegated-task readiness/audit linkage record without runtime activation.
+pub fn delegated_task_readiness_audit_linkage_record(
+    plan: &DelegatedTaskPlanContract,
+    plan_hash: FileFingerprint,
+    audit_references: Vec<DelegatedTaskAssistedAiAuditReference>,
+    event_sequence: EventSequence,
+    schema_version: u16,
+) -> Result<DelegatedTaskAuditLinkageRecord, AssistedAiContractError> {
+    delegated_task_audit_linkage_record(
+        format!(
+            "delegated-task:audit-linkage:{}:{}",
+            plan.plan_id.0, event_sequence.0
+        ),
+        plan,
+        plan_hash,
+        audit_references,
+        event_sequence,
+        schema_version,
+    )
+}
+
+/// Build an envelope-ready event from a validated delegated-task readiness/audit linkage record.
+pub fn delegated_task_readiness_audit_linkage_recorded_event(
+    record: &DelegatedTaskAuditLinkageRecord,
+) -> Result<EventEnvelope, AssistedAiContractError> {
+    validate_delegated_task_audit_linkage_record(record)?;
+    assert_core_ids(
+        record.causality_id,
+        record.correlation_id,
+        record.event_sequence,
+    );
+    Ok(EventEnvelopeBuilder::new(
+        "delegated_task.readiness_audit_linkage_recorded",
+        record.causality_id,
+    )
+    .correlation_id(record.correlation_id)
+    .sequence(record.event_sequence)
+    .severity(EventSeverity::Info)
+    .retention(RetentionLabel::Audit)
+    .metadata("linkage_id", record.linkage_id.clone())
+    .metadata("plan_id", record.plan_id.0.clone())
+    .metadata("plan_hash", record.plan_hash.value.clone())
+    .metadata(
+        "readiness_classification",
+        format!("{:?}", record.readiness_classification),
+    )
+    .metadata("step_count", record.step_ids.len() as u64)
+    .metadata(
+        "proposal_preview_link_count",
+        record.proposal_preview_links.len() as u64,
+    )
+    .metadata(
+        "audit_reference_count",
+        record.assisted_ai_audit_references.len() as u64,
+    )
+    .metadata("proposal_id_count", record.proposal_ids.len() as u64)
+    .metadata("blocker_count", record.blockers.len() as u64)
+    .metadata("refusal_count", record.refusals.len() as u64)
+    .metadata(
+        "runtime_activation",
+        format!("{:?}", record.runtime_activation),
+    )
+    .build())
 }
 
 /// Summarize a proposal payload using identifiers, hashes, counts, and byte lengths only.
@@ -1082,6 +1347,103 @@ fn add_fingerprint_metadata(
     builder
 }
 
+fn metadata_fingerprint(algorithm: &str, value: &str) -> FileFingerprint {
+    FileFingerprint {
+        algorithm: algorithm.to_string(),
+        value: metadata_hash(value),
+    }
+}
+
+fn assisted_ai_budget_dispositions(
+    request: &AssistedAiRequestContract,
+    boundary: Option<&AssistedAiConsentBoundary>,
+) -> Vec<PermissionBudgetEvaluationDisposition> {
+    boundary.map_or_else(
+        || {
+            request
+                .permission_budget_evaluations
+                .iter()
+                .map(|evaluation| evaluation.disposition)
+                .collect()
+        },
+        |boundary| {
+            boundary
+                .budget_evaluations
+                .iter()
+                .map(|evaluation| evaluation.disposition)
+                .collect()
+        },
+    )
+}
+
+fn assisted_ai_privacy_disposition(
+    request: &AssistedAiRequestContract,
+    preview: Option<&AssistedAiProposalPreviewSummary>,
+    boundary: Option<&AssistedAiConsentBoundary>,
+) -> AssistedAiAuditPrivacyDisposition {
+    if boundary.is_some_and(|boundary| !boundary.privacy_scope_allowed)
+        || request
+            .route_decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "privacy.scope_denied")
+    {
+        return AssistedAiAuditPrivacyDisposition::Denied;
+    }
+    if preview
+        .is_some_and(|preview| preview.privacy_label == ProposalPrivacyLabel::RedactedSensitive)
+        || request.redaction_hints.contains(&RedactionHint::Full)
+    {
+        return AssistedAiAuditPrivacyDisposition::Redacted;
+    }
+    if request.route_decision.disposition == AssistedAiRequestDisposition::MetadataOnlyReady {
+        AssistedAiAuditPrivacyDisposition::Allowed
+    } else {
+        AssistedAiAuditPrivacyDisposition::Unknown
+    }
+}
+
+fn reject_forbidden_assisted_ai_metadata<T: serde::Serialize>(
+    field: &str,
+    value: &T,
+) -> Result<(), AssistedAiContractError> {
+    let serialized = serde_json::to_string(value).map_err(|_| {
+        AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: field.to_string(),
+            reason: "metadata.serialize_failed".to_string(),
+        }
+    })?;
+    if contains_forbidden_assisted_ai_marker(&serialized) {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: field.to_string(),
+            reason: "forbidden.raw_or_payload_marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn contains_forbidden_assisted_ai_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "raw prompt",
+        "source_body",
+        "provider_payload",
+        "provider request payload",
+        "provider response payload",
+        "chatcompletionrequest",
+        "terminal output",
+        "full diff",
+        "reconstructed file",
+        "model-generated prose",
+        "network_request",
+        "tool_call",
+        "runtime_started",
+        "fn main",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 fn redacted_diagnostics(diagnostics: &[ProtocolDiagnostic]) -> Vec<ProtocolDiagnostic> {
     diagnostics
         .iter()
@@ -1284,6 +1646,58 @@ mod tests {
                 )),
                 range: None,
             }],
+        }
+    }
+
+    fn assisted_ai_audit_fixture() -> AssistedAiAuditRecord {
+        AssistedAiAuditRecord {
+            audit_id: "assist:audit:req-1:1".to_string(),
+            provider_capability_id: "provider:local-redacted".to_string(),
+            provider_capability_hash: FileFingerprint {
+                algorithm: "hash".to_string(),
+                value: "provider-hash".to_string(),
+            },
+            route_decision_id: "assist:route:req-1".to_string(),
+            route_decision_hash: FileFingerprint {
+                algorithm: "hash".to_string(),
+                value: "route-hash".to_string(),
+            },
+            consent_disposition: Some(devil_protocol::AssistedAiConsentState::Granted),
+            budget_dispositions: vec![PermissionBudgetEvaluationDisposition::Allowed],
+            privacy_disposition: AssistedAiAuditPrivacyDisposition::Allowed,
+            request_contract_id: "assist:req:1".to_string(),
+            request_contract_hash: FileFingerprint {
+                algorithm: "hash".to_string(),
+                value: "request-hash".to_string(),
+            },
+            projection_id: Some("assisted-ai:p6-3".to_string()),
+            projection_hash: Some(FileFingerprint {
+                algorithm: "hash".to_string(),
+                value: "projection-hash".to_string(),
+            }),
+            preview_id: Some("assist:preview:701".to_string()),
+            preview_hash: Some(FileFingerprint {
+                algorithm: "hash".to_string(),
+                value: "preview-hash".to_string(),
+            }),
+            proposal_id: Some(devil_protocol::ProposalId(701)),
+            outcome_category: AssistedAiAuditOutcomeCategory::ProposalPreviewReady,
+            refusal_error_category: None,
+            correlation_id: CorrelationId(901),
+            causality_id: CausalityId(Uuid::now_v7()),
+            event_sequence: EventSequence(77),
+            risk_labels: vec![devil_protocol::ProposalRiskLabel::Medium],
+            privacy_labels: vec![ProposalPrivacyLabel::WorkspaceMetadata],
+            redaction_state: AssistedAiAuditRedactionState::MetadataOnly,
+            runtime_invocation_state: AssistedAiProviderInvocationState::NotEncoded,
+            runtime_activation_labels: vec![
+                "provider.invocation.not_encoded".to_string(),
+                "network.not_encoded".to_string(),
+                "tool.disabled".to_string(),
+                "agent.disabled".to_string(),
+            ],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
         }
     }
 
@@ -1563,5 +1977,66 @@ mod tests {
         assert_eq!(metadata.event_id, event.event_id);
         assert_eq!(metadata.redaction, RedactionHint::MetadataOnly);
         assert_eq!(metadata.sequence, EventSequence(12));
+
+        let audit_event = proposal_audit_recorded_event(&proposal, &transition, EventSequence(13));
+        assert_eq!(audit_event.event, "proposal.audit_recorded");
+        assert_eq!(audit_event.redaction, RedactionHint::MetadataOnly);
+        assert_eq!(audit_event.sequence, EventSequence(13));
+        assert_ne!(audit_event.correlation_id.0, 0);
+        assert_ne!(audit_event.causality_id.0, Uuid::nil());
+        assert!(
+            !audit_event
+                .payload
+                .to_string()
+                .contains("/secret/source.rs")
+        );
+    }
+
+    #[test]
+    fn assisted_ai_audit_event_is_metadata_only_and_no_invocation() {
+        let record = assisted_ai_audit_fixture();
+        let event = assisted_ai_audit_recorded_event(&record).expect("audit event validates");
+        assert_eq!(event.event, "assisted_ai.audit_recorded");
+        assert_eq!(event.correlation_id, CorrelationId(901));
+        assert_eq!(event.sequence, EventSequence(77));
+        assert_eq!(event.redaction, RedactionHint::MetadataOnly);
+        assert_eq!(event.retention, RetentionLabel::Audit);
+        assert_eq!(event.payload["proposal_id"], 701);
+        assert_eq!(event.payload["runtime_invocation_state"], "NotEncoded");
+        assert_eq!(event.payload["runtime_activation_label_count"], 4);
+
+        let sink = InMemoryEventSink::new();
+        sink.try_emit(EventSinkRequest { envelope: event })
+            .expect("metadata-only assisted AI event stores");
+        let stored = sink.events().expect("stored events");
+        let serialized =
+            serde_json::to_string(&stored).expect("serialize stored assisted AI event");
+        assert!(serialized.contains("assisted_ai.audit_recorded"));
+        assert!(serialized.contains("NotEncoded"));
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("source_body"));
+        assert!(!serialized.contains("provider_payload"));
+        assert!(!serialized.contains("terminal output"));
+        assert!(!serialized.contains("ChatCompletionRequest"));
+        assert!(!serialized.contains("network_request"));
+        assert!(!serialized.contains("tool_call"));
+        assert!(!serialized.contains("runtime_started"));
+    }
+
+    #[test]
+    fn assisted_ai_audit_event_rejects_invalid_core_ids_and_raw_markers() {
+        let mut zero_sequence = assisted_ai_audit_fixture();
+        zero_sequence.event_sequence = EventSequence(0);
+        assert!(matches!(
+            assisted_ai_audit_recorded_event(&zero_sequence),
+            Err(AssistedAiContractError::ZeroEventSequence)
+        ));
+
+        let mut raw_marker = assisted_ai_audit_fixture();
+        raw_marker.refusal_error_category = Some("provider_payload raw prompt".to_string());
+        assert!(matches!(
+            assisted_ai_audit_recorded_event(&raw_marker),
+            Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
+        ));
     }
 }

@@ -258,7 +258,14 @@ fn ci_large_file_degraded_open_and_viewport_are_bounded() {
     assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
     assert!(viewport.line_slices.len() <= 12);
     assert_eq!(viewport.line_slices.len(), viewport.line_metrics.len());
+    assert!(
+        viewport
+            .line_slices
+            .iter()
+            .all(|slice| slice.visible_text.len() < CI_LARGE_FILE_BYTES)
+    );
     assert!(payload_bytes < DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES / 32);
+    assert!(payload_bytes < CI_LARGE_FILE_BYTES / 32);
     assert_eq!(
         status.threshold_bytes as usize,
         DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
