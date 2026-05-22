@@ -12,13 +12,13 @@ use devil_protocol::{
     EditorPort, EditorRequest, EditorResponse, EditorSaveAcknowledgement, EditorSaveOutcome,
     EditorSaveRequest, EditorViewportRequest, EventSequence, EventSinkPort, EventSinkRequest,
     FileConflictLifecycleState, FileConflictState, FileFingerprint, FileId, LargeFileStatus,
-    LineIndexRange, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
-    ProtocolTextRange, SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId,
-    SnapshotLeaseChunk, SnapshotLeaseDescriptor, TextCoordinate, TextTransactionDescriptor,
-    TimestampMillis, TransactionSource, Utf16Position as ProtocolUtf16Position,
-    Utf16Range as ProtocolUtf16Range, ViewportDecorationSpan, ViewportFoldRange,
-    ViewportLineMetric, ViewportLineSlice, ViewportLineTruncationState, ViewportProjection,
-    ViewportProjectionMode, ViewportSemanticTokenOverlay, WorkspaceId,
+    LineIndexRange, ProtocolDiagnostic, ProtocolError, ProtocolResult, ProtocolTextRange,
+    SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId, SnapshotLeaseChunk,
+    SnapshotLeaseDescriptor, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
+    TransactionSource, Utf16Position as ProtocolUtf16Position, Utf16Range as ProtocolUtf16Range,
+    ViewportDecorationSpan, ViewportFoldRange, ViewportLineMetric, ViewportLineSlice,
+    ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
+    ViewportSemanticTokenOverlay, WorkspaceId,
 };
 use devil_text::{
     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
@@ -50,9 +50,9 @@ pub enum EditorError {
     /// Redo stack empty.
     #[error("nothing to redo")]
     NothingToRedo,
-    /// Save requires a full-source payload that Phase 1 degraded mode does not provide.
+    /// Save requires a full-source payload that the current editor policy declined to assemble.
     #[error(
-        "buffer {0:?} is in degraded mode; phase 1 save requests fail closed until chunked save support is available"
+        "buffer {0:?} is in degraded mode; save requests fail closed when chunked save assembly is disabled"
     )]
     DegradedSaveUnavailable(BufferId),
     /// Snapshot lease was not found.
@@ -1582,24 +1582,16 @@ impl EditorEngine {
                 .buffers
                 .get_mut(&buffer_id)
                 .ok_or(EditorError::BufferNotFound(buffer_id))?;
-            if matches!(state.mode, BufferMode::Degraded) {
-                state.save_state = FileConflictLifecycleState::SaveFailed;
-                state.save_diagnostics = vec![ProtocolDiagnostic {
-                    code: "editor.degraded_save_unavailable".to_string(),
-                    message: format!(
-                        "phase 1 degraded mode for '{}' does not expose a full-source save payload",
-                        state.file_path
-                    ),
-                    severity: ProtocolDiagnosticSeverity::Error,
-                    path: Some(CanonicalPath(state.file_path.clone())),
-                    range: None,
-                }];
-                return Err(EditorError::DegradedSaveUnavailable(buffer_id));
-            }
             let snapshot = state
                 .buffer
                 .try_snapshot_with_retention(RetentionPinReason::BackgroundSave)?;
-            let full_text = snapshot.try_full_text()?;
+            let text = match snapshot.try_full_text() {
+                Ok(full_text) => full_text.to_string(),
+                Err(TextError::FullCacheBudgetExceeded { .. }) => {
+                    snapshot.materialize_full_text_from_chunks()?
+                }
+                Err(err) => return Err(EditorError::Text(err)),
+            };
             let dto = SaveRequestDto {
                 request_id: Uuid::now_v7(),
                 workspace_id: state.workspace_id,
@@ -1608,8 +1600,8 @@ impl EditorEngine {
                 snapshot_id: snapshot.snapshot_id(),
                 buffer_version: snapshot.buffer_version(),
                 content_hash: snapshot.content_hash().to_string(),
-                payload_byte_len: full_text.len() as u64,
-                text: full_text.to_string(),
+                payload_byte_len: text.len() as u64,
+                text,
                 requested_at: TimestampMillis::now(),
                 correlation_id: correlation_id
                     .unwrap_or_else(|| CorrelationId(TimestampMillis::now().0)),
@@ -2392,9 +2384,9 @@ mod tests {
     use super::*;
     use devil_observability::{InMemoryEventSink, SharedEventSink};
     use devil_protocol::{
-        EditBatch, EditorViewportRequest, ProjectId, ProjectInfo, ProtocolDiagnosticSeverity,
-        SnapshotConsumerKind, TextEdit as ProtocolTextEdit, TextRange as ProtocolTextRange,
-        ViewportDimensions, ViewportProjectionMode, ViewportScroll,
+        EditBatch, EditorViewportRequest, ProjectId, ProjectInfo, SnapshotConsumerKind,
+        TextEdit as ProtocolTextEdit, TextRange as ProtocolTextRange, ViewportDimensions,
+        ViewportProjectionMode, ViewportScroll,
     };
 
     fn project(file_id: u128) -> ProjectInfo {
@@ -2920,14 +2912,19 @@ mod tests {
     }
 
     #[test]
-    fn degraded_save_fails_explicitly_without_materializing_full_text() {
-        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
-            large_file_threshold_bytes: 8,
-            retention_budget_snapshots: 8,
-        });
+    fn degraded_save_assembles_payload_from_chunks_without_full_text_cache() {
+        let mut engine = EditorEngine::new();
+        let text = format!(
+            "head\n{}\ntail\n",
+            "x".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1024)
+        );
         let buffer = engine
-            .open_buffer(WorkspaceId(1), FileId(44), "save.txt", "0123456789abcdef")
+            .open_buffer(WorkspaceId(1), FileId(44), "save.txt", text.clone())
             .expect("open degraded buffer");
+        assert!(matches!(
+            engine.text(buffer),
+            Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
+        ));
         engine
             .apply_edit(
                 buffer,
@@ -2938,19 +2935,20 @@ mod tests {
             )
             .expect("edit");
 
-        let error = engine
+        let save = engine
             .request_save(buffer, None)
-            .expect_err("save must fail closed");
-        assert!(matches!(error, EditorError::DegradedSaveUnavailable(id) if id == buffer));
+            .expect("degraded save should assemble from chunks");
+        assert_eq!(save.text, format!("!{text}"));
+        assert_eq!(save.payload_byte_len, save.text.len() as u64);
         assert_eq!(
             engine.buffer_save_state(buffer).expect("save state"),
-            FileConflictLifecycleState::SaveFailed
+            FileConflictLifecycleState::Saving
         );
         assert!(engine.is_dirty(buffer).expect("dirty"));
-        assert!(engine.pending_save_requests().is_empty());
-        let diagnostics = engine.save_diagnostics(buffer).expect("diagnostics");
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, "editor.degraded_save_unavailable");
-        assert_eq!(diagnostics[0].severity, ProtocolDiagnosticSeverity::Error);
+        assert_eq!(engine.pending_save_requests().len(), 1);
+        assert_eq!(
+            engine.pending_save_requests()[0].snapshot_id,
+            save.snapshot_id
+        );
     }
 }

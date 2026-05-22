@@ -358,6 +358,26 @@ impl TextSnapshot {
         self.line_index.chunk_text(ordinal)
     }
 
+    /// Materialize the full snapshot by concatenating bounded chunks.
+    ///
+    /// Plan Phase 1: this is the save-payload escape hatch for degraded buffers. It preserves the
+    /// normal projection rule that UI callers must not rely on [`TextSnapshot::try_full_text`] for
+    /// large snapshots, while still allowing editor-owned save assembly to stream through chunk
+    /// boundaries under proposal-mediated workspace writes.
+    pub fn materialize_full_text_from_chunks(&self) -> TextResult<String> {
+        let mut text = String::with_capacity(self.len());
+        for chunk in self.chunk_descriptors() {
+            text.push_str(&self.chunk_text(chunk.ordinal)?);
+        }
+        if text.len() != self.len() {
+            return Err(TextError::MaterializedLengthMismatch {
+                expected: self.len(),
+                actual: text.len(),
+            });
+        }
+        Ok(text)
+    }
+
     /// Return a bounded slice for a single logical line.
     pub fn line_slice(&self, line: usize) -> TextResult<TextLineSlice> {
         self.line_slice_with_limit(line, DEFAULT_LINE_SLICE_MAX_BYTES)
@@ -519,6 +539,14 @@ pub enum TextError {
         byte_len: usize,
         /// Maximum allowed full-cache text length in bytes.
         budget: usize,
+    },
+    /// Chunk materialization did not recreate the expected snapshot byte length.
+    #[error("chunk materialization produced {actual} bytes but snapshot expects {expected} bytes")]
+    MaterializedLengthMismatch {
+        /// Expected snapshot length in bytes.
+        expected: usize,
+        /// Actual materialized text length in bytes.
+        actual: usize,
     },
 }
 
@@ -1827,6 +1855,26 @@ mod tests {
         assert_eq!(slices[2].text, "tail");
         assert!(payload_bytes < 128);
         assert!(payload_bytes < snapshot.len() / 1024);
+    }
+
+    #[test]
+    fn large_snapshot_can_materialize_save_payload_from_chunks() {
+        let text = format!(
+            "head\n{}\ntail\n",
+            "x".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1024)
+        );
+        let snapshot = TextSnapshot::try_new(text.clone()).unwrap();
+
+        assert!(matches!(
+            snapshot.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+
+        let materialized = snapshot
+            .materialize_full_text_from_chunks()
+            .expect("chunk materialization should reconstruct text exactly");
+        assert_eq!(materialized, text);
+        assert_eq!(materialized.len(), snapshot.len());
     }
 
     #[test]

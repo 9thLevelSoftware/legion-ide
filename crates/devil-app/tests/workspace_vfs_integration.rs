@@ -8,9 +8,10 @@ const FULL_CACHE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 use devil_app::{
     AppCommandExecutionState, AppCommandOutcome, AppCommandRequest, AppComposition,
-    AppEditorCommandPort, AppSaveOutcome, AppWorkspaceCommandPort, BatchExecutionStage,
-    BatchPlanningSemantics, BatchPreflightRoute, BatchRollbackContractStatus, CommandDispatcher,
-    CommandExecutionService, OpenFileIntent,
+    AppEditorCommandPort, AppSaveOutcome, AppWorkspaceCommandPort, BatchExecutionJournalItemState,
+    BatchExecutionJournalStageState, BatchExecutionStage, BatchPlanningSemantics,
+    BatchPreflightRoute, BatchRollbackContractStatus, CommandDispatcher, CommandExecutionService,
+    OpenFileIntent,
 };
 use devil_editor::{TextEdit, TextPosition};
 use devil_observability::{InMemoryEventSink, SharedEventSink};
@@ -2921,6 +2922,7 @@ fn workspace_vfs_integration_batch_execution_contract_reports_audit_and_commit_b
     );
 
     let contract = app.plan_batch_execution_contract(&proposal);
+    let journal = app.plan_batch_execution_journal(&proposal);
 
     assert!(contract.preflight.preflight_ok, "contract: {contract:?}");
     assert!(contract.runtime_apply_disabled);
@@ -2973,6 +2975,24 @@ fn workspace_vfs_integration_batch_execution_contract_reports_audit_and_commit_b
         assert!(stage.blocked);
         assert!(!stage.diagnostics.is_empty());
     }
+    assert!(!journal.mutation_allowed);
+    assert!(journal.runtime_apply_disabled);
+    assert!(journal.audit_before_success_required);
+    assert_eq!(journal.items.len(), 1);
+    assert_eq!(
+        journal.items[0].state,
+        BatchExecutionJournalItemState::RuntimeMutationDisabled
+    );
+    assert_eq!(journal.items[0].route, BatchPreflightRoute::CreateFile);
+    assert_eq!(
+        journal
+            .stages
+            .iter()
+            .find(|stage| stage.stage == BatchExecutionStage::Mutate)
+            .expect("mutate stage present")
+            .state,
+        BatchExecutionJournalStageState::Blocked
+    );
     assert!(!target.exists());
 
     let _ = std::fs::remove_dir_all(&root);
@@ -3132,6 +3152,7 @@ fn workspace_vfs_integration_batch_contract_records_dependency_blocked_partial_f
     );
 
     let contract = app.plan_batch_execution_contract(&proposal);
+    let journal = app.plan_batch_execution_journal(&proposal);
 
     assert!(!contract.preflight.preflight_ok);
     assert_eq!(
@@ -3155,6 +3176,21 @@ fn workspace_vfs_integration_batch_contract_records_dependency_blocked_partial_f
         contract.items[1].partial_failure_disposition,
         Some(devil_protocol::ProposalPartialFailureDisposition::NotStarted)
     );
+    assert_eq!(
+        journal
+            .items
+            .iter()
+            .map(|item| (item.item_id.as_str(), item.state))
+            .collect::<Vec<_>>(),
+        vec![
+            ("outside", BatchExecutionJournalItemState::PreflightRejected,),
+            (
+                "dependent",
+                BatchExecutionJournalItemState::DependencyBlocked,
+            ),
+        ]
+    );
+    assert!(!journal.mutation_allowed);
     assert!(!outside_normalized.exists());
     assert!(!dependent.exists());
 

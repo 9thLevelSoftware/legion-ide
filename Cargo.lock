@@ -248,6 +248,7 @@ dependencies = [
  "devil-index",
  "devil-protocol",
  "devil-storage",
+ "serde_json",
 ]
 
 [[package]]

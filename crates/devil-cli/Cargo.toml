@@ -11,3 +11,4 @@ devil-index = { workspace = true }
 devil-storage = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

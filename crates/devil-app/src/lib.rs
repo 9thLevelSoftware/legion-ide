@@ -331,6 +331,87 @@ pub struct BatchExecutionItemContract {
     pub diagnostics: Vec<ProtocolDiagnostic>,
 }
 
+/// Side-effect-free execution journal built from the batch execution contract.
+///
+/// Plan Phase 2: this is the bridge between preflight-only contracts and future runtime batch
+/// mutation. It records deterministic per-item state and blocked execution stages without invoking
+/// editor or workspace mutation helpers.
+#[derive(Debug, Clone)]
+pub struct BatchExecutionJournal {
+    /// Proposal id that was journaled.
+    pub proposal_id: ProposalId,
+    /// Batch id when the proposal payload is a batch.
+    pub batch_id: Option<uuid::Uuid>,
+    /// True only after a future stage enables runtime mutation and all preconditions pass.
+    pub mutation_allowed: bool,
+    /// True when current code still blocks runtime mutation.
+    pub runtime_apply_disabled: bool,
+    /// True because success must remain impossible without audit proof.
+    pub audit_before_success_required: bool,
+    /// Ordered stage states derived from the execution contract.
+    pub stages: Vec<BatchExecutionJournalStage>,
+    /// Deterministic item states sorted by batch order, then item id.
+    pub items: Vec<BatchExecutionJournalItem>,
+    /// Planning and dependency partial failures recorded before mutation.
+    pub partial_failures: Vec<ProposalPartialFailureRecord>,
+    /// Journal-level diagnostics.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Journal-level preview warnings.
+    pub preview_warnings: Vec<ProposalPreviewWarning>,
+}
+
+/// One batch execution stage recorded in the non-mutating journal.
+#[derive(Debug, Clone)]
+pub struct BatchExecutionJournalStage {
+    /// Stage represented by this journal row.
+    pub stage: BatchExecutionStage,
+    /// Current state of the stage.
+    pub state: BatchExecutionJournalStageState,
+    /// Metadata-only diagnostics explaining blockers.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// State of a batch execution stage in the non-mutating journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchExecutionJournalStageState {
+    /// Stage is structurally available for planning.
+    Ready,
+    /// Stage is required but blocked by current safety gates.
+    Blocked,
+}
+
+/// One batch item recorded in the non-mutating execution journal.
+#[derive(Debug, Clone)]
+pub struct BatchExecutionJournalItem {
+    /// Stable item id from the batch payload.
+    pub item_id: String,
+    /// Application order from the batch item.
+    pub order: u32,
+    /// App-level route selected for the item payload.
+    pub route: BatchPreflightRoute,
+    /// Target ids referenced by this item.
+    pub target_ids: Vec<String>,
+    /// Current item state.
+    pub state: BatchExecutionJournalItemState,
+    /// The item's planning/blocked disposition when present.
+    pub partial_failure_disposition: Option<ProposalPartialFailureDisposition>,
+    /// Diagnostics scoped to this journal item.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+}
+
+/// State of one batch item in the non-mutating execution journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchExecutionJournalItemState {
+    /// Item is prepared and could run in a future runtime-enabled stage.
+    Prepared,
+    /// Item failed preflight before any mutation.
+    PreflightRejected,
+    /// Item was not started because a prerequisite item failed.
+    DependencyBlocked,
+    /// Item preflight passed, but runtime mutation remains deliberately disabled.
+    RuntimeMutationDisabled,
+}
+
 /// Route classification used by the Stage 1D batch preflight planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchPreflightRoute {
@@ -4350,6 +4431,80 @@ impl AppComposition {
             preview_warnings,
             preflight,
         }
+    }
+
+    /// Build a deterministic, non-mutating batch execution journal.
+    ///
+    /// Plan Phase 2: this exposes execution-ready state without permitting runtime batch mutation.
+    /// It is intentionally derived from `plan_batch_execution_contract()` and does not call editor
+    /// or workspace mutation helpers.
+    pub fn plan_batch_execution_journal(
+        &self,
+        proposal: &WorkspaceProposal,
+    ) -> BatchExecutionJournal {
+        let contract = self.plan_batch_execution_contract(proposal);
+        let mutation_allowed = contract.preflight.preflight_ok
+            && !contract.runtime_apply_disabled
+            && !contract.commit_blocked
+            && !contract.finalize_blocked
+            && contract.diagnostics.is_empty();
+
+        let stages = contract
+            .stages
+            .iter()
+            .map(|stage| BatchExecutionJournalStage {
+                stage: stage.stage,
+                state: if stage.blocked {
+                    BatchExecutionJournalStageState::Blocked
+                } else {
+                    BatchExecutionJournalStageState::Ready
+                },
+                diagnostics: stage.diagnostics.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let items = contract
+            .items
+            .iter()
+            .map(|item| BatchExecutionJournalItem {
+                item_id: item.item_id.clone(),
+                order: item.order,
+                route: item.route,
+                target_ids: item.target_ids.clone(),
+                state: Self::batch_journal_item_state(&contract, item),
+                partial_failure_disposition: item.partial_failure_disposition,
+                diagnostics: item.diagnostics.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        BatchExecutionJournal {
+            proposal_id: contract.proposal_id,
+            batch_id: contract.batch_id,
+            mutation_allowed,
+            runtime_apply_disabled: contract.runtime_apply_disabled,
+            audit_before_success_required: contract.audit_before_success_required,
+            stages,
+            items,
+            partial_failures: contract.partial_failures,
+            diagnostics: contract.diagnostics,
+            preview_warnings: contract.preview_warnings,
+        }
+    }
+
+    fn batch_journal_item_state(
+        contract: &BatchExecutionContract,
+        item: &BatchExecutionItemContract,
+    ) -> BatchExecutionJournalItemState {
+        if item.partial_failure_disposition == Some(ProposalPartialFailureDisposition::NotStarted) {
+            return BatchExecutionJournalItemState::DependencyBlocked;
+        }
+        if !item.preflight_ok || !item.diagnostics.is_empty() {
+            return BatchExecutionJournalItemState::PreflightRejected;
+        }
+        if contract.runtime_apply_disabled {
+            return BatchExecutionJournalItemState::RuntimeMutationDisabled;
+        }
+        BatchExecutionJournalItemState::Prepared
     }
 
     /// Expose storage repository port for integration validation and future wiring.
