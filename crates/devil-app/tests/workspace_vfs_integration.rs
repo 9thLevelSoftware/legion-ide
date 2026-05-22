@@ -1800,6 +1800,78 @@ fn workspace_vfs_integration_registered_save_apply_routes_through_workspace_acto
 }
 
 #[test]
+fn workspace_vfs_integration_shell_projection_lists_live_registered_proposals() {
+    let root = create_root();
+    let target = root.join("projection-save.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let (mut app, _sink) = app_with_events();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let file_id = app
+        .open_file(target.to_string_lossy())
+        .expect("open target file");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), "!"))
+        .expect("dirty buffer before generic save");
+    let snapshot = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("current snapshot")
+        .clone();
+    let node = workspace_node_by_name(&app, opened.workspace_id, "projection-save.txt");
+    let mut preconditions = file_preconditions(&node, opened.generation);
+    preconditions.buffer_version = Some(snapshot.buffer_version);
+    preconditions.snapshot_id = Some(snapshot.snapshot_id);
+    let fingerprint = preconditions
+        .expected_fingerprint
+        .clone()
+        .expect("expected fingerprint");
+    let proposal = proposal_envelope_with(
+        ProposalId(745),
+        "fs.write",
+        save_payload_for_open_buffer(
+            node.identity.clone(),
+            file_id,
+            buffer_id,
+            snapshot.snapshot_id,
+            snapshot.buffer_version,
+            opened.generation,
+            fingerprint,
+        ),
+        preconditions,
+    );
+
+    register_validate_preview(&mut app, &proposal);
+
+    let shell = app
+        .shell_projection_snapshot("proposal ledger")
+        .expect("shell projection");
+    let ledger = shell.proposal_ledger_projection;
+    assert_eq!(ledger.selected_proposal_id, Some(proposal.proposal_id));
+    let row = ledger
+        .rows
+        .iter()
+        .find(|row| row.proposal_id == proposal.proposal_id)
+        .expect("proposal ledger row");
+    assert_eq!(row.lifecycle.state, ProposalLifecycleState::Previewed);
+    assert_eq!(row.workspace_id, Some(opened.workspace_id));
+    assert_eq!(
+        row.payload_kind,
+        devil_protocol::ProposalPayloadKind::SaveFile
+    );
+    assert!(row.diff_summary.full_source_redacted);
+    assert!(row.redaction_hints.contains(&RedactionHint::MetadataOnly));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back() {
     let root = create_root();
     let target = root.join("generic-save-audit-failure.txt");

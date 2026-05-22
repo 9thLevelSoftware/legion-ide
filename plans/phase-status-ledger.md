@@ -12,7 +12,7 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | --- | --- | --- | --- |
 | Phase 0 — Foundation and freeze | **Accepted** | [`plans/evidence/phase-0/`](evidence/phase-0/) | Architecture freeze recorded in [`plans/architecture-freeze-v0.1.md`](architecture-freeze-v0.1.md). Dependency policy enforced by `xtask`. |
 | Phase 1 — Editor and text substrate | **Accepted** | [`plans/evidence/phase-1/editor-text-substrate.md`](evidence/phase-1/editor-text-substrate.md) | Degraded large-file mode, chunk descriptors, viewport projection, and bounded fake consumers are evidenced. 100MB full-cache boundary is measurement-only, not a green benchmark. |
-| Phase 2 — Proposal mutation substrate | **Partially accepted** | [`plans/evidence/phase-2/proposal-mutation-substrate.md`](evidence/phase-2/proposal-mutation-substrate.md) | DTOs, routing, batch structures, lifecycle states, and deny-by-default validation are accepted. Runtime apply beyond saves remains denied until Phase 2B completes. |
+| Phase 2 — Proposal mutation substrate | **Partially accepted** | [`plans/evidence/phase-2/proposal-mutation-substrate.md`](evidence/phase-2/proposal-mutation-substrate.md) | DTOs, routing, lifecycle states, deny-by-default validation, generic save apply, open-buffer text edit apply, closed-file create/delete/rename apply, workspace-authorized audit-failure rollback checkpoints, batch planning contracts, and live proposal ledger projection are accepted. Runtime batch mutation, multi-file atomicity, format/code-action execution, and future runtime surfaces remain gated. |
 | Phase 3 — Semantic fabric and LSP supervision | **Not accepted** | [`plans/evidence/phase-3/predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md) | Scaffold only. Partial `devil-index` behavior exists, but acceptance requires all checklist artifacts, boundary remediation, and LSP supervision evidence. |
 | Phases 4–8 — AI, plugins, collaboration, remote, hardening | **Future-gated** | None accepted | Placeholder crates remain inert. Each phase requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
 
@@ -33,7 +33,7 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | ADR-0009 — Memory consent | Accepted (governance-only) | No runtime behavior until memory activation gates. |
 | ADR-0010 — Air-gap mode | Accepted (governance-only) | No runtime behavior until AI/provider activation gates. |
 | ADR-0015 — Streaming text viewport | Accepted | — |
-| ADR-0016 — Generalized proposal service | Accepted | Runtime apply beyond saves is the Phase 2B implementation gap, not an ADR gap. |
+| ADR-0016 — Generalized proposal service | Accepted | Runtime batch mutation, multi-file atomicity, and future runtime apply surfaces are the remaining implementation gaps, not ADR gaps. |
 | ADR-0017 — Semantic fabric indexing | Accepted (governance-only) | Phase 3 runtime not accepted; boundary remediation required first. |
 | ADR-0018 — LSP runtime supervision | Accepted (governance-only) | LSP runtime not accepted until Phase 3 evidence complete. |
 
@@ -43,9 +43,9 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 
 The following older architecture-review findings describe pre-rebaseline behavior and are **historical**:
 
-- [`plans/architecture-review-full-codebase-v0.1.md`](architecture-review-full-codebase-v0.1.md) Finding 1 (save bypasses proposal) — **Historical**. Manual saves now route through `SaveWorkflowService::save_active_buffer()` and `WorkspaceActor::save_file_with_proposal()`. The remaining gap is generalized proposal execution for non-save mutation classes (Phase 2B), not a missing save pipeline.
+- [`plans/architecture-review-full-codebase-v0.1.md`](architecture-review-full-codebase-v0.1.md) Finding 1 (save bypasses proposal) — **Historical**. Manual and generic save proposals now route through `SaveWorkflowService`/`AppComposition::apply_save_file_proposal()` and `WorkspaceActor::save_file_with_proposal()`. Registered open-buffer text edits and closed-file create/delete/rename proposals also execute through editor/workspace authorities; remaining gaps are runtime batch mutation, multi-file atomicity, format/code-action execution, and future runtime surfaces.
 - [`plans/architecture-review-full-codebase-v0.1.md`](architecture-review-full-codebase-v0.1.md) Finding 3 (service ports not implemented) — **Partially historical**. `ProposalPort` is implemented by `AppProposalCoordinator`. `StorageRepositoryPort` has in-memory and file-backed implementations. `EditorPort` adapter remains a future refinement, not a Phase 0/1 blocker.
-- [`plans/architecture-review-full-codebase-v0.1.md`](architecture-review-full-codebase-v0.1.md) mermaid diagram labeled "missing" for Proposal/Observability/Storage — **Historical**. Proposal lifecycle, observability event emission, and storage audit persistence are now wired for the manual save path. The remaining gap is universal mediation across all mutation classes.
+- [`plans/architecture-review-full-codebase-v0.1.md`](architecture-review-full-codebase-v0.1.md) mermaid diagram labeled "missing" for Proposal/Observability/Storage — **Historical**. Proposal lifecycle, observability event emission, storage audit persistence, workspace-authorized audit-failure rollback, and live ledger projection are now wired for accepted Phase 2 proposal routes. The remaining gap is universal mediation for batch/multi-file and later ADR-gated runtime classes.
 
 ---
 

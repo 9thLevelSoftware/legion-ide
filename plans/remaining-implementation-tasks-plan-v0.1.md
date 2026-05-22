@@ -24,7 +24,7 @@ Older review findings in [`plans/architecture-review-full-codebase-v0.1.md`](pla
 | --- | --- | --- |
 | Governance and architecture truth | Milestone 0 is accepted in [`plans/milestone-0-feasibility-proofs.md`](plans/milestone-0-feasibility-proofs.md:3), and dependency policy is enforced through [`xtask/src/main.rs`](xtask/src/main.rs:70). | Phase 0 of [`plans/implementation-plan.md`](plans/implementation-plan.md:39) is effectively complete, with cleanup tasks only. |
 | Editor and text substrate | Phase 1 evidence records degraded large-file mode, viewport projection, chunk descriptors, and non-blocking fake consumers in [`plans/evidence/phase-1/editor-text-substrate.md`](plans/evidence/phase-1/editor-text-substrate.md:7). | Phase 1 is accepted enough to unblock proposal and semantic work; renderer-backed UI measurements remain follow-up evidence, not a blocker. |
-| Proposal mutation substrate | Phase 2 DTO and routing substrate exists, but [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:62) records remaining gaps: runtime apply beyond saves is denied, open-buffer apply and closed-file mutation are future work, and future runtimes remain denied. | The next implementation wave must finish Phase 2B before accepting Phase 3 or activating AI/plugin/remote/collaboration writes. |
+| Proposal mutation substrate | Phase 2 now has DTOs, routing, lifecycle state, generic save apply, registered open-buffer text edit apply, closed-file create/delete/rename apply, workspace-authorized audit-failure rollback checkpoints, batch preflight/contracts, recoverable app lifecycle snapshots, and live proposal ledger projection in [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1). Runtime batch mutation, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and future runtimes remain gated. | Do not accept Phase 3 or activate AI/plugin/remote/collaboration writes until the remaining Phase 2 gated runtime surfaces have ADR/policy/test evidence or are explicitly deferred. |
 | Proposal execution handoff | [`plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md`](plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md:145) gives the concrete remaining checklist for proposal execution and LSP gating. | Treat this as the first actionable task list. |
 | Semantic fabric | [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:13) says partial [`crates/devil-index`](crates/devil-index/src/lib.rs:1) behavior exists, but Phase 3 and LSP supervision are not accepted. | Do not mark Phase 3 accepted until all artifacts and checklist items in [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:104) are complete. |
 | Semantic boundary remediation | [`plans/semantic-index-boundary-remediation-plan-v0.1.md`](plans/semantic-index-boundary-remediation-plan-v0.1.md:1) identifies current boundary problems: live filesystem discovery, full-source copies, cache freshness/privacy risk, and missing metadata persistence contracts. | This is the first Phase 3 implementation package after Phase 2B. |
@@ -74,6 +74,8 @@ Goal: finish the remaining Phase 2 mutation substrate so future LSP, AI, plugin,
 
 Source checklist: [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:62) and [`plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md`](plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md:145).
 
+Status note, 2026-05-22: lifecycle state, generic save equivalence, deny-by-default validation, open-buffer text edit apply, closed-file create/delete/rename apply, single-file workspace-edit delegation, audit-before-success rollback with workspace-authorized file checkpoints, and live proposal ledger projection are implemented and evidenced. Runtime batch mutation/rollback, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and later ADR-gated runtime sources remain deferred rather than accepted.
+
 Work packages:
 
 1. Proposal lifecycle state store
@@ -96,9 +98,9 @@ Work packages:
    - Add integration tests for old snapshot rejection and rollback after multi-step failure.
 
 5. Closed-file and workspace apply
-   - Add workspace VFS apply paths for create, delete, rename, format, and workspace-edit proposals.
-   - Require expected fingerprint or expected absence, file content version, workspace generation, path policy, trust, capability, and rollback metadata.
-   - Preserve fail-closed non-atomic behavior and dirty-open-buffer protection.
+    - Add workspace VFS apply paths for create, delete, rename, format, and workspace-edit proposals.
+    - Require expected fingerprint or expected absence, file content version, workspace generation, path policy, trust, capability, and rollback metadata.
+    - Preserve fail-closed non-atomic behavior, workspace-authorized rollback checkpoints, and dirty-open-buffer protection.
 
 6. Batch planner
    - Implement prepare, preflight, apply, commit, audit, rollback, and finalize steps.
@@ -118,10 +120,10 @@ Acceptance evidence:
 - Save equivalence test for manual save and generic save proposal execution.
 - Open-buffer stale rejection and rollback tests.
 - Closed-file conflict and path-policy tests.
-- Batch all-or-nothing or exact partial-failure tests.
-- Terminal/plugin/remote/collaboration denial tests.
+- Batch all-or-nothing or exact partial-failure tests before runtime batch mutation is enabled.
+- Terminal/plugin/remote/collaboration denial tests before those target kinds become first-class executable routes.
 - Audit-before-success storage-failure test.
-- Updated [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1) showing the remaining gaps are closed.
+- Updated [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1) showing which routes are accepted and which remain future-gated.
 
 Stop condition:
 

@@ -1,16 +1,17 @@
 # Phase 2 Proposal Mutation Substrate Evidence
 
-Date: 2026-05-15
+Date: 2026-05-22
 
 ## Scope
 
-This evidence records the Phase 2 protocol-contract, architecture-documentation, and app-orchestration substrate work for generalized proposal-mediated mutation. Stage 1C enables registered open-buffer text edits and closed-file create/delete/rename execution through existing editor/workspace authorities; unsupported mutation classes remain deny-by-default, and placeholder runtime crates remain inactive.
+This evidence records the Phase 2 protocol-contract, architecture-documentation, and app-orchestration substrate work for generalized proposal-mediated mutation. Stages 1A–1H cover lifecycle state management, deny-by-default validation, registered open-buffer text edits, closed-file create/delete/rename, single-file workspace-edit delegation, generic save-file apply with audit-before-success, batch preflight/contract planning, rollback-after-audit-failure, app-owned lifecycle recovery snapshots, live proposal ledger projection, and workspace-authorized rollback checkpoints for accepted file mutations. Unsupported mutation classes remain deny-by-default, and placeholder runtime crates remain inactive.
 
 ## Architecture decision
 
 - Added [`ADR-0016-generalized-proposal-service.md`](../../adrs/ADR-0016-generalized-proposal-service.md) to define the generalized proposal service boundary.
 - The ADR records universal lifecycle states, explicit approve/reject/cancel/rollback lifecycle commands, batch and multi-file atomicity boundaries, rollback limits, deny-by-default validation, audit-before-success semantics, metadata-only persistence, and projection-only UI constraints.
 - The current save baseline is preserved through [`SaveWorkflowService::save_active_buffer()`](../../../crates/devil-app/src/lib.rs:1314) and [`WorkspaceActor::save_file_with_proposal()`](../../../crates/devil-project/src/lib.rs:1622).
+- Generic save-file proposal apply is now implemented through [`AppComposition::apply_save_file_proposal()`](../../../crates/devil-app/src/lib.rs) and routes through the same editor/workspace preconditions, with audit-before-success and rollback on audit failure.
 
 ## Protocol contract changes
 
@@ -23,6 +24,7 @@ Updated [`lib.rs`](../../../crates/devil-protocol/src/lib.rs) with metadata-firs
 - Added [`ProposalLifecycleCommand`](../../../crates/devil-protocol/src/lib.rs:2007), [`ProposalLifecycleAction`](../../../crates/devil-protocol/src/lib.rs:1973), and [`ProposalLifecycleCommandReason`](../../../crates/devil-protocol/src/lib.rs:1992).
 - Extended [`ProposalRequest`](../../../crates/devil-protocol/src/lib.rs:2804) with approve, reject, cancel, and rollback commands while preserving validate, preview, and apply variants.
 - Added [`ProposalLifecycleState::Cancelled`](../../../crates/devil-protocol/src/lib.rs:1859), [`ProposalCancellationReason`](../../../crates/devil-protocol/src/lib.rs:1918), and [`ProposalResponse::Cancelled`](../../../crates/devil-protocol/src/lib.rs:2882).
+- Added rollback step DTOs and workspace-authorized rollback checkpoint records used for audit-failure rollback.
 
 ## App orchestration substrate
 
@@ -35,13 +37,21 @@ Updated [`lib.rs`](../../../crates/devil-app/src/lib.rs) with an app-level propo
 - Unsupported non-save validation or apply attempts return structured unsupported rejections through [`AppProposalCoordinator::unsupported_response()`](../../../crates/devil-app/src/lib.rs:545) rather than panicking or surfacing internal errors.
 - Explicit lifecycle request variants now produce typed lifecycle responses through [`ProposalPort`](../../../crates/devil-app/src/lib.rs:671) while non-save execution remains fail-closed.
 - Exposed app orchestration entry points through [`AppComposition::handle_proposal_request()`](../../../crates/devil-app/src/lib.rs:2064) and [`AppComposition::proposal_target_coverage()`](../../../crates/devil-app/src/lib.rs:2074) without adding editor text/session ownership to the UI.
+- Added audit-before-success wiring: `SaveWorkflowService::observe_proposal_response()` emits proposal audit and event metadata records; audit write failure causes `rollback_audit_failed_mutation()` to compensate side effects through editor/workspace authority.
+- Added app-owned proposal ledger projection and lifecycle recovery snapshot support in `AppProposalCoordinator`; `AppComposition::shell_projection_snapshot()` now supplies live metadata-only proposal rows to the projection-only UI shell.
 
-## Save invariants preserved
+## Save invariants preserved and extended
 
 - Existing durable saves still flow through [`AppComposition::save_active_buffer()`](../../../crates/devil-app/src/lib.rs:1959), [`SaveWorkflowService::save_active_buffer()`](../../../crates/devil-app/src/lib.rs:1314), and [`WorkspaceActor::save_file_with_proposal()`](../../../crates/devil-project/src/lib.rs:1622).
 - Save proposals continue carrying expected disk fingerprint, file content version, workspace generation, buffer version, snapshot identifier, required write capability, principal, correlation identifier, and causality metadata.
 - Stale/conflict/denied saves continue to return rejected app save outcomes rather than thrown errors, and dirty editor text remains preserved.
 - External overwrite protection remains covered by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:402), including an assertion that the rejected response is stale.
+- Generic save-file proposal apply is now covered by:
+  - `workspace_vfs_integration_registered_save_apply_routes_through_workspace_actor`
+  - `workspace_vfs_integration_stale_registered_save_preserves_dirty_buffer_and_disk`
+  - `workspace_vfs_integration_conflicted_registered_save_preserves_dirty_buffer_and_disk`
+  - `workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back`
+  - `workspace_vfs_integration_oversized_save_is_rejected_and_preserves_dirty_text`
 
 ## Stage 1A lifecycle service update
 
@@ -50,11 +60,11 @@ Date: 2026-05-15
 - `AppProposalCoordinator` now stores app-created lifecycle context and proposal lifecycle state keyed by `ProposalId` instead of accepting successful stateless lifecycle helper calls.
 - Registered proposals enforce ordered lifecycle transitions for created, validated, previewed, approved, applied, rejected, denied, failed, rolled back, stale, conflict, and cancelled outcomes.
 - Stateless preview and lifecycle command requests reject with `proposal.missing_lifecycle_context`; invalid ordering rejects with `proposal.invalid_lifecycle_transition`.
-- Generic `ProposalPayload::SaveFile` apply remains denied with an explicit migration rationale. The save proposal DTO does not carry source text, so safe execution must continue through `AppComposition::save_active_buffer()` -> `SaveWorkflowService` -> `WorkspaceActor::save_file_with_proposal()` until a generic app-level executor can reuse the same editor/workspace/storage context without weakening preconditions.
+- Generic `ProposalPayload::SaveFile` apply is now implemented; it is no longer denied. The save proposal DTO still does not carry source text, so safe execution routes through `apply_save_file_proposal()` -> editor save request -> `WorkspaceActor::save_file_with_proposal()`, reusing the same editor/workspace/storage context without weakening preconditions.
 - Focused tests added:
   - `proposal_coordinator_enforces_preview_after_validation`
   - `proposal_coordinator_rejects_command_without_lifecycle_context`
-  - `proposal_coordinator_documents_generic_save_apply_denial`
+  - `proposal_coordinator_rejects_stateless_generic_save_apply`
   - `workspace_vfs_integration_unknown_lifecycle_context_preview_is_rejected`
 
 ## Stage 1B deny-by-default validation update
@@ -79,7 +89,7 @@ Date: 2026-05-16
 - Open-buffer `ProposalPayload::TextEdit` applies through `EditorEngine::apply_protocol_edits()` using byte-coordinate protocol ranges, required buffer version, required snapshot id, editor-owned transactions, and `editor.transaction_applied` emission.
 - Closed-file `CreateFile`, `DeleteFile`, and `RenameFile` apply through `WorkspaceActor::{create,delete,rename}_file_with_proposal()` and the platform filesystem port rather than direct app-level `std::fs` mutation.
 - Workspace mutations require proposal lifecycle context, trusted `fs.write` capability, expected workspace generation, and file content/fingerprint preconditions where applicable. Open-file delete/rename is denied with `proposal.open_file_workspace_mutation_denied`.
-- Batch apply remains fail-closed with structured `ProposalRejectionReason::Unsupported`; generic save apply still remains denied in favor of `AppComposition::save_active_buffer()`.
+- Batch apply remains fail-closed with structured `ProposalRejectionReason::Unsupported`. Generic save apply is now implemented and tested.
 - Focused tests added:
   - `workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer`
   - `workspace_vfs_integration_stale_text_edit_precondition_does_not_apply`
@@ -121,6 +131,46 @@ Date: 2026-05-16
   - `workspace_vfs_integration_batch_contract_records_dependency_blocked_partial_failures`
   - `workspace_vfs_integration_batch_apply_remains_fail_closed_after_preview` now plans a successful contract first and still verifies unsupported apply leaves disk unchanged.
 
+## Stage 1F additional execution and audit coverage
+
+Date: 2026-05-16–2026-05-22
+
+- Added `apply_save_file_proposal()` with full precondition checks (buffer version, snapshot id, file content version, workspace generation, expected fingerprint), editor save payload assembly, workspace proposal save routing, and deferred success acknowledgment.
+- Added `apply_workspace_edit_proposal()` that delegates single-file create/delete/rename operations to the existing closed-file workspace apply helpers; multi-edit and non-trivial workspace edits remain unsupported.
+- Added rollback snapshot capture before mutation: text edit, create file, delete file, rename file, save file, and workspace edit paths capture rollback state.
+- Added `rollback_audit_failed_mutation()` with concrete rollback actions: undo transaction for open-buffer text edits, delete created files, restore deleted/saved files, and reverse renames.
+- Added `refresh_workspace_after_audit_rollback()` to rebuild workspace tree state after rollback disk changes.
+- Added `SaveWorkflowService::observe_proposal_response()` to emit metadata-only audit and event records for every proposal response; audit write failures trigger rollback.
+- Added integration tests for audit failure rollback on open-buffer text edits, closed-file create/delete/rename, and registered save apply.
+- Added integration tests for oversized save rejection and dirty text preservation.
+
+## Stage 1G lifecycle recovery and live projection
+
+Date: 2026-05-22
+
+- Added an app-owned proposal lifecycle recovery snapshot that captures remembered proposal envelopes, lifecycle states, and lifecycle event contexts so coordinator state can be reconstructed without giving UI editor/workspace authority.
+- Added metadata-only proposal ledger row construction from `AppProposalCoordinator` state, including payload kind, lifecycle display, target coverage, risk/privacy labels, rollback availability, context summary, redacted diff summary, warnings, diagnostics, and redaction hints.
+- Wired `AppComposition::shell_projection_snapshot()` to emit the live proposal ledger projection instead of an empty placeholder while keeping `devil-ui` projection-only.
+- Added focused tests:
+  - `proposal_coordinator_exports_and_recovers_lifecycle_snapshot`
+  - `proposal_coordinator_builds_metadata_only_ledger_projection`
+  - `workspace_vfs_integration_shell_projection_lists_live_registered_proposals`
+
+## Stage 1H workspace-authorized rollback checkpoints
+
+Date: 2026-05-22
+
+- Added workspace-owned rollback checkpoint DTOs and APIs in `devil-project`: `WorkspaceMutationRollbackTarget`, `WorkspaceMutationRollbackCheckpoint`, `WorkspaceActor::rollback_checkpoint_for_file_mutation()`, and `WorkspaceActor::rollback_file_mutation_with_checkpoint()`.
+- `AppComposition` now captures rollback material for accepted closed-file/save mutations through `WorkspaceActor` and compensates audit-failed create/delete/rename/save mutations through workspace authority instead of direct app-level `std::fs` read/write/remove/rename calls.
+- Open-buffer rollback remains editor-owned undo. Single-file workspace-edit delegation reuses the same workspace rollback checkpoints for create/delete/rename operations.
+- Runtime batch mutation, batch rollback, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and future AI/plugin/remote/collaboration/LSP/terminal runtime routes remain denied.
+- Focused tests added or rerun:
+  - `rename_file_with_proposal_requires_destination_write_authorization`
+  - `rollback_checkpoints_compensate_file_mutations_through_workspace_authority`
+  - `workspace_vfs_integration_closed_file_audit_failure_fails_closed_and_rolls_back`
+  - `workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back`
+  - `audit_rollback_failure_diagnostics_are_preserved_on_failed_response`
+
 ## Integration tests
 
 Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspace_vfs_integration.rs) with app-level Phase 2 regression coverage:
@@ -130,6 +180,8 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 - [`workspace_vfs_integration_batch_uses_explicit_target_coverage_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:599) verifies explicit batch target coverage order is preserved.
 - Stage 1C apply tests verify registered text-edit apply/stale behavior, closed-file workspace mutations, open-file mutation denial, and batch apply fail-closed behavior.
 - Stage 1D/1E batch tests verify supported-route planning metadata, dependency and cycle diagnostics, missing/unknown target diagnostics, route-compatible rollback proof, audit-before-success/commit/finalize barriers, deterministic direct and dependency-blocked partial-failure records, and no disk/editor mutation during planning.
+- Stage 1F/1H audit-rollback tests verify open-buffer text-edit undo, workspace-authorized closed-file create/delete/rename disk restoration, registered save rollback, and audit-failure dirty-buffer preservation.
+- Stage 1G projection tests verify recoverable lifecycle state and live metadata-only proposal ledger rows in the shell snapshot.
 - Existing stale/conflict, denial, failed-save, and dirty-buffer preservation tests remain in the same integration suite.
 
 ## Placeholder and dependency boundaries
@@ -141,30 +193,37 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 
 ## Remaining Phase 2 gaps
 
-- Runtime apply planning beyond manual saves, registered open-buffer text edits, closed-file create/delete/rename, and side-effect-free batch preflight/contract planning remains denied until follow-on work implements apply, commit, rollback, and audit emission for each mutation class.
-- Generic save apply remains intentionally denied until it can reuse the manual save workflow's editor text extraction, workspace preconditions, audit-before-success storage, and dirty-buffer preservation semantics.
-- Runtime batch mutation, batch rollback, multi-file atomicity, workspace-edit execution, format/code-action execution, and generic save execution remain future implementation work after the Stage 1E contract paths.
+- Runtime batch mutation, batch rollback, multi-file atomicity, and multi-edit workspace-edit execution remain future implementation work after the Stage 1E contract paths and Stage 1H single-route rollback authority.
+- Format/code-action execution remains denied until a later phase gate.
 - Future AI, plugin, LSP, collaboration, terminal, and remote runtime apply paths remain denied until their ADR, dependency-policy, and contract-test gates exist.
 
 ## Validation
 
-Completed targeted validation retained from earlier Phase 2 subtasks plus Stage 1D:
+Completed targeted validation retained from earlier Phase 2 subtasks plus Stage 1G/1H:
 
-- `cargo fmt --all` — passed on 2026-05-16 after Stage 1E edits.
-- `cargo check -p devil-app --all-targets` — passed after Stage 1E edits.
-- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 32 integration tests; 0 failed; 0 ignored.
-- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed after Stage 1E edits.
-- `cargo test -p devil-protocol --test dto_contracts` — passed with 14 tests; 0 failed; 0 ignored.
+- `cargo fmt --all` — passed on 2026-05-22.
+- `cargo check -p devil-app --all-targets` — passed.
+- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 50 integration tests; 0 failed; 0 ignored.
+- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed.
+- `cargo test -p devil-protocol --test dto_contracts` — passed with 56 tests; 0 failed; 0 ignored.
 - `cargo check -p devil-app -p devil-observability --all-targets` — passed.
+- `cargo test -p devil-app --lib` — passed with 18 unit tests; 0 failed; 0 ignored.
+- `cargo test -p devil-project rollback_checkpoints_compensate_file_mutations_through_workspace_authority` — passed.
+- `cargo test -p devil-project rename_file_with_proposal_requires_destination_write_authorization` — passed.
+- `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_closed_file_audit_failure_fails_closed_and_rolls_back` — passed.
+- `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back` — passed.
+- `cargo test -p devil-app --lib audit_rollback_failure_diagnostics_are_preserved_on_failed_response` — passed.
+- `cargo clippy -p devil-project --all-targets -- -D warnings` — passed.
+- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed.
 
-Completed full repository phase gates on 2026-05-16 from the workspace root with `C:/Users/dasbl/.cargo/bin` first in `PATH`:
+Completed full repository phase gates on 2026-05-22 from the workspace root with `C:/Users/dasbl/.cargo/bin` first in `PATH`:
 
 | Gate | Command | Result |
 | --- | --- | --- |
 | Dependency policy | `cargo run -p xtask -- check-deps` | Passed; `dependency policy checks passed`. |
 | Formatting | `cargo fmt --all --check` | Passed. |
 | Workspace check | `cargo check --workspace --all-targets` | Passed. |
-| Workspace tests | `cargo test --workspace --all-targets` | Passed; observed test binaries reported 187 passed, 0 failed, and 3 ignored performance-suite measurements. |
+| Workspace tests | `cargo test --workspace --all-targets` | Passed; observed test binaries reported 311 passed, 0 failed, and 3 ignored performance-suite measurements. |
 | Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed. |
 
 No placeholder crates were activated, and no runtime behavior was added for AI, plugins, collaboration, remote workspaces, terminal runtime, LSP execution, or batch rollback.

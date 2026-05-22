@@ -254,6 +254,119 @@ pub struct WorkspaceRenameFileRequest {
     pub causality_id: CausalityId,
 }
 
+/// Workspace-authorized rollback checkpoint target for accepted file mutations.
+#[derive(Debug, Clone)]
+pub enum WorkspaceMutationRollbackTarget {
+    /// A create-file proposal will create this path; rollback removes it if audit fails.
+    CreatedFile {
+        /// Path expected to be absent before mutation.
+        path: CanonicalPath,
+    },
+    /// A delete-file proposal will remove this file; rollback restores its text snapshot.
+    DeletedFile {
+        /// File identity expected before mutation.
+        file: FileIdentity,
+    },
+    /// A rename-file proposal will move this file; rollback moves destination back to source.
+    RenamedFile {
+        /// Source file identity expected before mutation.
+        file: FileIdentity,
+        /// Destination path expected to be absent before mutation.
+        destination: CanonicalPath,
+    },
+    /// A save-file proposal will replace this file; rollback restores its text snapshot.
+    SavedFile {
+        /// File identity expected before mutation.
+        file: FileIdentity,
+    },
+}
+
+/// Request to capture a workspace-owned rollback checkpoint before a file mutation.
+#[derive(Debug, Clone)]
+pub struct WorkspaceMutationRollbackCheckpointRequest {
+    /// Workspace being protected.
+    pub workspace_id: WorkspaceId,
+    /// Proposal authorizing the mutation that may need rollback.
+    pub proposal_id: ProposalId,
+    /// Principal requesting the mutation.
+    pub principal: PrincipalId,
+    /// Required capability for the mutation.
+    pub required_capability: CapabilityId,
+    /// Mutation target that needs rollback material.
+    pub target: WorkspaceMutationRollbackTarget,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id linking proposal/workspace events.
+    pub causality_id: CausalityId,
+}
+
+/// Workspace-owned rollback material for accepted file mutations.
+#[derive(Debug, Clone)]
+pub enum WorkspaceMutationRollbackCheckpoint {
+    /// Roll back a create by removing the created path.
+    CreatedFile {
+        /// Canonical path to remove.
+        path: CanonicalPath,
+    },
+    /// Roll back a delete by restoring the captured UTF-8 text.
+    DeletedFile {
+        /// File identity to restore.
+        file: FileIdentity,
+        /// Pre-mutation UTF-8 text snapshot.
+        text: String,
+    },
+    /// Roll back a rename by moving the destination back to the source identity path.
+    RenamedFile {
+        /// Original source file identity.
+        file: FileIdentity,
+        /// Canonical destination path after mutation.
+        destination: CanonicalPath,
+    },
+    /// Roll back a save by restoring the captured UTF-8 text.
+    SavedFile {
+        /// File identity to restore.
+        file: FileIdentity,
+        /// Pre-mutation UTF-8 text snapshot.
+        text: String,
+    },
+}
+
+/// Result of capturing workspace rollback material.
+#[allow(clippy::result_large_err)]
+pub type WorkspaceMutationRollbackCheckpointResult =
+    Result<WorkspaceMutationRollbackCheckpoint, ProposalResponse>;
+
+/// Request to compensate an audit-failed workspace file mutation.
+#[derive(Debug, Clone)]
+pub struct WorkspaceMutationRollbackRequest {
+    /// Workspace being compensated.
+    pub workspace_id: WorkspaceId,
+    /// Proposal whose mutation is being rolled back.
+    pub proposal_id: ProposalId,
+    /// Principal requesting the original mutation.
+    pub principal: PrincipalId,
+    /// Required capability for the original mutation.
+    pub required_capability: CapabilityId,
+    /// Workspace-owned checkpoint captured before mutation.
+    pub checkpoint: WorkspaceMutationRollbackCheckpoint,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id linking proposal/workspace events.
+    pub causality_id: CausalityId,
+}
+
+/// Successful rollback compensation metadata.
+#[derive(Debug, Clone)]
+pub struct WorkspaceMutationRollbackApplied {
+    /// Updated workspace generation after compensation.
+    pub workspace_generation: WorkspaceGeneration,
+}
+
+/// Workspace rollback compensation result preserving typed proposal responses.
+#[allow(clippy::result_large_err)]
+pub type WorkspaceMutationRollbackResult =
+    Result<WorkspaceMutationRollbackApplied, ProposalResponse>;
+
 /// Successful closed-file workspace mutation metadata.
 #[derive(Debug, Clone)]
 pub struct WorkspaceFileMutationApplied {
@@ -2472,6 +2585,22 @@ impl WorkspaceActor {
                 err.to_string(),
             ));
         }
+        if let Err(err) = self.decision_for_workspace_with_context(
+            state,
+            &request.required_capability.0,
+            Some(&destination.to_string_lossy()),
+            CapabilityRequestContext::default(),
+        ) {
+            return Err(Self::denied_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                request.destination.clone(),
+                err.to_string(),
+            ));
+        }
         if state.generation != request.expected_workspace_generation {
             return Err(Self::stale_mutation_response(
                 request.proposal_id,
@@ -2643,6 +2772,787 @@ impl WorkspaceActor {
             file_content_version: new_identity.content_version,
             workspace_generation: state.generation,
             response: ProposalResponse::Applied(transition),
+        })
+    }
+
+    fn rollback_target_path(target: &WorkspaceMutationRollbackTarget) -> CanonicalPath {
+        match target {
+            WorkspaceMutationRollbackTarget::CreatedFile { path } => path.clone(),
+            WorkspaceMutationRollbackTarget::DeletedFile { file }
+            | WorkspaceMutationRollbackTarget::RenamedFile { file, .. }
+            | WorkspaceMutationRollbackTarget::SavedFile { file } => file.canonical_path.clone(),
+        }
+    }
+
+    fn rollback_checkpoint_path(checkpoint: &WorkspaceMutationRollbackCheckpoint) -> CanonicalPath {
+        match checkpoint {
+            WorkspaceMutationRollbackCheckpoint::CreatedFile { path } => path.clone(),
+            WorkspaceMutationRollbackCheckpoint::DeletedFile { file, .. }
+            | WorkspaceMutationRollbackCheckpoint::SavedFile { file, .. } => {
+                file.canonical_path.clone()
+            }
+            WorkspaceMutationRollbackCheckpoint::RenamedFile { destination, .. } => {
+                destination.clone()
+            }
+        }
+    }
+
+    fn bump_generation_after_rollback(state: &mut WorkspaceState) {
+        state.generation = WorkspaceGeneration(state.generation.0.saturating_add(1));
+        state.config.captured_at = TimestampMillis(now_millis());
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn capture_text_rollback_checkpoint(
+        &self,
+        state: &mut WorkspaceState,
+        request: &WorkspaceMutationRollbackCheckpointRequest,
+        file: &FileIdentity,
+    ) -> Result<(FileIdentity, String), ProposalResponse> {
+        if file.workspace_id != request.workspace_id {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                file.canonical_path.clone(),
+                "rollback checkpoint file workspace does not match opened workspace",
+            ));
+        }
+        let canonical = match self.canonicalize_candidate(state, &file.canonical_path.0) {
+            Ok(path) => path,
+            Err(err) => {
+                return Err(Self::denied_mutation_response(
+                    request.proposal_id,
+                    &request.principal,
+                    &request.required_capability,
+                    request.correlation_id,
+                    request.causality_id,
+                    file.canonical_path.clone(),
+                    err.to_string(),
+                ));
+            }
+        };
+        if let Err(err) = self.decision_for_workspace_with_context(
+            state,
+            &request.required_capability.0,
+            Some(&canonical.to_string_lossy()),
+            CapabilityRequestContext::default(),
+        ) {
+            return Err(Self::denied_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                file.canonical_path.clone(),
+                err.to_string(),
+            ));
+        }
+        let metadata = self.fs.read_metadata(&canonical).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let fingerprint = FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata)
+            .map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let actual_identity =
+            self.file_identity_from_platform_metadata(state, &canonical, &fingerprint, &metadata);
+        if actual_identity.file_id != file.file_id
+            || actual_identity.content_version != file.content_version
+        {
+            return Err(Self::stale_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                file.canonical_path.clone(),
+                ProposalStaleReason::FileContentVersionMismatch,
+                ProposalVersionPreconditions {
+                    file_version: Some(file.content_version),
+                    buffer_version: None,
+                    snapshot_id: None,
+                    generation: None,
+                    file_content_version: Some(file.content_version),
+                    workspace_generation: None,
+                    expected_fingerprint: None,
+                    expected_file_length: None,
+                    expected_modified_at: None,
+                },
+                Some(devil_protocol::VersionContext {
+                    file_version: actual_identity.content_version,
+                    buffer_version: BufferVersion(0),
+                    snapshot_id: SnapshotId(0),
+                    generation: state.generation,
+                    file_content_version: actual_identity.content_version,
+                    workspace_generation: state.generation,
+                    fingerprint: Some(fingerprint.to_protocol()),
+                    file_length: fingerprint.size,
+                    modified_at: fingerprint.modified,
+                }),
+                "file changed before rollback checkpoint",
+            ));
+        }
+        let text = self.fs.read_text_file(&canonical).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                file.canonical_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        Ok((actual_identity, text))
+    }
+
+    /// Capture rollback material through workspace authority before an accepted file mutation.
+    #[allow(clippy::result_large_err)]
+    pub fn rollback_checkpoint_for_file_mutation(
+        &self,
+        request: WorkspaceMutationRollbackCheckpointRequest,
+    ) -> WorkspaceMutationRollbackCheckpointResult {
+        let target_path = Self::rollback_target_path(&request.target);
+        let mut state_guard = self.state.lock().map_err(|_| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                target_path.clone(),
+                "workspace state lock poisoned",
+            )
+        })?;
+        let Some(state) = state_guard.as_mut() else {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                target_path,
+                "workspace is not open",
+            ));
+        };
+        if state.workspace_id != request.workspace_id {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                target_path,
+                "workspace id does not match opened workspace",
+            ));
+        }
+
+        match &request.target {
+            WorkspaceMutationRollbackTarget::CreatedFile { path } => {
+                let canonical = match self.canonicalize_candidate(state, &path.0) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(Self::denied_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            path.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                };
+                if let Err(err) = self.decision_for_workspace_with_context(
+                    state,
+                    &request.required_capability.0,
+                    Some(&canonical.to_string_lossy()),
+                    CapabilityRequestContext::default(),
+                ) {
+                    return Err(Self::denied_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        path.clone(),
+                        err.to_string(),
+                    ));
+                }
+                match self.fs.read_metadata(&canonical) {
+                    Ok(_) => Err(Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        path.clone(),
+                        "rollback checkpoint expected create destination to be absent",
+                    )),
+                    Err(PlatformError::NotFound { .. }) => {
+                        Ok(WorkspaceMutationRollbackCheckpoint::CreatedFile {
+                            path: CanonicalPath(canonical.to_string_lossy().into_owned()),
+                        })
+                    }
+                    Err(err) => Err(Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        path.clone(),
+                        err.to_string(),
+                    )),
+                }
+            }
+            WorkspaceMutationRollbackTarget::DeletedFile { file } => {
+                let (file, text) = self.capture_text_rollback_checkpoint(state, &request, file)?;
+                Ok(WorkspaceMutationRollbackCheckpoint::DeletedFile { file, text })
+            }
+            WorkspaceMutationRollbackTarget::RenamedFile { file, destination } => {
+                let canonical_source =
+                    match self.canonicalize_candidate(state, &file.canonical_path.0) {
+                        Ok(path) => path,
+                        Err(err) => {
+                            return Err(Self::denied_mutation_response(
+                                request.proposal_id,
+                                &request.principal,
+                                &request.required_capability,
+                                request.correlation_id,
+                                request.causality_id,
+                                file.canonical_path.clone(),
+                                err.to_string(),
+                            ));
+                        }
+                    };
+                let canonical_destination = match self.canonicalize_candidate(state, &destination.0)
+                {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(Self::denied_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            destination.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                };
+                if let Err(err) = self.decision_for_workspace_with_context(
+                    state,
+                    &request.required_capability.0,
+                    Some(&canonical_source.to_string_lossy()),
+                    CapabilityRequestContext::default(),
+                ) {
+                    return Err(Self::denied_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        file.canonical_path.clone(),
+                        err.to_string(),
+                    ));
+                }
+                if let Err(err) = self.decision_for_workspace_with_context(
+                    state,
+                    &request.required_capability.0,
+                    Some(&canonical_destination.to_string_lossy()),
+                    CapabilityRequestContext::default(),
+                ) {
+                    return Err(Self::denied_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        destination.clone(),
+                        err.to_string(),
+                    ));
+                }
+                match self.fs.read_metadata(&canonical_destination) {
+                    Ok(_) => {
+                        return Err(Self::failed_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            destination.clone(),
+                            "rollback checkpoint expected rename destination to be absent",
+                        ));
+                    }
+                    Err(PlatformError::NotFound { .. }) => {}
+                    Err(err) => {
+                        return Err(Self::failed_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            destination.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                }
+                let metadata = self.fs.read_metadata(&canonical_source).map_err(|err| {
+                    Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        file.canonical_path.clone(),
+                        err.to_string(),
+                    )
+                })?;
+                let fingerprint =
+                    FileFingerprint::from_metadata(&canonical_source, self.fs.as_ref(), &metadata)
+                        .map_err(|err| {
+                            Self::failed_mutation_response(
+                                request.proposal_id,
+                                &request.principal,
+                                &request.required_capability,
+                                request.correlation_id,
+                                request.causality_id,
+                                file.canonical_path.clone(),
+                                err.to_string(),
+                            )
+                        })?;
+                let actual_identity = self.file_identity_from_platform_metadata(
+                    state,
+                    &canonical_source,
+                    &fingerprint,
+                    &metadata,
+                );
+                if actual_identity.file_id != file.file_id
+                    || actual_identity.content_version != file.content_version
+                {
+                    return Err(Self::stale_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        file.canonical_path.clone(),
+                        ProposalStaleReason::FileContentVersionMismatch,
+                        ProposalVersionPreconditions {
+                            file_version: Some(file.content_version),
+                            buffer_version: None,
+                            snapshot_id: None,
+                            generation: None,
+                            file_content_version: Some(file.content_version),
+                            workspace_generation: None,
+                            expected_fingerprint: None,
+                            expected_file_length: None,
+                            expected_modified_at: None,
+                        },
+                        Some(devil_protocol::VersionContext {
+                            file_version: actual_identity.content_version,
+                            buffer_version: BufferVersion(0),
+                            snapshot_id: SnapshotId(0),
+                            generation: state.generation,
+                            file_content_version: actual_identity.content_version,
+                            workspace_generation: state.generation,
+                            fingerprint: Some(fingerprint.to_protocol()),
+                            file_length: fingerprint.size,
+                            modified_at: fingerprint.modified,
+                        }),
+                        "file changed before rollback checkpoint",
+                    ));
+                }
+                Ok(WorkspaceMutationRollbackCheckpoint::RenamedFile {
+                    file: actual_identity,
+                    destination: CanonicalPath(
+                        canonical_destination.to_string_lossy().into_owned(),
+                    ),
+                })
+            }
+            WorkspaceMutationRollbackTarget::SavedFile { file } => {
+                let (file, text) = self.capture_text_rollback_checkpoint(state, &request, file)?;
+                Ok(WorkspaceMutationRollbackCheckpoint::SavedFile { file, text })
+            }
+        }
+    }
+
+    /// Compensate an audit-failed file mutation through workspace authority.
+    #[allow(clippy::result_large_err)]
+    pub fn rollback_file_mutation_with_checkpoint(
+        &self,
+        request: WorkspaceMutationRollbackRequest,
+    ) -> WorkspaceMutationRollbackResult {
+        let checkpoint_path = Self::rollback_checkpoint_path(&request.checkpoint);
+        let mut state_guard = self.state.lock().map_err(|_| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                checkpoint_path.clone(),
+                "workspace state lock poisoned",
+            )
+        })?;
+        let Some(state) = state_guard.as_mut() else {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                checkpoint_path,
+                "workspace is not open",
+            ));
+        };
+        if state.workspace_id != request.workspace_id {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                checkpoint_path,
+                "workspace id does not match opened workspace",
+            ));
+        }
+
+        match &request.checkpoint {
+            WorkspaceMutationRollbackCheckpoint::CreatedFile { path } => {
+                let canonical = match self.canonicalize_candidate(state, &path.0) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(Self::denied_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            path.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                };
+                if let Err(err) = self.decision_for_workspace_with_context(
+                    state,
+                    &request.required_capability.0,
+                    Some(&canonical.to_string_lossy()),
+                    CapabilityRequestContext::default(),
+                ) {
+                    return Err(Self::denied_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        path.clone(),
+                        err.to_string(),
+                    ));
+                }
+                self.fs.remove_file(&canonical).map_err(|err| {
+                    Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        path.clone(),
+                        err.to_string(),
+                    )
+                })?;
+                let key = canonical.to_string_lossy().into_owned();
+                if let Some(file_id) = state.file_id_by_path.get(&key).copied() {
+                    Self::remove_file_from_state(state, file_id, &CanonicalPath(key));
+                } else {
+                    state.last_scan.remove(&key);
+                    state
+                        .tree
+                        .retain(|node| node.identity.canonical_path.0 != key);
+                }
+            }
+            WorkspaceMutationRollbackCheckpoint::DeletedFile { file, text }
+            | WorkspaceMutationRollbackCheckpoint::SavedFile { file, text } => {
+                let canonical = match self.canonicalize_candidate(state, &file.canonical_path.0) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(Self::denied_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            file.canonical_path.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                };
+                if let Err(err) = self.decision_for_workspace_with_context(
+                    state,
+                    &request.required_capability.0,
+                    Some(&canonical.to_string_lossy()),
+                    CapabilityRequestContext::default(),
+                ) {
+                    return Err(Self::denied_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        file.canonical_path.clone(),
+                        err.to_string(),
+                    ));
+                }
+                if matches!(
+                    &request.checkpoint,
+                    WorkspaceMutationRollbackCheckpoint::DeletedFile { .. }
+                ) {
+                    match self.fs.read_metadata(&canonical) {
+                        Ok(_) => {
+                            return Err(Self::failed_mutation_response(
+                                request.proposal_id,
+                                &request.principal,
+                                &request.required_capability,
+                                request.correlation_id,
+                                request.causality_id,
+                                file.canonical_path.clone(),
+                                "rollback restore target already exists",
+                            ));
+                        }
+                        Err(PlatformError::NotFound { .. }) => {}
+                        Err(err) => {
+                            return Err(Self::failed_mutation_response(
+                                request.proposal_id,
+                                &request.principal,
+                                &request.required_capability,
+                                request.correlation_id,
+                                request.causality_id,
+                                file.canonical_path.clone(),
+                                err.to_string(),
+                            ));
+                        }
+                    }
+                }
+                self.fs
+                    .write_text_file_atomic(&canonical, text)
+                    .map_err(|err| {
+                        Self::failed_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            file.canonical_path.clone(),
+                            err.to_string(),
+                        )
+                    })?;
+                let metadata = self.fs.read_metadata(&canonical).map_err(|err| {
+                    Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        file.canonical_path.clone(),
+                        err.to_string(),
+                    )
+                })?;
+                let fingerprint =
+                    FileFingerprint::from_metadata(&canonical, self.fs.as_ref(), &metadata)
+                        .map_err(|err| {
+                            Self::failed_mutation_response(
+                                request.proposal_id,
+                                &request.principal,
+                                &request.required_capability,
+                                request.correlation_id,
+                                request.causality_id,
+                                file.canonical_path.clone(),
+                                err.to_string(),
+                            )
+                        })?;
+                let key = canonical.to_string_lossy().into_owned();
+                state.file_id_by_path.insert(key.clone(), file.file_id);
+                state.file_path_by_id.insert(file.file_id, key.clone());
+                let identity = self.file_identity_from_platform_metadata(
+                    state,
+                    &canonical,
+                    &fingerprint,
+                    &metadata,
+                );
+                let metadata = self
+                    .metadata_for_identity(state, identity.file_id)
+                    .expect("metadata inserted");
+                state.last_scan.insert(key, fingerprint.clone());
+                Self::upsert_tree_node(state, identity, metadata);
+            }
+            WorkspaceMutationRollbackCheckpoint::RenamedFile { file, destination } => {
+                let source = match self.canonicalize_candidate(state, &file.canonical_path.0) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(Self::denied_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            file.canonical_path.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                };
+                let destination = match self.canonicalize_candidate(state, &destination.0) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(Self::denied_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            destination.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                };
+                if let Err(err) = self.decision_for_workspace_with_context(
+                    state,
+                    &request.required_capability.0,
+                    Some(&destination.to_string_lossy()),
+                    CapabilityRequestContext::default(),
+                ) {
+                    return Err(Self::denied_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        CanonicalPath(destination.to_string_lossy().into_owned()),
+                        err.to_string(),
+                    ));
+                }
+                if let Err(err) = self.decision_for_workspace_with_context(
+                    state,
+                    &request.required_capability.0,
+                    Some(&source.to_string_lossy()),
+                    CapabilityRequestContext::default(),
+                ) {
+                    return Err(Self::denied_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        file.canonical_path.clone(),
+                        err.to_string(),
+                    ));
+                }
+                match self.fs.read_metadata(&source) {
+                    Ok(_) => {
+                        return Err(Self::failed_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            file.canonical_path.clone(),
+                            "rollback source already exists",
+                        ));
+                    }
+                    Err(PlatformError::NotFound { .. }) => {}
+                    Err(err) => {
+                        return Err(Self::failed_mutation_response(
+                            request.proposal_id,
+                            &request.principal,
+                            &request.required_capability,
+                            request.correlation_id,
+                            request.causality_id,
+                            file.canonical_path.clone(),
+                            err.to_string(),
+                        ));
+                    }
+                }
+                self.fs.rename_path(&destination, &source).map_err(|err| {
+                    Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        CanonicalPath(destination.to_string_lossy().into_owned()),
+                        err.to_string(),
+                    )
+                })?;
+                let source_key = source.to_string_lossy().into_owned();
+                let destination_key = destination.to_string_lossy().into_owned();
+                state.file_id_by_path.remove(&destination_key);
+                state
+                    .file_id_by_path
+                    .insert(source_key.clone(), file.file_id);
+                state
+                    .file_path_by_id
+                    .insert(file.file_id, source_key.clone());
+                state.last_scan.remove(&destination_key);
+                let metadata = self.fs.read_metadata(&source).map_err(|err| {
+                    Self::failed_mutation_response(
+                        request.proposal_id,
+                        &request.principal,
+                        &request.required_capability,
+                        request.correlation_id,
+                        request.causality_id,
+                        file.canonical_path.clone(),
+                        err.to_string(),
+                    )
+                })?;
+                let fingerprint =
+                    FileFingerprint::from_metadata(&source, self.fs.as_ref(), &metadata).map_err(
+                        |err| {
+                            Self::failed_mutation_response(
+                                request.proposal_id,
+                                &request.principal,
+                                &request.required_capability,
+                                request.correlation_id,
+                                request.causality_id,
+                                file.canonical_path.clone(),
+                                err.to_string(),
+                            )
+                        },
+                    )?;
+                let identity = self.file_identity_from_platform_metadata(
+                    state,
+                    &source,
+                    &fingerprint,
+                    &metadata,
+                );
+                let metadata = self
+                    .metadata_for_identity(state, identity.file_id)
+                    .expect("metadata inserted");
+                state.last_scan.insert(source_key, fingerprint.clone());
+                Self::upsert_tree_node(state, identity, metadata);
+            }
+        }
+
+        Self::bump_generation_after_rollback(state);
+        Ok(WorkspaceMutationRollbackApplied {
+            workspace_generation: state.generation,
         })
     }
 
@@ -3661,6 +4571,40 @@ mod tests {
         })
     }
 
+    fn rollback_checkpoint_request(
+        workspace_id: WorkspaceId,
+        proposal_id: ProposalId,
+        principal: &PrincipalId,
+        target: WorkspaceMutationRollbackTarget,
+    ) -> WorkspaceMutationRollbackCheckpointRequest {
+        WorkspaceMutationRollbackCheckpointRequest {
+            workspace_id,
+            proposal_id,
+            principal: principal.clone(),
+            required_capability: CapabilityId("fs.write".to_string()),
+            target,
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+        }
+    }
+
+    fn rollback_request(
+        workspace_id: WorkspaceId,
+        proposal_id: ProposalId,
+        principal: &PrincipalId,
+        checkpoint: WorkspaceMutationRollbackCheckpoint,
+    ) -> WorkspaceMutationRollbackRequest {
+        WorkspaceMutationRollbackRequest {
+            workspace_id,
+            proposal_id,
+            principal: principal.clone(),
+            required_capability: CapabilityId("fs.write".to_string()),
+            checkpoint,
+            correlation_id: CorrelationId(78),
+            causality_id: CausalityId(Uuid::now_v7()),
+        }
+    }
+
     #[test]
     fn open_and_resolve_path_stays_inside_root() {
         let (actor, opened, _) = root_workspace();
@@ -3761,6 +4705,261 @@ mod tests {
             .read_file_text(opened.workspace_id, file_path)
             .expect("read via actor should succeed");
         assert_eq!(actual, "hello\n");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rename_file_with_proposal_requires_destination_write_authorization() {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "devil-project-rename-policy-{}-{}-{}",
+            std::process::id(),
+            now_millis(),
+            next_test_temp_suffix()
+        );
+        let root = base.join(unique);
+        let allowed = root.join("allowed");
+        let blocked = root.join("blocked");
+        std::fs::create_dir_all(&allowed).expect("create allowed directory");
+        std::fs::create_dir_all(&blocked).expect("create blocked directory");
+        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize root");
+        let allowed = std::fs::canonicalize(&allowed).expect("canonicalize allowed directory");
+        let blocked = std::fs::canonicalize(&blocked).expect("canonicalize blocked directory");
+        let source = allowed.join("source.txt");
+        let destination = blocked.join("destination.txt");
+        std::fs::write(&source, "seed").expect("seed source file");
+
+        let mut policy = SecurityPolicy::default();
+        policy.path_policy.readable_roots = vec![canonical_root.to_string_lossy().into_owned()];
+        policy.path_policy.writable_roots = vec![allowed.to_string_lossy().into_owned()];
+        let actor = WorkspaceActor::new(
+            Arc::new(NativeFileSystem),
+            Arc::new(NativeWatcherService),
+            DenyByDefaultBroker::new(
+                policy,
+                devil_protocol::CapabilityNamespace("test".to_string()),
+            ),
+        );
+        let principal = PrincipalId("temp-principal".to_string());
+        let opened = actor
+            .open_workspace(WorkspaceOpenRequest {
+                correlation_id: CorrelationId(21),
+                principal_id: principal.clone(),
+                root_path: CanonicalPath(canonical_root.to_string_lossy().into_owned()),
+                trust: Some(WorkspaceTrustState::Trusted),
+            })
+            .expect("open workspace");
+        let opened_file = actor
+            .open_existing_file_text(opened.workspace_id, source.to_string_lossy())
+            .expect("open source file");
+
+        let response = actor
+            .rename_file_with_proposal(WorkspaceRenameFileRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(205),
+                principal,
+                required_capability: CapabilityId("fs.write".to_string()),
+                file: opened_file.identity.clone(),
+                destination: CanonicalPath(destination.to_string_lossy().into_owned()),
+                expected_fingerprint: opened_file.fingerprint.clone(),
+                expected_file_content_version: opened_file.file_content_version,
+                expected_workspace_generation: opened_file.workspace_generation,
+                correlation_id: CorrelationId(205),
+                causality_id: CausalityId(Uuid::now_v7()),
+            })
+            .expect_err("destination write policy should deny rename");
+
+        assert!(matches!(response, ProposalResponse::Denied { .. }));
+        assert!(source.exists());
+        assert!(!destination.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rollback_checkpoints_compensate_file_mutations_through_workspace_authority() {
+        let (actor, opened, principal, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        let create_path = CanonicalPath(
+            root.join("rollback-created.txt")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let create_checkpoint = actor
+            .rollback_checkpoint_for_file_mutation(rollback_checkpoint_request(
+                opened.workspace_id,
+                ProposalId(201),
+                &principal,
+                WorkspaceMutationRollbackTarget::CreatedFile {
+                    path: create_path.clone(),
+                },
+            ))
+            .expect("capture create rollback checkpoint");
+        actor
+            .create_file_with_proposal(WorkspaceCreateFileRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(201),
+                principal: principal.clone(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                path: create_path.clone(),
+                expected_workspace_generation: opened.generation,
+                initial_content: "created".to_string(),
+                correlation_id: CorrelationId(201),
+                causality_id: CausalityId(Uuid::now_v7()),
+            })
+            .expect("create through workspace proposal");
+        actor
+            .rollback_file_mutation_with_checkpoint(rollback_request(
+                opened.workspace_id,
+                ProposalId(201),
+                &principal,
+                create_checkpoint,
+            ))
+            .expect("rollback created file");
+        assert!(!Path::new(&create_path.0).exists());
+
+        let delete_path = root.join("rollback-delete.txt");
+        std::fs::write(&delete_path, "delete seed").expect("seed delete file");
+        let opened_delete = actor
+            .open_existing_file_text(opened.workspace_id, delete_path.to_string_lossy())
+            .expect("open delete target");
+        let delete_checkpoint = actor
+            .rollback_checkpoint_for_file_mutation(rollback_checkpoint_request(
+                opened.workspace_id,
+                ProposalId(202),
+                &principal,
+                WorkspaceMutationRollbackTarget::DeletedFile {
+                    file: opened_delete.identity.clone(),
+                },
+            ))
+            .expect("capture delete rollback checkpoint");
+        actor
+            .delete_file_with_proposal(WorkspaceDeleteFileRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(202),
+                principal: principal.clone(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                file: opened_delete.identity.clone(),
+                expected_fingerprint: opened_delete.fingerprint.clone(),
+                expected_file_content_version: opened_delete.file_content_version,
+                expected_workspace_generation: opened_delete.workspace_generation,
+                correlation_id: CorrelationId(202),
+                causality_id: CausalityId(Uuid::now_v7()),
+            })
+            .expect("delete through workspace proposal");
+        assert!(!delete_path.exists());
+        actor
+            .rollback_file_mutation_with_checkpoint(rollback_request(
+                opened.workspace_id,
+                ProposalId(202),
+                &principal,
+                delete_checkpoint,
+            ))
+            .expect("rollback deleted file");
+        assert_eq!(
+            std::fs::read_to_string(&delete_path).expect("read restored delete file"),
+            "delete seed"
+        );
+
+        let rename_source = root.join("rollback-rename.txt");
+        let rename_destination = CanonicalPath(
+            root.join("rollback-renamed.txt")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        std::fs::write(&rename_source, "rename seed").expect("seed rename file");
+        let opened_rename = actor
+            .open_existing_file_text(opened.workspace_id, rename_source.to_string_lossy())
+            .expect("open rename target");
+        let rename_checkpoint = actor
+            .rollback_checkpoint_for_file_mutation(rollback_checkpoint_request(
+                opened.workspace_id,
+                ProposalId(203),
+                &principal,
+                WorkspaceMutationRollbackTarget::RenamedFile {
+                    file: opened_rename.identity.clone(),
+                    destination: rename_destination.clone(),
+                },
+            ))
+            .expect("capture rename rollback checkpoint");
+        actor
+            .rename_file_with_proposal(WorkspaceRenameFileRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(203),
+                principal: principal.clone(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                file: opened_rename.identity.clone(),
+                destination: rename_destination.clone(),
+                expected_fingerprint: opened_rename.fingerprint.clone(),
+                expected_file_content_version: opened_rename.file_content_version,
+                expected_workspace_generation: opened_rename.workspace_generation,
+                correlation_id: CorrelationId(203),
+                causality_id: CausalityId(Uuid::now_v7()),
+            })
+            .expect("rename through workspace proposal");
+        assert!(!rename_source.exists());
+        assert!(Path::new(&rename_destination.0).exists());
+        actor
+            .rollback_file_mutation_with_checkpoint(rollback_request(
+                opened.workspace_id,
+                ProposalId(203),
+                &principal,
+                rename_checkpoint,
+            ))
+            .expect("rollback renamed file");
+        assert_eq!(
+            std::fs::read_to_string(&rename_source).expect("read restored rename file"),
+            "rename seed"
+        );
+        assert!(!Path::new(&rename_destination.0).exists());
+
+        let save_path = root.join("rollback-save.txt");
+        std::fs::write(&save_path, "save seed").expect("seed save file");
+        let opened_save = actor
+            .open_existing_file_text(opened.workspace_id, save_path.to_string_lossy())
+            .expect("open save target");
+        let save_checkpoint = actor
+            .rollback_checkpoint_for_file_mutation(rollback_checkpoint_request(
+                opened.workspace_id,
+                ProposalId(204),
+                &principal,
+                WorkspaceMutationRollbackTarget::SavedFile {
+                    file: opened_save.identity.clone(),
+                },
+            ))
+            .expect("capture save rollback checkpoint");
+        actor
+            .save_file_with_proposal(WorkspaceSaveRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(204),
+                principal: principal.clone(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                file_id: opened_save.identity.file_id,
+                path: opened_save.identity.canonical_path.clone(),
+                expected_fingerprint: opened_save.fingerprint.clone(),
+                expected_file_content_version: opened_save.file_content_version,
+                expected_workspace_generation: opened_save.workspace_generation,
+                buffer_version: BufferVersion(4),
+                snapshot_id: SnapshotId(4),
+                payload_byte_len: "save mutated".len() as u64,
+                correlation_id: CorrelationId(204),
+                causality_id: CausalityId(Uuid::now_v7()),
+                text: "save mutated".to_string(),
+            })
+            .expect("save through workspace proposal");
+        actor
+            .rollback_file_mutation_with_checkpoint(rollback_request(
+                opened.workspace_id,
+                ProposalId(204),
+                &principal,
+                save_checkpoint,
+            ))
+            .expect("rollback saved file");
+        assert_eq!(
+            std::fs::read_to_string(&save_path).expect("read restored save file"),
+            "save seed"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

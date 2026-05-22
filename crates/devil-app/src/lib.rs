@@ -21,7 +21,9 @@ use devil_observability::{
 use devil_platform::{NativeFileSystem, NativeWatcherService};
 use devil_project::{
     OpenedFileText, WorkspaceActor, WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest,
-    WorkspaceError, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
+    WorkspaceError, WorkspaceMutationRollbackCheckpoint,
+    WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
+    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
 };
 use devil_protocol::{
     BatchProposalPayload, BufferId, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId,
@@ -532,6 +534,23 @@ struct AppProposalCoordinator {
     proposals: RefCell<HashMap<ProposalId, WorkspaceProposal>>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct ProposalLifecycleRecoveryRecord {
+    proposal: WorkspaceProposal,
+    state: ProposalLifecycleState,
+    context: Option<EventContext>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct ProposalLifecycleRecoverySnapshot {
+    records: Vec<ProposalLifecycleRecoveryRecord>,
+    next_proposal_id: u64,
+    next_event_sequence: u64,
+    generated_at: TimestampMillis,
+}
+
 impl AppProposalCoordinator {
     fn new(event_sink: SharedEventSink) -> Self {
         Self {
@@ -669,6 +688,369 @@ impl AppProposalCoordinator {
 
     fn proposal(&self, proposal_id: ProposalId) -> Option<WorkspaceProposal> {
         self.proposals.borrow().get(&proposal_id).cloned()
+    }
+
+    #[allow(dead_code)]
+    fn proposal_lifecycle_recovery_snapshot(&self) -> ProposalLifecycleRecoverySnapshot {
+        let proposals = self.proposals.borrow();
+        let states = self.proposal_states.borrow();
+        let contexts = self.proposal_contexts.borrow();
+        let mut records = proposals
+            .values()
+            .map(|proposal| ProposalLifecycleRecoveryRecord {
+                proposal: proposal.clone(),
+                state: states
+                    .get(&proposal.proposal_id)
+                    .copied()
+                    .unwrap_or(ProposalLifecycleState::Created),
+                context: contexts.get(&proposal.proposal_id).copied(),
+            })
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| (record.proposal.proposal_id.0, record.proposal.created_at.0));
+
+        ProposalLifecycleRecoverySnapshot {
+            records,
+            next_proposal_id: self.next_proposal_id.get(),
+            next_event_sequence: self.next_event_sequence.get(),
+            generated_at: TimestampMillis::now(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn recover_lifecycle_from_snapshot(&self, snapshot: ProposalLifecycleRecoverySnapshot) {
+        let max_proposal_id = snapshot
+            .records
+            .iter()
+            .map(|record| record.proposal.proposal_id.0)
+            .max()
+            .unwrap_or(0);
+
+        {
+            let mut proposals = self.proposals.borrow_mut();
+            proposals.clear();
+            proposals.extend(
+                snapshot
+                    .records
+                    .iter()
+                    .map(|record| (record.proposal.proposal_id, record.proposal.clone())),
+            );
+        }
+        {
+            let mut states = self.proposal_states.borrow_mut();
+            states.clear();
+            states.extend(
+                snapshot
+                    .records
+                    .iter()
+                    .map(|record| (record.proposal.proposal_id, record.state)),
+            );
+        }
+        {
+            let mut contexts = self.proposal_contexts.borrow_mut();
+            contexts.clear();
+            contexts.extend(snapshot.records.into_iter().filter_map(|record| {
+                record
+                    .context
+                    .map(|context| (record.proposal.proposal_id, context))
+            }));
+        }
+
+        self.next_proposal_id
+            .set(snapshot.next_proposal_id.max(max_proposal_id));
+        self.next_event_sequence.set(snapshot.next_event_sequence);
+    }
+
+    fn proposal_ledger_projection(
+        &self,
+        generated_at: TimestampMillis,
+    ) -> devil_protocol::ProposalLedgerProjection {
+        let proposals = self.proposals.borrow();
+        let states = self.proposal_states.borrow();
+        let mut rows = proposals
+            .values()
+            .map(|proposal| {
+                let state = states
+                    .get(&proposal.proposal_id)
+                    .copied()
+                    .unwrap_or(ProposalLifecycleState::Created);
+                Self::proposal_ledger_row(proposal, state, generated_at)
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| (row.created_at.0, row.proposal_id.0));
+        let selected_proposal_id = rows.last().map(|row| row.proposal_id);
+
+        devil_protocol::ProposalLedgerProjection {
+            rows,
+            selected_proposal_id,
+            omitted_row_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn proposal_ledger_row(
+        proposal: &WorkspaceProposal,
+        state: ProposalLifecycleState,
+        generated_at: TimestampMillis,
+    ) -> devil_protocol::ProposalLedgerRow {
+        let target_coverage = devil_protocol::proposal_metadata_target_coverage(proposal);
+        let payload_kind = devil_protocol::proposal_payload_kind(&proposal.payload);
+        let risk_label = Self::proposal_risk_label(&proposal.payload, &target_coverage);
+        let privacy_label = if target_coverage.coverage_kind == ProposalTargetCoverageKind::Redacted
+            || target_coverage.omitted_target_count > 0
+        {
+            devil_protocol::ProposalPrivacyLabel::RedactedSensitive
+        } else {
+            devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata
+        };
+
+        devil_protocol::ProposalLedgerRow {
+            proposal_id: proposal.proposal_id,
+            workspace_id: Self::proposal_workspace_id(proposal, &target_coverage),
+            title: Self::bounded_proposal_title(proposal, payload_kind),
+            payload_kind,
+            lifecycle: Self::lifecycle_state_display(state),
+            principal: proposal.principal.clone(),
+            capability: proposal.capability.clone(),
+            created_at: proposal.created_at,
+            updated_at: generated_at,
+            expires_at: proposal.expires_at,
+            risk_label,
+            privacy_label,
+            rollback: Self::rollback_availability(&proposal.payload),
+            target_coverage: target_coverage.clone(),
+            context_manifest: Self::context_manifest_summary(
+                proposal.proposal_id,
+                &target_coverage,
+                privacy_label,
+            ),
+            diff_summary: Self::diff_summary(&proposal.payload, &target_coverage),
+            preview_warnings: Self::preview_warnings(&proposal.payload),
+            diagnostics: Self::payload_diagnostics(&proposal.payload),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn lifecycle_state_display(
+        state: ProposalLifecycleState,
+    ) -> devil_protocol::ProposalLifecycleStateDisplay {
+        devil_protocol::ProposalLifecycleStateDisplay {
+            state,
+            label: format!("{state:?}"),
+            description: format!("Proposal lifecycle state is {state:?}"),
+        }
+    }
+
+    fn bounded_proposal_title(
+        proposal: &WorkspaceProposal,
+        payload_kind: devil_protocol::ProposalPayloadKind,
+    ) -> String {
+        let summary = proposal.preview.summary.trim();
+        let title = if summary.is_empty() {
+            format!("{payload_kind:?} proposal")
+        } else {
+            summary.to_string()
+        };
+        title.chars().take(120).collect()
+    }
+
+    fn proposal_workspace_id(
+        proposal: &WorkspaceProposal,
+        target_coverage: &ProposalTargetCoverage,
+    ) -> Option<WorkspaceId> {
+        target_coverage
+            .targets
+            .iter()
+            .find_map(|target| target.workspace_id)
+            .or(match &proposal.payload {
+                ProposalPayload::SaveFile(payload) => Some(payload.file.workspace_id),
+                ProposalPayload::DeleteFile(payload) => Some(payload.file.workspace_id),
+                ProposalPayload::RenameFile(payload) => Some(payload.file.workspace_id),
+                ProposalPayload::FormatFile(payload) => Some(payload.file.workspace_id),
+                ProposalPayload::CodeAction(payload) => Some(payload.file.workspace_id),
+                ProposalPayload::WorkspaceEdit(payload) => Some(payload.workspace_id),
+                _ => None,
+            })
+    }
+
+    fn proposal_risk_label(
+        payload: &ProposalPayload,
+        target_coverage: &ProposalTargetCoverage,
+    ) -> devil_protocol::ProposalRiskLabel {
+        if target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
+            || target_coverage.omitted_target_count > 0
+        {
+            return devil_protocol::ProposalRiskLabel::Unknown;
+        }
+
+        match payload {
+            ProposalPayload::TerminalCommand(_) | ProposalPayload::DeleteFile(_) => {
+                devil_protocol::ProposalRiskLabel::High
+            }
+            ProposalPayload::Batch(_)
+            | ProposalPayload::WorkspaceEdit(_)
+            | ProposalPayload::RenameFile(_)
+            | ProposalPayload::CodeAction(_) => devil_protocol::ProposalRiskLabel::Medium,
+            ProposalPayload::TextEdit(_)
+            | ProposalPayload::CreateFile(_)
+            | ProposalPayload::SaveFile(_)
+            | ProposalPayload::FormatFile(_) => devil_protocol::ProposalRiskLabel::Low,
+        }
+    }
+
+    fn rollback_availability(
+        payload: &ProposalPayload,
+    ) -> devil_protocol::ProposalRollbackAvailability {
+        match payload {
+            ProposalPayload::Batch(batch) => match batch.rollback_policy {
+                ProposalBatchRollbackPolicy::Required => {
+                    if batch.rollback_steps.is_empty()
+                        || batch.rollback_steps.iter().any(|step| {
+                            step.action == devil_protocol::ProposalRollbackAction::Unsupported
+                        })
+                    {
+                        devil_protocol::ProposalRollbackAvailability::Unavailable
+                    } else {
+                        devil_protocol::ProposalRollbackAvailability::Available
+                    }
+                }
+                ProposalBatchRollbackPolicy::BestEffort => {
+                    devil_protocol::ProposalRollbackAvailability::BestEffort
+                }
+                ProposalBatchRollbackPolicy::NotSupported => {
+                    devil_protocol::ProposalRollbackAvailability::Unavailable
+                }
+                ProposalBatchRollbackPolicy::NotRequired => {
+                    devil_protocol::ProposalRollbackAvailability::NotRequired
+                }
+            },
+            ProposalPayload::WorkspaceEdit(_) => {
+                devil_protocol::ProposalRollbackAvailability::BestEffort
+            }
+            ProposalPayload::TerminalCommand(_) => {
+                devil_protocol::ProposalRollbackAvailability::Unavailable
+            }
+            ProposalPayload::TextEdit(_)
+            | ProposalPayload::CreateFile(_)
+            | ProposalPayload::DeleteFile(_)
+            | ProposalPayload::RenameFile(_)
+            | ProposalPayload::SaveFile(_)
+            | ProposalPayload::FormatFile(_)
+            | ProposalPayload::CodeAction(_) => {
+                devil_protocol::ProposalRollbackAvailability::Unknown
+            }
+        }
+    }
+
+    fn context_manifest_summary(
+        proposal_id: ProposalId,
+        target_coverage: &ProposalTargetCoverage,
+        privacy_label: devil_protocol::ProposalPrivacyLabel,
+    ) -> devil_protocol::ProposalContextManifestSummary {
+        let item_count = target_coverage.targets.len() as u32;
+        let categories = if item_count == 0 && target_coverage.omitted_target_count == 0 {
+            Vec::new()
+        } else {
+            vec![devil_protocol::ProposalContextManifestEntrySummary {
+                category: "proposal_targets".to_string(),
+                item_count,
+                omitted_item_count: target_coverage.omitted_target_count,
+                privacy_label,
+                manifest_hash: None,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            }]
+        };
+        let category_count = categories.len() as u32;
+
+        devil_protocol::ProposalContextManifestSummary {
+            manifest_id: format!("proposal:{}:context", proposal_id.0),
+            category_count,
+            total_item_count: item_count,
+            omitted_item_count: target_coverage.omitted_target_count,
+            categories,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }
+    }
+
+    fn diff_summary(
+        payload: &ProposalPayload,
+        target_coverage: &ProposalTargetCoverage,
+    ) -> devil_protocol::ProposalDiffSummary {
+        let (kind, hunk_count) = match payload {
+            ProposalPayload::TextEdit(payload) => (
+                devil_protocol::ProposalDiffSummaryKind::Text,
+                payload.edits.edits.len() as u32,
+            ),
+            ProposalPayload::CreateFile(_)
+            | ProposalPayload::DeleteFile(_)
+            | ProposalPayload::RenameFile(_) => {
+                (devil_protocol::ProposalDiffSummaryKind::FileOperation, 1)
+            }
+            ProposalPayload::WorkspaceEdit(payload) => (
+                devil_protocol::ProposalDiffSummaryKind::WorkspaceEdit,
+                payload
+                    .file_edits
+                    .iter()
+                    .map(|file| file.edits.edits.len() as u32)
+                    .sum::<u32>()
+                    .saturating_add(payload.file_operations.len() as u32),
+            ),
+            ProposalPayload::Batch(payload) => (
+                devil_protocol::ProposalDiffSummaryKind::WorkspaceEdit,
+                payload.items.len() as u32,
+            ),
+            ProposalPayload::SaveFile(_)
+            | ProposalPayload::FormatFile(_)
+            | ProposalPayload::CodeAction(_) => (devil_protocol::ProposalDiffSummaryKind::Text, 0),
+            ProposalPayload::TerminalCommand(_) => {
+                (devil_protocol::ProposalDiffSummaryKind::TerminalMetadata, 0)
+            }
+        };
+
+        devil_protocol::ProposalDiffSummary {
+            kind,
+            target_count: target_coverage.targets.len() as u32,
+            hunk_count,
+            inserted_line_count: 0,
+            deleted_line_count: 0,
+            omitted_hunk_count: 0,
+            full_source_redacted: true,
+            diff_hash: None,
+            chunks: target_coverage
+                .targets
+                .iter()
+                .enumerate()
+                .map(
+                    |(index, target)| devil_protocol::ProposalDiffChunkDescriptor {
+                        chunk_id: format!("metadata-chunk:{index}"),
+                        target_id: Some(target.target_id.clone()),
+                        byte_range: target.byte_ranges.first().copied(),
+                        changed_line_count: 0,
+                        inserted_line_count: 0,
+                        deleted_line_count: 0,
+                        content_hash: None,
+                    },
+                )
+                .collect(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }
+    }
+
+    fn preview_warnings(payload: &ProposalPayload) -> Vec<ProposalPreviewWarning> {
+        match payload {
+            ProposalPayload::Batch(payload) => payload.preview_warnings.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn payload_diagnostics(payload: &ProposalPayload) -> Vec<ProtocolDiagnostic> {
+        match payload {
+            ProposalPayload::SaveFile(payload) => payload.diagnostics.clone(),
+            ProposalPayload::WorkspaceEdit(payload) => payload.diagnostics.clone(),
+            _ => Vec::new(),
+        }
     }
 
     fn has_lifecycle_context(&self, proposal_id: ProposalId) -> bool {
@@ -2632,21 +3014,7 @@ struct DeferredSaveSuccess {
 enum ProposalMutationRollback {
     None,
     TextEdit,
-    CreatedFile {
-        path: CanonicalPath,
-    },
-    DeletedFile {
-        path: CanonicalPath,
-        text: String,
-    },
-    RenamedFile {
-        source: CanonicalPath,
-        destination: CanonicalPath,
-    },
-    SavedFile {
-        path: CanonicalPath,
-        text: String,
-    },
+    WorkspaceFile(WorkspaceMutationRollbackCheckpoint),
 }
 
 /// Port-shaped request emitted by the application command dispatcher.
@@ -4017,19 +4385,16 @@ impl AppComposition {
         title: impl Into<String>,
     ) -> Result<ShellProjectionSnapshot, AppCompositionError> {
         let layout_projection = ShellLayoutProjection::plain(title);
+        let generated_at = TimestampMillis::now();
+        let proposal_ledger_projection = self
+            .proposal_coordinator
+            .proposal_ledger_projection(generated_at);
         Ok(ShellProjectionSnapshot {
             active_buffer_projection: self.active_buffer_projection(&layout_projection)?,
             layout_projection,
             explorer_projection: self.explorer_projection()?,
             status_messages: Vec::new(),
-            proposal_ledger_projection: devil_protocol::ProposalLedgerProjection {
-                rows: Vec::new(),
-                selected_proposal_id: None,
-                omitted_row_count: 0,
-                generated_at: TimestampMillis(0),
-                redaction_hints: Vec::new(),
-                schema_version: 1,
-            },
+            proposal_ledger_projection,
             context_manifest_projection: devil_protocol::ContextManifestProjection {
                 manifest: devil_protocol::ContextManifestRecord {
                     manifest_id: "manifest:empty".to_string(),
@@ -4746,25 +5111,31 @@ impl AppComposition {
     ) -> Result<ProposalMutationRollback, ProposalResponse> {
         match &proposal.payload {
             ProposalPayload::TextEdit(_) => Ok(ProposalMutationRollback::TextEdit),
-            ProposalPayload::CreateFile(payload) => Ok(ProposalMutationRollback::CreatedFile {
-                path: payload.path.clone(),
-            }),
-            ProposalPayload::DeleteFile(payload) => self
-                .rollback_text_snapshot(proposal, &payload.file.canonical_path)
-                .map(|text| ProposalMutationRollback::DeletedFile {
-                    path: payload.file.canonical_path.clone(),
-                    text,
-                }),
-            ProposalPayload::RenameFile(payload) => Ok(ProposalMutationRollback::RenamedFile {
-                source: payload.file.canonical_path.clone(),
-                destination: payload.destination.clone(),
-            }),
-            ProposalPayload::SaveFile(payload) => self
-                .rollback_text_snapshot(proposal, &payload.file.canonical_path)
-                .map(|text| ProposalMutationRollback::SavedFile {
-                    path: payload.file.canonical_path.clone(),
-                    text,
-                }),
+            ProposalPayload::CreateFile(payload) => self.workspace_rollback_checkpoint(
+                proposal,
+                WorkspaceMutationRollbackTarget::CreatedFile {
+                    path: payload.path.clone(),
+                },
+            ),
+            ProposalPayload::DeleteFile(payload) => self.workspace_rollback_checkpoint(
+                proposal,
+                WorkspaceMutationRollbackTarget::DeletedFile {
+                    file: payload.file.clone(),
+                },
+            ),
+            ProposalPayload::RenameFile(payload) => self.workspace_rollback_checkpoint(
+                proposal,
+                WorkspaceMutationRollbackTarget::RenamedFile {
+                    file: payload.file.clone(),
+                    destination: payload.destination.clone(),
+                },
+            ),
+            ProposalPayload::SaveFile(payload) => self.workspace_rollback_checkpoint(
+                proposal,
+                WorkspaceMutationRollbackTarget::SavedFile {
+                    file: payload.file.clone(),
+                },
+            ),
             ProposalPayload::WorkspaceEdit(payload) => {
                 self.rollback_snapshot_for_workspace_edit(proposal, payload)
             }
@@ -4783,37 +5154,120 @@ impl AppComposition {
         }
 
         match &payload.file_operations[0] {
-            devil_protocol::WorkspaceFileOperation::Create { path, .. } => {
-                Ok(ProposalMutationRollback::CreatedFile { path: path.clone() })
-            }
+            devil_protocol::WorkspaceFileOperation::Create { path, .. } => self
+                .workspace_rollback_checkpoint(
+                    proposal,
+                    WorkspaceMutationRollbackTarget::CreatedFile { path: path.clone() },
+                ),
             devil_protocol::WorkspaceFileOperation::Delete { file } => self
-                .rollback_text_snapshot(proposal, &file.canonical_path)
-                .map(|text| ProposalMutationRollback::DeletedFile {
-                    path: file.canonical_path.clone(),
-                    text,
-                }),
-            devil_protocol::WorkspaceFileOperation::Rename { file, destination } => {
-                Ok(ProposalMutationRollback::RenamedFile {
-                    source: file.canonical_path.clone(),
-                    destination: destination.clone(),
-                })
-            }
+                .workspace_rollback_checkpoint(
+                    proposal,
+                    WorkspaceMutationRollbackTarget::DeletedFile { file: file.clone() },
+                ),
+            devil_protocol::WorkspaceFileOperation::Rename { file, destination } => self
+                .workspace_rollback_checkpoint(
+                    proposal,
+                    WorkspaceMutationRollbackTarget::RenamedFile {
+                        file: file.clone(),
+                        destination: destination.clone(),
+                    },
+                ),
         }
     }
 
     #[allow(clippy::result_large_err)]
-    fn rollback_text_snapshot(
+    fn workspace_rollback_checkpoint(
         &self,
         proposal: &WorkspaceProposal,
-        path: &CanonicalPath,
-    ) -> Result<String, ProposalResponse> {
-        std::fs::read_to_string(&path.0).map_err(|error| {
-            self.failed_apply_response(
-                proposal,
-                "proposal.rollback_snapshot_unavailable",
-                format!("apply requires a pre-mutation rollback snapshot: {error}"),
-            )
+        target: WorkspaceMutationRollbackTarget,
+    ) -> Result<ProposalMutationRollback, ProposalResponse> {
+        let workspace_id = self
+            .active_documents
+            .require_workspace_id()
+            .map_err(|error| {
+                self.failed_apply_response(
+                    proposal,
+                    "proposal.workspace_missing",
+                    format!("apply requires an active workspace rollback authority: {error}"),
+                )
+            })?;
+        let request = WorkspaceMutationRollbackCheckpointRequest {
+            workspace_id,
+            proposal_id: proposal.proposal_id,
+            principal: proposal.principal.clone(),
+            required_capability: proposal.capability.clone(),
+            target,
+            correlation_id: proposal.correlation_id,
+            causality_id: self.proposal_causality_id(proposal),
+        };
+        self.workspace
+            .rollback_checkpoint_for_file_mutation(request)
+            .map(ProposalMutationRollback::WorkspaceFile)
+            .map_err(|response| match response {
+                ProposalResponse::Failed { .. }
+                | ProposalResponse::Denied { .. }
+                | ProposalResponse::Stale { .. }
+                | ProposalResponse::Conflict { .. } => response,
+                other => self.failed_apply_response(
+                    proposal,
+                    "proposal.rollback_checkpoint_unavailable",
+                    format!("apply requires a pre-mutation rollback checkpoint: {other:?}"),
+                ),
+            })
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn workspace_rollback_request(
+        &self,
+        proposal: &WorkspaceProposal,
+        checkpoint: WorkspaceMutationRollbackCheckpoint,
+    ) -> Result<WorkspaceMutationRollbackRequest, ProtocolDiagnostic> {
+        let workspace_id = self
+            .active_documents
+            .require_workspace_id()
+            .map_err(|error| {
+                AppProposalCoordinator::diagnostic(
+                    "proposal.audit_rollback_workspace_missing",
+                    format!("audit failure rollback requires an active workspace: {error}"),
+                )
+            })?;
+        Ok(WorkspaceMutationRollbackRequest {
+            workspace_id,
+            proposal_id: proposal.proposal_id,
+            principal: proposal.principal.clone(),
+            required_capability: proposal.capability.clone(),
+            checkpoint,
+            correlation_id: proposal.correlation_id,
+            causality_id: self.proposal_causality_id(proposal),
         })
+    }
+
+    fn response_diagnostics(response: ProposalResponse) -> Vec<ProtocolDiagnostic> {
+        match response {
+            ProposalResponse::Created(transition)
+            | ProposalResponse::Validated(transition)
+            | ProposalResponse::Approved(transition)
+            | ProposalResponse::Applied(transition) => transition.diagnostics,
+            ProposalResponse::Previewed { transition, .. }
+            | ProposalResponse::Rejected { transition, .. }
+            | ProposalResponse::Denied { transition, .. }
+            | ProposalResponse::Failed { transition, .. }
+            | ProposalResponse::RolledBack { transition, .. }
+            | ProposalResponse::Stale { transition, .. }
+            | ProposalResponse::Conflict { transition, .. }
+            | ProposalResponse::Cancelled { transition, .. } => transition.diagnostics,
+        }
+    }
+
+    fn rollback_workspace_failed_diagnostic(response: ProposalResponse) -> Vec<ProtocolDiagnostic> {
+        let diagnostics = Self::response_diagnostics(response);
+        if diagnostics.is_empty() {
+            return vec![AppProposalCoordinator::diagnostic(
+                "proposal.audit_rollback_workspace_failed",
+                "audit failure rollback did not restore workspace state",
+            )];
+        }
+        diagnostics
     }
 
     fn rollback_audit_failed_mutation(
@@ -4826,50 +5280,18 @@ impl AppComposition {
         match rollback {
             ProposalMutationRollback::None => {}
             ProposalMutationRollback::TextEdit => self.rollback_audit_failed_text_edit(proposal),
-            ProposalMutationRollback::CreatedFile { path } => {
-                if let Err(error) = std::fs::remove_file(&path.0) {
-                    diagnostics.push(Self::rollback_failed_diagnostic(
-                        "proposal.audit_rollback_remove_failed",
-                        &path,
-                        error,
-                    ));
-                }
-                self.refresh_workspace_after_audit_rollback(proposal);
-            }
-            ProposalMutationRollback::DeletedFile { path, text }
-            | ProposalMutationRollback::SavedFile { path, text } => {
-                if let Err(error) = std::fs::write(&path.0, text) {
-                    diagnostics.push(Self::rollback_failed_diagnostic(
-                        "proposal.audit_rollback_write_failed",
-                        &path,
-                        error,
-                    ));
-                }
-                self.refresh_workspace_after_audit_rollback(proposal);
-            }
-            ProposalMutationRollback::RenamedFile {
-                source,
-                destination,
-            } => {
-                if Path::new(&destination.0).exists() {
-                    if let Err(error) = std::fs::rename(&destination.0, &source.0) {
-                        diagnostics.push(Self::rollback_failed_diagnostic(
-                            "proposal.audit_rollback_rename_failed",
-                            &destination,
-                            error,
-                        ));
+            ProposalMutationRollback::WorkspaceFile(checkpoint) => {
+                match self.workspace_rollback_request(proposal, checkpoint) {
+                    Ok(request) => {
+                        if let Err(response) = self
+                            .workspace
+                            .rollback_file_mutation_with_checkpoint(request)
+                        {
+                            diagnostics
+                                .extend(Self::rollback_workspace_failed_diagnostic(response));
+                        }
                     }
-                } else {
-                    diagnostics.push(ProtocolDiagnostic {
-                        code: "proposal.audit_rollback_rename_missing_destination".to_string(),
-                        message: format!(
-                            "audit failure rollback could not restore rename because destination '{}' is missing",
-                            &destination.0
-                        ),
-                        severity: ProtocolDiagnosticSeverity::Error,
-                        path: Some(destination),
-                        range: None,
-                    });
+                    Err(diagnostic) => diagnostics.push(diagnostic),
                 }
                 self.refresh_workspace_after_audit_rollback(proposal);
             }
@@ -4885,23 +5307,6 @@ impl AppComposition {
         }
 
         diagnostics
-    }
-
-    fn rollback_failed_diagnostic(
-        code: &str,
-        path: &CanonicalPath,
-        error: std::io::Error,
-    ) -> ProtocolDiagnostic {
-        ProtocolDiagnostic {
-            code: code.to_string(),
-            message: format!(
-                "audit failure rollback did not restore '{}': {error}",
-                path.0
-            ),
-            severity: ProtocolDiagnosticSeverity::Error,
-            path: Some(path.clone()),
-            range: None,
-        }
     }
 
     fn append_response_diagnostics(
@@ -7037,11 +7442,13 @@ mod tests {
     #[test]
     fn audit_rollback_failure_diagnostics_are_preserved_on_failed_response() {
         let path = CanonicalPath("C:/repo/locked-file.txt".to_string());
-        let diagnostic = AppComposition::rollback_failed_diagnostic(
-            "proposal.audit_rollback_write_failed",
-            &path,
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "locked"),
-        );
+        let diagnostic = ProtocolDiagnostic {
+            code: "proposal.audit_rollback_workspace_failed".to_string(),
+            message: "audit failure rollback did not restore workspace state: locked".to_string(),
+            severity: ProtocolDiagnosticSeverity::Error,
+            path: Some(path.clone()),
+            range: None,
+        };
         let mut response = ProposalResponse::Failed {
             transition: ProposalLifecycleTransition {
                 proposal_id: ProposalId(99),
@@ -7062,14 +7469,14 @@ mod tests {
         AppComposition::append_response_diagnostics(&mut response, vec![diagnostic]);
 
         assert_transition_diagnostic(&response, "proposal.audit_storage_failed");
-        assert_transition_diagnostic(&response, "proposal.audit_rollback_write_failed");
+        assert_transition_diagnostic(&response, "proposal.audit_rollback_workspace_failed");
         let ProposalResponse::Failed { transition, .. } = response else {
             panic!("expected failed response");
         };
         let rollback_diagnostic = transition
             .diagnostics
             .iter()
-            .find(|diagnostic| diagnostic.code == "proposal.audit_rollback_write_failed")
+            .find(|diagnostic| diagnostic.code == "proposal.audit_rollback_workspace_failed")
             .expect("rollback diagnostic");
         assert_eq!(rollback_diagnostic.path.as_ref(), Some(&path));
         assert!(rollback_diagnostic.message.contains("locked"));
@@ -7349,6 +7756,106 @@ mod tests {
     }
 
     #[test]
+    fn proposal_coordinator_exports_and_recovers_lifecycle_snapshot() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let proposal = save_proposal(ProposalId(20));
+        register_created(&coordinator, &proposal);
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
+            Ok(ProposalResponse::Validated(_))
+        ));
+        assert!(matches!(
+            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
+            Ok(ProposalResponse::Previewed { .. })
+        ));
+
+        let snapshot = coordinator.proposal_lifecycle_recovery_snapshot();
+        assert_eq!(snapshot.records.len(), 1);
+        assert!(snapshot.generated_at.0 > 0);
+
+        let recovered = AppProposalCoordinator::new(SharedEventSink::default());
+        recovered.recover_lifecycle_from_snapshot(snapshot);
+
+        assert_eq!(
+            recovered.current_lifecycle_state(proposal.proposal_id),
+            Some(ProposalLifecycleState::Previewed)
+        );
+        assert!(recovered.has_lifecycle_context(proposal.proposal_id));
+        assert_eq!(
+            recovered
+                .proposal(proposal.proposal_id)
+                .map(|proposal| proposal.proposal_id),
+            Some(proposal.proposal_id)
+        );
+
+        let ledger = recovered.proposal_ledger_projection(TimestampMillis(99));
+        assert_eq!(ledger.rows.len(), 1);
+        assert_eq!(ledger.selected_proposal_id, Some(proposal.proposal_id));
+        assert_eq!(
+            ledger.rows[0].lifecycle.state,
+            ProposalLifecycleState::Previewed
+        );
+        assert_eq!(ledger.rows[0].updated_at, TimestampMillis(99));
+        assert!(
+            ledger.rows[0]
+                .redaction_hints
+                .contains(&RedactionHint::MetadataOnly)
+        );
+    }
+
+    #[test]
+    fn proposal_coordinator_builds_metadata_only_ledger_projection() {
+        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        let save = save_proposal(ProposalId(21));
+        let terminal = proposal_with(ProposalId(22), "terminal.spawn", terminal_payload());
+        register_created(&coordinator, &save);
+        register_created(&coordinator, &terminal);
+
+        let ledger = coordinator.proposal_ledger_projection(TimestampMillis(123));
+        assert_eq!(ledger.rows.len(), 2);
+        assert_eq!(ledger.selected_proposal_id, Some(ProposalId(22)));
+        assert!(
+            ledger
+                .redaction_hints
+                .contains(&RedactionHint::MetadataOnly)
+        );
+
+        let save_row = ledger
+            .rows
+            .iter()
+            .find(|row| row.proposal_id == save.proposal_id)
+            .expect("save row");
+        assert_eq!(
+            save_row.payload_kind,
+            devil_protocol::ProposalPayloadKind::SaveFile
+        );
+        assert_eq!(save_row.workspace_id, Some(WorkspaceId(1)));
+        assert!(save_row.diff_summary.full_source_redacted);
+        assert_eq!(
+            save_row.privacy_label,
+            devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata
+        );
+
+        let terminal_row = ledger
+            .rows
+            .iter()
+            .find(|row| row.proposal_id == terminal.proposal_id)
+            .expect("terminal row");
+        assert_eq!(
+            terminal_row.risk_label,
+            devil_protocol::ProposalRiskLabel::High
+        );
+        assert_eq!(
+            terminal_row.rollback,
+            devil_protocol::ProposalRollbackAvailability::Unavailable
+        );
+        assert_eq!(
+            terminal_row.diff_summary.kind,
+            devil_protocol::ProposalDiffSummaryKind::TerminalMetadata
+        );
+    }
+
+    #[test]
     fn proposal_coordinator_allows_validated_denied_path() {
         let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
         let proposal = save_proposal(ProposalId(11));
@@ -7560,7 +8067,7 @@ mod tests {
     }
 
     #[test]
-    fn proposal_coordinator_documents_generic_save_apply_denial() {
+    fn proposal_coordinator_rejects_stateless_generic_save_apply() {
         let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
         let proposal = save_proposal(ProposalId(2));
         coordinator
@@ -7582,7 +8089,7 @@ mod tests {
             .handle(ProposalRequest::Apply(proposal))
             .expect("apply response");
         let ProposalResponse::Rejected { transition, reason } = response else {
-            panic!("generic save apply should remain denied");
+            panic!("stateless coordinator save apply should remain denied");
         };
         assert_eq!(reason, ProposalRejectionReason::Unsupported);
         assert!(transition.diagnostics.iter().any(|diagnostic| {
