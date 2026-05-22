@@ -3,7 +3,8 @@
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Mutex,
@@ -206,6 +207,14 @@ struct PersistedState {
     trust: HashMap<(WorkspaceId, String), TrustDecisionRecord>,
     metadata: HashMap<(WorkspaceId, String), FileMetadataRecord>,
     sessions: HashMap<String, SessionRecord>,
+    #[serde(default)]
+    protocol_proposal_audit: HashMap<ProposalId, ProposalAuditRecord>,
+    #[serde(default)]
+    protocol_assisted_ai_audit: HashMap<String, AssistedAiAuditRecord>,
+    #[serde(default)]
+    protocol_delegated_task_audit_linkage: HashMap<String, DelegatedTaskAuditLinkageRecord>,
+    #[serde(default)]
+    protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     semantic_tombstones: Vec<SemanticMetadataTombstone>,
 }
@@ -213,11 +222,17 @@ struct PersistedState {
 impl From<&InMemoryStorage> for PersistedState {
     fn from(value: &InMemoryStorage) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             workspace_configs: value.workspace_configs.clone(),
             trust: value.trust.clone(),
             metadata: value.metadata.clone(),
             sessions: value.sessions.clone(),
+            protocol_proposal_audit: value.protocol_proposal_audit.clone(),
+            protocol_assisted_ai_audit: value.protocol_assisted_ai_audit.clone(),
+            protocol_delegated_task_audit_linkage: value
+                .protocol_delegated_task_audit_linkage
+                .clone(),
+            protocol_event_metadata: value.protocol_event_metadata.clone(),
             semantic_metadata: value.protocol_semantic_metadata.clone(),
             semantic_tombstones: value.protocol_semantic_tombstones.clone(),
         }
@@ -388,10 +403,10 @@ impl From<PersistedState> for InMemoryStorage {
             protocol_file_metadata: HashMap::new(),
             protocol_sessions: HashMap::new(),
             protocol_trust: HashMap::new(),
-            protocol_proposal_audit: HashMap::new(),
-            protocol_assisted_ai_audit: HashMap::new(),
-            protocol_delegated_task_audit_linkage: HashMap::new(),
-            protocol_event_metadata: HashMap::new(),
+            protocol_proposal_audit: value.protocol_proposal_audit,
+            protocol_assisted_ai_audit: value.protocol_assisted_ai_audit,
+            protocol_delegated_task_audit_linkage: value.protocol_delegated_task_audit_linkage,
+            protocol_event_metadata: value.protocol_event_metadata,
             protocol_semantic_metadata: value.semantic_metadata,
             protocol_semantic_tombstones: value.semantic_tombstones,
         }
@@ -449,10 +464,112 @@ impl FileBackedStorage {
                 message: format!("serialize storage state failed: {err}"),
             })?;
 
-        fs::write(&self.path, body).map_err(|err| StorageError::Failed {
-            message: format!("write storage file failed: {err}"),
-        })
+        self.write_atomically(body.as_bytes())
     }
+
+    fn atomic_temp_path(&self) -> StorageResult<PathBuf> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = self
+            .path
+            .file_name()
+            .map(|value| value.to_string_lossy())
+            .unwrap_or_else(|| "storage.json".into());
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| StorageError::Failed {
+                message: format!("create atomic storage temp timestamp failed: {err}"),
+            })?
+            .as_nanos();
+        Ok(parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            suffix
+        )))
+    }
+
+    fn write_atomically(&self, body: &[u8]) -> StorageResult<()> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|err| StorageError::Failed {
+            message: format!("create storage directory failed: {err}"),
+        })?;
+
+        let temp = self.atomic_temp_path()?;
+        let write_result = (|| -> StorageResult<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .map_err(|err| StorageError::Failed {
+                    message: format!("create storage temp file failed: {err}"),
+                })?;
+            file.write_all(body).map_err(|err| StorageError::Failed {
+                message: format!("write storage temp file failed: {err}"),
+            })?;
+            file.flush().map_err(|err| StorageError::Failed {
+                message: format!("flush storage temp file failed: {err}"),
+            })?;
+            file.sync_all().map_err(|err| StorageError::Failed {
+                message: format!("sync storage temp file failed: {err}"),
+            })?;
+            drop(file);
+            atomic_replace(&temp, &self.path).map_err(|err| StorageError::Failed {
+                message: format!("replace storage file failed: {err}"),
+            })?;
+            sync_parent_directory_when_supported(parent).map_err(|err| StorageError::Failed {
+                message: format!("sync storage directory failed: {err}"),
+            })
+        })();
+
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        write_result
+    }
+}
+
+#[cfg(windows)]
+fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
+    }
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let ok = unsafe {
+        MoveFileExW(
+            wide(temp).as_ptr(),
+            wide(target).as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(temp, target)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory_when_supported(parent: &Path) -> std::io::Result<()> {
+    OpenOptions::new().read(true).open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory_when_supported(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl WorkspaceConfigRepository for FileBackedStorage {
@@ -1691,6 +1808,137 @@ mod tests {
 
         storage.delete_session("session-1").expect("delete session");
         assert!(storage.load_session("session-1").is_err());
+    }
+
+    #[test]
+    fn file_backed_storage_roundtrips_protocol_audit_and_event_metadata() {
+        let path = temp_storage_path("protocol-roundtrip");
+        let audit = audit_record();
+        let event = event_metadata_record();
+        let assisted = assisted_ai_audit_record();
+        let delegated = delegated_task_audit_linkage_record();
+
+        {
+            let mut storage = FileBackedStorage::open(&path).expect("open storage");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveProposalAuditRecord(
+                    audit.clone(),
+                ))
+                .expect("save proposal audit");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveEventMetadata(event.clone()))
+                .expect("save event metadata");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveAssistedAiAuditRecord(
+                    assisted.clone(),
+                ))
+                .expect("save assisted AI audit");
+            storage
+                .state
+                .handle_protocol_request(
+                    StorageRepositoryRequest::SaveDelegatedTaskAuditLinkageRecord(
+                        delegated.clone(),
+                    ),
+                )
+                .expect("save delegated task linkage");
+            storage.flush().expect("flush storage");
+        }
+
+        let mut reopened = FileBackedStorage::open(&path).expect("reopen storage");
+        assert!(
+            !fs::read_to_string(&path)
+                .expect("read persisted state")
+                .contains("raw prompt"),
+            "persisted state must stay metadata-only"
+        );
+
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadProposalAuditRecord(
+                audit.proposal_id,
+            ))
+            .expect("read proposal audit")
+        {
+            StorageRepositoryResponse::ProposalAuditRecord(Some(loaded)) => {
+                assert_eq!(loaded.proposal_id, audit.proposal_id);
+                assert_eq!(loaded.schema_version, 1);
+            }
+            other => panic!("unexpected proposal audit response: {other:?}"),
+        }
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadEventMetadata(event.event_id))
+            .expect("read event metadata")
+        {
+            StorageRepositoryResponse::EventMetadata(Some(loaded)) => {
+                assert_eq!(loaded.event_id, event.event_id);
+                assert_eq!(loaded.sequence, EventSequence(1));
+            }
+            other => panic!("unexpected event metadata response: {other:?}"),
+        }
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadAssistedAiAuditRecord(
+                assisted.audit_id.clone(),
+            ))
+            .expect("read assisted audit")
+        {
+            StorageRepositoryResponse::AssistedAiAuditRecord(loaded) => {
+                assert_eq!(loaded.expect("assisted audit").audit_id, assisted.audit_id);
+            }
+            other => panic!("unexpected assisted audit response: {other:?}"),
+        }
+        match reopened
+            .state
+            .handle_protocol_request(
+                StorageRepositoryRequest::ReadDelegatedTaskAuditLinkageRecord(
+                    delegated.linkage_id.clone(),
+                ),
+            )
+            .expect("read delegated linkage")
+        {
+            StorageRepositoryResponse::DelegatedTaskAuditLinkageRecord(loaded) => {
+                assert_eq!(
+                    loaded.expect("delegated linkage").linkage_id,
+                    delegated.linkage_id
+                );
+            }
+            other => panic!("unexpected delegated linkage response: {other:?}"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backed_storage_opens_schema_one_without_protocol_metadata() {
+        let path = temp_storage_path("schema-one-migration");
+        fs::write(
+            &path,
+            r#"{
+                "schema_version": 1,
+                "workspace_configs": {},
+                "trust": {},
+                "metadata": {},
+                "sessions": {},
+                "semantic_metadata": {},
+                "semantic_tombstones": []
+            }"#,
+        )
+        .expect("write schema one state");
+
+        let storage = FileBackedStorage::open(&path).expect("open schema one storage");
+        assert!(storage.state.protocol_proposal_audit.is_empty());
+        assert!(storage.state.protocol_event_metadata.is_empty());
+        assert!(
+            fs::read_to_string(&path)
+                .expect("read migrated state")
+                .contains("\"schema_version\": 2")
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

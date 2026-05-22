@@ -10,3 +10,4 @@ devil-protocol = { workspace = true }
 devil-index = { workspace = true }
 devil-storage = { workspace = true }
 anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }

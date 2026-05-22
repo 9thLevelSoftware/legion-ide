@@ -244,6 +244,7 @@ name = "devil-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "devil-index",
  "devil-protocol",
  "devil-storage",
