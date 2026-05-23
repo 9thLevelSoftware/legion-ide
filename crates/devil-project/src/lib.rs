@@ -2803,6 +2803,63 @@ impl WorkspaceActor {
     }
 
     #[allow(clippy::result_large_err)]
+    fn require_current_rollback_target(
+        &self,
+        state: &WorkspaceState,
+        request: &WorkspaceMutationRollbackRequest,
+        canonical: &Path,
+        diagnostic_path: CanonicalPath,
+    ) -> Result<FileFingerprint, ProposalResponse> {
+        let key = canonical.to_string_lossy().into_owned();
+        let Some(expected) = state.last_scan.get(&key) else {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                diagnostic_path,
+                "rollback target is not tracked after mutation",
+            ));
+        };
+        let metadata = self.fs.read_metadata(canonical).map_err(|err| {
+            Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                diagnostic_path.clone(),
+                err.to_string(),
+            )
+        })?;
+        let current = FileFingerprint::from_metadata(canonical, self.fs.as_ref(), &metadata)
+            .map_err(|err| {
+                Self::failed_mutation_response(
+                    request.proposal_id,
+                    &request.principal,
+                    &request.required_capability,
+                    request.correlation_id,
+                    request.causality_id,
+                    diagnostic_path.clone(),
+                    err.to_string(),
+                )
+            })?;
+        if &current != expected {
+            return Err(Self::failed_mutation_response(
+                request.proposal_id,
+                &request.principal,
+                &request.required_capability,
+                request.correlation_id,
+                request.causality_id,
+                diagnostic_path,
+                "rollback target changed after mutation; refusing to clobber external changes",
+            ));
+        }
+        Ok(current)
+    }
+
+    #[allow(clippy::result_large_err)]
     fn capture_text_rollback_checkpoint(
         &self,
         state: &mut WorkspaceState,
@@ -3269,6 +3326,12 @@ impl WorkspaceActor {
                         err.to_string(),
                     ));
                 }
+                let _ = self.require_current_rollback_target(
+                    state,
+                    &request,
+                    &canonical,
+                    path.clone(),
+                )?;
                 self.fs.remove_file(&canonical).map_err(|err| {
                     Self::failed_mutation_response(
                         request.proposal_id,
@@ -3351,6 +3414,17 @@ impl WorkspaceActor {
                             ));
                         }
                     }
+                }
+                if matches!(
+                    &request.checkpoint,
+                    WorkspaceMutationRollbackCheckpoint::SavedFile { .. }
+                ) {
+                    let _ = self.require_current_rollback_target(
+                        state,
+                        &request,
+                        &canonical,
+                        file.canonical_path.clone(),
+                    )?;
                 }
                 self.fs
                     .write_text_file_atomic(&canonical, text)
@@ -3490,6 +3564,12 @@ impl WorkspaceActor {
                         ));
                     }
                 }
+                let _ = self.require_current_rollback_target(
+                    state,
+                    &request,
+                    &destination,
+                    CanonicalPath(destination.to_string_lossy().into_owned()),
+                )?;
                 self.fs.rename_path(&destination, &source).map_err(|err| {
                     Self::failed_mutation_response(
                         request.proposal_id,
@@ -4959,6 +5039,160 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&save_path).expect("read restored save file"),
             "save seed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rollback_checkpoint_refuses_to_clobber_external_changes() {
+        let (actor, opened, principal, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        let create_path = CanonicalPath(
+            root.join("rollback-created-external.txt")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let create_checkpoint = actor
+            .rollback_checkpoint_for_file_mutation(rollback_checkpoint_request(
+                opened.workspace_id,
+                ProposalId(301),
+                &principal,
+                WorkspaceMutationRollbackTarget::CreatedFile {
+                    path: create_path.clone(),
+                },
+            ))
+            .expect("capture create rollback checkpoint");
+        actor
+            .create_file_with_proposal(WorkspaceCreateFileRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(301),
+                principal: principal.clone(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                path: create_path.clone(),
+                expected_workspace_generation: opened.generation,
+                initial_content: "created".to_string(),
+                correlation_id: CorrelationId(301),
+                causality_id: CausalityId(Uuid::now_v7()),
+            })
+            .expect("create through workspace proposal");
+        std::fs::write(&create_path.0, "external replacement")
+            .expect("external create target replacement");
+        let create_response = actor
+            .rollback_file_mutation_with_checkpoint(rollback_request(
+                opened.workspace_id,
+                ProposalId(301),
+                &principal,
+                create_checkpoint,
+            ))
+            .expect_err("rollback should not delete externally changed create target");
+        assert!(matches!(create_response, ProposalResponse::Failed { .. }));
+        assert_eq!(
+            std::fs::read_to_string(&create_path.0).expect("read external create target"),
+            "external replacement"
+        );
+
+        let save_path = root.join("rollback-save-external.txt");
+        std::fs::write(&save_path, "save seed").expect("seed save file");
+        let opened_save = actor
+            .open_existing_file_text(opened.workspace_id, save_path.to_string_lossy())
+            .expect("open save target");
+        let save_checkpoint = actor
+            .rollback_checkpoint_for_file_mutation(rollback_checkpoint_request(
+                opened.workspace_id,
+                ProposalId(302),
+                &principal,
+                WorkspaceMutationRollbackTarget::SavedFile {
+                    file: opened_save.identity.clone(),
+                },
+            ))
+            .expect("capture save rollback checkpoint");
+        actor
+            .save_file_with_proposal(WorkspaceSaveRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(302),
+                principal: principal.clone(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                file_id: opened_save.identity.file_id,
+                path: opened_save.identity.canonical_path.clone(),
+                expected_fingerprint: opened_save.fingerprint.clone(),
+                expected_file_content_version: opened_save.file_content_version,
+                expected_workspace_generation: opened_save.workspace_generation,
+                buffer_version: BufferVersion(5),
+                snapshot_id: SnapshotId(5),
+                payload_byte_len: "save mutated".len() as u64,
+                correlation_id: CorrelationId(302),
+                causality_id: CausalityId(Uuid::now_v7()),
+                text: "save mutated".to_string(),
+            })
+            .expect("save through workspace proposal");
+        std::fs::write(&save_path, "external save replacement")
+            .expect("external save target replacement");
+        let save_response = actor
+            .rollback_file_mutation_with_checkpoint(rollback_request(
+                opened.workspace_id,
+                ProposalId(302),
+                &principal,
+                save_checkpoint,
+            ))
+            .expect_err("rollback should not overwrite externally changed save target");
+        assert!(matches!(save_response, ProposalResponse::Failed { .. }));
+        assert_eq!(
+            std::fs::read_to_string(&save_path).expect("read external save target"),
+            "external save replacement"
+        );
+
+        let rename_source = root.join("rollback-rename-external.txt");
+        let rename_destination = CanonicalPath(
+            root.join("rollback-renamed-external.txt")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        std::fs::write(&rename_source, "rename seed").expect("seed rename file");
+        let opened_rename = actor
+            .open_existing_file_text(opened.workspace_id, rename_source.to_string_lossy())
+            .expect("open rename target");
+        let rename_checkpoint = actor
+            .rollback_checkpoint_for_file_mutation(rollback_checkpoint_request(
+                opened.workspace_id,
+                ProposalId(303),
+                &principal,
+                WorkspaceMutationRollbackTarget::RenamedFile {
+                    file: opened_rename.identity.clone(),
+                    destination: rename_destination.clone(),
+                },
+            ))
+            .expect("capture rename rollback checkpoint");
+        actor
+            .rename_file_with_proposal(WorkspaceRenameFileRequest {
+                workspace_id: opened.workspace_id,
+                proposal_id: ProposalId(303),
+                principal: principal.clone(),
+                required_capability: CapabilityId("fs.write".to_string()),
+                file: opened_rename.identity.clone(),
+                destination: rename_destination.clone(),
+                expected_fingerprint: opened_rename.fingerprint.clone(),
+                expected_file_content_version: opened_rename.file_content_version,
+                expected_workspace_generation: opened_rename.workspace_generation,
+                correlation_id: CorrelationId(303),
+                causality_id: CausalityId(Uuid::now_v7()),
+            })
+            .expect("rename through workspace proposal");
+        std::fs::write(&rename_destination.0, "external rename replacement")
+            .expect("external rename target replacement");
+        let rename_response = actor
+            .rollback_file_mutation_with_checkpoint(rollback_request(
+                opened.workspace_id,
+                ProposalId(303),
+                &principal,
+                rename_checkpoint,
+            ))
+            .expect_err("rollback should not rename externally changed destination");
+        assert!(matches!(rename_response, ProposalResponse::Failed { .. }));
+        assert!(!rename_source.exists());
+        assert_eq!(
+            std::fs::read_to_string(&rename_destination.0).expect("read external rename target"),
+            "external rename replacement"
         );
 
         let _ = std::fs::remove_dir_all(&root);

@@ -969,7 +969,6 @@ fn workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer() {
         }),
         preconditions,
     );
-
     register_validate_preview(&mut app, &proposal);
     let response = app
         .handle_proposal_request(ProposalRequest::Apply(proposal))
@@ -1107,6 +1106,99 @@ fn workspace_vfs_integration_rollback_lifecycle_emits_audit_before_success() {
 }
 
 #[test]
+fn workspace_vfs_integration_rollback_audit_failure_records_failed_lifecycle() {
+    let root = create_root();
+    let target = root.join("rollback-audit-failure.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let file_id = app
+        .open_file(target.to_string_lossy())
+        .expect("open target file");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+    let node = workspace_node_by_name(&app, opened.workspace_id, "rollback-audit-failure.txt");
+    let mut preconditions = file_preconditions(&node, opened.generation);
+    preconditions.buffer_version = Some(
+        app.editor()
+            .buffer_version(buffer_id)
+            .expect("buffer version"),
+    );
+    preconditions.snapshot_id = Some(
+        app.editor()
+            .current_snapshot(buffer_id)
+            .expect("current snapshot")
+            .snapshot_id,
+    );
+    let proposal = proposal_envelope_with(
+        ProposalId(742),
+        "editor.write",
+        ProposalPayload::TextEdit(devil_protocol::TextEditProposal {
+            file_id,
+            edits: EditBatch {
+                edits: vec![devil_protocol::TextEdit {
+                    range: TextRange::new(TextOffset::byte(0), TextOffset::byte(4)),
+                    replacement: "sprout".to_string(),
+                }],
+            },
+        }),
+        preconditions,
+    );
+    let proposal_id = proposal.proposal_id;
+
+    register_validate_preview(&mut app, &proposal);
+    assert!(matches!(
+        app.handle_proposal_request(ProposalRequest::Apply(proposal.clone()))
+            .expect("apply text edit proposal"),
+        ProposalResponse::Applied(_)
+    ));
+    app.fail_next_proposal_audit_write_for_test();
+    let rollback = ProposalLifecycleCommand {
+        proposal_id,
+        action: ProposalLifecycleAction::Rollback,
+        principal: proposal.principal.clone(),
+        capability: proposal.capability.clone(),
+        correlation_id: proposal.correlation_id,
+        causality_id: CausalityId(Uuid::now_v7()),
+        reason: Some(ProposalLifecycleCommandReason::Rollback(
+            ProposalRollbackReason::UserRequested,
+        )),
+        diagnostics: Vec::new(),
+        requested_at: TimestampMillis(2),
+        schema_version: 1,
+    };
+    let response = app
+        .handle_proposal_request(ProposalRequest::Rollback(rollback))
+        .expect("rollback proposal lifecycle with audit failure");
+
+    assert!(matches!(
+        response,
+        ProposalResponse::Failed {
+            reason: devil_protocol::ProposalFailureReason::StorageFailed,
+            ..
+        }
+    ));
+    let shell = app
+        .shell_projection_snapshot("rollback audit failure ledger")
+        .expect("shell projection after rollback audit failure");
+    let row = shell
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .find(|row| row.proposal_id == proposal_id)
+        .expect("proposal ledger row after rollback audit failure");
+    assert_eq!(row.lifecycle.state, ProposalLifecycleState::Failed);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn workspace_vfs_integration_open_buffer_audit_failure_fails_closed_and_rolls_back() {
     let root = create_root();
     let target = root.join("audit-failure.txt");
@@ -1151,6 +1243,7 @@ fn workspace_vfs_integration_open_buffer_audit_failure_fails_closed_and_rolls_ba
         }),
         preconditions,
     );
+    let proposal_id = proposal.proposal_id;
 
     register_validate_preview(&mut app, &proposal);
     app.fail_next_proposal_audit_write_for_test();
@@ -1165,6 +1258,16 @@ fn workspace_vfs_integration_open_buffer_audit_failure_fails_closed_and_rolls_ba
             ..
         }
     ));
+    let shell = app
+        .shell_projection_snapshot("text edit audit failure ledger")
+        .expect("shell projection after text edit audit failure");
+    let row = shell
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .find(|row| row.proposal_id == proposal_id)
+        .expect("proposal ledger row after text edit audit failure");
+    assert_eq!(row.lifecycle.state, ProposalLifecycleState::Failed);
     assert_eq!(app.editor().text(buffer_id).expect("buffer text"), "seed");
     assert_eq!(app.editor().undo_len(buffer_id).expect("undo len"), 0);
     let audit_response = app
@@ -1918,6 +2021,7 @@ fn workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_roll
         ),
         preconditions,
     );
+    let proposal_id = proposal.proposal_id;
 
     register_validate_preview(&mut app, &proposal);
     app.fail_next_proposal_audit_write_for_test();
@@ -1932,6 +2036,16 @@ fn workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_roll
             ..
         }
     ));
+    let shell = app
+        .shell_projection_snapshot("audit failure ledger")
+        .expect("shell projection after audit failure");
+    let row = shell
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .find(|row| row.proposal_id == proposal_id)
+        .expect("proposal ledger row after audit failure");
+    assert_eq!(row.lifecycle.state, ProposalLifecycleState::Failed);
     assert_eq!(
         std::fs::read_to_string(&target).expect("read rolled-back saved content"),
         "seed"

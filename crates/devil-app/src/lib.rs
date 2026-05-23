@@ -1230,6 +1230,14 @@ impl AppProposalCoordinator {
         }
     }
 
+    fn record_audit_failure_transition(&self, transition: &ProposalLifecycleTransition) {
+        if self.has_lifecycle_context(transition.proposal_id) {
+            self.proposal_states
+                .borrow_mut()
+                .insert(transition.proposal_id, transition.lifecycle_state);
+        }
+    }
+
     fn transition(
         &self,
         proposal: &WorkspaceProposal,
@@ -3737,29 +3745,37 @@ impl SaveWorkflowService {
             if let Err(error) = proposal_coordinator.emit(envelope)
                 && audit_required
             {
-                return Err(Self::audit_storage_failed_response(
-                    proposal, response, error,
+                return Err(Self::record_audit_storage_failed_response(
+                    proposal_coordinator,
+                    proposal,
+                    response,
+                    error,
                 ));
             }
             if let Err(error) =
                 storage.handle(StorageRepositoryRequest::SaveEventMetadata(metadata))
                 && audit_required
             {
-                return Err(Self::audit_storage_failed_response(
-                    proposal, response, error,
+                return Err(Self::record_audit_storage_failed_response(
+                    proposal_coordinator,
+                    proposal,
+                    response,
+                    error,
                 ));
             }
         }
 
         if let Some(transition) = Self::transition_for_response(response) {
-            proposal_coordinator.record_observed_transition(transition);
             let audit = proposal_audit_record(proposal, transition);
             if let Err(error) =
                 storage.handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit))
                 && audit_required
             {
-                return Err(Self::audit_storage_failed_response(
-                    proposal, response, error,
+                return Err(Self::record_audit_storage_failed_response(
+                    proposal_coordinator,
+                    proposal,
+                    response,
+                    error,
                 ));
             }
             if audit_required {
@@ -3770,18 +3786,25 @@ impl SaveWorkflowService {
                 );
                 let metadata = event_metadata_record(&envelope);
                 if let Err(error) = proposal_coordinator.emit(envelope) {
-                    return Err(Self::audit_storage_failed_response(
-                        proposal, response, error,
+                    return Err(Self::record_audit_storage_failed_response(
+                        proposal_coordinator,
+                        proposal,
+                        response,
+                        error,
                     ));
                 }
                 if let Err(error) =
                     storage.handle(StorageRepositoryRequest::SaveEventMetadata(metadata))
                 {
-                    return Err(Self::audit_storage_failed_response(
-                        proposal, response, error,
+                    return Err(Self::record_audit_storage_failed_response(
+                        proposal_coordinator,
+                        proposal,
+                        response,
+                        error,
                     ));
                 }
             }
+            proposal_coordinator.record_observed_transition(transition);
         }
 
         if let Some(applied) = applied {
@@ -3827,6 +3850,19 @@ impl SaveWorkflowService {
             },
             reason: ProposalFailureReason::StorageFailed,
         }
+    }
+
+    fn record_audit_storage_failed_response(
+        proposal_coordinator: &mut AppProposalCoordinator,
+        proposal: &WorkspaceProposal,
+        response: &ProposalResponse,
+        error: ProtocolError,
+    ) -> ProposalResponse {
+        let failure = Self::audit_storage_failed_response(proposal, response, error);
+        if let Some(transition) = Self::transition_for_response(&failure) {
+            proposal_coordinator.record_audit_failure_transition(transition);
+        }
+        failure
     }
 
     fn events_for_response(

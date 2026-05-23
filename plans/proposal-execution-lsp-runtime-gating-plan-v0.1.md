@@ -223,8 +223,8 @@ Future acceptance must keep or update the required artifact set already listed b
 ## Gating decision summary
 
 - Current manual saves are allowed and must remain equivalent.
-- Generalized non-save apply is not allowed yet.
-- Open-buffer and closed-file edits are deferred until generalized proposal execution proves preconditions, validation, preview, approval, rollback, audit, dirty-buffer preservation, and conflict handling.
+- Generalized single-route open-buffer text edits, closed-file create/delete/rename, and save-file proposal apply are allowed only through the accepted proposal lifecycle and authority-specific executors.
+- Runtime batch mutation/rollback, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and mixed-route apply remain deferred until generalized proposal execution proves exact apply, commit, audit, finalize, rollback, dirty-buffer preservation, and conflict handling for those routes.
 - Terminal, plugin, remote, collaboration, command-like, and mixed routes are future-gated and fail closed.
 - LSP runtime supervision remains not accepted and not implemented; future LSP workers may only emit DTOs and proposal payloads after governance, policy, contracts, tests, and evidence exist.
 - Phase 3 remains not accepted until evidence under [`plans/evidence/phase-3`](evidence/phase-3:1) satisfies the final checklist in [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:118).

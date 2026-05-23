@@ -162,11 +162,14 @@ Date: 2026-05-22
 
 - Added workspace-owned rollback checkpoint DTOs and APIs in `devil-project`: `WorkspaceMutationRollbackTarget`, `WorkspaceMutationRollbackCheckpoint`, `WorkspaceActor::rollback_checkpoint_for_file_mutation()`, and `WorkspaceActor::rollback_file_mutation_with_checkpoint()`.
 - `AppComposition` now captures rollback material for accepted closed-file/save mutations through `WorkspaceActor` and compensates audit-failed create/delete/rename/save mutations through workspace authority instead of direct app-level `std::fs` read/write/remove/rename calls.
+- Rollback compensation verifies the current rollback target still matches the workspace-tracked post-mutation fingerprint before deleting, overwriting, or renaming it, so external changes between mutation and audit-failure rollback are refused fail-closed.
 - Open-buffer rollback remains editor-owned undo. Single-file workspace-edit delegation reuses the same workspace rollback checkpoints for create/delete/rename operations.
 - Runtime batch mutation, batch rollback, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and future AI/plugin/remote/collaboration/LSP/terminal runtime routes remain denied.
 - Focused tests added or rerun:
   - `rename_file_with_proposal_requires_destination_write_authorization`
   - `rollback_checkpoints_compensate_file_mutations_through_workspace_authority`
+  - `rollback_checkpoint_refuses_to_clobber_external_changes`
+  - `workspace_vfs_integration_rollback_audit_failure_records_failed_lifecycle`
   - `workspace_vfs_integration_closed_file_audit_failure_fails_closed_and_rolls_back`
   - `workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back`
   - `audit_rollback_failure_diagnostics_are_preserved_on_failed_response`
@@ -180,7 +183,7 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 - [`workspace_vfs_integration_batch_uses_explicit_target_coverage_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:599) verifies explicit batch target coverage order is preserved.
 - Stage 1C apply tests verify registered text-edit apply/stale behavior, closed-file workspace mutations, open-file mutation denial, and batch apply fail-closed behavior.
 - Stage 1D/1E batch tests verify supported-route planning metadata, dependency and cycle diagnostics, missing/unknown target diagnostics, route-compatible rollback proof, audit-before-success/commit/finalize barriers, deterministic direct and dependency-blocked partial-failure records, and no disk/editor mutation during planning.
-- Stage 1F/1H audit-rollback tests verify open-buffer text-edit undo, workspace-authorized closed-file create/delete/rename disk restoration, registered save rollback, and audit-failure dirty-buffer preservation.
+- Stage 1F/1H audit-rollback tests verify open-buffer text-edit undo, workspace-authorized closed-file create/delete/rename disk restoration, registered save rollback, audit-failure dirty-buffer preservation, failed ledger state after audit rollback, and fail-closed refusal to clobber external rollback-target changes.
 - Stage 1G projection tests verify recoverable lifecycle state and live metadata-only proposal ledger rows in the shell snapshot.
 - Existing stale/conflict, denial, failed-save, and dirty-buffer preservation tests remain in the same integration suite.
 
@@ -203,13 +206,14 @@ Completed targeted validation retained from earlier Phase 2 subtasks plus Stage 
 
 - `cargo fmt --all` — passed on 2026-05-22.
 - `cargo check -p devil-app --all-targets` — passed.
-- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 50 integration tests; 0 failed; 0 ignored.
+- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 51 integration tests; 0 failed; 0 ignored.
 - `cargo clippy -p devil-app --all-targets -- -D warnings` — passed.
 - `cargo test -p devil-protocol --test dto_contracts` — passed with 56 tests; 0 failed; 0 ignored.
 - `cargo check -p devil-app -p devil-observability --all-targets` — passed.
 - `cargo test -p devil-app --lib` — passed with 18 unit tests; 0 failed; 0 ignored.
 - `cargo test -p devil-project rollback_checkpoints_compensate_file_mutations_through_workspace_authority` — passed.
 - `cargo test -p devil-project rename_file_with_proposal_requires_destination_write_authorization` — passed.
+- `cargo test -p devil-project rollback_checkpoint_refuses_to_clobber_external_changes` — passed.
 - `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_closed_file_audit_failure_fails_closed_and_rolls_back` — passed.
 - `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back` — passed.
 - `cargo test -p devil-app --lib audit_rollback_failure_diagnostics_are_preserved_on_failed_response` — passed.
@@ -223,7 +227,7 @@ Completed full repository phase gates on 2026-05-22 from the workspace root with
 | Dependency policy | `cargo run -p xtask -- check-deps` | Passed; `dependency policy checks passed`. |
 | Formatting | `cargo fmt --all --check` | Passed. |
 | Workspace check | `cargo check --workspace --all-targets` | Passed. |
-| Workspace tests | `cargo test --workspace --all-targets` | Passed; observed test binaries reported 311 passed, 0 failed, and 3 ignored performance-suite measurements. |
+| Workspace tests | `cargo test --workspace --all-targets` | Passed; observed test binaries reported 313 passed, 0 failed, and 3 ignored performance-suite measurements. |
 | Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed. |
 
 No placeholder crates were activated, and no runtime behavior was added for AI, plugins, collaboration, remote workspaces, terminal runtime, LSP execution, or batch rollback.
