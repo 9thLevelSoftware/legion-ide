@@ -66,6 +66,7 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `devil-agent`
   - `devil-ai`
   - `devil-ai-providers`
+  - `devil-collaboration`
   - `devil-editor`
   - `devil-memory`
   - `devil-observability`
@@ -150,6 +151,8 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `devil-protocol`
   - `devil-security`
   - `devil-storage`
+
+Phase 6 collaboration activation is currently limited to accepted protocol DTOs, governance scaffolding, evidence gates, and dependency-boundary planning. This policy entry authorizes a future `devil-collaboration` crate only within the dependency set above after accepted Phase 6 ADRs and contract tests exist. It does not authorize direct app, UI, editor, project, remote workspace, terminal/process, hosted egress, raw source retention, or direct durable workspace mutation authority. `devil-app` may compose collaboration only through protocol DTOs and proposal/workspace ports after the Phase 6 runtime gate is accepted.
 
 - `devil-remote` may depend on:
   - `devil-observability`
@@ -486,6 +489,30 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `StorageRepositoryPort`
   - `PluginPort`
   - `ProjectInfoPort`
+  - `CollaborationSessionId`
+  - `CollaborationParticipantId`
+  - `CollaborationOperationId`
+  - `CollaborationDocumentEpoch`
+  - `CollaborationParticipantRole`
+  - `CollaborationSessionState`
+  - `CollaborationPermission`
+  - `CollaborationDocumentBinding`
+  - `CollaborationSessionDescriptor`
+  - `CollaborationParticipant`
+  - `CollaborationVersionVectorEntry`
+  - `CollaborationVersionVector`
+  - `CollaborationDocumentOperationKind`
+  - `CollaborationOperationPreconditions`
+  - `CollaborationDocumentOperation`
+  - `CollaborationAcknowledgementStatus`
+  - `CollaborationAcknowledgement`
+  - `CollaborationCausalGap`
+  - `CollaborationPresenceProjection`
+  - `CollaborationSharedProposalDisposition`
+  - `CollaborationSharedProposalApproval`
+  - `CollaborationAuditRecord`
+  - `CollaborationTransportEnvelope`
+  - `CollaborationTransportPayload`
 
 ### 3. Forbidden/Deferred Edges
 
@@ -504,7 +531,7 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
 ### 4. Runtime Surface Activation Gates
 
 - Phase 3 activates `devil-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
-- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-collaboration` is Phase 6 scaffold-gated for protocol DTOs and evidence governance only; runtime behavior remains blocked until accepted collaboration ADRs, convergence tests, ownership tests, and Phase 6 evidence are complete. `devil-lsp`, `devil-terminal`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
 - Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated
   - an explicit dependency-policy entry in this document

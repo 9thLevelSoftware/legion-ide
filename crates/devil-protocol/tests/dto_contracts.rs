@@ -34,6 +34,41 @@ fn causality_id() -> CausalityId {
     CausalityId(Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap())
 }
 
+fn collaboration_vector() -> CollaborationVersionVector {
+    CollaborationVersionVector {
+        entries: vec![CollaborationVersionVectorEntry {
+            participant_id: CollaborationParticipantId(2001),
+            sequence: 7,
+        }],
+    }
+}
+
+fn collaboration_capability_decision() -> CapabilityDecision {
+    CapabilityDecision {
+        decision_id: CapabilityDecisionId(901),
+        granted: true,
+        capability: CapabilityId("collaboration.operation.publish".to_string()),
+        reason: None,
+    }
+}
+
+fn collaboration_preconditions() -> CollaborationOperationPreconditions {
+    CollaborationOperationPreconditions {
+        workspace_id: WorkspaceId(11),
+        file_id: FileId(33),
+        buffer_id: BufferId(22),
+        snapshot_id: SnapshotId(66),
+        buffer_version: BufferVersion(55),
+        document_epoch: CollaborationDocumentEpoch(3),
+        base_vector: collaboration_vector(),
+        author_principal: PrincipalId("principal-1".to_string()),
+        capability_decision: collaboration_capability_decision(),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+    }
+}
+
 fn file_identity() -> FileIdentity {
     FileIdentity {
         file_id: FileId(33),
@@ -6311,6 +6346,130 @@ fn dto_contracts_future_surface_gate_validation_rejects_raw_markers_and_invalid_
         raw_marker.validate(),
         Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
     ));
+}
+
+#[test]
+fn dto_contracts_collaboration_transport_envelope_serializes_metadata_and_operations() {
+    let operation = CollaborationDocumentOperation {
+        session_id: CollaborationSessionId(1001),
+        operation_id: CollaborationOperationId(3001),
+        author_participant_id: CollaborationParticipantId(2001),
+        participant_sequence: 8,
+        kind: CollaborationDocumentOperationKind::Replace {
+            text: "bounded replacement".to_string(),
+        },
+        range: Some(TextRange::byte(10, 14)),
+        preconditions: collaboration_preconditions(),
+        undo_group: Some(UndoGroup {
+            group_id: Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap(),
+            transaction_ids: vec![Uuid::parse_str("88888888-8888-8888-8888-888888888888").unwrap()],
+        }),
+        occurred_at: TimestampMillis(1700),
+        schema_version: 1,
+    };
+    let envelope = CollaborationTransportEnvelope {
+        session_id: CollaborationSessionId(1001),
+        sender_participant_id: CollaborationParticipantId(2001),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        payload: CollaborationTransportPayload::Operation(Box::new(operation)),
+        schema_version: 1,
+    };
+
+    let value = serde_json::to_value(&envelope).expect("collaboration envelope should serialize");
+
+    assert_eq!(value["session_id"], json!(1001));
+    assert_eq!(value["payload"]["Operation"]["operation_id"], json!(3001));
+    assert_eq!(
+        value["payload"]["Operation"]["preconditions"]["redaction_hints"],
+        json!(["MetadataOnly"])
+    );
+
+    let roundtrip: CollaborationTransportEnvelope =
+        serde_json::from_value(value.clone()).expect("collaboration envelope should round trip");
+    assert_eq!(roundtrip.session_id, CollaborationSessionId(1001));
+
+    let mut missing = value;
+    remove_required_field::<CollaborationTransportEnvelope>(&mut missing, "schema_version");
+}
+
+#[test]
+fn dto_contracts_collaboration_identity_metadata_rejects_zero_and_denied_values() {
+    let valid = collaboration_preconditions();
+    assert!(valid.has_valid_identity_metadata());
+
+    let zero_correlation = CollaborationOperationPreconditions {
+        correlation_id: CorrelationId(0),
+        ..valid.clone()
+    };
+    assert!(!zero_correlation.has_valid_identity_metadata());
+
+    let nil_causality = CollaborationOperationPreconditions {
+        causality_id: CausalityId(Uuid::nil()),
+        ..valid.clone()
+    };
+    assert!(!nil_causality.has_valid_identity_metadata());
+
+    let denied = CollaborationOperationPreconditions {
+        capability_decision: CapabilityDecision {
+            granted: false,
+            reason: Some("collaboration capability denied".to_string()),
+            ..collaboration_capability_decision()
+        },
+        ..valid
+    };
+    assert!(!denied.has_valid_identity_metadata());
+}
+
+#[test]
+fn dto_contracts_collaboration_shared_proposal_approval_links_policy_and_operations() {
+    let approval = CollaborationSharedProposalApproval {
+        session_id: CollaborationSessionId(1001),
+        proposal_id: ProposalId(700),
+        participant_id: CollaborationParticipantId(2001),
+        disposition: CollaborationSharedProposalDisposition::Approved,
+        capability_decision: collaboration_capability_decision(),
+        applied_operation_ids: vec![CollaborationOperationId(3001)],
+        denial_reason: None,
+        schema_version: 1,
+    };
+
+    let value = serde_json::to_value(&approval).expect("shared approval should serialize");
+
+    assert_eq!(value["proposal_id"], json!(700));
+    assert_eq!(value["disposition"], json!("Approved"));
+    assert_eq!(value["applied_operation_ids"], json!([3001]));
+    assert_eq!(value["capability_decision"]["decision_id"], json!(901));
+
+    let roundtrip: CollaborationSharedProposalApproval =
+        serde_json::from_value(value).expect("shared approval should round trip");
+    assert_eq!(
+        roundtrip.applied_operation_ids,
+        vec![CollaborationOperationId(3001)]
+    );
+}
+
+#[test]
+fn dto_contracts_collaboration_audit_records_are_metadata_only() {
+    let audit = CollaborationAuditRecord {
+        session_id: CollaborationSessionId(1001),
+        operation_id: Some(CollaborationOperationId(3001)),
+        proposal_id: Some(ProposalId(700)),
+        event_sequence: EventSequence(42),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        retention_label: RetentionLabel::Audit,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        metadata_summary: "replace range 10..14, 19 bytes redacted".to_string(),
+        schema_version: 1,
+    };
+
+    let serialized = serde_json::to_string(&audit).expect("audit record should serialize");
+
+    assert!(serialized.contains("MetadataOnly"));
+    assert!(serialized.contains("replace range"));
+    assert!(!serialized.contains("bounded replacement"));
+    assert!(!serialized.contains("source_text"));
 }
 
 #[test]

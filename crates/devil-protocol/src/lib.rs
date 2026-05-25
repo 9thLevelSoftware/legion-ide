@@ -1310,6 +1310,421 @@ pub struct SnapshotLeaseChunk {
     pub schema_version: u16,
 }
 
+/// Collaboration session identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CollaborationSessionId(pub u128);
+
+/// Collaboration participant identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CollaborationParticipantId(pub u128);
+
+/// Collaboration operation identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CollaborationOperationId(pub u128);
+
+/// Collaboration document epoch used to reject stale session state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CollaborationDocumentEpoch(pub u64);
+
+/// Participant role inside a collaboration session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CollaborationParticipantRole {
+    /// Session owner with admission authority.
+    Owner,
+    /// Participant allowed to publish document operations.
+    Editor,
+    /// Participant allowed to review and approve shared proposals.
+    Reviewer,
+    /// Read-only participant allowed to publish presence only.
+    Observer,
+    /// Bot or agent activity projected into the session.
+    Agent,
+}
+
+/// Collaboration session lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CollaborationSessionState {
+    /// Session has been created but is not active.
+    Created,
+    /// Participant admission is in progress.
+    Joining,
+    /// Session accepts validated operations.
+    Active,
+    /// Session is active with degraded transport or replay state.
+    Degraded,
+    /// Session is attempting to resume from a disconnected state.
+    Reconnecting,
+    /// Session is blocked on explicit conflict or resync handling.
+    Conflict,
+    /// Session is closing.
+    Closing,
+    /// Session is closed.
+    Closed,
+    /// Session or participant admission was denied.
+    Denied,
+}
+
+/// Collaboration permission class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CollaborationPermission {
+    /// Create a collaboration session.
+    CreateSession,
+    /// Join a collaboration session.
+    JoinSession,
+    /// Invite another participant.
+    InviteParticipant,
+    /// Publish a document operation.
+    PublishOperation,
+    /// Publish cursor, selection, or activity presence.
+    PublishPresence,
+    /// Approve a shared proposal.
+    ApproveSharedProposal,
+    /// Read replay metadata.
+    ReplayMetadata,
+    /// Export metadata-only audit records.
+    ExportAudit,
+}
+
+/// Collaboration document binding for an editor-owned buffer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationDocumentBinding {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// Base snapshot identifier.
+    pub snapshot_id: SnapshotId,
+    /// Base buffer version.
+    pub buffer_version: BufferVersion,
+    /// Document epoch.
+    pub document_epoch: CollaborationDocumentEpoch,
+    /// Optional metadata-only content fingerprint.
+    pub content_fingerprint: Option<FileFingerprint>,
+    /// Binding schema version.
+    pub schema_version: u16,
+}
+
+/// Collaboration session descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationSessionDescriptor {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Session lifecycle state.
+    pub state: CollaborationSessionState,
+    /// Creator principal.
+    pub created_by: PrincipalId,
+    /// Creation timestamp.
+    pub created_at: TimestampMillis,
+    /// Bound documents.
+    pub document_bindings: Vec<CollaborationDocumentBinding>,
+    /// Redaction hints for displayed session metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Collaboration participant descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationParticipant {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Participant identifier.
+    pub participant_id: CollaborationParticipantId,
+    /// Principal identifier.
+    pub principal_id: PrincipalId,
+    /// Participant role.
+    pub role: CollaborationParticipantRole,
+    /// Granted collaboration permissions.
+    pub permissions: Vec<CollaborationPermission>,
+    /// Redacted label for UI projections and audit.
+    pub display_label: String,
+    /// Participant schema version.
+    pub schema_version: u16,
+}
+
+/// Version vector entry for one collaboration participant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CollaborationVersionVectorEntry {
+    /// Participant identifier.
+    pub participant_id: CollaborationParticipantId,
+    /// Last observed operation sequence from this participant.
+    pub sequence: u64,
+}
+
+/// Collaboration version vector in deterministic entry order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationVersionVector {
+    /// Vector entries.
+    pub entries: Vec<CollaborationVersionVectorEntry>,
+}
+
+/// Collaboration operation kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CollaborationDocumentOperationKind {
+    /// Insert bounded text at a range start.
+    Insert {
+        /// Bounded inserted text.
+        text: String,
+    },
+    /// Delete a range.
+    Delete,
+    /// Replace a range with bounded text.
+    Replace {
+        /// Bounded replacement text.
+        text: String,
+    },
+    /// Move cursor without changing text.
+    CursorMove,
+    /// Update selection without changing text.
+    SelectionUpdate,
+    /// Explicit undo compensation operation.
+    UndoCompensation,
+    /// Acknowledgement with no text effect.
+    NoopAcknowledgement,
+    /// Request resynchronization after a causal gap or conflict.
+    ResyncRequest,
+}
+
+/// Collaboration operation preconditions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationOperationPreconditions {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// File identifier.
+    pub file_id: FileId,
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// Snapshot identifier used as the operation base.
+    pub snapshot_id: SnapshotId,
+    /// Buffer version used as the operation base.
+    pub buffer_version: BufferVersion,
+    /// Document epoch used as the operation base.
+    pub document_epoch: CollaborationDocumentEpoch,
+    /// Base version vector.
+    pub base_vector: CollaborationVersionVector,
+    /// Author principal.
+    pub author_principal: PrincipalId,
+    /// Capability decision for the operation.
+    pub capability_decision: CapabilityDecision,
+    /// Non-zero correlation id.
+    pub correlation_id: CorrelationId,
+    /// Non-nil causality id.
+    pub causality_id: CausalityId,
+    /// Redaction hints for operation metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+}
+
+impl CollaborationOperationPreconditions {
+    /// Returns true when required identity and capability metadata is non-empty.
+    pub fn has_valid_identity_metadata(&self) -> bool {
+        self.correlation_id.0 != 0
+            && !self.causality_id.0.is_nil()
+            && self.capability_decision.decision_id.0 != 0
+            && self.capability_decision.granted
+            && !self.author_principal.0.is_empty()
+    }
+}
+
+/// Collaboration document operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationDocumentOperation {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Operation identifier.
+    pub operation_id: CollaborationOperationId,
+    /// Author participant identifier.
+    pub author_participant_id: CollaborationParticipantId,
+    /// Participant-local sequence number.
+    pub participant_sequence: u64,
+    /// Operation kind.
+    pub kind: CollaborationDocumentOperationKind,
+    /// Affected text range, if any.
+    pub range: Option<TextRange>,
+    /// Operation preconditions.
+    pub preconditions: CollaborationOperationPreconditions,
+    /// Undo group metadata, if any.
+    pub undo_group: Option<UndoGroup>,
+    /// Operation timestamp.
+    pub occurred_at: TimestampMillis,
+    /// Operation schema version.
+    pub schema_version: u16,
+}
+
+/// Collaboration acknowledgement status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CollaborationAcknowledgementStatus {
+    /// Operation was accepted.
+    Accepted,
+    /// Operation was a duplicate and was ignored.
+    Duplicate,
+    /// Operation was rejected as stale.
+    Stale,
+    /// Operation exposed a causal gap.
+    GapDetected,
+    /// Operation requires resynchronization.
+    ResyncRequired,
+    /// Operation was denied by capability or trust policy.
+    Denied,
+}
+
+/// Collaboration acknowledgement DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationAcknowledgement {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Operation identifier.
+    pub operation_id: CollaborationOperationId,
+    /// Acknowledging participant.
+    pub participant_id: CollaborationParticipantId,
+    /// Acknowledgement status.
+    pub status: CollaborationAcknowledgementStatus,
+    /// Observed version vector after processing.
+    pub observed_vector: CollaborationVersionVector,
+    /// Reason code for denied, stale, or gap outcomes.
+    pub reason_code: Option<String>,
+    /// Acknowledgement schema version.
+    pub schema_version: u16,
+}
+
+/// Collaboration causal gap descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationCausalGap {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Participant whose sequence has a gap.
+    pub participant_id: CollaborationParticipantId,
+    /// Expected next sequence.
+    pub expected_sequence: u64,
+    /// Actual observed sequence.
+    pub observed_sequence: u64,
+    /// Gap reason code.
+    pub reason_code: String,
+}
+
+/// Collaboration presence update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationPresenceProjection {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Participant identifier.
+    pub participant_id: CollaborationParticipantId,
+    /// Optional cursor position.
+    pub cursor: Option<TextCoordinate>,
+    /// Visible selections.
+    pub selections: Vec<ProtocolTextRange>,
+    /// Redacted activity label.
+    pub activity_label: Option<String>,
+    /// Whether the participant is reconnecting.
+    pub reconnecting: bool,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+/// Shared proposal approval disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CollaborationSharedProposalDisposition {
+    /// Participant approval is pending.
+    Pending,
+    /// Participant approved the proposal.
+    Approved,
+    /// Participant denied the proposal.
+    Denied,
+    /// Participant approval was superseded by a newer proposal state.
+    Superseded,
+}
+
+/// Shared proposal approval record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationSharedProposalApproval {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Proposal identifier.
+    pub proposal_id: ProposalId,
+    /// Participant identifier.
+    pub participant_id: CollaborationParticipantId,
+    /// Approval disposition.
+    pub disposition: CollaborationSharedProposalDisposition,
+    /// Capability decision for approval or denial.
+    pub capability_decision: CapabilityDecision,
+    /// Applied operation identifiers linked to this proposal.
+    pub applied_operation_ids: Vec<CollaborationOperationId>,
+    /// Denial reason when disposition is denied.
+    pub denial_reason: Option<String>,
+    /// Approval schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only collaboration audit record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationAuditRecord {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Operation identifier when the audit record is operation-scoped.
+    pub operation_id: Option<CollaborationOperationId>,
+    /// Proposal identifier when the audit record is proposal-scoped.
+    pub proposal_id: Option<ProposalId>,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Retention label.
+    pub retention_label: RetentionLabel,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Metadata summary without raw source text.
+    pub metadata_summary: String,
+    /// Audit schema version.
+    pub schema_version: u16,
+}
+
+/// Collaboration transport envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationTransportEnvelope {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Sender participant identifier.
+    pub sender_participant_id: CollaborationParticipantId,
+    /// Envelope correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Envelope causality identifier.
+    pub causality_id: CausalityId,
+    /// Envelope payload.
+    pub payload: CollaborationTransportPayload,
+    /// Envelope schema version.
+    pub schema_version: u16,
+}
+
+/// Collaboration transport payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CollaborationTransportPayload {
+    /// Session descriptor payload.
+    Session(CollaborationSessionDescriptor),
+    /// Participant descriptor payload.
+    Participant(CollaborationParticipant),
+    /// Document operation payload.
+    Operation(Box<CollaborationDocumentOperation>),
+    /// Acknowledgement payload.
+    Acknowledgement(CollaborationAcknowledgement),
+    /// Causal gap payload.
+    CausalGap(CollaborationCausalGap),
+    /// Presence projection payload.
+    Presence(CollaborationPresenceProjection),
+    /// Shared proposal approval payload.
+    SharedProposalApproval(CollaborationSharedProposalApproval),
+    /// Metadata-only audit payload.
+    Audit(CollaborationAuditRecord),
+}
+
 /// Transaction source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransactionSource {
@@ -1321,6 +1736,15 @@ pub enum TransactionSource {
     Formatter,
     /// Plugin.
     Plugin,
+    /// Validated collaboration participant edit.
+    CollaborationParticipant {
+        /// Session identifier.
+        session_id: CollaborationSessionId,
+        /// Participant identifier.
+        participant_id: CollaborationParticipantId,
+        /// Operation identifier.
+        operation_id: CollaborationOperationId,
+    },
     /// Restore/redo command.
     Restore,
     /// System.
@@ -1381,7 +1805,7 @@ pub struct TextTransactionDescriptor {
 }
 
 /// Undo group.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UndoGroup {
     /// Group id.
     pub group_id: Uuid,
@@ -13348,7 +13772,7 @@ pub struct CapabilityDenial {
 }
 
 /// Capability decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDecision {
     /// Decision id.
     pub decision_id: CapabilityDecisionId,
