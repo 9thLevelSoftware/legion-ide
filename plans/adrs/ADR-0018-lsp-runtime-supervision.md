@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for Phase 3 governance and implementation gating.
+Accepted. Phase 3 implementation evidence satisfies this ADR in [`predictive-semantic-fabric.md`](../evidence/phase-3/predictive-semantic-fabric.md:1).
 
 ## Context
 
@@ -90,4 +90,4 @@ Phase 3 LSP runtime work will use a supervised, cancellable, backpressured worke
 
 ## Exit condition
 
-This ADR is satisfied when Phase 3 implementation demonstrates supervised LSP workers, cancellable operations, bounded queues, timeout behavior, normalized DTO flow for diagnostics, completion, hover, definition, reference, rename, formatting, and code actions, proposal-only mutation routing, non-blocking editor and save behavior, and evidence captured in [`predictive-semantic-fabric.md`](../evidence/phase-3/predictive-semantic-fabric.md:1).
+This ADR is satisfied by the Phase 3 implementation evidence in [`predictive-semantic-fabric.md`](../evidence/phase-3/predictive-semantic-fabric.md:1), which demonstrates metadata-only supervision contracts, cancellable operations, bounded and stale-safe DTO flows, timeout/degraded/unavailable result states, normalized DTO flow for diagnostics, completion, hover, definition, reference, rename, formatting, semantic tokens, and code actions, proposal-only mutation routing, and non-blocking editor/save behavior.

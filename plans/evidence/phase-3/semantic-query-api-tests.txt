@@ -1,0 +1,26 @@
+Command: cargo test -p devil-index --all-targets
+Date: 2026-05-24
+Result: passed; 28 tests passed, 0 failed, 0 ignored
+
+Semantic query coverage:
+- `semantic_queries_are_bounded_and_return_pure_dto_results`
+- `indexing_actor_exposes_semantic_port_for_planning_queries_and_cancellation`
+- `stale_upserts_are_ignored_and_newer_generations_replace_records`
+- `semantic_index_replaces_old_generation_when_content_version_resets`
+- `rename_preview_payload_is_proposal_only_and_preserves_preconditions`
+
+Accepted query kinds:
+- Symbol lookup
+- Completion ranking
+- AI context selection
+- Agent planning
+- Definition and hover-like location lookup
+- References
+- Test impact
+- Refactoring preview
+
+Accepted behavior:
+- Query responses are pure DTOs and do not mutate buffers, files, or workspaces.
+- Results carry freshness and degradation metadata.
+- Refactoring previews are proposal summaries, not direct edits.
+- Stale upserts are ignored and newer generations replace older records before query exposure.

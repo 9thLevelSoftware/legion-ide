@@ -729,16 +729,24 @@ mod tests {
     }
 
     #[test]
-    fn phase3_evidence_declares_partial_activation_not_acceptance() {
+    fn phase3_evidence_declares_accepted_status_with_artifacts() {
         let source = read_workspace_file(DEFAULT_PHASE3_EVIDENCE_PATH);
-        let issues = validate_phase3_acceptance_governance(&source, |_| false);
+        let evidence_path = workspace_root().join(DEFAULT_PHASE3_EVIDENCE_PATH);
+        let evidence_dir = evidence_path
+            .parent()
+            .expect("Phase 3 evidence path should have a parent directory");
+        let issues = validate_phase3_acceptance_governance(&source, |artifact| {
+            evidence_dir.join(artifact).is_file()
+        });
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
-        assert!(source.contains("This document is not implementation evidence yet"));
+        assert!(source.contains(PHASE3_ACCEPTED_MARKER));
+        assert!(source.contains(LSP_ACCEPTED_MARKER));
+        assert!(!source.contains("This document is not implementation evidence yet"));
         for artifact in PHASE3_REQUIRED_ARTIFACTS {
             assert!(
                 source.contains(artifact),
-                "Phase 3 scaffold must list required artifact `{artifact}`"
+                "Phase 3 evidence must list required artifact `{artifact}`"
             );
         }
     }

@@ -1,0 +1,26 @@
+Commands:
+- cargo test -p devil-protocol --test dto_contracts
+- cargo test -p devil-index --all-targets
+
+Date: 2026-05-24
+Result: passed; protocol DTO contracts 57 passed, index workflows 28 passed
+
+LSP supervision contract coverage:
+- `dto_contracts_lsp_phase3_definition_references_and_cancellation_golden`
+- `dto_contracts_lsp_phase3_mutation_proposals_are_proposal_ready`
+- `dto_contracts_lsp_supervision_boundary_is_metadata_only_and_redacted`
+- `dto_contracts_lsp_supervision_refuses_untrusted_or_privacy_denied_without_launch`
+- `dto_contracts_lsp_edits_convert_to_workspace_proposals_without_direct_mutation`
+- `dto_contracts_lsp_edit_contract_rejects_missing_correlation_privacy_or_preconditions`
+- `dto_contracts_lsp_diagnostics_and_capabilities_exclude_source_bodies`
+- `dto_contracts_lsp_supervision_slice_has_no_external_runtime_request`
+- `p4_3_semantic_fabric_lsp_contract_path_is_metadata_only_non_runtime_and_proposal_only`
+- `semantic_fabric_scheduler_does_not_start_lsp_or_external_processes`
+
+Accepted behavior:
+- Requests carry cancellation tokens, timeout budgets, content hash, snapshot identity, buffer version, correlation, causality, and privacy scope.
+- Result statuses represent fresh, stale, partial, cancelled, timeout, unavailable, and degraded outcomes.
+- Launch policy is fail-closed for untrusted workspace, privacy denial, missing activation, or capability denial.
+- Diagnostics and capability summaries are metadata-only and redacted.
+- Rename, formatting, and code-action edit outputs convert to proposals and cannot mutate buffers or workspace files directly.
+- Command-only actions are denied or deferred as metadata-only descriptors.

@@ -1,0 +1,6 @@
+Command: cargo clippy --workspace --all-targets -- -D warnings
+Date: 2026-05-24
+Result: passed
+
+Observed output:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.14s

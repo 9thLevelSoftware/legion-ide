@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for Phase 3 governance and implementation gating.
+Accepted. Phase 3 implementation evidence satisfies this ADR in [`predictive-semantic-fabric.md`](../evidence/phase-3/predictive-semantic-fabric.md:1).
 
 ## Context
 
@@ -110,4 +110,4 @@ Phase 3 will implement semantic indexing as an actor-owned, bounded, cancellable
 
 ## Exit condition
 
-This ADR is satisfied when Phase 3 implementation demonstrates bounded actor-owned indexing, priority scheduling, cancellation, backpressure, repository discovery, ignore handling, fingerprints, lexical maps, tree-sitter caches, normalized graph records, low-latency query APIs, invalidation by content hash, grammar version, model version, and privacy scope, plus documented vector-index deferral and validation evidence in [`predictive-semantic-fabric.md`](../evidence/phase-3/predictive-semantic-fabric.md:1).
+This ADR is satisfied by the Phase 3 implementation evidence in [`predictive-semantic-fabric.md`](../evidence/phase-3/predictive-semantic-fabric.md:1), which demonstrates bounded actor-owned indexing, priority scheduling, cancellation, backpressure, repository discovery, ignore handling, fingerprints, lexical maps, syntax-cache freshness, normalized graph records, low-latency query APIs, invalidation by content hash, grammar version, model version, and privacy scope, plus documented vector-index deferral.

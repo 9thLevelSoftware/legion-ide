@@ -4,7 +4,7 @@ Date: 2026-05-15
 
 ## Status
 
-This is a markdown-only implementation handoff for the remaining generalized proposal execution and LSP runtime gating concern. It does not implement Rust behavior, edit manifests, change evidence checklists, or mark Phase 3 or LSP supervision accepted.
+This was a markdown-only implementation handoff for the remaining generalized proposal execution and LSP runtime gating concern. It is superseded by accepted Phase 2 evidence in [`proposal-mutation-substrate.md`](evidence/phase-2/proposal-mutation-substrate.md:1) and accepted Phase 3 evidence in [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:1).
 
 ## Scope and non-goals
 
@@ -21,7 +21,7 @@ This is a markdown-only implementation handoff for the remaining generalized pro
 
 - No edits to Rust source, manifests, or evidence acceptance checklists.
 - No implementation of generalized proposal execution, LSP runtime supervision, terminal runtime behavior, plugin hosting, collaboration, remote workspaces, or command execution.
-- No change to the current Phase 3 acceptance state recorded by [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:11).
+- Superseded by the accepted Phase 3 state recorded by [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:11).
 
 ## Current-state evidence
 
@@ -32,7 +32,7 @@ This is a markdown-only implementation handoff for the remaining generalized pro
 5. Protocol DTOs for the generalized substrate exist. [`WorkspaceProposal`](../crates/devil-protocol/src/lib.rs:1472), [`ProposalPayload`](../crates/devil-protocol/src/lib.rs:1507), [`ProposalTargetCoverage`](../crates/devil-protocol/src/lib.rs:1617), [`BatchProposalPayload`](../crates/devil-protocol/src/lib.rs:1630), [`ProposalRollbackStep`](../crates/devil-protocol/src/lib.rs:1715), [`ProposalPartialFailureRecord`](../crates/devil-protocol/src/lib.rs:1751), [`ProposalLifecycleState`](../crates/devil-protocol/src/lib.rs:1969), [`ProposalLifecycleCommand`](../crates/devil-protocol/src/lib.rs:2141), [`ProposalRequest`](../crates/devil-protocol/src/lib.rs:3728), and [`ProposalResponse`](../crates/devil-protocol/src/lib.rs:3747) define the required contract shape.
 6. [`ADR-0016-generalized-proposal-service.md`](adrs/ADR-0016-generalized-proposal-service.md:1) accepts the generalized proposal service direction, including universal lifecycle states, batch atomicity, rollback limits, deny-by-default validation, audit-before-success, metadata-only persistence, and projection-only UI constraints.
 7. [`proposal-mutation-substrate.md`](evidence/phase-2/proposal-mutation-substrate.md:62) explicitly records remaining gaps: runtime apply planning beyond saves is denied; open-buffer edit execution through editor transactions and closed-file mutation through workspace VFS remain future work; future AI, plugin, LSP, collaboration, terminal, and remote runtime apply paths remain denied.
-8. LSP supervision is governance-gated, not accepted as runtime behavior. [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:11) states Phase 3 is not accepted and LSP supervision is not accepted. [`xtask`](../xtask/src/main.rs:730) validates that the scaffold remains in not-accepted state until required evidence exists.
+8. LSP supervision DTOs, metadata-only supervision records, stale/timeout/degraded result status, and proposal-only edit conversion are now accepted in [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:11). Process/runtime expansion remains separately gated.
 9. Project rules require proposal-mediated mutation and fail-closed saves. [`AGENTS.md`](../AGENTS.md:5) records phase gates, [`AGENTS.md`](../AGENTS.md:8) records projection-only UI, [`AGENTS.md`](../AGENTS.md:9) records save mediation and dirty-text preservation, [`AGENTS.md`](../AGENTS.md:10) records save preconditions and fail-closed fallback, and [`AGENTS.md`](../AGENTS.md:13) keeps placeholder runtime crates inert until gates exist.
 10. Dependency policy does not authorize an ad hoc LSP runtime. [`dependency-policy.md`](dependency-policy.md:88) limits Phase 3 internal activation for [`devil-index`](../crates/devil-index/Cargo.toml:1), and [`dependency-policy.md`](dependency-policy.md:113) states planned runtime surfaces are policy placeholders only until activation gates are satisfied.
 
@@ -150,11 +150,11 @@ This is a markdown-only implementation handoff for the remaining generalized pro
 - [x] Implement deny-by-default validation for [`ProposalPayload::TextEdit`](../crates/devil-protocol/src/lib.rs:1511), [`ProposalPayload::CreateFile`](../crates/devil-protocol/src/lib.rs:1513), [`ProposalPayload::DeleteFile`](../crates/devil-protocol/src/lib.rs:1515), [`ProposalPayload::RenameFile`](../crates/devil-protocol/src/lib.rs:1517), [`ProposalPayload::FormatFile`](../crates/devil-protocol/src/lib.rs:1521), [`ProposalPayload::CodeAction`](../crates/devil-protocol/src/lib.rs:1523), [`ProposalPayload::WorkspaceEdit`](../crates/devil-protocol/src/lib.rs:1525), [`ProposalPayload::TerminalCommand`](../crates/devil-protocol/src/lib.rs:1527), and [`ProposalPayload::Batch`](../crates/devil-protocol/src/lib.rs:1529).
 - [x] Add open-buffer apply through editor transactions with stale snapshot rejection, undo-group rollback, audit, and dirty-buffer preservation.
 - [x] Add closed-file apply through workspace VFS with expected fingerprint, file content version, workspace generation, path policy, capability checks, conflict handling, workspace-authorized rollback checkpoints, and audit for create/delete/rename routes.
-- [x] Add batch planning that validates route support, deterministic ordering, dependency edges, atomicity, rollback policy, target coverage, preflight, commit, rollback, and partial-failure records without enabling runtime batch mutation.
+- [x] Add batch planning that validates route support, deterministic ordering, dependency edges, atomicity, rollback policy, target coverage, preflight, commit, rollback, and partial-failure records before enabling accepted reversible runtime batch mutation.
 - [x] Keep terminal, plugin, remote, collaboration, command-like, and mixed routes denied until their corresponding ADRs, dependency policy entries, protocol DTOs, ownership contracts, and tests exist.
-- [ ] Add runtime batch mutation/rollback, multi-file atomicity, multi-edit workspace-edit execution, and format/code-action execution only after exact apply/commit/audit/finalize/rollback evidence exists beyond the accepted single-route workspace rollback checkpoints.
+- [x] Add accepted reversible batch mutation/rollback, multi-file workspace-edit execution, and edit-only code-action execution after exact preflight/apply/audit/rollback evidence exists. Raw format execution remains lowered through proposal-safe edit payloads.
 - [ ] Add LSP supervision only after proving supervised workers, bounded queues, cancellation, timeout behavior, stale-response suppression, DTO-only output, and proposal-only mutation routing.
-- [ ] Archive validation outputs in [`plans/evidence/phase-3`](evidence/phase-3:1) without marking acceptance until every checklist item is satisfied.
+- [x] Archive validation outputs in [`plans/evidence/phase-3`](evidence/phase-3:1) and mark acceptance after every checklist item is satisfied.
 
 ## Acceptance tests for future implementation subtasks
 
@@ -224,7 +224,7 @@ Future acceptance must keep or update the required artifact set already listed b
 
 - Current manual saves are allowed and must remain equivalent.
 - Generalized single-route open-buffer text edits, closed-file create/delete/rename, and save-file proposal apply are allowed only through the accepted proposal lifecycle and authority-specific executors.
-- Runtime batch mutation/rollback, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and mixed-route apply remain deferred until generalized proposal execution proves exact apply, commit, audit, finalize, rollback, dirty-buffer preservation, and conflict handling for those routes.
+- Accepted reversible batch mutation/rollback, multi-file workspace edits, and edit-only code-action execution are evidenced in Phase 2. Raw format, command-bearing code actions, terminal/plugin/remote/collaboration/AI routes, and mixed routes without accepted executors remain deferred.
 - Terminal, plugin, remote, collaboration, command-like, and mixed routes are future-gated and fail closed.
-- LSP runtime supervision remains not accepted and not implemented; future LSP workers may only emit DTOs and proposal payloads after governance, policy, contracts, tests, and evidence exist.
-- Phase 3 remains not accepted until evidence under [`plans/evidence/phase-3`](evidence/phase-3:1) satisfies the final checklist in [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:118).
+- LSP supervision DTOs, metadata-only supervision records, stale/timeout/degraded result statuses, and proposal-only edit output conversion are accepted for Phase 3. Process-launching expansion remains separately gated.
+- Phase 3 is accepted with evidence under [`plans/evidence/phase-3`](evidence/phase-3:1) satisfying the final checklist in [`predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md:118).

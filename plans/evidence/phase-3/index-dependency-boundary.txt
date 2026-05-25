@@ -1,0 +1,14 @@
+Command: cargo run -p xtask -- check-deps
+Date: 2026-05-24
+Result: passed
+
+Observed output:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running `target\debug\xtask.exe check-deps`
+dependency policy checks passed
+
+Phase 3 dependency boundary:
+- `plans/dependency-policy.md` permits `devil-index` to use only `devil-protocol`, `devil-storage`, and `devil-text` as internal dependencies.
+- `crates/devil-index/Cargo.toml` currently depends on `devil-protocol` and `devil-text` plus external utility crates `thiserror` and `uuid`.
+- No direct `devil-index` dependency on `devil-project`, `devil-editor`, `devil-app`, `devil-ui`, AI, plugin, collaboration, remote, terminal, vector, or provider crates is present.
+- `xtask` also verified required protocol symbols and accepted Phase 3 evidence governance.

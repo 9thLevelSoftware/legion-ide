@@ -34,7 +34,7 @@ flowchart TD
 Critical blockers:
 
 1. [`phase-status-ledger.md`](plans/phase-status-ledger.md:67) makes Phase 2B generalized proposal execution the next critical code work.
-2. [`remaining-implementation-tasks-plan-v0.1.md`](plans/remaining-implementation-tasks-plan-v0.1.md:27) blocks Phase 3 acceptance and all AI, plugin, remote, and collaboration writes until Phase 2B is complete.
+2. [`remaining-implementation-tasks-plan-v0.1.md`](plans/remaining-implementation-tasks-plan-v0.1.md:27) now records Phase 2 and Phase 3 as accepted while all AI, plugin, remote, and collaboration writes remain individually gated.
 3. [`ADR-0015-streaming-text-viewport.md`](plans/adrs/ADR-0015-streaming-text-viewport.md:16) provides streaming text guardrails but does not activate placeholder runtimes.
 4. [`ADR-0018-lsp-runtime-supervision.md`](plans/adrs/ADR-0018-lsp-runtime-supervision.md:11) requires LSP to consume streaming snapshots and proposal substrate without blocking input or saves.
 5. [`dependency-policy.md`](plans/dependency-policy.md:88) limits [`devil-index`](crates/devil-index/src/lib.rs:1) to [`devil-protocol`](crates/devil-protocol/src/lib.rs:1), [`devil-storage`](crates/devil-storage/src/lib.rs:1), and [`devil-text`](crates/devil-text/src/lib.rs:1) during Phase 3 activation.
@@ -49,7 +49,7 @@ Critical blockers:
 | Proposal execution | Yes | [`AppProposalCoordinator`](crates/devil-app/src/lib.rs:354), [`ProposalRequest`](crates/devil-protocol/src/lib.rs:3727), [`ProposalResponse`](crates/devil-protocol/src/lib.rs:3746) | LSP apply, AI edits, plugin writes, remote writes, collaboration writes | Phase 2 evidence updated with apply, rollback, denial, audit tests |
 | Proposal UI projection | Yes, DTO and projection only | [`Shell`](crates/devil-ui/src/ui.rs:239), [`CommandDispatchIntent`](crates/devil-ui/src/ui.rs:154) | UI-side apply or editor state ownership | UI emits intents only |
 | Viewport non-regression | Yes | [`ActiveBufferProjection`](crates/devil-ui/src/ui.rs:86), [`TextSnapshot`](crates/devil-text/src/lib.rs:240) | Full-source UI projection regressions | Large files remain viewport-only |
-| Semantic boundary remediation | Design now, runtime after proposal invariants | [`RepositoryScanner::scan()`](crates/devil-index/src/lib.rs:787), [`SourceDocument`](crates/devil-index/src/lib.rs:937) | LSP runtime acceptance or Phase 3 acceptance claim | No production disk scan or full-source copy in [`devil-index`](crates/devil-index/src/lib.rs:1) |
+| Semantic boundary remediation | Accepted Phase 3 scope | `RepositoryDiscoveryImporter`, descriptor/lease source inputs, syntax-cache freshness, metadata storage | AI/plugin/remote/collaboration activation | No production disk scan or unbounded full-source persistence in [`devil-index`](crates/devil-index/src/lib.rs:1) |
 | Semantic runtime | After semantic boundary remediation | [`IndexingActor`](crates/devil-index/src/lib.rs:253) | AI activation | Bounded queues, cancellation, no input or save blocking |
 | LSP supervision | After proposal and semantic runtime gates | [`ADR-0018`](plans/adrs/ADR-0018-lsp-runtime-supervision.md:63) | Direct buffer or disk mutation | DTO-only output and proposal-only mutation |
 | Trust surfaces | DTO and projection now | [`event_metadata_record()`](crates/devil-observability/src/lib.rs:376), [`InMemoryStorageRepositoryPort`](crates/devil-storage/src/lib.rs:209) | Raw source or prompt persistence | Metadata-only context and privacy records |

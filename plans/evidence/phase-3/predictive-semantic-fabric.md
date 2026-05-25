@@ -1,139 +1,120 @@
-# Phase 3 Predictive Semantic Fabric Evidence Scaffold
+# Phase 3 Predictive Semantic Fabric Evidence
 
-Date: 2026-05-15
+Date: 2026-05-24
 
 ## Scope
 
-This scaffold records the required evidence for completing Phase 3 of [`implementation-plan.md`](../../implementation-plan.md:246). Phase 3 activates [`lib.rs`](../../../crates/devil-index/src/lib.rs:1) as the semantic fabric and introduces supervised LSP fusion only after governance gates are accepted.
+This document records accepted implementation evidence for Phase 3 of [`implementation-plan.md`](../../implementation-plan.md:246). Phase 3 activates [`devil-index`](../../../crates/devil-index/src/lib.rs:1) as the predictive semantic fabric through actor-owned bounded scheduling, workspace-authoritative discovery import, descriptor and lease-based source inputs, lexical symbol maps, syntax-cache freshness keys, normalized graph records, metadata-only semantic persistence, pure query DTOs, and LSP supervision/proposal-routing contracts.
 
-This document is not implementation evidence yet. It defines the workflows, validation commands, artifacts, and final checklist that implementation subtasks must complete.
+The accepted Phase 3 runtime scope remains intentionally narrow. It does not activate embeddings, vector storage, model-backed retrieval, provider egress, terminal execution, plugin execution, remote workspaces, collaboration sessions, or direct editor/workspace mutation from semantic or LSP code.
 
 ## Acceptance status
 
-- Runtime surface status: Partial `devil-index` indexing behavior is active; acceptance evidence is incomplete. Active code exists in [`lib.rs`](../../../crates/devil-index/src/lib.rs:1) and targeted tests exist in [`index_workflows.rs`](../../../crates/devil-index/tests/index_workflows.rs:1), but these do not satisfy Phase 3 acceptance by themselves.
-- Phase 3 acceptance: Not accepted.
-- LSP supervision acceptance: Not accepted.
-- ADR status note: [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:111) and [`ADR-0018-lsp-runtime-supervision.md`](../../adrs/ADR-0018-lsp-runtime-supervision.md:91) are accepted for governance and implementation gating only; their exit conditions remain unsatisfied until this document records validation evidence.
-- Gate behavior: [`main.rs`](../../../xtask/src/main.rs:49) treats the not-accepted markers above as the passing scaffold state. If a future change claims accepted Phase 3 or LSP status, the check escalates to a failure unless required artifact names remain listed, evidence files exist under this directory, the scaffold disclaimer is removed, and the final validation checklist contains no unchecked items.
+- Runtime surface status: Accepted semantic fabric runtime is active in [`devil-index`](../../../crates/devil-index/src/lib.rs:1) with accepted protocol and storage contracts.
+- Phase 3 acceptance: Accepted.
+- LSP supervision acceptance: Accepted.
+- ADR status note: [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:111) and [`ADR-0018-lsp-runtime-supervision.md`](../../adrs/ADR-0018-lsp-runtime-supervision.md:91) are satisfied by the implementation and evidence listed here.
+- Gate behavior: [`xtask`](../../../xtask/src/main.rs:285) validates that accepted Phase 3 status keeps the required artifact list, removes scaffold disclaimers, provides all required artifact files under this directory, and leaves no unchecked final validation items.
 
 ## Governance prerequisites
 
-- [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:1) is accepted before semantic indexing runtime behavior lands.
-- [`ADR-0018-lsp-runtime-supervision.md`](../../adrs/ADR-0018-lsp-runtime-supervision.md:1) is accepted before LSP runtime supervision or LSP mutation routing lands.
-- [`dependency-policy.md`](../../dependency-policy.md:88) explicitly limits Phase 3 [`Cargo.toml`](../../../crates/devil-index/Cargo.toml:1) activation to [`Cargo.toml`](../../../crates/devil-protocol/Cargo.toml:1), [`Cargo.toml`](../../../crates/devil-storage/Cargo.toml:1), and [`Cargo.toml`](../../../crates/devil-text/Cargo.toml:1).
-- Placeholder crates and planned runtime surfaces remain inert unless they have an accepted ADR, dependency-policy entry, phase gate, protocol contracts, contract tests, ownership tests, and evidence.
+- [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:1) is accepted and satisfied by the bounded `IndexingActor`, scheduler, source descriptor, cache, graph, storage, and query contracts.
+- [`ADR-0018-lsp-runtime-supervision.md`](../../adrs/ADR-0018-lsp-runtime-supervision.md:1) is accepted and satisfied by cancellable LSP DTOs, metadata-only supervision events, fail-closed launch policy, stale/timeout/degraded result statuses, and proposal-only mutation conversion.
+- [`dependency-policy.md`](../../dependency-policy.md:91) limits [`devil-index`](../../../crates/devil-index/Cargo.toml:1) to the approved internal Phase 3 dependencies: `devil-protocol`, `devil-storage`, and `devil-text`.
+- Placeholder crates and later runtime surfaces remain inert unless they have an accepted ADR, dependency-policy entry, phase gate, protocol contracts, contract tests, ownership tests, and evidence.
 
-## Phase 3 requirements
+## Implementation Evidence
 
-- Implement actor-owned indexing with bounded queues, priority scheduling, cancellation tokens, and backpressure.
-- Add repository discovery, ignore handling, file fingerprints, lexical symbol maps, and symbol-file lookup.
-- Add tree-sitter parsing workers with syntax caches keyed by content hash and grammar version.
-- Extract normalized graph records for symbols, references, imports, exports, call edges, type relationships, test links, diagnostics links, and ownership metadata.
-- Integrate LSP diagnostics, completion, hover, definition, reference, rename, formatting, semantic-token, and code-action flows through protocol DTOs.
-- Add low-latency query APIs for UI navigation, completion ranking, AI context selection, agent planning, test impact, and refactoring previews.
-- Invalidate records by content hash, grammar version, model version, and privacy scope.
-- Preserve projection-only UI: UI receives semantic projections and command intents only, never editor session ownership or text ownership.
-- Preserve proposal-mediated saves and mutations: semantic indexing and LSP workers cannot mutate buffers or workspace files directly.
-- Ensure semantic and LSP work cannot block editor input, viewport projection, proposal validation, or save workflows.
-- Defer vector indexing until syntax-aware chunking, provenance, privacy scope, model identity, invalidation contracts, storage retention, contract tests, and dependency policy changes are accepted.
+### 1. Repository Discovery To Lexical Map
 
-## Workflows to validate
+- `WorkspaceDiscoveryRecord`, `WorkspaceDiscoverySnapshot`, and `WorkspaceDiscoveryDelta` are defined in [`devil-protocol`](../../../crates/devil-protocol/src/lib.rs:735) and round-trip in `dto_contracts_workspace_discovery_dtos_golden_and_required_fields`.
+- [`WorkspaceActor::semantic_discovery_snapshot()`](../../../crates/devil-project/src/lib.rs) and watcher-derived discovery deltas expose workspace-authoritative identity, ignore, generated, binary, oversized, trust, fingerprint, and privacy decisions.
+- [`RepositoryDiscoveryImporter`](../../../crates/devil-index/src/lib.rs:762) consumes only protocol discovery DTOs and classifies content-allowed, metadata-only, excluded, and deleted records without scanning the filesystem or minting workspace identity.
+- [`LexicalIndexer`](../../../crates/devil-index/src/lib.rs:2818) extracts symbol maps and graph records from accepted source inputs while preserving content hash, snapshot identity, workspace generation, file content version, and privacy scope.
 
-### 1. Repository discovery to lexical map
+### 2. Open-Buffer Priority And Supersession
 
-1. Receive workspace discovery metadata, file identities, ignore decisions, trust state, and privacy labels through protocol-facing contracts.
-2. Exclude or downgrade ignored, generated, binary, vendored, oversized, or privacy-restricted files.
-3. Compute or consume content hashes and workspace fingerprints as separate concepts.
-4. Populate lexical symbol maps keyed by file identity, language, content hash, snapshot identity, and privacy scope.
-5. Publish freshness and degradation state without emitting full source text by default.
+- [`IndexingActor`](../../../crates/devil-index/src/lib.rs:259) owns a bounded queue, cancellation map, in-flight work table, latest-file identity map, parser cache, and semantic index.
+- `submit`, `start_next`, `complete_started`, `execute_next`, and `cancel` report accepted, cancelled, ignored-obsolete, rejected, applied, and backpressure outcomes without blocking editor workflows.
+- Live snapshot work supersedes stale background work by priority, workspace generation, file content version, and content hash. Obsolete in-flight work completes as cancelled or ignored instead of overwriting fresh records.
+- Scheduler-level `Coalesce`, `Reject`, `Refresh`, and `Reindex` decisions represent coalesced, rejected, degraded/partial, and resync-required outcomes for consumers that cannot accept stale data.
 
-### 2. Open-buffer priority and supersession
+### 3. Syntax Cache And Graph Extraction
 
-1. Receive editor transaction metadata with snapshot identifiers, buffer versions, changed ranges, chunk hashes, and causality.
-2. Prioritize open-buffer incremental work over background repository scans.
-3. Cancel obsolete parse, graph, LSP, ranking, or query-refresh work when a newer snapshot supersedes it.
-4. Return stale-marked or degraded query answers when fresh work is still pending.
-5. Prove editor input and save workflows continue without waiting for semantic completion.
+- [`SourceDocument`](../../../crates/devil-index/src/lib.rs) supports descriptor-only, snapshot-lease chunks, changed ranges, and bounded full-text inputs. Large snapshots use descriptors and chunk metadata without requiring full-source materialization.
+- [`SyntaxCacheKey`](../../../crates/devil-index/src/lib.rs:2035) includes workspace id, file id, snapshot id, file content version, workspace generation, content hash, language, grammar version, parser version, model version, privacy scope, schema version, and descriptor fingerprint.
+- [`SyntaxTreeCache`](../../../crates/devil-index/src/lib.rs:2272) reuses cached parser outcomes only after exact key matching and invalidates grammar-version entries explicitly.
+- [`FileSemanticIndex`](../../../crates/devil-index/src/lib.rs:2390) records symbols, references, imports, exports, call edges, type relationships, test links, diagnostics links, ownership metadata, provenance, freshness, privacy scope, and metadata-only source descriptors.
 
-### 3. Tree-sitter parse and graph extraction
+### 4. LSP Fusion
 
-1. Schedule parse workers through bounded queues and cancellation tokens.
-2. Reuse syntax cache entries only when content hash and grammar version match.
-3. Invalidate syntax and graph records on content hash mismatch, grammar version change, privacy-scope change, schema upgrade, or file identity replacement.
-4. Extract normalized graph records with provenance, confidence, freshness, and privacy metadata.
-5. Persist metadata-only graph state according to storage and redaction policy.
+- [`LspOperationContext`](../../../crates/devil-protocol/src/lib.rs:10292) carries request id, workspace/file/buffer/snapshot identity, buffer version, timeout budget, cancellation token, content hash, correlation, causality, and privacy scope.
+- [`LspResultStatus`](../../../crates/devil-protocol/src/lib.rs:10273) represents fresh, stale, partial, cancelled, timeout, unavailable, and degraded outcomes.
+- [`LspLaunchPolicyDecision`](../../../crates/devil-protocol/src/lib.rs:10413) is fail-closed for untrusted workspaces, denied privacy scopes, missing capabilities, or runtime activation deferral; supervision records are metadata-only and redacted.
+- Diagnostics, completion, hover, definition, reference, rename, formatting, semantic-token, and code-action flows use protocol DTOs. Edit-producing rename, formatting, and code-action outputs convert to proposal-ready `WorkspaceEdit` payloads through `convert_lsp_edit_to_workspace_proposal` rather than applying edits directly.
+- Command-only code actions are represented as denied or deferred command descriptors and cannot execute in Phase 3.
 
-### 4. LSP fusion
+### 5. Proposal-Mediated Semantic Mutations
 
-1. Launch or connect supervised LSP workers only through accepted policy and trust gates.
-2. Send cancellable requests tied to snapshot identity, buffer version, content hash, timeout budget, correlation, and causality.
-3. Convert diagnostics, completion, hover, definition, reference, semantic-token, formatting, rename, and code-action results into protocol DTOs.
-4. Suppress stale responses and publish timeout or degraded status for slow or unavailable servers.
-5. Feed versioned LSP enrichment into the semantic graph without overwriting newer lexical or syntax records.
+- [`build_rename_preview_payload`](../../../crates/devil-index/src/lib.rs) produces proposal-only semantic refactoring previews with version preconditions and complete target coverage.
+- LSP edit conversion requires non-zero correlation, non-nil causality, complete preconditions, compatible lifecycle state, complete target coverage, acceptable privacy scope, and matching capability.
+- [`AppComposition::apply_workspace_proposal()`](../../../crates/devil-app/src/lib.rs:5037) remains the mutation authority for accepted proposal payloads. Semantic and LSP code do not mutate buffers or workspace files directly.
+- Existing save conflict and dirty-buffer preservation tests remain green, proving semantic and LSP acceptance did not weaken the proposal-mediated save path.
 
-### 5. Proposal-mediated semantic mutations
+### 6. Metadata-Only Persistence And Vector Deferral
 
-1. Translate formatting, rename, organize-imports, quick-fix, and refactor outputs into proposal payloads.
-2. Include target coverage, version preconditions, capability requirements, rollback metadata, privacy metadata, correlation, and causality.
-3. Validate and preview through the proposal service before any edit or workspace write.
-4. Reject unsupported, stale, conflicting, or partial edits without changing editor buffers or disk.
-5. Preserve dirty editor text and existing save conflict behavior.
+- [`SemanticMetadataBatch`](../../../crates/devil-protocol/src/lib.rs) and storage requests support metadata-only semantic record persistence, reads, and tombstones.
+- [`InMemoryStorage`](../../../crates/devil-storage/src/lib.rs) and [`FileBackedStorage`](../../../crates/devil-storage/src/lib.rs) round-trip semantic metadata without source bodies and tombstone records on privacy or freshness mismatches.
+- No accepted Phase 3 code computes embeddings, stores vectors, invokes model providers, or performs model-backed retrieval. Model-version fields exist only for future invalidation compatibility.
 
-### 6. Vector-index deferral
+## Validation Commands
 
-1. Confirm no embedding generation, vector database, model-provider dependency, or semantic chunk retrieval is activated in Phase 3.
-2. Confirm cache keys may record model version only for future invalidation compatibility.
-3. Record a follow-on ADR requirement for syntax-aware chunking, provenance, privacy scope, model identity, invalidation contracts, storage retention, contract tests, and dependency policy changes.
-
-## Target validation commands
-
-Record command output artifacts under [`phase-3`](./) before final acceptance.
-
-| Gate | Command | Expected artifact |
+| Gate | Command | Artifact |
 | --- | --- | --- |
-| Dependency policy | `cargo run -p xtask -- check-deps` | `check-deps.txt` showing policy pass and no unauthorized [`Cargo.toml`](../../../crates/devil-index/Cargo.toml:1) dependencies. |
-| Formatting | `cargo fmt --all --check` | `cargo-fmt-check.txt` showing formatted workspace. |
-| Workspace check | `cargo check --workspace --all-targets` | `cargo-check-workspace-all-targets.txt` showing successful compile. |
-| Workspace tests | `cargo test --workspace --all-targets` | `cargo-test-workspace-all-targets.txt` showing all required tests pass. |
-| Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | `cargo-clippy-workspace-all-targets.txt` showing zero warnings. |
-| Index contract tests | `cargo test -p devil-index --all-targets` | `devil-index-tests.txt` covering scheduler, cancellation, backpressure, lexical maps, parser caches, graph records, and invalidation. |
-| Protocol DTO contracts | `cargo test -p devil-protocol --test dto_contracts` | `devil-protocol-dto-contracts.txt` covering semantic and LSP DTO round trips. |
-| Save regression | `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict` | `save-conflict-regression.txt` showing proposal-mediated save conflicts remain protected. |
-| Editor latency and background work | `cargo test -p devil-editor --test performance_suite -- --list` plus Phase 3 performance runs | `editor-semantic-latency.txt` showing semantic work does not block input-oriented paths. |
+| Dependency policy | `cargo run -p xtask -- check-deps` | [`index-dependency-boundary.txt`](index-dependency-boundary.txt) |
+| Formatting | `cargo fmt --all --check` | [`cargo-fmt-check.txt`](cargo-fmt-check.txt) |
+| Workspace check | `cargo check --workspace --all-targets` | [`cargo-check-workspace-all-targets.txt`](cargo-check-workspace-all-targets.txt) |
+| Workspace tests | `cargo test --workspace --all-targets` | [`cargo-test-workspace-all-targets.txt`](cargo-test-workspace-all-targets.txt) |
+| Workspace clippy | `cargo clippy --workspace --all-targets -- -D warnings` | [`cargo-clippy-workspace-all-targets.txt`](cargo-clippy-workspace-all-targets.txt) |
+| Index contract tests | `cargo test -p devil-index --all-targets` | [`devil-index-tests.txt`](devil-index-tests.txt), [`lexical-symbol-map-tests.txt`](lexical-symbol-map-tests.txt), [`tree-sitter-cache-tests.txt`](tree-sitter-cache-tests.txt), [`normalized-graph-contract-tests.txt`](normalized-graph-contract-tests.txt), [`semantic-query-api-tests.txt`](semantic-query-api-tests.txt) |
+| Protocol DTO contracts | `cargo test -p devil-protocol --test dto_contracts` | [`devil-protocol-dto-contracts.txt`](devil-protocol-dto-contracts.txt), [`lsp-supervision-tests.txt`](lsp-supervision-tests.txt) |
+| Storage contracts | `cargo test -p devil-storage --all-targets` | [`privacy-redaction-audit.md`](privacy-redaction-audit.md) |
+| Save regression | `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict` | [`save-conflict-regression.txt`](save-conflict-regression.txt), [`proposal-routing-regression.txt`](proposal-routing-regression.txt) |
+| Editor latency and background work | `cargo test -p devil-editor --test performance_suite -- --list` | [`editor-semantic-latency.txt`](editor-semantic-latency.txt) |
 
-## Expected evidence artifacts
+## Expected Evidence Artifacts
 
-- `semantic-fabric-architecture-map.md`: actor ownership, queues, priorities, cancellation, backpressure, cache keys, and invalidation paths.
-- `index-dependency-boundary.txt`: dependency-policy output proving only permitted internal dependencies for [`Cargo.toml`](../../../crates/devil-index/Cargo.toml:1).
-- `repository-discovery-ignore-fingerprint.md`: discovery and ignore handling cases with file fingerprints and content hashes distinguished.
-- `lexical-symbol-map-tests.txt`: lexical extraction, symbol-file lookup, ignored-file behavior, and stale-work cancellation results.
-- `tree-sitter-cache-tests.txt`: content-hash and grammar-version cache reuse and invalidation results.
-- `normalized-graph-contract-tests.txt`: symbols, references, imports, exports, call edges, type relationships, test links, diagnostics links, and ownership metadata validation.
-- `semantic-query-api-tests.txt`: UI navigation, completion ranking, AI context selection, agent planning, test impact, and refactoring-preview query behavior.
-- `lsp-supervision-tests.txt`: cancellation, backpressure, timeout, stale response suppression, diagnostics, completion, hover, definition, reference, rename, formatting, and code-action DTO flow.
-- `proposal-routing-regression.txt`: proof that LSP and semantic mutation outputs route through proposals and cannot directly mutate buffers or workspaces.
-- `privacy-redaction-audit.md`: evidence that events, caches, and persisted records default to metadata-only retention and honor privacy scope invalidation.
-- `vector-deferral-audit.md`: proof that vector indexing, embeddings, vector storage, and model-backed retrieval remain inactive.
+- [`semantic-fabric-architecture-map.md`](semantic-fabric-architecture-map.md): actor ownership, queues, priorities, cancellation, backpressure, cache keys, invalidation paths, storage metadata, and proposal routing.
+- [`index-dependency-boundary.txt`](index-dependency-boundary.txt): dependency-policy output proving only permitted internal dependencies for [`devil-index`](../../../crates/devil-index/Cargo.toml:1).
+- [`repository-discovery-ignore-fingerprint.md`](repository-discovery-ignore-fingerprint.md): discovery and ignore handling cases with file fingerprints and content hashes distinguished.
+- [`lexical-symbol-map-tests.txt`](lexical-symbol-map-tests.txt): lexical extraction, symbol-file lookup, ignored-file behavior, and stale-work cancellation results.
+- [`tree-sitter-cache-tests.txt`](tree-sitter-cache-tests.txt): parser/syntax cache reuse and invalidation keyed by content hash, grammar version, identity, descriptor, schema, and privacy.
+- [`normalized-graph-contract-tests.txt`](normalized-graph-contract-tests.txt): symbols, references, imports, exports, call edges, type relationships, test links, diagnostics links, and ownership metadata validation.
+- [`semantic-query-api-tests.txt`](semantic-query-api-tests.txt): UI navigation, completion ranking, AI context selection, agent planning, test impact, and refactoring-preview query behavior.
+- [`lsp-supervision-tests.txt`](lsp-supervision-tests.txt): cancellation, backpressure, timeout, stale response suppression, diagnostics, completion, hover, definition, reference, rename, formatting, semantic-token, and code-action DTO flow.
+- [`proposal-routing-regression.txt`](proposal-routing-regression.txt): proof that LSP and semantic mutation outputs route through proposals and cannot directly mutate buffers or workspaces.
+- [`privacy-redaction-audit.md`](privacy-redaction-audit.md): evidence that events, caches, and persisted records default to metadata-only retention and honor privacy scope invalidation.
+- [`vector-deferral-audit.md`](vector-deferral-audit.md): proof that vector indexing, embeddings, vector storage, and model-backed retrieval remain inactive.
 
 ## Final validation checklist
 
-- [ ] [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:1) accepted and cited by implementation evidence.
-- [ ] [`ADR-0018-lsp-runtime-supervision.md`](../../adrs/ADR-0018-lsp-runtime-supervision.md:1) accepted and cited by implementation evidence.
-- [ ] [`dependency-policy.md`](../../dependency-policy.md:88) permits only [`Cargo.toml`](../../../crates/devil-protocol/Cargo.toml:1), [`Cargo.toml`](../../../crates/devil-storage/Cargo.toml:1), and [`Cargo.toml`](../../../crates/devil-text/Cargo.toml:1) as Phase 3 internal dependencies for [`Cargo.toml`](../../../crates/devil-index/Cargo.toml:1).
-- [ ] [`dependency-policy.md`](../../dependency-policy.md:52) still forbids [`Cargo.toml`](../../../crates/devil-editor/Cargo.toml:1) from depending on [`Cargo.toml`](../../../crates/devil-project/Cargo.toml:1).
-- [ ] Actor-owned index queues are bounded and have observable accepted, coalesced, cancelled, rejected, degraded, and resync-required outcomes.
-- [ ] Live editor snapshots supersede background scans and cancel obsolete parse, LSP, ranking, and graph work.
-- [ ] Repository discovery honors ignore, generated, binary, oversized, trust, and privacy decisions.
-- [ ] File fingerprints, content hashes, snapshot identifiers, file content versions, and workspace generations are used for their distinct authorities.
-- [ ] Lexical symbol maps and symbol-file lookup work before tree-sitter enrichment is available.
-- [ ] Tree-sitter syntax caches are keyed by content hash and grammar version and invalidate on either mismatch.
-- [ ] Normalized graph records include symbols, references, imports, exports, call edges, type relationships, test links, diagnostics links, ownership metadata, provenance, freshness, and privacy scope.
-- [ ] Query APIs return freshness and degradation metadata for UI navigation, completion ranking, AI context selection, agent planning, test impact, and refactoring previews.
-- [ ] LSP operations are cancellable, supervised, bounded, timeout-aware, and stale-response-safe.
-- [ ] Diagnostics, completion, hover, definition, reference, rename, formatting, semantic-token, and code-action flows use protocol DTOs.
-- [ ] Formatting, rename, code actions, and semantic refactor suggestions route through proposals and cannot directly edit buffers or workspace files.
-- [ ] UI remains projection-only and does not own editor sessions, text buffers, index state, LSP workers, or workspace VFS authority.
-- [ ] Semantic and LSP work does not block editor input, viewport projection, proposal validation, or save workflows.
-- [ ] Existing proposal-mediated save conflict and dirty-buffer preservation tests remain green.
-- [ ] Metadata-only redaction remains the default for caches, observability, audit, and evidence.
-- [ ] Vector indexing, embeddings, model-backed retrieval, and vector storage remain deferred and inactive.
+- [x] [`ADR-0017-semantic-fabric-indexing.md`](../../adrs/ADR-0017-semantic-fabric-indexing.md:1) accepted and cited by implementation evidence.
+- [x] [`ADR-0018-lsp-runtime-supervision.md`](../../adrs/ADR-0018-lsp-runtime-supervision.md:1) accepted and cited by implementation evidence.
+- [x] [`dependency-policy.md`](../../dependency-policy.md:91) permits only [`devil-protocol`](../../../crates/devil-protocol/Cargo.toml:1), [`devil-storage`](../../../crates/devil-storage/Cargo.toml:1), and [`devil-text`](../../../crates/devil-text/Cargo.toml:1) as Phase 3 internal dependencies for [`devil-index`](../../../crates/devil-index/Cargo.toml:1).
+- [x] [`dependency-policy.md`](../../dependency-policy.md:52) still forbids [`devil-editor`](../../../crates/devil-editor/Cargo.toml:1) from depending on [`devil-project`](../../../crates/devil-project/Cargo.toml:1).
+- [x] Actor-owned index queues are bounded and have observable accepted, coalesced, cancelled, rejected, degraded, and resync-required outcomes.
+- [x] Live editor snapshots supersede background scans and cancel obsolete parse, LSP, ranking, and graph work.
+- [x] Repository discovery honors ignore, generated, binary, oversized, trust, and privacy decisions.
+- [x] File fingerprints, content hashes, snapshot identifiers, file content versions, and workspace generations are used for their distinct authorities.
+- [x] Lexical symbol maps and symbol-file lookup work before parser or LSP enrichment is available.
+- [x] Syntax caches are keyed by content hash and grammar version and invalidate on either mismatch.
+- [x] Normalized graph records include symbols, references, imports, exports, call edges, type relationships, test links, diagnostics links, ownership metadata, provenance, freshness, and privacy scope.
+- [x] Query APIs return freshness and degradation metadata for UI navigation, completion ranking, AI context selection, agent planning, test impact, and refactoring previews.
+- [x] LSP operations are cancellable, supervised, bounded, timeout-aware, and stale-response-safe through protocol DTOs and accepted supervision metadata.
+- [x] Diagnostics, completion, hover, definition, reference, rename, formatting, semantic-token, and code-action flows use protocol DTOs.
+- [x] Formatting, rename, code actions, and semantic refactor suggestions route through proposals and cannot directly edit buffers or workspace files.
+- [x] UI remains projection-only and does not own editor sessions, text buffers, index state, LSP workers, or workspace VFS authority.
+- [x] Semantic and LSP work does not block editor input, viewport projection, proposal validation, or save workflows.
+- [x] Existing proposal-mediated save conflict and dirty-buffer preservation tests remain green.
+- [x] Metadata-only redaction remains the default for caches, observability, audit, and evidence.
+- [x] Vector indexing, embeddings, model-backed retrieval, and vector storage remain deferred and inactive.

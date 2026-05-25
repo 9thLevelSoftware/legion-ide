@@ -1,0 +1,24 @@
+Commands:
+- cargo test -p devil-app --test workspace_vfs_integration
+- cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict
+- cargo test -p devil-protocol --test dto_contracts
+- cargo test -p devil-index --all-targets
+
+Date: 2026-05-24
+Result: passed; app integration 54 passed, save regression 1 passed, protocol DTO contracts 57 passed, index workflows 28 passed
+
+Proposal-routing coverage:
+- `workspace_vfs_integration_registered_save_apply_routes_through_workspace_actor`
+- `workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict`
+- `workspace_vfs_integration_workspace_edit_multi_file_text_edits_apply_atomically`
+- `workspace_vfs_integration_code_action_edits_apply_through_proposal_executor`
+- `workspace_vfs_integration_batch_ordered_non_atomic_requires_partial_failures_before_apply`
+- `workspace_vfs_integration_batch_apply_cannot_self_approve_from_created_state`
+- `dto_contracts_lsp_edits_convert_to_workspace_proposals_without_direct_mutation`
+- `rename_preview_payload_is_proposal_only_and_preserves_preconditions`
+
+Accepted behavior:
+- Semantic and LSP mutation outputs become `WorkspaceProposal` or proposal preview DTOs.
+- Apply is owned by `AppComposition` and authority-specific editor/workspace executors.
+- Save conflicts still return rejected outcomes and preserve dirty text.
+- Unsupported runtime surfaces remain fail-closed.

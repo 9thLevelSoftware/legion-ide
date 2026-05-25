@@ -24,9 +24,9 @@ Older review findings in [`plans/architecture-review-full-codebase-v0.1.md`](pla
 | --- | --- | --- |
 | Governance and architecture truth | Milestone 0 is accepted in [`plans/milestone-0-feasibility-proofs.md`](plans/milestone-0-feasibility-proofs.md:3), and dependency policy is enforced through [`xtask/src/main.rs`](xtask/src/main.rs:70). | Phase 0 of [`plans/implementation-plan.md`](plans/implementation-plan.md:39) is effectively complete, with cleanup tasks only. |
 | Editor and text substrate | Phase 1 evidence records degraded large-file mode, viewport projection, chunk descriptors, and non-blocking fake consumers in [`plans/evidence/phase-1/editor-text-substrate.md`](plans/evidence/phase-1/editor-text-substrate.md:7). | Phase 1 is accepted enough to unblock proposal and semantic work; renderer-backed UI measurements remain follow-up evidence, not a blocker. |
-| Proposal mutation substrate | Phase 2 now has DTOs, routing, lifecycle state, generic save apply, registered open-buffer text edit apply, closed-file create/delete/rename apply, workspace-authorized audit-failure rollback checkpoints, batch preflight/contracts, recoverable app lifecycle snapshots, and live proposal ledger projection in [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1). Runtime batch mutation, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and future runtimes remain gated. | Do not accept Phase 3 or activate AI/plugin/remote/collaboration writes until the remaining Phase 2 gated runtime surfaces have ADR/policy/test evidence or are explicitly deferred. |
+| Proposal mutation substrate | Phase 2 is accepted in [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1). It has DTOs, routing, lifecycle state, generic save apply, registered open-buffer text edit apply, closed-file create/delete/rename apply, multi-file workspace-edit execution, edit-only code-action execution, reversible batch apply/rollback, workspace-authorized audit-failure rollback checkpoints, batch preflight/contracts, recoverable app lifecycle snapshots, and live proposal ledger projection. | Raw `FormatFile`, command-bearing code actions, and future AI/plugin/remote/collaboration/terminal runtime surfaces remain gated beyond Phase 2. |
 | Proposal execution handoff | [`plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md`](plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md:145) gives the concrete remaining checklist for proposal execution and LSP gating. | Treat this as the first actionable task list. |
-| Semantic fabric | [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:13) says partial [`crates/devil-index`](crates/devil-index/src/lib.rs:1) behavior exists, but Phase 3 and LSP supervision are not accepted. | Do not mark Phase 3 accepted until all artifacts and checklist items in [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:104) are complete. |
+| Semantic fabric | Phase 3 is accepted in [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:1). `devil-index` is active for actor-owned bounded scheduling, workspace-authored discovery import, descriptor/lease indexing, syntax-cache freshness, normalized graph records, metadata-only persistence, semantic query APIs, and LSP supervision/proposal-routing DTOs. | Vector indexing, embeddings, model-backed retrieval, and later runtime surfaces remain gated beyond Phase 3. |
 | Semantic boundary remediation | [`plans/semantic-index-boundary-remediation-plan-v0.1.md`](plans/semantic-index-boundary-remediation-plan-v0.1.md:1) identifies current boundary problems: live filesystem discovery, full-source copies, cache freshness/privacy risk, and missing metadata persistence contracts. | This is the first Phase 3 implementation package after Phase 2B. |
 | Agentic AI, plugins, collaboration, remote, hardening | Phases 4-8 in [`plans/implementation-plan.md`](plans/implementation-plan.md:280) remain future platform work. | Keep placeholder crates inert until their ADR, dependency-policy, protocol, test, and evidence gates are complete. |
 
@@ -62,7 +62,7 @@ Tasks:
 
 Exit criteria:
 
-- The status ledger explicitly says Phase 0 and Phase 1 are accepted, Phase 2 is partially accepted, Phase 3 is not accepted, and Phases 4-8 are future-gated.
+- The status ledger explicitly says Phase 0, Phase 1, Phase 2, and Phase 3 are accepted, and Phases 4-8 are future-gated.
 - ADR status ambiguity is removed or tracked as an explicit blocker.
 - `cargo run -p xtask -- check-deps` still passes.
 
@@ -74,7 +74,7 @@ Goal: finish the remaining Phase 2 mutation substrate so future LSP, AI, plugin,
 
 Source checklist: [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:62) and [`plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md`](plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md:145).
 
-Status note, 2026-05-22: lifecycle state, generic save equivalence, deny-by-default validation, open-buffer text edit apply, closed-file create/delete/rename apply, single-file workspace-edit delegation, audit-before-success rollback with workspace-authorized file checkpoints, and live proposal ledger projection are implemented and evidenced. Runtime batch mutation/rollback, multi-file atomicity, multi-edit workspace edits, format/code-action execution, and later ADR-gated runtime sources remain deferred rather than accepted.
+Status note, 2026-05-24: lifecycle state, generic save equivalence, deny-by-default validation, open-buffer text edit apply, closed-file create/delete/rename apply, multi-file workspace-edit execution, edit-only code-action execution, accepted reversible batch mutation/rollback, audit-before-success rollback with workspace-authorized file checkpoints, and live proposal ledger projection are implemented and evidenced. Raw format execution and later ADR-gated runtime sources remain deferred beyond Phase 2.
 
 Work packages:
 
@@ -120,7 +120,7 @@ Acceptance evidence:
 - Save equivalence test for manual save and generic save proposal execution.
 - Open-buffer stale rejection and rollback tests.
 - Closed-file conflict and path-policy tests.
-- Batch all-or-nothing or exact partial-failure tests before runtime batch mutation is enabled.
+- Batch all-or-nothing rollback and ordered non-atomic fail-closed tests are present before accepted reversible batch mutation.
 - Terminal/plugin/remote/collaboration denial tests before those target kinds become first-class executable routes.
 - Audit-before-success storage-failure test.
 - Updated [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1) showing which routes are accepted and which remain future-gated.
@@ -200,17 +200,17 @@ Work packages:
    - Ensure refactoring previews produce proposal-ready payloads without applying edits; [`build_rename_preview_payload()`](crates/devil-index/src/lib.rs:2005) is the current pattern.
 
 5. LSP runtime supervision
-   - Introduce LSP runtime only after dependency policy authorizes it and [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:11) remains not accepted until evidence exists.
+   - Keep LSP process/runtime expansion beyond the accepted Phase 3 DTO and supervision contract behind dependency policy and future evidence.
    - Implement supervised workers, bounded queues, cancellation, timeout behavior, stale-response suppression, circuit breaking, DTO-only output, and proposal-only mutation routing as required by [`plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md`](plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md:111).
    - Formatting, rename, organize imports, quick fixes, refactors, and workspace edits from LSP must become [`WorkspaceProposal`](crates/devil-protocol/src/lib.rs:1472) values before preview or apply.
 
 6. Phase 3 acceptance update
    - Capture every required artifact listed by [`PHASE3_REQUIRED_ARTIFACTS`](xtask/src/main.rs:21).
-   - Only then update [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:11) from not accepted to accepted, remove the scaffold disclaimer, and check every checklist item.
+   - [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:1) is now accepted, scaffold disclaimers are removed, required artifacts exist, and every checklist item is checked.
 
 Stop condition:
 
-- If LSP or semantic workers can write buffers, write files, execute commands, block saves, block input, or return fresh query status across stale privacy/version boundaries, Phase 3 remains not accepted.
+- If future LSP or semantic workers gain the ability to write buffers, write files, execute commands, block saves, block input, or return fresh query status across stale privacy/version boundaries, Phase 3 acceptance must be reopened and revoked until corrected.
 
 ---
 
@@ -364,8 +364,8 @@ Acceptance evidence:
 | --- | --- | --- | --- |
 | 0 | R0 rebaseline and ADR reconciliation | Test/evidence cleanup only | Runtime activation work that depends on unresolved ADRs |
 | 1 | R1 generalized proposal execution | UI projection design for proposal views | LSP apply, AI edits, plugin writes, collaboration writes, remote writes |
-| 2 | R2 semantic-index boundary remediation | R1 tests that do not use semantic mutation | LSP supervision acceptance or Phase 3 acceptance claim |
-| 3 | R3 semantic fabric and LSP supervision | Phase 3 evidence artifact authoring | AI control plane activation |
+| 2 | R2 semantic-index boundary remediation | Complete and accepted | AI control plane activation |
+| 3 | R3 semantic fabric and LSP supervision | Complete and accepted for Phase 3 scope | AI control plane activation |
 | 4 | R4 agentic AI | Privacy Inspector UI design and tracker schema work | Plugin, collaboration, or remote mutation shortcuts |
 | 5 | R5 plugins | R8 diagnostics scaffolding for plugin health | Untrusted extension execution without sandbox quotas |
 | 6 | R6 collaboration | Presence projection UI prototypes | Remote writes or collaborative AI approvals before convergence tests |
