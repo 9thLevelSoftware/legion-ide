@@ -1,0 +1,14 @@
+Command: `cargo test -p devil-collaboration --all-targets`
+Result: PASS
+
+Output summary:
+- 6 tests passed
+- 0 failed
+
+Disconnect/reconnect/replay evidence:
+- Causal gap detection is represented by `CollaborationCausalGap` and `GapDetected` acknowledgement.
+- Resync-required outcomes are emitted for invalid text operation ranges without changing current text.
+- `presence_and_replay_manifest_are_metadata_only` validates metadata-only replay manifests containing operation IDs, participant counts, acknowledgement counts, gap counts, byte counts, correlation, causality, sequence, retention, and redaction hints.
+- `disconnect_reconnect_and_shutdown_states_are_fail_closed` validates participant disconnect, reconnecting presence, text-operation rejection while reconnecting, metadata-only replay manifest resume, reconnect completion, closing, closed-session rejection, and presence rejection after close.
+- App-owned collaboration integration tests in `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_collaboration` validate deterministic protocol-envelope handling without UI/editor ownership leakage.
+- Phase 7 remote workspace authority remains deferred.

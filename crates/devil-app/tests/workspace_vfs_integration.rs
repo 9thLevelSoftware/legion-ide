@@ -18,21 +18,25 @@ use devil_editor::{TextEdit, TextPosition};
 use devil_observability::{InMemoryEventSink, SharedEventSink};
 use devil_project::OpenedFileText;
 use devil_protocol::{
-    BatchProposalPayload, BufferId, BufferVersion, CanonicalPath, CapabilityId, CausalityId,
-    ChangedTextRange, CorrelationId, EditBatch, EventEnvelope, FileConflictLifecycleState,
-    FileContentVersion, FileId, FileIdentity, FileMetadata, FileTreeNode, PreviewSummary,
-    PrincipalId, ProposalAffectedTarget, ProposalAuditRecord, ProposalBatchAtomicity,
-    ProposalBatchDependency, ProposalBatchDependencyKind, ProposalBatchItem,
-    ProposalBatchRollbackPolicy, ProposalDenialReason, ProposalId, ProposalLifecycleAction,
-    ProposalLifecycleCommand, ProposalLifecycleCommandReason, ProposalLifecycleState,
-    ProposalPayload, ProposalRejectionReason, ProposalRequest, ProposalResponse,
-    ProposalRollbackAction, ProposalRollbackReason, ProposalRollbackStep, ProposalStaleReason,
-    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
-    ProposalVersionPreconditions, RedactionHint, SaveConflictPolicy, SaveFileProposal, SaveIntent,
-    SnapshotId, StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextOffset,
-    TextRange, TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
-    ViewportProjectionMode, WorkspaceGeneration, WorkspaceId, WorkspacePort, WorkspaceProposal,
-    WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
+    BatchProposalPayload, BufferId, BufferVersion, CanonicalPath, CapabilityDecision,
+    CapabilityDecisionId, CapabilityId, CausalityId, ChangedTextRange, CollaborationDocumentEpoch,
+    CollaborationDocumentOperation, CollaborationDocumentOperationKind, CollaborationOperationId,
+    CollaborationOperationPreconditions, CollaborationParticipantId, CollaborationSessionId,
+    CollaborationTransportEnvelope, CollaborationTransportPayload, CollaborationVersionVector,
+    CorrelationId, EditBatch, EventEnvelope, FileConflictLifecycleState, FileContentVersion,
+    FileId, FileIdentity, FileMetadata, FileTreeNode, PreviewSummary, PrincipalId,
+    ProposalAffectedTarget, ProposalAuditRecord, ProposalBatchAtomicity, ProposalBatchDependency,
+    ProposalBatchDependencyKind, ProposalBatchItem, ProposalBatchRollbackPolicy,
+    ProposalDenialReason, ProposalId, ProposalLifecycleAction, ProposalLifecycleCommand,
+    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalPayload,
+    ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackAction,
+    ProposalRollbackReason, ProposalRollbackStep, ProposalStaleReason, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions, RedactionHint,
+    SaveConflictPolicy, SaveFileProposal, SaveIntent, SnapshotId, StorageRepositoryRequest,
+    StorageRepositoryResponse, TextCoordinate, TextOffset, TextRange, TextTransactionDescriptor,
+    TimestampMillis, TransactionSource, TrustDecisionContext, ViewportProjectionMode,
+    WorkspaceGeneration, WorkspaceId, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceTrustState,
 };
 use devil_ui::{CommandDispatchIntent, ShellLayoutProjection};
 use uuid::Uuid;
@@ -4670,5 +4674,144 @@ fn workspace_vfs_integration_path_escape_is_denied_without_disk_mutation() {
     assert!(!outside.exists());
 
     let _ = open_err;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_collaboration_presence_is_app_owned_projection() {
+    let root = create_root();
+    let target = root.join("collab.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(target.to_string_lossy()).expect("open file");
+
+    let denied = app.dispatch_ui_intent(CommandDispatchIntent::JoinCollaborationSession {
+        session_id: CollaborationSessionId(71),
+    });
+    assert!(denied.is_err(), "default policy denies runtime sessions");
+
+    app.enable_local_collaboration_runtime();
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::JoinCollaborationSession {
+            session_id: CollaborationSessionId(71),
+        })
+        .expect("join after explicit enable");
+    assert!(matches!(
+        outcome,
+        AppCommandOutcome::CollaborationSessionJoined(CollaborationSessionId(71))
+    ));
+
+    app.dispatch_ui_intent(CommandDispatchIntent::PublishCollaborationPresence {
+        session_id: CollaborationSessionId(71),
+        participant_id: CollaborationParticipantId(1),
+    })
+    .expect("publish presence");
+    let snapshot = app
+        .shell_projection_snapshot("collab")
+        .expect("shell projection");
+    assert_eq!(snapshot.collaboration_presence_projections.len(), 1);
+    assert_eq!(
+        snapshot.collaboration_presence_projections[0].participant_id,
+        CollaborationParticipantId(1)
+    );
+
+    let text = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("collab"))
+        .expect("active buffer projection")
+        .small_buffer_preview
+        .expect("small preview");
+    assert!(text.contains("seed"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_collaboration_operation_uses_editor_authority() {
+    let root = create_root();
+    let target = root.join("collab-op.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".to_string()),
+    )
+    .expect("open workspace");
+    let file_id = app.open_file(target.to_string_lossy()).expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    let workspace_id = app.workspace_id().expect("workspace id");
+    let snapshot = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("snapshot")
+        .clone();
+
+    app.enable_local_collaboration_runtime();
+    app.join_collaboration_session(CollaborationSessionId(72))
+        .expect("join collaboration");
+    let operation = CollaborationDocumentOperation {
+        session_id: CollaborationSessionId(72),
+        operation_id: CollaborationOperationId(7201),
+        author_participant_id: CollaborationParticipantId(1),
+        participant_sequence: 1,
+        kind: CollaborationDocumentOperationKind::Insert {
+            text: "!".to_string(),
+        },
+        range: Some(TextRange::byte(0, 0)),
+        preconditions: CollaborationOperationPreconditions {
+            workspace_id,
+            file_id,
+            buffer_id,
+            snapshot_id: snapshot.snapshot_id,
+            buffer_version: snapshot.buffer_version,
+            document_epoch: CollaborationDocumentEpoch(1),
+            base_vector: CollaborationVersionVector { entries: vec![] },
+            author_principal: PrincipalId("trusted".to_string()),
+            capability_decision: CapabilityDecision {
+                decision_id: CapabilityDecisionId(1),
+                granted: true,
+                capability: CapabilityId("collaboration.operation.publish".to_string()),
+                reason: None,
+            },
+            correlation_id: CorrelationId(7201),
+            causality_id: CausalityId(Uuid::now_v7()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        },
+        undo_group: None,
+        occurred_at: TimestampMillis::now(),
+        schema_version: 1,
+    };
+    let outcome = app
+        .receive_collaboration_transport_envelope(CollaborationTransportEnvelope {
+            session_id: CollaborationSessionId(72),
+            sender_participant_id: CollaborationParticipantId(1),
+            correlation_id: CorrelationId(7201),
+            causality_id: CausalityId(Uuid::now_v7()),
+            payload: CollaborationTransportPayload::Operation(Box::new(operation)),
+            schema_version: 1,
+        })
+        .expect("receive envelope")
+        .expect("operation applied");
+    let AppCommandOutcome::CollaborationOperationApplied(descriptor) = outcome else {
+        panic!("expected collaboration operation outcome");
+    };
+    assert!(matches!(
+        descriptor.source,
+        TransactionSource::CollaborationParticipant { .. }
+    ));
+    let text = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("collab"))
+        .expect("active buffer projection")
+        .small_buffer_preview
+        .expect("small preview");
+    assert!(text.starts_with('!'));
+    assert_eq!(std::fs::read_to_string(&target).expect("disk text"), "seed");
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -2441,6 +2441,56 @@ mod tests {
     }
 
     #[test]
+    fn collaboration_participant_edit_uses_editor_transaction_authority() {
+        let mut engine = EditorEngine::new();
+        let buffer = engine
+            .open_buffer(WorkspaceId(1), FileId(20), "main.rs", "hello")
+            .unwrap();
+        let tx = engine
+            .apply_protocol_edits(EditorApplyTransactionRequest {
+                workspace_id: WorkspaceId(1),
+                buffer_id: buffer,
+                file_id: FileId(20),
+                edits: EditBatch {
+                    edits: vec![ProtocolTextEdit {
+                        range: ProtocolTextRange::byte(5, 5),
+                        replacement: " collab".to_string(),
+                    }],
+                },
+                source: TransactionSource::CollaborationParticipant {
+                    session_id: devil_protocol::CollaborationSessionId(1001),
+                    participant_id: devil_protocol::CollaborationParticipantId(2001),
+                    operation_id: devil_protocol::CollaborationOperationId(3001),
+                },
+                undo_group_id: Some(Uuid::now_v7()),
+                correlation_id: CorrelationId(99),
+            })
+            .unwrap();
+
+        assert_eq!(engine.text(buffer).unwrap(), "hello collab");
+        let descriptor = tx.to_protocol_descriptor();
+        match descriptor.source {
+            TransactionSource::CollaborationParticipant {
+                session_id,
+                participant_id,
+                operation_id,
+            } => {
+                assert_eq!(session_id, devil_protocol::CollaborationSessionId(1001));
+                assert_eq!(
+                    participant_id,
+                    devil_protocol::CollaborationParticipantId(2001)
+                );
+                assert_eq!(operation_id, devil_protocol::CollaborationOperationId(3001));
+            }
+            other => panic!("unexpected transaction source: {other:?}"),
+        }
+        assert_eq!(descriptor.correlation_id, CorrelationId(99));
+        assert!(descriptor.undo_group_id.is_some());
+        assert_eq!(descriptor.pre_buffer_version, BufferVersion(0));
+        assert_eq!(descriptor.post_buffer_version, BufferVersion(1));
+    }
+
+    #[test]
     fn compatibility_session_undo_redo_invariants() {
         let mut session = EditorSession::open("src/main.rs", project(7), "hello");
         session

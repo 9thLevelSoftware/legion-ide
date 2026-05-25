@@ -1,0 +1,15 @@
+Commands:
+- `cargo test -p devil-protocol --test dto_contracts`
+- `cargo test -p devil-app collaboration -- --nocapture`
+Result: PASS
+
+Output summary:
+- 66 tests passed
+- 0 failed
+
+Shared proposal evidence:
+- `dto_contracts_collaboration_shared_proposal_approval_links_policy_and_operations` validates proposal ID, participant ID, approval disposition, capability decision, applied collaboration operation IDs, denial reason field, and schema version.
+- Shared approvals remain protocol metadata and do not bypass proposal execution gates.
+- `shared_collaboration_route_wraps_existing_safe_targets_only` validates that collaboration proposal targets can only wrap an existing safe executor target and that pure collaboration targets remain unsupported/fail-closed.
+- App-owned shared proposal gates require authorized `collaboration.proposal.approve` capability decisions, reject unauthorized approvers, reject denial/stale state, and require all app-registered approvers before applying through existing proposal executors.
+- `devil-app` proposal lifecycle and workspace VFS regression tests pass in the workspace suite, preserving existing proposal-mediated mutation behavior.

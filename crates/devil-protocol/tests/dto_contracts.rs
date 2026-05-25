@@ -3909,6 +3909,18 @@ fn dto_contracts_storage_request_response_schema_golden() {
         occurred_at: TimestampMillis(1700),
         schema_version: 1,
     };
+    let collaboration_audit = CollaborationAuditRecord {
+        session_id: CollaborationSessionId(1001),
+        operation_id: Some(CollaborationOperationId(3001)),
+        proposal_id: Some(ProposalId(700)),
+        event_sequence: EventSequence(8),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        retention_label: RetentionLabel::Audit,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        metadata_summary: "operation_count=1 byte_count=42".to_string(),
+        schema_version: 1,
+    };
     let trust = TrustRecord {
         workspace_id: WorkspaceId(11),
         principal_id: PrincipalId("principal-1".to_string()),
@@ -4029,6 +4041,7 @@ fn dto_contracts_storage_request_response_schema_golden() {
         StorageRepositoryRequest::SaveTrustRecord(trust.clone()),
         StorageRepositoryRequest::SaveProposalAuditRecord(audit.clone()),
         StorageRepositoryRequest::SaveEventMetadata(event_metadata.clone()),
+        StorageRepositoryRequest::SaveCollaborationAuditRecord(collaboration_audit.clone()),
         StorageRepositoryRequest::SaveSemanticMetadata(SemanticMetadataBatch {
             records: vec![semantic_record.clone()],
             tombstones: Vec::new(),
@@ -4046,6 +4059,10 @@ fn dto_contracts_storage_request_response_schema_golden() {
         },
         StorageRepositoryRequest::ReadProposalAuditRecord(devil_protocol::ProposalId(700)),
         StorageRepositoryRequest::ReadEventMetadata(event_id),
+        StorageRepositoryRequest::ReadCollaborationAuditRecord {
+            session_id: CollaborationSessionId(1001),
+            event_sequence: EventSequence(8),
+        },
         StorageRepositoryRequest::ReadSemanticMetadata(semantic_query),
         StorageRepositoryRequest::ReadSemanticMetadataTombstones {
             workspace_id: WorkspaceId(11),
@@ -4067,20 +4084,20 @@ fn dto_contracts_storage_request_response_schema_golden() {
         "proposal.applied"
     );
     assert_eq!(
-        request_value[4]["SaveSemanticMetadata"]["records"][0]["symbols"][0]["symbol_name_hash"]["value"],
+        request_value[5]["SaveSemanticMetadata"]["records"][0]["symbols"][0]["symbol_name_hash"]["value"],
         "symbol-name"
     );
     assert_eq!(
-        request_value[5]["TombstoneSemanticMetadata"]["reason"],
+        request_value[6]["TombstoneSemanticMetadata"]["reason"],
         "PrivacyScopeRevoked"
     );
     assert_eq!(
-        request_value[6]["ReadSessionRecord"]["session_id"],
+        request_value[7]["ReadSessionRecord"]["session_id"],
         "session-1"
     );
-    assert_eq!(request_value[8]["ReadProposalAuditRecord"], 700);
+    assert_eq!(request_value[9]["ReadProposalAuditRecord"], 700);
     assert_eq!(
-        request_value[10]["ReadSemanticMetadata"]["include_stale"],
+        request_value[12]["ReadSemanticMetadata"]["include_stale"],
         false
     );
 
@@ -4089,6 +4106,7 @@ fn dto_contracts_storage_request_response_schema_golden() {
         StorageRepositoryResponse::TrustRecord(Some(trust)),
         StorageRepositoryResponse::ProposalAuditRecord(Some(audit)),
         StorageRepositoryResponse::EventMetadata(Some(event_metadata)),
+        StorageRepositoryResponse::CollaborationAuditRecord(Box::new(Some(collaboration_audit))),
         StorageRepositoryResponse::SemanticMetadata(SemanticMetadataReadResult {
             records: vec![semantic_record],
             rejected: Vec::new(),
@@ -4111,21 +4129,21 @@ fn dto_contracts_storage_request_response_schema_golden() {
     );
     assert_eq!(response_value[3]["EventMetadata"]["correlation_id"], 901);
     assert_eq!(
-        response_value[4]["SemanticMetadata"]["records"][0]["freshness_key"]["parser_version"],
+        response_value[5]["SemanticMetadata"]["records"][0]["freshness_key"]["parser_version"],
         "parser-v1"
     );
     assert_eq!(
-        response_value[5]["SemanticMetadataTombstones"][0]["reason"],
+        response_value[6]["SemanticMetadataTombstones"][0]["reason"],
         "PrivacyScopeRevoked"
     );
 
     let roundtrip: Vec<StorageRepositoryRequest> =
         serde_json::from_value(request_value).expect("deserialize storage requests");
     assert!(matches!(
-        roundtrip[8],
+        roundtrip[9],
         StorageRepositoryRequest::ReadProposalAuditRecord(_)
     ));
-    let serialized_semantic = serde_json::to_string(&response_value[4]).expect("semantic json");
+    let serialized_semantic = serde_json::to_string(&response_value[5]).expect("semantic json");
     assert!(!serialized_semantic.contains("fn main"));
     assert!(!serialized_semantic.contains("source_body"));
 }
@@ -6470,6 +6488,48 @@ fn dto_contracts_collaboration_audit_records_are_metadata_only() {
     assert!(serialized.contains("replace range"));
     assert!(!serialized.contains("bounded replacement"));
     assert!(!serialized.contains("source_text"));
+}
+
+#[test]
+fn dto_contracts_collaboration_replay_manifest_is_metadata_only_and_audit_validated() {
+    let manifest = CollaborationReplayManifest {
+        session_id: CollaborationSessionId(1001),
+        operation_ids: vec![CollaborationOperationId(3001)],
+        participant_count: 2,
+        acknowledgement_count: 1,
+        causal_gap_count: 0,
+        final_byte_count: 42,
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        event_sequence: EventSequence(7),
+        retention_label: RetentionLabel::Audit,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let value = serde_json::to_value(&manifest).expect("manifest should serialize");
+
+    assert_eq!(value["final_byte_count"], json!(42));
+    assert!(!value.to_string().contains("bounded replacement"));
+
+    let valid_audit = CollaborationAuditRecord {
+        session_id: CollaborationSessionId(1001),
+        operation_id: Some(CollaborationOperationId(3001)),
+        proposal_id: None,
+        event_sequence: EventSequence(8),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        retention_label: RetentionLabel::Audit,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        metadata_summary: "operation_count=1 byte_count=42".to_string(),
+        schema_version: 1,
+    };
+    validate_collaboration_audit_record(&valid_audit).expect("metadata-only audit is valid");
+
+    let invalid_audit = CollaborationAuditRecord {
+        metadata_summary: "raw_source=fn main() {}".to_string(),
+        ..valid_audit
+    };
+    assert!(validate_collaboration_audit_record(&invalid_audit).is_err());
 }
 
 #[test]

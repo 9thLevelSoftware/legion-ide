@@ -232,6 +232,7 @@ dependencies = [
  "devil-agent",
  "devil-ai",
  "devil-ai-providers",
+ "devil-collaboration",
  "devil-editor",
  "devil-memory",
  "devil-observability",
@@ -257,6 +258,15 @@ dependencies = [
  "devil-protocol",
  "devil-storage",
  "serde_json",
+]
+
+[[package]]
+name = "devil-collaboration"
+version = "0.1.0"
+dependencies = [
+ "devil-protocol",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

@@ -1,0 +1,14 @@
+Command: `cargo run -p xtask -- check-deps`
+Result: PASS
+
+Output summary:
+- `dependency policy checks passed`
+
+Boundary evidence:
+- `devil-collaboration` is a workspace crate.
+- Allowed internal dependency policy is limited to approved boundary crates.
+- Actual normal internal dependency: `devil-protocol`.
+- No dependency on `devil-app`, `devil-ui`, `devil-editor`, `devil-project`, `devil-remote`, `devil-terminal`, or process/runtime authority crates.
+- `devil-app` has a one-way direct dependency on `devil-collaboration` for app-owned session composition.
+- Collaboration command intents route to explicit app command requests instead of `Noop`.
+- The dependency remains one-way: `devil-collaboration` does not depend on app, UI, editor, project, workspace, remote, terminal, process, or host authority crates.

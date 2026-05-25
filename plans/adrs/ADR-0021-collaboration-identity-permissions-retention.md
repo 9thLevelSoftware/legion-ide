@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft for Phase 6 implementation review.
+Accepted for Phase 6 collaboration identity, policy, and metadata-retention boundaries.
 
 ## Context
 
@@ -12,11 +12,13 @@ Collaboration needs participant identity, admission, operation publishing, prese
 
 Represent collaboration permissions explicitly in protocol DTOs and require principal, capability decision, non-zero correlation ID, non-nil causality ID, workspace/document binding, participant role, retention label, and redaction hints on operation or audit paths. Durable collaboration records default to metadata-only summaries and identifiers.
 
+The security policy exposes collaboration capabilities separately from filesystem, process, terminal, network, plugin, and AI capabilities. Collaboration runtime sessions are disabled by default; presence, shared proposal approval, replay metadata, and audit export must be explicitly enabled by policy. Air-gap and local-provider-only policy deny non-loopback collaboration transport egress.
+
 ## Retention Policy
 
-- Source-bearing operation content is allowed only in bounded in-memory transport/runtime payloads until a later accepted encrypted/session-scoped storage decision exists.
+- Source-bearing operation content is allowed only in bounded in-memory transport/runtime payloads.
 - Audit and replay records keep IDs, ordering, hashes, ranges, byte counts, redaction hints, retention labels, conflict/gap status, and proposal links.
-- Raw source snapshots, full transcripts, secrets, and unbounded comments are not persisted by default.
+- Raw source snapshots, full transcripts, secrets, unbounded comments, and unbounded operation payloads are not persisted by default.
 
 ## Consequences
 

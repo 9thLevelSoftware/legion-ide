@@ -2,6 +2,7 @@
 
 use devil_protocol::{
     AgentRunId, AssistedAiProjection, BufferId, CanonicalPath, CheckpointRollbackProjection,
+    CollaborationParticipantId, CollaborationPresenceProjection, CollaborationSessionId,
     ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
     ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
     PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
@@ -286,6 +287,23 @@ pub enum CommandDispatchIntent {
         /// Metadata-only label for audit/UI display.
         metadata_label: String,
     },
+    /// Join a collaboration session through app-owned collaboration composition.
+    JoinCollaborationSession {
+        /// Session identifier selected from projection data or user input.
+        session_id: CollaborationSessionId,
+    },
+    /// Leave a collaboration session through app-owned collaboration composition.
+    LeaveCollaborationSession {
+        /// Session identifier selected from projection data or user input.
+        session_id: CollaborationSessionId,
+    },
+    /// Publish metadata-only collaboration presence through app-owned composition.
+    PublishCollaborationPresence {
+        /// Session identifier selected from projection data or user input.
+        session_id: CollaborationSessionId,
+        /// Participant identifier selected from projection data or user input.
+        participant_id: CollaborationParticipantId,
+    },
 }
 
 /// Projection snapshot provided to the shell by the application layer.
@@ -317,6 +335,8 @@ pub struct ShellProjectionSnapshot {
     pub delegated_task_projection: DelegatedTaskProjection,
     /// Plugin contribution projections supplied by the application layer.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
+    /// Collaboration presence projections supplied by the application layer.
+    pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
 }
 
 /// Command parsing errors surfaced by projection-only shell input handling.
@@ -359,6 +379,8 @@ pub struct Shell {
     pub delegated_task_projection: DelegatedTaskProjection,
     /// Static plugin contribution projections.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
+    /// Static collaboration presence projections.
+    pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Command dispatch intents emitted by input parsing.
     pub command_dispatch_intents: Vec<CommandDispatchIntent>,
 }
@@ -380,6 +402,7 @@ impl Shell {
             assisted_ai_projection: snapshot.assisted_ai_projection,
             delegated_task_projection: snapshot.delegated_task_projection,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
+            collaboration_presence_projections: snapshot.collaboration_presence_projections,
             command_dispatch_intents: Vec::new(),
         }
     }
@@ -403,6 +426,7 @@ impl Shell {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         })
     }
 
@@ -422,6 +446,7 @@ impl Shell {
             assisted_ai_projection: self.assisted_ai_projection.clone(),
             delegated_task_projection: self.delegated_task_projection.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
+            collaboration_presence_projections: self.collaboration_presence_projections.clone(),
         }
     }
 
@@ -440,6 +465,7 @@ impl Shell {
         self.assisted_ai_projection = snapshot.assisted_ai_projection;
         self.delegated_task_projection = snapshot.delegated_task_projection;
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
+        self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
     }
 
     /// Drain queued command-dispatch intents.
@@ -797,6 +823,43 @@ impl Shell {
             }
         }
 
+        if let Some(session_id) =
+            parse_collaboration_session_id(trimmed.strip_prefix(":collab-join "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::JoinCollaborationSession { session_id },
+            )));
+        }
+        if let Some(session_id) =
+            parse_collaboration_session_id(trimmed.strip_prefix(":collab-leave "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::LeaveCollaborationSession { session_id },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":collab-presence ") {
+            let mut split = payload.split_whitespace();
+            let session_id = split
+                .next()
+                .and_then(|value| value.parse::<u128>().ok())
+                .map(CollaborationSessionId);
+            let participant_id = split
+                .next()
+                .and_then(|value| value.parse::<u128>().ok())
+                .map(CollaborationParticipantId);
+            if let (Some(session_id), Some(participant_id)) = (session_id, participant_id)
+                && session_id.0 != 0
+                && participant_id.0 != 0
+            {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::PublishCollaborationPresence {
+                        session_id,
+                        participant_id,
+                    },
+                )));
+            }
+        }
+
         if let Some(proposal_id) = parse_proposal_id(trimmed.strip_prefix(":proposal-preview ")) {
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::PreviewProposal { proposal_id },
@@ -1130,6 +1193,13 @@ fn parse_proposal_id(payload: Option<&str>) -> Option<ProposalId> {
         .map(ProposalId)
 }
 
+fn parse_collaboration_session_id(payload: Option<&str>) -> Option<CollaborationSessionId> {
+    payload
+        .and_then(|value| value.trim().parse::<u128>().ok())
+        .filter(|value| *value != 0)
+        .map(CollaborationSessionId)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1360,6 +1430,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let intent = shell
@@ -1402,6 +1473,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1446,6 +1518,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1498,6 +1571,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let before = shell.projection_snapshot();
@@ -1572,6 +1646,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1654,6 +1729,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1723,6 +1799,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1856,6 +1933,7 @@ mod tests {
             assisted_ai_projection: assisted.clone(),
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1937,6 +2015,7 @@ mod tests {
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: delegated.clone(),
             plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1979,6 +2058,36 @@ mod tests {
                 plugin_id: PluginId(7),
                 command_id: "phase5.run".to_string(),
                 metadata_label: "metadata-only".to_string(),
+            }
+        );
+        assert_eq!(shell.projection_snapshot(), before);
+        assert_eq!(shell.command_dispatch_intents.len(), 1);
+    }
+
+    #[test]
+    fn ui_collaboration_presence_is_projection_only_command_intent() {
+        let mut shell = Shell::empty("collaboration");
+        shell.collaboration_presence_projections = vec![CollaborationPresenceProjection {
+            session_id: CollaborationSessionId(1001),
+            participant_id: CollaborationParticipantId(2001),
+            cursor: Some(test_coordinate(0, 0)),
+            selections: Vec::new(),
+            activity_label: Some("editing metadata-only range".to_string()),
+            reconnecting: false,
+            schema_version: 1,
+        }];
+
+        let before = shell.projection_snapshot();
+        let intent = shell
+            .handle_command(":collab-presence 1001 2001")
+            .expect("collaboration command should parse")
+            .expect("intent should be emitted");
+
+        assert_eq!(
+            intent,
+            CommandDispatchIntent::PublishCollaborationPresence {
+                session_id: CollaborationSessionId(1001),
+                participant_id: CollaborationParticipantId(2001),
             }
         );
         assert_eq!(shell.projection_snapshot(), before);

@@ -335,6 +335,44 @@ impl Default for PluginCapabilityPolicy {
     }
 }
 
+/// Collaboration capability policy controls.
+#[derive(Debug, Clone)]
+pub struct CollaborationCapabilityPolicy {
+    /// Allowed collaboration capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
+    /// Require trusted workspace for all collaboration actions.
+    pub require_trusted_workspace: bool,
+    /// Whether runtime session creation/join and operation publish are enabled.
+    pub runtime_sessions_enabled: bool,
+    /// Whether metadata-only presence publication is enabled.
+    pub presence_enabled: bool,
+    /// Whether shared proposal approval is enabled.
+    pub shared_proposal_approval_enabled: bool,
+    /// Whether metadata-only audit export is enabled.
+    pub audit_export_enabled: bool,
+}
+
+impl Default for CollaborationCapabilityPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_capabilities: HashSet::from([
+                "collaboration.session.create".to_string(),
+                "collaboration.session.join".to_string(),
+                "collaboration.operation.publish".to_string(),
+                "collaboration.presence.publish".to_string(),
+                "collaboration.proposal.approve".to_string(),
+                "collaboration.replay.metadata".to_string(),
+                "collaboration.audit.export".to_string(),
+            ]),
+            require_trusted_workspace: true,
+            runtime_sessions_enabled: false,
+            presence_enabled: false,
+            shared_proposal_approval_enabled: false,
+            audit_export_enabled: false,
+        }
+    }
+}
+
 /// File-write policy controls.
 #[derive(Debug, Clone)]
 pub struct FileWritePolicy {
@@ -426,6 +464,8 @@ pub struct SecurityPolicy {
     pub network_policy: NetworkPolicy,
     /// AI provider policy.
     pub ai_provider_policy: AiProviderPolicy,
+    /// Collaboration policy.
+    pub collaboration_policy: CollaborationCapabilityPolicy,
 }
 
 /// Security errors.
@@ -708,6 +748,80 @@ impl DenyByDefaultBroker {
         }
     }
 
+    fn collaboration_capability_decision(
+        &self,
+        trust: TrustState,
+        capability: &str,
+        context: &CapabilityRequestContext,
+    ) -> SecurityDecision {
+        if self.policy.collaboration_policy.require_trusted_workspace
+            && trust != TrustState::Trusted
+        {
+            return SecurityDecision::deny(
+                "collaboration capability denied for untrusted workspace",
+            );
+        }
+        if !self
+            .policy
+            .collaboration_policy
+            .allowed_capabilities
+            .contains(capability)
+        {
+            return SecurityDecision::deny(format!(
+                "capability {capability} denied by deny-by-default"
+            ));
+        }
+        if let Some(target) = &context.network_target
+            && (self.policy.network_policy.air_gap
+                || self.policy.network_policy.local_provider_only)
+            && !Self::is_loopback_host(&target.host)
+        {
+            return SecurityDecision::deny(
+                "collaboration transport cannot use non-loopback egress in air-gap policy",
+            );
+        }
+
+        match capability {
+            "collaboration.presence.publish" => {
+                if self.policy.collaboration_policy.presence_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("collaboration presence is disabled by policy")
+                }
+            }
+            "collaboration.proposal.approve" => {
+                if self
+                    .policy
+                    .collaboration_policy
+                    .shared_proposal_approval_enabled
+                {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("collaboration shared proposal approval is disabled")
+                }
+            }
+            "collaboration.replay.metadata" | "collaboration.audit.export" => {
+                if self.policy.collaboration_policy.audit_export_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("collaboration replay/audit export is disabled")
+                }
+            }
+            "collaboration.session.create"
+            | "collaboration.session.join"
+            | "collaboration.operation.publish" => {
+                if self.policy.collaboration_policy.runtime_sessions_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("collaboration runtime sessions are disabled by policy")
+                }
+            }
+            _ => {
+                SecurityDecision::deny(format!("capability {capability} denied by deny-by-default"))
+            }
+        }
+    }
+
     fn decide_with_context(
         &self,
         trust: TrustState,
@@ -725,6 +839,10 @@ impl DenyByDefaultBroker {
             || capability == "tool.plan"
         {
             return self.ai_capability_decision(trust, &capability, context);
+        }
+
+        if capability.starts_with("collaboration.") {
+            return self.collaboration_capability_decision(trust, &capability, context);
         }
 
         if capability.starts_with("plugin.") {
@@ -882,6 +1000,7 @@ impl DenyByDefaultBroker {
             || capability.starts_with("ai.")
             || capability.starts_with("tracker.")
             || capability.starts_with("memory.")
+            || capability.starts_with("collaboration.")
         {
             return true;
         }
@@ -1075,6 +1194,82 @@ mod tests {
             CapabilityId("custom.unknown".to_string()),
             Some("./workspace/a"),
         );
+        assert!(matches!(decision, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn collaboration_capabilities_are_disabled_by_default_and_require_trust() {
+        let mut broker = DenyByDefaultBroker::default();
+        let operation = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("collaboration.operation.publish".to_string()),
+            None,
+        );
+        assert!(matches!(operation, SecurityDecision::Deny(_)));
+
+        let untrusted_presence = broker.decide(
+            TrustState::Untrusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("collaboration.presence.publish".to_string()),
+            None,
+        );
+        assert!(matches!(untrusted_presence, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn collaboration_policy_allows_presence_without_runtime_mutation() {
+        let policy = SecurityPolicy {
+            collaboration_policy: CollaborationCapabilityPolicy {
+                presence_enabled: true,
+                ..CollaborationCapabilityPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+
+        let presence = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("collaboration.presence.publish".to_string()),
+            None,
+        );
+        let operation = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("collaboration.operation.publish".to_string()),
+            None,
+        );
+
+        assert!(matches!(presence, SecurityDecision::Allow));
+        assert!(matches!(operation, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn collaboration_transport_denies_non_loopback_air_gap_egress() {
+        let policy = SecurityPolicy {
+            collaboration_policy: CollaborationCapabilityPolicy {
+                runtime_sessions_enabled: true,
+                ..CollaborationCapabilityPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let decision = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("collaboration.session.join".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "collab.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+
         assert!(matches!(decision, SecurityDecision::Deny(_)));
     }
 

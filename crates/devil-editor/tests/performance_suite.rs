@@ -5,9 +5,10 @@ use devil_editor::{
     SnapshotRetentionPolicy, TextPosition,
 };
 use devil_protocol::{
-    BufferId, EditorViewportRequest, FileId, SnapshotConsumerKind, TextTransactionDescriptor,
-    TransactionSource, ViewportDimensions, ViewportProjection, ViewportProjectionMode,
-    ViewportScroll, WorkspaceId,
+    BufferId, CollaborationOperationId, CollaborationParticipantId, CollaborationSessionId,
+    EditBatch, EditorApplyTransactionRequest, EditorViewportRequest, FileId, SnapshotConsumerKind,
+    TextEdit as ProtocolTextEdit, TextTransactionDescriptor, TransactionSource, ViewportDimensions,
+    ViewportProjection, ViewportProjectionMode, ViewportScroll, WorkspaceId,
 };
 use devil_text::{DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, TextEdit, TextRange};
 
@@ -467,6 +468,156 @@ fn ci_mixed_fake_consumers_do_not_block_user_edits() {
             .iter()
             .all(|consumer| consumer.skipped_versions > 0 && consumer.stale_events == 0)
     );
+}
+
+#[test]
+fn ci_collaboration_edit_overhead_p95_p99_vs_user_baseline() {
+    const SAMPLES: usize = 256;
+    let mut baseline = EditorEngine::new();
+    let baseline_buffer = baseline
+        .open_buffer(
+            WorkspaceId(1),
+            FileId(201),
+            "collab-baseline.txt",
+            deterministic_large_text(64 * 1024),
+        )
+        .expect("open baseline buffer");
+    let mut collaboration = EditorEngine::new();
+    let collaboration_buffer = collaboration
+        .open_buffer(
+            WorkspaceId(1),
+            FileId(202),
+            "collab-apply.txt",
+            deterministic_large_text(64 * 1024),
+        )
+        .expect("open collaboration buffer");
+
+    let mut baseline_samples = Vec::with_capacity(SAMPLES);
+    let mut collaboration_samples = Vec::with_capacity(SAMPLES);
+    for idx in 0..SAMPLES {
+        let start = Instant::now();
+        baseline
+            .apply_edit(
+                baseline_buffer,
+                TextEdit::insert(TextPosition::new(0, 0), "u"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("baseline user edit");
+        baseline_samples.push(start.elapsed());
+
+        let start = Instant::now();
+        collaboration
+            .apply_protocol_edits(EditorApplyTransactionRequest {
+                workspace_id: WorkspaceId(1),
+                buffer_id: collaboration_buffer,
+                file_id: FileId(202),
+                edits: EditBatch {
+                    edits: vec![ProtocolTextEdit {
+                        range: devil_protocol::TextRange::byte(0, 0),
+                        replacement: "c".to_string(),
+                    }],
+                },
+                source: TransactionSource::CollaborationParticipant {
+                    session_id: CollaborationSessionId(9001),
+                    participant_id: CollaborationParticipantId(1),
+                    operation_id: CollaborationOperationId(idx as u128 + 1),
+                },
+                undo_group_id: None,
+                correlation_id: devil_protocol::CorrelationId(idx as u64 + 1),
+            })
+            .expect("collaboration protocol edit");
+        collaboration_samples.push(start.elapsed());
+    }
+
+    let mut baseline_sorted = baseline_samples.clone();
+    let baseline_p50 = percentile(&mut baseline_sorted, 0.50);
+    let baseline_p95 = percentile(&mut baseline_sorted, 0.95);
+    let baseline_p99 = percentile(&mut baseline_sorted, 0.99);
+    let mut collaboration_sorted = collaboration_samples.clone();
+    let collaboration_p50 = percentile(&mut collaboration_sorted, 0.50);
+    let collaboration_p95 = percentile(&mut collaboration_sorted, 0.95);
+    let collaboration_p99 = percentile(&mut collaboration_sorted, 0.99);
+    let p95_overhead = collaboration_p95.saturating_sub(baseline_p95);
+    let p99_overhead = collaboration_p99.saturating_sub(baseline_p99);
+
+    eprintln!(
+        "collaboration edit overhead samples={SAMPLES} baseline_p50={baseline_p50:?} baseline_p95={baseline_p95:?} baseline_p99={baseline_p99:?} collaboration_p50={collaboration_p50:?} collaboration_p95={collaboration_p95:?} collaboration_p99={collaboration_p99:?} overhead_p95={p95_overhead:?} overhead_p99={p99_overhead:?}"
+    );
+
+    assert!(p95_overhead <= Duration::from_millis(2));
+    assert!(p99_overhead <= Duration::from_millis(5));
+}
+
+#[test]
+fn ci_collaboration_snapshot_consumer_overhead_p95_p99() {
+    const SAMPLES: usize = 128;
+    let mut engine = EditorEngine::with_transaction_event_queue_capacity(256);
+    let buffer = engine
+        .open_buffer(
+            WorkspaceId(1),
+            FileId(203),
+            "collab-consumer.txt",
+            deterministic_large_text(64 * 1024),
+        )
+        .expect("open buffer");
+    let mut consumer = FakeBackgroundConsumer::new(SnapshotConsumerKind::Collaboration, 64);
+    let lease = engine
+        .lease_snapshot(buffer, SnapshotConsumerKind::Collaboration)
+        .expect("lease collaboration snapshot");
+
+    let mut baseline_samples = Vec::with_capacity(SAMPLES);
+    let mut consumer_samples = Vec::with_capacity(SAMPLES);
+    for idx in 0..SAMPLES {
+        let descriptor = TextTransactionDescriptor {
+            workspace_id: WorkspaceId(1),
+            buffer_id: buffer,
+            file_id: FileId(203),
+            transaction_id: uuid::Uuid::now_v7(),
+            correlation_id: devil_protocol::CorrelationId(idx as u64 + 1),
+            source: TransactionSource::User,
+            pre_snapshot_id: devil_protocol::SnapshotId(idx as u128 + 1),
+            post_snapshot_id: devil_protocol::SnapshotId(idx as u128 + 2),
+            pre_buffer_version: devil_protocol::BufferVersion(idx as u64 + 1),
+            post_buffer_version: devil_protocol::BufferVersion(idx as u64 + 2),
+            changed_ranges: Vec::new(),
+            causality_id: devil_protocol::CausalityId(uuid::Uuid::now_v7()),
+            parent_transaction_id: None,
+            schema_version: 1,
+            undo_group_id: None,
+            occurred_at: devil_protocol::TimestampMillis(1),
+        };
+        let start = Instant::now();
+        std::hint::black_box(&descriptor);
+        baseline_samples.push(start.elapsed());
+
+        let start = Instant::now();
+        consumer.offer_events(std::slice::from_ref(&descriptor));
+        consumer.drain_one();
+        consumer_samples.push(start.elapsed());
+    }
+    assert!(engine.release_snapshot_lease(lease.lease_id).is_some());
+
+    let mut baseline_sorted = baseline_samples.clone();
+    let baseline_p50 = percentile(&mut baseline_sorted, 0.50);
+    let baseline_p95 = percentile(&mut baseline_sorted, 0.95);
+    let baseline_p99 = percentile(&mut baseline_sorted, 0.99);
+    let mut consumer_sorted = consumer_samples.clone();
+    let consumer_p50 = percentile(&mut consumer_sorted, 0.50);
+    let consumer_p95 = percentile(&mut consumer_sorted, 0.95);
+    let consumer_p99 = percentile(&mut consumer_sorted, 0.99);
+    let p95_overhead = consumer_p95.saturating_sub(baseline_p95);
+    let p99_overhead = consumer_p99.saturating_sub(baseline_p99);
+
+    eprintln!(
+        "collaboration snapshot consumer overhead samples={SAMPLES} baseline_p50={baseline_p50:?} baseline_p95={baseline_p95:?} baseline_p99={baseline_p99:?} consumer_p50={consumer_p50:?} consumer_p95={consumer_p95:?} consumer_p99={consumer_p99:?} overhead_p95={p95_overhead:?} overhead_p99={p99_overhead:?} accepted={} dropped={} queued={}",
+        consumer.accepted_events, consumer.dropped_events, consumer.queued_events
+    );
+
+    assert!(p95_overhead <= Duration::from_millis(2));
+    assert!(p99_overhead <= Duration::from_millis(5));
+    assert!(consumer.accepted_events > 0);
 }
 
 #[test]

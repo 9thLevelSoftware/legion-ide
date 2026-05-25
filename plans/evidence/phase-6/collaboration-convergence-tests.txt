@@ -1,0 +1,12 @@
+Command: `cargo test -p devil-collaboration --all-targets`
+Result: PASS
+
+Output summary:
+- 5 tests passed
+- 0 failed
+
+Convergence evidence:
+- `concurrent_insert_converges_for_two_three_and_five_participants` verifies deterministic final states for 2, 3, and 5 participants under opposite arrival orders.
+- Operation ordering uses participant sequence, participant ID, operation ID, and causal vector dependencies.
+- Duplicate operation submission returns explicit duplicate acknowledgement without changing text.
+- Out-of-order participant sequences produce causal-gap acknowledgement without changing text.

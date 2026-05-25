@@ -1,0 +1,13 @@
+Commands:
+- `cargo test -p devil-ui`
+- `cargo test --workspace --all-targets`
+Result: PASS
+
+Output summary:
+- `devil-ui`: 12 tests passed.
+- Workspace suite passed.
+
+Projection-only evidence:
+- `ui_collaboration_presence_is_projection_only_command_intent` proves collaboration presence projections are consumed as UI projection data and commands emit intents only.
+- `ShellProjectionSnapshot` carries `collaboration_presence_projections` without editor, app, storage, project, or runtime ownership.
+- Existing UI projection-only tests continue to pass for proposal, plugin, AI, privacy, budget, rollback, and large-file projections.

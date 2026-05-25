@@ -1,0 +1,12 @@
+Command: `cargo test --workspace --all-targets`
+Result: PASS
+
+Output summary:
+- Workspace test suite passed.
+- `devil-app` workspace VFS integration: 55 tests passed.
+- `devil-editor` unit tests: 16 passed; atomicity/retention tests: 7 passed; performance suite CI tests: 5 passed and 3 ignored by design.
+
+Dirty-buffer and conflict evidence:
+- Existing save conflict tests continue to pass, including external overwrite conflict, untrusted save denial, stale save preservation, conflict preservation, failed save preservation, and oversized save rejection.
+- New editor test `collaboration_participant_edit_uses_editor_transaction_authority` proves collaboration-authored edits enter through editor-owned transaction authority with `TransactionSource::CollaborationParticipant`.
+- `devil-collaboration` test `duplicate_gap_and_conflict_fail_closed_without_clobbering_text` proves duplicate, gap, and invalid-range resync outcomes preserve current text.

@@ -1,0 +1,13 @@
+Command: `cargo test -p devil-security`
+Result: PASS
+
+Output summary:
+- 23 library tests passed.
+- 4 path policy tests passed.
+
+Security evidence:
+- Collaboration capabilities are denied by default.
+- Collaboration capabilities require trusted workspace by default.
+- Presence can be enabled independently without enabling operation publishing or runtime session mutation.
+- Non-loopback collaboration transport is denied under air-gap/local-provider-only policy.
+- Existing plugin, AI, network, file-write, terminal, and path policies remain green.

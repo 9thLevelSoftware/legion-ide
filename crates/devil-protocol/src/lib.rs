@@ -1687,6 +1687,35 @@ pub struct CollaborationAuditRecord {
     pub schema_version: u16,
 }
 
+/// Metadata-only collaboration replay manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationReplayManifest {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Deterministic operation identifiers in replay order.
+    pub operation_ids: Vec<CollaborationOperationId>,
+    /// Participant count.
+    pub participant_count: u32,
+    /// Acknowledgement count.
+    pub acknowledgement_count: u32,
+    /// Causal gap count.
+    pub causal_gap_count: u32,
+    /// Final document byte count without source text.
+    pub final_byte_count: u64,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Retention label.
+    pub retention_label: RetentionLabel,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Replay manifest schema version.
+    pub schema_version: u16,
+}
+
 /// Collaboration transport envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollaborationTransportEnvelope {
@@ -14643,6 +14672,8 @@ pub enum StorageRepositoryRequest {
     SavePhase4RuntimeAuditRecord(Phase4RuntimeAuditRecord),
     /// Save metadata-only agent replay manifest.
     SaveAgentReplayManifest(AgentReplayManifest),
+    /// Save metadata-only collaboration audit record.
+    SaveCollaborationAuditRecord(CollaborationAuditRecord),
     /// Save durable event metadata.
     SaveEventMetadata(EventMetadataRecord),
     /// Save metadata-only semantic records and tombstones.
@@ -14677,6 +14708,13 @@ pub enum StorageRepositoryRequest {
     ReadPhase4RuntimeAuditRecord(String),
     /// Read metadata-only agent replay manifest.
     ReadAgentReplayManifest(AgentRunId),
+    /// Read metadata-only collaboration audit record.
+    ReadCollaborationAuditRecord {
+        /// Collaboration session identifier.
+        session_id: CollaborationSessionId,
+        /// Event sequence for the audit record.
+        event_sequence: EventSequence,
+    },
     /// Read durable event metadata.
     ReadEventMetadata(EventId),
     /// Read freshness-gated metadata-only semantic records.
@@ -14716,6 +14754,8 @@ pub enum StorageRepositoryResponse {
     Phase4RuntimeAuditRecord(Box<Option<Phase4RuntimeAuditRecord>>),
     /// Metadata-only agent replay manifest.
     AgentReplayManifest(Box<Option<AgentReplayManifest>>),
+    /// Metadata-only collaboration audit record.
+    CollaborationAuditRecord(Box<Option<CollaborationAuditRecord>>),
     /// Event metadata.
     EventMetadata(Option<EventMetadataRecord>),
     /// Freshness-gated semantic metadata read result.
@@ -14846,6 +14886,57 @@ pub fn validate_plugin_storage_record(record: &PluginStorageRecord) -> ProtocolR
         });
     }
     Ok(())
+}
+
+/// Validate metadata-only collaboration audit records before persistence.
+pub fn validate_collaboration_audit_record(
+    record: &CollaborationAuditRecord,
+) -> ProtocolResult<()> {
+    if record.session_id.0 == 0
+        || record.event_sequence.0 == 0
+        || record.correlation_id.0 == 0
+        || record.causality_id.0 == Uuid::nil()
+        || record.schema_version == 0
+    {
+        return Err(ProtocolError {
+            code: "collaboration_audit_invalid".to_string(),
+            message: "session, event sequence, correlation, causality, and schema metadata must be non-zero".to_string(),
+        });
+    }
+    if !record
+        .redaction_hints
+        .contains(&RedactionHint::MetadataOnly)
+        && record.retention_label == RetentionLabel::Audit
+    {
+        return Err(ProtocolError {
+            code: "collaboration_audit_invalid".to_string(),
+            message: "audit-retained collaboration records must be metadata-only".to_string(),
+        });
+    }
+    if contains_forbidden_collaboration_payload(&record.metadata_summary) {
+        return Err(ProtocolError {
+            code: "collaboration_audit_invalid".to_string(),
+            message: "collaboration audit metadata contains forbidden source or secret marker"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn contains_forbidden_collaboration_payload(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "source_text",
+        "source_body",
+        "raw_source",
+        "raw_transcript",
+        "full_snapshot",
+        "secret",
+        "api_key",
+        "unbounded_payload",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn contains_forbidden_plugin_payload(value: &str) -> bool {

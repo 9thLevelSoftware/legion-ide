@@ -511,6 +511,7 @@ Phase 6 collaboration activation is currently limited to accepted protocol DTOs,
   - `CollaborationSharedProposalDisposition`
   - `CollaborationSharedProposalApproval`
   - `CollaborationAuditRecord`
+  - `CollaborationReplayManifest`
   - `CollaborationTransportEnvelope`
   - `CollaborationTransportPayload`
 

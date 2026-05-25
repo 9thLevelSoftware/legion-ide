@@ -16,7 +16,8 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | Phase 3 — Semantic fabric and LSP supervision | **Accepted** | [`plans/evidence/phase-3/predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md) | `devil-index` is activated for actor-owned bounded scheduling, workspace-authored discovery import, descriptor/lease indexing, syntax-cache freshness, graph records, metadata-only persistence, semantic query APIs, and LSP supervision/proposal-routing DTOs. Vector indexing and later runtime surfaces remain deferred. |
 | Phase 4 — Native agentic AI execution context | **Accepted** | [`plans/evidence/phase-4/agentic-ai-architecture-map.md`](evidence/phase-4/agentic-ai-architecture-map.md) | Local-provider, proposal-only, metadata-audited agent execution is accepted. Cloud providers, hosted telemetry, hosted embeddings, gateways, vector storage/retrieval, terminal execution, collaboration, and remote development remain deferred. |
 | Phase 5 — WASM isolated extension ecosystem | **Accepted** | [`plans/evidence/phase-5/plugin-architecture-map.md`](evidence/phase-5/plugin-architecture-map.md) | Manifest-validated, capability-checked, quota-bound, metadata-only plugin runtime boundary is accepted. Plugin command invocation is app-owned and protocol-mediated; UI remains projection-only. Marketplace, VS Code compatibility, Node extensions, arbitrary host scripting, network/process/filesystem/terminal authority, collaboration, and remote development remain deferred. |
-| Phases 6–8 — Collaboration, remote, hardening | **Future-gated** | None accepted | Each phase requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
+| Phase 6 — Collaboration substrate | **Accepted** | [`plans/evidence/phase-6/collaboration-architecture-map.md`](evidence/phase-6/collaboration-architecture-map.md) | Local deterministic collaboration runtime, app-owned session composition/transport envelopes, shared proposal approval gates, reconnect/shutdown lifecycle semantics, metadata-only audit/replay, projection-only UI, and p95/p99 editor overhead evidence are accepted. Remote workspace authority, terminal/process execution, hosted telemetry, and raw-source retention remain deferred. |
+| Phases 7–8 — Remote development and hardening | **Future-gated** | None accepted | Each phase requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
 
 ---
 
@@ -39,6 +40,8 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | ADR-0017 — Semantic fabric indexing | Accepted | Phase 3 evidence accepts the bounded semantic fabric runtime; vector indexing remains deferred. |
 | ADR-0018 — LSP runtime supervision | Accepted | Phase 3 evidence accepts metadata-only LSP supervision contracts and proposal-routed edit outputs; command/process/runtime expansion remains separately gated. |
 | ADR-0019 — WASM plugin runtime boundary | Accepted | Phase 5 evidence accepts the isolated plugin boundary for manifest validation, host-call capability checks, quotas, plugin storage, metadata-only observability, app-owned command invocation, and projection-only UI contributions. |
+| ADR-0020 — Collaboration operation model | Accepted | Phase 6 evidence accepts deterministic operation-log runtime behavior, editor-authority application, app-owned transport composition, replay metadata, and lifecycle fail-closed semantics. |
+| ADR-0021 — Collaboration identity, permissions, and retention | Accepted | Phase 6 evidence accepts collaboration identities, capability-gated runtime activation, shared proposal approvals, metadata-only audit/replay storage, and projection-only UI presence. |
 
 ---
 
@@ -75,7 +78,8 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 4. **R3 — Phase 3B predictive semantic fabric and LSP supervision** — complete and accepted for Phase 3 scope.
 5. **R4 — Phase 4 native agentic AI execution context** — complete and accepted for the local-provider, proposal-only, metadata-audited runtime slice.
 6. **R5 — Phase 5 WASM isolated extension ecosystem** — complete and accepted for the manifest-validated, capability-checked, metadata-only plugin runtime boundary.
-7. **R6–R8** — blocked on individual ADR/policy gates, not on Phase 2, Phase 3, Phase 4, or accepted Phase 5 scope.
+7. **R6 — Collaboration substrate** — complete and accepted for the local deterministic, app-owned, metadata-only collaboration substrate.
+8. **R7–R8** — blocked on individual ADR/policy gates, not on accepted Phase 2 through Phase 6 scope.
 
 ---
 
@@ -87,7 +91,8 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 - [x] Phase 3 is explicitly accepted.
 - [x] Phase 4 is explicitly accepted for local-provider, proposal-only, metadata-audited agent execution.
 - [x] Phase 5 is explicitly accepted.
-- [x] Phases 6–8 are explicitly future-gated.
+- [x] Phase 6 is explicitly accepted.
+- [x] Phases 7–8 are explicitly future-gated.
 - [x] ADR-0002 and ADR-0005 ambiguity is resolved.
 - [x] Historical claims are annotated as historical.
 - [x] Dependency-policy / `xtask` duplication decision is recorded.

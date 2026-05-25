@@ -14,18 +14,19 @@ use devil_protocol::{
     AssistedAiAuditRecord, AssistedAiAuditRedactionState, AssistedAiConsentBoundary,
     AssistedAiContractError, AssistedAiProjection, AssistedAiProposalPreviewSummary,
     AssistedAiProviderInvocationState, AssistedAiRequestContract, AssistedAiRequestDisposition,
-    BufferId, CapabilityId, CausalityId, CorrelationId, DelegatedTaskAssistedAiAuditReference,
-    DelegatedTaskAuditLinkageRecord, DelegatedTaskPlanContract, EventEnvelope, EventId,
-    EventMetadataRecord, EventSequence, EventSeverity, EventSinkPort, EventSinkRequest,
-    FileFingerprint, FileId, PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord,
-    PluginId, PrincipalId, ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
+    BufferId, CapabilityId, CausalityId, CollaborationAuditRecord, CorrelationId,
+    DelegatedTaskAssistedAiAuditReference, DelegatedTaskAuditLinkageRecord,
+    DelegatedTaskPlanContract, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
+    EventSeverity, EventSinkPort, EventSinkRequest, FileFingerprint, FileId,
+    PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord, PluginId, PrincipalId,
+    ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
     ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
     ProposalPrivacyLabel, ProposalRejectionReason, ProposalRollbackReason, ProposalStaleReason,
     ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint, RetentionLabel,
     TextTransactionDescriptor, TimestampMillis, WorkspaceId, WorkspaceProposal,
     delegated_task_audit_linkage_record, validate_agent_replay_manifest,
-    validate_assisted_ai_audit_record, validate_delegated_task_audit_linkage_record,
-    validate_phase4_runtime_audit_record,
+    validate_assisted_ai_audit_record, validate_collaboration_audit_record,
+    validate_delegated_task_audit_linkage_record, validate_phase4_runtime_audit_record,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -86,6 +87,32 @@ pub fn plugin_event_envelope(
             "payload_class": "metadata_only"
         }),
     };
+    validate_envelope(&envelope, EventSinkConfig::default())?;
+    Ok(envelope)
+}
+
+/// Build a metadata-only collaboration audit event envelope.
+pub fn collaboration_audit_recorded_event(
+    record: &CollaborationAuditRecord,
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_collaboration_audit_record(record).map_err(|_| ObservabilityError::InvalidPayload)?;
+    let mut builder =
+        EventEnvelopeBuilder::new("collaboration.audit_recorded", record.causality_id)
+            .retention(record.retention_label)
+            .redaction(RedactionHint::MetadataOnly)
+            .correlation_id(record.correlation_id)
+            .sequence(record.event_sequence)
+            .metadata("session_id", json!(record.session_id.0.to_string()))
+            .metadata("payload_class", json!("metadata_only"))
+            .metadata("metadata_summary", json!(record.metadata_summary));
+    if let Some(operation_id) = record.operation_id {
+        builder = builder.metadata("operation_id", json!(operation_id.0.to_string()));
+    }
+    if let Some(proposal_id) = record.proposal_id {
+        builder = builder.metadata("proposal_id", json!(proposal_id.0));
+    }
+
+    let envelope = builder.build();
     validate_envelope(&envelope, EventSinkConfig::default())?;
     Ok(envelope)
 }
@@ -2167,6 +2194,46 @@ mod tests {
         assert!(!serialized.contains("raw_prompt"));
         assert!(!serialized.contains("provider_response"));
         assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
+    fn collaboration_audit_event_is_metadata_only_and_validated() {
+        let record = CollaborationAuditRecord {
+            session_id: devil_protocol::CollaborationSessionId(1001),
+            operation_id: Some(devil_protocol::CollaborationOperationId(3001)),
+            proposal_id: Some(devil_protocol::ProposalId(42)),
+            event_sequence: EventSequence(88),
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            retention_label: RetentionLabel::Audit,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            metadata_summary: "operations=1 participants=2 bytes=42".to_string(),
+            schema_version: 1,
+        };
+
+        let event = collaboration_audit_recorded_event(&record).expect("collaboration event");
+
+        assert_eq!(event.event, "collaboration.audit_recorded");
+        assert_eq!(event.redaction, RedactionHint::MetadataOnly);
+        assert_eq!(event.retention, RetentionLabel::Audit);
+        assert_eq!(event.payload["payload_class"], "metadata_only");
+        assert_eq!(event.payload["proposal_id"], 42);
+
+        let sink = InMemoryEventSink::new();
+        sink.try_emit(EventSinkRequest { envelope: event })
+            .expect("collaboration event stores");
+        let serialized = serde_json::to_string(&sink.events().expect("stored events"))
+            .expect("serialize stored collaboration event");
+        assert!(!serialized.contains("source_text"));
+        assert!(!serialized.contains("raw_transcript"));
+        assert!(!serialized.contains("secret"));
+
+        let mut invalid = record;
+        invalid.metadata_summary = "source_text=fn main()".to_string();
+        assert!(matches!(
+            collaboration_audit_recorded_event(&invalid),
+            Err(ObservabilityError::InvalidPayload)
+        ));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+Command: `cargo test -p devil-protocol --test dto_contracts`
+Result: PASS
+
+Output summary:
+- 66 tests passed
+- 0 failed
+
+Phase 6 coverage:
+- Collaboration transport envelope serialization and required fields
+- Collaboration identity metadata rejection for zero correlation, nil causality, and denied capability
+- Shared proposal approval policy/operation linkage
+- Metadata-only collaboration audit record validation
+- Metadata-only replay manifest DTO contract
+- Storage repository request/response schema coverage for collaboration audit records

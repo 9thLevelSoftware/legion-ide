@@ -10,18 +10,19 @@ use std::sync::Arc;
 use devil_agent::AgentRuntime;
 use devil_ai::ProviderRouter;
 use devil_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_stub_registry};
+use devil_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use devil_editor::{
     EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, TextEdit, TextPosition,
     TextRange as EditorTextRange,
 };
 use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
 use devil_observability::{
-    SharedEventSink, agent_replay_manifest_recorded_event, event_metadata_record,
-    phase4_runtime_audit_recorded_event, plugin_event_envelope, proposal_applied_event,
-    proposal_approved_event, proposal_audit_record, proposal_audit_recorded_event,
-    proposal_created_event, proposal_failed_event, proposal_previewed_event,
-    proposal_rejected_event, proposal_rolled_back_event, proposal_validated_event,
-    save_denied_event, stale_proposal_rejected_event, transaction_event,
+    SharedEventSink, agent_replay_manifest_recorded_event, collaboration_audit_recorded_event,
+    event_metadata_record, phase4_runtime_audit_recorded_event, plugin_event_envelope,
+    proposal_applied_event, proposal_approved_event, proposal_audit_record,
+    proposal_audit_recorded_event, proposal_created_event, proposal_failed_event,
+    proposal_previewed_event, proposal_rejected_event, proposal_rolled_back_event,
+    proposal_validated_event, save_denied_event, stale_proposal_rejected_event, transaction_event,
 };
 use devil_platform::{NativeFileSystem, NativeWatcherService};
 use devil_plugin::PluginRuntimeHost;
@@ -33,18 +34,24 @@ use devil_project::{
 };
 use devil_protocol::{
     BatchProposalPayload, BufferId, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId,
-    CorrelationId, EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort,
-    EventSinkRequest, FileConflictContext, FileConflictLifecycleState, FileConflictReason,
-    FileConflictState, FileContentVersion, FileFingerprint, FileId, FileIdentity, FileTreeNode,
-    PluginContributionProjection, PluginHostCallKind, PluginHostCallRequest,
-    PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary, PrincipalId,
-    ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem, ProposalBatchRollbackPolicy,
-    ProposalCancellationReason, ProposalDenialReason, ProposalFailureReason, ProposalId,
-    ProposalLifecycleAction, ProposalLifecycleCommand, ProposalLifecycleCommandReason,
-    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPartialFailureDisposition,
-    ProposalPartialFailureRecord, ProposalPayload, ProposalPort, ProposalPreviewWarning,
-    ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest, ProposalResponse,
-    ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
+    CollaborationAuditRecord, CollaborationDocumentBinding, CollaborationDocumentEpoch,
+    CollaborationDocumentOperation, CollaborationDocumentOperationKind, CollaborationParticipant,
+    CollaborationParticipantId, CollaborationParticipantRole, CollaborationPermission,
+    CollaborationPresenceProjection, CollaborationSessionDescriptor, CollaborationSessionId,
+    CollaborationSessionState, CollaborationSharedProposalApproval,
+    CollaborationSharedProposalDisposition, CollaborationTransportEnvelope,
+    CollaborationTransportPayload, CorrelationId, EditorApplyTransactionRequest, EventEnvelope,
+    EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
+    FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
+    FileFingerprint, FileId, FileIdentity, FileTreeNode, PluginContributionProjection,
+    PluginHostCallKind, PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest,
+    PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
+    ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
+    ProposalFailureReason, ProposalId, ProposalLifecycleAction, ProposalLifecycleCommand,
+    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalPartialFailureDisposition, ProposalPartialFailureRecord, ProposalPayload, ProposalPort,
+    ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
+    ProposalResponse, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
     ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, RedactionHint,
     SaveConflictPolicy, SaveFileProposal, SaveIntent, StorageRepositoryPort,
@@ -114,6 +121,9 @@ pub enum AppCompositionError {
         /// Missing run identifier.
         run_id: String,
     },
+    /// Collaboration runtime or app gate rejected a request.
+    #[error("collaboration request failed: {0}")]
+    Collaboration(String),
 }
 
 /// Typed save result returned by application save routing.
@@ -479,6 +489,7 @@ enum ProposalExecutionRoute {
     WorkspaceFile,
     Terminal,
     Batch,
+    SharedCollaboration,
     MetadataOnly,
     Mixed,
     Unsupported,
@@ -494,6 +505,7 @@ impl ProposalExecutionRoute {
                 let mut has_editor = false;
                 let mut has_workspace = false;
                 let mut has_terminal = false;
+                let mut has_collaboration = false;
                 let mut has_metadata = false;
                 let mut has_other = false;
 
@@ -505,9 +517,10 @@ impl ProposalExecutionRoute {
                         }
                         ProposalTargetKind::TerminalSession => has_terminal = true,
                         ProposalTargetKind::MetadataOnly => has_metadata = true,
-                        ProposalTargetKind::RemoteWorkspace
-                        | ProposalTargetKind::CollaborationSession
-                        | ProposalTargetKind::Plugin => has_other = true,
+                        ProposalTargetKind::CollaborationSession => has_collaboration = true,
+                        ProposalTargetKind::RemoteWorkspace | ProposalTargetKind::Plugin => {
+                            has_other = true;
+                        }
                     }
                 }
 
@@ -515,6 +528,7 @@ impl ProposalExecutionRoute {
                     has_editor,
                     has_workspace,
                     has_terminal,
+                    has_collaboration,
                     has_metadata,
                     has_other,
                 ]
@@ -527,14 +541,19 @@ impl ProposalExecutionRoute {
                     has_editor,
                     has_workspace,
                     has_terminal,
+                    has_collaboration,
                     has_metadata,
                     has_other,
                 ) {
-                    (1, true, false, false, false, false) => Self::EditorBuffer,
-                    (1, false, true, false, false, false) => Self::WorkspaceFile,
-                    (1, false, false, true, false, false) => Self::Terminal,
-                    (1, false, false, false, true, false) => Self::MetadataOnly,
-                    (_, _, _, _, _, true) => Self::Unsupported,
+                    (1, true, false, false, false, false, false) => Self::EditorBuffer,
+                    (1, false, true, false, false, false, false) => Self::WorkspaceFile,
+                    (1, false, false, true, false, false, false) => Self::Terminal,
+                    (1, false, false, false, false, true, false) => Self::MetadataOnly,
+                    (1, false, false, false, true, false, false) => Self::Unsupported,
+                    (_, true, false, false, true, false, false)
+                    | (_, false, true, false, true, false, false)
+                    | (_, true, true, false, true, false, false) => Self::SharedCollaboration,
+                    (_, _, _, _, _, _, true) => Self::Unsupported,
                     _ => Self::Mixed,
                 }
             }
@@ -3338,6 +3357,23 @@ pub enum AppCommandRequest {
         /// Metadata-only label for audit and bounded output.
         metadata_label: String,
     },
+    /// Join a collaboration session through app-owned composition.
+    JoinCollaborationSession {
+        /// Session identifier selected from projection data.
+        session_id: CollaborationSessionId,
+    },
+    /// Leave a collaboration session through app-owned composition.
+    LeaveCollaborationSession {
+        /// Session identifier selected from projection data.
+        session_id: CollaborationSessionId,
+    },
+    /// Publish metadata-only collaboration presence through app-owned composition.
+    PublishCollaborationPresence {
+        /// Session identifier selected from projection data.
+        session_id: CollaborationSessionId,
+        /// Participant identifier selected from projection data.
+        participant_id: CollaborationParticipantId,
+    },
 }
 
 /// Minimal editor command port used by app command routing.
@@ -3519,7 +3555,10 @@ impl CommandExecutionService {
             | AppCommandRequest::CancelAiRun { .. }
             | AppCommandRequest::ReplayAiRun { .. }
             | AppCommandRequest::InspectAiRun { .. }
-            | AppCommandRequest::InvokePluginCommand { .. } => Ok(None),
+            | AppCommandRequest::InvokePluginCommand { .. }
+            | AppCommandRequest::JoinCollaborationSession { .. }
+            | AppCommandRequest::LeaveCollaborationSession { .. }
+            | AppCommandRequest::PublishCollaborationPresence { .. } => Ok(None),
             AppCommandRequest::RefreshExplorer => {
                 let workspace_id = state.require_workspace_id()?;
                 let tree = workspace.tree_snapshot(workspace_id)?;
@@ -3639,6 +3678,19 @@ impl CommandDispatcher {
                 plugin_id,
                 command_id,
                 metadata_label,
+            }),
+            CommandDispatchIntent::JoinCollaborationSession { session_id } => {
+                Ok(AppCommandRequest::JoinCollaborationSession { session_id })
+            }
+            CommandDispatchIntent::LeaveCollaborationSession { session_id } => {
+                Ok(AppCommandRequest::LeaveCollaborationSession { session_id })
+            }
+            CommandDispatchIntent::PublishCollaborationPresence {
+                session_id,
+                participant_id,
+            } => Ok(AppCommandRequest::PublishCollaborationPresence {
+                session_id,
+                participant_id,
             }),
             CommandDispatchIntent::PreviewProposal { .. }
             | CommandDispatchIntent::ApproveProposal { .. }
@@ -4742,6 +4794,14 @@ pub enum AppCommandOutcome {
     AiRunInspected(Box<AppAiInspectionSnapshot>),
     /// Phase 5 plugin command was invoked through app-owned plugin composition.
     PluginCommandInvoked(Box<PluginHostCallResponse>),
+    /// Collaboration session was joined through app-owned composition.
+    CollaborationSessionJoined(CollaborationSessionId),
+    /// Collaboration session was left through app-owned composition.
+    CollaborationSessionLeft(CollaborationSessionId),
+    /// Metadata-only collaboration presence was published.
+    CollaborationPresencePublished(CollaborationSessionId),
+    /// Collaboration transport operation was accepted and applied through editor authority.
+    CollaborationOperationApplied(TextTransactionDescriptor),
 }
 
 /// App-owned result for a Phase 4 AI run.
@@ -4789,6 +4849,37 @@ struct Phase4ProjectionState {
     replay_manifests: HashMap<devil_protocol::AgentRunId, devil_protocol::AgentReplayManifest>,
 }
 
+#[derive(Debug, Clone)]
+struct SharedProposalGate {
+    required_approvers: HashSet<CollaborationParticipantId>,
+    authorized_approvers: HashSet<CollaborationParticipantId>,
+    approvals: HashMap<CollaborationParticipantId, CollaborationSharedProposalApproval>,
+    denials: HashMap<CollaborationParticipantId, CollaborationSharedProposalApproval>,
+    applied_operation_ids: Vec<devil_protocol::CollaborationOperationId>,
+    stale: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CollaborationComposition {
+    runtime_sessions_enabled: bool,
+    presence_enabled: bool,
+    sessions: HashMap<CollaborationSessionId, CollaborationSessionRuntime>,
+    shared_proposals: HashMap<(CollaborationSessionId, ProposalId), SharedProposalGate>,
+}
+
+impl CollaborationComposition {
+    fn presence_projections(&self) -> Vec<CollaborationPresenceProjection> {
+        let mut projections = self
+            .sessions
+            .values()
+            .flat_map(CollaborationSessionRuntime::presence)
+            .collect::<Vec<_>>();
+        projections
+            .sort_by_key(|projection| (projection.session_id.0, projection.participant_id.0));
+        projections
+    }
+}
+
 /// Root application composition.
 pub struct AppComposition {
     workspace: WorkspaceActor,
@@ -4805,6 +4896,7 @@ pub struct AppComposition {
     phase4_projection_state: Phase4ProjectionState,
     plugin_runtime: PluginRuntimeHost,
     plugin_contribution_projections: Vec<PluginContributionProjection>,
+    collaboration: CollaborationComposition,
 }
 
 impl AppComposition {
@@ -4842,6 +4934,7 @@ impl AppComposition {
             phase4_projection_state: Phase4ProjectionState::default(),
             plugin_runtime: PluginRuntimeHost::new(),
             plugin_contribution_projections: Vec::new(),
+            collaboration: CollaborationComposition::default(),
         }
     }
 
@@ -5007,6 +5100,23 @@ impl AppComposition {
             } => Ok(AppCommandOutcome::PluginCommandInvoked(Box::new(
                 self.invoke_plugin_command(plugin_id, command_id, metadata_label)?,
             ))),
+            AppCommandRequest::JoinCollaborationSession { session_id } => {
+                self.join_collaboration_session(session_id)?;
+                Ok(AppCommandOutcome::CollaborationSessionJoined(session_id))
+            }
+            AppCommandRequest::LeaveCollaborationSession { session_id } => {
+                self.leave_collaboration_session(session_id)?;
+                Ok(AppCommandOutcome::CollaborationSessionLeft(session_id))
+            }
+            AppCommandRequest::PublishCollaborationPresence {
+                session_id,
+                participant_id,
+            } => {
+                self.publish_collaboration_presence(session_id, participant_id)?;
+                Ok(AppCommandOutcome::CollaborationPresencePublished(
+                    session_id,
+                ))
+            }
             _ => unreachable!("command execution service handled non-workflow command"),
         }
     }
@@ -5069,6 +5179,236 @@ impl AppComposition {
         })?;
         self.emit_event(envelope);
         Ok(response)
+    }
+
+    /// Enable local deterministic collaboration runtime for trusted app-owned sessions.
+    pub fn enable_local_collaboration_runtime(&mut self) {
+        self.collaboration.runtime_sessions_enabled = true;
+        self.collaboration.presence_enabled = true;
+    }
+
+    /// Create or join a local collaboration session bound to the active editor buffer.
+    pub fn join_collaboration_session(
+        &mut self,
+        session_id: CollaborationSessionId,
+    ) -> Result<(), AppCompositionError> {
+        if !self.collaboration.runtime_sessions_enabled {
+            return Err(AppCompositionError::Collaboration(
+                "collaboration runtime sessions are disabled by policy".to_string(),
+            ));
+        }
+        let context = self.active_documents.require_active_save_context()?;
+        if context.trust != WorkspaceTrustState::Trusted {
+            return Err(AppCompositionError::Collaboration(
+                "untrusted workspaces cannot join collaboration sessions".to_string(),
+            ));
+        }
+        if self.collaboration.sessions.contains_key(&session_id) {
+            return Ok(());
+        }
+        let snapshot = self.editor.current_snapshot(context.buffer_id)?.clone();
+        let descriptor = CollaborationSessionDescriptor {
+            session_id,
+            workspace_id: context.workspace_id,
+            state: CollaborationSessionState::Active,
+            created_by: context.principal.clone(),
+            created_at: TimestampMillis::now(),
+            document_bindings: vec![CollaborationDocumentBinding {
+                workspace_id: context.workspace_id,
+                file_id: context.metadata.identity.file_id,
+                buffer_id: context.buffer_id,
+                snapshot_id: snapshot.snapshot_id,
+                buffer_version: snapshot.buffer_version,
+                document_epoch: CollaborationDocumentEpoch(1),
+                content_fingerprint: Some(FileFingerprint {
+                    algorithm: "devil-text-snapshot".to_string(),
+                    value: snapshot.content_hash,
+                }),
+                schema_version: 1,
+            }],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let participant = CollaborationParticipant {
+            session_id,
+            participant_id: CollaborationParticipantId(1),
+            principal_id: context.principal,
+            role: CollaborationParticipantRole::Owner,
+            permissions: vec![
+                CollaborationPermission::CreateSession,
+                CollaborationPermission::JoinSession,
+                CollaborationPermission::PublishOperation,
+                CollaborationPermission::PublishPresence,
+                CollaborationPermission::ApproveSharedProposal,
+                CollaborationPermission::ReplayMetadata,
+                CollaborationPermission::ExportAudit,
+            ],
+            display_label: "local participant".to_string(),
+            schema_version: 1,
+        };
+        let runtime = CollaborationSessionRuntime::new(
+            descriptor,
+            vec![participant],
+            "",
+            CollaborationRuntimeConfig::enabled(),
+        )
+        .map_err(|error| AppCompositionError::Collaboration(error.to_string()))?;
+        self.collaboration.sessions.insert(session_id, runtime);
+        Ok(())
+    }
+
+    /// Leave a local collaboration session without mutating editor text.
+    pub fn leave_collaboration_session(
+        &mut self,
+        session_id: CollaborationSessionId,
+    ) -> Result<(), AppCompositionError> {
+        if let Some(runtime) = self.collaboration.sessions.get_mut(&session_id) {
+            runtime.begin_shutdown();
+            runtime.finish_shutdown();
+        }
+        self.collaboration.sessions.remove(&session_id);
+        Ok(())
+    }
+
+    /// Publish metadata-only collaboration presence through app-owned runtime state.
+    pub fn publish_collaboration_presence(
+        &mut self,
+        session_id: CollaborationSessionId,
+        participant_id: CollaborationParticipantId,
+    ) -> Result<(), AppCompositionError> {
+        if !self.collaboration.presence_enabled {
+            return Err(AppCompositionError::Collaboration(
+                "collaboration presence is disabled by policy".to_string(),
+            ));
+        }
+        let runtime = self
+            .collaboration
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| {
+                AppCompositionError::Collaboration("collaboration session is missing".to_string())
+            })?;
+        runtime
+            .publish_presence(CollaborationPresenceProjection {
+                session_id,
+                participant_id,
+                cursor: None,
+                selections: Vec::new(),
+                activity_label: Some("active".to_string()),
+                reconnecting: false,
+                schema_version: 1,
+            })
+            .map_err(|error| AppCompositionError::Collaboration(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Receive a deterministic local transport envelope and apply accepted operations through editor authority.
+    pub fn receive_collaboration_transport_envelope(
+        &mut self,
+        envelope: CollaborationTransportEnvelope,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let operation = match &envelope.payload {
+            CollaborationTransportPayload::Operation(operation) => Some((**operation).clone()),
+            _ => None,
+        };
+        let runtime = self
+            .collaboration
+            .sessions
+            .get_mut(&envelope.session_id)
+            .ok_or_else(|| {
+                AppCompositionError::Collaboration("collaboration session is missing".to_string())
+            })?;
+        let outcome = runtime
+            .handle_transport_envelope(envelope)
+            .map_err(|error| AppCompositionError::Collaboration(error.to_string()))?;
+
+        let Some(operation) = operation else {
+            return Ok(None);
+        };
+        let Some(outcome) = outcome else {
+            return Ok(None);
+        };
+        if outcome.acknowledgement.status
+            != devil_protocol::CollaborationAcknowledgementStatus::Accepted
+        {
+            return Ok(None);
+        }
+        let descriptor = self.apply_collaboration_operation_through_editor(operation)?;
+        self.emit_transaction_event(&descriptor);
+        let audit = self.collaboration_audit_record(Some(descriptor.correlation_id), None, None)?;
+        self.persist_collaboration_audit(audit)?;
+        Ok(Some(AppCommandOutcome::CollaborationOperationApplied(
+            descriptor,
+        )))
+    }
+
+    fn apply_collaboration_operation_through_editor(
+        &mut self,
+        operation: CollaborationDocumentOperation,
+    ) -> Result<TextTransactionDescriptor, AppCompositionError> {
+        let replacement = match operation.kind {
+            CollaborationDocumentOperationKind::Insert { text }
+            | CollaborationDocumentOperationKind::Replace { text } => text,
+            CollaborationDocumentOperationKind::Delete => String::new(),
+            _ => {
+                return Err(AppCompositionError::Collaboration(
+                    "operation has no text mutation".to_string(),
+                ));
+            }
+        };
+        let range = operation.range.ok_or_else(|| {
+            AppCompositionError::Collaboration("text operation requires a range".to_string())
+        })?;
+        let record = self
+            .editor
+            .apply_protocol_edits(EditorApplyTransactionRequest {
+                workspace_id: operation.preconditions.workspace_id,
+                buffer_id: operation.preconditions.buffer_id,
+                file_id: operation.preconditions.file_id,
+                edits: devil_protocol::EditBatch {
+                    edits: vec![devil_protocol::TextEdit { range, replacement }],
+                },
+                source: TransactionSource::CollaborationParticipant {
+                    session_id: operation.session_id,
+                    participant_id: operation.author_participant_id,
+                    operation_id: operation.operation_id,
+                },
+                undo_group_id: operation.undo_group.map(|group| group.group_id),
+                correlation_id: operation.preconditions.correlation_id,
+            })?;
+        Ok(record.to_protocol_descriptor())
+    }
+
+    fn collaboration_audit_record(
+        &mut self,
+        correlation_id: Option<CorrelationId>,
+        operation_id: Option<devil_protocol::CollaborationOperationId>,
+        proposal_id: Option<ProposalId>,
+    ) -> Result<CollaborationAuditRecord, AppCompositionError> {
+        let session = self.collaboration.sessions.values().next().ok_or_else(|| {
+            AppCompositionError::Collaboration("collaboration session is missing".to_string())
+        })?;
+        Ok(session.audit_record(
+            operation_id,
+            proposal_id,
+            self.event_sequence_generator.next(),
+            correlation_id.unwrap_or_else(|| self.correlation_generator.next()),
+        ))
+    }
+
+    fn persist_collaboration_audit(
+        &self,
+        record: CollaborationAuditRecord,
+    ) -> Result<(), AppCompositionError> {
+        self.storage
+            .handle(StorageRepositoryRequest::SaveCollaborationAuditRecord(
+                record.clone(),
+            ))
+            .map_err(AppCompositionError::Protocol)?;
+        let envelope = collaboration_audit_recorded_event(&record)
+            .map_err(|error| AppCompositionError::Collaboration(error.to_string()))?;
+        self.emit_event(envelope);
+        Ok(())
     }
 
     /// Start a Phase 4 local-provider AI run and register its generated edit as a proposal.
@@ -5682,6 +6022,7 @@ impl AppComposition {
                 schema_version: 1,
             },
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
+            collaboration_presence_projections: self.collaboration.presence_projections(),
         })
     }
 
@@ -6124,6 +6465,125 @@ impl AppComposition {
         Ok(response)
     }
 
+    /// Register a shared collaboration approval gate for an app-owned proposal.
+    pub fn register_shared_collaboration_proposal(
+        &mut self,
+        session_id: CollaborationSessionId,
+        proposal_id: ProposalId,
+        required_approvers: Vec<CollaborationParticipantId>,
+        authorized_approvers: Vec<CollaborationParticipantId>,
+        applied_operation_ids: Vec<devil_protocol::CollaborationOperationId>,
+    ) {
+        self.collaboration.shared_proposals.insert(
+            (session_id, proposal_id),
+            SharedProposalGate {
+                required_approvers: required_approvers.iter().copied().collect(),
+                authorized_approvers: authorized_approvers.into_iter().collect(),
+                approvals: HashMap::new(),
+                denials: HashMap::new(),
+                applied_operation_ids,
+                stale: false,
+            },
+        );
+    }
+
+    /// Record an app-owned shared collaboration proposal approval or denial.
+    pub fn record_shared_collaboration_approval(
+        &mut self,
+        approval: CollaborationSharedProposalApproval,
+    ) -> Result<(), AppCompositionError> {
+        if !approval.capability_decision.granted
+            || approval.capability_decision.capability
+                != CapabilityId("collaboration.proposal.approve".to_string())
+        {
+            return Err(AppCompositionError::Collaboration(
+                "shared proposal approval lacks authorized capability".to_string(),
+            ));
+        }
+        let gate = self
+            .collaboration
+            .shared_proposals
+            .get_mut(&(approval.session_id, approval.proposal_id))
+            .ok_or_else(|| {
+                AppCompositionError::Collaboration("shared proposal gate is missing".to_string())
+            })?;
+        if !gate.authorized_approvers.contains(&approval.participant_id) {
+            return Err(AppCompositionError::Collaboration(
+                "participant is not authorized to approve shared proposal".to_string(),
+            ));
+        }
+        match approval.disposition {
+            CollaborationSharedProposalDisposition::Approved => {
+                gate.approvals.insert(approval.participant_id, approval);
+            }
+            CollaborationSharedProposalDisposition::Denied => {
+                gate.denials.insert(approval.participant_id, approval);
+            }
+            CollaborationSharedProposalDisposition::Superseded => {
+                gate.stale = true;
+            }
+            CollaborationSharedProposalDisposition::Pending => {}
+        }
+        Ok(())
+    }
+
+    fn collaboration_session_for_proposal(
+        proposal: &WorkspaceProposal,
+    ) -> Option<CollaborationSessionId> {
+        AppProposalCoordinator::affected_target_coverage(proposal)
+            .targets
+            .iter()
+            .filter_map(|target| target.collaboration_session_id.as_deref())
+            .find_map(|id| id.parse::<u128>().ok().map(CollaborationSessionId))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn ensure_shared_collaboration_proposal_approved(
+        &self,
+        proposal: &WorkspaceProposal,
+    ) -> Result<Option<CollaborationSessionId>, ProposalResponse> {
+        let Some(session_id) = Self::collaboration_session_for_proposal(proposal) else {
+            return Ok(None);
+        };
+        let Some(gate) = self
+            .collaboration
+            .shared_proposals
+            .get(&(session_id, proposal.proposal_id))
+        else {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.shared_collaboration_approval_missing",
+                "shared collaboration proposal requires app-owned approval evidence before apply",
+            ));
+        };
+        if gate.stale {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.shared_collaboration_approval_stale",
+                "stale or superseded shared collaboration approval does not authorize apply",
+            ));
+        }
+        if !gate.denials.is_empty() {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.shared_collaboration_denied",
+                "explicit shared collaboration denial blocks proposal apply",
+            ));
+        }
+        if !gate
+            .required_approvers
+            .iter()
+            .all(|participant| gate.approvals.contains_key(participant))
+        {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.shared_collaboration_quorum_missing",
+                "shared collaboration proposal lacks required approvals",
+            ));
+        }
+        Ok(Some(session_id))
+    }
+
     fn apply_workspace_proposal(
         &mut self,
         proposal: WorkspaceProposal,
@@ -6169,6 +6629,21 @@ impl AppComposition {
             );
             return Ok(response);
         }
+
+        let shared_session_id = match self.ensure_shared_collaboration_proposal_approved(&proposal)
+        {
+            Ok(session_id) => session_id,
+            Err(response) => {
+                let _ = SaveWorkflowService::observe_proposal_response(
+                    &mut self.proposal_coordinator,
+                    &self.storage,
+                    &proposal,
+                    &response,
+                    None,
+                );
+                return Ok(response);
+            }
+        };
 
         let rollback = match self.rollback_snapshot_for_proposal(&proposal) {
             Ok(rollback) => rollback,
@@ -6234,6 +6709,24 @@ impl AppComposition {
         } else {
             if let Some(save_success) = deferred_save_success {
                 self.commit_deferred_save_success(save_success);
+            }
+            if let ProposalResponse::Applied(_) = &response
+                && let Some(session_id) = shared_session_id
+                && let Some(gate) = self
+                    .collaboration
+                    .shared_proposals
+                    .get(&(session_id, proposal.proposal_id))
+            {
+                let operation_id = gate.applied_operation_ids.first().copied();
+                if let Some(runtime) = self.collaboration.sessions.get(&session_id) {
+                    let audit = runtime.audit_record(
+                        operation_id,
+                        Some(proposal.proposal_id),
+                        self.event_sequence_generator.next(),
+                        proposal.correlation_id,
+                    );
+                    self.persist_collaboration_audit(audit)?;
+                }
             }
             Ok(response)
         }
@@ -9396,6 +9889,105 @@ mod tests {
             }
             other => panic!("unexpected plugin command outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_dispatcher_routes_collaboration_intents_to_app_requests() {
+        let active = AppCommandRouteContext {
+            workspace_id: Some(WorkspaceId(1)),
+            buffer_id: Some(BufferId(1)),
+            file_id: Some(FileId(1)),
+        };
+        let join = CommandDispatcher::route_intent(
+            CommandDispatchIntent::JoinCollaborationSession {
+                session_id: CollaborationSessionId(7),
+            },
+            active,
+            CorrelationId(1),
+        )
+        .expect("join routes");
+        assert_eq!(
+            join,
+            AppCommandRequest::JoinCollaborationSession {
+                session_id: CollaborationSessionId(7)
+            }
+        );
+
+        let presence = CommandDispatcher::route_intent(
+            CommandDispatchIntent::PublishCollaborationPresence {
+                session_id: CollaborationSessionId(7),
+                participant_id: CollaborationParticipantId(9),
+            },
+            active,
+            CorrelationId(1),
+        )
+        .expect("presence routes");
+        assert_eq!(
+            presence,
+            AppCommandRequest::PublishCollaborationPresence {
+                session_id: CollaborationSessionId(7),
+                participant_id: CollaborationParticipantId(9),
+            }
+        );
+    }
+
+    #[test]
+    fn shared_collaboration_route_wraps_existing_safe_targets_only() {
+        let editor_target = ProposalAffectedTarget {
+            target_id: "editor".to_string(),
+            kind: ProposalTargetKind::OpenBuffer,
+            workspace_id: Some(WorkspaceId(1)),
+            file_id: Some(FileId(1)),
+            buffer_id: Some(BufferId(1)),
+            path: None,
+            terminal_session_id: None,
+            plugin_id: None,
+            remote_authority: None,
+            collaboration_session_id: None,
+            byte_ranges: Vec::new(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        };
+        let collaboration_target = ProposalAffectedTarget {
+            target_id: "collaboration".to_string(),
+            kind: ProposalTargetKind::CollaborationSession,
+            workspace_id: Some(WorkspaceId(1)),
+            file_id: Some(FileId(1)),
+            buffer_id: Some(BufferId(1)),
+            path: None,
+            terminal_session_id: None,
+            plugin_id: None,
+            remote_authority: None,
+            collaboration_session_id: Some("7".to_string()),
+            byte_ranges: Vec::new(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        };
+        let shared = ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets: vec![editor_target, collaboration_target.clone()],
+            omitted_target_count: 0,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        };
+        assert_eq!(
+            ProposalExecutionRoute::for_payload(
+                &text_edit_proposal(ProposalId(70)).payload,
+                &shared
+            ),
+            ProposalExecutionRoute::SharedCollaboration
+        );
+
+        let pure_collaboration = ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets: vec![collaboration_target],
+            omitted_target_count: 0,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        };
+        assert_eq!(
+            ProposalExecutionRoute::for_payload(
+                &text_edit_proposal(ProposalId(71)).payload,
+                &pure_collaboration
+            ),
+            ProposalExecutionRoute::Unsupported
+        );
     }
 
     #[test]

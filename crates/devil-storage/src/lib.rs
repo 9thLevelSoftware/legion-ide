@@ -14,8 +14,9 @@ use std::sync::{
 use devil_observability::{SharedEventSink, event_metadata_record};
 use devil_protocol::{
     AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
-    CorrelationId, DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId, EventMetadataRecord,
-    EventSequence, EventSinkPort, EventSinkRequest, FileId, FileMetadata, Phase4RuntimeAuditRecord,
+    CollaborationAuditRecord, CollaborationSessionId, CorrelationId,
+    DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
+    EventSinkPort, EventSinkRequest, FileId, FileMetadata, Phase4RuntimeAuditRecord,
     PluginDenialReason, PluginStorageOperation, PluginStorageRecord, PrincipalId,
     ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult, SemanticMetadataBatch,
     SemanticMetadataFreshnessKey, SemanticMetadataQuery, SemanticMetadataReadResult,
@@ -23,8 +24,8 @@ use devil_protocol::{
     StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse, TrustRecord,
     WorkspaceConfigSnapshot, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
     validate_agent_replay_manifest, validate_assisted_ai_audit_record,
-    validate_delegated_task_audit_linkage_record, validate_phase4_runtime_audit_record,
-    validate_plugin_storage_record,
+    validate_collaboration_audit_record, validate_delegated_task_audit_linkage_record,
+    validate_phase4_runtime_audit_record, validate_plugin_storage_record,
 };
 use devil_security::TrustState;
 use serde::{Deserialize, Serialize};
@@ -193,6 +194,7 @@ pub struct InMemoryStorage {
     protocol_delegated_task_audit_linkage: HashMap<String, DelegatedTaskAuditLinkageRecord>,
     protocol_phase4_runtime_audit: HashMap<String, Phase4RuntimeAuditRecord>,
     protocol_agent_replay_manifests: HashMap<AgentRunId, AgentReplayManifest>,
+    protocol_collaboration_audit: HashMap<String, CollaborationAuditRecord>,
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     protocol_semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     protocol_semantic_tombstones: Vec<SemanticMetadataTombstone>,
@@ -224,6 +226,8 @@ struct PersistedState {
     #[serde(default)]
     protocol_agent_replay_manifests: HashMap<AgentRunId, AgentReplayManifest>,
     #[serde(default)]
+    protocol_collaboration_audit: HashMap<String, CollaborationAuditRecord>,
+    #[serde(default)]
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     semantic_tombstones: Vec<SemanticMetadataTombstone>,
@@ -246,6 +250,7 @@ impl From<&InMemoryStorage> for PersistedState {
                 .clone(),
             protocol_phase4_runtime_audit: value.protocol_phase4_runtime_audit.clone(),
             protocol_agent_replay_manifests: value.protocol_agent_replay_manifests.clone(),
+            protocol_collaboration_audit: value.protocol_collaboration_audit.clone(),
             protocol_event_metadata: value.protocol_event_metadata.clone(),
             semantic_metadata: value.protocol_semantic_metadata.clone(),
             semantic_tombstones: value.protocol_semantic_tombstones.clone(),
@@ -272,6 +277,7 @@ impl Clone for InMemoryStorage {
                 .clone(),
             protocol_phase4_runtime_audit: self.protocol_phase4_runtime_audit.clone(),
             protocol_agent_replay_manifests: self.protocol_agent_replay_manifests.clone(),
+            protocol_collaboration_audit: self.protocol_collaboration_audit.clone(),
             protocol_event_metadata: self.protocol_event_metadata.clone(),
             protocol_semantic_metadata: self.protocol_semantic_metadata.clone(),
             protocol_semantic_tombstones: self.protocol_semantic_tombstones.clone(),
@@ -426,6 +432,7 @@ impl From<PersistedState> for InMemoryStorage {
             protocol_delegated_task_audit_linkage: value.protocol_delegated_task_audit_linkage,
             protocol_phase4_runtime_audit: value.protocol_phase4_runtime_audit,
             protocol_agent_replay_manifests: value.protocol_agent_replay_manifests,
+            protocol_collaboration_audit: value.protocol_collaboration_audit,
             protocol_event_metadata: value.protocol_event_metadata,
             protocol_semantic_metadata: value.semantic_metadata,
             protocol_semantic_tombstones: value.semantic_tombstones,
@@ -812,6 +819,13 @@ impl InMemoryStorage {
                     key.0
                 )))
             }
+            StorageRepositoryRequest::SaveCollaborationAuditRecord(record) => {
+                Self::validate_collaboration_audit_record(&record)?;
+                let key = collaboration_audit_storage_key(record.session_id, record.event_sequence);
+                self.protocol_collaboration_audit
+                    .insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!("collaboration_audit:{key}")))
+            }
             StorageRepositoryRequest::SaveEventMetadata(record) => {
                 Self::validate_event_metadata(&record)?;
                 let key = record.event_id;
@@ -880,6 +894,16 @@ impl InMemoryStorage {
                     self.protocol_agent_replay_manifests.get(&run_id).cloned(),
                 )))
             }
+            StorageRepositoryRequest::ReadCollaborationAuditRecord {
+                session_id,
+                event_sequence,
+            } => Ok(StorageRepositoryResponse::CollaborationAuditRecord(
+                Box::new(
+                    self.protocol_collaboration_audit
+                        .get(&collaboration_audit_storage_key(session_id, event_sequence))
+                        .cloned(),
+                ),
+            )),
             StorageRepositoryRequest::ReadEventMetadata(event_id) => {
                 Ok(StorageRepositoryResponse::EventMetadata(
                     self.protocol_event_metadata.get(&event_id).cloned(),
@@ -1150,6 +1174,12 @@ impl InMemoryStorage {
         })
     }
 
+    fn validate_collaboration_audit_record(record: &CollaborationAuditRecord) -> StorageResult<()> {
+        validate_collaboration_audit_record(record).map_err(|error| StorageError::Failed {
+            message: error.message,
+        })
+    }
+
     fn validate_delegated_task_audit_linkage_record(
         record: &DelegatedTaskAuditLinkageRecord,
     ) -> StorageResult<()> {
@@ -1203,6 +1233,13 @@ fn semantic_metadata_storage_key(record: &SemanticMetadataRecord) -> String {
         key.parser_version,
         key.privacy_scope,
     )
+}
+
+fn collaboration_audit_storage_key(
+    session_id: CollaborationSessionId,
+    event_sequence: EventSequence,
+) -> String {
+    format!("{}:{}", session_id.0, event_sequence.0)
 }
 
 fn semantic_metadata_matches_query(
@@ -1593,6 +1630,21 @@ mod tests {
         }
     }
 
+    fn collaboration_audit_record() -> CollaborationAuditRecord {
+        CollaborationAuditRecord {
+            session_id: CollaborationSessionId(1001),
+            operation_id: Some(devil_protocol::CollaborationOperationId(3001)),
+            proposal_id: Some(ProposalId(700)),
+            event_sequence: EventSequence(9),
+            correlation_id: CorrelationId(7),
+            causality_id: non_nil_causality_id(),
+            retention_label: RetentionLabel::Audit,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            metadata_summary: "operations=1 participants=2 bytes=42".to_string(),
+            schema_version: 1,
+        }
+    }
+
     fn assisted_ai_audit_record() -> AssistedAiAuditRecord {
         AssistedAiAuditRecord {
             audit_id: "assist:audit:req-1:1".to_string(),
@@ -1892,6 +1944,57 @@ mod tests {
     }
 
     #[test]
+    fn collaboration_audit_storage_roundtrips_metadata_only_and_rejects_raw_source() {
+        let storage = InMemoryStorageRepositoryPort::new();
+        let record = collaboration_audit_record();
+        storage
+            .handle(StorageRepositoryRequest::SaveCollaborationAuditRecord(
+                record.clone(),
+            ))
+            .expect("save collaboration audit record");
+
+        let loaded = storage
+            .handle(StorageRepositoryRequest::ReadCollaborationAuditRecord {
+                session_id: record.session_id,
+                event_sequence: record.event_sequence,
+            })
+            .expect("read collaboration audit record");
+        match loaded {
+            StorageRepositoryResponse::CollaborationAuditRecord(loaded) => {
+                let loaded = loaded.expect("collaboration audit should exist");
+                assert_eq!(loaded.session_id, record.session_id);
+                assert!(
+                    loaded
+                        .redaction_hints
+                        .contains(&RedactionHint::MetadataOnly)
+                );
+                assert!(!loaded.metadata_summary.contains("source_text"));
+            }
+            other => panic!("unexpected collaboration audit response: {other:?}"),
+        }
+
+        let mut invalid = collaboration_audit_record();
+        invalid.metadata_summary = "raw_transcript=secret source_text".to_string();
+        assert!(
+            storage
+                .handle(StorageRepositoryRequest::SaveCollaborationAuditRecord(
+                    invalid
+                ))
+                .is_err()
+        );
+
+        let mut zero_sequence = collaboration_audit_record();
+        zero_sequence.event_sequence = EventSequence(0);
+        assert!(
+            storage
+                .handle(StorageRepositoryRequest::SaveCollaborationAuditRecord(
+                    zero_sequence
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn assisted_ai_audit_storage_roundtrips_metadata_only_and_rejects_invalid_records() {
         let storage = InMemoryStorageRepositoryPort::new();
         let record = assisted_ai_audit_record();
@@ -2115,6 +2218,7 @@ mod tests {
         let event = event_metadata_record();
         let assisted = assisted_ai_audit_record();
         let delegated = delegated_task_audit_linkage_record();
+        let collaboration = collaboration_audit_record();
 
         {
             let mut storage = FileBackedStorage::open(&path).expect("open storage");
@@ -2142,6 +2246,12 @@ mod tests {
                     ),
                 )
                 .expect("save delegated task linkage");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveCollaborationAuditRecord(
+                    collaboration.clone(),
+                ))
+                .expect("save collaboration audit");
             storage.flush().expect("flush storage");
         }
 
@@ -2205,6 +2315,22 @@ mod tests {
                 );
             }
             other => panic!("unexpected delegated linkage response: {other:?}"),
+        }
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadCollaborationAuditRecord {
+                session_id: collaboration.session_id,
+                event_sequence: collaboration.event_sequence,
+            })
+            .expect("read collaboration audit")
+        {
+            StorageRepositoryResponse::CollaborationAuditRecord(loaded) => {
+                assert_eq!(
+                    loaded.expect("collaboration audit").metadata_summary,
+                    collaboration.metadata_summary
+                );
+            }
+            other => panic!("unexpected collaboration audit response: {other:?}"),
         }
 
         let _ = fs::remove_file(path);

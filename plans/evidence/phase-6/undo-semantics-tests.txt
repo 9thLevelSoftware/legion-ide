@@ -1,0 +1,11 @@
+Command: `cargo test -p devil-collaboration --all-targets`
+Result: PASS
+
+Output summary:
+- 5 tests passed
+- 0 failed
+
+Undo evidence:
+- `delete_replace_and_undo_compensation_are_deterministic_metadata_operations` covers delete, replace, and explicit undo-compensation operation metadata.
+- Undo compensation is represented as a collaboration operation kind and participates in deterministic acknowledgement/replay without raw source persistence.
+- Undo grouping remains represented in protocol through `UndoGroup` on `CollaborationDocumentOperation` and editor transaction descriptors.
