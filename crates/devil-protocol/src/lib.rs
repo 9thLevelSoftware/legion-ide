@@ -12665,6 +12665,15 @@ pub enum WorkspaceRequest {
     ReadConfig(WorkspaceId),
     /// Read current workspace tree snapshot.
     ReadTree(WorkspaceId),
+    /// Read workspace-authored semantic discovery snapshot.
+    ReadSemanticDiscoverySnapshot(WorkspaceId),
+    /// Build a workspace-authored semantic discovery delta from watcher metadata.
+    BuildSemanticDiscoveryDelta {
+        /// Workspace id to resolve events against.
+        workspace_id: WorkspaceId,
+        /// Watcher events supplied by workspace authority.
+        events: Vec<WatcherEvent>,
+    },
     /// Apply tree delta.
     ApplyTreeDelta(FileTreeDelta),
 }
@@ -12682,8 +12691,41 @@ pub enum WorkspaceResponse {
     Config(WorkspaceConfigSnapshot),
     /// Tree.
     Tree(Vec<FileTreeNode>),
+    /// Workspace-authored semantic discovery snapshot.
+    SemanticDiscoverySnapshot(WorkspaceDiscoverySnapshot),
+    /// Workspace-authored semantic discovery delta.
+    SemanticDiscoveryDelta(WorkspaceDiscoveryDelta),
     /// Conflict.
     Conflict(FileConflictState),
+}
+
+/// Semantic fabric request envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SemanticRequest {
+    /// Plan semantic fabric jobs through actor-owned scheduling policy.
+    PlanJobs {
+        /// Metadata-only job requests to plan.
+        requests: Vec<SemanticFabricJobRequest>,
+        /// Correlation id.
+        correlation_id: CorrelationId,
+        /// Causality id.
+        causality_id: CausalityId,
+    },
+    /// Execute a semantic query against actor-owned index state.
+    Query(SemanticQueryRequest),
+    /// Cancel semantic work by token metadata.
+    Cancel(SemanticCancellationToken),
+}
+
+/// Semantic fabric response envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SemanticResponse {
+    /// Metadata-only scheduling plan.
+    SchedulePlan(SemanticFabricSchedulePlan),
+    /// Semantic query response.
+    Query(SemanticQueryResponse),
+    /// Cancellation was accepted or observed by the semantic service boundary.
+    Cancelled(SemanticCancellationToken),
 }
 
 /// Editor request envelope.
@@ -13379,6 +13421,12 @@ pub trait LspPort {
     fn handle(&self, request: LspRequest) -> ProtocolResult<LspResponse>;
 }
 
+/// Service-port for semantic fabric interactions.
+pub trait SemanticPort {
+    /// Handle semantic fabric request.
+    fn handle(&self, request: SemanticRequest) -> ProtocolResult<SemanticResponse>;
+}
+
 /// Service-port for capability broker interactions.
 pub trait CapabilityBrokerPort {
     /// Handle capability request.
@@ -13832,6 +13880,7 @@ mod tests {
         struct MockProposalPort;
         struct MockTerminalPort;
         struct MockLspPort;
+        struct MockSemanticPort;
         struct MockCapabilityBrokerPort;
         struct MockEventSinkPort;
         struct MockStorageRepositoryPort;
@@ -13861,6 +13910,11 @@ mod tests {
                 Err(ProtocolError::unsupported("not implemented"))
             }
         }
+        impl SemanticPort for MockSemanticPort {
+            fn handle(&self, _request: SemanticRequest) -> ProtocolResult<SemanticResponse> {
+                Err(ProtocolError::unsupported("not implemented"))
+            }
+        }
         impl CapabilityBrokerPort for MockCapabilityBrokerPort {
             fn handle(&self, _request: CapabilityRequest) -> ProtocolResult<CapabilityResponse> {
                 Err(ProtocolError::unsupported("not implemented"))
@@ -13880,24 +13934,27 @@ mod tests {
             }
         }
 
-        struct AllPorts<W, E, P, T, L, C, ES, S> {
+        struct AllPorts<W, E, P, T, L, SEM, C, ES, S> {
             w: W,
             e: E,
             p: P,
             t: T,
             l: L,
+            sem: SEM,
             c: C,
             es: ES,
             s: S,
         }
 
-        fn use_all_ports<W, E, P, T, L, C, ES, S>(ports: AllPorts<W, E, P, T, L, C, ES, S>)
-        where
+        fn use_all_ports<W, E, P, T, L, SEM, C, ES, S>(
+            ports: AllPorts<W, E, P, T, L, SEM, C, ES, S>,
+        ) where
             W: WorkspacePort,
             E: EditorPort,
             P: ProposalPort,
             T: TerminalPort,
             L: LspPort,
+            SEM: SemanticPort,
             C: CapabilityBrokerPort,
             ES: EventSinkPort,
             S: StorageRepositoryPort,
@@ -13908,6 +13965,7 @@ mod tests {
                 p,
                 t,
                 l,
+                sem,
                 c,
                 es,
                 s,
@@ -13991,6 +14049,19 @@ mod tests {
                     server_id: LanguageServerId(1),
                     file_id: FileId(1),
                 }),
+                sem.handle(SemanticRequest::Cancel(SemanticCancellationToken {
+                    token_id: CancellationTokenId(Uuid::now_v7()),
+                    workspace_id: WorkspaceId(1),
+                    file_id: None,
+                    snapshot_id: None,
+                    content_hash: None,
+                    workspace_generation: Some(WorkspaceGeneration(1)),
+                    privacy_scope: SemanticPrivacyScope::Workspace,
+                    reason: Some(SemanticCancellationReason::UserCancelled),
+                    issued_at: TimestampMillis(1),
+                    expires_at: None,
+                    schema_version: 1,
+                })),
                 c.handle(CapabilityRequest::Request {
                     principal_id: PrincipalId("x".to_string()),
                     capability_id: CapabilityId("k".to_string()),
@@ -14030,6 +14101,7 @@ mod tests {
             p: MockProposalPort,
             t: MockTerminalPort,
             l: MockLspPort,
+            sem: MockSemanticPort,
             c: MockCapabilityBrokerPort,
             es: MockEventSinkPort,
             s: MockStorageRepositoryPort,

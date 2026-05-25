@@ -198,6 +198,8 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `SemanticFabricJobRequest`
   - `SemanticFabricSchedulingDecision`
   - `SemanticFabricSchedulePlan`
+  - `SemanticRequest`
+  - `SemanticResponse`
   - `ContextManifestPurpose`
   - `ContextManifestItemKind`
   - `ContextManifestInclusionState`
@@ -430,6 +432,7 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `ProposalPort`
   - `TerminalPort`
   - `LspPort`
+  - `SemanticPort`
   - `CapabilityBrokerPort`
   - `EventSinkPort`
   - `StorageRepositoryPort`

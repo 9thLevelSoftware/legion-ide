@@ -19,15 +19,16 @@ use devil_protocol::{
     SemanticFabricDependencyHint, SemanticFabricInvalidationCause, SemanticFabricSchedulingAction,
     SemanticFabricSchedulingTrigger, SemanticFabricWorkSourceKind, SemanticFileFingerprintIdentity,
     SemanticFreshnessState, SemanticGrammarVersion, SemanticGraphRecordKind,
-    SemanticMetadataSourceKind, SemanticModelVersion, SemanticPrivacyScope,
+    SemanticMetadataSourceKind, SemanticModelVersion, SemanticPort, SemanticPrivacyScope,
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
-    SemanticQueryScope, SemanticQueryStatus, SnapshotChunkDescriptor, SnapshotConsumerKind,
-    SnapshotId, SnapshotLeaseChunk, SnapshotLeaseDescriptor, TextCoordinate, TextEdit, TextRange,
-    TimestampMillis, WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision,
-    WorkspaceDiscoveryDelta, WorkspaceDiscoveryPathPolicyResult, WorkspaceDiscoveryPolicyDecision,
-    WorkspaceDiscoveryRecord, WorkspaceDiscoverySkipReason, WorkspaceDiscoverySnapshot,
-    WorkspaceDiscoveryTrustResult, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
-    WorkspaceGeneration, WorkspaceId, WorkspaceRootId, WorkspaceTextEdit, WorkspaceTrustState,
+    SemanticQueryScope, SemanticQueryStatus, SemanticRequest, SemanticResponse,
+    SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId, SnapshotLeaseChunk,
+    SnapshotLeaseDescriptor, TextCoordinate, TextEdit, TextRange, TimestampMillis,
+    WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision, WorkspaceDiscoveryDelta,
+    WorkspaceDiscoveryPathPolicyResult, WorkspaceDiscoveryPolicyDecision, WorkspaceDiscoveryRecord,
+    WorkspaceDiscoverySkipReason, WorkspaceDiscoverySnapshot, WorkspaceDiscoveryTrustResult,
+    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
+    WorkspaceRootId, WorkspaceTextEdit, WorkspaceTrustState,
     convert_lsp_edit_to_workspace_proposal, validate_lsp_edit_proposal_contract,
 };
 use devil_text::{DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, TextSnapshot};
@@ -579,6 +580,75 @@ fn priority_ordering_starts_highest_priority_before_fifo_background_work() {
         started.item.cancellation.token_id,
         CancellationTokenId(Uuid::from_u128(2))
     );
+}
+
+#[test]
+fn indexing_actor_exposes_semantic_port_for_planning_queries_and_cancellation() {
+    let mut actor = IndexingActor::new(2);
+    actor
+        .submit(work(
+            1,
+            WorkPriority::LiveSnapshot,
+            1,
+            1,
+            "pub fn semantic_port_symbol() {}",
+        ))
+        .unwrap();
+    let report = actor.execute_next().unwrap().unwrap();
+    assert_eq!(report.state, WorkCompletionState::Applied);
+
+    let SemanticResponse::Query(response) = actor
+        .handle(SemanticRequest::Query(query(
+            SemanticQueryKind::SymbolLookup,
+            None,
+            10,
+        )))
+        .expect("semantic port query should be served by actor-owned index")
+    else {
+        panic!("semantic port returned unexpected response");
+    };
+    assert_eq!(response.status, SemanticQueryStatus::Fresh);
+    assert!(
+        response
+            .results
+            .iter()
+            .any(|result| result.label == "semantic_port_symbol")
+    );
+
+    let document = document(
+        "/workspace/src/port_plan.rs",
+        2,
+        1,
+        "pub fn semantic_port_plan() {}",
+    );
+    let request = fabric_scheduler(2).request_from_source_document(
+        &document,
+        SemanticFabricSchedulingTrigger::RecentEdit,
+        None,
+        token(2),
+        CorrelationId(2),
+        CausalityId(Uuid::from_u128(2)),
+    );
+    let SemanticResponse::SchedulePlan(plan) = actor
+        .handle(SemanticRequest::PlanJobs {
+            requests: vec![request],
+            correlation_id: CorrelationId(3),
+            causality_id: CausalityId(Uuid::from_u128(3)),
+        })
+        .expect("semantic port should plan jobs through metadata-only scheduler")
+    else {
+        panic!("semantic port returned unexpected response");
+    };
+    assert_eq!(plan.capacity, 2);
+    assert_eq!(plan.decisions.len(), 1);
+
+    let SemanticResponse::Cancelled(cancelled) = actor
+        .handle(SemanticRequest::Cancel(token(3)))
+        .expect("semantic port should accept cancellation metadata")
+    else {
+        panic!("semantic port returned unexpected response");
+    };
+    assert_eq!(cancelled.token_id, CancellationTokenId(Uuid::from_u128(3)));
 }
 
 #[test]

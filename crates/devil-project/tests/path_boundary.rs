@@ -15,7 +15,8 @@ use devil_protocol::{
     BufferVersion, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId, CorrelationId,
     EventSequence, PrincipalId, ProposalId, ProposalResponse, ProposalStaleReason, SnapshotId,
     WatcherEvent, WatcherEventKind, WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision,
-    WorkspaceDiscoverySkipReason, WorkspaceOpenRequest, WorkspaceTrustState,
+    WorkspaceDiscoverySkipReason, WorkspaceOpenRequest, WorkspacePort, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use uuid::Uuid;
@@ -220,9 +221,15 @@ fn semantic_discovery_snapshot_reports_safe_workspace_policy_outcomes() {
     std::fs::write(root.join(".gitignore"), "target\n").expect("ignore file");
 
     let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
-    let snapshot = actor
-        .semantic_discovery_snapshot(opened.workspace_id)
-        .expect("workspace-authored discovery snapshot");
+    let snapshot = match actor
+        .handle(WorkspaceRequest::ReadSemanticDiscoverySnapshot(
+            opened.workspace_id,
+        ))
+        .expect("workspace port should expose workspace-authored discovery snapshot")
+    {
+        WorkspaceResponse::SemanticDiscoverySnapshot(snapshot) => snapshot,
+        other => panic!("unexpected workspace response: {other:?}"),
+    };
 
     assert!(snapshot.records.iter().any(|record| {
         record.display_path.as_deref() == Some("src/lib.rs")
@@ -251,9 +258,15 @@ fn semantic_discovery_snapshot_reports_safe_workspace_policy_outcomes() {
     }));
 
     let (untrusted_actor, untrusted_opened) = open_workspace(&root, WorkspaceTrustState::Untrusted);
-    let denied_snapshot = untrusted_actor
-        .semantic_discovery_snapshot(untrusted_opened.workspace_id)
-        .expect("untrusted discovery snapshot");
+    let denied_snapshot = match untrusted_actor
+        .handle(WorkspaceRequest::ReadSemanticDiscoverySnapshot(
+            untrusted_opened.workspace_id,
+        ))
+        .expect("workspace port should expose untrusted discovery snapshot")
+    {
+        WorkspaceResponse::SemanticDiscoverySnapshot(snapshot) => snapshot,
+        other => panic!("unexpected workspace response: {other:?}"),
+    };
     assert!(denied_snapshot.records.iter().any(|record| {
         record.display_path.as_deref() == Some("src/lib.rs")
             && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::PolicyDenied)
@@ -303,9 +316,16 @@ fn semantic_discovery_delta_reports_external_deleted_and_changed_outcomes() {
             sequence: EventSequence(3),
         },
     ];
-    let delta = actor
-        .semantic_discovery_delta_from_watcher_events(opened.workspace_id, &events)
-        .expect("workspace-authored discovery delta");
+    let delta = match actor
+        .handle(WorkspaceRequest::BuildSemanticDiscoveryDelta {
+            workspace_id: opened.workspace_id,
+            events,
+        })
+        .expect("workspace port should expose workspace-authored discovery delta")
+    {
+        WorkspaceResponse::SemanticDiscoveryDelta(delta) => delta,
+        other => panic!("unexpected workspace response: {other:?}"),
+    };
 
     assert!(delta.records.iter().any(|record| {
         record.display_path.as_deref() == Some("src/lib.rs")

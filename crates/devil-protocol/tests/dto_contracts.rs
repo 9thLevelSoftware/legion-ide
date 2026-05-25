@@ -2048,6 +2048,53 @@ fn dto_contracts_semantic_fabric_scheduling_metadata_only_roundtrip() {
 }
 
 #[test]
+fn dto_contracts_semantic_and_workspace_service_envelopes_roundtrip() {
+    let token = SemanticCancellationToken {
+        token_id: cancellation_token_id(),
+        workspace_id: WorkspaceId(11),
+        file_id: Some(FileId(33)),
+        snapshot_id: Some(SnapshotId(66)),
+        content_hash: Some(fingerprint("content")),
+        workspace_generation: Some(WorkspaceGeneration(77)),
+        privacy_scope: SemanticPrivacyScope::Workspace,
+        reason: Some(SemanticCancellationReason::UserCancelled),
+        issued_at: TimestampMillis(1111),
+        expires_at: Some(TimestampMillis(2222)),
+        schema_version: 1,
+    };
+    let semantic_request = SemanticRequest::Cancel(token.clone());
+    let semantic_response = SemanticResponse::Cancelled(token);
+    let workspace_request = WorkspaceRequest::BuildSemanticDiscoveryDelta {
+        workspace_id: WorkspaceId(11),
+        events: vec![WatcherEvent {
+            workspace_id: WorkspaceId(11),
+            kind: WatcherEventKind::Modified,
+            path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+            old_path: None,
+            sequence: EventSequence(9),
+        }],
+    };
+
+    let value = serde_json::to_value((&semantic_request, &semantic_response, &workspace_request))
+        .expect("serialize service envelopes");
+    assert_eq!(value[0]["Cancel"]["privacy_scope"], json!("Workspace"));
+    assert_eq!(value[1]["Cancelled"]["reason"], json!("UserCancelled"));
+    assert_eq!(
+        value[2]["BuildSemanticDiscoveryDelta"]["events"][0]["kind"],
+        json!("Modified")
+    );
+
+    let roundtrip: (SemanticRequest, SemanticResponse, WorkspaceRequest) =
+        serde_json::from_value(value).expect("deserialize service envelopes");
+    assert!(matches!(roundtrip.0, SemanticRequest::Cancel(_)));
+    assert!(matches!(roundtrip.1, SemanticResponse::Cancelled(_)));
+    assert!(matches!(
+        roundtrip.2,
+        WorkspaceRequest::BuildSemanticDiscoveryDelta { .. }
+    ));
+}
+
+#[test]
 fn dto_contracts_save_proposal_golden_with_all_preconditions() {
     let proposal = SaveFileProposal {
         file: file_identity(),

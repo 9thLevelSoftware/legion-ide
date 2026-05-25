@@ -2541,12 +2541,12 @@ impl AppProposalCoordinator {
         Self::push_target_validation_diagnostics(proposal, &coverage, &mut diagnostics);
         Self::push_payload_validation_diagnostics(proposal, &mut diagnostics);
 
-        if matches!(
+        if (matches!(
             route,
-            ProposalExecutionRoute::Terminal
-                | ProposalExecutionRoute::Unsupported
-                | ProposalExecutionRoute::Mixed
-        ) && diagnostics.is_empty()
+            ProposalExecutionRoute::Terminal | ProposalExecutionRoute::Unsupported
+        ) || (route == ProposalExecutionRoute::Mixed
+            && !matches!(proposal.payload, ProposalPayload::WorkspaceEdit(_))))
+            && diagnostics.is_empty()
         {
             return self.unsupported_response(proposal, "validate");
         }
@@ -3021,8 +3021,16 @@ struct DeferredSaveSuccess {
 #[derive(Debug, Clone)]
 enum ProposalMutationRollback {
     None,
-    TextEdit,
+    TextEdit {
+        workspace_id: WorkspaceId,
+        file_id: FileId,
+    },
     WorkspaceFile(WorkspaceMutationRollbackCheckpoint),
+    Composite(Vec<ProposalMutationRollback>),
+    Scoped {
+        proposal: Box<WorkspaceProposal>,
+        rollback: Box<ProposalMutationRollback>,
+    },
 }
 
 /// Port-shaped request emitted by the application command dispatcher.
@@ -4642,19 +4650,14 @@ impl AppComposition {
             proposal_id: proposal.proposal_id,
             batch_id: None,
             preflight_ok: false,
-            runtime_apply_disabled: true,
+            runtime_apply_disabled: false,
             atomicity: None,
             rollback_policy: None,
             planning_semantics: None,
             rollback_contract: None,
             items: Vec::new(),
             diagnostics: Vec::new(),
-            preview_warnings: vec![Self::batch_warning(
-                "proposal.batch_runtime_apply_disabled",
-                ProposalPreviewWarningKind::UnsupportedRuntime,
-                "batch runtime mutation remains fail-closed in Stage 1D",
-                None,
-            )],
+            preview_warnings: Vec::new(),
             partial_failures: Vec::new(),
         };
 
@@ -5110,9 +5113,15 @@ impl AppComposition {
             ProposalPayload::WorkspaceEdit(payload) => {
                 self.apply_workspace_edit_proposal(&proposal, payload)
             }
-            ProposalPayload::Batch(_) => self
-                .proposal_coordinator
-                .unsupported_response(&proposal, "apply"),
+            ProposalPayload::Batch(payload) => self.apply_batch_proposal(&proposal, payload),
+            ProposalPayload::CodeAction(payload) => {
+                self.apply_code_action_proposal(&proposal, payload)
+            }
+            ProposalPayload::FormatFile(_) => self.failed_apply_response(
+                &proposal,
+                "proposal.format_requires_lowered_workspace_edit",
+                "format-file apply requires a lowered TextEdit or WorkspaceEdit proposal payload",
+            ),
             _ => self
                 .proposal_coordinator
                 .unsupported_response(&proposal, "apply"),
@@ -5146,7 +5155,24 @@ impl AppComposition {
         proposal: &WorkspaceProposal,
     ) -> Result<ProposalMutationRollback, ProposalResponse> {
         match &proposal.payload {
-            ProposalPayload::TextEdit(_) => Ok(ProposalMutationRollback::TextEdit),
+            ProposalPayload::TextEdit(payload) => {
+                let workspace_id =
+                    self.active_documents
+                        .require_workspace_id()
+                        .map_err(|error| {
+                            self.failed_apply_response(
+                                proposal,
+                                "proposal.workspace_missing",
+                                format!(
+                                    "apply requires an active workspace rollback authority: {error}"
+                                ),
+                            )
+                        })?;
+                Ok(ProposalMutationRollback::TextEdit {
+                    workspace_id,
+                    file_id: payload.file_id,
+                })
+            }
             ProposalPayload::CreateFile(payload) => self.workspace_rollback_checkpoint(
                 proposal,
                 WorkspaceMutationRollbackTarget::CreatedFile {
@@ -5175,6 +5201,11 @@ impl AppComposition {
             ProposalPayload::WorkspaceEdit(payload) => {
                 self.rollback_snapshot_for_workspace_edit(proposal, payload)
             }
+            ProposalPayload::CodeAction(payload) => Ok(ProposalMutationRollback::TextEdit {
+                workspace_id: payload.file.workspace_id,
+                file_id: payload.file.file_id,
+            }),
+            ProposalPayload::Batch(payload) => self.rollback_snapshot_for_batch(proposal, payload),
             _ => Ok(ProposalMutationRollback::None),
         }
     }
@@ -5185,11 +5216,27 @@ impl AppComposition {
         proposal: &WorkspaceProposal,
         payload: &devil_protocol::WorkspaceEditProposalPayload,
     ) -> Result<ProposalMutationRollback, ProposalResponse> {
-        if !payload.file_edits.is_empty() || payload.file_operations.len() != 1 {
-            return Ok(ProposalMutationRollback::None);
+        let mut rollbacks = Vec::new();
+        for edit in &payload.file_edits {
+            rollbacks.push(ProposalMutationRollback::TextEdit {
+                workspace_id: edit.file.workspace_id,
+                file_id: edit.file.file_id,
+            });
         }
+        for operation in &payload.file_operations {
+            rollbacks
+                .push(self.rollback_snapshot_for_workspace_file_operation(proposal, operation)?);
+        }
+        Ok(ProposalMutationRollback::Composite(rollbacks))
+    }
 
-        match &payload.file_operations[0] {
+    #[allow(clippy::result_large_err)]
+    fn rollback_snapshot_for_workspace_file_operation(
+        &self,
+        proposal: &WorkspaceProposal,
+        operation: &devil_protocol::WorkspaceFileOperation,
+    ) -> Result<ProposalMutationRollback, ProposalResponse> {
+        match operation {
             devil_protocol::WorkspaceFileOperation::Create { path, .. } => self
                 .workspace_rollback_checkpoint(
                     proposal,
@@ -5209,6 +5256,90 @@ impl AppComposition {
                     },
                 ),
         }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn rollback_snapshot_for_batch(
+        &self,
+        proposal: &WorkspaceProposal,
+        payload: &BatchProposalPayload,
+    ) -> Result<ProposalMutationRollback, ProposalResponse> {
+        let mut rollbacks = Vec::new();
+        for item in self.ordered_batch_items(payload) {
+            let item_proposal = Self::batch_item_proposal(proposal, item);
+            match item.payload.as_ref() {
+                ProposalPayload::TextEdit(payload) => {
+                    let workspace_id =
+                        self.active_documents
+                            .require_workspace_id()
+                            .map_err(|error| {
+                                self.failed_apply_response(
+                                &item_proposal,
+                                "proposal.workspace_missing",
+                                format!(
+                                    "batch text edit rollback requires an active workspace: {error}"
+                                ),
+                            )
+                            })?;
+                    rollbacks.push(ProposalMutationRollback::Scoped {
+                        proposal: Box::new(item_proposal),
+                        rollback: Box::new(ProposalMutationRollback::TextEdit {
+                            workspace_id,
+                            file_id: payload.file_id,
+                        }),
+                    });
+                }
+                ProposalPayload::CreateFile(payload) => {
+                    let rollback = self.workspace_rollback_checkpoint(
+                        &item_proposal,
+                        WorkspaceMutationRollbackTarget::CreatedFile {
+                            path: payload.path.clone(),
+                        },
+                    )?;
+                    rollbacks.push(ProposalMutationRollback::Scoped {
+                        proposal: Box::new(item_proposal),
+                        rollback: Box::new(rollback),
+                    });
+                }
+                ProposalPayload::DeleteFile(payload) => {
+                    let rollback = self.workspace_rollback_checkpoint(
+                        &item_proposal,
+                        WorkspaceMutationRollbackTarget::DeletedFile {
+                            file: payload.file.clone(),
+                        },
+                    )?;
+                    rollbacks.push(ProposalMutationRollback::Scoped {
+                        proposal: Box::new(item_proposal),
+                        rollback: Box::new(rollback),
+                    });
+                }
+                ProposalPayload::RenameFile(payload) => {
+                    let rollback = self.workspace_rollback_checkpoint(
+                        &item_proposal,
+                        WorkspaceMutationRollbackTarget::RenamedFile {
+                            file: payload.file.clone(),
+                            destination: payload.destination.clone(),
+                        },
+                    )?;
+                    rollbacks.push(ProposalMutationRollback::Scoped {
+                        proposal: Box::new(item_proposal),
+                        rollback: Box::new(rollback),
+                    });
+                }
+                ProposalPayload::WorkspaceEdit(payload) => {
+                    if let ProposalMutationRollback::Composite(items) =
+                        self.rollback_snapshot_for_workspace_edit(&item_proposal, payload)?
+                    {
+                        rollbacks.push(ProposalMutationRollback::Scoped {
+                            proposal: Box::new(item_proposal),
+                            rollback: Box::new(ProposalMutationRollback::Composite(items)),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(ProposalMutationRollback::Composite(rollbacks))
     }
 
     #[allow(clippy::result_large_err)]
@@ -5315,7 +5446,10 @@ impl AppComposition {
         let mut diagnostics = Vec::new();
         match rollback {
             ProposalMutationRollback::None => {}
-            ProposalMutationRollback::TextEdit => self.rollback_audit_failed_text_edit(proposal),
+            ProposalMutationRollback::TextEdit {
+                workspace_id,
+                file_id,
+            } => self.rollback_audit_failed_text_edit(proposal, workspace_id, file_id),
             ProposalMutationRollback::WorkspaceFile(checkpoint) => {
                 match self.workspace_rollback_request(proposal, checkpoint) {
                     Ok(request) => {
@@ -5330,6 +5464,22 @@ impl AppComposition {
                     Err(diagnostic) => diagnostics.push(diagnostic),
                 }
                 self.refresh_workspace_after_audit_rollback(proposal);
+            }
+            ProposalMutationRollback::Composite(rollbacks) => {
+                for rollback in rollbacks.into_iter().rev() {
+                    diagnostics.extend(self.rollback_audit_failed_mutation(
+                        proposal,
+                        rollback,
+                        deferred_save_success,
+                    ));
+                }
+            }
+            ProposalMutationRollback::Scoped { proposal, rollback } => {
+                diagnostics.extend(self.rollback_audit_failed_mutation(
+                    &proposal,
+                    *rollback,
+                    deferred_save_success,
+                ));
             }
         }
 
@@ -5371,14 +5521,13 @@ impl AppComposition {
         }
     }
 
-    fn rollback_audit_failed_text_edit(&mut self, proposal: &WorkspaceProposal) {
-        let ProposalPayload::TextEdit(payload) = &proposal.payload else {
-            return;
-        };
-        let Some(workspace_id) = self.active_documents.workspace_id() else {
-            return;
-        };
-        let Some(buffer_id) = self.editor.buffer_for_file(workspace_id, payload.file_id) else {
+    fn rollback_audit_failed_text_edit(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        workspace_id: WorkspaceId,
+        file_id: FileId,
+    ) {
+        let Some(buffer_id) = self.editor.buffer_for_file(workspace_id, file_id) else {
             return;
         };
         if let Ok(record) = self.editor.undo(buffer_id, Some(proposal.correlation_id)) {
@@ -5665,12 +5814,13 @@ impl AppComposition {
         }
     }
 
-    fn stale_text_edit_precondition_response(
+    fn stale_text_edit_precondition_response_for(
         &self,
         proposal: &WorkspaceProposal,
+        preconditions: &ProposalVersionPreconditions,
         actual: &VersionContext,
     ) -> Option<ProposalResponse> {
-        if proposal.preconditions.buffer_version != Some(actual.buffer_version) {
+        if preconditions.buffer_version != Some(actual.buffer_version) {
             return Some(self.stale_apply_response(
                 proposal,
                 ProposalStaleReason::BufferVersionMismatch,
@@ -5678,7 +5828,7 @@ impl AppComposition {
                 "buffer version changed before text edit apply",
             ));
         }
-        if proposal.preconditions.snapshot_id != Some(actual.snapshot_id) {
+        if preconditions.snapshot_id != Some(actual.snapshot_id) {
             return Some(self.stale_apply_response(
                 proposal,
                 ProposalStaleReason::SnapshotMismatch,
@@ -5686,10 +5836,9 @@ impl AppComposition {
                 "snapshot changed before text edit apply",
             ));
         }
-        if let Some(expected) = proposal
-            .preconditions
+        if let Some(expected) = preconditions
             .file_content_version
-            .or(proposal.preconditions.file_version)
+            .or(preconditions.file_version)
             && expected != actual.file_content_version
         {
             return Some(self.stale_apply_response(
@@ -5699,10 +5848,9 @@ impl AppComposition {
                 "file content version changed before text edit apply",
             ));
         }
-        if let Some(expected) = proposal
-            .preconditions
+        if let Some(expected) = preconditions
             .workspace_generation
-            .or(proposal.preconditions.generation)
+            .or(preconditions.generation)
             && expected != actual.workspace_generation
         {
             return Some(self.stale_apply_response(
@@ -5712,7 +5860,7 @@ impl AppComposition {
                 "workspace generation changed before text edit apply",
             ));
         }
-        if let Some(expected) = &proposal.preconditions.expected_fingerprint
+        if let Some(expected) = &preconditions.expected_fingerprint
             && actual.fingerprint.as_ref() != Some(expected)
         {
             return Some(self.stale_apply_response(
@@ -5722,7 +5870,7 @@ impl AppComposition {
                 "file fingerprint changed before text edit apply",
             ));
         }
-        if let Some(expected) = proposal.preconditions.expected_file_length
+        if let Some(expected) = preconditions.expected_file_length
             && actual.file_length != Some(expected)
         {
             return Some(self.stale_apply_response(
@@ -5732,7 +5880,7 @@ impl AppComposition {
                 "file length changed before text edit apply",
             ));
         }
-        if let Some(expected) = proposal.preconditions.expected_modified_at
+        if let Some(expected) = preconditions.expected_modified_at
             && actual.modified_at != Some(expected)
         {
             return Some(self.stale_apply_response(
@@ -5751,35 +5899,56 @@ impl AppComposition {
         proposal: &WorkspaceProposal,
         payload: &devil_protocol::TextEditProposal,
     ) -> ProposalResponse {
+        match self.apply_text_edit_mutation(
+            proposal,
+            payload.file_id,
+            &payload.edits,
+            &proposal.preconditions,
+        ) {
+            Ok(()) => self.applied_response(proposal),
+            Err(response) => response,
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn apply_text_edit_mutation(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        file_id: FileId,
+        edits: &devil_protocol::EditBatch,
+        preconditions: &ProposalVersionPreconditions,
+    ) -> Result<(), ProposalResponse> {
         let workspace_id = match self.active_documents.require_workspace_id() {
             Ok(workspace_id) => workspace_id,
             Err(err) => {
-                return self.failed_apply_response(
+                return Err(self.failed_apply_response(
                     proposal,
                     "proposal.workspace_missing",
                     err.to_string(),
-                );
+                ));
             }
         };
-        let Some(buffer_id) = self.editor.buffer_for_file(workspace_id, payload.file_id) else {
-            return self.failed_apply_response(
+        let Some(buffer_id) = self.editor.buffer_for_file(workspace_id, file_id) else {
+            return Err(self.failed_apply_response(
                 proposal,
                 "proposal.closed_file_text_edit_denied",
                 "text edit apply requires an open editor buffer in Stage 1C",
-            );
+            ));
         };
         let actual = match self.active_file_version_context(buffer_id) {
             Ok(actual) => actual,
             Err(err) => {
-                return self.failed_apply_response(
+                return Err(self.failed_apply_response(
                     proposal,
                     "proposal.editor_state_unavailable",
                     err.to_string(),
-                );
+                ));
             }
         };
-        if let Some(response) = self.stale_text_edit_precondition_response(proposal, &actual) {
-            return response;
+        if let Some(response) =
+            self.stale_text_edit_precondition_response_for(proposal, preconditions, &actual)
+        {
+            return Err(response);
         }
 
         match self
@@ -5787,8 +5956,8 @@ impl AppComposition {
             .apply_protocol_edits(EditorApplyTransactionRequest {
                 workspace_id,
                 buffer_id,
-                file_id: payload.file_id,
-                edits: payload.edits.clone(),
+                file_id,
+                edits: edits.clone(),
                 source: TransactionSource::System,
                 undo_group_id: Some(uuid::Uuid::now_v7()),
                 correlation_id: proposal.correlation_id,
@@ -5796,13 +5965,13 @@ impl AppComposition {
             Ok(record) => {
                 let descriptor = record.to_protocol_descriptor();
                 self.emit_transaction_event(&descriptor);
-                self.applied_response(proposal)
+                Ok(())
             }
-            Err(err) => self.failed_apply_response(
+            Err(err) => Err(self.failed_apply_response(
                 proposal,
                 "proposal.editor_apply_failed",
                 err.to_string(),
-            ),
+            )),
         }
     }
 
@@ -6119,11 +6288,6 @@ impl AppComposition {
         proposal: &WorkspaceProposal,
         payload: &devil_protocol::WorkspaceEditProposalPayload,
     ) -> ProposalResponse {
-        if !payload.file_edits.is_empty() || payload.file_operations.len() != 1 {
-            return self
-                .proposal_coordinator
-                .unsupported_response(proposal, "apply");
-        }
         let workspace_id = match self.active_documents.require_workspace_id() {
             Ok(workspace_id) => workspace_id,
             Err(err) => {
@@ -6142,16 +6306,165 @@ impl AppComposition {
             );
         }
 
-        match &payload.file_operations[0] {
+        for edit in &payload.file_edits {
+            if edit.file.workspace_id != workspace_id {
+                return self.failed_apply_response(
+                    proposal,
+                    "proposal.workspace_mismatch",
+                    "workspace-edit file edit target does not match the active workspace",
+                );
+            }
+            if let Err(response) = self.preflight_workspace_text_edit(proposal, edit) {
+                return response;
+            }
+        }
+        for operation in &payload.file_operations {
+            if let Err(response) =
+                self.preflight_workspace_file_operation(proposal, workspace_id, operation)
+            {
+                return response;
+            }
+        }
+
+        let mut committed = Vec::new();
+        for edit in &payload.file_edits {
+            match self.apply_text_edit_mutation(
+                proposal,
+                edit.file.file_id,
+                &edit.edits,
+                &edit.preconditions,
+            ) {
+                Ok(()) => committed.push(ProposalMutationRollback::TextEdit {
+                    workspace_id: edit.file.workspace_id,
+                    file_id: edit.file.file_id,
+                }),
+                Err(response) => {
+                    let diagnostics = self.rollback_committed_mutations(proposal, committed);
+                    let mut response = response;
+                    Self::append_response_diagnostics(&mut response, diagnostics);
+                    return response;
+                }
+            }
+        }
+        for operation in &payload.file_operations {
+            let rollback =
+                match self.rollback_snapshot_for_workspace_file_operation(proposal, operation) {
+                    Ok(rollback) => rollback,
+                    Err(response) => {
+                        let diagnostics = self.rollback_committed_mutations(proposal, committed);
+                        let mut response = response;
+                        Self::append_response_diagnostics(&mut response, diagnostics);
+                        return response;
+                    }
+                };
+            let response = self.apply_workspace_file_operation(proposal, operation);
+            if Self::response_is_success(&response) {
+                committed.push(rollback);
+            } else {
+                let diagnostics = self.rollback_committed_mutations(proposal, committed);
+                let mut response = response;
+                Self::append_response_diagnostics(&mut response, diagnostics);
+                return response;
+            }
+        }
+
+        self.applied_response(proposal)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn preflight_workspace_text_edit(
+        &self,
+        proposal: &WorkspaceProposal,
+        edit: &devil_protocol::WorkspaceTextEdit,
+    ) -> Result<(), ProposalResponse> {
+        let Some(buffer_id) = edit.buffer_id.or_else(|| {
+            self.editor
+                .buffer_for_file(edit.file.workspace_id, edit.file.file_id)
+        }) else {
+            return Err(self.failed_apply_response(
+                proposal,
+                "proposal.closed_file_text_edit_denied",
+                "workspace-edit text edits require an open editor buffer authority",
+            ));
+        };
+        let actual = self
+            .active_file_version_context(buffer_id)
+            .map_err(|error| {
+                self.failed_apply_response(
+                    proposal,
+                    "proposal.editor_state_unavailable",
+                    error.to_string(),
+                )
+            })?;
+        if let Some(response) =
+            self.stale_text_edit_precondition_response_for(proposal, &edit.preconditions, &actual)
+        {
+            return Err(response);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn preflight_workspace_file_operation(
+        &self,
+        proposal: &WorkspaceProposal,
+        workspace_id: WorkspaceId,
+        operation: &devil_protocol::WorkspaceFileOperation,
+    ) -> Result<(), ProposalResponse> {
+        match operation {
             devil_protocol::WorkspaceFileOperation::Create {
                 path,
                 initial_content_hash,
             } => {
                 if initial_content_hash.is_some() {
-                    return self
-                        .proposal_coordinator
-                        .unsupported_response(proposal, "apply");
+                    return Err(self.failed_apply_response(
+                        proposal,
+                        "proposal.workspace_edit_hash_only_create_denied",
+                        "workspace-edit create cannot materialize non-empty hash-only content",
+                    ));
                 }
+                if let Some(response) = self.reject_open_path_mutation(proposal, workspace_id, path)
+                {
+                    return Err(response);
+                }
+                if proposal
+                    .preconditions
+                    .workspace_generation
+                    .or(proposal.preconditions.generation)
+                    .is_none()
+                {
+                    return Err(self.failed_apply_response(
+                        proposal,
+                        "proposal.missing_workspace_precondition",
+                        "workspace-edit file operation requires workspace generation precondition",
+                    ));
+                }
+            }
+            devil_protocol::WorkspaceFileOperation::Delete { file }
+            | devil_protocol::WorkspaceFileOperation::Rename { file, .. } => {
+                if file.workspace_id != workspace_id {
+                    return Err(self.failed_apply_response(
+                        proposal,
+                        "proposal.workspace_mismatch",
+                        "workspace-edit file operation target does not match the active workspace",
+                    ));
+                }
+                if let Some(response) = self.reject_open_file_mutation(proposal, file) {
+                    return Err(response);
+                }
+                self.closed_file_preconditions(proposal)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_workspace_file_operation(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        operation: &devil_protocol::WorkspaceFileOperation,
+    ) -> ProposalResponse {
+        match operation {
+            devil_protocol::WorkspaceFileOperation::Create { path, .. } => {
                 let create = devil_protocol::CreateFileProposal {
                     path: path.clone(),
                     initial_content: Some(String::new()),
@@ -6170,6 +6483,209 @@ impl AppComposition {
                 self.apply_rename_file_proposal(proposal, &rename)
             }
         }
+    }
+
+    fn apply_code_action_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &devil_protocol::CodeActionProposal,
+    ) -> ProposalResponse {
+        if payload.edits.is_empty() {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.code_action_requires_edits",
+                "code-action apply requires concrete text edits and no command execution",
+            );
+        }
+        let edits = devil_protocol::EditBatch {
+            edits: payload.edits.clone(),
+        };
+        match self.apply_text_edit_mutation(
+            proposal,
+            payload.file.file_id,
+            &edits,
+            &proposal.preconditions,
+        ) {
+            Ok(()) => self.applied_response(proposal),
+            Err(response) => response,
+        }
+    }
+
+    fn apply_batch_proposal(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        payload: &BatchProposalPayload,
+    ) -> ProposalResponse {
+        let plan = self.preflight_batch_proposal(proposal);
+        if !plan.preflight_ok {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.batch_preflight_failed",
+                "batch apply requires all item preflight checks to pass before mutation",
+            );
+        }
+        if payload.atomicity == ProposalBatchAtomicity::OrderedNonAtomic {
+            return self.failed_apply_response(
+                proposal,
+                "proposal.batch_ordered_non_atomic_requires_partial_failures",
+                "ordered non-atomic batch apply requires exact partial-failure records before runtime mutation is enabled",
+            );
+        }
+
+        let mut committed = Vec::new();
+        for item in self.ordered_batch_items(payload) {
+            let item_proposal = Self::batch_item_proposal(proposal, item);
+            let rollback = match self.rollback_snapshot_for_batch_item(&item_proposal, item) {
+                Ok(rollback) => rollback,
+                Err(response) => {
+                    let diagnostics = self.rollback_committed_mutations(proposal, committed);
+                    let mut response = response;
+                    Self::append_response_diagnostics(&mut response, diagnostics);
+                    return response;
+                }
+            };
+            let response = self.apply_batch_item(&item_proposal, item);
+            if Self::response_is_success(&response) {
+                committed.push(ProposalMutationRollback::Scoped {
+                    proposal: Box::new(item_proposal),
+                    rollback: Box::new(rollback),
+                });
+            } else {
+                let diagnostics = self.rollback_committed_mutations(proposal, committed);
+                let mut response = response;
+                Self::append_response_diagnostics(&mut response, diagnostics);
+                return response;
+            }
+        }
+
+        self.applied_response(proposal)
+    }
+
+    fn batch_item_proposal(
+        proposal: &WorkspaceProposal,
+        item: &ProposalBatchItem,
+    ) -> WorkspaceProposal {
+        let mut item_proposal = proposal.clone();
+        item_proposal.payload = (*item.payload).clone();
+        item_proposal.capability = item.required_capability.clone();
+        item_proposal
+    }
+
+    fn ordered_batch_items<'a>(
+        &self,
+        payload: &'a BatchProposalPayload,
+    ) -> Vec<&'a ProposalBatchItem> {
+        let mut items = payload.items.iter().collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.item_id.cmp(&right.item_id))
+        });
+        items
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn rollback_snapshot_for_batch_item(
+        &self,
+        proposal: &WorkspaceProposal,
+        item: &ProposalBatchItem,
+    ) -> Result<ProposalMutationRollback, ProposalResponse> {
+        match item.payload.as_ref() {
+            ProposalPayload::TextEdit(payload) => {
+                let workspace_id =
+                    self.active_documents
+                        .require_workspace_id()
+                        .map_err(|error| {
+                            self.failed_apply_response(
+                                proposal,
+                                "proposal.workspace_missing",
+                                format!(
+                                    "batch text edit rollback requires an active workspace: {error}"
+                                ),
+                            )
+                        })?;
+                Ok(ProposalMutationRollback::TextEdit {
+                    workspace_id,
+                    file_id: payload.file_id,
+                })
+            }
+            ProposalPayload::CreateFile(payload) => self.workspace_rollback_checkpoint(
+                proposal,
+                WorkspaceMutationRollbackTarget::CreatedFile {
+                    path: payload.path.clone(),
+                },
+            ),
+            ProposalPayload::DeleteFile(payload) => self.workspace_rollback_checkpoint(
+                proposal,
+                WorkspaceMutationRollbackTarget::DeletedFile {
+                    file: payload.file.clone(),
+                },
+            ),
+            ProposalPayload::RenameFile(payload) => self.workspace_rollback_checkpoint(
+                proposal,
+                WorkspaceMutationRollbackTarget::RenamedFile {
+                    file: payload.file.clone(),
+                    destination: payload.destination.clone(),
+                },
+            ),
+            ProposalPayload::WorkspaceEdit(payload) => {
+                self.rollback_snapshot_for_workspace_edit(proposal, payload)
+            }
+            _ => Ok(ProposalMutationRollback::None),
+        }
+    }
+
+    fn apply_batch_item(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        item: &ProposalBatchItem,
+    ) -> ProposalResponse {
+        match item.payload.as_ref() {
+            ProposalPayload::TextEdit(payload) => match self.apply_text_edit_mutation(
+                proposal,
+                payload.file_id,
+                &payload.edits,
+                &proposal.preconditions,
+            ) {
+                Ok(()) => ProposalResponse::Applied(self.proposal_coordinator.transition(
+                    proposal,
+                    ProposalLifecycleState::Applied,
+                    Vec::new(),
+                )),
+                Err(response) => response,
+            },
+            ProposalPayload::CreateFile(payload) => {
+                self.apply_create_file_proposal(proposal, payload)
+            }
+            ProposalPayload::DeleteFile(payload) => {
+                self.apply_delete_file_proposal(proposal, payload)
+            }
+            ProposalPayload::RenameFile(payload) => {
+                self.apply_rename_file_proposal(proposal, payload)
+            }
+            ProposalPayload::WorkspaceEdit(payload) => {
+                self.apply_workspace_edit_proposal(proposal, payload)
+            }
+            _ => self
+                .proposal_coordinator
+                .unsupported_response(proposal, "apply"),
+        }
+    }
+
+    fn response_is_success(response: &ProposalResponse) -> bool {
+        matches!(response, ProposalResponse::Applied(_))
+    }
+
+    fn rollback_committed_mutations(
+        &mut self,
+        proposal: &WorkspaceProposal,
+        committed: Vec<ProposalMutationRollback>,
+    ) -> Vec<ProtocolDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for rollback in committed.into_iter().rev() {
+            diagnostics.extend(self.rollback_audit_failed_mutation(proposal, rollback, None));
+        }
+        diagnostics
     }
 
     /// Build deterministic affected-target coverage for a proposal without executing it.
@@ -6348,11 +6864,8 @@ impl AppComposition {
             BatchExecutionStageContract {
                 stage: BatchExecutionStage::Mutate,
                 required: true,
-                blocked: true,
-                diagnostics: vec![AppProposalCoordinator::diagnostic(
-                    "proposal.batch_runtime_apply_disabled",
-                    "runtime batch mutation remains disabled in Stage 1E",
-                )],
+                blocked: false,
+                diagnostics: Vec::new(),
             },
             BatchExecutionStageContract {
                 stage: BatchExecutionStage::Commit,
@@ -6384,11 +6897,8 @@ impl AppComposition {
             BatchExecutionStageContract {
                 stage: BatchExecutionStage::Rollback,
                 required: true,
-                blocked: true,
-                diagnostics: vec![AppProposalCoordinator::diagnostic(
-                    "proposal.batch_rollback_runtime_disabled",
-                    "runtime batch rollback remains disabled while exact rollback is only contract-validated",
-                )],
+                blocked: false,
+                diagnostics: Vec::new(),
             },
         ]
     }

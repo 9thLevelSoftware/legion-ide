@@ -4274,6 +4274,19 @@ impl devil_protocol::WorkspacePort for WorkspaceActor {
 
                 WorkspaceResponse::Tree(state.tree.clone())
             }
+            WorkspaceRequest::ReadSemanticDiscoverySnapshot(workspace_id) => {
+                WorkspaceResponse::SemanticDiscoverySnapshot(
+                    self.semantic_discovery_snapshot(workspace_id)
+                        .map_err(Self::protocol_error)?,
+                )
+            }
+            WorkspaceRequest::BuildSemanticDiscoveryDelta {
+                workspace_id,
+                events,
+            } => WorkspaceResponse::SemanticDiscoveryDelta(
+                self.semantic_discovery_delta_from_watcher_events(workspace_id, &events)
+                    .map_err(Self::protocol_error)?,
+            ),
             WorkspaceRequest::ApplyTreeDelta(delta) => {
                 let mut guard = self.state.lock().map_err(|_| {
                     Self::protocol_error(WorkspaceError::Internal("workspace state lock poisoned"))

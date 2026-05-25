@@ -10,20 +10,21 @@ use devil_protocol::{
     FileFingerprint, FileId, FileIdentity, LanguageId, LineIndexRange, LspDiagnosticSummary,
     ProposalAffectedTarget, ProposalPayloadKind, ProposalPayloadSummary, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
-    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint,
-    SemanticCancellationReason, SemanticCancellationToken, SemanticFabricDescriptorReference,
-    SemanticFabricInvalidationCause, SemanticFabricJobRequest, SemanticFabricPriority,
-    SemanticFabricPrivacyLabel, SemanticFabricSchedulePlan, SemanticFabricSchedulingAction,
-    SemanticFabricSchedulingDecision, SemanticFabricSchedulingTrigger,
-    SemanticFabricWorkSourceKind, SemanticFileFingerprintIdentity, SemanticFreshness,
-    SemanticFreshnessState, SemanticGrammarVersion, SemanticGraphEndpoint, SemanticGraphRecord,
-    SemanticGraphRecordKind, SemanticInvalidationKey, SemanticMetadataChunkReference,
-    SemanticMetadataDescriptorIdentity, SemanticMetadataDiagnosticSummary,
-    SemanticMetadataFreshnessKey, SemanticMetadataGraphRecord, SemanticMetadataRecord,
-    SemanticMetadataSourceKind, SemanticMetadataSymbolRecord, SemanticModelVersion,
-    SemanticPrivacyScope, SemanticProperty, SemanticQueryFreshnessPolicy, SemanticQueryKind,
-    SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResult, SemanticQueryResultKind,
-    SemanticQueryStatus, SemanticRecordId, SemanticRecordProvenance, SemanticRecordSource,
+    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolResult, ProtocolTextRange,
+    RedactionHint, SemanticCancellationReason, SemanticCancellationToken,
+    SemanticFabricDescriptorReference, SemanticFabricInvalidationCause, SemanticFabricJobRequest,
+    SemanticFabricPriority, SemanticFabricPrivacyLabel, SemanticFabricSchedulePlan,
+    SemanticFabricSchedulingAction, SemanticFabricSchedulingDecision,
+    SemanticFabricSchedulingTrigger, SemanticFabricWorkSourceKind, SemanticFileFingerprintIdentity,
+    SemanticFreshness, SemanticFreshnessState, SemanticGrammarVersion, SemanticGraphEndpoint,
+    SemanticGraphRecord, SemanticGraphRecordKind, SemanticInvalidationKey,
+    SemanticMetadataChunkReference, SemanticMetadataDescriptorIdentity,
+    SemanticMetadataDiagnosticSummary, SemanticMetadataFreshnessKey, SemanticMetadataGraphRecord,
+    SemanticMetadataRecord, SemanticMetadataSourceKind, SemanticMetadataSymbolRecord,
+    SemanticModelVersion, SemanticPort, SemanticPrivacyScope, SemanticProperty,
+    SemanticQueryFreshnessPolicy, SemanticQueryKind, SemanticQueryRequest, SemanticQueryResponse,
+    SemanticQueryResult, SemanticQueryResultKind, SemanticQueryStatus, SemanticRecordId,
+    SemanticRecordProvenance, SemanticRecordSource, SemanticRequest, SemanticResponse,
     SemanticSymbolId, SnapshotChunkDescriptor, SnapshotDescriptor, SnapshotId, SnapshotLeaseChunk,
     SnapshotLeaseDescriptor, SymbolFileMapRecord, TextCoordinate, TextEdit, TextOffset, TextRange,
     TimestampMillis, WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision,
@@ -680,6 +681,42 @@ impl IndexingActor {
                 || (latest_version == document_version
                     && latest.content_hash != document.identity.content_hash)
         })
+    }
+}
+
+impl SemanticPort for IndexingActor {
+    fn handle(&self, request: SemanticRequest) -> ProtocolResult<SemanticResponse> {
+        match request {
+            SemanticRequest::PlanJobs {
+                requests,
+                correlation_id,
+                causality_id,
+            } => {
+                let workspace_generation = requests
+                    .first()
+                    .map(|request| request.file_identity.workspace_generation)
+                    .unwrap_or(WorkspaceGeneration(0));
+                let privacy_scope = requests
+                    .first()
+                    .map(|request| request.privacy.privacy_scope)
+                    .unwrap_or(SemanticPrivacyScope::Workspace);
+                let scheduler = SemanticFabricScheduler::new(SemanticFabricSchedulingPolicy::new(
+                    workspace_generation,
+                    privacy_scope,
+                    self.capacity as u32,
+                ));
+
+                Ok(SemanticResponse::SchedulePlan(scheduler.plan(
+                    requests,
+                    correlation_id,
+                    causality_id,
+                )))
+            }
+            SemanticRequest::Query(request) => {
+                Ok(SemanticResponse::Query(self.index.query(&request)))
+            }
+            SemanticRequest::Cancel(token) => Ok(SemanticResponse::Cancelled(token)),
+        }
     }
 }
 
