@@ -10,20 +10,22 @@ use std::{
 };
 
 use devil_protocol::{
-    AssistedAiAuditOutcomeCategory, AssistedAiAuditPrivacyDisposition, AssistedAiAuditRecord,
-    AssistedAiAuditRedactionState, AssistedAiConsentBoundary, AssistedAiContractError,
-    AssistedAiProjection, AssistedAiProposalPreviewSummary, AssistedAiProviderInvocationState,
-    AssistedAiRequestContract, AssistedAiRequestDisposition, BufferId, CapabilityId, CausalityId,
-    CorrelationId, DelegatedTaskAssistedAiAuditReference, DelegatedTaskAuditLinkageRecord,
-    DelegatedTaskPlanContract, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
-    EventSeverity, EventSinkPort, EventSinkRequest, FileFingerprint, FileId,
-    PermissionBudgetEvaluationDisposition, PrincipalId, ProposalAuditRecord, ProposalFailureReason,
-    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind,
-    ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRollbackReason,
-    ProposalStaleReason, ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint,
-    RetentionLabel, TextTransactionDescriptor, TimestampMillis, WorkspaceId, WorkspaceProposal,
-    delegated_task_audit_linkage_record, validate_assisted_ai_audit_record,
-    validate_delegated_task_audit_linkage_record,
+    AgentReplayManifest, AssistedAiAuditOutcomeCategory, AssistedAiAuditPrivacyDisposition,
+    AssistedAiAuditRecord, AssistedAiAuditRedactionState, AssistedAiConsentBoundary,
+    AssistedAiContractError, AssistedAiProjection, AssistedAiProposalPreviewSummary,
+    AssistedAiProviderInvocationState, AssistedAiRequestContract, AssistedAiRequestDisposition,
+    BufferId, CapabilityId, CausalityId, CorrelationId, DelegatedTaskAssistedAiAuditReference,
+    DelegatedTaskAuditLinkageRecord, DelegatedTaskPlanContract, EventEnvelope, EventId,
+    EventMetadataRecord, EventSequence, EventSeverity, EventSinkPort, EventSinkRequest,
+    FileFingerprint, FileId, PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord,
+    PrincipalId, ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
+    ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
+    ProposalPrivacyLabel, ProposalRejectionReason, ProposalRollbackReason, ProposalStaleReason,
+    ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint, RetentionLabel,
+    TextTransactionDescriptor, TimestampMillis, WorkspaceId, WorkspaceProposal,
+    delegated_task_audit_linkage_record, validate_agent_replay_manifest,
+    validate_assisted_ai_audit_record, validate_delegated_task_audit_linkage_record,
+    validate_phase4_runtime_audit_record,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -672,6 +674,70 @@ pub fn delegated_task_readiness_audit_linkage_recorded_event(
         "runtime_activation",
         format!("{:?}", record.runtime_activation),
     )
+    .build())
+}
+
+/// Build an envelope-ready event from a validated Phase 4 runtime audit record.
+pub fn phase4_runtime_audit_recorded_event(
+    record: &Phase4RuntimeAuditRecord,
+) -> Result<EventEnvelope, AssistedAiContractError> {
+    validate_phase4_runtime_audit_record(record)?;
+    assert_core_ids(
+        record.causality_id,
+        record.correlation_id,
+        record.event_sequence,
+    );
+    let mut builder =
+        EventEnvelopeBuilder::new("phase4.runtime_audit_recorded", record.causality_id)
+            .correlation_id(record.correlation_id)
+            .sequence(record.event_sequence)
+            .severity(EventSeverity::Info)
+            .retention(RetentionLabel::Audit)
+            .metadata("audit_id", record.audit_id.clone())
+            .metadata("invocation_state", format!("{:?}", record.invocation_state))
+            .metadata("outcome_label", record.outcome_label.clone())
+            .metadata("label_count", record.labels.len() as u64);
+    if let Some(run_id) = &record.run_id {
+        builder = builder.metadata("run_id", run_id.0.clone());
+    }
+    if let Some(step_id) = &record.step_id {
+        builder = builder.metadata("step_id", step_id.0.clone());
+    }
+    if let Some(provider_route_id) = &record.provider_route_id {
+        builder = builder.metadata("provider_route_id", provider_route_id.clone());
+    }
+    Ok(builder.build())
+}
+
+/// Build an envelope-ready event from a validated agent replay manifest.
+pub fn agent_replay_manifest_recorded_event(
+    manifest: &AgentReplayManifest,
+) -> Result<EventEnvelope, AssistedAiContractError> {
+    validate_agent_replay_manifest(manifest)?;
+    assert_core_ids(
+        manifest.causality_id,
+        manifest.correlation_id,
+        manifest.event_sequence,
+    );
+    Ok(EventEnvelopeBuilder::new(
+        "phase4.agent_replay_manifest_recorded",
+        manifest.causality_id,
+    )
+    .correlation_id(manifest.correlation_id)
+    .sequence(manifest.event_sequence)
+    .severity(EventSeverity::Info)
+    .retention(RetentionLabel::Audit)
+    .metadata("run_id", manifest.run_id.0.clone())
+    .metadata("transition_count", manifest.transitions.len() as u64)
+    .metadata(
+        "context_manifest_count",
+        manifest.context_manifests.len() as u64,
+    )
+    .metadata(
+        "provider_route_count",
+        manifest.provider_route_ids.len() as u64,
+    )
+    .metadata("proposal_id_count", manifest.proposal_ids.len() as u64)
     .build())
 }
 
@@ -2036,6 +2102,53 @@ mod tests {
         raw_marker.refusal_error_category = Some("provider_payload raw prompt".to_string());
         assert!(matches!(
             assisted_ai_audit_recorded_event(&raw_marker),
+            Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn phase4_runtime_and_replay_events_are_metadata_only() {
+        let run_id = devil_protocol::AgentRunId("phase4-run-observe".to_string());
+        let audit = Phase4RuntimeAuditRecord {
+            audit_id: "phase4-audit-observe".to_string(),
+            run_id: Some(run_id.clone()),
+            step_id: None,
+            provider_route_id: Some("route-observe".to_string()),
+            invocation_state: AssistedAiProviderInvocationState::Completed,
+            outcome_label: "phase4.provider.completed".to_string(),
+            labels: vec!["metadata-only".to_string()],
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            event_sequence: EventSequence(88),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let event = phase4_runtime_audit_recorded_event(&audit).expect("phase4 event");
+        assert_eq!(event.event, "phase4.runtime_audit_recorded");
+        assert_eq!(event.payload["invocation_state"], "Completed");
+
+        let manifest = AgentReplayManifest {
+            run_id,
+            transitions: Vec::new(),
+            context_manifests: Vec::new(),
+            provider_route_ids: vec!["route-observe".to_string()],
+            proposal_ids: vec![devil_protocol::ProposalId(9)],
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            event_sequence: EventSequence(89),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let replay_event = agent_replay_manifest_recorded_event(&manifest).expect("replay event");
+        assert_eq!(replay_event.event, "phase4.agent_replay_manifest_recorded");
+        assert_eq!(replay_event.payload["provider_route_count"], 1);
+
+        let mut raw_marker = audit;
+        raw_marker
+            .labels
+            .push("provider_payload raw prompt".to_string());
+        assert!(matches!(
+            phase4_runtime_audit_recorded_event(&raw_marker),
             Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
         ));
     }

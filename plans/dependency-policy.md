@@ -63,13 +63,18 @@ Every current workspace crate must have an explicit internal dependency policy e
 - `devil-ui` MUST NOT depend on `devil-storage`.
 
 - `devil-app` may depend on:
+  - `devil-agent`
+  - `devil-ai`
+  - `devil-ai-providers`
   - `devil-editor`
+  - `devil-memory`
   - `devil-observability`
   - `devil-platform`
   - `devil-project`
   - `devil-protocol`
   - `devil-security`
   - `devil-storage`
+  - `devil-tracker`
   - `devil-ui`
 
 - `devil-ai` may depend on:
@@ -107,6 +112,8 @@ Phase 3 semantic fabric activation for `crates/devil-index/Cargo.toml` is limite
   - `devil-ai`
   - `devil-protocol`
   - `devil-tracker`
+
+Phase 4 activates `devil-agent`, `devil-tracker`, and `devil-memory` only for metadata-only local-provider planning, tracker ledger records, memory candidate review, and proposal-only agent outputs. These crates must not depend on app/UI/editor/workspace internals and must not gain direct filesystem, process, network, terminal, storage, settings, or buffer mutation authority.
 
 - `devil-cli` may depend on:
   - `devil-index`
@@ -246,6 +253,18 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `AssistedAiConsentState`
   - `AssistedAiRequestDisposition`
   - `AssistedAiProviderInvocationState`
+  - `AgentRunId`
+  - `AgentStepId`
+  - `AgentRunState`
+  - `AgentStepState`
+  - `AssistedAiProviderRouteRequest`
+  - `AssistedAiProviderRouteResponse`
+  - `AssistedAiRuntimeProviderCapability`
+  - `AssistedAiStructuredOutputSchemaMetadata`
+  - `AssistedAiStructuredOutputValidationResult`
+  - `AgentStateTransitionRecord`
+  - `AgentReplayManifest`
+  - `Phase4RuntimeAuditRecord`
   - `AssistedAiTrustProjectionReference`
   - `AssistedAiTrustProjectionKind`
   - `AssistedAiPermissionBudgetEvaluationReference`
@@ -455,7 +474,7 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
 ### 4. Runtime Surface Activation Gates
 
 - Phase 3 activates `devil-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
-- `devil-agent`, `devil-tracker`, `devil-memory`, `devil-plugin`, `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin`, `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
 - Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated
   - an explicit dependency-policy entry in this document
@@ -464,7 +483,7 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - contract tests for the newly activated protocol and runtime behavior
   - architecture-gate tests proving the new surface preserves ownership and mutation rules
   - an owner recorded in the active implementation plan or evidence
-- Existing ADRs for tracker or memory do not waive the other activation gates. Placeholder crates remain inert unless they have an accepted ADR, dependency-policy entry, phase gate, required protocol contracts, contract tests, ownership tests, and evidence.
+- Existing ADRs for tracker or memory do not waive the other activation gates. Planned runtime crates remain inert unless they have an accepted ADR, dependency-policy entry, phase gate, required protocol contracts, contract tests, ownership tests, and evidence.
 - Vector indexing remains deferred until a later accepted ADR, dependency-policy update, syntax-aware chunking contract, provenance contract, privacy-scope contract, model-identity contract, invalidation contract, storage-retention decision, and contract-test suite exist.
 
 ### 5. Enforcement

@@ -199,6 +199,7 @@ dependencies = [
  "devil-protocol",
  "devil-tracker",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -210,6 +211,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -227,13 +229,18 @@ name = "devil-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "devil-agent",
+ "devil-ai",
+ "devil-ai-providers",
  "devil-editor",
+ "devil-memory",
  "devil-observability",
  "devil-platform",
  "devil-project",
  "devil-protocol",
  "devil-security",
  "devil-storage",
+ "devil-tracker",
  "devil-ui",
  "thiserror 2.0.18",
  "uuid",
@@ -279,6 +286,7 @@ dependencies = [
  "devil-protocol",
  "devil-storage",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -361,6 +369,7 @@ dependencies = [
  "devil-protocol",
  "devil-storage",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

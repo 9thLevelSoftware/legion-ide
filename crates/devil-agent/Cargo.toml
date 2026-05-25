@@ -10,3 +10,6 @@ devil-protocol = { workspace = true }
 devil-ai = { workspace = true }
 devil-tracker = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

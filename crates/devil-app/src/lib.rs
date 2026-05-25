@@ -7,12 +7,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use devil_agent::AgentRuntime;
+use devil_ai::ProviderRouter;
+use devil_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_stub_registry};
 use devil_editor::{
     EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, TextEdit, TextPosition,
     TextRange as EditorTextRange,
 };
+use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
 use devil_observability::{
-    SharedEventSink, event_metadata_record, proposal_applied_event, proposal_approved_event,
+    SharedEventSink, agent_replay_manifest_recorded_event, event_metadata_record,
+    phase4_runtime_audit_recorded_event, proposal_applied_event, proposal_approved_event,
     proposal_audit_record, proposal_audit_recorded_event, proposal_created_event,
     proposal_failed_event, proposal_previewed_event, proposal_rejected_event,
     proposal_rolled_back_event, proposal_validated_event, save_denied_event,
@@ -40,13 +45,14 @@ use devil_protocol::{
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
     ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, RedactionHint,
     SaveConflictPolicy, SaveFileProposal, SaveIntent, StorageRepositoryPort,
-    StorageRepositoryRequest, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, TrustDecisionContext, VersionContext, WorkspaceCloseRequest,
-    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
-    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
+    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor,
+    TimestampMillis, TransactionSource, TrustDecisionContext, VersionContext,
+    WorkspaceCloseRequest, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened,
+    WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
 };
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
+use devil_tracker::{TrackerLedger, TrackerRunLedgerRecord};
 use devil_ui::{
     ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
     ExplorerSelectionProjection, ShellLayoutProjection, ShellProjectionSnapshot,
@@ -96,6 +102,15 @@ pub enum AppCompositionError {
     /// Proposal-mediated save did not apply.
     #[error("save proposal did not apply: {0:?}")]
     SaveProposalRejected(Box<ProposalResponse>),
+    /// Phase 4 AI runtime refused or failed a metadata-only step.
+    #[error("phase 4 AI runtime failed: {0}")]
+    AiRuntime(String),
+    /// Requested Phase 4 AI run does not exist.
+    #[error("phase 4 AI run not found: {run_id}")]
+    AiRunMissing {
+        /// Missing run identifier.
+        run_id: String,
+    },
 }
 
 /// Typed save result returned by application save routing.
@@ -3011,6 +3026,223 @@ struct ActiveSaveContext {
     trust: WorkspaceTrustState,
 }
 
+struct Phase4ContextAssemblyService;
+
+impl Phase4ContextAssemblyService {
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_context_manifest(
+        context: &ActiveSaveContext,
+        run_id: &devil_protocol::AgentRunId,
+        provider_route_id: &str,
+        snapshot_id: devil_protocol::SnapshotId,
+        buffer_version: devil_protocol::BufferVersion,
+        snapshot_hash: FileFingerprint,
+        byte_len: u64,
+        line_count: u32,
+        generated_at: TimestampMillis,
+    ) -> devil_protocol::ContextManifestProjection {
+        let file_item = devil_protocol::ContextManifestItem {
+            item_id: format!("phase4:{}:file", run_id.0),
+            kind: devil_protocol::ContextManifestItemKind::File,
+            inclusion: devil_protocol::ContextManifestInclusionState::Included,
+            workspace_id: Some(context.workspace_id),
+            file_id: Some(context.metadata.identity.file_id),
+            buffer_id: Some(context.buffer_id),
+            proposal_id: None,
+            target_id: Some(context.metadata.identity.file_id.0.to_string()),
+            path: Some(context.metadata.identity.canonical_path.clone()),
+            ranges: Vec::new(),
+            counts: context
+                .metadata
+                .file_length
+                .map(|count| devil_protocol::ContextManifestItemCount {
+                    label: "file_bytes".to_string(),
+                    count: count.min(u32::MAX as u64) as u32,
+                })
+                .into_iter()
+                .collect(),
+            hashes: vec![context.metadata.fingerprint.clone()],
+            privacy_scope: Some(devil_protocol::SemanticPrivacyScope::MetadataOnly),
+            privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            risk_label: devil_protocol::ProposalRiskLabel::Low,
+            egress: devil_protocol::ContextManifestEgressStatus::LocalOnly,
+            freshness: Some(devil_protocol::ContextManifestFreshnessSummary {
+                state: devil_protocol::SemanticFreshnessState::Fresh,
+                freshness_key_present: true,
+                snapshot_id: Some(snapshot_id),
+                file_content_version: Some(context.metadata.file_content_version),
+                workspace_generation: Some(context.metadata.workspace_generation),
+                content_hash: Some(context.metadata.fingerprint.clone()),
+                privacy_scope: Some(devil_protocol::SemanticPrivacyScope::MetadataOnly),
+                observed_at: Some(generated_at),
+                risk_label: devil_protocol::ProposalRiskLabel::Low,
+                risk_reasons: Vec::new(),
+                schema_version: 1,
+            }),
+            preconditions: None,
+            labels: vec!["phase4.context.file_metadata".to_string()],
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let buffer_item = devil_protocol::ContextManifestItem {
+            item_id: format!("phase4:{}:buffer", run_id.0),
+            kind: devil_protocol::ContextManifestItemKind::Buffer,
+            inclusion: devil_protocol::ContextManifestInclusionState::Included,
+            workspace_id: Some(context.workspace_id),
+            file_id: Some(context.metadata.identity.file_id),
+            buffer_id: Some(context.buffer_id),
+            proposal_id: None,
+            target_id: Some(context.buffer_id.0.to_string()),
+            path: None,
+            ranges: Vec::new(),
+            counts: vec![
+                devil_protocol::ContextManifestItemCount {
+                    label: "snapshot_bytes".to_string(),
+                    count: byte_len.min(u32::MAX as u64) as u32,
+                },
+                devil_protocol::ContextManifestItemCount {
+                    label: "lines".to_string(),
+                    count: line_count,
+                },
+            ],
+            hashes: vec![snapshot_hash],
+            privacy_scope: Some(devil_protocol::SemanticPrivacyScope::MetadataOnly),
+            privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            risk_label: devil_protocol::ProposalRiskLabel::Low,
+            egress: devil_protocol::ContextManifestEgressStatus::LocalOnly,
+            freshness: Some(devil_protocol::ContextManifestFreshnessSummary {
+                state: devil_protocol::SemanticFreshnessState::Fresh,
+                freshness_key_present: true,
+                snapshot_id: Some(snapshot_id),
+                file_content_version: Some(context.metadata.file_content_version),
+                workspace_generation: Some(context.metadata.workspace_generation),
+                content_hash: None,
+                privacy_scope: Some(devil_protocol::SemanticPrivacyScope::MetadataOnly),
+                observed_at: Some(generated_at),
+                risk_label: devil_protocol::ProposalRiskLabel::Low,
+                risk_reasons: Vec::new(),
+                schema_version: 1,
+            }),
+            preconditions: Some(devil_protocol::ContextManifestPreconditionSummary {
+                file_content_version: Some(context.metadata.file_content_version),
+                buffer_version: Some(buffer_version),
+                snapshot_id: Some(snapshot_id),
+                workspace_generation: Some(context.metadata.workspace_generation),
+                expected_fingerprint: Some(context.metadata.fingerprint.clone()),
+                expected_file_length: context.metadata.file_length,
+                expected_modified_at: context.metadata.modified_at,
+                core_preconditions_present: true,
+                risk_label: devil_protocol::ProposalRiskLabel::Low,
+                risk_reasons: Vec::new(),
+                schema_version: 1,
+            }),
+            labels: vec!["phase4.context.buffer_descriptor".to_string()],
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let route_item = Self::metadata_item(
+            format!("phase4:{}:provider-route", run_id.0),
+            devil_protocol::ContextManifestItemKind::ProviderRoute,
+            context.workspace_id,
+            provider_route_id,
+            devil_protocol::ContextManifestEgressStatus::LocalProvider,
+            vec!["phase4.provider.local_loopback".to_string()],
+        );
+        let agent_item = Self::metadata_item(
+            format!("phase4:{}:agent-step", run_id.0),
+            devil_protocol::ContextManifestItemKind::AgentStep,
+            context.workspace_id,
+            &run_id.0,
+            devil_protocol::ContextManifestEgressStatus::LocalOnly,
+            vec!["phase4.agent.proposal_only".to_string()],
+        );
+        let selection_item = Self::metadata_item(
+            format!("phase4:{}:selection", run_id.0),
+            devil_protocol::ContextManifestItemKind::UserSelection,
+            context.workspace_id,
+            "active-buffer",
+            devil_protocol::ContextManifestEgressStatus::LocalOnly,
+            vec!["phase4.selection.active_buffer".to_string()],
+        );
+
+        let permission = devil_protocol::ContextManifestPermissionSummary {
+            kind: devil_protocol::ContextManifestPermissionKind::ModelProvider,
+            capability: CapabilityId("ai.provider.invoke".to_string()),
+            principal: Some(context.principal.clone()),
+            decision_id: None,
+            granted: false,
+            privacy_scope: devil_protocol::SemanticPrivacyScope::MetadataOnly,
+            egress: devil_protocol::ContextManifestEgressStatus::LocalProvider,
+            risk_label: devil_protocol::ProposalRiskLabel::Low,
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let manifest = devil_protocol::ContextManifestRecord {
+            manifest_id: format!("phase4:manifest:{}", run_id.0),
+            workspace_id: Some(context.workspace_id),
+            proposal_id: None,
+            purpose: devil_protocol::ContextManifestPurpose::ProviderRequest,
+            workspace_trust_state: Some(context.trust.clone()),
+            privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            risk_label: devil_protocol::ProposalRiskLabel::Low,
+            egress: devil_protocol::ContextManifestEgressStatus::LocalProvider,
+            items: vec![
+                file_item,
+                buffer_item,
+                selection_item,
+                route_item,
+                agent_item,
+            ],
+            permissions: vec![permission],
+            omitted_item_count: 0,
+            stale_or_missing_metadata_risk_present: false,
+            generated_at,
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        devil_protocol::ContextManifestProjection {
+            manifest,
+            selected_item_id: None,
+            generated_at,
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn metadata_item(
+        item_id: String,
+        kind: devil_protocol::ContextManifestItemKind,
+        workspace_id: WorkspaceId,
+        target_id: &str,
+        egress: devil_protocol::ContextManifestEgressStatus,
+        labels: Vec<String>,
+    ) -> devil_protocol::ContextManifestItem {
+        devil_protocol::ContextManifestItem {
+            item_id,
+            kind,
+            inclusion: devil_protocol::ContextManifestInclusionState::Included,
+            workspace_id: Some(workspace_id),
+            file_id: None,
+            buffer_id: None,
+            proposal_id: None,
+            target_id: Some(target_id.to_string()),
+            path: None,
+            ranges: Vec::new(),
+            counts: Vec::new(),
+            hashes: Vec::new(),
+            privacy_scope: Some(devil_protocol::SemanticPrivacyScope::MetadataOnly),
+            privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            risk_label: devil_protocol::ProposalRiskLabel::Low,
+            egress,
+            freshness: None,
+            preconditions: None,
+            labels,
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DeferredSaveSuccess {
     request_id: uuid::Uuid,
@@ -3073,6 +3305,26 @@ pub enum AppCommandRequest {
     RevealInExplorer {
         /// File identifier to reveal.
         file_id: FileId,
+    },
+    /// Start a Phase 4 AI run through app-owned composition.
+    StartAiRun {
+        /// Display-safe instruction label.
+        instruction_label: String,
+    },
+    /// Cancel a Phase 4 AI run through app-owned composition.
+    CancelAiRun {
+        /// Run id to cancel.
+        run_id: devil_protocol::AgentRunId,
+    },
+    /// Replay a Phase 4 AI run through metadata storage.
+    ReplayAiRun {
+        /// Run id to replay.
+        run_id: devil_protocol::AgentRunId,
+    },
+    /// Inspect a Phase 4 AI run through projection metadata.
+    InspectAiRun {
+        /// Run id to inspect.
+        run_id: devil_protocol::AgentRunId,
     },
 }
 
@@ -3249,7 +3501,12 @@ impl CommandExecutionService {
                     editor.apply_edit(*buffer_id, edit.clone())?,
                 )))
             }
-            AppCommandRequest::Save { .. } | AppCommandRequest::OpenPath { .. } => Ok(None),
+            AppCommandRequest::Save { .. }
+            | AppCommandRequest::OpenPath { .. }
+            | AppCommandRequest::StartAiRun { .. }
+            | AppCommandRequest::CancelAiRun { .. }
+            | AppCommandRequest::ReplayAiRun { .. }
+            | AppCommandRequest::InspectAiRun { .. } => Ok(None),
             AppCommandRequest::RefreshExplorer => {
                 let workspace_id = state.require_workspace_id()?;
                 let tree = workspace.tree_snapshot(workspace_id)?;
@@ -3348,6 +3605,18 @@ impl CommandDispatcher {
             CommandDispatchIntent::RefreshExplorer => Ok(AppCommandRequest::RefreshExplorer),
             CommandDispatchIntent::RevealInExplorer { file_id } => {
                 Ok(AppCommandRequest::RevealInExplorer { file_id })
+            }
+            CommandDispatchIntent::StartAiRun { instruction_label } => {
+                Ok(AppCommandRequest::StartAiRun { instruction_label })
+            }
+            CommandDispatchIntent::CancelAiRun { run_id } => {
+                Ok(AppCommandRequest::CancelAiRun { run_id })
+            }
+            CommandDispatchIntent::ReplayAiRun { run_id } => {
+                Ok(AppCommandRequest::ReplayAiRun { run_id })
+            }
+            CommandDispatchIntent::InspectAiRun { run_id } => {
+                Ok(AppCommandRequest::InspectAiRun { run_id })
             }
             CommandDispatchIntent::PreviewProposal { .. }
             | CommandDispatchIntent::ApproveProposal { .. }
@@ -4178,6 +4447,254 @@ fn save_event_target(proposal: &WorkspaceProposal) -> Option<SaveEventTarget> {
     }
 }
 
+fn empty_context_manifest_projection() -> devil_protocol::ContextManifestProjection {
+    devil_protocol::ContextManifestProjection {
+        manifest: devil_protocol::ContextManifestRecord {
+            manifest_id: "manifest:empty".to_string(),
+            workspace_id: None,
+            proposal_id: None,
+            purpose: devil_protocol::ContextManifestPurpose::TrustReview,
+            workspace_trust_state: None,
+            privacy_label: devil_protocol::ProposalPrivacyLabel::PublicMetadata,
+            risk_label: devil_protocol::ProposalRiskLabel::Informational,
+            egress: devil_protocol::ContextManifestEgressStatus::LocalOnly,
+            items: Vec::new(),
+            permissions: Vec::new(),
+            omitted_item_count: 0,
+            stale_or_missing_metadata_risk_present: false,
+            generated_at: TimestampMillis(0),
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        selected_item_id: None,
+        generated_at: TimestampMillis(0),
+        redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn empty_privacy_inspector_projection() -> devil_protocol::PrivacyInspectorProjection {
+    devil_protocol::PrivacyInspectorProjection {
+        inspector_id: "privacy:empty".to_string(),
+        manifest_id: None,
+        workspace_id: None,
+        proposal_id: None,
+        records: Vec::new(),
+        denied_record_count: 0,
+        redacted_record_count: 0,
+        external_egress_record_count: 0,
+        high_risk_record_count: 0,
+        refusal: None,
+        generated_at: TimestampMillis(0),
+        redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn empty_permission_budget_projection() -> devil_protocol::PermissionBudgetProjection {
+    devil_protocol::PermissionBudgetProjection {
+        projection_id: "permission-budgets:empty".to_string(),
+        budgets: Vec::new(),
+        evaluations: Vec::new(),
+        denied_budget_count: 0,
+        depleted_budget_count: 0,
+        refused_evaluation_count: 0,
+        generated_at: TimestampMillis(0),
+        redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn empty_approval_checklist_projection() -> devil_protocol::ProposalApprovalChecklistProjection {
+    devil_protocol::ProposalApprovalChecklistProjection {
+        checklist_id: "approval-checklist:empty".to_string(),
+        proposal_id: ProposalId(0),
+        workspace_id: None,
+        payload_kind: devil_protocol::ProposalPayloadKind::SaveFile,
+        lifecycle_state: devil_protocol::ProposalLifecycleState::Created,
+        correlation_id: CorrelationId(0),
+        causality_id: None,
+        ready_for_approval: false,
+        gates: Vec::new(),
+        blockers: Vec::new(),
+        risk_labels: Vec::new(),
+        privacy_labels: Vec::new(),
+        explicit_denial_reasons: Vec::new(),
+        generated_at: TimestampMillis(0),
+        redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn empty_checkpoint_rollback_projection() -> devil_protocol::CheckpointRollbackProjection {
+    devil_protocol::CheckpointRollbackProjection {
+        projection_id: "checkpoint-rollback:empty".to_string(),
+        proposal_id: ProposalId(0),
+        workspace_id: None,
+        payload_kind: devil_protocol::ProposalPayloadKind::SaveFile,
+        lifecycle_state: devil_protocol::ProposalLifecycleState::Created,
+        correlation_id: CorrelationId(0),
+        causality_id: None,
+        checkpoint: devil_protocol::ProposalCheckpointProjection {
+            checkpoint_id: "checkpoint:empty".to_string(),
+            available: false,
+            target_count: 0,
+            expected_preconditions:
+                devil_protocol::ContextManifestPreconditionSummary::from_preconditions(
+                    &ProposalVersionPreconditions {
+                        file_version: None,
+                        buffer_version: None,
+                        snapshot_id: None,
+                        generation: None,
+                        file_content_version: None,
+                        workspace_generation: None,
+                        expected_fingerprint: None,
+                        expected_file_length: None,
+                        expected_modified_at: None,
+                    },
+                    1,
+                ),
+            hashes: Vec::new(),
+            audit_status: devil_protocol::CheckpointRollbackAuditStatus::NotRequired,
+            labels: Vec::new(),
+            limitations: Vec::new(),
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        rollback: devil_protocol::ProposalRollbackProjection {
+            availability: devil_protocol::ProposalRollbackAvailability::NotRequired,
+            rollback_step_count: 0,
+            reversible_target_count: 0,
+            irreversible_target_count: 0,
+            audit_status: devil_protocol::CheckpointRollbackAuditStatus::NotRequired,
+            labels: Vec::new(),
+            limitations: Vec::new(),
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        targets: Vec::new(),
+        risk_labels: Vec::new(),
+        privacy_labels: Vec::new(),
+        generated_at: TimestampMillis(0),
+        redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn empty_assisted_ai_projection() -> devil_protocol::AssistedAiProjection {
+    devil_protocol::AssistedAiProjection {
+        projection_id: "assisted-ai:empty".to_string(),
+        providers: Vec::new(),
+        routes: Vec::new(),
+        requests: Vec::new(),
+        refusals: Vec::new(),
+        proposal_previews: Vec::new(),
+        provider_count: 0,
+        request_count: 0,
+        refusal_count: 0,
+        preview_ready_count: 0,
+        provider_invocation: devil_protocol::AssistedAiProviderInvocationState::NotEncoded,
+        generated_at: TimestampMillis(0),
+        redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn metadata_fingerprint(algorithm: &str, value: &str) -> FileFingerprint {
+    FileFingerprint {
+        algorithm: algorithm.to_string(),
+        value: value.to_string(),
+    }
+}
+
+fn trust_reference(
+    reference_id: &str,
+    kind: devil_protocol::AssistedAiTrustProjectionKind,
+) -> devil_protocol::AssistedAiTrustProjectionReference {
+    devil_protocol::AssistedAiTrustProjectionReference {
+        reference_id: reference_id.to_string(),
+        kind,
+        projection_hash: metadata_fingerprint("projection-id", reference_id),
+        schema_version: 1,
+    }
+}
+
+fn phase4_provider_capability() -> devil_protocol::AssistedAiProviderCapability {
+    devil_protocol::AssistedAiProviderCapability {
+        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+        provider_label: "Deterministic local provider".to_string(),
+        provider_class: devil_protocol::AssistedAiProviderClass::LocalLoopback,
+        supported_operations: vec![devil_protocol::AssistedAiOperationClass::ProposeEdit],
+        model_capability_labels: vec!["deterministic".to_string()],
+        tool_capability_labels: Vec::new(),
+        context_window_label: "small".to_string(),
+        cost_budget_label: "local.free".to_string(),
+        risk_budget_label: "low".to_string(),
+        privacy_retention_label: "metadata-only".to_string(),
+        byok_support: devil_protocol::AssistedAiSupportLabel::Unsupported,
+        local_execution_support: devil_protocol::AssistedAiSupportLabel::Supported,
+        offline_support: devil_protocol::AssistedAiSupportLabel::Supported,
+        air_gap_support: devil_protocol::AssistedAiSupportLabel::Supported,
+        redaction_requirements: vec!["metadata-only".to_string()],
+        consent_requirements: vec!["proposal-review".to_string()],
+        availability: devil_protocol::AssistedAiProviderAvailabilityState::Available,
+        refusal: None,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn phase4_permission_budget_projection(
+    context_manifest: &devil_protocol::ContextManifestProjection,
+    run_id: &devil_protocol::AgentRunId,
+    generated_at: TimestampMillis,
+) -> devil_protocol::PermissionBudgetProjection {
+    let budget = devil_protocol::PermissionBudgetContract {
+        budget_id: format!("phase4:budget:{}", run_id.0),
+        action_class: devil_protocol::PermissionBudgetActionClass::InvokeProvider,
+        capability: Some(CapabilityId("ai.provider.invoke".to_string())),
+        state: devil_protocol::PermissionBudgetState::Allowed,
+        privacy_scope: devil_protocol::SemanticPrivacyScope::MetadataOnly,
+        usage: devil_protocol::PermissionBudgetUsageSummary {
+            unit_label: "calls".to_string(),
+            used: 0,
+            ceiling: Some(1),
+            remaining: Some(1),
+            attempted: 0,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        reset_policy_label: devil_protocol::PermissionBudgetResetPolicyLabel::Session,
+        consent_requirement_label:
+            devil_protocol::PermissionBudgetConsentRequirementLabel::NotRequired,
+        risk_label: devil_protocol::ProposalRiskLabel::Low,
+        reasons: vec!["phase4.local_provider.budget_allowed".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let action = devil_protocol::permission_budget_action_from_permission_summary(
+        &context_manifest.manifest.permissions[0],
+        format!("phase4:budget-action:{}", run_id.0),
+        devil_protocol::PermissionBudgetActionClass::InvokeProvider,
+        context_manifest.manifest.workspace_id,
+        context_manifest.manifest.proposal_id,
+        1,
+    );
+    let evaluation = devil_protocol::evaluate_permission_budget(
+        &budget,
+        action,
+        format!("phase4:budget-eval:{}", run_id.0),
+        1,
+    );
+    devil_protocol::permission_budget_projection_from_contracts(
+        format!("phase4:permission-budget:{}", run_id.0),
+        vec![budget],
+        vec![evaluation],
+        generated_at,
+        1,
+    )
+}
+
 /// Result of routing a UI command intent through application-owned services.
 #[derive(Debug, Clone)]
 pub enum AppCommandOutcome {
@@ -4193,6 +4710,59 @@ pub enum AppCommandOutcome {
     ExplorerRefreshed(ExplorerProjection),
     /// A workspace path was opened and bound to an editor buffer.
     Opened(FileId),
+    /// Phase 4 AI run started and produced a proposal-only output.
+    AiRunStarted(Box<AppAiRunOutcome>),
+    /// Phase 4 AI run was cancelled through app-owned metadata.
+    AiRunCancelled(devil_protocol::AgentRunId),
+    /// Phase 4 AI run replay metadata was loaded.
+    AiRunReplayed(Box<devil_protocol::AgentReplayManifest>),
+    /// Phase 4 AI run inspectability snapshot was loaded.
+    AiRunInspected(Box<AppAiInspectionSnapshot>),
+}
+
+/// App-owned result for a Phase 4 AI run.
+#[derive(Debug, Clone)]
+pub struct AppAiRunOutcome {
+    /// Agent run identifier.
+    pub run_id: devil_protocol::AgentRunId,
+    /// Proposal id generated by the run.
+    pub proposal_id: ProposalId,
+    /// Created lifecycle response for the generated proposal.
+    pub proposal_created: ProposalResponse,
+    /// Provider route response metadata.
+    pub route_response: devil_protocol::AssistedAiProviderRouteResponse,
+    /// Context manifest projection used before provider invocation.
+    pub context_manifest_projection: devil_protocol::ContextManifestProjection,
+    /// Privacy inspector projection derived from the manifest.
+    pub privacy_inspector_projection: devil_protocol::PrivacyInspectorProjection,
+    /// Replay manifest persisted for the run.
+    pub replay_manifest: devil_protocol::AgentReplayManifest,
+}
+
+/// App-owned inspectability snapshot for a Phase 4 AI run.
+#[derive(Debug, Clone)]
+pub struct AppAiInspectionSnapshot {
+    /// Agent run identifier.
+    pub run_id: devil_protocol::AgentRunId,
+    /// Latest context manifest projection.
+    pub context_manifest_projection: devil_protocol::ContextManifestProjection,
+    /// Latest privacy inspector projection.
+    pub privacy_inspector_projection: devil_protocol::PrivacyInspectorProjection,
+    /// Latest permission budget projection.
+    pub permission_budget_projection: devil_protocol::PermissionBudgetProjection,
+    /// Latest assisted-AI projection.
+    pub assisted_ai_projection: devil_protocol::AssistedAiProjection,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Phase4ProjectionState {
+    context_manifest_projection: Option<devil_protocol::ContextManifestProjection>,
+    privacy_inspector_projection: Option<devil_protocol::PrivacyInspectorProjection>,
+    permission_budget_projection: Option<devil_protocol::PermissionBudgetProjection>,
+    approval_checklist_projection: Option<devil_protocol::ProposalApprovalChecklistProjection>,
+    checkpoint_rollback_projection: Option<devil_protocol::CheckpointRollbackProjection>,
+    assisted_ai_projection: Option<devil_protocol::AssistedAiProjection>,
+    replay_manifests: HashMap<devil_protocol::AgentRunId, devil_protocol::AgentReplayManifest>,
 }
 
 /// Root application composition.
@@ -4205,6 +4775,10 @@ pub struct AppComposition {
     event_sequence_generator: EventSequenceGenerator,
     storage: InMemoryStorageRepositoryPort,
     event_sink: SharedEventSink,
+    ai_registry: devil_ai::ProviderRegistry,
+    tracker_ledger: TrackerLedger,
+    memory_service: MemoryService,
+    phase4_projection_state: Phase4ProjectionState,
 }
 
 impl AppComposition {
@@ -4236,6 +4810,10 @@ impl AppComposition {
             event_sequence_generator: EventSequenceGenerator::default(),
             storage: InMemoryStorageRepositoryPort::with_event_sink(event_sink.clone()),
             event_sink,
+            ai_registry: make_stub_registry(),
+            tracker_ledger: TrackerLedger::new(),
+            memory_service: MemoryService::new(),
+            phase4_projection_state: Phase4ProjectionState::default(),
         }
     }
 
@@ -4381,8 +4959,529 @@ impl AppComposition {
             AppCommandRequest::OpenPath { path } => {
                 Ok(AppCommandOutcome::Opened(self.open_file(path)?))
             }
+            AppCommandRequest::StartAiRun { instruction_label } => Ok(
+                AppCommandOutcome::AiRunStarted(Box::new(self.start_ai_run(instruction_label)?)),
+            ),
+            AppCommandRequest::CancelAiRun { run_id } => {
+                self.cancel_ai_run(run_id.clone())?;
+                Ok(AppCommandOutcome::AiRunCancelled(run_id))
+            }
+            AppCommandRequest::ReplayAiRun { run_id } => Ok(AppCommandOutcome::AiRunReplayed(
+                Box::new(self.replay_ai_run(run_id)?),
+            )),
+            AppCommandRequest::InspectAiRun { run_id } => Ok(AppCommandOutcome::AiRunInspected(
+                Box::new(self.inspect_ai_run(run_id)?),
+            )),
             _ => unreachable!("command execution service handled non-workflow command"),
         }
+    }
+
+    /// Start a Phase 4 local-provider AI run and register its generated edit as a proposal.
+    pub fn start_ai_run(
+        &mut self,
+        instruction_label: impl Into<String>,
+    ) -> Result<AppAiRunOutcome, AppCompositionError> {
+        let instruction_label = instruction_label.into();
+        let context = self.active_documents.require_active_save_context()?;
+        let event_context = self.next_event_context();
+        let generated_at = TimestampMillis::now();
+        let snapshot = self.editor.current_snapshot(context.buffer_id)?.clone();
+        let run_id =
+            devil_protocol::AgentRunId(format!("phase4-run-{}", event_context.correlation_id.0));
+        let route_id = format!("phase4-route-{}", event_context.correlation_id.0);
+        let snapshot_hash = FileFingerprint {
+            algorithm: "devil-text-snapshot".to_string(),
+            value: snapshot.content_hash.clone(),
+        };
+        let context_manifest_projection = Phase4ContextAssemblyService::assemble_context_manifest(
+            &context,
+            &run_id,
+            &route_id,
+            snapshot.snapshot_id,
+            snapshot.buffer_version,
+            snapshot_hash,
+            snapshot.byte_len as u64,
+            snapshot.line_count.min(u32::MAX as usize) as u32,
+            generated_at,
+        );
+        let privacy_inspector_projection =
+            devil_protocol::privacy_inspector_from_context_manifest_projection(
+                &context_manifest_projection,
+                format!("phase4:privacy:{}", run_id.0),
+                generated_at,
+                1,
+            );
+        let permission_budget_projection = phase4_permission_budget_projection(
+            &context_manifest_projection,
+            &run_id,
+            generated_at,
+        );
+
+        let mut agent = AgentRuntime::new(run_id.clone());
+        agent
+            .transition(
+                devil_protocol::AgentRunState::Planning,
+                "agent.planning.context_ready",
+                event_context.correlation_id,
+                event_context.causality_id,
+                self.event_sequence_generator.next(),
+            )
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+
+        let provider_route_request = devil_protocol::AssistedAiProviderRouteRequest {
+            route_id: route_id.clone(),
+            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            model_label: "deterministic-local".to_string(),
+            provider_class: devil_protocol::AssistedAiProviderClass::LocalLoopback,
+            operation_class: devil_protocol::AssistedAiOperationClass::ProposeEdit,
+            context_manifest: trust_reference(
+                &context_manifest_projection.manifest.manifest_id,
+                devil_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+            ),
+            privacy_inspector: trust_reference(
+                &privacy_inspector_projection.inspector_id,
+                devil_protocol::AssistedAiTrustProjectionKind::PrivacyInspector,
+            ),
+            permission_budget: trust_reference(
+                &permission_budget_projection.projection_id,
+                devil_protocol::AssistedAiTrustProjectionKind::PermissionBudget,
+            ),
+            proposal_intent: devil_protocol::AssistedAiProposalTargetIntent {
+                payload_kind: devil_protocol::ProposalPayloadKind::TextEdit,
+                target_coverage: ProposalTargetCoverage {
+                    coverage_kind: ProposalTargetCoverageKind::Complete,
+                    targets: vec![ProposalAffectedTarget {
+                        target_id: format!("file:{}", context.metadata.identity.file_id.0),
+                        kind: ProposalTargetKind::OpenBuffer,
+                        workspace_id: Some(context.workspace_id),
+                        file_id: Some(context.metadata.identity.file_id),
+                        buffer_id: Some(context.buffer_id),
+                        path: Some(context.metadata.identity.canonical_path.clone()),
+                        terminal_session_id: None,
+                        plugin_id: None,
+                        remote_authority: None,
+                        collaboration_session_id: None,
+                        byte_ranges: vec![devil_protocol::ByteRange::new(0, 0)],
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                    }],
+                    omitted_target_count: 0,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                },
+                required_capability: CapabilityId("editor.write".to_string()),
+                risk_label: devil_protocol::ProposalRiskLabel::Low,
+                privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                labels: vec![instruction_label],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            policy_decision_id: None,
+            required_capability: CapabilityId("ai.provider.invoke".to_string()),
+            network_target: Some(devil_protocol::NetworkTarget {
+                scheme: "http".to_string(),
+                host: "localhost".to_string(),
+                port: Some(11434),
+            }),
+            cancellation_token: devil_protocol::CancellationTokenId(uuid::Uuid::now_v7()),
+            health_labels: vec!["local.deterministic".to_string()],
+            cost_labels: vec!["local.free".to_string()],
+            principal_id: context.principal.clone(),
+            workspace_trust_state: context.trust.clone(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let broker = DenyByDefaultBroker::new(
+            SecurityPolicy::default(),
+            CapabilityNamespace("app.ai".to_string()),
+        );
+        let route_response = ProviderRouter::new(&self.ai_registry, &broker)
+            .route_completion(provider_route_request.clone())
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        if route_response.invocation_state
+            != devil_protocol::AssistedAiProviderInvocationState::Completed
+        {
+            return Err(AppCompositionError::AiRuntime(format!(
+                "provider route refused: {:?}",
+                route_response.refusal
+            )));
+        }
+
+        agent
+            .transition(
+                devil_protocol::AgentRunState::Proposing,
+                "agent.proposing.provider_completed",
+                event_context.correlation_id,
+                event_context.causality_id,
+                self.event_sequence_generator.next(),
+            )
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+
+        let proposal_id = self.proposal_coordinator.next_id();
+        let preconditions = ProposalVersionPreconditions {
+            file_version: Some(context.metadata.file_content_version),
+            buffer_version: Some(snapshot.buffer_version),
+            snapshot_id: Some(snapshot.snapshot_id),
+            generation: Some(context.metadata.workspace_generation),
+            file_content_version: Some(context.metadata.file_content_version),
+            workspace_generation: Some(context.metadata.workspace_generation),
+            expected_fingerprint: Some(context.metadata.fingerprint.clone()),
+            expected_file_length: context.metadata.file_length,
+            expected_modified_at: context.metadata.modified_at,
+        };
+        let output = devil_protocol::AssistedAiEditProposalOutput {
+            output_id: format!("phase4-output-{}", event_context.correlation_id.0),
+            request_id: format!("phase4-request-{}", event_context.correlation_id.0),
+            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            proposal_id,
+            principal: context.principal.clone(),
+            capability: CapabilityId("editor.write".to_string()),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            payload: ProposalPayload::TextEdit(devil_protocol::TextEditProposal {
+                file_id: context.metadata.identity.file_id,
+                edits: devil_protocol::EditBatch {
+                    edits: vec![devil_protocol::TextEdit {
+                        range: devil_protocol::TextRange::byte(0, 0),
+                        replacement: "/* phase4 local AI proposal */\n".to_string(),
+                    }],
+                },
+            }),
+            preconditions,
+            preview: PreviewSummary {
+                summary: "Phase 4 local AI edit proposal".to_string(),
+                details: vec![
+                    "Generated by deterministic local provider".to_string(),
+                    "Proposal is registered only; app/editor/workspace own apply".to_string(),
+                ],
+            },
+            expires_at: None,
+            created_at: generated_at,
+            context_manifest: trust_reference(
+                &context_manifest_projection.manifest.manifest_id,
+                devil_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+            ),
+            approval_checklist: trust_reference(
+                &format!("phase4:approval:{}", run_id.0),
+                devil_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+            ),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let proposal = output
+            .to_workspace_proposal()
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        let proposal_created = self.register_proposal_lifecycle(&proposal)?;
+        let ledger_projection = self
+            .proposal_coordinator
+            .proposal_ledger_projection(generated_at);
+        let checkpoint_rollback_projection =
+            devil_protocol::checkpoint_rollback_projection_from_proposal(
+                format!("phase4:checkpoint:{}", run_id.0),
+                &proposal,
+                ProposalLifecycleState::Created,
+                Some(&ledger_projection),
+                devil_protocol::CheckpointRollbackAuditStatus::Available,
+                Some(event_context.causality_id),
+                generated_at,
+                1,
+            );
+        let approval_checklist_projection =
+            devil_protocol::approval_checklist_from_trust_projections(
+                format!("phase4:approval:{}", run_id.0),
+                &proposal,
+                ProposalLifecycleState::Created,
+                Some(&ledger_projection),
+                Some(&context_manifest_projection),
+                Some(&privacy_inspector_projection),
+                Some(&permission_budget_projection),
+                Some(&checkpoint_rollback_projection),
+                true,
+                Some(event_context.causality_id),
+                generated_at,
+                1,
+            );
+        let provider_capability = phase4_provider_capability();
+        let request_contract = devil_protocol::AssistedAiRequestContract {
+            request_id: output.request_id.clone(),
+            provider: provider_capability.clone(),
+            operation_class: devil_protocol::AssistedAiOperationClass::ProposeEdit,
+            context_manifest: output.context_manifest.clone(),
+            privacy_inspector: trust_reference(
+                &privacy_inspector_projection.inspector_id,
+                devil_protocol::AssistedAiTrustProjectionKind::PrivacyInspector,
+            ),
+            permission_budget_projection: trust_reference(
+                &permission_budget_projection.projection_id,
+                devil_protocol::AssistedAiTrustProjectionKind::PermissionBudget,
+            ),
+            permission_budget_evaluations: permission_budget_projection
+                .evaluations
+                .iter()
+                .map(|evaluation| {
+                    devil_protocol::AssistedAiPermissionBudgetEvaluationReference::from_evaluation(
+                        evaluation,
+                        metadata_fingerprint(
+                            "permission-budget-evaluation",
+                            &evaluation.evaluation_id,
+                        ),
+                        1,
+                    )
+                })
+                .collect(),
+            approval_checklist: trust_reference(
+                &approval_checklist_projection.checklist_id,
+                devil_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+            ),
+            checkpoint_rollback: Some(trust_reference(
+                &checkpoint_rollback_projection.projection_id,
+                devil_protocol::AssistedAiTrustProjectionKind::CheckpointRollback,
+            )),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            proposal_intent: provider_route_request.proposal_intent.clone(),
+            route_decision: route_response.route_decision.clone(),
+            created_at: generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let assisted_ai_projection = devil_protocol::assisted_ai_projection_from_metadata(
+            format!("phase4:assisted:{}", run_id.0),
+            vec![provider_capability],
+            vec![request_contract],
+            vec![output.clone()],
+            Some(&ledger_projection),
+            Some(&context_manifest_projection),
+            Some(&privacy_inspector_projection),
+            Some(&permission_budget_projection),
+            Some(&approval_checklist_projection),
+            Some(&checkpoint_rollback_projection),
+            generated_at,
+            1,
+        );
+
+        agent
+            .transition(
+                devil_protocol::AgentRunState::WaitingForApproval,
+                "agent.waiting_for_approval.proposal_registered",
+                event_context.correlation_id,
+                event_context.causality_id,
+                self.event_sequence_generator.next(),
+            )
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        let replay_manifest = devil_protocol::AgentReplayManifest {
+            run_id: run_id.clone(),
+            transitions: agent.transitions().to_vec(),
+            context_manifests: vec![trust_reference(
+                &context_manifest_projection.manifest.manifest_id,
+                devil_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+            )],
+            provider_route_ids: vec![route_id.clone()],
+            proposal_ids: vec![proposal_id],
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        self.persist_phase4_runtime_records(
+            &run_id,
+            &route_id,
+            route_response.invocation_state,
+            "phase4.provider.route.completed",
+            event_context,
+            &replay_manifest,
+        )?;
+        self.tracker_ledger
+            .append(TrackerRunLedgerRecord {
+                run_id: run_id.clone(),
+                state: devil_protocol::AgentRunState::WaitingForApproval,
+                proposal_id: Some(proposal_id),
+                transitions: replay_manifest.transitions.clone(),
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                labels: vec!["tracker.phase4.run.waiting_for_approval".to_string()],
+            })
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        let _ = self
+            .memory_service
+            .propose_candidate(MemoryCandidateRecord {
+                candidate_id: format!("phase4-memory-candidate-{}", run_id.0),
+                run_id: Some(run_id.clone()),
+                consent: MemoryConsentState::NotGranted,
+                labels: vec!["memory.candidate.review_required".to_string()],
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+            })
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+
+        self.phase4_projection_state.context_manifest_projection =
+            Some(context_manifest_projection.clone());
+        self.phase4_projection_state.privacy_inspector_projection =
+            Some(privacy_inspector_projection.clone());
+        self.phase4_projection_state.permission_budget_projection =
+            Some(permission_budget_projection.clone());
+        self.phase4_projection_state.approval_checklist_projection =
+            Some(approval_checklist_projection);
+        self.phase4_projection_state.checkpoint_rollback_projection =
+            Some(checkpoint_rollback_projection);
+        self.phase4_projection_state.assisted_ai_projection = Some(assisted_ai_projection);
+        self.phase4_projection_state
+            .replay_manifests
+            .insert(run_id.clone(), replay_manifest.clone());
+
+        Ok(AppAiRunOutcome {
+            run_id,
+            proposal_id,
+            proposal_created,
+            route_response,
+            context_manifest_projection,
+            privacy_inspector_projection,
+            replay_manifest,
+        })
+    }
+
+    /// Cancel a Phase 4 run by writing metadata-only cancellation audit.
+    pub fn cancel_ai_run(
+        &mut self,
+        run_id: devil_protocol::AgentRunId,
+    ) -> Result<(), AppCompositionError> {
+        if !self
+            .phase4_projection_state
+            .replay_manifests
+            .contains_key(&run_id)
+        {
+            return Err(AppCompositionError::AiRunMissing { run_id: run_id.0 });
+        }
+        let event_context = self.next_event_context();
+        let record = devil_protocol::Phase4RuntimeAuditRecord {
+            audit_id: format!("phase4-cancel:{}", run_id.0),
+            run_id: Some(run_id),
+            step_id: None,
+            provider_route_id: None,
+            invocation_state: devil_protocol::AssistedAiProviderInvocationState::Cancelled,
+            outcome_label: "phase4.agent.cancelled".to_string(),
+            labels: vec!["agent.cancelled.metadata_only".to_string()],
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        self.storage
+            .handle(StorageRepositoryRequest::SavePhase4RuntimeAuditRecord(
+                record.clone(),
+            ))
+            .map_err(AppCompositionError::Protocol)?;
+        let envelope = phase4_runtime_audit_recorded_event(&record)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        self.emit_event(envelope);
+        Ok(())
+    }
+
+    /// Replay a Phase 4 run from metadata-only storage.
+    pub fn replay_ai_run(
+        &self,
+        run_id: devil_protocol::AgentRunId,
+    ) -> Result<devil_protocol::AgentReplayManifest, AppCompositionError> {
+        match self
+            .storage
+            .handle(StorageRepositoryRequest::ReadAgentReplayManifest(
+                run_id.clone(),
+            ))
+            .map_err(AppCompositionError::Protocol)?
+        {
+            StorageRepositoryResponse::AgentReplayManifest(manifest) => manifest
+                .as_ref()
+                .clone()
+                .ok_or(AppCompositionError::AiRunMissing { run_id: run_id.0 }),
+            other => Err(AppCompositionError::Protocol(ProtocolError {
+                code: "phase4_replay_unexpected_response".to_string(),
+                message: format!("expected agent replay manifest, got {other:?}"),
+            })),
+        }
+    }
+
+    /// Inspect Phase 4 projections for the latest run metadata.
+    pub fn inspect_ai_run(
+        &self,
+        run_id: devil_protocol::AgentRunId,
+    ) -> Result<AppAiInspectionSnapshot, AppCompositionError> {
+        if !self
+            .phase4_projection_state
+            .replay_manifests
+            .contains_key(&run_id)
+        {
+            return Err(AppCompositionError::AiRunMissing { run_id: run_id.0 });
+        }
+        Ok(AppAiInspectionSnapshot {
+            run_id,
+            context_manifest_projection: self
+                .phase4_projection_state
+                .context_manifest_projection
+                .clone()
+                .unwrap_or_else(empty_context_manifest_projection),
+            privacy_inspector_projection: self
+                .phase4_projection_state
+                .privacy_inspector_projection
+                .clone()
+                .unwrap_or_else(empty_privacy_inspector_projection),
+            permission_budget_projection: self
+                .phase4_projection_state
+                .permission_budget_projection
+                .clone()
+                .unwrap_or_else(empty_permission_budget_projection),
+            assisted_ai_projection: self
+                .phase4_projection_state
+                .assisted_ai_projection
+                .clone()
+                .unwrap_or_else(empty_assisted_ai_projection),
+        })
+    }
+
+    fn persist_phase4_runtime_records(
+        &self,
+        run_id: &devil_protocol::AgentRunId,
+        route_id: &str,
+        invocation_state: devil_protocol::AssistedAiProviderInvocationState,
+        outcome_label: &str,
+        event_context: EventContext,
+        replay_manifest: &devil_protocol::AgentReplayManifest,
+    ) -> Result<(), AppCompositionError> {
+        let record = devil_protocol::Phase4RuntimeAuditRecord {
+            audit_id: format!("phase4-runtime:{}:{}", run_id.0, route_id),
+            run_id: Some(run_id.clone()),
+            step_id: None,
+            provider_route_id: Some(route_id.to_string()),
+            invocation_state,
+            outcome_label: outcome_label.to_string(),
+            labels: vec!["phase4.runtime.metadata_only".to_string()],
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: replay_manifest.event_sequence,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        self.storage
+            .handle(StorageRepositoryRequest::SavePhase4RuntimeAuditRecord(
+                record.clone(),
+            ))
+            .map_err(AppCompositionError::Protocol)?;
+        self.storage
+            .handle(StorageRepositoryRequest::SaveAgentReplayManifest(
+                replay_manifest.clone(),
+            ))
+            .map_err(AppCompositionError::Protocol)?;
+        let runtime_event = phase4_runtime_audit_recorded_event(&record)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        self.emit_event(runtime_event);
+        let replay_event = agent_replay_manifest_recorded_event(replay_manifest)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        self.emit_event(replay_event);
+        Ok(())
     }
 
     /// Save currently active buffer through editor save request and workspace write authority.
@@ -4439,141 +5538,36 @@ impl AppComposition {
             explorer_projection: self.explorer_projection()?,
             status_messages: Vec::new(),
             proposal_ledger_projection,
-            context_manifest_projection: devil_protocol::ContextManifestProjection {
-                manifest: devil_protocol::ContextManifestRecord {
-                    manifest_id: "manifest:empty".to_string(),
-                    workspace_id: None,
-                    proposal_id: None,
-                    purpose: devil_protocol::ContextManifestPurpose::TrustReview,
-                    workspace_trust_state: None,
-                    privacy_label: devil_protocol::ProposalPrivacyLabel::PublicMetadata,
-                    risk_label: devil_protocol::ProposalRiskLabel::Informational,
-                    egress: devil_protocol::ContextManifestEgressStatus::LocalOnly,
-                    items: Vec::new(),
-                    permissions: Vec::new(),
-                    omitted_item_count: 0,
-                    stale_or_missing_metadata_risk_present: false,
-                    generated_at: TimestampMillis(0),
-                    redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                    schema_version: 1,
-                },
-                selected_item_id: None,
-                generated_at: TimestampMillis(0),
-                redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
-            privacy_inspector_projection: devil_protocol::PrivacyInspectorProjection {
-                inspector_id: "privacy:empty".to_string(),
-                manifest_id: None,
-                workspace_id: None,
-                proposal_id: None,
-                records: Vec::new(),
-                denied_record_count: 0,
-                redacted_record_count: 0,
-                external_egress_record_count: 0,
-                high_risk_record_count: 0,
-                refusal: None,
-                generated_at: TimestampMillis(0),
-                redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
-            permission_budget_projection: devil_protocol::PermissionBudgetProjection {
-                projection_id: "permission-budgets:empty".to_string(),
-                budgets: Vec::new(),
-                evaluations: Vec::new(),
-                denied_budget_count: 0,
-                depleted_budget_count: 0,
-                refused_evaluation_count: 0,
-                generated_at: TimestampMillis(0),
-                redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
-            approval_checklist_projection: devil_protocol::ProposalApprovalChecklistProjection {
-                checklist_id: "approval-checklist:empty".to_string(),
-                proposal_id: ProposalId(0),
-                workspace_id: None,
-                payload_kind: devil_protocol::ProposalPayloadKind::SaveFile,
-                lifecycle_state: devil_protocol::ProposalLifecycleState::Created,
-                correlation_id: CorrelationId(0),
-                causality_id: None,
-                ready_for_approval: false,
-                gates: Vec::new(),
-                blockers: Vec::new(),
-                risk_labels: Vec::new(),
-                privacy_labels: Vec::new(),
-                explicit_denial_reasons: Vec::new(),
-                generated_at: TimestampMillis(0),
-                redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
-            checkpoint_rollback_projection: devil_protocol::CheckpointRollbackProjection {
-                projection_id: "checkpoint-rollback:empty".to_string(),
-                proposal_id: ProposalId(0),
-                workspace_id: None,
-                payload_kind: devil_protocol::ProposalPayloadKind::SaveFile,
-                lifecycle_state: devil_protocol::ProposalLifecycleState::Created,
-                correlation_id: CorrelationId(0),
-                causality_id: None,
-                checkpoint: devil_protocol::ProposalCheckpointProjection {
-                    checkpoint_id: "checkpoint:empty".to_string(),
-                    available: false,
-                    target_count: 0,
-                    expected_preconditions:
-                        devil_protocol::ContextManifestPreconditionSummary::from_preconditions(
-                            &ProposalVersionPreconditions {
-                                file_version: None,
-                                buffer_version: None,
-                                snapshot_id: None,
-                                generation: None,
-                                file_content_version: None,
-                                workspace_generation: None,
-                                expected_fingerprint: None,
-                                expected_file_length: None,
-                                expected_modified_at: None,
-                            },
-                            1,
-                        ),
-                    hashes: Vec::new(),
-                    audit_status: devil_protocol::CheckpointRollbackAuditStatus::NotRequired,
-                    labels: Vec::new(),
-                    limitations: Vec::new(),
-                    redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                    schema_version: 1,
-                },
-                rollback: devil_protocol::ProposalRollbackProjection {
-                    availability: devil_protocol::ProposalRollbackAvailability::NotRequired,
-                    rollback_step_count: 0,
-                    reversible_target_count: 0,
-                    irreversible_target_count: 0,
-                    audit_status: devil_protocol::CheckpointRollbackAuditStatus::NotRequired,
-                    labels: Vec::new(),
-                    limitations: Vec::new(),
-                    redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                    schema_version: 1,
-                },
-                targets: Vec::new(),
-                risk_labels: Vec::new(),
-                privacy_labels: Vec::new(),
-                generated_at: TimestampMillis(0),
-                redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
-            assisted_ai_projection: devil_protocol::AssistedAiProjection {
-                projection_id: "assisted-ai:empty".to_string(),
-                providers: Vec::new(),
-                routes: Vec::new(),
-                requests: Vec::new(),
-                refusals: Vec::new(),
-                proposal_previews: Vec::new(),
-                provider_count: 0,
-                request_count: 0,
-                refusal_count: 0,
-                preview_ready_count: 0,
-                provider_invocation: devil_protocol::AssistedAiProviderInvocationState::NotEncoded,
-                generated_at: TimestampMillis(0),
-                redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
+            context_manifest_projection: self
+                .phase4_projection_state
+                .context_manifest_projection
+                .clone()
+                .unwrap_or_else(empty_context_manifest_projection),
+            privacy_inspector_projection: self
+                .phase4_projection_state
+                .privacy_inspector_projection
+                .clone()
+                .unwrap_or_else(empty_privacy_inspector_projection),
+            permission_budget_projection: self
+                .phase4_projection_state
+                .permission_budget_projection
+                .clone()
+                .unwrap_or_else(empty_permission_budget_projection),
+            approval_checklist_projection: self
+                .phase4_projection_state
+                .approval_checklist_projection
+                .clone()
+                .unwrap_or_else(empty_approval_checklist_projection),
+            checkpoint_rollback_projection: self
+                .phase4_projection_state
+                .checkpoint_rollback_projection
+                .clone()
+                .unwrap_or_else(empty_checkpoint_rollback_projection),
+            assisted_ai_projection: self
+                .phase4_projection_state
+                .assisted_ai_projection
+                .clone()
+                .unwrap_or_else(empty_assisted_ai_projection),
             delegated_task_projection: devil_protocol::DelegatedTaskProjection {
                 projection_id: "delegated-task:empty".to_string(),
                 plan_rows: Vec::new(),

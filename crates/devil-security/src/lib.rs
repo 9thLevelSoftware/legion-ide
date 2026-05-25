@@ -353,6 +353,10 @@ pub struct NetworkPolicy {
     pub allowlist: Vec<String>,
     /// Deny explicit host blocklist.
     pub blocklist: Vec<String>,
+    /// Air-gap mode blocks hosted provider, telemetry, gateway, and non-loopback egress.
+    pub air_gap: bool,
+    /// Provider invocation is restricted to local or loopback targets.
+    pub local_provider_only: bool,
 }
 
 impl Default for NetworkPolicy {
@@ -361,6 +365,32 @@ impl Default for NetworkPolicy {
             allow_untrusted: false,
             allowlist: vec!["localhost".to_string()],
             blocklist: vec!["example.exfiltration.invalid".to_string()],
+            air_gap: true,
+            local_provider_only: true,
+        }
+    }
+}
+
+/// AI provider policy controls.
+#[derive(Debug, Clone)]
+pub struct AiProviderPolicy {
+    /// Whether provider invocation is enabled at all.
+    pub provider_invocation_enabled: bool,
+    /// Whether local provider invocation is allowed.
+    pub allow_local_provider: bool,
+    /// Whether remote/cloud provider invocation is allowed.
+    pub allow_remote_provider: bool,
+    /// Deny provider capability requests in untrusted workspaces.
+    pub deny_when_untrusted: bool,
+}
+
+impl Default for AiProviderPolicy {
+    fn default() -> Self {
+        Self {
+            provider_invocation_enabled: true,
+            allow_local_provider: true,
+            allow_remote_provider: false,
+            deny_when_untrusted: true,
         }
     }
 }
@@ -382,6 +412,8 @@ pub struct SecurityPolicy {
     pub file_write_policy: FileWritePolicy,
     /// Network policy.
     pub network_policy: NetworkPolicy,
+    /// AI provider policy.
+    pub ai_provider_policy: AiProviderPolicy,
 }
 
 /// Security errors.
@@ -562,6 +594,108 @@ impl DenyByDefaultBroker {
         }
     }
 
+    fn is_loopback_host(host: &str) -> bool {
+        matches!(
+            host.to_ascii_lowercase().as_str(),
+            "localhost" | "127.0.0.1" | "::1"
+        )
+    }
+
+    fn host_matches_configured(pattern: &str, host: &str) -> bool {
+        pattern.eq_ignore_ascii_case(host)
+    }
+
+    fn network_target_decision(&self, context: &CapabilityRequestContext) -> SecurityDecision {
+        let Some(target) = &context.network_target else {
+            return SecurityDecision::deny("network target metadata required by policy");
+        };
+
+        if target.scheme != "http" && target.scheme != "https" {
+            return SecurityDecision::deny("network scheme denied by policy");
+        }
+
+        if self
+            .policy
+            .network_policy
+            .blocklist
+            .iter()
+            .any(|host| Self::host_matches_configured(host, &target.host))
+        {
+            return SecurityDecision::deny("network host blocked by policy");
+        }
+
+        if self.policy.network_policy.air_gap && !Self::is_loopback_host(&target.host) {
+            return SecurityDecision::deny("air-gap mode denies non-loopback network access");
+        }
+
+        if self.policy.network_policy.local_provider_only && !Self::is_loopback_host(&target.host) {
+            return SecurityDecision::deny("local-provider-only mode denies remote network access");
+        }
+
+        if self
+            .policy
+            .network_policy
+            .allowlist
+            .iter()
+            .any(|host| Self::host_matches_configured(host, &target.host))
+        {
+            SecurityDecision::allow()
+        } else {
+            SecurityDecision::deny("network host not allowlisted by policy")
+        }
+    }
+
+    fn ai_capability_decision(
+        &self,
+        trust: TrustState,
+        capability: &str,
+        context: &CapabilityRequestContext,
+    ) -> SecurityDecision {
+        if self.policy.ai_provider_policy.deny_when_untrusted && trust != TrustState::Trusted {
+            return SecurityDecision::deny("AI capability denied for untrusted workspace");
+        }
+
+        match capability {
+            "ai.provider.invoke" | "ai.provider.stream" => {
+                if !self.policy.ai_provider_policy.provider_invocation_enabled {
+                    return SecurityDecision::deny("AI provider invocation disabled by policy");
+                }
+                if let Some(target) = &context.network_target {
+                    let loopback = Self::is_loopback_host(&target.host);
+                    if loopback && !self.policy.ai_provider_policy.allow_local_provider {
+                        return SecurityDecision::deny(
+                            "local AI provider invocation disabled by policy",
+                        );
+                    }
+                    if !loopback && !self.policy.ai_provider_policy.allow_remote_provider {
+                        return SecurityDecision::deny(
+                            "remote AI provider invocation disabled by policy",
+                        );
+                    }
+                }
+                if self.policy.network_policy.air_gap
+                    && context
+                        .network_target
+                        .as_ref()
+                        .is_some_and(|target| !Self::is_loopback_host(&target.host))
+                {
+                    return SecurityDecision::deny(
+                        "air-gap mode denies hosted provider invocation",
+                    );
+                }
+                self.network_target_decision(context)
+            }
+            "ai.provider.cancel" | "ai.context.assemble" | "ai.proposal.create" => {
+                SecurityDecision::allow()
+            }
+            "tracker.write" | "memory.candidate.write" | "tool.plan" => SecurityDecision::allow(),
+            "memory.retain" => SecurityDecision::deny("memory retention requires explicit consent"),
+            _ => {
+                SecurityDecision::deny(format!("capability {capability} denied by deny-by-default"))
+            }
+        }
+    }
+
     fn decide_with_context(
         &self,
         trust: TrustState,
@@ -572,6 +706,14 @@ impl DenyByDefaultBroker {
         _decision_id: CapabilityDecisionId,
     ) -> SecurityDecision {
         let capability = capability.0;
+
+        if capability.starts_with("ai.")
+            || capability.starts_with("tracker.")
+            || capability.starts_with("memory.")
+            || capability == "tool.plan"
+        {
+            return self.ai_capability_decision(trust, &capability, context);
+        }
 
         if let Some(stripped) = capability.strip_prefix("plugin.") {
             return if self.policy.plugin_policy.namespace_required
@@ -652,7 +794,7 @@ impl DenyByDefaultBroker {
             }
 
             if rest == "fetch" || rest == "egress" {
-                return SecurityDecision::allow();
+                return self.network_target_decision(context);
             }
 
             return SecurityDecision::allow();
@@ -687,6 +829,9 @@ impl DenyByDefaultBroker {
             || capability.starts_with("lsp.")
             || capability.starts_with("network.")
             || capability.starts_with("plugin.")
+            || capability.starts_with("ai.")
+            || capability.starts_with("tracker.")
+            || capability.starts_with("memory.")
         {
             return true;
         }
@@ -918,5 +1063,173 @@ mod tests {
             | CapabilityResponse::Granted(_)
             | CapabilityResponse::Denied(_) => {}
         }
+    }
+
+    #[test]
+    fn network_fetch_requires_allowlisted_target_even_when_trusted() {
+        let mut broker = DenyByDefaultBroker::default();
+        let decision = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("network.fetch".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(decision, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn ai_provider_invoke_allows_loopback_for_trusted_workspace() {
+        let mut broker = DenyByDefaultBroker::default();
+        let decision = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("ai.provider.invoke".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "http".to_string(),
+                    host: "localhost".to_string(),
+                    port: Some(11434),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(decision, SecurityDecision::Allow));
+    }
+
+    #[test]
+    fn air_gap_denies_hosted_provider_telemetry_embeddings_and_gateway() {
+        let mut broker = DenyByDefaultBroker::default();
+        let remote_target = CapabilityRequestContext {
+            network_target: Some(devil_protocol::NetworkTarget {
+                scheme: "https".to_string(),
+                host: "api.openai.com".to_string(),
+                port: Some(443),
+            }),
+            ..Default::default()
+        };
+
+        let hosted_provider = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("ai.provider.invoke".to_string()),
+            None,
+            remote_target,
+        );
+        assert!(matches!(hosted_provider, SecurityDecision::Deny(_)));
+
+        for capability in [
+            "ai.telemetry.hosted",
+            "ai.embedding.hosted",
+            "ai.gateway.invoke",
+            "network.fetch",
+        ] {
+            let decision = broker.decide_with_request_context(
+                TrustState::Trusted,
+                PrincipalId("principal-1".to_string()),
+                CapabilityId(capability.to_string()),
+                None,
+                CapabilityRequestContext {
+                    network_target: Some(devil_protocol::NetworkTarget {
+                        scheme: "https".to_string(),
+                        host: "telemetry.example.com".to_string(),
+                        port: Some(443),
+                    }),
+                    ..Default::default()
+                },
+            );
+            assert!(matches!(decision, SecurityDecision::Deny(_)));
+        }
+    }
+
+    #[test]
+    fn provider_policy_denies_remote_even_when_network_allowlist_permits_host() {
+        let policy = SecurityPolicy {
+            network_policy: NetworkPolicy {
+                allowlist: vec!["api.openai.com".to_string()],
+                air_gap: false,
+                local_provider_only: false,
+                ..NetworkPolicy::default()
+            },
+            ai_provider_policy: AiProviderPolicy {
+                allow_remote_provider: false,
+                ..AiProviderPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+
+        let decision = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("ai.provider.invoke".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "api.openai.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            matches!(decision, SecurityDecision::Deny(reason) if reason.contains("remote AI provider"))
+        );
+    }
+
+    #[test]
+    fn provider_policy_can_disable_local_loopback_invocation() {
+        let policy = SecurityPolicy {
+            ai_provider_policy: AiProviderPolicy {
+                allow_local_provider: false,
+                ..AiProviderPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+
+        let decision = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("ai.provider.invoke".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "http".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: Some(11434),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            matches!(decision, SecurityDecision::Deny(reason) if reason.contains("local AI provider"))
+        );
+    }
+
+    #[test]
+    fn memory_retain_denied_without_explicit_consent() {
+        let mut broker = DenyByDefaultBroker::default();
+        let decision = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("memory.retain".to_string()),
+            None,
+        );
+
+        assert!(matches!(decision, SecurityDecision::Deny(_)));
     }
 }

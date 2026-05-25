@@ -2593,6 +2593,20 @@ pub enum ContextManifestItemKind {
     ToolPermission,
     /// Risk label metadata.
     RiskLabel,
+    /// Tracker task metadata.
+    TrackerTask,
+    /// Memory retention or candidate metadata.
+    MemoryRecord,
+    /// Retrieval result metadata without vector payloads or source bodies.
+    RetrievedChunk,
+    /// Terminal summary metadata without terminal output bodies.
+    TerminalSummary,
+    /// User selection metadata.
+    UserSelection,
+    /// Provider route metadata.
+    ProviderRoute,
+    /// Agent step metadata.
+    AgentStep,
 }
 
 /// Inclusion disposition for a manifest item.
@@ -3557,6 +3571,306 @@ pub enum AssistedAiRequestDisposition {
 pub enum AssistedAiProviderInvocationState {
     /// No provider call, network request, tool execution, prompt payload, or runtime work is encoded.
     NotEncoded,
+    /// Provider route is planned but has not been approved for invocation.
+    Planned,
+    /// Provider route passed policy checks and may be invoked by the owning runtime.
+    PolicyApproved,
+    /// Local provider invocation is in progress.
+    InvokingLocalProvider,
+    /// Provider invocation is producing bounded stream metadata.
+    Streaming,
+    /// Provider invocation completed; raw response payload is not stored here.
+    Completed,
+    /// Provider invocation was cancelled.
+    Cancelled,
+    /// Provider invocation failed with redacted metadata.
+    Failed,
+    /// Provider invocation was refused by policy, consent, privacy, budget, or availability.
+    Refused,
+}
+
+/// Stable agent run identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentRunId(pub String);
+
+/// Stable agent step identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentStepId(pub String);
+
+/// Phase 4 agent run state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentRunState {
+    /// Runtime is collecting metadata-only context.
+    Observing,
+    /// Runtime is planning provider and proposal work.
+    Planning,
+    /// Runtime is preparing proposal-only output.
+    Proposing,
+    /// Runtime is waiting for explicit user approval.
+    WaitingForApproval,
+    /// Existing app/workspace authorities are applying an approved proposal.
+    Applying,
+    /// Runtime is verifying metadata-only outcome evidence.
+    Verifying,
+    /// Runtime is recovering from a failed or stale step.
+    Recovering,
+    /// Runtime is blocked by policy or missing preconditions.
+    Blocked,
+    /// Runtime was cancelled.
+    Cancelled,
+    /// Runtime completed.
+    Completed,
+    /// Runtime failed.
+    Failed,
+}
+
+/// Phase 4 agent step state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentStepState {
+    /// Step is planned.
+    Planned,
+    /// Step is ready to execute through an owning runtime.
+    Ready,
+    /// Step is running.
+    Running,
+    /// Step is waiting for approval.
+    WaitingForApproval,
+    /// Step is blocked.
+    Blocked,
+    /// Step was cancelled.
+    Cancelled,
+    /// Step completed.
+    Completed,
+    /// Step failed.
+    Failed,
+}
+
+/// Redacted provider route request used by Phase 4 runtime composition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistedAiProviderRouteRequest {
+    /// Stable route identifier.
+    pub route_id: String,
+    /// Provider identifier.
+    pub provider_id: String,
+    /// Display-safe model label.
+    pub model_label: String,
+    /// Provider class.
+    pub provider_class: AssistedAiProviderClass,
+    /// Operation class requested from the provider.
+    pub operation_class: AssistedAiOperationClass,
+    /// Context manifest reference required before invocation.
+    pub context_manifest: AssistedAiTrustProjectionReference,
+    /// Privacy inspector reference required before invocation.
+    pub privacy_inspector: AssistedAiTrustProjectionReference,
+    /// Permission-budget reference required before invocation.
+    pub permission_budget: AssistedAiTrustProjectionReference,
+    /// Proposal intent required to keep output proposal-only.
+    pub proposal_intent: AssistedAiProposalTargetIntent,
+    /// Capability decision id, if already decided.
+    pub policy_decision_id: Option<CapabilityDecisionId>,
+    /// Required provider capability.
+    pub required_capability: CapabilityId,
+    /// Optional network target metadata for loopback/egress policy.
+    pub network_target: Option<NetworkTarget>,
+    /// Cancellation token for in-flight work.
+    pub cancellation_token: CancellationTokenId,
+    /// Health metadata labels.
+    pub health_labels: Vec<String>,
+    /// Cost estimate metadata labels.
+    pub cost_labels: Vec<String>,
+    /// Principal requesting the route.
+    pub principal_id: PrincipalId,
+    /// Workspace trust state observed for the route.
+    pub workspace_trust_state: WorkspaceTrustState,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence associated with the route.
+    pub event_sequence: EventSequence,
+    /// Redaction hints for route metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Route schema version.
+    pub schema_version: u16,
+}
+
+/// Redacted provider route response used by Phase 4 runtime composition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistedAiProviderRouteResponse {
+    /// Stable route identifier.
+    pub route_id: String,
+    /// Provider invocation state after routing.
+    pub invocation_state: AssistedAiProviderInvocationState,
+    /// Route decision.
+    pub route_decision: AssistedAiRouteDecision,
+    /// Provider identifier.
+    pub provider_id: String,
+    /// Display-safe model label.
+    pub model_label: String,
+    /// Bounded output labels, never raw response text.
+    pub output_labels: Vec<String>,
+    /// Optional refusal metadata.
+    pub refusal: Option<AssistedAiRefusalMetadata>,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence associated with the response.
+    pub event_sequence: EventSequence,
+    /// Redaction hints for response metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Response schema version.
+    pub schema_version: u16,
+}
+
+/// Runtime-safe provider capability metadata for Phase 4 routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistedAiRuntimeProviderCapability {
+    /// Provider identifier.
+    pub provider_id: String,
+    /// Provider class.
+    pub provider_class: AssistedAiProviderClass,
+    /// Supports stream metadata.
+    pub supports_streaming: bool,
+    /// Supports structured proposal-producing output.
+    pub supports_structured_output: bool,
+    /// Embedding support label; vector persistence remains deferred.
+    pub embeddings_label: String,
+    /// Reranking support label; retrieval remains metadata-only.
+    pub reranking_label: String,
+    /// Tool-planning support label; tool execution is not authorized here.
+    pub tool_planning_label: String,
+    /// Context-window display label.
+    pub context_window_label: String,
+    /// Cost display label.
+    pub cost_label: String,
+    /// Cancellation support.
+    pub supports_cancellation: bool,
+    /// Health state label.
+    pub health_state_label: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+/// Structured output schema metadata without schema bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistedAiStructuredOutputSchemaMetadata {
+    /// Stable schema identifier.
+    pub schema_id: String,
+    /// Display-safe schema label.
+    pub schema_label: String,
+    /// Hash of the schema body stored or shipped elsewhere.
+    pub schema_hash: FileFingerprint,
+    /// Expected proposal payload kind.
+    pub proposal_payload_kind: ProposalPayloadKind,
+    /// Whether proposal preconditions are required.
+    pub requires_proposal_preconditions: bool,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+/// Structured output validation result metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistedAiStructuredOutputValidationResult {
+    /// Stable validation identifier.
+    pub validation_id: String,
+    /// Referenced schema identifier.
+    pub schema_id: String,
+    /// Whether validation passed.
+    pub valid: bool,
+    /// Display-safe reason labels.
+    pub reason_labels: Vec<String>,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+/// Agent runtime state transition record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStateTransitionRecord {
+    /// Agent run identifier.
+    pub run_id: AgentRunId,
+    /// Optional step identifier.
+    pub step_id: Option<AgentStepId>,
+    /// Previous run state.
+    pub from_state: AgentRunState,
+    /// Next run state.
+    pub to_state: AgentRunState,
+    /// Metadata-only reason code.
+    pub reason_code: String,
+    /// Optional proposal link.
+    pub proposal_id: Option<ProposalId>,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+/// Agent replay manifest built from metadata-only records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReplayManifest {
+    /// Agent run identifier.
+    pub run_id: AgentRunId,
+    /// Transition records needed for replay.
+    pub transitions: Vec<AgentStateTransitionRecord>,
+    /// Context manifest references used by the run.
+    pub context_manifests: Vec<AssistedAiTrustProjectionReference>,
+    /// Provider route identifiers used by the run.
+    pub provider_route_ids: Vec<String>,
+    /// Proposal identifiers linked to the run.
+    pub proposal_ids: Vec<ProposalId>,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only Phase 4 runtime audit record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Phase4RuntimeAuditRecord {
+    /// Stable audit identifier.
+    pub audit_id: String,
+    /// Optional agent run identifier.
+    pub run_id: Option<AgentRunId>,
+    /// Optional agent step identifier.
+    pub step_id: Option<AgentStepId>,
+    /// Optional provider route identifier.
+    pub provider_route_id: Option<String>,
+    /// Runtime invocation state.
+    pub invocation_state: AssistedAiProviderInvocationState,
+    /// Outcome label.
+    pub outcome_label: String,
+    /// Display-safe metadata labels.
+    pub labels: Vec<String>,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Schema version.
+    pub schema_version: u16,
 }
 
 /// Stable reference to a trust-layer projection by identifier and hash only.
@@ -5440,8 +5754,9 @@ pub fn assisted_ai_proposal_preview_from_output(
         .and_then(|projection| proposal_ledger_row(projection, output.proposal_id));
     let request_route_ready = request.is_none_or(|request| {
         request.route_decision.disposition == AssistedAiRequestDisposition::MetadataOnlyReady
-            && request.route_decision.provider_invocation
-                == AssistedAiProviderInvocationState::NotEncoded
+            && assisted_ai_provider_state_allows_proposal_preview(
+                request.route_decision.provider_invocation,
+            )
     });
     let readiness = if !request_route_ready {
         AssistedAiProposalPreviewReadiness::RouteRefused
@@ -5622,11 +5937,26 @@ pub fn assisted_ai_projection_from_metadata(
         requests: request_summaries,
         refusals,
         proposal_previews,
-        provider_invocation: AssistedAiProviderInvocationState::NotEncoded,
+        provider_invocation: requests
+            .iter()
+            .map(|request| request.route_decision.provider_invocation)
+            .find(|state| *state != AssistedAiProviderInvocationState::NotEncoded)
+            .unwrap_or(AssistedAiProviderInvocationState::NotEncoded),
         generated_at,
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version,
     }
+}
+
+fn assisted_ai_provider_state_allows_proposal_preview(
+    state: AssistedAiProviderInvocationState,
+) -> bool {
+    matches!(
+        state,
+        AssistedAiProviderInvocationState::NotEncoded
+            | AssistedAiProviderInvocationState::PolicyApproved
+            | AssistedAiProviderInvocationState::Completed
+    )
 }
 
 /// Validates assisted-AI audit metadata without allowing runtime invocation or raw payload storage.
@@ -5683,6 +6013,127 @@ pub fn validate_assisted_ai_audit_record(
     }
     for label in &record.runtime_activation_labels {
         validate_assisted_ai_audit_string("runtime_activation_labels", label)?;
+    }
+    Ok(())
+}
+
+/// Validates Phase 4 runtime audit metadata while preserving raw-payload redaction rules.
+pub fn validate_phase4_runtime_audit_record(
+    record: &Phase4RuntimeAuditRecord,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(record.correlation_id, record.causality_id)?;
+    if record.event_sequence.0 == 0 {
+        return Err(AssistedAiContractError::ZeroEventSequence);
+    }
+    if record.schema_version == 0 {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: "schema_version".to_string(),
+            reason: "schema.zero".to_string(),
+        });
+    }
+    if record.redaction_hints.contains(&RedactionHint::None) {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: "redaction_hints".to_string(),
+            reason: "redaction.none".to_string(),
+        });
+    }
+
+    validate_assisted_ai_audit_string("audit_id", &record.audit_id)?;
+    validate_assisted_ai_audit_string("outcome_label", &record.outcome_label)?;
+    if let Some(route_id) = &record.provider_route_id {
+        validate_assisted_ai_audit_string("provider_route_id", route_id)?;
+    }
+    if let Some(run_id) = &record.run_id {
+        validate_assisted_ai_audit_string("run_id", &run_id.0)?;
+    }
+    if let Some(step_id) = &record.step_id {
+        validate_assisted_ai_audit_string("step_id", &step_id.0)?;
+    }
+    for label in &record.labels {
+        validate_assisted_ai_audit_string("labels", label)?;
+    }
+    Ok(())
+}
+
+/// Validates an agent replay manifest without allowing raw provider, prompt, or source payloads.
+pub fn validate_agent_replay_manifest(
+    manifest: &AgentReplayManifest,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(manifest.correlation_id, manifest.causality_id)?;
+    if manifest.event_sequence.0 == 0 {
+        return Err(AssistedAiContractError::ZeroEventSequence);
+    }
+    if manifest.schema_version == 0 {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: "schema_version".to_string(),
+            reason: "schema.zero".to_string(),
+        });
+    }
+    if manifest.redaction_hints.contains(&RedactionHint::None) {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: "redaction_hints".to_string(),
+            reason: "redaction.none".to_string(),
+        });
+    }
+    validate_assisted_ai_audit_string("run_id", &manifest.run_id.0)?;
+    for transition in &manifest.transitions {
+        validate_assisted_ai_audit_string("transition.reason_code", &transition.reason_code)?;
+        validate_assisted_ai_correlation(transition.correlation_id, transition.causality_id)?;
+        if transition.event_sequence.0 == 0 {
+            return Err(AssistedAiContractError::ZeroEventSequence);
+        }
+    }
+    for reference in &manifest.context_manifests {
+        validate_assisted_ai_audit_string(
+            "context_manifest.reference_id",
+            &reference.reference_id,
+        )?;
+        validate_assisted_ai_audit_fingerprint(
+            "context_manifest.projection_hash",
+            &reference.projection_hash,
+        )?;
+    }
+    for route_id in &manifest.provider_route_ids {
+        validate_assisted_ai_audit_string("provider_route_ids", route_id)?;
+    }
+    Ok(())
+}
+
+/// Validates a provider route request before a provider router may invoke runtime behavior.
+pub fn validate_assisted_ai_provider_route_request(
+    request: &AssistedAiProviderRouteRequest,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(request.correlation_id, request.causality_id)?;
+    if request.event_sequence.0 == 0 {
+        return Err(AssistedAiContractError::ZeroEventSequence);
+    }
+    if request.schema_version == 0 {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: "schema_version".to_string(),
+            reason: "schema.zero".to_string(),
+        });
+    }
+    if request.redaction_hints.contains(&RedactionHint::None) {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: "redaction_hints".to_string(),
+            reason: "redaction.none".to_string(),
+        });
+    }
+    if request.cancellation_token.0 == Uuid::nil() {
+        return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+            field: "cancellation_token".to_string(),
+            reason: "cancellation.nil".to_string(),
+        });
+    }
+    validate_assisted_ai_audit_string("route_id", &request.route_id)?;
+    validate_assisted_ai_audit_string("provider_id", &request.provider_id)?;
+    validate_assisted_ai_audit_string("model_label", &request.model_label)?;
+    validate_assisted_ai_audit_string("required_capability", &request.required_capability.0)?;
+    for label in &request.health_labels {
+        validate_assisted_ai_audit_string("health_labels", label)?;
+    }
+    for label in &request.cost_labels {
+        validate_assisted_ai_audit_string("cost_labels", label)?;
     }
     Ok(())
 }
@@ -13314,6 +13765,10 @@ pub enum StorageRepositoryRequest {
     SaveAssistedAiAuditRecord(AssistedAiAuditRecord),
     /// Save metadata-only delegated-task readiness/audit linkage record.
     SaveDelegatedTaskAuditLinkageRecord(DelegatedTaskAuditLinkageRecord),
+    /// Save metadata-only Phase 4 runtime audit record.
+    SavePhase4RuntimeAuditRecord(Phase4RuntimeAuditRecord),
+    /// Save metadata-only agent replay manifest.
+    SaveAgentReplayManifest(AgentReplayManifest),
     /// Save durable event metadata.
     SaveEventMetadata(EventMetadataRecord),
     /// Save metadata-only semantic records and tombstones.
@@ -13342,6 +13797,10 @@ pub enum StorageRepositoryRequest {
     ReadAssistedAiAuditRecord(String),
     /// Read metadata-only delegated-task readiness/audit linkage record.
     ReadDelegatedTaskAuditLinkageRecord(String),
+    /// Read metadata-only Phase 4 runtime audit record.
+    ReadPhase4RuntimeAuditRecord(String),
+    /// Read metadata-only agent replay manifest.
+    ReadAgentReplayManifest(AgentRunId),
     /// Read durable event metadata.
     ReadEventMetadata(EventId),
     /// Read freshness-gated metadata-only semantic records.
@@ -13377,6 +13836,10 @@ pub enum StorageRepositoryResponse {
     AssistedAiAuditRecord(Box<Option<AssistedAiAuditRecord>>),
     /// Metadata-only delegated-task readiness/audit linkage record.
     DelegatedTaskAuditLinkageRecord(Box<Option<DelegatedTaskAuditLinkageRecord>>),
+    /// Metadata-only Phase 4 runtime audit record.
+    Phase4RuntimeAuditRecord(Box<Option<Phase4RuntimeAuditRecord>>),
+    /// Metadata-only agent replay manifest.
+    AgentReplayManifest(Box<Option<AgentReplayManifest>>),
     /// Event metadata.
     EventMetadata(Option<EventMetadataRecord>),
     /// Freshness-gated semantic metadata read result.

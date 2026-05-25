@@ -1,0 +1,13 @@
+Command: cargo test -p devil-memory --all-targets
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src\lib.rs (target\debug\deps\devil_memory-4a58868e24677799.exe)
+
+running 4 tests
+test tests::candidate_review_does_not_retain_without_authority ... ok
+test tests::long_term_retention_requires_explicit_consent_and_can_be_deleted ... ok
+test tests::memory_candidates_reject_raw_source_and_provider_payload_markers ... ok
+test tests::memory_validation_uses_not_encoded_invocation_metadata ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ExitCode: 0

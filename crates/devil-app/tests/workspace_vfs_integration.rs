@@ -4510,6 +4510,89 @@ fn workspace_vfs_integration_command_dispatcher_routes_without_concrete_ports() 
 }
 
 #[test]
+fn workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only() {
+    let root = create_root();
+    let target = root.join("phase4.rs");
+    std::fs::write(&target, "fn main() {}\n").expect("seed file");
+
+    let (mut app, sink) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("phase4-user".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(target.to_string_lossy())
+        .expect("open active file");
+
+    let outcome = app
+        .start_ai_run("phase4.integration")
+        .expect("phase4 AI run starts");
+
+    assert!(matches!(
+        outcome.proposal_created,
+        ProposalResponse::Created(_)
+    ));
+    assert_eq!(
+        outcome.route_response.invocation_state,
+        devil_protocol::AssistedAiProviderInvocationState::Completed
+    );
+    assert!(
+        outcome
+            .context_manifest_projection
+            .manifest
+            .items
+            .iter()
+            .any(|item| item.kind == devil_protocol::ContextManifestItemKind::ProviderRoute)
+    );
+    assert!(
+        outcome
+            .privacy_inspector_projection
+            .records
+            .iter()
+            .any(|record| record.egress
+                == devil_protocol::ContextManifestEgressStatus::LocalProvider)
+    );
+
+    let shell = app
+        .shell_projection_snapshot("phase4")
+        .expect("shell projection");
+    assert_eq!(
+        shell.context_manifest_projection.manifest.manifest_id,
+        outcome.context_manifest_projection.manifest.manifest_id
+    );
+    assert_eq!(
+        shell.assisted_ai_projection.provider_invocation,
+        devil_protocol::AssistedAiProviderInvocationState::Completed
+    );
+    assert_eq!(shell.assisted_ai_projection.preview_ready_count, 1);
+
+    let replay = app
+        .replay_ai_run(outcome.run_id.clone())
+        .expect("replay manifest roundtrip");
+    assert_eq!(replay.proposal_ids, vec![outcome.proposal_id]);
+    let inspect = app
+        .inspect_ai_run(outcome.run_id.clone())
+        .expect("inspect AI run");
+    assert_eq!(inspect.run_id, outcome.run_id);
+    assert_eq!(
+        inspect.context_manifest_projection.manifest.items.len(),
+        outcome.context_manifest_projection.manifest.items.len()
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read target"),
+        "fn main() {}\n",
+        "AI run must not apply proposal directly"
+    );
+
+    let events = sink.events().expect("events");
+    let names = event_names(&events);
+    assert!(names.contains(&"phase4.runtime_audit_recorded"));
+    assert!(names.contains(&"phase4.agent_replay_manifest_recorded"));
+}
+
+#[test]
 fn workspace_vfs_integration_command_execution_uses_mock_editor_and_workspace_ports() {
     let workspace_id = WorkspaceId(11);
     let file_id = FileId(7);

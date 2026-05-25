@@ -15,5 +15,10 @@ devil-observability = { workspace = true }
 devil-security = { workspace = true }
 devil-storage = { workspace = true }
 devil-ui = { workspace = true }
+devil-agent = { workspace = true }
+devil-ai = { workspace = true }
+devil-ai-providers = { workspace = true }
+devil-tracker = { workspace = true }
+devil-memory = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

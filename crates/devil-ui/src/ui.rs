@@ -1,7 +1,7 @@
 //! Projection-only UI primitives for the native shell.
 
 use devil_protocol::{
-    AssistedAiProjection, BufferId, CanonicalPath, CheckpointRollbackProjection,
+    AgentRunId, AssistedAiProjection, BufferId, CanonicalPath, CheckpointRollbackProjection,
     ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
     ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
     PermissionBudgetProjection, PrivacyInspectorProjection, ProposalApprovalChecklistProjection,
@@ -255,6 +255,26 @@ pub enum CommandDispatchIntent {
     OpenProposalDetails {
         /// Proposal identifier selected from projection data.
         proposal_id: ProposalId,
+    },
+    /// Start a Phase 4 AI run through app-owned composition.
+    StartAiRun {
+        /// Display-safe instruction label.
+        instruction_label: String,
+    },
+    /// Cancel a Phase 4 AI run through app-owned composition.
+    CancelAiRun {
+        /// Agent run identifier selected from projection data or user input.
+        run_id: AgentRunId,
+    },
+    /// Replay a Phase 4 AI run from metadata.
+    ReplayAiRun {
+        /// Agent run identifier selected from projection data or user input.
+        run_id: AgentRunId,
+    },
+    /// Inspect a Phase 4 AI run using projection metadata.
+    InspectAiRun {
+        /// Agent run identifier selected from projection data or user input.
+        run_id: AgentRunId,
     },
 }
 
@@ -672,7 +692,9 @@ impl Shell {
                 );
             }
         }
-        println!("Commands: :i text | :d start,end | :r start,end,text | :w | :u | :redo | :q");
+        println!(
+            "Commands: :i text | :d start,end | :r start,end,text | :w | :ai-start label | :u | :redo | :q"
+        );
     }
 
     /// Parse a command and emit a typed dispatch intent without mutating editor or workspace state.
@@ -701,6 +723,34 @@ impl Shell {
             return Ok(Some(
                 self.push_intent(CommandDispatchIntent::Save { buffer_id }),
             ));
+        }
+
+        if let Some(label) = trimmed.strip_prefix(":ai-start") {
+            let instruction_label = label.trim();
+            return Ok(Some(self.push_intent(CommandDispatchIntent::StartAiRun {
+                instruction_label: if instruction_label.is_empty() {
+                    "phase4.local_proposal".to_string()
+                } else {
+                    instruction_label.to_string()
+                },
+            })));
+        }
+        if let Some(run_id) = trimmed.strip_prefix(":ai-cancel ") {
+            return Ok(Some(self.push_intent(CommandDispatchIntent::CancelAiRun {
+                run_id: AgentRunId(run_id.trim().to_string()),
+            })));
+        }
+        if let Some(run_id) = trimmed.strip_prefix(":ai-replay ") {
+            return Ok(Some(self.push_intent(CommandDispatchIntent::ReplayAiRun {
+                run_id: AgentRunId(run_id.trim().to_string()),
+            })));
+        }
+        if let Some(run_id) = trimmed.strip_prefix(":ai-inspect ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::InspectAiRun {
+                    run_id: AgentRunId(run_id.trim().to_string()),
+                },
+            )));
         }
 
         if let Some(proposal_id) = parse_proposal_id(trimmed.strip_prefix(":proposal-preview ")) {

@@ -14,7 +14,8 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | Phase 1 — Editor and text substrate | **Accepted** | [`plans/evidence/phase-1/editor-text-substrate.md`](evidence/phase-1/editor-text-substrate.md) | Degraded large-file mode, chunk descriptors, viewport projection, and bounded fake consumers are evidenced. 100MB full-cache boundary is measurement-only, not a green benchmark. |
 | Phase 2 — Proposal mutation substrate | **Accepted** | [`plans/evidence/phase-2/proposal-mutation-substrate.md`](evidence/phase-2/proposal-mutation-substrate.md) | DTOs, routing, lifecycle states, deny-by-default validation, save apply, open-buffer text edit apply, closed-file create/delete/rename apply, multi-file workspace-edit execution, edit-only code-action execution, accepted reversible batch apply/rollback, workspace-authorized audit-failure rollback checkpoints, batch planning contracts, and live proposal ledger projection are accepted. Raw format execution and future runtime surfaces remain gated unless lowered into accepted proposal payloads. |
 | Phase 3 — Semantic fabric and LSP supervision | **Accepted** | [`plans/evidence/phase-3/predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md) | `devil-index` is activated for actor-owned bounded scheduling, workspace-authored discovery import, descriptor/lease indexing, syntax-cache freshness, graph records, metadata-only persistence, semantic query APIs, and LSP supervision/proposal-routing DTOs. Vector indexing and later runtime surfaces remain deferred. |
-| Phases 4–8 — AI, plugins, collaboration, remote, hardening | **Future-gated** | None accepted | Placeholder crates remain inert. Each phase requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
+| Phase 4 — Native agentic AI execution context | **Accepted** | [`plans/evidence/phase-4/agentic-ai-architecture-map.md`](evidence/phase-4/agentic-ai-architecture-map.md) | Local-provider, proposal-only, metadata-audited agent execution is accepted. Cloud providers, hosted telemetry, hosted embeddings, gateways, vector storage/retrieval, terminal execution, plugins, collaboration, and remote development remain deferred. |
+| Phases 5–8 — Plugins, collaboration, remote, hardening | **Future-gated** | None accepted | Each phase requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
 
 ---
 
@@ -27,11 +28,11 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | ADR-0003 — Editor core text model | Accepted | Large-file and retained-history benchmark reservations recorded in Phase 1 evidence. |
 | ADR-0004 — Async runtime actor model | Accepted | — |
 | ADR-0005 — Storage backends | **Accepted with reservations** | Spike 3 vector-store evaluation is deferred. SQLite/Tantivy metadata baseline is accepted; durable semantic/tracker/memory/plugin/collaboration/replay storage requires follow-up ADR. |
-| ADR-0006 — AI provider abstraction | Accepted (governance-only) | No runtime behavior until Phase 4 gates. |
+| ADR-0006 — AI provider abstraction | Accepted for Phase 4 local-provider slice | Deterministic local/provider-router behavior is accepted through Phase 4 evidence. Cloud providers remain deferred behind provider-specific gates. |
 | ADR-0007 — Mode policy engine | Accepted | — |
-| ADR-0008 — Tracker schema | Accepted (governance-only) | No runtime behavior until tracker activation gates. |
-| ADR-0009 — Memory consent | Accepted (governance-only) | No runtime behavior until memory activation gates. |
-| ADR-0010 — Air-gap mode | Accepted (governance-only) | No runtime behavior until AI/provider activation gates. |
+| ADR-0008 — Tracker schema | Accepted for Phase 4 metadata ledger | Tracker runtime is limited to metadata-only run ledger records and protocol/storage-mediated evidence. |
+| ADR-0009 — Memory consent | Accepted for Phase 4 metadata retention | Memory runtime is limited to candidate review, explicit consent, deletion, and metadata-only retention. Vector retrieval remains deferred. |
+| ADR-0010 — Air-gap mode | Accepted for Phase 4 provider policy | Air-gap and local-provider-only policy denies hosted providers, hosted telemetry, hosted embeddings, gateways, and unapproved outbound access. |
 | ADR-0015 — Streaming text viewport | Accepted | — |
 | ADR-0016 — Generalized proposal service | Accepted | Phase 2 accepted for save, text edit, closed-file, workspace-edit, edit-only code-action, and reversible batch proposal routes. Future runtime apply surfaces remain separately gated. |
 | ADR-0017 — Semantic fabric indexing | Accepted | Phase 3 evidence accepts the bounded semantic fabric runtime; vector indexing remains deferred. |
@@ -70,7 +71,8 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 2. **R1 — Phase 2B generalized proposal execution** — complete and accepted.
 3. **R2 — Phase 3A semantic-index boundary remediation** — complete and accepted.
 4. **R3 — Phase 3B predictive semantic fabric and LSP supervision** — complete and accepted for Phase 3 scope.
-5. **R4–R8** — blocked on individual ADR/policy gates, not on Phase 2 or Phase 3 acceptance.
+5. **R4 — Phase 4 native agentic AI execution context** — complete and accepted for the local-provider, proposal-only, metadata-audited runtime slice.
+6. **R5–R8** — blocked on individual ADR/policy gates, not on Phase 2, Phase 3, or accepted Phase 4 scope.
 
 ---
 
@@ -80,7 +82,8 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 - [x] Phase 0 and Phase 1 are explicitly accepted.
 - [x] Phase 2 is explicitly accepted.
 - [x] Phase 3 is explicitly accepted.
-- [x] Phases 4–8 are explicitly future-gated.
+- [x] Phase 4 is explicitly accepted for local-provider, proposal-only, metadata-audited agent execution.
+- [x] Phases 5–8 are explicitly future-gated.
 - [x] ADR-0002 and ADR-0005 ambiguity is resolved.
 - [x] Historical claims are annotated as historical.
 - [x] Dependency-policy / `xtask` duplication decision is recorded.

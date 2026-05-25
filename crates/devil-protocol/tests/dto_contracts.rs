@@ -58,6 +58,18 @@ fn chunk_hash(value: &str) -> FileFingerprint {
     }
 }
 
+fn trust_reference(
+    id: &str,
+    kind: AssistedAiTrustProjectionKind,
+) -> AssistedAiTrustProjectionReference {
+    AssistedAiTrustProjectionReference {
+        reference_id: id.to_string(),
+        kind,
+        projection_hash: fingerprint(id),
+        schema_version: 1,
+    }
+}
+
 fn diagnostic(code: &str) -> ProtocolDiagnostic {
     ProtocolDiagnostic {
         code: code.to_string(),
@@ -5129,6 +5141,99 @@ fn dto_contracts_assisted_ai_audit_record_is_metadata_only_and_validated() {
 }
 
 #[test]
+fn dto_contracts_phase4_runtime_audit_allows_runtime_states_but_rejects_raw_markers() {
+    let mut record = Phase4RuntimeAuditRecord {
+        audit_id: "phase4:audit:1".to_string(),
+        run_id: Some(AgentRunId("run-1".to_string())),
+        step_id: Some(AgentStepId("step-1".to_string())),
+        provider_route_id: Some("route-1".to_string()),
+        invocation_state: AssistedAiProviderInvocationState::Completed,
+        outcome_label: "provider.completed.metadata_only".to_string(),
+        labels: vec!["local.provider".to_string()],
+        correlation_id: CorrelationId(42),
+        causality_id: causality_id(),
+        event_sequence: EventSequence(7),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    validate_phase4_runtime_audit_record(&record).expect("runtime audit metadata is valid");
+
+    record.labels.push("raw prompt: secret".to_string());
+    assert!(matches!(
+        validate_phase4_runtime_audit_record(&record),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
+    ));
+}
+
+#[test]
+fn dto_contracts_provider_route_request_requires_complete_runtime_metadata() {
+    let mut request = AssistedAiProviderRouteRequest {
+        route_id: "route-1".to_string(),
+        provider_id: "deterministic-local".to_string(),
+        model_label: "local-test".to_string(),
+        provider_class: AssistedAiProviderClass::LocalLoopback,
+        operation_class: AssistedAiOperationClass::ProposeEdit,
+        context_manifest: trust_reference("ctx-1", AssistedAiTrustProjectionKind::ContextManifest),
+        privacy_inspector: trust_reference(
+            "privacy-1",
+            AssistedAiTrustProjectionKind::PrivacyInspector,
+        ),
+        permission_budget: trust_reference(
+            "budget-1",
+            AssistedAiTrustProjectionKind::PermissionBudget,
+        ),
+        proposal_intent: AssistedAiProposalTargetIntent {
+            payload_kind: ProposalPayloadKind::TextEdit,
+            target_coverage: ProposalTargetCoverage {
+                coverage_kind: ProposalTargetCoverageKind::Complete,
+                targets: Vec::new(),
+                omitted_target_count: 0,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            },
+            required_capability: CapabilityId("ai.proposal.create".to_string()),
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            labels: vec!["proposal.intent".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        policy_decision_id: Some(CapabilityDecisionId(9)),
+        required_capability: CapabilityId("ai.provider.invoke".to_string()),
+        network_target: Some(NetworkTarget {
+            scheme: "http".to_string(),
+            host: "localhost".to_string(),
+            port: Some(11434),
+        }),
+        cancellation_token: cancellation_token_id(),
+        health_labels: vec!["healthy".to_string()],
+        cost_labels: vec!["local".to_string()],
+        principal_id: PrincipalId("principal-1".to_string()),
+        workspace_trust_state: WorkspaceTrustState::Trusted,
+        correlation_id: CorrelationId(42),
+        causality_id: causality_id(),
+        event_sequence: EventSequence(8),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    validate_assisted_ai_provider_route_request(&request).expect("route request is valid");
+
+    request.event_sequence = EventSequence(0);
+    assert_eq!(
+        validate_assisted_ai_provider_route_request(&request),
+        Err(AssistedAiContractError::ZeroEventSequence)
+    );
+
+    request.event_sequence = EventSequence(8);
+    request.cancellation_token = CancellationTokenId(Uuid::nil());
+    assert!(matches!(
+        validate_assisted_ai_provider_route_request(&request),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
+    ));
+}
+
+#[test]
 fn dto_contracts_assisted_ai_audit_outcomes_are_metadata_only_without_invocation() {
     let mut route_refused = assisted_ai_audit(None);
     route_refused.outcome_category = AssistedAiAuditOutcomeCategory::RouteRefused;
@@ -6083,19 +6188,22 @@ fn dto_contracts_future_surface_gate_validation_rejects_raw_markers_and_invalid_
 }
 
 #[test]
-fn dto_contracts_future_surface_slice_keeps_placeholder_crates_inert() {
+fn dto_contracts_phase4_runtime_surfaces_are_protocol_mediated() {
     let agent_src = include_str!("../../devil-agent/src/lib.rs");
     let tracker_src = include_str!("../../devil-tracker/src/lib.rs");
     let memory_src = include_str!("../../devil-memory/src/lib.rs");
     assert!(agent_src.contains("#![warn(missing_docs)]"));
     assert!(tracker_src.contains("#![warn(missing_docs)]"));
     assert!(memory_src.contains("#![warn(missing_docs)]"));
-    assert!(!agent_src.contains("fn "));
-    assert!(!tracker_src.contains("fn "));
-    assert!(!memory_src.contains("fn "));
-    assert!(!agent_src.contains("struct "));
-    assert!(!tracker_src.contains("struct "));
-    assert!(!memory_src.contains("struct "));
+    assert!(agent_src.contains("devil_protocol"));
+    assert!(tracker_src.contains("devil_protocol"));
+    assert!(memory_src.contains("devil_protocol"));
+    assert!(!agent_src.contains("WorkspaceActor"));
+    assert!(!tracker_src.contains("WorkspaceActor"));
+    assert!(!memory_src.contains("WorkspaceActor"));
+    assert!(!agent_src.contains("EditorSession"));
+    assert!(!tracker_src.contains("EditorSession"));
+    assert!(!memory_src.contains("EditorSession"));
 
     let agent_manifest = include_str!("../../devil-agent/Cargo.toml");
     let tracker_manifest = include_str!("../../devil-tracker/Cargo.toml");

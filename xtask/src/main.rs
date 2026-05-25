@@ -11,13 +11,18 @@ use clap::{Parser, Subcommand};
 const DEFAULT_POLICY_PATH: &str = "plans/dependency-policy.md";
 const DEFAULT_PROTOCOL_PATH: &str = "crates/devil-protocol/src/lib.rs";
 const DEFAULT_PHASE3_EVIDENCE_PATH: &str = "plans/evidence/phase-3/predictive-semantic-fabric.md";
+const DEFAULT_PHASE4_EVIDENCE_PATH: &str = "plans/evidence/phase-4/agentic-ai-architecture-map.md";
 const PHASE3_STATUS_HEADING: &str = "## Acceptance status";
 const PHASE3_FINAL_CHECKLIST_HEADING: &str = "## Final validation checklist";
+const PHASE4_STATUS_HEADING: &str = "## Acceptance status";
+const PHASE4_FINAL_CHECKLIST_HEADING: &str = "## Final validation checklist";
 const PHASE3_PARTIAL_RUNTIME_MARKER: &str = "Runtime surface status: Partial `devil-index` indexing behavior is active; acceptance evidence is incomplete.";
 const PHASE3_NOT_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Not accepted.";
 const PHASE3_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Accepted.";
 const LSP_NOT_ACCEPTED_MARKER: &str = "LSP supervision acceptance: Not accepted.";
 const LSP_ACCEPTED_MARKER: &str = "LSP supervision acceptance: Accepted.";
+const PHASE4_NOT_ACCEPTED_MARKER: &str = "Phase 4 acceptance: Not accepted.";
+const PHASE4_ACCEPTED_MARKER: &str = "Phase 4 acceptance: Accepted.";
 const PHASE3_REQUIRED_ARTIFACTS: &[&str] = &[
     "semantic-fabric-architecture-map.md",
     "index-dependency-boundary.txt",
@@ -30,6 +35,25 @@ const PHASE3_REQUIRED_ARTIFACTS: &[&str] = &[
     "proposal-routing-regression.txt",
     "privacy-redaction-audit.md",
     "vector-deferral-audit.md",
+];
+const PHASE4_REQUIRED_ARTIFACTS: &[&str] = &[
+    "agentic-ai-architecture-map.md",
+    "dependency-boundary.txt",
+    "provider-router-contract-tests.txt",
+    "local-provider-adapter-tests.txt",
+    "air-gap-provider-egress-tests.txt",
+    "privacy-inspector-context-manifest-tests.txt",
+    "agent-state-machine-tests.txt",
+    "tracker-run-ledger-tests.txt",
+    "memory-retention-consent-tests.txt",
+    "proposal-routing-regression.txt",
+    "observability-redaction-audit.md",
+    "cloud-provider-deferral-audit.md",
+    "vector-deferral-audit.md",
+    "cargo-fmt-check.txt",
+    "cargo-check-workspace-all-targets.txt",
+    "cargo-test-workspace-all-targets.txt",
+    "cargo-clippy-workspace-all-targets.txt",
 ];
 
 #[derive(Parser)]
@@ -99,9 +123,24 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
         phase3_evidence_dir.join(artifact).is_file()
     });
 
+    let phase4_evidence_path = workspace_root.join(DEFAULT_PHASE4_EVIDENCE_PATH);
+    let phase4_evidence = fs::read_to_string(&phase4_evidence_path).map_err(|err| {
+        format!(
+            "unable to read Phase 4 evidence at `{}`: {err}",
+            phase4_evidence_path.display()
+        )
+    })?;
+    let phase4_evidence_dir = phase4_evidence_path
+        .parent()
+        .ok_or_else(|| "unable to resolve Phase 4 evidence directory".to_string())?;
+    let phase4_violations = validate_phase4_acceptance_governance(&phase4_evidence, |artifact| {
+        phase4_evidence_dir.join(artifact).is_file()
+    });
+
     let mut all = violations;
     all.extend(protocol_violations);
     all.extend(phase3_violations);
+    all.extend(phase4_violations);
 
     if !all.is_empty() {
         let mut output = String::new();
@@ -382,6 +421,86 @@ where
     issues
 }
 
+fn validate_phase4_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    let Some(status_section) = markdown_section(evidence, PHASE4_STATUS_HEADING) else {
+        issues.push(format!(
+            "`{DEFAULT_PHASE4_EVIDENCE_PATH}` must include `{PHASE4_STATUS_HEADING}` with explicit Phase 4 acceptance status"
+        ));
+        return issues;
+    };
+
+    let phase4_not_accepted = status_section.contains(PHASE4_NOT_ACCEPTED_MARKER);
+    let phase4_accepted = status_section.contains(PHASE4_ACCEPTED_MARKER);
+    match (phase4_not_accepted, phase4_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_PHASE4_EVIDENCE_PATH}` must not declare both `{PHASE4_NOT_ACCEPTED_MARKER}` and `{PHASE4_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_PHASE4_EVIDENCE_PATH}` must declare either `{PHASE4_NOT_ACCEPTED_MARKER}` or `{PHASE4_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    if phase4_accepted {
+        issues.extend(validate_phase4_completion_evidence(
+            evidence,
+            &artifact_exists,
+        ));
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_phase4_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    if evidence.contains("This document is not implementation evidence yet") {
+        issues.push(format!(
+            "`{DEFAULT_PHASE4_EVIDENCE_PATH}` claims acceptance while still saying it is not implementation evidence yet"
+        ));
+    }
+
+    if let Some(checklist) = markdown_section(evidence, PHASE4_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_PHASE4_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_PHASE4_EVIDENCE_PATH}` claims acceptance but `{PHASE4_FINAL_CHECKLIST_HEADING}` is missing"
+        ));
+    }
+
+    for artifact in PHASE4_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE4_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is not listed"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE4_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing from `plans/evidence/phase-4`"
+            ));
+        }
+    }
+
+    issues
+}
+
 fn markdown_section<'a>(source: &'a str, heading: &str) -> Option<&'a str> {
     let start = source.find(heading)?;
     let tail = &source[start..];
@@ -567,19 +686,24 @@ mod tests {
         tail[..end + 2].to_string()
     }
 
-    fn assert_placeholder_docs_only(relative_path: &str) {
+    fn assert_phase4_runtime_surface_preserves_boundaries(relative_path: &str) {
         let source = read_workspace_file(relative_path);
-        let code_lines = source
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .filter(|line| !line.starts_with("//!"))
-            .filter(|line| !line.starts_with("#!["))
-            .collect::<Vec<_>>();
 
         assert!(
-            code_lines.is_empty(),
-            "placeholder crate `{relative_path}` must remain docs-only, found code lines: {code_lines:?}"
+            source.contains("devil_protocol"),
+            "Phase 4 runtime crate `{relative_path}` must use protocol DTOs as its boundary"
+        );
+        assert!(
+            source.contains("metadata") || source.contains("Metadata"),
+            "Phase 4 runtime crate `{relative_path}` must keep runtime records metadata-oriented"
+        );
+        assert!(
+            !source.contains("devil_app") && !source.contains("devil_ui"),
+            "Phase 4 runtime crate `{relative_path}` must not depend on app or UI ownership"
+        );
+        assert!(
+            !source.contains("WorkspaceActor") && !source.contains("EditorSession"),
+            "Phase 4 runtime crate `{relative_path}` must not own workspace/editor mutation"
         );
     }
 
@@ -602,6 +726,36 @@ mod tests {
 
 - {PHASE3_ACCEPTED_MARKER}
 - {LSP_ACCEPTED_MARKER}
+
+{disclaimer}
+## Expected evidence artifacts
+
+{artifacts}
+## Final validation checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
+    fn accepted_phase4_evidence(scaffold_disclaimer: bool, checklist_checked: bool) -> String {
+        let artifacts = PHASE4_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let disclaimer = if scaffold_disclaimer {
+            "This document is not implementation evidence yet.\n"
+        } else {
+            ""
+        };
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# Phase 4 evidence
+
+## Acceptance status
+
+- {PHASE4_ACCEPTED_MARKER}
 
 {disclaimer}
 ## Expected evidence artifacts
@@ -752,6 +906,86 @@ mod tests {
     }
 
     #[test]
+    fn phase4_acceptance_status_section_is_required() {
+        let issues = validate_phase4_acceptance_governance(
+            "# Phase 4 evidence\n\n## Final validation checklist\n\n- [ ] pending\n",
+            |_| false,
+        );
+
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains(PHASE4_STATUS_HEADING))
+        );
+    }
+
+    #[test]
+    fn phase4_not_accepted_status_allows_scaffold_without_artifacts() {
+        let evidence = format!(
+            r#"# Phase 4 evidence
+
+## Acceptance status
+
+- {PHASE4_NOT_ACCEPTED_MARKER}
+
+## Final validation checklist
+
+- [ ] pending
+"#
+        );
+
+        let issues = validate_phase4_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase4_acceptance_claim_requires_artifacts_and_checked_checklist() {
+        let evidence = accepted_phase4_evidence(true, false);
+        let issues = validate_phase4_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while still saying it is not implementation evidence yet"
+        )));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required artifact `provider-router-contract-tests.txt` is missing")
+        }));
+    }
+
+    #[test]
+    fn phase4_acceptance_claim_passes_with_checked_checklist_and_artifacts() {
+        let evidence = accepted_phase4_evidence(false, true);
+        let issues = validate_phase4_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase4_evidence_declares_accepted_status_with_artifacts() {
+        let source = read_workspace_file(DEFAULT_PHASE4_EVIDENCE_PATH);
+        let evidence_path = workspace_root().join(DEFAULT_PHASE4_EVIDENCE_PATH);
+        let evidence_dir = evidence_path
+            .parent()
+            .expect("Phase 4 evidence path should have a parent directory");
+        let issues = validate_phase4_acceptance_governance(&source, |artifact| {
+            evidence_dir.join(artifact).is_file()
+        });
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+        assert!(source.contains(PHASE4_ACCEPTED_MARKER));
+        assert!(!source.contains("This document is not implementation evidence yet"));
+        for artifact in PHASE4_REQUIRED_ARTIFACTS {
+            assert!(
+                source.contains(artifact),
+                "Phase 4 evidence must list required artifact `{artifact}`"
+            );
+        }
+    }
+
+    #[test]
     fn ui_shell_remains_projection_only() {
         let source = read_workspace_file("crates/devil-ui/src/ui.rs");
         let manifest = read_workspace_file("crates/devil-ui/Cargo.toml");
@@ -792,13 +1026,13 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_crates_remain_inert_until_activation_gates_land() {
+    fn phase4_runtime_surfaces_remain_protocol_mediated() {
         for path in [
             "crates/devil-agent/src/lib.rs",
             "crates/devil-tracker/src/lib.rs",
             "crates/devil-memory/src/lib.rs",
         ] {
-            assert_placeholder_docs_only(path);
+            assert_phase4_runtime_surface_preserves_boundaries(path);
         }
     }
 }

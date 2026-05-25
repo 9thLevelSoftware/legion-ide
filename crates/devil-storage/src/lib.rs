@@ -13,15 +13,17 @@ use std::sync::{
 
 use devil_observability::{SharedEventSink, event_metadata_record};
 use devil_protocol::{
-    AssistedAiAuditRecord, CanonicalPath, CausalityId, CorrelationId,
-    DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
-    EventSinkPort, EventSinkRequest, FileId, FileMetadata, PrincipalId, ProposalAuditRecord,
-    ProposalId, ProtocolError, ProtocolResult, SemanticMetadataBatch, SemanticMetadataFreshnessKey,
-    SemanticMetadataQuery, SemanticMetadataReadResult, SemanticMetadataRecord,
-    SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId, StorageRepositoryPort,
-    StorageRepositoryRequest, StorageRepositoryResponse, TrustRecord, WorkspaceConfigSnapshot,
-    WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState, validate_assisted_ai_audit_record,
-    validate_delegated_task_audit_linkage_record,
+    AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
+    CorrelationId, DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId, EventMetadataRecord,
+    EventSequence, EventSinkPort, EventSinkRequest, FileId, FileMetadata, Phase4RuntimeAuditRecord,
+    PrincipalId, ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult,
+    SemanticMetadataBatch, SemanticMetadataFreshnessKey, SemanticMetadataQuery,
+    SemanticMetadataReadResult, SemanticMetadataRecord, SemanticMetadataTombstone,
+    SemanticMetadataTombstoneReason, SnapshotId, StorageRepositoryPort, StorageRepositoryRequest,
+    StorageRepositoryResponse, TrustRecord, WorkspaceConfigSnapshot, WorkspaceId,
+    WorkspaceSessionRecord, WorkspaceTrustState, validate_agent_replay_manifest,
+    validate_assisted_ai_audit_record, validate_delegated_task_audit_linkage_record,
+    validate_phase4_runtime_audit_record,
 };
 use devil_security::TrustState;
 use serde::{Deserialize, Serialize};
@@ -188,6 +190,8 @@ pub struct InMemoryStorage {
     protocol_proposal_audit: HashMap<ProposalId, ProposalAuditRecord>,
     protocol_assisted_ai_audit: HashMap<String, AssistedAiAuditRecord>,
     protocol_delegated_task_audit_linkage: HashMap<String, DelegatedTaskAuditLinkageRecord>,
+    protocol_phase4_runtime_audit: HashMap<String, Phase4RuntimeAuditRecord>,
+    protocol_agent_replay_manifests: HashMap<AgentRunId, AgentReplayManifest>,
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     protocol_semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     protocol_semantic_tombstones: Vec<SemanticMetadataTombstone>,
@@ -214,6 +218,10 @@ struct PersistedState {
     #[serde(default)]
     protocol_delegated_task_audit_linkage: HashMap<String, DelegatedTaskAuditLinkageRecord>,
     #[serde(default)]
+    protocol_phase4_runtime_audit: HashMap<String, Phase4RuntimeAuditRecord>,
+    #[serde(default)]
+    protocol_agent_replay_manifests: HashMap<AgentRunId, AgentReplayManifest>,
+    #[serde(default)]
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     semantic_tombstones: Vec<SemanticMetadataTombstone>,
@@ -232,6 +240,8 @@ impl From<&InMemoryStorage> for PersistedState {
             protocol_delegated_task_audit_linkage: value
                 .protocol_delegated_task_audit_linkage
                 .clone(),
+            protocol_phase4_runtime_audit: value.protocol_phase4_runtime_audit.clone(),
+            protocol_agent_replay_manifests: value.protocol_agent_replay_manifests.clone(),
             protocol_event_metadata: value.protocol_event_metadata.clone(),
             semantic_metadata: value.protocol_semantic_metadata.clone(),
             semantic_tombstones: value.protocol_semantic_tombstones.clone(),
@@ -255,6 +265,8 @@ impl Clone for InMemoryStorage {
             protocol_delegated_task_audit_linkage: self
                 .protocol_delegated_task_audit_linkage
                 .clone(),
+            protocol_phase4_runtime_audit: self.protocol_phase4_runtime_audit.clone(),
+            protocol_agent_replay_manifests: self.protocol_agent_replay_manifests.clone(),
             protocol_event_metadata: self.protocol_event_metadata.clone(),
             protocol_semantic_metadata: self.protocol_semantic_metadata.clone(),
             protocol_semantic_tombstones: self.protocol_semantic_tombstones.clone(),
@@ -406,6 +418,8 @@ impl From<PersistedState> for InMemoryStorage {
             protocol_proposal_audit: value.protocol_proposal_audit,
             protocol_assisted_ai_audit: value.protocol_assisted_ai_audit,
             protocol_delegated_task_audit_linkage: value.protocol_delegated_task_audit_linkage,
+            protocol_phase4_runtime_audit: value.protocol_phase4_runtime_audit,
+            protocol_agent_replay_manifests: value.protocol_agent_replay_manifests,
             protocol_event_metadata: value.protocol_event_metadata,
             protocol_semantic_metadata: value.semantic_metadata,
             protocol_semantic_tombstones: value.semantic_tombstones,
@@ -774,6 +788,23 @@ impl InMemoryStorage {
                     "delegated_task_audit_linkage:{key}"
                 )))
             }
+            StorageRepositoryRequest::SavePhase4RuntimeAuditRecord(record) => {
+                Self::validate_phase4_runtime_audit_record(&record)?;
+                let key = record.audit_id.clone();
+                self.protocol_phase4_runtime_audit
+                    .insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!("phase4_runtime_audit:{key}")))
+            }
+            StorageRepositoryRequest::SaveAgentReplayManifest(manifest) => {
+                Self::validate_agent_replay_manifest(&manifest)?;
+                let key = manifest.run_id.clone();
+                self.protocol_agent_replay_manifests
+                    .insert(key.clone(), manifest);
+                Ok(Self::protocol_saved(format!(
+                    "agent_replay_manifest:{}",
+                    key.0
+                )))
+            }
             StorageRepositoryRequest::SaveEventMetadata(record) => {
                 Self::validate_event_metadata(&record)?;
                 let key = record.event_id;
@@ -831,6 +862,16 @@ impl InMemoryStorage {
                         .cloned(),
                 )),
             ),
+            StorageRepositoryRequest::ReadPhase4RuntimeAuditRecord(audit_id) => {
+                Ok(StorageRepositoryResponse::Phase4RuntimeAuditRecord(
+                    Box::new(self.protocol_phase4_runtime_audit.get(&audit_id).cloned()),
+                ))
+            }
+            StorageRepositoryRequest::ReadAgentReplayManifest(run_id) => {
+                Ok(StorageRepositoryResponse::AgentReplayManifest(Box::new(
+                    self.protocol_agent_replay_manifests.get(&run_id).cloned(),
+                )))
+            }
             StorageRepositoryRequest::ReadEventMetadata(event_id) => {
                 Ok(StorageRepositoryResponse::EventMetadata(
                     self.protocol_event_metadata.get(&event_id).cloned(),
@@ -934,6 +975,20 @@ impl InMemoryStorage {
 
     fn validate_assisted_ai_audit_record(record: &AssistedAiAuditRecord) -> StorageResult<()> {
         validate_assisted_ai_audit_record(record).map_err(|error| StorageError::Failed {
+            message: error.to_string(),
+        })
+    }
+
+    fn validate_phase4_runtime_audit_record(
+        record: &Phase4RuntimeAuditRecord,
+    ) -> StorageResult<()> {
+        validate_phase4_runtime_audit_record(record).map_err(|error| StorageError::Failed {
+            message: error.to_string(),
+        })
+    }
+
+    fn validate_agent_replay_manifest(manifest: &AgentReplayManifest) -> StorageResult<()> {
+        validate_agent_replay_manifest(manifest).map_err(|error| StorageError::Failed {
             message: error.to_string(),
         })
     }
@@ -1303,11 +1358,12 @@ pub fn protocol_trust_to_security(state: WorkspaceTrustState) -> TrustState {
 mod tests {
     use super::*;
     use devil_protocol::{
+        AgentReplayManifest, AgentRunId, AgentStateTransitionRecord,
         AssistedAiAuditOutcomeCategory, AssistedAiAuditPrivacyDisposition,
         AssistedAiAuditRedactionState, AssistedAiProviderInvocationState, ByteRange, CapabilityId,
         EventId, FileContentVersion, FileFingerprint, LanguageId, LineIndexRange,
-        PermissionBudgetEvaluationDisposition, ProposalLifecycleState, ProposalPayloadKind,
-        ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRiskLabel,
+        PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord, ProposalLifecycleState,
+        ProposalPayloadKind, ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRiskLabel,
         ProtocolDiagnosticSeverity, RedactionHint, RetentionLabel, SemanticFileFingerprintIdentity,
         SemanticFreshnessState, SemanticGrammarVersion, SemanticMetadataChunkReference,
         SemanticMetadataDescriptorIdentity, SemanticMetadataDiagnosticSummary,
@@ -1787,6 +1843,91 @@ mod tests {
         assert!(
             storage
                 .handle(StorageRepositoryRequest::SaveDelegatedTaskAuditLinkageRecord(raw_marker))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only() {
+        let storage = InMemoryStorageRepositoryPort::new();
+        let run_id = AgentRunId("phase4-run-storage".to_string());
+        let audit = Phase4RuntimeAuditRecord {
+            audit_id: "phase4-audit-storage".to_string(),
+            run_id: Some(run_id.clone()),
+            step_id: None,
+            provider_route_id: Some("route-storage".to_string()),
+            invocation_state: AssistedAiProviderInvocationState::Completed,
+            outcome_label: "phase4.provider.completed".to_string(),
+            labels: vec!["metadata-only".to_string()],
+            correlation_id: CorrelationId(44),
+            causality_id: non_nil_causality_id(),
+            event_sequence: EventSequence(55),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        storage
+            .handle(StorageRepositoryRequest::SavePhase4RuntimeAuditRecord(
+                audit.clone(),
+            ))
+            .expect("save phase4 audit");
+        match storage
+            .handle(StorageRepositoryRequest::ReadPhase4RuntimeAuditRecord(
+                audit.audit_id.clone(),
+            ))
+            .expect("read phase4 audit")
+        {
+            StorageRepositoryResponse::Phase4RuntimeAuditRecord(stored) => {
+                assert_eq!(stored.as_ref(), &Some(audit.clone()));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let replay = AgentReplayManifest {
+            run_id: run_id.clone(),
+            transitions: vec![AgentStateTransitionRecord {
+                run_id: run_id.clone(),
+                step_id: None,
+                from_state: devil_protocol::AgentRunState::Observing,
+                to_state: devil_protocol::AgentRunState::Planning,
+                reason_code: "phase4.replay.storage".to_string(),
+                proposal_id: Some(ProposalId(9)),
+                correlation_id: CorrelationId(44),
+                causality_id: non_nil_causality_id(),
+                event_sequence: EventSequence(56),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            context_manifests: Vec::new(),
+            provider_route_ids: vec!["route-storage".to_string()],
+            proposal_ids: vec![ProposalId(9)],
+            correlation_id: CorrelationId(44),
+            causality_id: non_nil_causality_id(),
+            event_sequence: EventSequence(57),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        storage
+            .handle(StorageRepositoryRequest::SaveAgentReplayManifest(
+                replay.clone(),
+            ))
+            .expect("save replay");
+        match storage
+            .handle(StorageRepositoryRequest::ReadAgentReplayManifest(run_id))
+            .expect("read replay")
+        {
+            StorageRepositoryResponse::AgentReplayManifest(stored) => {
+                assert_eq!(stored.as_ref(), &Some(replay));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let mut raw_marker = audit;
+        raw_marker.labels.push("raw prompt".to_string());
+        assert!(
+            storage
+                .handle(StorageRepositoryRequest::SavePhase4RuntimeAuditRecord(
+                    raw_marker
+                ))
                 .is_err()
         );
     }
