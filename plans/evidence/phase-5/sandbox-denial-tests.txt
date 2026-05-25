@@ -1,0 +1,14 @@
+Commands:
+- cargo test -p devil-plugin --all-targets
+- cargo test -p devil-security --all-targets
+
+Observed focused coverage:
+- plugin_sandbox_denies_invalid_core_ids_before_host_dispatch
+- plugin_manifest_incompatible_abi_is_rejected_before_load
+- plugin_network_process_filesystem_and_untrusted_workspace_are_denied
+
+Sandbox posture evidenced:
+- No ambient filesystem/process/network/terminal capability is granted through plugin policy.
+- Host calls require non-zero correlation, non-nil causality, and non-zero event sequence before dispatch.
+
+Status: PASS in focused runs before final workspace gates.

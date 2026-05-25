@@ -1,0 +1,15 @@
+[package]
+name = "devil-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devil-protocol = { workspace = true }
+devil-security = { workspace = true }
+devil-observability = { workspace = true }
+devil-storage = { workspace = true }
+devil-platform = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

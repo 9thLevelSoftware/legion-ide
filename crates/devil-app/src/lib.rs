@@ -17,13 +17,14 @@ use devil_editor::{
 use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
 use devil_observability::{
     SharedEventSink, agent_replay_manifest_recorded_event, event_metadata_record,
-    phase4_runtime_audit_recorded_event, proposal_applied_event, proposal_approved_event,
-    proposal_audit_record, proposal_audit_recorded_event, proposal_created_event,
-    proposal_failed_event, proposal_previewed_event, proposal_rejected_event,
-    proposal_rolled_back_event, proposal_validated_event, save_denied_event,
-    stale_proposal_rejected_event, transaction_event,
+    phase4_runtime_audit_recorded_event, plugin_event_envelope, proposal_applied_event,
+    proposal_approved_event, proposal_audit_record, proposal_audit_recorded_event,
+    proposal_created_event, proposal_failed_event, proposal_previewed_event,
+    proposal_rejected_event, proposal_rolled_back_event, proposal_validated_event,
+    save_denied_event, stale_proposal_rejected_event, transaction_event,
 };
 use devil_platform::{NativeFileSystem, NativeWatcherService};
+use devil_plugin::PluginRuntimeHost;
 use devil_project::{
     OpenedFileText, WorkspaceActor, WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest,
     WorkspaceError, WorkspaceMutationRollbackCheckpoint,
@@ -35,13 +36,15 @@ use devil_protocol::{
     CorrelationId, EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort,
     EventSinkRequest, FileConflictContext, FileConflictLifecycleState, FileConflictReason,
     FileConflictState, FileContentVersion, FileFingerprint, FileId, FileIdentity, FileTreeNode,
-    PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
-    ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
-    ProposalFailureReason, ProposalId, ProposalLifecycleAction, ProposalLifecycleCommand,
-    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalLifecycleTransition,
-    ProposalPartialFailureDisposition, ProposalPartialFailureRecord, ProposalPayload, ProposalPort,
-    ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
-    ProposalResponse, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
+    PluginContributionProjection, PluginHostCallKind, PluginHostCallRequest,
+    PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary, PrincipalId,
+    ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem, ProposalBatchRollbackPolicy,
+    ProposalCancellationReason, ProposalDenialReason, ProposalFailureReason, ProposalId,
+    ProposalLifecycleAction, ProposalLifecycleCommand, ProposalLifecycleCommandReason,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPartialFailureDisposition,
+    ProposalPartialFailureRecord, ProposalPayload, ProposalPort, ProposalPreviewWarning,
+    ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest, ProposalResponse,
+    ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
     ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, RedactionHint,
     SaveConflictPolicy, SaveFileProposal, SaveIntent, StorageRepositoryPort,
@@ -3326,6 +3329,15 @@ pub enum AppCommandRequest {
         /// Run id to inspect.
         run_id: devil_protocol::AgentRunId,
     },
+    /// Invoke a Phase 5 plugin command through app-owned plugin composition.
+    InvokePluginCommand {
+        /// Plugin id selected from UI projection data.
+        plugin_id: PluginId,
+        /// Plugin command id selected from UI projection data.
+        command_id: String,
+        /// Metadata-only label for audit and bounded output.
+        metadata_label: String,
+    },
 }
 
 /// Minimal editor command port used by app command routing.
@@ -3506,7 +3518,8 @@ impl CommandExecutionService {
             | AppCommandRequest::StartAiRun { .. }
             | AppCommandRequest::CancelAiRun { .. }
             | AppCommandRequest::ReplayAiRun { .. }
-            | AppCommandRequest::InspectAiRun { .. } => Ok(None),
+            | AppCommandRequest::InspectAiRun { .. }
+            | AppCommandRequest::InvokePluginCommand { .. } => Ok(None),
             AppCommandRequest::RefreshExplorer => {
                 let workspace_id = state.require_workspace_id()?;
                 let tree = workspace.tree_snapshot(workspace_id)?;
@@ -3618,6 +3631,15 @@ impl CommandDispatcher {
             CommandDispatchIntent::InspectAiRun { run_id } => {
                 Ok(AppCommandRequest::InspectAiRun { run_id })
             }
+            CommandDispatchIntent::InvokePluginCommand {
+                plugin_id,
+                command_id,
+                metadata_label,
+            } => Ok(AppCommandRequest::InvokePluginCommand {
+                plugin_id,
+                command_id,
+                metadata_label,
+            }),
             CommandDispatchIntent::PreviewProposal { .. }
             | CommandDispatchIntent::ApproveProposal { .. }
             | CommandDispatchIntent::RejectProposal { .. }
@@ -4718,6 +4740,8 @@ pub enum AppCommandOutcome {
     AiRunReplayed(Box<devil_protocol::AgentReplayManifest>),
     /// Phase 4 AI run inspectability snapshot was loaded.
     AiRunInspected(Box<AppAiInspectionSnapshot>),
+    /// Phase 5 plugin command was invoked through app-owned plugin composition.
+    PluginCommandInvoked(Box<PluginHostCallResponse>),
 }
 
 /// App-owned result for a Phase 4 AI run.
@@ -4779,6 +4803,8 @@ pub struct AppComposition {
     tracker_ledger: TrackerLedger,
     memory_service: MemoryService,
     phase4_projection_state: Phase4ProjectionState,
+    plugin_runtime: PluginRuntimeHost,
+    plugin_contribution_projections: Vec<PluginContributionProjection>,
 }
 
 impl AppComposition {
@@ -4814,6 +4840,8 @@ impl AppComposition {
             tracker_ledger: TrackerLedger::new(),
             memory_service: MemoryService::new(),
             phase4_projection_state: Phase4ProjectionState::default(),
+            plugin_runtime: PluginRuntimeHost::new(),
+            plugin_contribution_projections: Vec::new(),
         }
     }
 
@@ -4972,8 +5000,75 @@ impl AppComposition {
             AppCommandRequest::InspectAiRun { run_id } => Ok(AppCommandOutcome::AiRunInspected(
                 Box::new(self.inspect_ai_run(run_id)?),
             )),
+            AppCommandRequest::InvokePluginCommand {
+                plugin_id,
+                command_id,
+                metadata_label,
+            } => Ok(AppCommandOutcome::PluginCommandInvoked(Box::new(
+                self.invoke_plugin_command(plugin_id, command_id, metadata_label)?,
+            ))),
             _ => unreachable!("command execution service handled non-workflow command"),
         }
+    }
+
+    /// Load a Phase 5 plugin manifest after app-level trust and manifest validation.
+    pub fn load_plugin_manifest(
+        &mut self,
+        manifest: PluginManifest,
+    ) -> Result<PluginId, AppCompositionError> {
+        let projection = PluginContributionProjection {
+            plugin_id: manifest.plugin_id,
+            contributions: manifest.contributions.clone(),
+            status_label: "loaded".to_string(),
+        };
+        let plugin_id = self
+            .plugin_runtime
+            .load_manifest(manifest)
+            .map_err(AppCompositionError::Protocol)?;
+        self.plugin_contribution_projections.push(projection);
+        Ok(plugin_id)
+    }
+
+    /// Invoke a Phase 5 plugin command through protocol host-call envelopes only.
+    pub fn invoke_plugin_command(
+        &mut self,
+        plugin_id: PluginId,
+        command_id: impl Into<String>,
+        metadata_label: impl Into<String>,
+    ) -> Result<PluginHostCallResponse, AppCompositionError> {
+        let command_id = command_id.into();
+        let event_context = self.next_event_context();
+        let sequence = self.event_sequence_generator.next();
+        let response = self
+            .plugin_runtime
+            .dispatch_host_call(PluginHostCallRequest {
+                plugin_id,
+                kind: PluginHostCallKind::ReadOnlyContext,
+                host_call_name: format!("command:{command_id}"),
+                declared_capability: CapabilityId("plugin.command".to_string()),
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                sequence,
+                metadata_label: metadata_label.into(),
+            })
+            .map_err(AppCompositionError::Protocol)?;
+        let envelope = plugin_event_envelope(
+            devil_protocol::EventId(uuid::Uuid::now_v7()),
+            plugin_id,
+            "plugin.command_invoked",
+            event_context.correlation_id,
+            event_context.causality_id,
+            sequence,
+            TimestampMillis::now(),
+        )
+        .map_err(|err| {
+            AppCompositionError::Protocol(ProtocolError {
+                code: "plugin_event_invalid".to_string(),
+                message: err.to_string(),
+            })
+        })?;
+        self.emit_event(envelope);
+        Ok(response)
     }
 
     /// Start a Phase 4 local-provider AI run and register its generated edit as a proposal.
@@ -5586,6 +5681,7 @@ impl AppComposition {
                 redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
                 schema_version: 1,
             },
+            plugin_contribution_projections: self.plugin_contribution_projections.clone(),
         })
     }
 
@@ -8955,6 +9051,46 @@ mod tests {
         }
     }
 
+    fn plugin_manifest(plugin_id: PluginId) -> PluginManifest {
+        PluginManifest {
+            plugin_id,
+            name: "phase5.test".to_string(),
+            version: "0.1.0".to_string(),
+            schema_version: 1,
+            min_abi_version: 1,
+            max_abi_version: 1,
+            module_hash: "sha256:phase5".to_string(),
+            manifest_id: "manifest:phase5".to_string(),
+            trust: devil_protocol::PluginTrustMetadata {
+                source: devil_protocol::PluginTrustSource::ExplicitLocalAllow,
+                decision: devil_protocol::PluginTrustDecision::ExplicitlyAllowed,
+                reason: "test allow".to_string(),
+            },
+            signature: None,
+            activation_events: vec![devil_protocol::PluginActivationEvent::OnCommand {
+                command: "phase5.run".to_string(),
+            }],
+            contributions: vec![devil_protocol::PluginContribution::Command(
+                devil_protocol::PluginCommandDescriptor {
+                    command_id: "phase5.run".to_string(),
+                    title: "Phase 5 Run".to_string(),
+                    required_capability: CapabilityId("plugin.command".to_string()),
+                },
+            )],
+            requested_capabilities: vec![CapabilityId("plugin.command".to_string())],
+            storage_namespace: devil_plugin::plugin_namespace(plugin_id, "state"),
+            quotas: devil_protocol::PluginQuotaDeclaration {
+                max_fuel: 1000,
+                max_wall_time_ms: 50,
+                max_memory_pages: 8,
+                max_storage_bytes: 4096,
+                max_host_calls: 4,
+                max_events: 4,
+                max_output_bytes: 128,
+            },
+        }
+    }
+
     fn assert_transition_diagnostic(response: &ProposalResponse, expected_code: &str) {
         let diagnostics = match response {
             ProposalResponse::Created(transition)
@@ -9233,6 +9369,33 @@ mod tests {
         )
         .expect("details intent maps");
         assert!(details.is_none());
+    }
+
+    #[test]
+    fn plugin_command_intent_routes_through_app_owned_plugin_runtime() {
+        let mut app = AppComposition::new();
+        let plugin_id = app
+            .load_plugin_manifest(plugin_manifest(PluginId(7)))
+            .expect("plugin manifest loads");
+
+        let outcome = app
+            .dispatch_ui_intent(CommandDispatchIntent::InvokePluginCommand {
+                plugin_id,
+                command_id: "phase5.run".to_string(),
+                metadata_label: "metadata-only".to_string(),
+            })
+            .expect("plugin command routes through app");
+
+        match outcome {
+            AppCommandOutcome::PluginCommandInvoked(response) => {
+                assert!(matches!(
+                    response.as_ref(),
+                    PluginHostCallResponse::Accepted { metadata_label }
+                        if metadata_label == "metadata-only"
+                ));
+            }
+            other => panic!("unexpected plugin command outcome: {other:?}"),
+        }
     }
 
     #[test]

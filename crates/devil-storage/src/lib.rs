@@ -16,14 +16,15 @@ use devil_protocol::{
     AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
     CorrelationId, DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId, EventMetadataRecord,
     EventSequence, EventSinkPort, EventSinkRequest, FileId, FileMetadata, Phase4RuntimeAuditRecord,
-    PrincipalId, ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult,
-    SemanticMetadataBatch, SemanticMetadataFreshnessKey, SemanticMetadataQuery,
-    SemanticMetadataReadResult, SemanticMetadataRecord, SemanticMetadataTombstone,
-    SemanticMetadataTombstoneReason, SnapshotId, StorageRepositoryPort, StorageRepositoryRequest,
-    StorageRepositoryResponse, TrustRecord, WorkspaceConfigSnapshot, WorkspaceId,
-    WorkspaceSessionRecord, WorkspaceTrustState, validate_agent_replay_manifest,
-    validate_assisted_ai_audit_record, validate_delegated_task_audit_linkage_record,
-    validate_phase4_runtime_audit_record,
+    PluginDenialReason, PluginStorageOperation, PluginStorageRecord, PrincipalId,
+    ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult, SemanticMetadataBatch,
+    SemanticMetadataFreshnessKey, SemanticMetadataQuery, SemanticMetadataReadResult,
+    SemanticMetadataRecord, SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId,
+    StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse, TrustRecord,
+    WorkspaceConfigSnapshot, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
+    validate_agent_replay_manifest, validate_assisted_ai_audit_record,
+    validate_delegated_task_audit_linkage_record, validate_phase4_runtime_audit_record,
+    validate_plugin_storage_record,
 };
 use devil_security::TrustState;
 use serde::{Deserialize, Serialize};
@@ -195,6 +196,7 @@ pub struct InMemoryStorage {
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     protocol_semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     protocol_semantic_tombstones: Vec<SemanticMetadataTombstone>,
+    protocol_plugin_storage: HashMap<String, PluginStorageRecord>,
 }
 
 #[derive(Debug)]
@@ -225,6 +227,8 @@ struct PersistedState {
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     semantic_tombstones: Vec<SemanticMetadataTombstone>,
+    #[serde(default)]
+    plugin_storage: HashMap<String, PluginStorageRecord>,
 }
 
 impl From<&InMemoryStorage> for PersistedState {
@@ -245,6 +249,7 @@ impl From<&InMemoryStorage> for PersistedState {
             protocol_event_metadata: value.protocol_event_metadata.clone(),
             semantic_metadata: value.protocol_semantic_metadata.clone(),
             semantic_tombstones: value.protocol_semantic_tombstones.clone(),
+            plugin_storage: value.protocol_plugin_storage.clone(),
         }
     }
 }
@@ -270,6 +275,7 @@ impl Clone for InMemoryStorage {
             protocol_event_metadata: self.protocol_event_metadata.clone(),
             protocol_semantic_metadata: self.protocol_semantic_metadata.clone(),
             protocol_semantic_tombstones: self.protocol_semantic_tombstones.clone(),
+            protocol_plugin_storage: self.protocol_plugin_storage.clone(),
         }
     }
 }
@@ -423,6 +429,7 @@ impl From<PersistedState> for InMemoryStorage {
             protocol_event_metadata: value.protocol_event_metadata,
             protocol_semantic_metadata: value.semantic_metadata,
             protocol_semantic_tombstones: value.semantic_tombstones,
+            protocol_plugin_storage: value.plugin_storage,
         }
     }
 }
@@ -822,6 +829,7 @@ impl InMemoryStorage {
                     "semantic_metadata_tombstone:{removed}"
                 )))
             }
+            StorageRepositoryRequest::PluginStorage(request) => self.handle_plugin_storage(request),
             StorageRepositoryRequest::ReadWorkspaceConfig(workspace_id) => {
                 Ok(StorageRepositoryResponse::WorkspaceConfig(
                     self.protocol_workspace_configs.get(&workspace_id).cloned(),
@@ -887,6 +895,155 @@ impl InMemoryStorage {
                 self.semantic_metadata_tombstones(workspace_id, file_id)?,
             )),
         }
+    }
+
+    fn handle_plugin_storage(
+        &mut self,
+        request: devil_protocol::PluginStorageRequest,
+    ) -> StorageResult<StorageRepositoryResponse> {
+        if request.plugin_id.0 == 0 || request.namespace.plugin_id != request.plugin_id {
+            return Ok(StorageRepositoryResponse::PluginStorage(
+                devil_protocol::PluginStorageResponse::Denied {
+                    reason: PluginDenialReason::InvalidMetadata,
+                    message: "plugin storage namespace escape denied".to_string(),
+                },
+            ));
+        }
+
+        match request.operation {
+            PluginStorageOperation::Put => {
+                let Some(record) = request.record else {
+                    return Ok(StorageRepositoryResponse::PluginStorage(
+                        devil_protocol::PluginStorageResponse::Denied {
+                            reason: PluginDenialReason::InvalidMetadata,
+                            message: "plugin storage put requires a record".to_string(),
+                        },
+                    ));
+                };
+                validate_plugin_storage_record(&record).map_err(|err| StorageError::Failed {
+                    message: err.message,
+                })?;
+                let used_without_existing = self.plugin_storage_used_bytes(
+                    request.workspace_id,
+                    request.plugin_id,
+                    Some(&record.key),
+                );
+                let projected = used_without_existing.saturating_add(record.byte_count);
+                if projected > request.quota_bytes {
+                    return Ok(StorageRepositoryResponse::PluginStorage(
+                        devil_protocol::PluginStorageResponse::Denied {
+                            reason: PluginDenialReason::QuotaExceeded,
+                            message: "plugin storage quota exceeded".to_string(),
+                        },
+                    ));
+                }
+                let key = Self::plugin_storage_key(
+                    record.workspace_id,
+                    record.plugin_id,
+                    &record.namespace.namespace,
+                    &record.key,
+                );
+                let record_key = record.key.clone();
+                self.protocol_plugin_storage.insert(key, record);
+                Ok(StorageRepositoryResponse::PluginStorage(
+                    devil_protocol::PluginStorageResponse::Stored {
+                        key: record_key,
+                        used_bytes: projected,
+                    },
+                ))
+            }
+            PluginStorageOperation::Get => {
+                let Some(key) = request.key else {
+                    return Ok(StorageRepositoryResponse::PluginStorage(
+                        devil_protocol::PluginStorageResponse::Record(None),
+                    ));
+                };
+                let storage_key = Self::plugin_storage_key(
+                    request.workspace_id,
+                    request.plugin_id,
+                    &request.namespace.namespace,
+                    &key,
+                );
+                Ok(StorageRepositoryResponse::PluginStorage(
+                    devil_protocol::PluginStorageResponse::Record(
+                        self.protocol_plugin_storage.get(&storage_key).cloned(),
+                    ),
+                ))
+            }
+            PluginStorageOperation::Delete => {
+                if let Some(key) = request.key {
+                    let storage_key = Self::plugin_storage_key(
+                        request.workspace_id,
+                        request.plugin_id,
+                        &request.namespace.namespace,
+                        &key,
+                    );
+                    self.protocol_plugin_storage.remove(&storage_key);
+                }
+                Ok(StorageRepositoryResponse::PluginStorage(
+                    devil_protocol::PluginStorageResponse::QuotaUsage {
+                        used_bytes: self.plugin_storage_used_bytes(
+                            request.workspace_id,
+                            request.plugin_id,
+                            None,
+                        ),
+                        quota_bytes: request.quota_bytes,
+                    },
+                ))
+            }
+            PluginStorageOperation::List => {
+                let mut keys = self
+                    .protocol_plugin_storage
+                    .values()
+                    .filter(|record| {
+                        record.workspace_id == request.workspace_id
+                            && record.plugin_id == request.plugin_id
+                            && record.namespace.namespace == request.namespace.namespace
+                    })
+                    .map(|record| record.key.clone())
+                    .collect::<Vec<_>>();
+                keys.sort();
+                Ok(StorageRepositoryResponse::PluginStorage(
+                    devil_protocol::PluginStorageResponse::Keys(keys),
+                ))
+            }
+            PluginStorageOperation::QuotaUsage => Ok(StorageRepositoryResponse::PluginStorage(
+                devil_protocol::PluginStorageResponse::QuotaUsage {
+                    used_bytes: self.plugin_storage_used_bytes(
+                        request.workspace_id,
+                        request.plugin_id,
+                        None,
+                    ),
+                    quota_bytes: request.quota_bytes,
+                },
+            )),
+        }
+    }
+
+    fn plugin_storage_key(
+        workspace_id: WorkspaceId,
+        plugin_id: devil_protocol::PluginId,
+        namespace: &str,
+        key: &str,
+    ) -> String {
+        format!("{}:{}:{namespace}:{key}", workspace_id.0, plugin_id.0)
+    }
+
+    fn plugin_storage_used_bytes(
+        &self,
+        workspace_id: WorkspaceId,
+        plugin_id: devil_protocol::PluginId,
+        excluding_key: Option<&str>,
+    ) -> u64 {
+        self.protocol_plugin_storage
+            .values()
+            .filter(|record| {
+                record.workspace_id == workspace_id
+                    && record.plugin_id == plugin_id
+                    && excluding_key != Some(record.key.as_str())
+            })
+            .map(|record| record.byte_count)
+            .sum()
     }
 
     fn validate_semantic_batch(batch: &SemanticMetadataBatch) -> StorageResult<()> {
@@ -2080,6 +2237,119 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn plugin_storage_namespace_isolation_and_quota_fail_closed() {
+        let storage = InMemoryStorageRepositoryPort::new();
+        let namespace = devil_protocol::PluginStateNamespace {
+            plugin_id: devil_protocol::PluginId(7),
+            namespace: "state".to_string(),
+        };
+        let record = PluginStorageRecord {
+            workspace_id: WorkspaceId(1),
+            plugin_id: devil_protocol::PluginId(7),
+            namespace: namespace.clone(),
+            key: "settings".to_string(),
+            value: "metadata-only".to_string(),
+            schema_version: 1,
+            retention: devil_protocol::RetentionLabel::Warm,
+            redaction: RedactionHint::MetadataOnly,
+            byte_count: 13,
+        };
+
+        let put = storage
+            .handle(StorageRepositoryRequest::PluginStorage(
+                devil_protocol::PluginStorageRequest {
+                    operation: PluginStorageOperation::Put,
+                    workspace_id: WorkspaceId(1),
+                    plugin_id: devil_protocol::PluginId(7),
+                    namespace: namespace.clone(),
+                    key: Some("settings".to_string()),
+                    record: Some(record.clone()),
+                    quota_bytes: 32,
+                    correlation_id: CorrelationId(9),
+                },
+            ))
+            .expect("put plugin storage");
+        assert!(matches!(
+            put,
+            StorageRepositoryResponse::PluginStorage(
+                devil_protocol::PluginStorageResponse::Stored { used_bytes: 13, .. }
+            )
+        ));
+
+        let get = storage
+            .handle(StorageRepositoryRequest::PluginStorage(
+                devil_protocol::PluginStorageRequest {
+                    operation: PluginStorageOperation::Get,
+                    workspace_id: WorkspaceId(1),
+                    plugin_id: devil_protocol::PluginId(7),
+                    namespace: namespace.clone(),
+                    key: Some("settings".to_string()),
+                    record: None,
+                    quota_bytes: 32,
+                    correlation_id: CorrelationId(10),
+                },
+            ))
+            .expect("get plugin storage");
+        assert!(matches!(
+            get,
+            StorageRepositoryResponse::PluginStorage(devil_protocol::PluginStorageResponse::Record(
+                Some(stored)
+            )) if stored.key == "settings"
+        ));
+
+        let escape = storage
+            .handle(StorageRepositoryRequest::PluginStorage(
+                devil_protocol::PluginStorageRequest {
+                    operation: PluginStorageOperation::Get,
+                    workspace_id: WorkspaceId(1),
+                    plugin_id: devil_protocol::PluginId(8),
+                    namespace: namespace.clone(),
+                    key: Some("settings".to_string()),
+                    record: None,
+                    quota_bytes: 32,
+                    correlation_id: CorrelationId(11),
+                },
+            ))
+            .expect("namespace escape returns typed denial");
+        assert!(matches!(
+            escape,
+            StorageRepositoryResponse::PluginStorage(
+                devil_protocol::PluginStorageResponse::Denied {
+                    reason: PluginDenialReason::InvalidMetadata,
+                    ..
+                }
+            )
+        ));
+
+        let mut over_quota = record;
+        over_quota.key = "large".to_string();
+        over_quota.byte_count = 64;
+        let denied = storage
+            .handle(StorageRepositoryRequest::PluginStorage(
+                devil_protocol::PluginStorageRequest {
+                    operation: PluginStorageOperation::Put,
+                    workspace_id: WorkspaceId(1),
+                    plugin_id: devil_protocol::PluginId(7),
+                    namespace,
+                    key: Some("large".to_string()),
+                    record: Some(over_quota),
+                    quota_bytes: 32,
+                    correlation_id: CorrelationId(12),
+                },
+            ))
+            .expect("quota returns typed denial");
+        assert!(matches!(
+            denied,
+            StorageRepositoryResponse::PluginStorage(
+                devil_protocol::PluginStorageResponse::Denied {
+                    reason: PluginDenialReason::QuotaExceeded,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]

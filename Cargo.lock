@@ -236,6 +236,7 @@ dependencies = [
  "devil-memory",
  "devil-observability",
  "devil-platform",
+ "devil-plugin",
  "devil-project",
  "devil-protocol",
  "devil-security",
@@ -306,6 +307,19 @@ version = "0.1.0"
 dependencies = [
  "devil-protocol",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "devil-plugin"
+version = "0.1.0"
+dependencies = [
+ "devil-observability",
+ "devil-platform",
+ "devil-protocol",
+ "devil-security",
+ "devil-storage",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

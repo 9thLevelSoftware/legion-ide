@@ -70,6 +70,7 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `devil-memory`
   - `devil-observability`
   - `devil-platform`
+  - `devil-plugin`
   - `devil-project`
   - `devil-protocol`
   - `devil-security`
@@ -115,6 +116,15 @@ Phase 3 semantic fabric activation for `crates/devil-index/Cargo.toml` is limite
 
 Phase 4 activates `devil-agent`, `devil-tracker`, and `devil-memory` only for metadata-only local-provider planning, tracker ledger records, memory candidate review, and proposal-only agent outputs. These crates must not depend on app/UI/editor/workspace internals and must not gain direct filesystem, process, network, terminal, storage, settings, or buffer mutation authority.
 
+- `devil-plugin` may depend on:
+  - `devil-observability`
+  - `devil-platform`
+  - `devil-protocol`
+  - `devil-security`
+  - `devil-storage`
+
+Phase 5 activates `devil-plugin` only as an isolated WASM plugin runtime boundary using protocol DTOs, manifest/capability validation, quota metadata, plugin-scoped storage, and metadata-only observability. It must not depend on app/UI/editor/project internals and must not gain direct filesystem, process, network, terminal, AI, tracker, memory, collaboration, remote, settings, or buffer mutation authority. Plugin mutation outputs must remain proposal-mediated.
+
 - `devil-cli` may depend on:
   - `devil-index`
   - `devil-protocol`
@@ -123,13 +133,6 @@ Phase 4 activates `devil-agent`, `devil-tracker`, and `devil-memory` only for me
 The planned runtime surfaces below are policy placeholders only. They do not authorize activation, crate creation, or runtime behavior before the activation gates in section 4 are satisfied.
 
 - `devil-lsp` may depend on:
-  - `devil-observability`
-  - `devil-platform`
-  - `devil-protocol`
-  - `devil-security`
-  - `devil-storage`
-
-- `devil-plugin` may depend on:
   - `devil-observability`
   - `devil-platform`
   - `devil-protocol`
@@ -408,10 +411,36 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `TerminalExit`
   - `TerminalCapability`
   - `PluginManifest`
+  - `PluginTrustMetadata`
+  - `PluginTrustSource`
+  - `PluginTrustDecision`
+  - `PluginSignatureMetadata`
+  - `PluginQuotaDeclaration`
   - `PluginActivationEvent`
   - `PluginCommandDescriptor`
+  - `PluginContribution`
+  - `PluginMenuContribution`
+  - `PluginPanelContribution`
+  - `PluginStatusItemContribution`
+  - `PluginEditorDecorationContribution`
+  - `PluginSnippetContribution`
+  - `PluginLanguageProviderContribution`
+  - `PluginFormatterContribution`
+  - `PluginLspRegistrationContribution`
+  - `PluginWorkspaceScannerContribution`
+  - `PluginHostCallKind`
+  - `PluginQuotaClass`
+  - `PluginSandboxOperationClass`
+  - `PluginHostCallRequest`
+  - `PluginDenialReason`
+  - `PluginHostCallResponse`
+  - `PluginStorageOperation`
+  - `PluginStorageRecord`
+  - `PluginStorageRequest`
+  - `PluginStorageResponse`
   - `ContributionDescriptor`
   - `PluginStateNamespace`
+  - `PluginContributionProjection`
   - `CapabilityGrant`
   - `CapabilityDenial`
   - `CapabilityDecision`
@@ -455,6 +484,7 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `CapabilityBrokerPort`
   - `EventSinkPort`
   - `StorageRepositoryPort`
+  - `PluginPort`
   - `ProjectInfoPort`
 
 ### 3. Forbidden/Deferred Edges
@@ -474,7 +504,7 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
 ### 4. Runtime Surface Activation Gates
 
 - Phase 3 activates `devil-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
-- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin`, `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-lsp`, `devil-terminal`, `devil-collaboration`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
 - Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated
   - an explicit dependency-policy entry in this document

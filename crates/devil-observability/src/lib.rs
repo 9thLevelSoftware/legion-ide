@@ -18,7 +18,7 @@ use devil_protocol::{
     DelegatedTaskAuditLinkageRecord, DelegatedTaskPlanContract, EventEnvelope, EventId,
     EventMetadataRecord, EventSequence, EventSeverity, EventSinkPort, EventSinkRequest,
     FileFingerprint, FileId, PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord,
-    PrincipalId, ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
+    PluginId, PrincipalId, ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
     ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
     ProposalPrivacyLabel, ProposalRejectionReason, ProposalRollbackReason, ProposalStaleReason,
     ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint, RetentionLabel,
@@ -55,6 +55,39 @@ pub enum ObservabilityError {
     /// Event sink storage lock was poisoned.
     #[error("event sink storage lock poisoned")]
     StorageUnavailable,
+}
+
+/// Build a metadata-only plugin audit event envelope.
+pub fn plugin_event_envelope(
+    event_id: EventId,
+    plugin_id: PluginId,
+    event: impl Into<String>,
+    correlation_id: CorrelationId,
+    causality_id: CausalityId,
+    sequence: EventSequence,
+    occurred_at: TimestampMillis,
+) -> Result<EventEnvelope, ObservabilityError> {
+    let envelope = EventEnvelope {
+        schema_version: 1,
+        event_id,
+        parent_event_id: None,
+        causality_id,
+        event: event.into(),
+        severity: EventSeverity::Info,
+        retention: RetentionLabel::Audit,
+        redaction: RedactionHint::MetadataOnly,
+        correlation_id,
+        workspace_id: None,
+        sequence,
+        principal_id: Some(PrincipalId(format!("plugin:{}", plugin_id.0))),
+        occurred_at,
+        payload: json!({
+            "plugin_id": plugin_id.0,
+            "payload_class": "metadata_only"
+        }),
+    };
+    validate_envelope(&envelope, EventSinkConfig::default())?;
+    Ok(envelope)
 }
 
 /// Runtime configuration for validating and storing event envelopes.
@@ -2104,6 +2137,36 @@ mod tests {
             assisted_ai_audit_recorded_event(&raw_marker),
             Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
         ));
+    }
+
+    #[test]
+    fn plugin_observability_event_is_metadata_only_and_validated() {
+        let event = plugin_event_envelope(
+            EventId(Uuid::now_v7()),
+            PluginId(7),
+            "plugin.host_call",
+            CorrelationId(77),
+            CausalityId(Uuid::now_v7()),
+            EventSequence(88),
+            TimestampMillis(99),
+        )
+        .expect("plugin event validates");
+
+        assert_eq!(event.event, "plugin.host_call");
+        assert_eq!(event.redaction, RedactionHint::MetadataOnly);
+        assert_eq!(event.retention, RetentionLabel::Audit);
+        assert_eq!(event.payload["plugin_id"], 7);
+        assert_eq!(event.payload["payload_class"], "metadata_only");
+
+        let sink = InMemoryEventSink::new();
+        sink.try_emit(EventSinkRequest { envelope: event })
+            .expect("plugin event stores");
+        let serialized = serde_json::to_string(&sink.events().expect("stored events"))
+            .expect("serialize stored plugin event");
+        assert!(!serialized.contains("source_body"));
+        assert!(!serialized.contains("raw_prompt"));
+        assert!(!serialized.contains("provider_response"));
+        assert!(!serialized.contains("secret"));
     }
 
     #[test]

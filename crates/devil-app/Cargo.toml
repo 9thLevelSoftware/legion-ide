@@ -20,5 +20,6 @@ devil-ai = { workspace = true }
 devil-ai-providers = { workspace = true }
 devil-tracker = { workspace = true }
 devil-memory = { workspace = true }
+devil-plugin = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

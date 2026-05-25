@@ -4,10 +4,11 @@ use devil_protocol::{
     AgentRunId, AssistedAiProjection, BufferId, CanonicalPath, CheckpointRollbackProjection,
     ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
     ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
-    PermissionBudgetProjection, PrivacyInspectorProjection, ProposalApprovalChecklistProjection,
-    ProposalCancellationReason, ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel,
-    ProposalRejectionReason, ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange,
-    RedactionHint, TextCoordinate, TimestampMillis, WorkspaceId,
+    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
+    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
+    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
+    ProposalRollbackReason, ProtocolTextRange, RedactionHint, TextCoordinate, TimestampMillis,
+    WorkspaceId,
 };
 use thiserror::Error;
 
@@ -276,6 +277,15 @@ pub enum CommandDispatchIntent {
         /// Agent run identifier selected from projection data or user input.
         run_id: AgentRunId,
     },
+    /// Invoke a plugin command through app-owned plugin composition.
+    InvokePluginCommand {
+        /// Plugin identifier selected from projection data.
+        plugin_id: PluginId,
+        /// Command id selected from projection data.
+        command_id: String,
+        /// Metadata-only label for audit/UI display.
+        metadata_label: String,
+    },
 }
 
 /// Projection snapshot provided to the shell by the application layer.
@@ -305,6 +315,8 @@ pub struct ShellProjectionSnapshot {
     pub assisted_ai_projection: AssistedAiProjection,
     /// Delegated-task plan projection supplied by the application layer.
     pub delegated_task_projection: DelegatedTaskProjection,
+    /// Plugin contribution projections supplied by the application layer.
+    pub plugin_contribution_projections: Vec<PluginContributionProjection>,
 }
 
 /// Command parsing errors surfaced by projection-only shell input handling.
@@ -345,6 +357,8 @@ pub struct Shell {
     pub assisted_ai_projection: AssistedAiProjection,
     /// Static delegated-task plan projection.
     pub delegated_task_projection: DelegatedTaskProjection,
+    /// Static plugin contribution projections.
+    pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Command dispatch intents emitted by input parsing.
     pub command_dispatch_intents: Vec<CommandDispatchIntent>,
 }
@@ -365,6 +379,7 @@ impl Shell {
             checkpoint_rollback_projection: snapshot.checkpoint_rollback_projection,
             assisted_ai_projection: snapshot.assisted_ai_projection,
             delegated_task_projection: snapshot.delegated_task_projection,
+            plugin_contribution_projections: snapshot.plugin_contribution_projections,
             command_dispatch_intents: Vec::new(),
         }
     }
@@ -387,6 +402,7 @@ impl Shell {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         })
     }
 
@@ -405,6 +421,7 @@ impl Shell {
             checkpoint_rollback_projection: self.checkpoint_rollback_projection.clone(),
             assisted_ai_projection: self.assisted_ai_projection.clone(),
             delegated_task_projection: self.delegated_task_projection.clone(),
+            plugin_contribution_projections: self.plugin_contribution_projections.clone(),
         }
     }
 
@@ -422,6 +439,7 @@ impl Shell {
         self.checkpoint_rollback_projection = snapshot.checkpoint_rollback_projection;
         self.assisted_ai_projection = snapshot.assisted_ai_projection;
         self.delegated_task_projection = snapshot.delegated_task_projection;
+        self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
     }
 
     /// Drain queued command-dispatch intents.
@@ -693,7 +711,7 @@ impl Shell {
             }
         }
         println!(
-            "Commands: :i text | :d start,end | :r start,end,text | :w | :ai-start label | :u | :redo | :q"
+            "Commands: :i text | :d start,end | :r start,end,text | :w | :plugin id command | :ai-start label | :u | :redo | :q"
         );
     }
 
@@ -751,6 +769,32 @@ impl Shell {
                     run_id: AgentRunId(run_id.trim().to_string()),
                 },
             )));
+        }
+
+        if let Some(payload) = trimmed.strip_prefix(":plugin ") {
+            let mut split = payload.splitn(3, ' ');
+            let plugin_id = split
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(PluginId);
+            let command_id = split.next().unwrap_or_default().trim();
+            let metadata_label = split.next().unwrap_or(command_id).trim();
+            if let Some(plugin_id) = plugin_id
+                && plugin_id.0 != 0
+                && !command_id.is_empty()
+            {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::InvokePluginCommand {
+                        plugin_id,
+                        command_id: command_id.to_string(),
+                        metadata_label: if metadata_label.is_empty() {
+                            command_id.to_string()
+                        } else {
+                            metadata_label.to_string()
+                        },
+                    },
+                )));
+            }
         }
 
         if let Some(proposal_id) = parse_proposal_id(trimmed.strip_prefix(":proposal-preview ")) {
@@ -1315,6 +1359,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let intent = shell
@@ -1356,6 +1401,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1399,6 +1445,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1450,6 +1497,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let before = shell.projection_snapshot();
@@ -1523,6 +1571,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1604,6 +1653,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1672,6 +1722,7 @@ mod tests {
             checkpoint_rollback_projection: rollback.clone(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1804,6 +1855,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: assisted.clone(),
             delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1884,6 +1936,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: delegated.clone(),
+            plugin_contribution_projections: Vec::new(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1897,6 +1950,39 @@ mod tests {
             Some(ProposalId(42))
         );
         assert!(shell.command_dispatch_intents.is_empty());
+    }
+
+    #[test]
+    fn ui_plugin_contributions_are_projection_only_command_intents() {
+        let mut shell = Shell::empty("plugins");
+        shell.plugin_contribution_projections = vec![PluginContributionProjection {
+            plugin_id: PluginId(7),
+            contributions: vec![devil_protocol::PluginContribution::Command(
+                devil_protocol::PluginCommandDescriptor {
+                    command_id: "phase5.run".to_string(),
+                    title: "Phase 5 Run".to_string(),
+                    required_capability: CapabilityId("plugin.command".to_string()),
+                },
+            )],
+            status_label: "loaded".to_string(),
+        }];
+
+        let before = shell.projection_snapshot();
+        let intent = shell
+            .handle_command(":plugin 7 phase5.run metadata-only")
+            .expect("plugin command should parse")
+            .expect("intent should be emitted");
+
+        assert_eq!(
+            intent,
+            CommandDispatchIntent::InvokePluginCommand {
+                plugin_id: PluginId(7),
+                command_id: "phase5.run".to_string(),
+                metadata_label: "metadata-only".to_string(),
+            }
+        );
+        assert_eq!(shell.projection_snapshot(), before);
+        assert_eq!(shell.command_dispatch_intents.len(), 1);
     }
 
     #[test]

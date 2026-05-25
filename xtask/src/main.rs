@@ -12,10 +12,13 @@ const DEFAULT_POLICY_PATH: &str = "plans/dependency-policy.md";
 const DEFAULT_PROTOCOL_PATH: &str = "crates/devil-protocol/src/lib.rs";
 const DEFAULT_PHASE3_EVIDENCE_PATH: &str = "plans/evidence/phase-3/predictive-semantic-fabric.md";
 const DEFAULT_PHASE4_EVIDENCE_PATH: &str = "plans/evidence/phase-4/agentic-ai-architecture-map.md";
+const DEFAULT_PHASE5_EVIDENCE_PATH: &str = "plans/evidence/phase-5/plugin-architecture-map.md";
 const PHASE3_STATUS_HEADING: &str = "## Acceptance status";
 const PHASE3_FINAL_CHECKLIST_HEADING: &str = "## Final validation checklist";
 const PHASE4_STATUS_HEADING: &str = "## Acceptance status";
 const PHASE4_FINAL_CHECKLIST_HEADING: &str = "## Final validation checklist";
+const PHASE5_STATUS_HEADING: &str = "## Acceptance Status";
+const PHASE5_FINAL_CHECKLIST_HEADING: &str = "## Final Validation Checklist";
 const PHASE3_PARTIAL_RUNTIME_MARKER: &str = "Runtime surface status: Partial `devil-index` indexing behavior is active; acceptance evidence is incomplete.";
 const PHASE3_NOT_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Not accepted.";
 const PHASE3_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Accepted.";
@@ -23,6 +26,8 @@ const LSP_NOT_ACCEPTED_MARKER: &str = "LSP supervision acceptance: Not accepted.
 const LSP_ACCEPTED_MARKER: &str = "LSP supervision acceptance: Accepted.";
 const PHASE4_NOT_ACCEPTED_MARKER: &str = "Phase 4 acceptance: Not accepted.";
 const PHASE4_ACCEPTED_MARKER: &str = "Phase 4 acceptance: Accepted.";
+const PHASE5_NOT_ACCEPTED_MARKER: &str = "Phase 5 acceptance: Not accepted.";
+const PHASE5_ACCEPTED_MARKER: &str = "Phase 5 acceptance: Accepted.";
 const PHASE3_REQUIRED_ARTIFACTS: &[&str] = &[
     "semantic-fabric-architecture-map.md",
     "index-dependency-boundary.txt",
@@ -50,6 +55,23 @@ const PHASE4_REQUIRED_ARTIFACTS: &[&str] = &[
     "observability-redaction-audit.md",
     "cloud-provider-deferral-audit.md",
     "vector-deferral-audit.md",
+    "cargo-fmt-check.txt",
+    "cargo-check-workspace-all-targets.txt",
+    "cargo-test-workspace-all-targets.txt",
+    "cargo-clippy-workspace-all-targets.txt",
+];
+const PHASE5_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plugin-architecture-map.md",
+    "dependency-boundary.txt",
+    "wasm-abi-contract-tests.txt",
+    "manifest-golden-tests.txt",
+    "host-call-capability-tests.txt",
+    "sandbox-denial-tests.txt",
+    "plugin-crash-isolation-tests.txt",
+    "plugin-storage-quota-tests.txt",
+    "plugin-proposal-routing-tests.txt",
+    "plugin-observability-redaction-audit.md",
+    "future-surface-deferral-audit.md",
     "cargo-fmt-check.txt",
     "cargo-check-workspace-all-targets.txt",
     "cargo-test-workspace-all-targets.txt",
@@ -137,10 +159,25 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
         phase4_evidence_dir.join(artifact).is_file()
     });
 
+    let phase5_evidence_path = workspace_root.join(DEFAULT_PHASE5_EVIDENCE_PATH);
+    let phase5_evidence = fs::read_to_string(&phase5_evidence_path).map_err(|err| {
+        format!(
+            "unable to read Phase 5 evidence at `{}`: {err}",
+            phase5_evidence_path.display()
+        )
+    })?;
+    let phase5_evidence_dir = phase5_evidence_path
+        .parent()
+        .ok_or_else(|| "unable to resolve Phase 5 evidence directory".to_string())?;
+    let phase5_violations = validate_phase5_acceptance_governance(&phase5_evidence, |artifact| {
+        phase5_evidence_dir.join(artifact).is_file()
+    });
+
     let mut all = violations;
     all.extend(protocol_violations);
     all.extend(phase3_violations);
     all.extend(phase4_violations);
+    all.extend(phase5_violations);
 
     if !all.is_empty() {
         let mut output = String::new();
@@ -501,6 +538,80 @@ where
     issues
 }
 
+fn validate_phase5_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    let Some(status_section) = markdown_section(evidence, PHASE5_STATUS_HEADING) else {
+        issues.push(format!(
+            "`{DEFAULT_PHASE5_EVIDENCE_PATH}` must include `{PHASE5_STATUS_HEADING}` with explicit Phase 5 acceptance status"
+        ));
+        return issues;
+    };
+
+    let phase5_not_accepted = status_section.contains(PHASE5_NOT_ACCEPTED_MARKER);
+    let phase5_accepted = status_section.contains(PHASE5_ACCEPTED_MARKER);
+    match (phase5_not_accepted, phase5_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_PHASE5_EVIDENCE_PATH}` must not declare both `{PHASE5_NOT_ACCEPTED_MARKER}` and `{PHASE5_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_PHASE5_EVIDENCE_PATH}` must declare either `{PHASE5_NOT_ACCEPTED_MARKER}` or `{PHASE5_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    if phase5_accepted {
+        issues.extend(validate_phase5_completion_evidence(
+            evidence,
+            &artifact_exists,
+        ));
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_phase5_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    if let Some(checklist) = markdown_section(evidence, PHASE5_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_PHASE5_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_PHASE5_EVIDENCE_PATH}` claims acceptance but `{PHASE5_FINAL_CHECKLIST_HEADING}` is missing"
+        ));
+    }
+
+    for artifact in PHASE5_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE5_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is not listed"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE5_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing from `plans/evidence/phase-5`"
+            ));
+        }
+    }
+
+    issues
+}
+
 fn markdown_section<'a>(source: &'a str, heading: &str) -> Option<&'a str> {
     let start = source.find(heading)?;
     let tail = &source[start..];
@@ -768,6 +879,30 @@ mod tests {
         )
     }
 
+    fn accepted_phase5_evidence(checklist_checked: bool) -> String {
+        let artifacts = PHASE5_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# Phase 5 evidence
+
+## Acceptance Status
+
+- {PHASE5_ACCEPTED_MARKER}
+
+## Expected Evidence Artifacts
+
+{artifacts}
+## Final Validation Checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
     #[test]
     fn missing_workspace_crate_policy_is_reported() {
         let packages = HashMap::from([(
@@ -981,6 +1116,68 @@ mod tests {
             assert!(
                 source.contains(artifact),
                 "Phase 4 evidence must list required artifact `{artifact}`"
+            );
+        }
+    }
+
+    #[test]
+    fn phase5_not_accepted_status_allows_scaffold_without_artifacts() {
+        let evidence = format!(
+            r#"# Phase 5 evidence
+
+## Acceptance Status
+
+- {PHASE5_NOT_ACCEPTED_MARKER}
+
+## Final Validation Checklist
+
+- [ ] pending
+"#
+        );
+
+        let issues = validate_phase5_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase5_acceptance_claim_requires_artifacts_and_checked_checklist() {
+        let evidence = accepted_phase5_evidence(false);
+        let issues = validate_phase5_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required artifact `host-call-capability-tests.txt` is missing")
+        }));
+    }
+
+    #[test]
+    fn phase5_acceptance_claim_passes_with_checked_checklist_and_artifacts() {
+        let evidence = accepted_phase5_evidence(true);
+        let issues = validate_phase5_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase5_evidence_declares_accepted_status_with_artifacts() {
+        let source = read_workspace_file(DEFAULT_PHASE5_EVIDENCE_PATH);
+        let evidence_path = workspace_root().join(DEFAULT_PHASE5_EVIDENCE_PATH);
+        let evidence_dir = evidence_path
+            .parent()
+            .expect("Phase 5 evidence path should have a parent directory");
+        let issues = validate_phase5_acceptance_governance(&source, |artifact| {
+            evidence_dir.join(artifact).is_file()
+        });
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+        assert!(source.contains(PHASE5_ACCEPTED_MARKER));
+        for artifact in PHASE5_REQUIRED_ARTIFACTS {
+            assert!(
+                source.contains(artifact),
+                "Phase 5 evidence must list required artifact `{artifact}`"
             );
         }
     }

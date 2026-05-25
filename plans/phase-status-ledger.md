@@ -14,8 +14,9 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | Phase 1 — Editor and text substrate | **Accepted** | [`plans/evidence/phase-1/editor-text-substrate.md`](evidence/phase-1/editor-text-substrate.md) | Degraded large-file mode, chunk descriptors, viewport projection, and bounded fake consumers are evidenced. 100MB full-cache boundary is measurement-only, not a green benchmark. |
 | Phase 2 — Proposal mutation substrate | **Accepted** | [`plans/evidence/phase-2/proposal-mutation-substrate.md`](evidence/phase-2/proposal-mutation-substrate.md) | DTOs, routing, lifecycle states, deny-by-default validation, save apply, open-buffer text edit apply, closed-file create/delete/rename apply, multi-file workspace-edit execution, edit-only code-action execution, accepted reversible batch apply/rollback, workspace-authorized audit-failure rollback checkpoints, batch planning contracts, and live proposal ledger projection are accepted. Raw format execution and future runtime surfaces remain gated unless lowered into accepted proposal payloads. |
 | Phase 3 — Semantic fabric and LSP supervision | **Accepted** | [`plans/evidence/phase-3/predictive-semantic-fabric.md`](evidence/phase-3/predictive-semantic-fabric.md) | `devil-index` is activated for actor-owned bounded scheduling, workspace-authored discovery import, descriptor/lease indexing, syntax-cache freshness, graph records, metadata-only persistence, semantic query APIs, and LSP supervision/proposal-routing DTOs. Vector indexing and later runtime surfaces remain deferred. |
-| Phase 4 — Native agentic AI execution context | **Accepted** | [`plans/evidence/phase-4/agentic-ai-architecture-map.md`](evidence/phase-4/agentic-ai-architecture-map.md) | Local-provider, proposal-only, metadata-audited agent execution is accepted. Cloud providers, hosted telemetry, hosted embeddings, gateways, vector storage/retrieval, terminal execution, plugins, collaboration, and remote development remain deferred. |
-| Phases 5–8 — Plugins, collaboration, remote, hardening | **Future-gated** | None accepted | Each phase requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
+| Phase 4 — Native agentic AI execution context | **Accepted** | [`plans/evidence/phase-4/agentic-ai-architecture-map.md`](evidence/phase-4/agentic-ai-architecture-map.md) | Local-provider, proposal-only, metadata-audited agent execution is accepted. Cloud providers, hosted telemetry, hosted embeddings, gateways, vector storage/retrieval, terminal execution, collaboration, and remote development remain deferred. |
+| Phase 5 — WASM isolated extension ecosystem | **Accepted** | [`plans/evidence/phase-5/plugin-architecture-map.md`](evidence/phase-5/plugin-architecture-map.md) | Manifest-validated, capability-checked, quota-bound, metadata-only plugin runtime boundary is accepted. Plugin command invocation is app-owned and protocol-mediated; UI remains projection-only. Marketplace, VS Code compatibility, Node extensions, arbitrary host scripting, network/process/filesystem/terminal authority, collaboration, and remote development remain deferred. |
+| Phases 6–8 — Collaboration, remote, hardening | **Future-gated** | None accepted | Each phase requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
 
 ---
 
@@ -37,6 +38,7 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | ADR-0016 — Generalized proposal service | Accepted | Phase 2 accepted for save, text edit, closed-file, workspace-edit, edit-only code-action, and reversible batch proposal routes. Future runtime apply surfaces remain separately gated. |
 | ADR-0017 — Semantic fabric indexing | Accepted | Phase 3 evidence accepts the bounded semantic fabric runtime; vector indexing remains deferred. |
 | ADR-0018 — LSP runtime supervision | Accepted | Phase 3 evidence accepts metadata-only LSP supervision contracts and proposal-routed edit outputs; command/process/runtime expansion remains separately gated. |
+| ADR-0019 — WASM plugin runtime boundary | Accepted | Phase 5 evidence accepts the isolated plugin boundary for manifest validation, host-call capability checks, quotas, plugin storage, metadata-only observability, app-owned command invocation, and projection-only UI contributions. |
 
 ---
 
@@ -72,7 +74,8 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 3. **R2 — Phase 3A semantic-index boundary remediation** — complete and accepted.
 4. **R3 — Phase 3B predictive semantic fabric and LSP supervision** — complete and accepted for Phase 3 scope.
 5. **R4 — Phase 4 native agentic AI execution context** — complete and accepted for the local-provider, proposal-only, metadata-audited runtime slice.
-6. **R5–R8** — blocked on individual ADR/policy gates, not on Phase 2, Phase 3, or accepted Phase 4 scope.
+6. **R5 — Phase 5 WASM isolated extension ecosystem** — complete and accepted for the manifest-validated, capability-checked, metadata-only plugin runtime boundary.
+7. **R6–R8** — blocked on individual ADR/policy gates, not on Phase 2, Phase 3, Phase 4, or accepted Phase 5 scope.
 
 ---
 
@@ -83,7 +86,8 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 - [x] Phase 2 is explicitly accepted.
 - [x] Phase 3 is explicitly accepted.
 - [x] Phase 4 is explicitly accepted for local-provider, proposal-only, metadata-audited agent execution.
-- [x] Phases 5–8 are explicitly future-gated.
+- [x] Phase 5 is explicitly accepted.
+- [x] Phases 6–8 are explicitly future-gated.
 - [x] ADR-0002 and ADR-0005 ambiguity is resolved.
 - [x] Historical claims are annotated as historical.
 - [x] Dependency-policy / `xtask` duplication decision is recorded.

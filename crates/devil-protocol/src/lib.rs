@@ -12832,12 +12832,421 @@ pub struct PluginManifest {
     pub name: String,
     /// Version.
     pub version: String,
-    /// API range.
-    pub api_version: String,
-    /// Source hash.
-    pub checksum: Option<String>,
+    /// Runtime contract schema version.
+    pub schema_version: u16,
+    /// Minimum supported ABI version.
+    pub min_abi_version: u16,
+    /// Maximum supported ABI version.
+    pub max_abi_version: u16,
+    /// Module hash used for deterministic trust decisions.
+    pub module_hash: String,
+    /// Manifest identifier or signed manifest digest.
+    pub manifest_id: String,
+    /// Source/trust metadata.
+    pub trust: PluginTrustMetadata,
+    /// Optional signature metadata.
+    pub signature: Option<PluginSignatureMetadata>,
+    /// Activation events.
+    pub activation_events: Vec<PluginActivationEvent>,
+    /// Declarative contributions.
+    pub contributions: Vec<PluginContribution>,
     /// Requested capabilities.
     pub requested_capabilities: Vec<CapabilityId>,
+    /// Plugin-owned storage namespace.
+    pub storage_namespace: PluginStateNamespace,
+    /// Runtime quota declaration.
+    pub quotas: PluginQuotaDeclaration,
+}
+
+/// Plugin trust metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginTrustMetadata {
+    /// Source classification.
+    pub source: PluginTrustSource,
+    /// Trust decision.
+    pub decision: PluginTrustDecision,
+    /// Human-readable decision reason.
+    pub reason: String,
+}
+
+/// Plugin source classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginTrustSource {
+    /// First-party bundled plugin.
+    FirstParty,
+    /// Explicitly allowed local plugin.
+    ExplicitLocalAllow,
+    /// Unknown local plugin.
+    UnknownLocal,
+    /// Revoked source.
+    Revoked,
+}
+
+/// Plugin trust decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginTrustDecision {
+    /// Manifest is trusted for activation.
+    Trusted,
+    /// Manifest is explicitly allowed locally.
+    ExplicitlyAllowed,
+    /// Manifest was revoked.
+    Revoked,
+    /// Module checksum mismatched.
+    ChecksumMismatch,
+    /// Signer is unknown.
+    UnknownSigner,
+    /// ABI is incompatible.
+    IncompatibleAbi,
+    /// Manifest is denied by default.
+    DeniedByDefault,
+}
+
+/// Plugin signature metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginSignatureMetadata {
+    /// Signing key identifier.
+    pub signer: String,
+    /// Signature algorithm.
+    pub algorithm: String,
+    /// Detached signature digest or label, never raw key material.
+    pub signature_digest: String,
+}
+
+/// Plugin quota declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginQuotaDeclaration {
+    /// Maximum fuel units per invocation.
+    pub max_fuel: u64,
+    /// Maximum wall-clock milliseconds per invocation.
+    pub max_wall_time_ms: u64,
+    /// Maximum WebAssembly memory pages.
+    pub max_memory_pages: u32,
+    /// Maximum storage bytes for this plugin.
+    pub max_storage_bytes: u64,
+    /// Maximum host calls per invocation.
+    pub max_host_calls: u32,
+    /// Maximum emitted events per invocation.
+    pub max_events: u32,
+    /// Maximum bounded output bytes.
+    pub max_output_bytes: u64,
+}
+
+/// Declarative plugin contribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginContribution {
+    /// Command palette command.
+    Command(PluginCommandDescriptor),
+    /// Menu entry.
+    Menu(PluginMenuContribution),
+    /// Bounded panel projection.
+    Panel(PluginPanelContribution),
+    /// Status item projection.
+    StatusItem(PluginStatusItemContribution),
+    /// Editor decoration label.
+    EditorDecoration(PluginEditorDecorationContribution),
+    /// Snippet contribution.
+    Snippet(PluginSnippetContribution),
+    /// Language-provider availability.
+    LanguageProvider(PluginLanguageProviderContribution),
+    /// Formatter availability.
+    Formatter(PluginFormatterContribution),
+    /// LSP registration metadata only.
+    LspRegistration(PluginLspRegistrationContribution),
+    /// Workspace scanner metadata only.
+    WorkspaceScanner(PluginWorkspaceScannerContribution),
+    /// Passive AI context provider metadata only.
+    PassiveAiContextProvider(ContextProviderDescriptor),
+}
+
+/// Menu contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMenuContribution {
+    /// Menu path label.
+    pub menu_path: String,
+    /// Command id to dispatch through app authority.
+    pub command_id: String,
+    /// Display label.
+    pub title: String,
+}
+
+/// Panel contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginPanelContribution {
+    /// Panel id.
+    pub panel_id: String,
+    /// Display title.
+    pub title: String,
+    /// Bounded metadata-only label.
+    pub metadata_label: String,
+}
+
+/// Status item contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginStatusItemContribution {
+    /// Status item id.
+    pub status_item_id: String,
+    /// Display label.
+    pub label: String,
+}
+
+/// Editor decoration contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginEditorDecorationContribution {
+    /// Decoration id.
+    pub decoration_id: String,
+    /// Display label.
+    pub label: String,
+}
+
+/// Snippet contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSnippetContribution {
+    /// Language id.
+    pub language_id: LanguageId,
+    /// Snippet label.
+    pub label: String,
+}
+
+/// Language provider contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginLanguageProviderContribution {
+    /// Language id.
+    pub language_id: LanguageId,
+    /// Provider kind label.
+    pub provider_kind: String,
+}
+
+/// Formatter contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginFormatterContribution {
+    /// Language id.
+    pub language_id: LanguageId,
+    /// Command id to invoke for proposal-producing format.
+    pub command_id: String,
+}
+
+/// LSP registration metadata projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginLspRegistrationContribution {
+    /// Language id.
+    pub language_id: LanguageId,
+    /// Server label only; process launch remains separately gated.
+    pub server_label: String,
+}
+
+/// Workspace scanner metadata projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginWorkspaceScannerContribution {
+    /// Scanner id.
+    pub scanner_id: String,
+    /// Metadata-only scanner label.
+    pub label: String,
+}
+
+/// Runtime host call class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginHostCallKind {
+    /// Read-only context lookup.
+    ReadOnlyContext,
+    /// Semantic metadata query.
+    SemanticMetadataQuery,
+    /// Contribution registration.
+    RegisterContribution,
+    /// Proposal creation.
+    CreateProposal,
+    /// Metadata-only event emission.
+    EmitEvent,
+    /// Cancellation check.
+    CheckCancellation,
+    /// Plugin storage operation.
+    Storage,
+}
+
+/// Runtime quota class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginQuotaClass {
+    /// CPU/fuel budget.
+    Fuel,
+    /// Wall-clock timeout budget.
+    WallTime,
+    /// Memory-pages budget.
+    Memory,
+    /// Storage-byte budget.
+    Storage,
+    /// Host-call count budget.
+    HostCall,
+    /// Event count budget.
+    Event,
+    /// Output byte budget.
+    Output,
+}
+
+/// Sandbox operation class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginSandboxOperationClass {
+    /// WebAssembly module instantiation.
+    Instantiate,
+    /// Plugin activation.
+    Activate,
+    /// Command invocation.
+    InvokeCommand,
+    /// Host call dispatch.
+    HostCall,
+    /// Storage operation.
+    Storage,
+    /// Cancellation or teardown.
+    Teardown,
+}
+
+/// Plugin host-call request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginHostCallRequest {
+    /// Plugin id.
+    pub plugin_id: PluginId,
+    /// Host-call kind.
+    pub kind: PluginHostCallKind,
+    /// Host-call name.
+    pub host_call_name: String,
+    /// Required declared capability.
+    pub declared_capability: CapabilityId,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+    /// Causality id.
+    pub causality_id: CausalityId,
+    /// Event sequence for audit ordering.
+    pub sequence: EventSequence,
+    /// Metadata-only payload label.
+    pub metadata_label: String,
+}
+
+/// Plugin denial reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginDenialReason {
+    /// Host call is unsupported.
+    UnsupportedHostCall,
+    /// Capability was not declared or granted.
+    MissingCapability,
+    /// Workspace is untrusted.
+    UntrustedWorkspace,
+    /// ABI mismatch.
+    AbiMismatch,
+    /// Quota exceeded.
+    QuotaExceeded,
+    /// Invocation was cancelled.
+    CancelledInvocation,
+    /// Sandbox trapped or crashed.
+    SandboxCrash,
+    /// Metadata validation failed.
+    InvalidMetadata,
+}
+
+/// Plugin host-call response.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PluginHostCallResponse {
+    /// Host call accepted with metadata-only label.
+    Accepted {
+        /// Accepted metadata-only response label.
+        metadata_label: String,
+    },
+    /// Proposal creation output.
+    ProposalCreated(PluginActionProposal),
+    /// Denied response.
+    Denied {
+        /// Denial reason.
+        reason: PluginDenialReason,
+        /// Human-readable denial message.
+        message: String,
+    },
+}
+
+/// Plugin storage operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginStorageOperation {
+    /// Put a metadata record.
+    Put,
+    /// Get a metadata record.
+    Get,
+    /// Delete a metadata record.
+    Delete,
+    /// List metadata keys.
+    List,
+    /// Query quota usage.
+    QuotaUsage,
+}
+
+/// Plugin storage record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginStorageRecord {
+    /// Workspace id.
+    pub workspace_id: WorkspaceId,
+    /// Plugin id.
+    pub plugin_id: PluginId,
+    /// Plugin namespace.
+    pub namespace: PluginStateNamespace,
+    /// Record key.
+    pub key: String,
+    /// Metadata-only value.
+    pub value: String,
+    /// Schema version.
+    pub schema_version: u16,
+    /// Retention label.
+    pub retention: RetentionLabel,
+    /// Redaction hint.
+    pub redaction: RedactionHint,
+    /// Byte count charged to quota.
+    pub byte_count: u64,
+}
+
+/// Plugin storage request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginStorageRequest {
+    /// Operation.
+    pub operation: PluginStorageOperation,
+    /// Workspace id.
+    pub workspace_id: WorkspaceId,
+    /// Calling plugin id.
+    pub plugin_id: PluginId,
+    /// Target namespace.
+    pub namespace: PluginStateNamespace,
+    /// Optional record key.
+    pub key: Option<String>,
+    /// Optional metadata-only record.
+    pub record: Option<PluginStorageRecord>,
+    /// Maximum allowed bytes for this plugin.
+    pub quota_bytes: u64,
+    /// Correlation id.
+    pub correlation_id: CorrelationId,
+}
+
+/// Plugin storage response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PluginStorageResponse {
+    /// Record was stored.
+    Stored {
+        /// Stored record key.
+        key: String,
+        /// Used bytes after storing this record.
+        used_bytes: u64,
+    },
+    /// Optional record result.
+    Record(Option<PluginStorageRecord>),
+    /// Listed keys.
+    Keys(Vec<String>),
+    /// Quota usage.
+    QuotaUsage {
+        /// Used bytes for the plugin.
+        used_bytes: u64,
+        /// Configured quota bytes.
+        quota_bytes: u64,
+    },
+    /// Denied storage request.
+    Denied {
+        /// Denial reason.
+        reason: PluginDenialReason,
+        /// Human-readable denial message.
+        message: String,
+    },
 }
 
 /// Activation event.
@@ -12855,10 +13264,19 @@ pub enum PluginActivationEvent {
         /// Command id to match.
         command: String,
     },
+    /// Activate on language identifier.
+    OnLanguage {
+        /// Language identifier.
+        language_id: LanguageId,
+    },
+    /// Activate on workspace scanner trigger.
+    OnWorkspaceScanner,
+    /// Activate on passive context provider trigger.
+    OnPassiveContextProvider,
 }
 
 /// Capability request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginCommandDescriptor {
     /// Command id.
     pub command_id: String,
@@ -12888,6 +13306,17 @@ pub struct PluginStateNamespace {
     pub plugin_id: PluginId,
     /// Namespace.
     pub namespace: String,
+}
+
+/// Plugin contribution projection for UI shells.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginContributionProjection {
+    /// Plugin id.
+    pub plugin_id: PluginId,
+    /// Contributions accepted for projection-only rendering.
+    pub contributions: Vec<PluginContribution>,
+    /// Metadata-only status label.
+    pub status_label: String,
 }
 
 /// Capability grant.
@@ -12974,6 +13403,20 @@ pub struct CapabilityRequestContext {
     pub network_target: Option<NetworkTarget>,
     /// Plugin namespace for plugin-scoped policy decisions.
     pub plugin_namespace: Option<CapabilityNamespace>,
+    /// Plugin id for plugin-scoped policy decisions.
+    pub plugin_id: Option<PluginId>,
+    /// Plugin host-call name.
+    pub plugin_host_call_name: Option<String>,
+    /// Plugin module hash.
+    pub plugin_module_hash: Option<String>,
+    /// Plugin manifest id.
+    pub plugin_manifest_id: Option<String>,
+    /// Declared plugin capability id.
+    pub plugin_declared_capability_id: Option<CapabilityId>,
+    /// Plugin quota class for budget decisions.
+    pub plugin_quota_class: Option<PluginQuotaClass>,
+    /// Sandbox operation class.
+    pub plugin_sandbox_operation_class: Option<PluginSandboxOperationClass>,
     /// Language-server binary for LSP-scoped policy decisions.
     pub lsp_server_binary: Option<String>,
 }
@@ -12988,7 +13431,7 @@ pub struct PluginActionProposal {
 }
 
 /// Context provider descriptor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextProviderDescriptor {
     /// Plugin id.
     pub plugin_id: PluginId,
@@ -13449,6 +13892,7 @@ pub enum LspResponse {
 }
 
 /// Plugin/manifest request envelope.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PluginRequest {
     /// Manifest.
@@ -13457,9 +13901,12 @@ pub enum PluginRequest {
     CommandDescriptor(PluginCommandDescriptor),
     /// Contribution descriptor.
     Contribution(ContributionDescriptor),
+    /// Host-call request.
+    HostCall(PluginHostCallRequest),
 }
 
 /// Plugin response envelope.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PluginResponse {
     /// Manifest loaded.
@@ -13468,9 +13915,12 @@ pub enum PluginResponse {
     CommandRegistered(String),
     /// Contribution registered.
     ContributionRegistered(String),
+    /// Host-call response.
+    HostCall(PluginHostCallResponse),
 }
 
 /// Capability request envelope.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CapabilityRequest {
     /// New capability request.
@@ -13775,6 +14225,8 @@ pub enum StorageRepositoryRequest {
     SaveSemanticMetadata(SemanticMetadataBatch),
     /// Tombstone metadata-only semantic records.
     TombstoneSemanticMetadata(SemanticMetadataTombstone),
+    /// Execute plugin-scoped metadata storage operation.
+    PluginStorage(PluginStorageRequest),
     /// Read workspace config.
     ReadWorkspaceConfig(WorkspaceId),
     /// Read file metadata.
@@ -13846,8 +14298,146 @@ pub enum StorageRepositoryResponse {
     SemanticMetadata(SemanticMetadataReadResult),
     /// Semantic metadata tombstones.
     SemanticMetadataTombstones(Vec<SemanticMetadataTombstone>),
+    /// Plugin storage response.
+    PluginStorage(PluginStorageResponse),
     /// Missing.
     Missing,
+}
+
+/// Validate Phase 5 plugin manifest metadata before runtime activation.
+pub fn validate_plugin_manifest(
+    manifest: &PluginManifest,
+    host_abi_version: u16,
+) -> ProtocolResult<()> {
+    if manifest.plugin_id.0 == 0 {
+        return Err(ProtocolError {
+            code: "plugin_manifest_invalid".to_string(),
+            message: "plugin id must be non-zero".to_string(),
+        });
+    }
+    if manifest.name.trim().is_empty() {
+        return Err(ProtocolError {
+            code: "plugin_manifest_invalid".to_string(),
+            message: "plugin name must be non-empty".to_string(),
+        });
+    }
+    if manifest.schema_version == 0
+        || manifest.min_abi_version == 0
+        || manifest.max_abi_version == 0
+        || manifest.min_abi_version > manifest.max_abi_version
+    {
+        return Err(ProtocolError {
+            code: "plugin_manifest_invalid".to_string(),
+            message: "plugin ABI/schema version is invalid".to_string(),
+        });
+    }
+    if host_abi_version < manifest.min_abi_version || host_abi_version > manifest.max_abi_version {
+        return Err(ProtocolError {
+            code: "plugin_abi_mismatch".to_string(),
+            message: "plugin ABI range does not include host ABI".to_string(),
+        });
+    }
+    if manifest.module_hash.trim().is_empty() || manifest.manifest_id.trim().is_empty() {
+        return Err(ProtocolError {
+            code: "plugin_manifest_invalid".to_string(),
+            message: "plugin module hash and manifest id are required".to_string(),
+        });
+    }
+    if manifest.storage_namespace.plugin_id != manifest.plugin_id
+        || manifest.storage_namespace.namespace.trim().is_empty()
+    {
+        return Err(ProtocolError {
+            code: "plugin_namespace_invalid".to_string(),
+            message: "plugin storage namespace must match plugin id and be non-empty".to_string(),
+        });
+    }
+    if manifest
+        .requested_capabilities
+        .iter()
+        .any(|capability| contains_forbidden_plugin_payload(&capability.0))
+    {
+        return Err(ProtocolError {
+            code: "plugin_manifest_invalid".to_string(),
+            message: "plugin capability contains forbidden payload marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate plugin host-call audit metadata.
+pub fn validate_plugin_host_call_request(request: &PluginHostCallRequest) -> ProtocolResult<()> {
+    if request.plugin_id.0 == 0 {
+        return Err(ProtocolError {
+            code: "plugin_host_call_invalid".to_string(),
+            message: "plugin id must be non-zero".to_string(),
+        });
+    }
+    if request.host_call_name.trim().is_empty() || request.metadata_label.trim().is_empty() {
+        return Err(ProtocolError {
+            code: "plugin_host_call_invalid".to_string(),
+            message: "host call name and metadata label are required".to_string(),
+        });
+    }
+    if request.correlation_id.0 == 0
+        || request.causality_id.0 == Uuid::nil()
+        || request.sequence.0 == 0
+    {
+        return Err(ProtocolError {
+            code: "plugin_host_call_invalid".to_string(),
+            message: "correlation, causality, and sequence metadata must be non-zero".to_string(),
+        });
+    }
+    if contains_forbidden_plugin_payload(&request.metadata_label) {
+        return Err(ProtocolError {
+            code: "plugin_host_call_invalid".to_string(),
+            message: "host-call metadata contains forbidden payload marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate plugin storage metadata before persistence.
+pub fn validate_plugin_storage_record(record: &PluginStorageRecord) -> ProtocolResult<()> {
+    if record.plugin_id.0 == 0
+        || record.namespace.plugin_id != record.plugin_id
+        || record.namespace.namespace.trim().is_empty()
+    {
+        return Err(ProtocolError {
+            code: "plugin_storage_invalid".to_string(),
+            message: "plugin storage namespace is invalid".to_string(),
+        });
+    }
+    if record.key.trim().is_empty() || record.schema_version == 0 || record.byte_count == 0 {
+        return Err(ProtocolError {
+            code: "plugin_storage_invalid".to_string(),
+            message: "plugin storage key, schema version, and byte count are required".to_string(),
+        });
+    }
+    if contains_forbidden_plugin_payload(&record.key)
+        || contains_forbidden_plugin_payload(&record.value)
+    {
+        return Err(ProtocolError {
+            code: "plugin_storage_invalid".to_string(),
+            message: "plugin storage contains forbidden payload marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn contains_forbidden_plugin_payload(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "source_body",
+        "fn main",
+        "raw_source",
+        "raw_prompt",
+        "provider_response",
+        "secret",
+        "api_key",
+        "unbounded_output",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 // -----------------------------------------------------------------------------
@@ -13909,6 +14499,12 @@ pub trait StorageRepositoryPort {
         &self,
         request: StorageRepositoryRequest,
     ) -> ProtocolResult<StorageRepositoryResponse>;
+}
+
+/// Service-port for plugin runtime interactions.
+pub trait PluginPort {
+    /// Handle a plugin request.
+    fn handle(&self, request: PluginRequest) -> ProtocolResult<PluginResponse>;
 }
 
 /// Minimal protocol abstraction for editor/project interactions.
@@ -14188,9 +14784,39 @@ mod tests {
             plugin_id: PluginId(3),
             name: "my-plugin".to_string(),
             version: "0.1.0".to_string(),
-            api_version: "1.0".to_string(),
-            checksum: Some("sha256".to_string()),
-            requested_capabilities: vec![CapabilityId("cmd.exec".to_string())],
+            schema_version: 1,
+            min_abi_version: 1,
+            max_abi_version: 1,
+            module_hash: "sha256:module".to_string(),
+            manifest_id: "manifest-1".to_string(),
+            trust: PluginTrustMetadata {
+                source: PluginTrustSource::ExplicitLocalAllow,
+                decision: PluginTrustDecision::ExplicitlyAllowed,
+                reason: "test allow".to_string(),
+            },
+            signature: None,
+            activation_events: vec![PluginActivationEvent::OnCommand {
+                command: "plugin.command".to_string(),
+            }],
+            contributions: vec![PluginContribution::Command(PluginCommandDescriptor {
+                command_id: "plugin.command".to_string(),
+                title: "Plugin Command".to_string(),
+                required_capability: CapabilityId("plugin.command".to_string()),
+            })],
+            requested_capabilities: vec![CapabilityId("plugin.command".to_string())],
+            storage_namespace: PluginStateNamespace {
+                plugin_id: PluginId(3),
+                namespace: "state".to_string(),
+            },
+            quotas: PluginQuotaDeclaration {
+                max_fuel: 1000,
+                max_wall_time_ms: 100,
+                max_memory_pages: 16,
+                max_storage_bytes: 4096,
+                max_host_calls: 16,
+                max_events: 8,
+                max_output_bytes: 1024,
+            },
         };
 
         let as_json = serde_json::to_string(&manifest).unwrap();
@@ -14199,6 +14825,7 @@ mod tests {
 
         let invalid = r#"{"plugin_id":1, "name":"x", "version":"0.1.0"}"#;
         assert!(serde_json::from_str::<PluginManifest>(invalid).is_err());
+        assert!(validate_plugin_manifest(&manifest, 1).is_ok());
     }
 
     #[test]

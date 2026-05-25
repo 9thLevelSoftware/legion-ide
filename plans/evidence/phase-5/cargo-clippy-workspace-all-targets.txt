@@ -1,0 +1,6 @@
+Command: cargo clippy --workspace --all-targets -- -D warnings
+
+Final status: PASS
+
+Output summary:
+- Finished `dev` profile for all workspace targets with warnings denied.

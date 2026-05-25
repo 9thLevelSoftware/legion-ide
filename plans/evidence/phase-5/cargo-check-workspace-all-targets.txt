@@ -1,0 +1,6 @@
+Command: cargo check --workspace --all-targets
+
+Final status: PASS
+
+Output summary:
+- Finished `dev` profile for all workspace targets.

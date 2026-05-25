@@ -1,0 +1,7 @@
+Command: cargo test -p devil-protocol --test dto_contracts
+
+Observed focused coverage:
+- Plugin manifest includes schema version, ABI range, module hash, manifest id, trust metadata, signature metadata, activation events, contributions, requested capabilities, storage namespace, and quotas.
+- Invalid namespace/plugin-id mismatch is rejected by `validate_plugin_manifest`.
+
+Status: PASS in focused run before final workspace gates.

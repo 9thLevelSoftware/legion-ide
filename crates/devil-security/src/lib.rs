@@ -302,23 +302,35 @@ impl Default for LspLaunchPolicy {
 /// Plugin capability policy controls.
 #[derive(Debug, Clone)]
 pub struct PluginCapabilityPolicy {
-    /// Allowed capabilities, keyed by namespace and capability id.
-    pub allowed: HashMap<String, HashSet<String>>,
+    /// Allowed plugin host capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
     /// Required namespace if capability requested.
     pub namespace_required: bool,
     /// Allow plugins in untrusted workspaces.
     pub allow_in_untrusted_workspace: bool,
+    /// Deny all plugin network host calls, including in trusted workspaces.
+    pub deny_network: bool,
+    /// Deny process/filesystem/terminal-like host authority.
+    pub deny_ambient_host_authority: bool,
 }
 
 impl Default for PluginCapabilityPolicy {
     fn default() -> Self {
         Self {
-            allowed: HashMap::from([(
-                "plugin".to_string(),
-                HashSet::from(["read".to_string(), "command".to_string()]),
-            )]),
+            allowed_capabilities: HashSet::from([
+                "plugin.command".to_string(),
+                "plugin.context.read".to_string(),
+                "plugin.semantic.query".to_string(),
+                "plugin.contribution.register".to_string(),
+                "plugin.proposal.create".to_string(),
+                "plugin.event.emit".to_string(),
+                "plugin.cancel.check".to_string(),
+                "plugin.storage".to_string(),
+            ]),
             namespace_required: true,
             allow_in_untrusted_workspace: false,
+            deny_network: true,
+            deny_ambient_host_authority: true,
         }
     }
 }
@@ -715,18 +727,56 @@ impl DenyByDefaultBroker {
             return self.ai_capability_decision(trust, &capability, context);
         }
 
-        if let Some(stripped) = capability.strip_prefix("plugin.") {
-            return if self.policy.plugin_policy.namespace_required
-                && (self.policy.plugin_policy.allowed.is_empty() && !stripped.is_empty())
+        if capability.starts_with("plugin.") {
+            if self.policy.plugin_policy.deny_ambient_host_authority
+                && matches!(
+                    capability.as_str(),
+                    "plugin.fs" | "plugin.process" | "plugin.terminal"
+                )
             {
-                SecurityDecision::deny("plugin namespace policy denied")
-            } else if !self.policy.plugin_policy.allow_in_untrusted_workspace
+                return SecurityDecision::deny("plugin ambient host authority denied by policy");
+            }
+            if self.policy.plugin_policy.deny_network && capability == "plugin.network" {
+                return SecurityDecision::deny(
+                    "plugin network capability denied by air-gap policy",
+                );
+            }
+            if !self
+                .policy
+                .plugin_policy
+                .allowed_capabilities
+                .contains(&capability)
+            {
+                return SecurityDecision::deny(format!(
+                    "capability {capability} denied by deny-by-default"
+                ));
+            }
+            if self.policy.plugin_policy.namespace_required
+                && (context.plugin_namespace.is_none()
+                    || context.plugin_id.is_none()
+                    || context.plugin_host_call_name.is_none()
+                    || context.plugin_module_hash.is_none()
+                    || context.plugin_manifest_id.is_none()
+                    || context.plugin_declared_capability_id.is_none()
+                    || context.plugin_sandbox_operation_class.is_none())
+            {
+                return SecurityDecision::deny("plugin manifest and host-call context required");
+            }
+            if context
+                .plugin_declared_capability_id
+                .as_ref()
+                .is_some_and(|declared| declared.0 != capability)
+            {
+                return SecurityDecision::deny(
+                    "plugin host call capability does not match declaration",
+                );
+            }
+            if !self.policy.plugin_policy.allow_in_untrusted_workspace
                 && trust != TrustState::Trusted
             {
-                SecurityDecision::deny("plugin capability denied for untrusted workspace")
-            } else {
-                SecurityDecision::allow()
-            };
+                return SecurityDecision::deny("plugin capability denied for untrusted workspace");
+            }
+            return SecurityDecision::allow();
         }
 
         if let Some(rest) = capability.strip_prefix("fs.") {
@@ -1231,5 +1281,98 @@ mod tests {
         );
 
         assert!(matches!(decision, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn plugin_manifest_context_is_required_and_unknown_capabilities_are_denied() {
+        let mut broker = DenyByDefaultBroker::default();
+        let missing_context = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("plugin:7".to_string()),
+            CapabilityId("plugin.command".to_string()),
+            None,
+            CapabilityRequestContext::default(),
+        );
+        assert!(
+            matches!(missing_context, SecurityDecision::Deny(reason) if reason.contains("context required"))
+        );
+
+        let denied_unknown = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("plugin:7".to_string()),
+            CapabilityId("plugin.raw_source".to_string()),
+            None,
+            CapabilityRequestContext {
+                plugin_namespace: Some(CapabilityNamespace("plugin.7".to_string())),
+                plugin_id: Some(devil_protocol::PluginId(7)),
+                plugin_host_call_name: Some("rawSource".to_string()),
+                plugin_module_hash: Some("sha256:module".to_string()),
+                plugin_manifest_id: Some("manifest:7".to_string()),
+                plugin_declared_capability_id: Some(CapabilityId("plugin.raw_source".to_string())),
+                plugin_quota_class: Some(devil_protocol::PluginQuotaClass::HostCall),
+                plugin_sandbox_operation_class: Some(
+                    devil_protocol::PluginSandboxOperationClass::HostCall,
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(denied_unknown, SecurityDecision::Deny(reason) if reason.contains("deny-by-default"))
+        );
+    }
+
+    #[test]
+    fn plugin_network_process_filesystem_and_untrusted_workspace_are_denied() {
+        let mut broker = DenyByDefaultBroker::default();
+        for capability in [
+            "plugin.network",
+            "plugin.fs",
+            "plugin.process",
+            "plugin.terminal",
+        ] {
+            let decision = broker.decide_with_request_context(
+                TrustState::Trusted,
+                PrincipalId("plugin:7".to_string()),
+                CapabilityId(capability.to_string()),
+                None,
+                CapabilityRequestContext {
+                    plugin_namespace: Some(CapabilityNamespace("plugin.7".to_string())),
+                    plugin_id: Some(devil_protocol::PluginId(7)),
+                    plugin_host_call_name: Some(capability.to_string()),
+                    plugin_module_hash: Some("sha256:module".to_string()),
+                    plugin_manifest_id: Some("manifest:7".to_string()),
+                    plugin_declared_capability_id: Some(CapabilityId(capability.to_string())),
+                    plugin_quota_class: Some(devil_protocol::PluginQuotaClass::HostCall),
+                    plugin_sandbox_operation_class: Some(
+                        devil_protocol::PluginSandboxOperationClass::HostCall,
+                    ),
+                    ..Default::default()
+                },
+            );
+            assert!(matches!(decision, SecurityDecision::Deny(_)));
+        }
+
+        let untrusted = broker.decide_with_request_context(
+            TrustState::Untrusted,
+            PrincipalId("plugin:7".to_string()),
+            CapabilityId("plugin.command".to_string()),
+            None,
+            CapabilityRequestContext {
+                plugin_namespace: Some(CapabilityNamespace("plugin.7".to_string())),
+                plugin_id: Some(devil_protocol::PluginId(7)),
+                plugin_host_call_name: Some("command:phase5.run".to_string()),
+                plugin_module_hash: Some("sha256:module".to_string()),
+                plugin_manifest_id: Some("manifest:7".to_string()),
+                plugin_declared_capability_id: Some(CapabilityId("plugin.command".to_string())),
+                plugin_quota_class: Some(devil_protocol::PluginQuotaClass::HostCall),
+                plugin_sandbox_operation_class: Some(
+                    devil_protocol::PluginSandboxOperationClass::HostCall,
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(untrusted, SecurityDecision::Deny(reason) if reason.contains("untrusted"))
+        );
     }
 }

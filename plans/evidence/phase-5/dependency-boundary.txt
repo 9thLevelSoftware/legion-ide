@@ -1,0 +1,13 @@
+Command: cargo run -p xtask -- check-deps
+
+Final status: PASS
+
+Output:
+- dependency policy checks passed
+
+Boundary assertions covered:
+- `devil-plugin` is a workspace member with policy coverage.
+- `devil-plugin` internal edges are limited to protocol, security, storage, observability, and platform.
+- `devil-app -> devil-plugin` is explicitly authorized for app-owned composition.
+- Required Phase 5 protocol symbols are listed in `plans/dependency-policy.md` and defined directly in `crates/devil-protocol/src/lib.rs`.
+- Accepted Phase 5 evidence has all required artifacts and checked final validation items.

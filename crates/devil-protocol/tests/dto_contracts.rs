@@ -4168,6 +4168,13 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                 port: Some(443),
             }),
             plugin_namespace: Some(CapabilityNamespace("plugins.rust".to_string())),
+            plugin_id: Some(PluginId(42)),
+            plugin_host_call_name: Some("createProposal".to_string()),
+            plugin_module_hash: Some("sha256:module".to_string()),
+            plugin_manifest_id: Some("manifest-42".to_string()),
+            plugin_declared_capability_id: Some(CapabilityId("plugin.proposal.create".to_string())),
+            plugin_quota_class: Some(PluginQuotaClass::HostCall),
+            plugin_sandbox_operation_class: Some(PluginSandboxOperationClass::HostCall),
             lsp_server_binary: Some("rust-analyzer".to_string()),
         },
         correlation_id: CorrelationId(91),
@@ -4191,6 +4198,13 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                     "port": 443
                 },
                 "plugin_namespace": "plugins.rust",
+                "plugin_id": 42,
+                "plugin_host_call_name": "createProposal",
+                "plugin_module_hash": "sha256:module",
+                "plugin_manifest_id": "manifest-42",
+                "plugin_declared_capability_id": "plugin.proposal.create",
+                "plugin_quota_class": "HostCall",
+                "plugin_sandbox_operation_class": "HostCall",
                 "lsp_server_binary": "rust-analyzer"
             },
             "correlation_id": 91
@@ -4227,6 +4241,11 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                 context.plugin_namespace.expect("plugin namespace").0,
                 "plugins.rust"
             );
+            assert_eq!(context.plugin_id, Some(PluginId(42)));
+            assert!(matches!(
+                context.plugin_quota_class,
+                Some(PluginQuotaClass::HostCall)
+            ));
             assert_eq!(
                 context.lsp_server_binary.expect("lsp binary"),
                 "rust-analyzer"
@@ -4237,6 +4256,113 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
 
     let mut root = value;
     remove_required_field_in_request_variant(&mut root, "workspace_trust_state");
+}
+
+#[test]
+fn dto_contracts_plugin_manifest_requires_abi_trust_capabilities_and_quota_metadata() {
+    let manifest = PluginManifest {
+        plugin_id: PluginId(7),
+        name: "phase5.test".to_string(),
+        version: "0.1.0".to_string(),
+        schema_version: 1,
+        min_abi_version: 1,
+        max_abi_version: 1,
+        module_hash: "sha256:module".to_string(),
+        manifest_id: "manifest:phase5".to_string(),
+        trust: PluginTrustMetadata {
+            source: PluginTrustSource::ExplicitLocalAllow,
+            decision: PluginTrustDecision::ExplicitlyAllowed,
+            reason: "test allow".to_string(),
+        },
+        signature: Some(PluginSignatureMetadata {
+            signer: "devil.local".to_string(),
+            algorithm: "ed25519".to_string(),
+            signature_digest: "sha256:signature".to_string(),
+        }),
+        activation_events: vec![PluginActivationEvent::OnCommand {
+            command: "phase5.run".to_string(),
+        }],
+        contributions: vec![PluginContribution::Command(PluginCommandDescriptor {
+            command_id: "phase5.run".to_string(),
+            title: "Phase 5 Run".to_string(),
+            required_capability: CapabilityId("plugin.command".to_string()),
+        })],
+        requested_capabilities: vec![CapabilityId("plugin.command".to_string())],
+        storage_namespace: PluginStateNamespace {
+            plugin_id: PluginId(7),
+            namespace: "state".to_string(),
+        },
+        quotas: PluginQuotaDeclaration {
+            max_fuel: 1000,
+            max_wall_time_ms: 50,
+            max_memory_pages: 8,
+            max_storage_bytes: 4096,
+            max_host_calls: 16,
+            max_events: 8,
+            max_output_bytes: 1024,
+        },
+    };
+
+    let value = serde_json::to_value(&manifest).expect("serialize plugin manifest");
+    assert_eq!(value["plugin_id"], 7);
+    assert_eq!(value["min_abi_version"], 1);
+    assert_eq!(value["trust"]["decision"], "ExplicitlyAllowed");
+    assert_eq!(value["requested_capabilities"][0], "plugin.command");
+    assert_eq!(value["quotas"]["max_memory_pages"], 8);
+    validate_plugin_manifest(&manifest, 1).expect("valid manifest");
+
+    let mut invalid = manifest;
+    invalid.storage_namespace.plugin_id = PluginId(8);
+    assert!(validate_plugin_manifest(&invalid, 1).is_err());
+}
+
+#[test]
+fn dto_contracts_plugin_host_call_and_storage_schemas_are_versioned_and_metadata_only() {
+    let host_call = PluginHostCallRequest {
+        plugin_id: PluginId(7),
+        kind: PluginHostCallKind::CreateProposal,
+        host_call_name: "createProposal".to_string(),
+        declared_capability: CapabilityId("plugin.proposal.create".to_string()),
+        correlation_id: CorrelationId(77),
+        causality_id: causality_id(),
+        sequence: EventSequence(88),
+        metadata_label: "bounded-proposal-output".to_string(),
+    };
+    validate_plugin_host_call_request(&host_call).expect("host call metadata validates");
+    let host_value = serde_json::to_value(&host_call).expect("serialize host call");
+    assert_eq!(host_value["kind"], "CreateProposal");
+    assert!(!host_value.to_string().contains("source_body"));
+
+    let storage = PluginStorageRecord {
+        workspace_id: WorkspaceId(1),
+        plugin_id: PluginId(7),
+        namespace: PluginStateNamespace {
+            plugin_id: PluginId(7),
+            namespace: "state".to_string(),
+        },
+        key: "settings".to_string(),
+        value: "metadata-only".to_string(),
+        schema_version: 1,
+        retention: RetentionLabel::Warm,
+        redaction: RedactionHint::MetadataOnly,
+        byte_count: 13,
+    };
+    validate_plugin_storage_record(&storage).expect("plugin storage metadata validates");
+    let storage_value = serde_json::to_value(StorageRepositoryRequest::PluginStorage(
+        PluginStorageRequest {
+            operation: PluginStorageOperation::Put,
+            workspace_id: WorkspaceId(1),
+            plugin_id: PluginId(7),
+            namespace: storage.namespace.clone(),
+            key: Some(storage.key.clone()),
+            record: Some(storage),
+            quota_bytes: 4096,
+            correlation_id: CorrelationId(99),
+        },
+    ))
+    .expect("serialize plugin storage request");
+    assert_eq!(storage_value["PluginStorage"]["operation"], "Put");
+    assert!(!storage_value.to_string().contains("raw_prompt"));
 }
 
 #[test]

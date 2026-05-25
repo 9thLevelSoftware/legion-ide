@@ -1,0 +1,12 @@
+Command: cargo test -p devil-storage --all-targets
+
+Observed focused coverage:
+- plugin_storage_namespace_isolation_and_quota_fail_closed
+
+Storage assertions:
+- Put/get/list/delete/quota APIs are represented by `PluginStorageRequest` and `PluginStorageResponse`.
+- Cross-plugin namespace access returns typed denial.
+- Quota overflow returns typed denial.
+- Metadata-only validation rejects raw source, prompt, provider payload, secret, and unbounded-output markers.
+
+Status: PASS in focused run before final workspace gates.
