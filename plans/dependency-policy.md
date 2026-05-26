@@ -699,4 +699,4 @@ Phase 8 production capability names are reserved for security-broker decisions b
 - `xtask check-deps` fails when forbidden edges are detected.
 - `xtask check-deps` fails when required internal dependencies are missing.
 - `xtask check-deps` fails when required protocol symbols are absent from `crates/devil-protocol/src/lib.rs`.
-- `xtask check-deps` fails when `devil-ui` declares renderer/windowing dependencies or when this policy stops documenting the `devil-desktop` renderer boundary.
+- `xtask check-deps` fails when any workspace package other than `devil-desktop` declares renderer/windowing dependencies or when this policy stops documenting the `devil-desktop` renderer boundary.

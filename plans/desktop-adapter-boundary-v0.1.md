@@ -85,5 +85,5 @@ Phase 2 must include:
 - ADR-0002 accepts the `eframe`/`egui` Phase 2 foundation path and fallback triggers.
 - ADR-0030 accepts the `devil-desktop` ownership boundary.
 - `plans/dependency-policy.md` allows renderer crates only in `devil-desktop`.
-- `xtask` fails closed if renderer/windowing dependencies appear in `devil-ui`.
+- `xtask` fails closed if renderer/windowing dependencies appear in any workspace package other than `devil-desktop`.
 - `cargo run -p xtask -- check-deps` and targeted `xtask` renderer-gate tests pass.

@@ -2,7 +2,7 @@
 
 ## Phases
 
-- [ ] Phase 1: Baseline Reconciliation and Renderer Decision
+- [x] Phase 1: Baseline Reconciliation and Renderer Decision
 - [ ] Phase 2: Renderer-Backed Foundation Mode
 - [ ] Phase 3: Daily Editing MVP
 - [ ] Phase 4: Language and Terminal IDE Loop

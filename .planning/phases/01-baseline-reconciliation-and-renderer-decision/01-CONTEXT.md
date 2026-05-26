@@ -46,4 +46,3 @@ Phase 1 must convert the current post-substrate state into a clean GUI productiz
 - Keep placeholder/gated crates inert unless their ADR, dependency-policy entry, and contract tests exist.
 - Update dependency policy and `xtask` together whenever dependency protocol symbols change.
 - Verify before reporting completion. Do not mark Phase 1 accepted from documentation alone if the planned verification commands fail.
-

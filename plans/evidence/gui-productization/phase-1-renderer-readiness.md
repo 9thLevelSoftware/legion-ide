@@ -4,7 +4,7 @@
 
 Date: 2026-05-26
 
-Phase 1 is accepted for starting Phase 2 renderer-backed foundation work. The phase reconciled accepted Phase 8 substrate evidence, selected a Windows-first renderer proof path, documented the desktop adapter ownership boundary, and added dependency-policy plus `xtask` enforcement so renderer dependencies stay out of `devil-ui`.
+Phase 1 is accepted for starting Phase 2 renderer-backed foundation work. The phase reconciled accepted Phase 8 substrate evidence, selected a Windows-first renderer proof path, documented the desktop adapter ownership boundary, and added dependency-policy plus `xtask` enforcement so renderer dependencies stay out of every workspace package except `devil-desktop`.
 
 ## Artifact Inventory
 
@@ -16,8 +16,8 @@ Phase 1 is accepted for starting Phase 2 renderer-backed foundation work. The ph
 | `plans/adrs/ADR-0002-ui-editor-rendering.md` | Accepted with Phase 1 update | Selects `eframe`/`egui` for Phase 2 foundation proof in `devil-desktop` only. |
 | `plans/adrs/ADR-0030-desktop-adapter-boundary.md` | Accepted | Defines `devil-desktop` as an adapter, not an editor/workspace/proposal authority. |
 | `plans/desktop-adapter-boundary-v0.1.md` | Accepted | Specifies startup flow, projection input, intent output, side effects, forbidden authority, recovery semantics, and test harness requirements. |
-| `plans/dependency-policy.md` | Accepted | Adds adapter-only renderer dependency policy and conservative `devil-ui` renderer deny list. |
-| `xtask/src/main.rs` | Accepted | Adds `renderer_dependency_gate_preserves_projection_boundary` and runtime `check-deps` validation for the renderer boundary. |
+| `plans/dependency-policy.md` | Accepted | Adds adapter-only renderer dependency policy and a conservative non-adapter renderer deny list. |
+| `xtask/src/main.rs` | Accepted | Adds `renderer_dependency_gate_preserves_projection_boundary` and runtime `check-deps` validation across non-adapter workspace packages. |
 
 ## Decision Summary
 
@@ -44,7 +44,7 @@ Formatting note: the first `cargo fmt --all --check` found one formatting diff i
 
 - [x] Renderer path and fallback triggers are documented.
 - [x] `devil-desktop` ownership and dependency boundaries are explicit enough to scaffold without moving editor or workspace authority into UI.
-- [x] `devil-ui` remains projection-only and may not depend on renderer/windowing crates.
+- [x] `devil-ui` remains projection-only and no non-adapter workspace package may depend on renderer/windowing crates.
 - [x] Saves remain proposal-mediated through app/workspace services.
 - [x] Dependency policy and `xtask` fail closed for renderer-boundary drift.
 - [x] Phase 2 must archive p50/p95 input-to-paint, frame variance, IME, clipboard, focus, high-DPI, file-dialog, and accessibility proof before claiming GUI acceptance.

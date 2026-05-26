@@ -1,9 +1,9 @@
 # Project State
 
 ## Current Position
-- **Phase**: 1 of 8 (executed, pending review)
-- **Status**: Phase 1 complete -- all plans executed successfully
-- **Last Activity**: Phase 1 execution (2026-05-26)
+- **Phase**: 1 of 8 (review passed)
+- **Status**: Phase 1 review passed -- 1 blocker and 1 warning resolved
+- **Last Activity**: Phase 1 review (2026-05-26)
 
 ## Progress
 ```
@@ -27,4 +27,4 @@
 - Phase plan counts are estimates, not hard caps.
 
 ## Next Action
-Run `/legion:review` to verify Phase 1: Baseline Reconciliation and Renderer Decision
+Run `/legion:plan 2` to plan Phase 2: Renderer-Backed Foundation Mode

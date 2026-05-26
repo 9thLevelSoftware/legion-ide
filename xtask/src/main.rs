@@ -219,8 +219,10 @@ const RENDERER_BOUNDARY_POLICY_MARKERS: &[&str] = &[
     "`egui`",
     "renderer dependencies",
     "adapter-only",
+    "any core substrate crate",
 ];
-const DEVIL_UI_FORBIDDEN_RENDERER_DEPS: &[&str] = &[
+const RENDERER_DEPENDENCY_ALLOWED_PACKAGES: &[&str] = &["devil-desktop"];
+const FORBIDDEN_RENDERER_DEPS: &[&str] = &[
     "eframe",
     "egui",
     "egui-winit",
@@ -284,7 +286,7 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     let violations = validate_dependency_policy(&packages, &policy);
     let renderer_violations = validate_renderer_dependency_gate(
         &policy_text,
-        &package_dependency_names(&metadata, "devil-ui"),
+        &workspace_package_dependency_names(&metadata),
     );
 
     let protocol_violations = validate_protocol_contracts(
@@ -435,19 +437,21 @@ fn workspace_packages(metadata: &Metadata) -> HashMap<String, HashSet<String>> {
         .collect()
 }
 
-fn package_dependency_names(metadata: &Metadata, package_name: &str) -> HashSet<String> {
+fn workspace_package_dependency_names(metadata: &Metadata) -> HashMap<String, HashSet<String>> {
     metadata
         .packages
         .iter()
-        .find(|package| package.name == package_name)
+        .filter(|package| package.source.is_none())
         .map(|package| {
-            package
+            let dependencies = package
                 .dependencies
                 .iter()
                 .map(|dependency| dependency.name.clone())
-                .collect()
+                .collect();
+
+            (package.name.clone(), dependencies)
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn validate_dependency_policy(
@@ -520,7 +524,7 @@ fn validate_dependency_policy(
 
 fn validate_renderer_dependency_gate(
     policy_text: &str,
-    devil_ui_dependencies: &HashSet<String>,
+    package_dependencies: &HashMap<String, HashSet<String>>,
 ) -> Vec<String> {
     let mut issues = Vec::new();
 
@@ -532,18 +536,39 @@ fn validate_renderer_dependency_gate(
         }
     }
 
-    let mut forbidden_declared = DEVIL_UI_FORBIDDEN_RENDERER_DEPS
+    let allowed_packages = RENDERER_DEPENDENCY_ALLOWED_PACKAGES
         .iter()
-        .filter(|dependency| devil_ui_dependencies.contains(**dependency))
         .copied()
-        .collect::<Vec<_>>();
-    forbidden_declared.sort();
+        .collect::<HashSet<_>>();
+    let mut packages = package_dependencies.keys().collect::<Vec<_>>();
+    packages.sort();
 
-    if !forbidden_declared.is_empty() {
-        issues.push(format!(
-            "`{DEFAULT_UI_MANIFEST_PATH}` must not declare renderer/windowing dependencies: {}",
-            forbidden_declared.join(", ")
-        ));
+    for package in packages {
+        if allowed_packages.contains(package.as_str()) {
+            continue;
+        }
+
+        let dependencies = package_dependencies
+            .get(package)
+            .expect("sorted package key must exist in dependency map");
+        let mut forbidden_declared = FORBIDDEN_RENDERER_DEPS
+            .iter()
+            .filter(|dependency| dependencies.contains(**dependency))
+            .copied()
+            .collect::<Vec<_>>();
+        forbidden_declared.sort();
+
+        if !forbidden_declared.is_empty() {
+            let package_label = if package == "devil-ui" {
+                format!("`{DEFAULT_UI_MANIFEST_PATH}`")
+            } else {
+                format!("workspace package `{package}`")
+            };
+            issues.push(format!(
+                "{package_label} must not declare renderer/windowing dependencies outside `devil-desktop`: {}",
+                forbidden_declared.join(", ")
+            ));
+        }
     }
 
     issues.sort();
@@ -1387,23 +1412,57 @@ fn renderer_dependency_gate_preserves_projection_boundary() {
         .expect("xtask manifest should live under workspace root");
     let policy = fs::read_to_string(workspace_root.join(DEFAULT_POLICY_PATH))
         .expect("policy should be readable");
-    let devil_ui_dependencies = HashSet::from([
-        "devil-protocol".to_string(),
-        "thiserror".to_string(),
-        "uuid".to_string(),
+    let package_dependencies = HashMap::from([
+        (
+            "devil-ui".to_string(),
+            HashSet::from([
+                "devil-protocol".to_string(),
+                "thiserror".to_string(),
+                "uuid".to_string(),
+            ]),
+        ),
+        (
+            "devil-app".to_string(),
+            HashSet::from(["devil-editor".to_string(), "devil-ui".to_string()]),
+        ),
+        (
+            "devil-desktop".to_string(),
+            HashSet::from([
+                "devil-app".to_string(),
+                "devil-ui".to_string(),
+                "egui".to_string(),
+                "eframe".to_string(),
+            ]),
+        ),
     ]);
 
-    let issues = validate_renderer_dependency_gate(&policy, &devil_ui_dependencies);
+    let issues = validate_renderer_dependency_gate(&policy, &package_dependencies);
     assert!(issues.is_empty(), "unexpected issues: {issues:?}");
 
-    let mut violating_dependencies = devil_ui_dependencies;
-    violating_dependencies.insert("eframe".to_string());
+    let mut violating_dependencies = package_dependencies.clone();
+    violating_dependencies
+        .get_mut("devil-app")
+        .expect("devil-app fixture must exist")
+        .insert("eframe".to_string());
     let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
     assert!(
         issues
             .iter()
-            .any(|issue| issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("eframe")),
-        "renderer dependency violation should be reported, got: {issues:?}"
+            .any(|issue| issue.contains("devil-app") && issue.contains("eframe")),
+        "core crate renderer dependency violation should be reported, got: {issues:?}"
+    );
+
+    let mut violating_dependencies = package_dependencies;
+    violating_dependencies
+        .get_mut("devil-ui")
+        .expect("devil-ui fixture must exist")
+        .insert("egui".to_string());
+    let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("egui")),
+        "devil-ui renderer dependency violation should be reported, got: {issues:?}"
     );
 }
 
@@ -1727,29 +1786,6 @@ Final gate outputs archived from current commands.
                 .contains(&("devil-ui".to_string(), "devil-project".to_string()))
         );
         assert!(policy.protocol_symbols().contains("WorkspaceId"));
-    }
-
-    #[test]
-    fn renderer_dependency_gate_preserves_projection_boundary() {
-        let policy = read_workspace_file(DEFAULT_POLICY_PATH);
-        let devil_ui_dependencies = HashSet::from([
-            "devil-protocol".to_string(),
-            "thiserror".to_string(),
-            "uuid".to_string(),
-        ]);
-
-        let issues = validate_renderer_dependency_gate(&policy, &devil_ui_dependencies);
-        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
-
-        let mut violating_dependencies = devil_ui_dependencies;
-        violating_dependencies.insert("eframe".to_string());
-        let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
-        assert!(
-            issues.iter().any(|issue| {
-                issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("eframe")
-            }),
-            "renderer dependency violation should be reported, got: {issues:?}"
-        );
     }
 
     #[test]
