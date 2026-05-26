@@ -19,6 +19,7 @@ wildcards = "allow"
 # Phase 8 rustls/keyring review notes:
 # - ISC is required by ring/rustls-webpki/untrusted in the reviewed rustls ring-provider graph.
 # - CDLA-Permissive-2.0 is required by webpki-root-certs through reqwest's rustls platform verifier.
+# - sha2 is used for metadata-only root-store and certificate-pin digest checks; no key material is hashed or logged.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

@@ -189,7 +189,7 @@ Phase 8 currently activates `devil-remote-transport`, `devil-terminal`, `devil-t
 
 Phase 8 production dependency rebaseline permits the following external crates only for the named gates and only when the same change updates manifests, tests, evidence, and `deny.toml` review notes:
 
-- Remote TLS/mTLS carrier (`devil-remote-transport`): `tokio` with network/I/O/runtime features, `rustls`, `tokio-rustls`, `rustls-pki-types`, and certificate/root handling crates that do not expose private key material in diagnostics.
+- Remote TLS/mTLS carrier (`devil-remote-transport`): `tokio` with network/I/O/runtime features, `rustls`, `tokio-rustls`, `rustls-pki-types`, `sha2` for metadata-only root/pin digest checks, and certificate/root handling crates that do not expose private key material in diagnostics.
 - Hosted telemetry HTTPS exporter (`devil-telemetry`): either `hyper` plus `hyper-rustls` or a rustls-only `reqwest` profile; native-tls/OpenSSL-backed production profiles are not approved by this policy. The accepted `reqwest` profile must disable default features and enable only rustls-backed TLS plus required request/serialization features.
 - Native terminal PTY (`devil-platform` and `devil-terminal`): `windows` for ConPTY and either `nix` or `rustix` for Unix PTY, process-group, and signal handling.
 - Raw-source production vault (`devil-retention`): `aes-gcm` or `chacha20poly1305`, `rand_core`/`getrandom`, `sha2`, `zeroize`, and `keyring` for the bundled OS key-provider. Cloud KMS SDKs are not bundled in Phase 8; KMS integration is represented by a provider contract and deployment-supplied adapters.

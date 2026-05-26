@@ -11,20 +11,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use devil_protocol::{
-    CausalityId, EventSequence, RedactionHint, RemoteAgentPackageDescriptor,
+    CausalityId, EventSequence, FileFingerprint, RedactionHint, RemoteAgentPackageDescriptor,
     RemoteNetworkHealthState, RemoteOfflineResumeManifest, RemoteOperationId,
     RemoteOperationLogCheckpoint, RemoteOperationLogCheckpointId, RemoteTransportAuditSummary,
     RemoteTransportCarrierDiagnostic, RemoteTransportConnectionAttempt,
-    RemoteTransportFlowControlWindow, RemoteTransportFrameMetadata, RemoteTransportHandshake,
-    RemoteTransportHealthSummary, RemoteTransportLifecycleState, RemoteTransportMutualTlsMode,
-    RemoteTransportPeerIdentity, RemoteTransportReplayWindow, RemoteTransportResumeToken,
-    RemoteWorkspaceSessionId, TimestampMillis, validate_remote_agent_package_descriptor,
+    RemoteTransportCredentialReference, RemoteTransportFlowControlWindow,
+    RemoteTransportFrameMetadata, RemoteTransportHandshake, RemoteTransportHealthSummary,
+    RemoteTransportLifecycleState, RemoteTransportMutualTlsMode, RemoteTransportPeerIdentity,
+    RemoteTransportReplayWindow, RemoteTransportResumeToken, RemoteWorkspaceSessionId,
+    TimestampMillis, validate_remote_agent_package_descriptor,
     validate_remote_transport_audit_summary, validate_remote_transport_carrier_diagnostic,
     validate_remote_transport_connection_attempt, validate_remote_transport_flow_control_window,
     validate_remote_transport_handshake, validate_remote_transport_replay_window,
 };
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -197,15 +199,23 @@ impl RustlsMtlsCarrier {
             }
         })?;
 
-        let mut roots = RootCertStore::empty();
+        let mut root_certs = Vec::new();
         for path in &self.config.root_ca_pem_paths {
-            for cert in load_certs(path)? {
-                roots
-                    .add(cert)
-                    .map_err(|err| RemoteTransportCarrierError::Credential {
-                        reason: format!("root certificate rejected: {err}"),
-                    })?;
-            }
+            root_certs.extend(load_certs(path)?);
+        }
+        enforce_root_store_reference(
+            attempt.tls_policy.root_store_reference.as_ref(),
+            &root_certs,
+        )?;
+        validate_certificate_pin_reference(attempt.tls_policy.certificate_pin_reference.as_ref())?;
+
+        let mut roots = RootCertStore::empty();
+        for cert in root_certs {
+            roots
+                .add(cert)
+                .map_err(|err| RemoteTransportCarrierError::Credential {
+                    reason: format!("root certificate rejected: {err}"),
+                })?;
         }
 
         let wants_mtls = attempt.tls_policy.mtls_mode == RemoteTransportMutualTlsMode::Required;
@@ -265,28 +275,14 @@ impl RustlsMtlsCarrier {
         let endpoint = &attempt.endpoint_policy.endpoint;
         let port = endpoint.port.unwrap_or(443);
         let deadline = Instant::now() + Duration::from_millis(attempt.timeout_ms);
-        let target_addr = resolve_endpoint_socket_addr(
+        let target_addrs = resolve_endpoint_socket_addrs(
             endpoint.host.as_str(),
             port,
             endpoint.loopback_only,
             deadline,
         )
         .await?;
-        let stream = tokio::time::timeout(
-            remaining_attempt_budget(deadline).ok_or_else(|| {
-                RemoteTransportCarrierError::Network {
-                    reason: "tcp connect timed out".to_string(),
-                }
-            })?,
-            TcpStream::connect(target_addr),
-        )
-        .await
-        .map_err(|_| RemoteTransportCarrierError::Network {
-            reason: "tcp connect timed out".to_string(),
-        })?
-        .map_err(|err| RemoteTransportCarrierError::Network {
-            reason: err.to_string(),
-        })?;
+        let stream = connect_endpoint_socket_addrs(&target_addrs, deadline).await?;
         let server_identity = tls_server_identity_name(&attempt.tls_policy.server_identity)?;
         let server_name = ServerName::try_from(server_identity).map_err(|err| {
             RemoteTransportCarrierError::InvalidPolicy {
@@ -307,6 +303,10 @@ impl RustlsMtlsCarrier {
         .map_err(|err| RemoteTransportCarrierError::Tls {
             reason: err.to_string(),
         })?;
+        verify_peer_certificate_pin(
+            attempt.tls_policy.certificate_pin_reference.as_ref(),
+            tls_stream.get_ref().1.peer_certificates(),
+        )?;
         let negotiated_alpn = tls_stream.get_ref().1.alpn_protocol().ok_or_else(|| {
             RemoteTransportCarrierError::Tls {
                 reason: "tls handshake did not negotiate ALPN".to_string(),
@@ -1005,6 +1005,127 @@ fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, RemoteTran
     })
 }
 
+fn enforce_root_store_reference(
+    reference: Option<&RemoteTransportCredentialReference>,
+    root_certs: &[CertificateDer<'static>],
+) -> Result<(), RemoteTransportCarrierError> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    if reference.kind != "root-store" {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "root store reference `{}` used unsupported kind `{}`",
+                reference.reference_id, reference.kind
+            ),
+        });
+    }
+    if root_certs.is_empty() {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "root store reference `{}` has no configured root certificates",
+                reference.reference_id
+            ),
+        });
+    }
+    let configured_digest = root_store_fingerprint(root_certs);
+    if !fingerprint_matches(&reference.digest, &configured_digest) {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "root store reference `{}` digest mismatch",
+                reference.reference_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_certificate_pin_reference(
+    reference: Option<&RemoteTransportCredentialReference>,
+) -> Result<(), RemoteTransportCarrierError> {
+    if let Some(reference) = reference
+        && reference.kind != "pin"
+    {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "certificate pin reference `{}` used unsupported kind `{}`",
+                reference.reference_id, reference.kind
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn verify_peer_certificate_pin(
+    reference: Option<&RemoteTransportCredentialReference>,
+    peer_certs: Option<&[CertificateDer<'static>]>,
+) -> Result<(), RemoteTransportCarrierError> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    validate_certificate_pin_reference(Some(reference))?;
+    let leaf = peer_certs.and_then(|certs| certs.first()).ok_or_else(|| {
+        RemoteTransportCarrierError::Tls {
+            reason: format!(
+                "certificate pin reference `{}` could not inspect peer leaf certificate",
+                reference.reference_id
+            ),
+        }
+    })?;
+    let leaf_digest = sha256_fingerprint(leaf.as_ref());
+    if !fingerprint_matches(&reference.digest, &leaf_digest) {
+        return Err(RemoteTransportCarrierError::Tls {
+            reason: format!(
+                "certificate pin reference `{}` digest mismatch",
+                reference.reference_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn root_store_fingerprint(certs: &[CertificateDer<'static>]) -> FileFingerprint {
+    let mut hasher = Sha256::new();
+    for cert in certs {
+        let bytes = cert.as_ref();
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    let digest = hasher.finalize();
+    sha256_digest_fingerprint(digest.as_ref())
+}
+
+fn sha256_fingerprint(bytes: &[u8]) -> FileFingerprint {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    sha256_digest_fingerprint(digest.as_ref())
+}
+
+fn sha256_digest_fingerprint(digest: &[u8]) -> FileFingerprint {
+    FileFingerprint {
+        algorithm: "sha256".to_string(),
+        value: format!("sha256:{}", lowercase_hex(digest)),
+    }
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn fingerprint_matches(expected: &FileFingerprint, actual: &FileFingerprint) -> bool {
+    expected
+        .algorithm
+        .eq_ignore_ascii_case(actual.algorithm.as_str())
+        && expected.value == actual.value
+}
+
 fn remaining_attempt_budget(deadline: Instant) -> Option<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -1013,12 +1134,12 @@ fn remaining_attempt_budget(deadline: Instant) -> Option<Duration> {
     Some(remaining)
 }
 
-async fn resolve_endpoint_socket_addr(
+async fn resolve_endpoint_socket_addrs(
     host: &str,
     port: u16,
     loopback_only: bool,
     deadline: Instant,
-) -> Result<SocketAddr, RemoteTransportCarrierError> {
+) -> Result<Vec<SocketAddr>, RemoteTransportCarrierError> {
     let addrs = tokio::time::timeout(
         remaining_attempt_budget(deadline).ok_or_else(|| RemoteTransportCarrierError::Network {
             reason: "endpoint resolution timed out".to_string(),
@@ -1033,19 +1154,19 @@ async fn resolve_endpoint_socket_addr(
         reason: err.to_string(),
     })?
     .collect::<Vec<_>>();
-    select_endpoint_socket_addr(host, loopback_only, addrs)
+    select_endpoint_socket_addrs(host, loopback_only, addrs)
 }
 
-fn select_endpoint_socket_addr(
+fn select_endpoint_socket_addrs(
     host: &str,
     loopback_only: bool,
     addrs: Vec<SocketAddr>,
-) -> Result<SocketAddr, RemoteTransportCarrierError> {
-    let Some(addr) = addrs.first().copied() else {
+) -> Result<Vec<SocketAddr>, RemoteTransportCarrierError> {
+    if addrs.is_empty() {
         return Err(RemoteTransportCarrierError::Network {
             reason: format!("endpoint `{host}` resolved no socket addresses"),
         });
-    };
+    }
     if loopback_only && let Some(non_loopback) = addrs.iter().find(|addr| !addr.ip().is_loopback())
     {
         return Err(RemoteTransportCarrierError::InvalidPolicy {
@@ -1054,7 +1175,46 @@ fn select_endpoint_socket_addr(
             ),
         });
     }
-    Ok(addr)
+    Ok(addrs)
+}
+
+async fn connect_endpoint_socket_addrs(
+    addrs: &[SocketAddr],
+    deadline: Instant,
+) -> Result<TcpStream, RemoteTransportCarrierError> {
+    if addrs.is_empty() {
+        return Err(RemoteTransportCarrierError::Network {
+            reason: "endpoint resolved no socket addresses".to_string(),
+        });
+    }
+    let mut last_error = None;
+    for addr in addrs {
+        let Some(remaining) = remaining_attempt_budget(deadline) else {
+            return Err(
+                last_error.unwrap_or_else(|| RemoteTransportCarrierError::Network {
+                    reason: "tcp connect timed out".to_string(),
+                }),
+            );
+        };
+        match tokio::time::timeout(remaining, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => {
+                last_error = Some(RemoteTransportCarrierError::Network {
+                    reason: format!("tcp connect to {addr} failed: {err}"),
+                });
+            }
+            Err(_) => {
+                return Err(RemoteTransportCarrierError::Network {
+                    reason: format!("tcp connect to {addr} timed out"),
+                });
+            }
+        }
+    }
+    Err(
+        last_error.unwrap_or_else(|| RemoteTransportCarrierError::Network {
+            reason: "tcp connect failed for all resolved socket addresses".to_string(),
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -1410,9 +1570,75 @@ mod tests {
     }
 
     #[test]
+    fn root_store_reference_must_match_configured_root_digest() {
+        let root = CertificateDer::from(vec![1, 2, 3, 4]);
+        let matching = RemoteTransportCredentialReference {
+            reference_id: "root-store-ref".to_string(),
+            kind: "root-store".to_string(),
+            digest: root_store_fingerprint(std::slice::from_ref(&root)),
+            schema_version: 1,
+        };
+        enforce_root_store_reference(Some(&matching), std::slice::from_ref(&root))
+            .expect("matching root-store reference");
+
+        let mismatched = RemoteTransportCredentialReference {
+            digest: sha256_fingerprint(b"other-root-store"),
+            ..matching
+        };
+        assert!(matches!(
+            enforce_root_store_reference(Some(&mismatched), &[root]),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_rejects_policy_root_reference_without_configured_roots() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let attempt = RemoteTransportConnectionAttempt {
+            tls_policy: RemoteTransportTlsPolicy {
+                root_store_reference: Some(RemoteTransportCredentialReference {
+                    reference_id: "root-store-ref".to_string(),
+                    kind: "root-store".to_string(),
+                    digest: sha256_fingerprint(b"missing-root-store"),
+                    schema_version: 1,
+                }),
+                ..connection_attempt().tls_policy
+            },
+            ..connection_attempt()
+        };
+        assert!(matches!(
+            carrier.build_client_config(&attempt),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+    }
+
+    #[test]
+    fn certificate_pin_reference_must_match_peer_leaf_digest() {
+        let leaf = CertificateDer::from(vec![4, 3, 2, 1]);
+        let intermediate = CertificateDer::from(vec![5, 6, 7, 8]);
+        let matching = RemoteTransportCredentialReference {
+            reference_id: "pin-ref".to_string(),
+            kind: "pin".to_string(),
+            digest: sha256_fingerprint(leaf.as_ref()),
+            schema_version: 1,
+        };
+        verify_peer_certificate_pin(Some(&matching), Some(&[leaf.clone(), intermediate.clone()]))
+            .expect("matching leaf certificate pin");
+
+        let mismatched = RemoteTransportCredentialReference {
+            digest: sha256_fingerprint(intermediate.as_ref()),
+            ..matching
+        };
+        assert!(matches!(
+            verify_peer_certificate_pin(Some(&mismatched), Some(&[leaf])),
+            Err(RemoteTransportCarrierError::Tls { .. })
+        ));
+    }
+
+    #[test]
     fn loopback_only_endpoint_rejects_external_resolution_before_dial() {
         assert!(matches!(
-            select_endpoint_socket_addr(
+            select_endpoint_socket_addrs(
                 "example.com",
                 true,
                 vec!["93.184.216.34:443".parse().expect("external socket addr")],
@@ -1420,7 +1646,7 @@ mod tests {
             Err(RemoteTransportCarrierError::InvalidPolicy { .. })
         ));
         assert!(matches!(
-            select_endpoint_socket_addr(
+            select_endpoint_socket_addrs(
                 "localhost",
                 true,
                 vec![
@@ -1431,7 +1657,7 @@ mod tests {
             Err(RemoteTransportCarrierError::InvalidPolicy { .. })
         ));
         assert_eq!(
-            select_endpoint_socket_addr(
+            select_endpoint_socket_addrs(
                 "localhost",
                 true,
                 vec![
@@ -1439,9 +1665,42 @@ mod tests {
                     "[::1]:443".parse().expect("ipv6 loopback socket addr"),
                 ],
             )
-            .expect("loopback-only socket addr"),
-            "127.0.0.1:443".parse().expect("loopback socket addr")
+            .expect("loopback-only socket addrs"),
+            vec![
+                "127.0.0.1:443".parse().expect("loopback socket addr"),
+                "[::1]:443".parse().expect("ipv6 loopback socket addr"),
+            ]
         );
+    }
+
+    #[test]
+    fn connect_endpoint_socket_addrs_tries_later_resolved_addresses() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async {
+            let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind closed listener");
+            let closed_addr = closed.local_addr().expect("closed listener addr");
+            drop(closed);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind accepting listener");
+            let open_addr = listener.local_addr().expect("open listener addr");
+            let accept = tokio::spawn(async move {
+                let _ = listener.accept().await.expect("accept fallback connection");
+            });
+            let stream = connect_endpoint_socket_addrs(
+                &[closed_addr, open_addr],
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("connects to later resolved address");
+            drop(stream);
+            accept.await.expect("accept task");
+        });
     }
 
     #[test]
