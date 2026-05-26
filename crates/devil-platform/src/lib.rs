@@ -3,14 +3,21 @@
 #![warn(missing_docs)]
 
 use std::{
+    collections::HashMap,
     env,
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::sync::Arc;
 
 use devil_protocol::{CanonicalPath, EventSequence, WatcherEvent, WatcherEventKind, WorkspaceId};
 use thiserror::Error;
@@ -29,6 +36,9 @@ const STABLE_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Monotonic suffix for same-directory atomic-write temporary paths.
 static ATOMIC_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Monotonic suffix for native PTY session handles.
+static NATIVE_PTY_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Errors surfaced by platform services.
 #[derive(Debug, Error)]
@@ -533,6 +543,19 @@ fn atomic_replace(temp: &Path, target: &Path) -> Result<(), PlatformError> {
     })
 }
 
+#[cfg(not(windows))]
+fn unsupported_operation(
+    operation: impl Into<String>,
+    path: impl Into<PathBuf>,
+    reason: impl Into<String>,
+) -> PlatformError {
+    PlatformError::UnsupportedOperation {
+        operation: operation.into(),
+        path: path.into(),
+        reason: reason.into(),
+    }
+}
+
 /// Process abstraction.
 pub trait ProcessService {
     /// Executes a command and returns the output.
@@ -543,6 +566,51 @@ pub trait ProcessService {
 pub trait PtyService {
     /// Spawns a PTY session.
     fn spawn_pty(&self, request: &PtyRequest) -> Result<PtySession, PlatformError>;
+
+    /// Writes bounded input into a PTY session.
+    fn write_pty(&self, session_id: &str, input: &str) -> Result<(), PlatformError> {
+        let _ = (session_id, input);
+        Err(PlatformError::PtyUnavailable {
+            reason: "PTY input is not supported by this service".to_string(),
+        })
+    }
+
+    /// Resizes a PTY session.
+    fn resize_pty(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), PlatformError> {
+        let _ = (session_id, cols, rows);
+        Err(PlatformError::PtyUnavailable {
+            reason: "PTY resize is not supported by this service".to_string(),
+        })
+    }
+
+    /// Polls available PTY output without blocking editor/workspace callers.
+    fn read_pty(&self, session_id: &str, max_bytes: usize) -> Result<PtyReadResult, PlatformError> {
+        let _ = (session_id, max_bytes);
+        Err(PlatformError::PtyUnavailable {
+            reason: "PTY output polling is not supported by this service".to_string(),
+        })
+    }
+
+    /// Requests graceful PTY close.
+    fn close_pty(&self, session_id: &str) -> Result<(), PlatformError> {
+        let _ = session_id;
+        Err(PlatformError::PtyUnavailable {
+            reason: "PTY close is not supported by this service".to_string(),
+        })
+    }
+
+    /// Kills a PTY session.
+    fn kill_pty(&self, session_id: &str, mode: PtyKillMode) -> Result<(), PlatformError> {
+        let _ = (session_id, mode);
+        Err(PlatformError::PtyUnavailable {
+            reason: "PTY kill is not supported by this service".to_string(),
+        })
+    }
+
+    /// Cleans up native PTY sessions whose child process has exited.
+    fn cleanup_orphaned_ptys(&self) -> Result<Vec<String>, PlatformError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Watcher abstraction.
@@ -644,6 +712,34 @@ pub struct PtySession {
     pub id: String,
     /// Session output.
     pub output: String,
+}
+
+/// Result from a non-blocking PTY output poll.
+#[derive(Debug, Clone)]
+pub struct PtyReadResult {
+    /// Session id.
+    pub id: String,
+    /// Output bytes decoded as UTF-8 replacement text.
+    pub output: String,
+    /// Whether the session has exited.
+    pub exited: bool,
+    /// Process exit code when known.
+    pub exit_code: Option<i32>,
+    /// Whether output was truncated to the requested maximum.
+    pub truncated: bool,
+}
+
+/// PTY kill mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyKillMode {
+    /// Graceful interrupt signal.
+    Interrupt,
+    /// Graceful termination.
+    Terminate,
+    /// Forceful process kill.
+    Kill,
+    /// Kill the session process tree/process group where the platform supports it.
+    KillTree,
 }
 
 /// Native filesystem implementation.
@@ -930,38 +1026,879 @@ impl ProcessService for NativeProcessService {
     }
 }
 
-impl PtyService for NativePtyService {
-    fn spawn_pty(&self, request: &PtyRequest) -> Result<PtySession, PlatformError> {
-        const PTY_SHIM_OUTPUT_LIMIT: usize = 256 * 1024;
+const PTY_OUTPUT_LIMIT: usize = 256 * 1024;
 
-        let mut command = Command::new(&request.command);
-        command.args(&request.args);
-        if let Some(cwd) = &request.cwd {
-            command.current_dir(cwd);
-        }
+enum NativePtySessionHandle {
+    #[cfg(unix)]
+    Unix {
+        master: std::fs::File,
+        child: std::process::Child,
+    },
+    #[cfg(windows)]
+    Windows(WindowsPtySessionHandle),
+}
 
-        let output = command
-            .output()
-            .map_err(|err| PlatformError::ProcessSpawnFailure {
-                operation: "spawn degraded PTY".to_string(),
+#[cfg(windows)]
+struct WindowsPtySessionHandle {
+    conpty: usize,
+    process: usize,
+    input_write: usize,
+    output: Arc<Mutex<Vec<u8>>>,
+}
+
+static NATIVE_PTY_SESSIONS: OnceLock<Mutex<HashMap<String, NativePtySessionHandle>>> =
+    OnceLock::new();
+
+fn native_pty_sessions() -> &'static Mutex<HashMap<String, NativePtySessionHandle>> {
+    NATIVE_PTY_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_native_pty_session_id(prefix: &str) -> String {
+    let sequence = NATIVE_PTY_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{sequence}")
+}
+
+#[cfg(windows)]
+fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
+    let handle = spawn_windows_conpty(request)?;
+    let id = next_native_pty_session_id("native-conpty");
+    let output = poll_windows_output(&handle, PTY_OUTPUT_LIMIT, Duration::from_millis(50))?;
+    let mut sessions = native_pty_sessions()
+        .lock()
+        .map_err(|_| pty_registry_poisoned())?;
+    if sessions.contains_key(&id) {
+        close_windows_session(handle, true);
+        return Err(PlatformError::PtyUnavailable {
+            reason: format!("native PTY session id collision for `{id}`"),
+        });
+    }
+    sessions.insert(id.clone(), NativePtySessionHandle::Windows(handle));
+    Ok(PtySession { id, output })
+}
+
+#[cfg(unix)]
+fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
+    use std::fs::File;
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let pty = nix::pty::openpty(None, None).map_err(|err| PlatformError::PtyUnavailable {
+        reason: format!("open unix PTY: {err}"),
+    })?;
+    let mut master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
+    set_unix_nonblocking(&master)?;
+    let slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
+    let stdin = slave
+        .try_clone()
+        .map_err(|err| PlatformError::from_io_error("clone PTY stdin", PathBuf::from("."), err))?;
+    let slave_stdin_fd = stdin.as_raw_fd();
+    let stdout = slave
+        .try_clone()
+        .map_err(|err| PlatformError::from_io_error("clone PTY stdout", PathBuf::from("."), err))?;
+    let stderr = slave;
+
+    let mut command = Command::new(&request.command);
+    command.args(&request.args);
+    if let Some(cwd) = &request.cwd {
+        command.current_dir(cwd);
+    }
+    command
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    unsafe {
+        command.pre_exec(move || {
+            nix::unistd::setsid().map_err(|err| io::Error::from_raw_os_error(err as i32))?;
+            let result = nix::libc::ioctl(
+                slave_stdin_fd,
+                nix::libc::TIOCSCTTY as nix::libc::c_ulong,
+                0,
+            );
+            if result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .spawn()
+        .map_err(|err| PlatformError::ProcessSpawnFailure {
+            operation: "spawn Unix PTY command".to_string(),
+            command: request.command.clone(),
+            message: err.to_string(),
+        })?;
+    let output = poll_unix_output(&mut master, PTY_OUTPUT_LIMIT, Duration::from_millis(50))?;
+    let id = next_native_pty_session_id("native-unix-pty");
+    native_pty_sessions()
+        .lock()
+        .map_err(|_| pty_registry_poisoned())?
+        .insert(id.clone(), NativePtySessionHandle::Unix { master, child });
+    Ok(PtySession { id, output })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
+    Err(PlatformError::PtyUnavailable {
+        reason: format!(
+            "native PTY is unsupported on this target for `{}`",
+            request.command
+        ),
+    })
+}
+
+#[cfg(windows)]
+fn spawn_windows_conpty(request: &PtyRequest) -> Result<WindowsPtySessionHandle, PlatformError> {
+    use std::mem::{size_of, zeroed};
+    use std::ptr;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Console::{COORD, CreatePseudoConsole, HPCON, ResizePseudoConsole};
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::{
+        CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, UpdateProcThreadAttribute,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    let mut input_read = HANDLE::default();
+    let mut input_write = HANDLE::default();
+    let mut output_read = HANDLE::default();
+    let mut output_write = HANDLE::default();
+    unsafe {
+        CreatePipe(&mut input_read, &mut input_write, None, 0).map_err(|err| {
+            PlatformError::PtyUnavailable {
+                reason: format!("create ConPTY input pipe: {err}"),
+            }
+        })?;
+        CreatePipe(&mut output_read, &mut output_write, None, 0).map_err(|err| {
+            let _ = CloseHandle(input_read);
+            let _ = CloseHandle(input_write);
+            PlatformError::PtyUnavailable {
+                reason: format!("create ConPTY output pipe: {err}"),
+            }
+        })?;
+        let conpty = CreatePseudoConsole(COORD { X: 80, Y: 24 }, input_read, output_write, 0)
+            .map_err(|err| {
+                let _ = CloseHandle(input_read);
+                let _ = CloseHandle(input_write);
+                let _ = CloseHandle(output_read);
+                let _ = CloseHandle(output_write);
+                PlatformError::PtyUnavailable {
+                    reason: format!("create Windows ConPTY: {err}"),
+                }
+            })?;
+
+        let mut attribute_size = 0usize;
+        let _ = InitializeProcThreadAttributeList(None, 1, Some(0), &mut attribute_size);
+        let mut attribute_storage = vec![0u8; attribute_size];
+        let attribute_list = LPPROC_THREAD_ATTRIBUTE_LIST(
+            attribute_storage.as_mut_ptr().cast::<core::ffi::c_void>(),
+        );
+        InitializeProcThreadAttributeList(Some(attribute_list), 1, Some(0), &mut attribute_size)
+            .map_err(|err| {
+                close_windows_conpty_handles(
+                    Some(conpty),
+                    &[input_read, input_write, output_read, output_write],
+                );
+                PlatformError::PtyUnavailable {
+                    reason: format!("initialize ConPTY process attribute list: {err}"),
+                }
+            })?;
+        UpdateProcThreadAttribute(
+            attribute_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            Some(conpty.0 as *const core::ffi::c_void),
+            size_of::<HPCON>(),
+            None,
+            None,
+        )
+        .map_err(|err| {
+            DeleteProcThreadAttributeList(attribute_list);
+            close_windows_conpty_handles(
+                Some(conpty),
+                &[input_read, input_write, output_read, output_write],
+            );
+            PlatformError::PtyUnavailable {
+                reason: format!("attach ConPTY process attribute: {err}"),
+            }
+        })?;
+
+        let mut startup: STARTUPINFOEXW = zeroed();
+        startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.lpAttributeList = attribute_list;
+
+        let mut process_info = PROCESS_INFORMATION::default();
+        let mut command_line = windows_command_line(request);
+        let current_dir = request
+            .cwd
+            .as_ref()
+            .map(|cwd| wide_null(&cwd.to_string_lossy()));
+        let current_dir_ptr = current_dir
+            .as_ref()
+            .map(|cwd| PCWSTR(cwd.as_ptr()))
+            .unwrap_or(PCWSTR(ptr::null()));
+
+        let spawn_result = CreateProcessW(
+            PCWSTR(ptr::null()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP,
+            None,
+            current_dir_ptr,
+            (&startup.StartupInfo) as *const _,
+            &mut process_info,
+        );
+        DeleteProcThreadAttributeList(attribute_list);
+        if let Err(err) = spawn_result {
+            close_windows_conpty_handles(
+                Some(conpty),
+                &[input_read, input_write, output_read, output_write],
+            );
+            return Err(PlatformError::ProcessSpawnFailure {
+                operation: "spawn Windows ConPTY command".to_string(),
                 command: request.command.clone(),
                 message: err.to_string(),
-            })?;
-        let mut bytes = output.stdout;
-        if !output.stderr.is_empty() {
-            bytes.extend_from_slice(b"\n");
-            bytes.extend_from_slice(&output.stderr);
+            });
         }
-        if bytes.len() > PTY_SHIM_OUTPUT_LIMIT {
-            bytes.truncate(PTY_SHIM_OUTPUT_LIMIT);
-        }
-        Ok(PtySession {
-            id: format!(
-                "degraded-pty-{}",
-                stable_hash_bytes(request.command.as_bytes())
-            ),
-            output: String::from_utf8_lossy(&bytes).into_owned(),
+
+        let _ = CloseHandle(input_read);
+        let _ = CloseHandle(output_write);
+        let _ = CloseHandle(process_info.hThread);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        spawn_windows_output_reader(output_read.0 as usize, Arc::clone(&output));
+        let _ = ResizePseudoConsole(conpty, COORD { X: 80, Y: 24 });
+
+        Ok(WindowsPtySessionHandle {
+            conpty: conpty.0 as usize,
+            process: process_info.hProcess.0 as usize,
+            input_write: input_write.0 as usize,
+            output,
         })
+    }
+}
+
+#[cfg(windows)]
+fn spawn_windows_output_reader(output_read: usize, output: Arc<Mutex<Vec<u8>>>) {
+    std::thread::spawn(move || {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Storage::FileSystem::ReadFile;
+        let handle = HANDLE(output_read as *mut core::ffi::c_void);
+        let mut buffer = [0u8; 4096];
+        loop {
+            let mut read = 0u32;
+            let result = unsafe { ReadFile(handle, Some(&mut buffer), Some(&mut read), None) };
+            if result.is_err() || read == 0 {
+                break;
+            }
+            if let Ok(mut output) = output.lock() {
+                let remaining = PTY_OUTPUT_LIMIT.saturating_sub(output.len());
+                if remaining > 0 {
+                    output.extend_from_slice(&buffer[..(read as usize).min(remaining)]);
+                }
+            }
+        }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+    });
+}
+
+#[cfg(windows)]
+fn drain_windows_output(
+    handle: &WindowsPtySessionHandle,
+    max_bytes: usize,
+) -> Result<String, PlatformError> {
+    let mut output = handle.output.lock().map_err(|_| pty_registry_poisoned())?;
+    let take = output.len().min(max_bytes);
+    let bytes = output.drain(..take).collect::<Vec<_>>();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(windows)]
+fn poll_windows_output(
+    handle: &WindowsPtySessionHandle,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<String, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = drain_windows_output(handle, max_bytes)?;
+        if !output.is_empty() || Instant::now() >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(windows)]
+fn poll_windows_output_until_quiet(
+    handle: &WindowsPtySessionHandle,
+    max_bytes: usize,
+    timeout: Duration,
+    quiet_period: Duration,
+) -> Result<String, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    let mut output = String::new();
+    let mut last_output_at = None;
+    loop {
+        let remaining = max_bytes.saturating_sub(output.len());
+        if remaining == 0 {
+            return Ok(output);
+        }
+        let chunk = drain_windows_output(handle, remaining)?;
+        if !chunk.is_empty() {
+            output.push_str(&chunk);
+            last_output_at = Some(Instant::now());
+            continue;
+        }
+        let now = Instant::now();
+        if now >= deadline
+            || last_output_at.is_some_and(|last| now.duration_since(last) >= quiet_period)
+        {
+            return Ok(output);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(windows)]
+fn write_windows_conpty_input(
+    handle: &WindowsPtySessionHandle,
+    bytes: &[u8],
+) -> Result<(), PlatformError> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::WriteFile;
+
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let mut written = 0u32;
+        unsafe {
+            WriteFile(
+                HANDLE(handle.input_write as *mut core::ffi::c_void),
+                Some(&bytes[offset..]),
+                Some(&mut written),
+                None,
+            )
+            .map_err(|err| PlatformError::PtyUnavailable {
+                reason: format!("write Windows ConPTY input at offset {offset}: {err}"),
+            })?;
+        }
+        if written == 0 {
+            return Err(PlatformError::PtyUnavailable {
+                reason: format!("write Windows ConPTY input wrote zero bytes at offset {offset}"),
+            });
+        }
+        offset += written as usize;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_session_exited(
+    handle: &WindowsPtySessionHandle,
+) -> Result<(bool, Option<i32>), PlatformError> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::GetExitCodeProcess;
+    let mut exit_code = 0u32;
+    unsafe {
+        GetExitCodeProcess(
+            HANDLE(handle.process as *mut core::ffi::c_void),
+            &mut exit_code,
+        )
+        .map_err(|err| PlatformError::PtyUnavailable {
+            reason: format!("read Windows ConPTY process exit code: {err}"),
+        })?;
+    }
+    if exit_code == 259 {
+        Ok((false, None))
+    } else {
+        Ok((true, Some(exit_code as i32)))
+    }
+}
+
+#[cfg(windows)]
+fn close_windows_session(handle: WindowsPtySessionHandle, terminate: bool) {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Console::{ClosePseudoConsole, HPCON};
+    use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+    unsafe {
+        let process = HANDLE(handle.process as *mut core::ffi::c_void);
+        if terminate {
+            let _ = TerminateProcess(process, 1);
+        }
+        let _ = CloseHandle(HANDLE(handle.input_write as *mut core::ffi::c_void));
+        ClosePseudoConsole(HPCON(handle.conpty as isize));
+        let _ = WaitForSingleObject(process, 100);
+        let _ = CloseHandle(process);
+    }
+}
+
+fn close_removed_pty_session(handle: NativePtySessionHandle, _terminate: bool) {
+    match handle {
+        #[cfg(unix)]
+        NativePtySessionHandle::Unix { .. } => {}
+        #[cfg(windows)]
+        NativePtySessionHandle::Windows(handle) => close_windows_session(handle, _terminate),
+    }
+}
+
+#[cfg(windows)]
+fn close_windows_conpty_handles(
+    conpty: Option<windows::Win32::System::Console::HPCON>,
+    handles: &[windows::Win32::Foundation::HANDLE],
+) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Console::ClosePseudoConsole;
+    unsafe {
+        if let Some(conpty) = conpty {
+            ClosePseudoConsole(conpty);
+        }
+        for handle in handles {
+            let _ = CloseHandle(*handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_command_line(request: &PtyRequest) -> Vec<u16> {
+    let mut parts = Vec::with_capacity(request.args.len() + 1);
+    parts.push(quote_windows_arg(&request.command));
+    parts.extend(request.args.iter().map(|arg| quote_windows_arg(arg)));
+    wide_null(&parts.join(" "))
+}
+
+#[cfg(windows)]
+fn quote_windows_arg(value: &str) -> String {
+    if !value.is_empty() && !value.chars().any(|ch| ch.is_whitespace() || ch == '"') {
+        return value.to_string();
+    }
+
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut pending_backslashes = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => pending_backslashes += 1,
+            '"' => {
+                push_windows_backslashes(&mut quoted, pending_backslashes.saturating_mul(2) + 1);
+                quoted.push('"');
+                pending_backslashes = 0;
+            }
+            _ => {
+                push_windows_backslashes(&mut quoted, pending_backslashes);
+                pending_backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    push_windows_backslashes(&mut quoted, pending_backslashes.saturating_mul(2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(windows)]
+fn push_windows_backslashes(output: &mut String, count: usize) {
+    for _ in 0..count {
+        output.push('\\');
+    }
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(unix)]
+fn set_unix_nonblocking(file: &std::fs::File) -> Result<(), PlatformError> {
+    use std::os::fd::AsRawFd;
+    let fd = file.as_raw_fd();
+    let flags = unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFL) };
+    if flags < 0 {
+        return Err(PlatformError::PtyUnavailable {
+            reason: "read Unix PTY flags".to_string(),
+        });
+    }
+    let result = unsafe { nix::libc::fcntl(fd, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) };
+    if result < 0 {
+        return Err(PlatformError::PtyUnavailable {
+            reason: "set Unix PTY nonblocking".to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_unix_available(
+    master: &mut std::fs::File,
+    max_bytes: usize,
+) -> Result<PtyReadResult, PlatformError> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    loop {
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+        let mut chunk = vec![0u8; remaining.min(4096)];
+        match master.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(err) if err.raw_os_error() == Some(nix::libc::EIO) => break,
+            Err(err) => {
+                return Err(PlatformError::from_io_error(
+                    "read Unix PTY output",
+                    ".",
+                    err,
+                ));
+            }
+        }
+    }
+    Ok(PtyReadResult {
+        id: String::new(),
+        output: String::from_utf8_lossy(&bytes).into_owned(),
+        exited: false,
+        exit_code: None,
+        truncated,
+    })
+}
+
+#[cfg(unix)]
+fn poll_unix_output(
+    master: &mut std::fs::File,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<String, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = read_unix_available(master, max_bytes)?.output;
+        if !output.is_empty() || Instant::now() >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(unix)]
+fn write_unix_nonblocking(master: &mut std::fs::File, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::io::Write as _;
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        match master.write(&bytes[offset..]) {
+            Ok(0) => {
+                return Err(PlatformError::PtyUnavailable {
+                    reason: format!("write Unix PTY input wrote zero bytes at offset {offset}"),
+                });
+            }
+            Ok(written) => offset += written,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => {
+                return Err(PlatformError::from_io_error(
+                    "write Unix PTY input",
+                    ".",
+                    err,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_unix_child_exit(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<bool, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|err| PlatformError::from_io_error("wait Unix PTY child", ".", err))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(unix)]
+fn resize_unix_pty(master: &std::fs::File, cols: u16, rows: u16) -> Result<(), PlatformError> {
+    use std::os::fd::AsRawFd;
+    let size = nix::libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe { nix::libc::ioctl(master.as_raw_fd(), nix::libc::TIOCSWINSZ, &size) };
+    if result < 0 {
+        return Err(PlatformError::PtyUnavailable {
+            reason: "resize Unix PTY".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn pty_registry_poisoned() -> PlatformError {
+    PlatformError::PtyUnavailable {
+        reason: "native PTY registry is poisoned".to_string(),
+    }
+}
+
+fn pty_session_missing(session_id: &str) -> PlatformError {
+    PlatformError::PtyUnavailable {
+        reason: format!("PTY session `{session_id}` is not active"),
+    }
+}
+
+impl PtyService for NativePtyService {
+    fn spawn_pty(&self, request: &PtyRequest) -> Result<PtySession, PlatformError> {
+        spawn_native_pty(request)
+    }
+
+    fn write_pty(&self, session_id: &str, input: &str) -> Result<(), PlatformError> {
+        let mut sessions = native_pty_sessions()
+            .lock()
+            .map_err(|_| pty_registry_poisoned())?;
+        let handle = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| pty_session_missing(session_id))?;
+        match handle {
+            #[cfg(unix)]
+            NativePtySessionHandle::Unix { master, .. } => {
+                write_unix_nonblocking(master, input.as_bytes())
+            }
+            #[cfg(windows)]
+            NativePtySessionHandle::Windows(handle) => {
+                write_windows_conpty_input(handle, input.as_bytes())
+            }
+        }
+    }
+
+    fn resize_pty(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), PlatformError> {
+        let mut sessions = native_pty_sessions()
+            .lock()
+            .map_err(|_| pty_registry_poisoned())?;
+        let handle = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| pty_session_missing(session_id))?;
+        match handle {
+            #[cfg(unix)]
+            NativePtySessionHandle::Unix { master, .. } => resize_unix_pty(master, cols, rows),
+            #[cfg(windows)]
+            NativePtySessionHandle::Windows(handle) => {
+                use windows::Win32::System::Console::{COORD, HPCON, ResizePseudoConsole};
+                unsafe {
+                    ResizePseudoConsole(
+                        HPCON(handle.conpty as isize),
+                        COORD {
+                            X: cols as i16,
+                            Y: rows as i16,
+                        },
+                    )
+                    .map_err(|err| PlatformError::PtyUnavailable {
+                        reason: format!("resize Windows ConPTY: {err}"),
+                    })
+                }
+            }
+        }
+    }
+
+    fn read_pty(&self, session_id: &str, max_bytes: usize) -> Result<PtyReadResult, PlatformError> {
+        let mut sessions = native_pty_sessions()
+            .lock()
+            .map_err(|_| pty_registry_poisoned())?;
+        let handle = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| pty_session_missing(session_id))?;
+        let (mut result, remove) = match handle {
+            #[cfg(unix)]
+            NativePtySessionHandle::Unix { master, child } => {
+                let mut result = read_unix_available(master, max_bytes)?;
+                let mut remove = false;
+                if let Some(status) = child
+                    .try_wait()
+                    .map_err(|err| PlatformError::from_io_error("poll Unix PTY child", ".", err))?
+                {
+                    result.exited = true;
+                    result.exit_code = status.code();
+                    remove = true;
+                }
+                (result, remove)
+            }
+            #[cfg(windows)]
+            NativePtySessionHandle::Windows(handle) => {
+                let (exited, exit_code) = windows_session_exited(handle)?;
+                let output = if exited {
+                    poll_windows_output_until_quiet(
+                        handle,
+                        max_bytes,
+                        Duration::from_millis(250),
+                        Duration::from_millis(20),
+                    )?
+                } else {
+                    drain_windows_output(handle, max_bytes)?
+                };
+                (
+                    PtyReadResult {
+                        id: String::new(),
+                        truncated: output.len() >= max_bytes,
+                        output,
+                        exited,
+                        exit_code,
+                    },
+                    exited,
+                )
+            }
+        };
+        result.id = session_id.to_string();
+        if remove
+            && !result.truncated
+            && let Some(handle) = sessions.remove(session_id)
+        {
+            close_removed_pty_session(handle, false);
+        }
+        Ok(result)
+    }
+
+    fn close_pty(&self, session_id: &str) -> Result<(), PlatformError> {
+        #[cfg(unix)]
+        self.kill_pty(session_id, PtyKillMode::Terminate)?;
+        #[cfg(windows)]
+        {
+            if let Some(NativePtySessionHandle::Windows(handle)) = native_pty_sessions()
+                .lock()
+                .map_err(|_| pty_registry_poisoned())?
+                .remove(session_id)
+            {
+                close_windows_session(handle, false);
+            } else {
+                return Err(pty_session_missing(session_id));
+            }
+        }
+        Ok(())
+    }
+
+    fn kill_pty(&self, session_id: &str, mode: PtyKillMode) -> Result<(), PlatformError> {
+        let mut sessions = native_pty_sessions()
+            .lock()
+            .map_err(|_| pty_registry_poisoned())?;
+        #[cfg(unix)]
+        {
+            let handle = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| pty_session_missing(session_id))?;
+            match handle {
+                NativePtySessionHandle::Unix { child, .. } => {
+                    let signal = match mode {
+                        PtyKillMode::Interrupt => nix::sys::signal::Signal::SIGINT,
+                        PtyKillMode::Terminate => nix::sys::signal::Signal::SIGTERM,
+                        PtyKillMode::Kill | PtyKillMode::KillTree => {
+                            nix::sys::signal::Signal::SIGKILL
+                        }
+                    };
+                    let pid = child.id() as i32;
+                    let target = if matches!(mode, PtyKillMode::Interrupt | PtyKillMode::KillTree) {
+                        nix::unistd::Pid::from_raw(-pid)
+                    } else {
+                        nix::unistd::Pid::from_raw(pid)
+                    };
+                    let _ = nix::sys::signal::kill(target, signal);
+                    if mode == PtyKillMode::Interrupt {
+                        return Ok(());
+                    }
+                    if wait_unix_child_exit(child, Duration::from_millis(500))? {
+                        let _ = sessions.remove(session_id);
+                        Ok(())
+                    } else {
+                        Err(PlatformError::PtyUnavailable {
+                            reason: format!(
+                                "Unix PTY session `{session_id}` did not exit after {signal:?}"
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            match mode {
+                PtyKillMode::Interrupt => {
+                    let handle = sessions
+                        .get(session_id)
+                        .ok_or_else(|| pty_session_missing(session_id))?;
+                    match handle {
+                        NativePtySessionHandle::Windows(handle) => {
+                            write_windows_conpty_input(handle, b"\x03")
+                        }
+                    }
+                }
+                PtyKillMode::Terminate | PtyKillMode::Kill | PtyKillMode::KillTree => {
+                    let handle = sessions
+                        .remove(session_id)
+                        .ok_or_else(|| pty_session_missing(session_id))?;
+                    match handle {
+                        NativePtySessionHandle::Windows(handle) => {
+                            close_windows_session(handle, true);
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn cleanup_orphaned_ptys(&self) -> Result<Vec<String>, PlatformError> {
+        let mut sessions = native_pty_sessions()
+            .lock()
+            .map_err(|_| pty_registry_poisoned())?;
+        let mut orphaned = Vec::new();
+        for (id, handle) in sessions.iter_mut() {
+            match handle {
+                #[cfg(unix)]
+                NativePtySessionHandle::Unix { child, .. } => {
+                    if child
+                        .try_wait()
+                        .map_err(|err| {
+                            PlatformError::from_io_error("poll Unix PTY child", ".", err)
+                        })?
+                        .is_some()
+                    {
+                        orphaned.push(id.clone());
+                    }
+                }
+                #[cfg(windows)]
+                NativePtySessionHandle::Windows(handle) => {
+                    if windows_session_exited(handle)?.0 {
+                        orphaned.push(id.clone());
+                    }
+                }
+            }
+        }
+        for id in &orphaned {
+            if let Some(handle) = sessions.remove(id) {
+                close_removed_pty_session(handle, false);
+            }
+        }
+        Ok(orphaned)
     }
 }
 
@@ -1184,6 +2121,115 @@ mod tests {
         let start = now.now_millis();
         now.sleep(Duration::from_millis(1));
         assert!(now.is_over_deadline(start, Duration::from_nanos(10)));
+    }
+
+    #[test]
+    fn native_pty_service_uses_platform_backend_for_one_shot_output() {
+        let service = NativePtyService;
+        #[cfg(windows)]
+        let request = PtyRequest {
+            command: "cmd".to_string(),
+            args: vec!["/C".to_string(), "echo hello".to_string()],
+            cwd: None,
+        };
+        #[cfg(unix)]
+        let request = PtyRequest {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "printf hello".to_string()],
+            cwd: None,
+        };
+        #[cfg(not(any(unix, windows)))]
+        let request = PtyRequest {
+            command: "unsupported".to_string(),
+            args: vec![],
+            cwd: None,
+        };
+        let session = service.spawn_pty(&request).expect("spawn native pty");
+        assert!(session.id.starts_with("native-"));
+        let mut output = session.output;
+        let mut reads = Vec::new();
+        for _ in 0..20 {
+            if output.to_ascii_lowercase().contains("hello") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            let chunk = service
+                .read_pty(&session.id, PTY_OUTPUT_LIMIT)
+                .expect("read native pty output");
+            reads.push(format!(
+                "output={:?}; exited={}; exit_code={:?}; truncated={}",
+                chunk.output, chunk.exited, chunk.exit_code, chunk.truncated
+            ));
+            output.push_str(&chunk.output);
+            if chunk.exited {
+                break;
+            }
+        }
+        assert!(
+            output.to_ascii_lowercase().contains("hello"),
+            "native PTY output did not contain hello; output={output:?}; reads={reads:?}"
+        );
+        let _ = service.cleanup_orphaned_ptys();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn native_unix_pty_child_has_controlling_terminal() {
+        let service = NativePtyService;
+        let request = PtyRequest {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "if : </dev/tty 2>/dev/null; then printf ctty; else printf no-ctty; fi".to_string(),
+            ],
+            cwd: None,
+        };
+        let session = service
+            .spawn_pty(&request)
+            .expect("spawn native unix pty with controlling terminal");
+        let mut output = session.output;
+        let mut reads = Vec::new();
+        for _ in 0..20 {
+            if output.contains("ctty") || output.contains("no-ctty") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            let chunk = service
+                .read_pty(&session.id, PTY_OUTPUT_LIMIT)
+                .expect("read native unix pty output");
+            reads.push(format!(
+                "output={:?}; exited={}; exit_code={:?}; truncated={}",
+                chunk.output, chunk.exited, chunk.exit_code, chunk.truncated
+            ));
+            output.push_str(&chunk.output);
+            if chunk.exited {
+                break;
+            }
+        }
+        assert!(
+            output.contains("ctty") && !output.contains("no-ctty"),
+            "native Unix PTY child did not have controlling terminal; output={output:?}; reads={reads:?}"
+        );
+        let _ = service.cleanup_orphaned_ptys();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_argument_quoting_preserves_backslashes() {
+        assert_eq!(
+            quote_windows_arg("C:\\repo\\file.txt"),
+            "C:\\repo\\file.txt"
+        );
+        assert_eq!(
+            quote_windows_arg("C:\\Program Files\\devil\\file.txt"),
+            "\"C:\\Program Files\\devil\\file.txt\""
+        );
+        assert_eq!(quote_windows_arg("say \"hello\""), "\"say \\\"hello\\\"\"");
+        assert_eq!(quote_windows_arg("C:\\path\\"), "C:\\path\\");
+        assert_eq!(
+            quote_windows_arg("C:\\path with space\\"),
+            "\"C:\\path with space\\\\\""
+        );
     }
 
     #[test]

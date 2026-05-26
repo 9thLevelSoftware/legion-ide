@@ -2,9 +2,11 @@ Command: cargo deny check
 Result: completed
 
 Findings:
-- warning[duplicate]: getrandom / rand_core duplicate versions through ChaCha20-Poly1305 AEAD and existing uuid/quickcheck dependency chains.
-- warning[duplicate]: thiserror / thiserror-impl duplicate major versions through `cargo_metadata` and workspace crates.
+- warning[duplicate]: core-foundation and security-framework duplicate versions through keyring and rustls platform verifier dependency chains.
+- warning[duplicate]: getrandom / rand_core duplicate versions through ring, ChaCha20-Poly1305 AEAD, uuid, and quickcheck dependency chains.
+- warning[duplicate]: thiserror / thiserror-impl duplicate major versions through `cargo_metadata`, rustls platform verifier, and workspace crates.
+- warning[duplicate]: windows target crate duplicate versions through rustls/keyring/Windows platform dependency chains.
 - warning[duplicate]: wit-bindgen duplicate versions through WASI dependency chain.
 - advisories ok, bans ok, licenses ok, sources ok.
 
-Policy note: repository `deny.toml` treats duplicate versions as warning-level baseline and allows OSI-approved `BSD-3-Clause` for the reviewed AEAD dependency chain.
+Policy note: repository `deny.toml` treats duplicate versions as warning-level baseline and now allows reviewed Phase 8 rustls/keyring dependency licenses: OSI-approved `ISC` for ring/rustls-webpki/untrusted and `CDLA-Permissive-2.0` for webpki root certificate data through reqwest's rustls platform verifier.

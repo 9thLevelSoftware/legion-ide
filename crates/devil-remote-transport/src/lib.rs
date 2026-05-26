@@ -1,21 +1,35 @@
-//! Deterministic Phase 8 remote transport fixture harness.
+//! Deterministic and production-gated Phase 8 remote transport carriers.
 
 #![warn(missing_docs)]
 
 use std::collections::{HashSet, VecDeque};
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use devil_protocol::{
-    CausalityId, EventSequence, RedactionHint, RemoteAgentPackageDescriptor,
+    CausalityId, EventSequence, FileFingerprint, RedactionHint, RemoteAgentPackageDescriptor,
     RemoteNetworkHealthState, RemoteOfflineResumeManifest, RemoteOperationId,
     RemoteOperationLogCheckpoint, RemoteOperationLogCheckpointId, RemoteTransportAuditSummary,
-    RemoteTransportFlowControlWindow, RemoteTransportFrameMetadata, RemoteTransportHandshake,
-    RemoteTransportHealthSummary, RemoteTransportLifecycleState, RemoteTransportPeerIdentity,
+    RemoteTransportCarrierDiagnostic, RemoteTransportConnectionAttempt,
+    RemoteTransportCredentialReference, RemoteTransportFlowControlWindow,
+    RemoteTransportFrameMetadata, RemoteTransportHandshake, RemoteTransportHealthSummary,
+    RemoteTransportLifecycleState, RemoteTransportMutualTlsMode, RemoteTransportPeerIdentity,
     RemoteTransportReplayWindow, RemoteTransportResumeToken, RemoteWorkspaceSessionId,
     TimestampMillis, validate_remote_agent_package_descriptor,
-    validate_remote_transport_audit_summary, validate_remote_transport_flow_control_window,
+    validate_remote_transport_audit_summary, validate_remote_transport_carrier_diagnostic,
+    validate_remote_transport_connection_attempt, validate_remote_transport_flow_control_window,
     validate_remote_transport_handshake, validate_remote_transport_replay_window,
 };
+use rustls::{ClientConfig, RootCertStore};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 /// Remote transport fixture error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -82,6 +96,311 @@ pub enum RemoteTransportCoreError {
         /// Rejection reason.
         reason: String,
     },
+}
+
+/// Production remote transport carrier error.
+#[derive(Debug, Error)]
+pub enum RemoteTransportCarrierError {
+    /// Carrier is disabled.
+    #[error("remote transport carrier is disabled")]
+    Disabled,
+    /// Protocol or policy metadata was invalid.
+    #[error("invalid remote transport carrier policy: {reason}")]
+    InvalidPolicy {
+        /// Rejection reason.
+        reason: String,
+    },
+    /// TLS credential material was missing or invalid.
+    #[error("remote transport TLS credential error: {reason}")]
+    Credential {
+        /// Failure reason.
+        reason: String,
+    },
+    /// Network connection failed.
+    #[error("remote transport network error: {reason}")]
+    Network {
+        /// Failure reason.
+        reason: String,
+    },
+    /// TLS handshake failed.
+    #[error("remote transport TLS error: {reason}")]
+    Tls {
+        /// Failure reason.
+        reason: String,
+    },
+    /// Connection attempt was canceled before activation.
+    #[error("remote transport connection canceled: {reason}")]
+    Canceled {
+        /// Failure reason.
+        reason: String,
+    },
+}
+
+/// Production remote transport carrier.
+pub trait RemoteTransportCarrier {
+    /// Connect to a policy-validated endpoint and return metadata-only diagnostics.
+    fn connect<'a>(
+        &'a self,
+        attempt: RemoteTransportConnectionAttempt,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<RemoteTransportCarrierDiagnostic, RemoteTransportCarrierError>,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Rustls-backed outbound TLS/mTLS carrier configuration.
+#[derive(Debug, Clone, Default)]
+pub struct RustlsMtlsCarrierConfig {
+    /// Whether outbound carrier use is enabled.
+    pub enabled: bool,
+    /// PEM files containing trusted server roots. Empty uses the rustls empty root store.
+    pub root_ca_pem_paths: Vec<PathBuf>,
+    /// PEM file containing the client certificate chain for required mTLS.
+    pub client_cert_chain_pem_path: Option<PathBuf>,
+    /// PEM file containing the client private key for required mTLS.
+    pub client_private_key_pem_path: Option<PathBuf>,
+}
+
+impl RustlsMtlsCarrierConfig {
+    /// Return an enabled carrier configuration.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Rustls-backed production outbound TLS/mTLS carrier.
+#[derive(Debug, Clone)]
+pub struct RustlsMtlsCarrier {
+    config: RustlsMtlsCarrierConfig,
+}
+
+impl RustlsMtlsCarrier {
+    /// Construct a carrier from explicit configuration.
+    pub fn new(config: RustlsMtlsCarrierConfig) -> Self {
+        Self { config }
+    }
+
+    /// Build a rustls client configuration after policy validation.
+    pub fn build_client_config(
+        &self,
+        attempt: &RemoteTransportConnectionAttempt,
+    ) -> Result<ClientConfig, RemoteTransportCarrierError> {
+        self.ensure_enabled()?;
+        validate_remote_transport_connection_attempt(attempt).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: err.message,
+            }
+        })?;
+
+        let mut root_certs = Vec::new();
+        for path in &self.config.root_ca_pem_paths {
+            root_certs.extend(load_certs(path)?);
+        }
+        enforce_root_store_reference(
+            attempt.tls_policy.root_store_reference.as_ref(),
+            &root_certs,
+        )?;
+        validate_certificate_pin_reference(attempt.tls_policy.certificate_pin_reference.as_ref())?;
+
+        let mut roots = RootCertStore::empty();
+        for cert in root_certs {
+            roots
+                .add(cert)
+                .map_err(|err| RemoteTransportCarrierError::Credential {
+                    reason: format!("root certificate rejected: {err}"),
+                })?;
+        }
+
+        let wants_mtls = attempt.tls_policy.mtls_mode == RemoteTransportMutualTlsMode::Required;
+        let mut client_config = if wants_mtls {
+            let cert_path = self
+                .config
+                .client_cert_chain_pem_path
+                .as_ref()
+                .ok_or_else(|| RemoteTransportCarrierError::Credential {
+                    reason: "required mTLS has no client certificate chain path".to_string(),
+                })?;
+            let key_path = self
+                .config
+                .client_private_key_pem_path
+                .as_ref()
+                .ok_or_else(|| RemoteTransportCarrierError::Credential {
+                    reason: "required mTLS has no client private key path".to_string(),
+                })?;
+            let certs = load_certs(cert_path)?;
+            enforce_client_credential_reference(
+                attempt.tls_policy.client_credential_reference.as_ref(),
+                &certs,
+            )?;
+            let key = load_private_key(key_path)?;
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certs, key)
+                .map_err(|err| RemoteTransportCarrierError::Credential {
+                    reason: format!("client certificate rejected: {err}"),
+                })?
+        } else {
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        };
+        client_config.alpn_protocols = attempt
+            .tls_policy
+            .alpn_protocols
+            .iter()
+            .map(|protocol| protocol.as_bytes().to_vec())
+            .collect();
+        Ok(client_config)
+    }
+
+    async fn connect_inner(
+        &self,
+        attempt: RemoteTransportConnectionAttempt,
+    ) -> Result<RemoteTransportCarrierDiagnostic, RemoteTransportCarrierError> {
+        self.ensure_enabled()?;
+        validate_remote_transport_connection_attempt(&attempt).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: err.message,
+            }
+        })?;
+        if attempt.cancellation_requested {
+            return Err(RemoteTransportCarrierError::Canceled {
+                reason: "connection attempt canceled before activation".to_string(),
+            });
+        }
+        let client_config = self.build_client_config(&attempt)?;
+        let endpoint = &attempt.endpoint_policy.endpoint;
+        let port = endpoint.port.unwrap_or(443);
+        let deadline = Instant::now() + Duration::from_millis(attempt.timeout_ms);
+        let target_addrs = resolve_endpoint_socket_addrs(
+            endpoint.host.as_str(),
+            port,
+            endpoint.loopback_only,
+            deadline,
+        )
+        .await?;
+        let stream = connect_endpoint_socket_addrs(&target_addrs, deadline).await?;
+        let server_identity = tls_server_identity_name(&attempt.tls_policy.server_identity)?;
+        let server_name = ServerName::try_from(server_identity).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: format!("invalid TLS policy server identity: {err}"),
+            }
+        })?;
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let tls_stream = tokio::time::timeout(
+            remaining_attempt_budget(deadline).ok_or_else(|| RemoteTransportCarrierError::Tls {
+                reason: "tls handshake timed out".to_string(),
+            })?,
+            connector.connect(server_name, stream),
+        )
+        .await
+        .map_err(|_| RemoteTransportCarrierError::Tls {
+            reason: "tls handshake timed out".to_string(),
+        })?
+        .map_err(|err| RemoteTransportCarrierError::Tls {
+            reason: err.to_string(),
+        })?;
+        verify_peer_certificate_pin(
+            attempt.tls_policy.certificate_pin_reference.as_ref(),
+            tls_stream.get_ref().1.peer_certificates(),
+        )?;
+        let negotiated_alpn = tls_stream.get_ref().1.alpn_protocol().ok_or_else(|| {
+            RemoteTransportCarrierError::Tls {
+                reason: "tls handshake did not negotiate ALPN".to_string(),
+            }
+        })?;
+        if negotiated_alpn != attempt.selected_alpn.as_bytes() {
+            return Err(RemoteTransportCarrierError::Tls {
+                reason: format!(
+                    "negotiated ALPN `{}` did not match selected policy `{}`",
+                    String::from_utf8_lossy(negotiated_alpn),
+                    attempt.selected_alpn
+                ),
+            });
+        }
+        let diagnostic = RemoteTransportCarrierDiagnostic {
+            session_id: None,
+            state: RemoteTransportLifecycleState::Active,
+            event_sequence: attempt.event_sequence,
+            correlation_id: attempt.correlation_id,
+            causality_id: attempt.causality_id,
+            metadata_summary: format!(
+                "tls_handshake=ok mtls={:?} alpn={} schema={}",
+                attempt.tls_policy.mtls_mode,
+                attempt.selected_alpn,
+                attempt.selected_schema_version
+            ),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_remote_transport_carrier_diagnostic(&diagnostic).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: err.message,
+            }
+        })?;
+        Ok(diagnostic)
+    }
+
+    fn ensure_enabled(&self) -> Result<(), RemoteTransportCarrierError> {
+        if self.config.enabled {
+            Ok(())
+        } else {
+            Err(RemoteTransportCarrierError::Disabled)
+        }
+    }
+}
+
+impl RemoteTransportCarrier for RustlsMtlsCarrier {
+    fn connect<'a>(
+        &'a self,
+        attempt: RemoteTransportConnectionAttempt,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<RemoteTransportCarrierDiagnostic, RemoteTransportCarrierError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(self.connect_inner(attempt))
+    }
+}
+
+fn tls_server_identity_name(identity: &str) -> Result<String, RemoteTransportCarrierError> {
+    let trimmed = identity.trim();
+    let (identity_kind, name) = if let Some(name) = trimmed.strip_prefix("dns:") {
+        ("dns", name.trim())
+    } else if let Some(name) = trimmed.strip_prefix("ip:") {
+        ("ip", name.trim())
+    } else {
+        ("untyped", trimmed)
+    };
+    if name.is_empty() || name.contains('/') {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: "TLS policy server identity must be a DNS name or IP address".to_string(),
+        });
+    }
+    match identity_kind {
+        "ip" if name.parse::<IpAddr>().is_err() => {
+            return Err(RemoteTransportCarrierError::InvalidPolicy {
+                reason: "TLS policy ip: server identity must be an IP literal".to_string(),
+            });
+        }
+        "dns" if name.parse::<IpAddr>().is_ok() => {
+            return Err(RemoteTransportCarrierError::InvalidPolicy {
+                reason: "TLS policy dns: server identity must be a DNS name".to_string(),
+            });
+        }
+        _ => {}
+    }
+    Ok(name.to_string())
 }
 
 /// Production transport-core configuration.
@@ -664,15 +983,296 @@ fn uuid_from_sequence(sequence: u64) -> uuid::Uuid {
     uuid::Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0000_u128 + sequence as u128)
 }
 
+fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>, RemoteTransportCarrierError> {
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|err| RemoteTransportCarrierError::Credential {
+            reason: format!("open certificate PEM `{}`: {err}", path.display()),
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| RemoteTransportCarrierError::Credential {
+            reason: format!("decode certificate PEM `{}`: {err}", path.display()),
+        })?;
+    if certs.is_empty() {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "certificate PEM `{}` contained no certificates",
+                path.display()
+            ),
+        });
+    }
+    Ok(certs)
+}
+
+fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, RemoteTransportCarrierError> {
+    PrivateKeyDer::from_pem_file(path).map_err(|err| RemoteTransportCarrierError::Credential {
+        reason: format!("decode private key PEM `{}`: {err}", path.display()),
+    })
+}
+
+fn enforce_root_store_reference(
+    reference: Option<&RemoteTransportCredentialReference>,
+    root_certs: &[CertificateDer<'static>],
+) -> Result<(), RemoteTransportCarrierError> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    if reference.kind != "root-store" {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "root store reference `{}` used unsupported kind `{}`",
+                reference.reference_id, reference.kind
+            ),
+        });
+    }
+    if root_certs.is_empty() {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "root store reference `{}` has no configured root certificates",
+                reference.reference_id
+            ),
+        });
+    }
+    let configured_digest = root_store_fingerprint(root_certs);
+    if !fingerprint_matches(&reference.digest, &configured_digest) {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "root store reference `{}` digest mismatch",
+                reference.reference_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_certificate_pin_reference(
+    reference: Option<&RemoteTransportCredentialReference>,
+) -> Result<(), RemoteTransportCarrierError> {
+    if let Some(reference) = reference
+        && reference.kind != "pin"
+    {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "certificate pin reference `{}` used unsupported kind `{}`",
+                reference.reference_id, reference.kind
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn enforce_client_credential_reference(
+    reference: Option<&RemoteTransportCredentialReference>,
+    client_certs: &[CertificateDer<'static>],
+) -> Result<(), RemoteTransportCarrierError> {
+    let Some(reference) = reference else {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: "required mTLS has no client credential reference".to_string(),
+        });
+    };
+    if reference.kind != "client-cert" {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "client credential reference `{}` used unsupported kind `{}`",
+                reference.reference_id, reference.kind
+            ),
+        });
+    }
+    if client_certs.is_empty() {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "client credential reference `{}` has no configured certificate chain",
+                reference.reference_id
+            ),
+        });
+    }
+    let configured_digest = certificate_chain_fingerprint(client_certs);
+    if !fingerprint_matches(&reference.digest, &configured_digest) {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "client credential reference `{}` digest mismatch",
+                reference.reference_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn verify_peer_certificate_pin(
+    reference: Option<&RemoteTransportCredentialReference>,
+    peer_certs: Option<&[CertificateDer<'static>]>,
+) -> Result<(), RemoteTransportCarrierError> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    validate_certificate_pin_reference(Some(reference))?;
+    let leaf = peer_certs.and_then(|certs| certs.first()).ok_or_else(|| {
+        RemoteTransportCarrierError::Tls {
+            reason: format!(
+                "certificate pin reference `{}` could not inspect peer leaf certificate",
+                reference.reference_id
+            ),
+        }
+    })?;
+    let leaf_digest = sha256_fingerprint(leaf.as_ref());
+    if !fingerprint_matches(&reference.digest, &leaf_digest) {
+        return Err(RemoteTransportCarrierError::Tls {
+            reason: format!(
+                "certificate pin reference `{}` digest mismatch",
+                reference.reference_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn root_store_fingerprint(certs: &[CertificateDer<'static>]) -> FileFingerprint {
+    certificate_chain_fingerprint(certs)
+}
+
+fn certificate_chain_fingerprint(certs: &[CertificateDer<'static>]) -> FileFingerprint {
+    let mut hasher = Sha256::new();
+    for cert in certs {
+        let bytes = cert.as_ref();
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    let digest = hasher.finalize();
+    sha256_digest_fingerprint(digest.as_ref())
+}
+
+fn sha256_fingerprint(bytes: &[u8]) -> FileFingerprint {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    sha256_digest_fingerprint(digest.as_ref())
+}
+
+fn sha256_digest_fingerprint(digest: &[u8]) -> FileFingerprint {
+    FileFingerprint {
+        algorithm: "sha256".to_string(),
+        value: format!("sha256:{}", lowercase_hex(digest)),
+    }
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn fingerprint_matches(expected: &FileFingerprint, actual: &FileFingerprint) -> bool {
+    expected
+        .algorithm
+        .eq_ignore_ascii_case(actual.algorithm.as_str())
+        && expected.value == actual.value
+}
+
+fn remaining_attempt_budget(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(remaining)
+}
+
+async fn resolve_endpoint_socket_addrs(
+    host: &str,
+    port: u16,
+    loopback_only: bool,
+    deadline: Instant,
+) -> Result<Vec<SocketAddr>, RemoteTransportCarrierError> {
+    let addrs = tokio::time::timeout(
+        remaining_attempt_budget(deadline).ok_or_else(|| RemoteTransportCarrierError::Network {
+            reason: "endpoint resolution timed out".to_string(),
+        })?,
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    .map_err(|_| RemoteTransportCarrierError::Network {
+        reason: "endpoint resolution timed out".to_string(),
+    })?
+    .map_err(|err| RemoteTransportCarrierError::Network {
+        reason: err.to_string(),
+    })?
+    .collect::<Vec<_>>();
+    select_endpoint_socket_addrs(host, loopback_only, addrs)
+}
+
+fn select_endpoint_socket_addrs(
+    host: &str,
+    loopback_only: bool,
+    addrs: Vec<SocketAddr>,
+) -> Result<Vec<SocketAddr>, RemoteTransportCarrierError> {
+    if addrs.is_empty() {
+        return Err(RemoteTransportCarrierError::Network {
+            reason: format!("endpoint `{host}` resolved no socket addresses"),
+        });
+    }
+    if loopback_only && let Some(non_loopback) = addrs.iter().find(|addr| !addr.ip().is_loopback())
+    {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "loopback-only endpoint `{host}` resolved non-loopback address {non_loopback}"
+            ),
+        });
+    }
+    Ok(addrs)
+}
+
+async fn connect_endpoint_socket_addrs(
+    addrs: &[SocketAddr],
+    deadline: Instant,
+) -> Result<TcpStream, RemoteTransportCarrierError> {
+    if addrs.is_empty() {
+        return Err(RemoteTransportCarrierError::Network {
+            reason: "endpoint resolved no socket addresses".to_string(),
+        });
+    }
+    let mut last_error = None;
+    for addr in addrs {
+        let Some(remaining) = remaining_attempt_budget(deadline) else {
+            return Err(
+                last_error.unwrap_or_else(|| RemoteTransportCarrierError::Network {
+                    reason: "tcp connect timed out".to_string(),
+                }),
+            );
+        };
+        match tokio::time::timeout(remaining, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => {
+                last_error = Some(RemoteTransportCarrierError::Network {
+                    reason: format!("tcp connect to {addr} failed: {err}"),
+                });
+            }
+            Err(_) => {
+                return Err(RemoteTransportCarrierError::Network {
+                    reason: format!("tcp connect to {addr} timed out"),
+                });
+            }
+        }
+    }
+    Err(
+        last_error.unwrap_or_else(|| RemoteTransportCarrierError::Network {
+            reason: "tcp connect failed for all resolved socket addresses".to_string(),
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use devil_protocol::{
         CapabilityDecision, CapabilityDecisionId, CapabilityId, CollaborationVersionVector,
         CorrelationId, FileFingerprint, PrincipalId, RemoteAgentId, RemoteAuthorityId,
         RemoteOperationLogCheckpoint, RemoteOperationLogCheckpointId,
-        RemoteTransportEndpointDescriptor, RemoteTransportPeerIdentity,
-        RemoteTransportSchemaCompatibility, SnapshotId, TimestampMillis, WorkspaceGeneration,
-        WorkspaceTrustState,
+        RemoteTransportConnectionAttempt, RemoteTransportCredentialReference,
+        RemoteTransportEndpointDescriptor, RemoteTransportEndpointPolicy,
+        RemoteTransportMutualTlsMode, RemoteTransportPeerIdentity,
+        RemoteTransportSchemaCompatibility, RemoteTransportTlsPolicy, SnapshotId, TimestampMillis,
+        WorkspaceGeneration, WorkspaceTrustState,
     };
 
     use super::*;
@@ -748,6 +1348,52 @@ mod tests {
                 capability: CapabilityId("remote.agent.package.activate".to_string()),
                 reason: None,
             },
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn connection_attempt() -> RemoteTransportConnectionAttempt {
+        RemoteTransportConnectionAttempt {
+            endpoint_policy: RemoteTransportEndpointPolicy {
+                endpoint: RemoteTransportEndpointDescriptor {
+                    endpoint_id: "loopback".to_string(),
+                    scheme: "https".to_string(),
+                    host: "localhost".to_string(),
+                    port: Some(9443),
+                    loopback_only: true,
+                    schema_version: 1,
+                },
+                allowed_schemes: vec!["https".to_string()],
+                redirects_allowed: false,
+                schema_version: 1,
+            },
+            tls_policy: RemoteTransportTlsPolicy {
+                require_tls: true,
+                server_identity: "dns:localhost".to_string(),
+                root_store_reference: None,
+                certificate_pin_reference: None,
+                mtls_mode: RemoteTransportMutualTlsMode::Optional,
+                client_credential_reference: None,
+                alpn_protocols: vec!["devil-remote/phase8".to_string()],
+                min_schema_version: 1,
+                max_schema_version: 1,
+                schema_version: 1,
+            },
+            selected_alpn: "devil-remote/phase8".to_string(),
+            selected_schema_version: 1,
+            timeout_ms: 100,
+            cancellation_requested: false,
+            capability_decision: CapabilityDecision {
+                decision_id: CapabilityDecisionId(55),
+                granted: true,
+                capability: CapabilityId("remote.transport.connect".to_string()),
+                reason: None,
+            },
+            event_sequence: EventSequence(9),
+            correlation_id: CorrelationId(9),
+            causality_id: CausalityId(uuid_from_sequence(9)),
+            metadata_summary: "tls=required mtls=optional".to_string(),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         }
@@ -859,6 +1505,283 @@ mod tests {
         let audit = machine.audit_summary().expect("audit");
         assert!(audit.metadata_summary.contains("duplicates=1"));
         assert!(!audit.metadata_summary.contains("transport_payload"));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_is_default_off() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::default());
+        assert!(matches!(
+            carrier.build_client_config(&connection_attempt()),
+            Err(RemoteTransportCarrierError::Disabled)
+        ));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_builds_optional_mtls_config_without_inline_material() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let config = carrier
+            .build_client_config(&connection_attempt())
+            .expect("optional mTLS config");
+        assert_eq!(config.alpn_protocols, vec![b"devil-remote/phase8".to_vec()]);
+    }
+
+    #[test]
+    fn tls_server_identity_is_policy_bound_and_normalized() {
+        assert_eq!(
+            tls_server_identity_name("dns:localhost").expect("dns identity"),
+            "localhost"
+        );
+        assert_eq!(
+            tls_server_identity_name("ip:127.0.0.1").expect("ip identity"),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            tls_server_identity_name("ip:::1").expect("ipv6 identity"),
+            "::1"
+        );
+        assert!(matches!(
+            tls_server_identity_name("ip:example.com"),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+        assert!(matches!(
+            tls_server_identity_name("dns:127.0.0.1"),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+        assert!(matches!(
+            tls_server_identity_name("spiffe://example/workload"),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_rejects_required_mtls_without_files_before_network() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let attempt = RemoteTransportConnectionAttempt {
+            tls_policy: RemoteTransportTlsPolicy {
+                mtls_mode: RemoteTransportMutualTlsMode::Required,
+                client_credential_reference: Some(RemoteTransportCredentialReference {
+                    reference_id: "client-cert-ref".to_string(),
+                    kind: "client-cert".to_string(),
+                    digest: FileFingerprint {
+                        algorithm: "sha256".to_string(),
+                        value: "abc123".to_string(),
+                    },
+                    schema_version: 1,
+                }),
+                ..connection_attempt().tls_policy
+            },
+            ..connection_attempt()
+        };
+        assert!(matches!(
+            carrier.build_client_config(&attempt),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_short_circuits_canceled_attempt_before_credentials_or_network() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let attempt = RemoteTransportConnectionAttempt {
+            cancellation_requested: true,
+            tls_policy: RemoteTransportTlsPolicy {
+                mtls_mode: RemoteTransportMutualTlsMode::Required,
+                client_credential_reference: Some(RemoteTransportCredentialReference {
+                    reference_id: "client-cert-ref".to_string(),
+                    kind: "client-cert".to_string(),
+                    digest: FileFingerprint {
+                        algorithm: "sha256".to_string(),
+                        value: "abc123".to_string(),
+                    },
+                    schema_version: 1,
+                }),
+                ..connection_attempt().tls_policy
+            },
+            ..connection_attempt()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let err = runtime
+            .block_on(carrier.connect(attempt))
+            .expect_err("canceled before credential loading or network dial");
+        assert!(matches!(err, RemoteTransportCarrierError::Canceled { .. }));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_uses_single_attempt_timeout_budget() {
+        let expired = Instant::now() - Duration::from_millis(1);
+        assert_eq!(remaining_attempt_budget(expired), None);
+    }
+
+    #[test]
+    fn root_store_reference_must_match_configured_root_digest() {
+        let root = CertificateDer::from(vec![1, 2, 3, 4]);
+        let matching = RemoteTransportCredentialReference {
+            reference_id: "root-store-ref".to_string(),
+            kind: "root-store".to_string(),
+            digest: root_store_fingerprint(std::slice::from_ref(&root)),
+            schema_version: 1,
+        };
+        enforce_root_store_reference(Some(&matching), std::slice::from_ref(&root))
+            .expect("matching root-store reference");
+
+        let mismatched = RemoteTransportCredentialReference {
+            digest: sha256_fingerprint(b"other-root-store"),
+            ..matching
+        };
+        assert!(matches!(
+            enforce_root_store_reference(Some(&mismatched), &[root]),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+    }
+
+    #[test]
+    fn client_credential_reference_must_match_configured_client_chain_digest() {
+        let leaf = CertificateDer::from(vec![1, 1, 2, 3, 5, 8]);
+        let intermediate = CertificateDer::from(vec![13, 21, 34]);
+        let chain = vec![leaf, intermediate];
+        let matching = RemoteTransportCredentialReference {
+            reference_id: "client-cert-ref".to_string(),
+            kind: "client-cert".to_string(),
+            digest: certificate_chain_fingerprint(&chain),
+            schema_version: 1,
+        };
+        assert!(enforce_client_credential_reference(Some(&matching), &chain).is_ok());
+
+        let mismatched = RemoteTransportCredentialReference {
+            reference_id: "client-cert-ref".to_string(),
+            kind: "client-cert".to_string(),
+            digest: sha256_fingerprint(b"other-client-cert"),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            enforce_client_credential_reference(Some(&mismatched), &chain),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+
+        let wrong_kind = RemoteTransportCredentialReference {
+            reference_id: "client-cert-ref".to_string(),
+            kind: "private-key".to_string(),
+            digest: certificate_chain_fingerprint(&chain),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            enforce_client_credential_reference(Some(&wrong_kind), &chain),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_rejects_policy_root_reference_without_configured_roots() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let attempt = RemoteTransportConnectionAttempt {
+            tls_policy: RemoteTransportTlsPolicy {
+                root_store_reference: Some(RemoteTransportCredentialReference {
+                    reference_id: "root-store-ref".to_string(),
+                    kind: "root-store".to_string(),
+                    digest: sha256_fingerprint(b"missing-root-store"),
+                    schema_version: 1,
+                }),
+                ..connection_attempt().tls_policy
+            },
+            ..connection_attempt()
+        };
+        assert!(matches!(
+            carrier.build_client_config(&attempt),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+    }
+
+    #[test]
+    fn certificate_pin_reference_must_match_peer_leaf_digest() {
+        let leaf = CertificateDer::from(vec![4, 3, 2, 1]);
+        let intermediate = CertificateDer::from(vec![5, 6, 7, 8]);
+        let matching = RemoteTransportCredentialReference {
+            reference_id: "pin-ref".to_string(),
+            kind: "pin".to_string(),
+            digest: sha256_fingerprint(leaf.as_ref()),
+            schema_version: 1,
+        };
+        verify_peer_certificate_pin(Some(&matching), Some(&[leaf.clone(), intermediate.clone()]))
+            .expect("matching leaf certificate pin");
+
+        let mismatched = RemoteTransportCredentialReference {
+            digest: sha256_fingerprint(intermediate.as_ref()),
+            ..matching
+        };
+        assert!(matches!(
+            verify_peer_certificate_pin(Some(&mismatched), Some(&[leaf])),
+            Err(RemoteTransportCarrierError::Tls { .. })
+        ));
+    }
+
+    #[test]
+    fn loopback_only_endpoint_rejects_external_resolution_before_dial() {
+        assert!(matches!(
+            select_endpoint_socket_addrs(
+                "example.com",
+                true,
+                vec!["93.184.216.34:443".parse().expect("external socket addr")],
+            ),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+        assert!(matches!(
+            select_endpoint_socket_addrs(
+                "localhost",
+                true,
+                vec![
+                    "127.0.0.1:443".parse().expect("loopback socket addr"),
+                    "93.184.216.34:443".parse().expect("external socket addr"),
+                ],
+            ),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+        assert_eq!(
+            select_endpoint_socket_addrs(
+                "localhost",
+                true,
+                vec![
+                    "127.0.0.1:443".parse().expect("loopback socket addr"),
+                    "[::1]:443".parse().expect("ipv6 loopback socket addr"),
+                ],
+            )
+            .expect("loopback-only socket addrs"),
+            vec![
+                "127.0.0.1:443".parse().expect("loopback socket addr"),
+                "[::1]:443".parse().expect("ipv6 loopback socket addr"),
+            ]
+        );
+    }
+
+    #[test]
+    fn connect_endpoint_socket_addrs_tries_later_resolved_addresses() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async {
+            let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind closed listener");
+            let closed_addr = closed.local_addr().expect("closed listener addr");
+            drop(closed);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind accepting listener");
+            let open_addr = listener.local_addr().expect("open listener addr");
+            let accept = tokio::spawn(async move {
+                let _ = listener.accept().await.expect("accept fallback connection");
+            });
+            let stream = connect_endpoint_socket_addrs(
+                &[closed_addr, open_addr],
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("connects to later resolved address");
+            drop(stream);
+            accept.await.expect("accept task");
+        });
     }
 
     #[test]

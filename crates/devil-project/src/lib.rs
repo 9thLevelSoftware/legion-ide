@@ -4605,11 +4605,12 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create temporary workspace directory");
         let canonical_root =
             std::fs::canonicalize(&root).expect("canonicalize temp workspace root");
-        let canonical_root = canonical_root.to_string_lossy().into_owned();
+        let root = canonical_root;
+        let canonical_root = root.to_string_lossy().into_owned();
 
         let mut policy = SecurityPolicy::default();
         policy.path_policy.readable_roots = vec![canonical_root.clone()];
-        policy.path_policy.writable_roots = vec![canonical_root];
+        policy.path_policy.writable_roots = vec![canonical_root.clone()];
 
         let actor = WorkspaceActor::new(
             Arc::new(NativeFileSystem),
@@ -4622,7 +4623,7 @@ mod tests {
         let req = WorkspaceOpenRequest {
             correlation_id: CorrelationId(3),
             principal_id: PrincipalId("temp-principal".to_string()),
-            root_path: CanonicalPath(root.to_string_lossy().into_owned()),
+            root_path: CanonicalPath(canonical_root.clone()),
             trust: Some(trust),
         };
 

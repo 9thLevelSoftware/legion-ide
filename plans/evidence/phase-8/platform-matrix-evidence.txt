@@ -1,0 +1,28 @@
+Status: final platform matrix evidence archived for Phase 8 GA acceptance.
+
+Workflow: .github/workflows/ci.yml
+Run URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26470308103
+Head SHA: b3ca8f8efe9f4e68bf55bbfd098512e4bc0ead22
+Completed: 2026-05-26T19:34:19Z
+
+Matrix jobs:
+- ubuntu-latest: passed
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26470308103/job/77941657804
+- windows-latest: passed
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26470308103/job/77941657823
+- macos-latest: passed
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26470308103/job/77941657819
+
+Archived gate outputs from CI run 26470308103:
+- cargo fmt --all --check: passed
+- cargo check --workspace --all-targets: passed
+- cargo test --workspace --all-targets: passed
+- cargo clippy --workspace --all-targets -- -D warnings: passed
+- cargo deny check: passed
+- cargo run -p devil-cli -- evidence check --phase phase8: passed
+- cargo run -p xtask -- check-deps: passed
+
+Notes:
+- Cargo deny ran on ubuntu-latest with the repository warning-level policy in deny.toml.
+- Windows and macOS skipped the cargo-deny action intentionally because the CI gate is Linux-owned.
+- Release readiness signoff and architecture map acceptance are recorded in the paired Phase 8 GA artifacts.

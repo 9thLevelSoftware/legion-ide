@@ -12,12 +12,14 @@ use chacha20poly1305::{
 };
 use devil_protocol::{
     CanonicalPath, CausalityId, CorrelationId, EventSequence, FileFingerprint,
-    RawSourceCaptureRequest, RawSourceKeyReference, RawSourceKeyRotationRecord,
+    HostedRetentionExportLinkage, HostedTelemetryEndpointDescriptor, RawSourceCaptureRequest,
+    RawSourceHostedExportConsent, RawSourceKeyReference, RawSourceKeyRotationRecord,
     RawSourceRetentionAccessAudit, RawSourceRetentionBundleDescriptor,
     RawSourceRetentionConsentGrant, RawSourceRetentionLease, RawSourceRetentionPolicy,
     RawSourceRetentionPurpose, RawSourceRetentionTombstone, RawSourceVaultAlgorithm,
     RawSourceVaultEnvelope, RawSourceVaultRecoveryReport, RawSourceVaultRecoveryState,
-    RedactionHint, TimestampMillis, WorkspaceId, validate_raw_source_capture_request,
+    RedactionHint, TimestampMillis, WorkspaceId, validate_hosted_retention_export_linkage,
+    validate_raw_source_capture_request, validate_raw_source_hosted_export_consent,
     validate_raw_source_key_reference, validate_raw_source_key_rotation_record,
     validate_raw_source_retention_access_audit, validate_raw_source_vault_envelope,
     validate_raw_source_vault_recovery_report,
@@ -130,6 +132,136 @@ pub trait RawSourceVaultKeyProvider {
     fn key_reference(&self) -> RawSourceKeyReference;
     /// Return key bytes used by the cipher implementation.
     fn key_bytes(&self) -> Vec<u8>;
+}
+
+/// OS keyring-backed raw-source vault key provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsKeyringRawSourceKeyProvider {
+    service: String,
+    account: String,
+    key_reference: RawSourceKeyReference,
+}
+
+impl OsKeyringRawSourceKeyProvider {
+    /// Construct an OS keyring provider from metadata-only key reference fields.
+    pub fn new(
+        service: impl Into<String>,
+        account: impl Into<String>,
+        key_reference: RawSourceKeyReference,
+    ) -> Result<Self, RawSourceVaultError> {
+        validate_raw_source_key_reference(&key_reference).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        Ok(Self {
+            service: service.into(),
+            account: account.into(),
+            key_reference,
+        })
+    }
+
+    /// Store or rotate a 256-bit vault key in the platform keyring.
+    pub fn store_key(&self, key: &[u8]) -> Result<(), RawSourceVaultError> {
+        if key.len() != CHACHA20_POLY1305_KEY_LEN {
+            return Err(RawSourceVaultError::Denied {
+                reason: "OS keyring raw-source keys must be 256-bit".to_string(),
+            });
+        }
+        let encoded = lowercase_hex(key);
+        keyring::Entry::new(&self.service, &self.account)
+            .map_err(keyring_error)?
+            .set_password(&encoded)
+            .map_err(keyring_error)
+    }
+
+    /// Delete the current vault key from the platform keyring.
+    pub fn delete_key(&self) -> Result<(), RawSourceVaultError> {
+        keyring::Entry::new(&self.service, &self.account)
+            .map_err(keyring_error)?
+            .delete_credential()
+            .map_err(keyring_error)
+    }
+}
+
+impl RawSourceVaultKeyProvider for OsKeyringRawSourceKeyProvider {
+    fn key_reference(&self) -> RawSourceKeyReference {
+        self.key_reference.clone()
+    }
+
+    fn key_bytes(&self) -> Vec<u8> {
+        let Ok(entry) = keyring::Entry::new(&self.service, &self.account) else {
+            return Vec::new();
+        };
+        let Ok(encoded) = entry.get_password() else {
+            return Vec::new();
+        };
+        decode_hex(&encoded).unwrap_or_default()
+    }
+}
+
+/// Metadata-only wrapped key descriptor returned by KMS envelope providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawSourceWrappedKey {
+    /// Metadata-only key reference.
+    pub key_reference: RawSourceKeyReference,
+    /// Digest of wrapped key bytes, never wrapped key material.
+    pub wrapped_key_digest: String,
+    /// Wrapped key byte length.
+    pub wrapped_key_byte_len: u64,
+    /// Provider label.
+    pub provider_label: String,
+}
+
+/// KMS envelope-provider contract. Cloud adapters are deployment supplied.
+pub trait RawSourceKmsEnvelopeProvider {
+    /// Wrap a local data key and return metadata-only wrapped-key evidence.
+    fn wrap_key(
+        &self,
+        key_reference: RawSourceKeyReference,
+        plaintext_key: &[u8],
+    ) -> Result<RawSourceWrappedKey, RawSourceVaultError>;
+
+    /// Unwrap a data key into memory for immediate AEAD use.
+    fn unwrap_key(
+        &self,
+        wrapped: &RawSourceWrappedKey,
+    ) -> Result<Zeroizing<Vec<u8>>, RawSourceVaultError>;
+}
+
+/// Hosted encrypted raw-source export request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawSourceHostedExportRequest {
+    /// Hosted raw-source export consent.
+    pub consent: RawSourceHostedExportConsent,
+    /// Allowlisted HTTPS endpoint.
+    pub endpoint: HostedTelemetryEndpointDescriptor,
+    /// Retained encrypted bundle descriptor.
+    pub descriptor: RawSourceRetentionBundleDescriptor,
+    /// Metadata-only vault envelope.
+    pub envelope: RawSourceVaultEnvelope,
+    /// Opaque encrypted bundle bytes.
+    pub encrypted_bundle: Vec<u8>,
+}
+
+/// Hosted encrypted raw-source export acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawSourceHostedExportAck {
+    /// Hosted telemetry/export batch identifier used for linkage.
+    pub telemetry_batch_id: String,
+    /// Whether endpoint accepted the encrypted bundle.
+    pub accepted: bool,
+    /// Metadata-only status label.
+    pub status: String,
+}
+
+/// Client abstraction for hosted encrypted raw-source export.
+pub trait RawSourceHostedExportClient {
+    /// Upload one encrypted raw-source bundle and return metadata-only acknowledgement.
+    fn upload_encrypted_bundle(
+        &mut self,
+        request: &RawSourceHostedExportRequest,
+    ) -> Result<RawSourceHostedExportAck, RawSourceVaultError>;
 }
 
 /// Sealed raw-source vault payload and metadata digests.
@@ -940,6 +1072,84 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
         )
     }
 
+    /// Export an encrypted raw-source bundle to a hosted endpoint by descriptor reference only.
+    pub fn export_encrypted_bundle_hosted<Cli: RawSourceHostedExportClient>(
+        &self,
+        bundle_id: &str,
+        consent: RawSourceHostedExportConsent,
+        endpoint: HostedTelemetryEndpointDescriptor,
+        client: &mut Cli,
+    ) -> Result<HostedRetentionExportLinkage, RawSourceVaultError> {
+        if !self.config.enabled || !self.policy.capture_enabled {
+            return Err(RawSourceVaultError::Disabled);
+        }
+        validate_raw_source_hosted_export_consent(&consent).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        let now = TimestampMillis::now();
+        if consent.issued_at.0 > now.0 || consent.expires_at.0 <= now.0 {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export consent is not current".to_string(),
+            });
+        }
+        if !endpoint.allowlisted || !endpoint.endpoint_label.starts_with("https://") {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export requires an allowlisted HTTPS endpoint"
+                    .to_string(),
+            });
+        }
+        if consent.endpoint_id != endpoint.endpoint_id {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export consent endpoint does not match upload endpoint"
+                    .to_string(),
+            });
+        }
+        let descriptor = self.read_bundle_descriptor(bundle_id)?;
+        let envelope = self.read_vault_envelope(bundle_id)?;
+        if consent.workspace_id != descriptor.workspace_id || consent.purpose != descriptor.purpose
+        {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export consent does not match retained bundle"
+                    .to_string(),
+            });
+        }
+        let encrypted_bundle = self.read_encrypted_bundle(bundle_id)?;
+        if encrypted_bundle.len() as u64 != descriptor.encrypted_byte_len
+            || sha256_fingerprint(&encrypted_bundle) != descriptor.integrity
+        {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export ciphertext digest mismatch".to_string(),
+            });
+        }
+        let request = RawSourceHostedExportRequest {
+            consent,
+            endpoint,
+            descriptor: descriptor.clone(),
+            envelope,
+            encrypted_bundle,
+        };
+        let ack = client.upload_encrypted_bundle(&request)?;
+        if !ack.accepted || ack.telemetry_batch_id.trim().is_empty() {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export was not accepted".to_string(),
+            });
+        }
+        let linkage = HostedRetentionExportLinkage {
+            telemetry_batch_id: ack.telemetry_batch_id,
+            bundle_id: descriptor.bundle_id,
+            raw_source_consent_verified: true,
+            schema_version: 1,
+        };
+        validate_hosted_retention_export_linkage(&linkage).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        Ok(linkage)
+    }
+
     /// Delete encrypted content and keep a metadata-only tombstone.
     pub fn delete_bundle(
         &mut self,
@@ -1198,6 +1408,33 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     text
 }
 
+fn decode_hex(text: &str) -> Result<Vec<u8>, RawSourceVaultError> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return Err(RawSourceVaultError::Denied {
+            reason: "hex key material has odd length".to_string(),
+        });
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    for chunk in text.as_bytes().chunks_exact(2) {
+        let high = hex_value(chunk[0])?;
+        let low = hex_value(chunk[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_value(value: u8) -> Result<u8, RawSourceVaultError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(RawSourceVaultError::Denied {
+            reason: "hex key material contains non-hex byte".to_string(),
+        }),
+    }
+}
+
 fn crypto_error(message: impl Into<String>) -> RawSourceVaultError {
     RawSourceVaultError::Crypto {
         message: message.into(),
@@ -1217,13 +1454,20 @@ fn io_error(err: std::io::Error) -> RawSourceVaultError {
     }
 }
 
+fn keyring_error(err: keyring::Error) -> RawSourceVaultError {
+    RawSourceVaultError::Denied {
+        reason: format!("OS keyring operation failed: {err}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::PathBuf;
 
     use devil_protocol::{
-        CanonicalPath, CausalityId, CorrelationId, EventSequence, PrincipalId,
+        CanonicalPath, CausalityId, CorrelationId, EventSequence,
+        HostedTelemetryEndpointDescriptor, PrincipalId, RawSourceHostedExportConsent,
         RawSourceRetentionPurpose, RedactionHint, TimestampMillis, WorkspaceId,
     };
 
@@ -1273,6 +1517,61 @@ mod tests {
 
         fn key_bytes(&self) -> Vec<u8> {
             self.key.clone()
+        }
+    }
+
+    struct TestKmsProvider {
+        key: Vec<u8>,
+    }
+
+    impl RawSourceKmsEnvelopeProvider for TestKmsProvider {
+        fn wrap_key(
+            &self,
+            key_reference: RawSourceKeyReference,
+            plaintext_key: &[u8],
+        ) -> Result<RawSourceWrappedKey, RawSourceVaultError> {
+            if plaintext_key != self.key {
+                return Err(RawSourceVaultError::Denied {
+                    reason: "unexpected plaintext key".to_string(),
+                });
+            }
+            Ok(RawSourceWrappedKey {
+                key_reference,
+                wrapped_key_digest: sha256_label(plaintext_key),
+                wrapped_key_byte_len: plaintext_key.len() as u64,
+                provider_label: "test-kms-envelope".to_string(),
+            })
+        }
+
+        fn unwrap_key(
+            &self,
+            wrapped: &RawSourceWrappedKey,
+        ) -> Result<Zeroizing<Vec<u8>>, RawSourceVaultError> {
+            if wrapped.wrapped_key_digest != sha256_label(&self.key) {
+                return Err(RawSourceVaultError::Denied {
+                    reason: "wrapped key digest mismatch".to_string(),
+                });
+            }
+            Ok(Zeroizing::new(self.key.clone()))
+        }
+    }
+
+    struct AcceptingHostedRawExport {
+        saw_plaintext: bool,
+    }
+
+    impl RawSourceHostedExportClient for AcceptingHostedRawExport {
+        fn upload_encrypted_bundle(
+            &mut self,
+            request: &RawSourceHostedExportRequest,
+        ) -> Result<RawSourceHostedExportAck, RawSourceVaultError> {
+            let body = String::from_utf8_lossy(&request.encrypted_bundle);
+            self.saw_plaintext = body.contains("fn main") || body.contains("secret");
+            Ok(RawSourceHostedExportAck {
+                telemetry_batch_id: format!("raw-export:{}", request.descriptor.bundle_id),
+                accepted: !self.saw_plaintext,
+                status: "accepted".to_string(),
+            })
         }
     }
 
@@ -1334,6 +1633,32 @@ mod tests {
             correlation_id: CorrelationId(sequence),
             causality_id: CausalityId(uuid::Uuid::now_v7()),
             redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn hosted_export_consent() -> RawSourceHostedExportConsent {
+        let now = TimestampMillis::now().0.max(2);
+        RawSourceHostedExportConsent {
+            grant_id: "hosted-raw-grant".to_string(),
+            principal_id: PrincipalId("tester".to_string()),
+            workspace_id: WorkspaceId(1),
+            endpoint_id: "support-endpoint".to_string(),
+            purpose: RawSourceRetentionPurpose::SupportBundle,
+            issued_at: TimestampMillis(now - 1),
+            expires_at: TimestampMillis(now + 60_000),
+            revoked: false,
+            correlation_id: CorrelationId(1),
+            schema_version: 1,
+        }
+    }
+
+    fn hosted_endpoint() -> HostedTelemetryEndpointDescriptor {
+        HostedTelemetryEndpointDescriptor {
+            endpoint_id: "support-endpoint".to_string(),
+            endpoint_label: "https://support.invalid/raw".to_string(),
+            region: "local-test".to_string(),
+            allowlisted: true,
             schema_version: 1,
         }
     }
@@ -1893,6 +2218,153 @@ mod tests {
             .read_vault_envelope(&descriptor.bundle_id)
             .expect("envelope unchanged");
         assert_eq!(envelope.key_reference.key_version, "v1");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kms_envelope_contract_wraps_by_reference_without_key_material() {
+        let key_provider = TestKeyProvider::default();
+        let kms = TestKmsProvider {
+            key: key_provider.key_bytes(),
+        };
+        let wrapped = kms
+            .wrap_key(key_provider.key_reference(), &key_provider.key_bytes())
+            .expect("wrap key");
+        assert_eq!(wrapped.provider_label, "test-kms-envelope");
+        assert_eq!(wrapped.wrapped_key_byte_len, 32);
+        assert!(!format!("{wrapped:?}").contains("0123456789abcdef"));
+        let unwrapped = kms.unwrap_key(&wrapped).expect("unwrap key");
+        assert_eq!(&*unwrapped, key_provider.key_bytes().as_slice());
+    }
+
+    #[test]
+    fn os_keyring_provider_exposes_metadata_reference_without_inline_key() {
+        let provider = OsKeyringRawSourceKeyProvider::new(
+            "devil-test",
+            "workspace-1",
+            RawSourceKeyReference {
+                key_id: "key:os:test".to_string(),
+                key_version: "v1".to_string(),
+                provider_label: "local-os-keyring".to_string(),
+                rotation_generation: 1,
+                schema_version: 1,
+            },
+        )
+        .expect("provider metadata");
+        let reference = provider.key_reference();
+        assert_eq!(reference.provider_label, "local-os-keyring");
+        assert!(!format!("{reference:?}").contains("key_bytes"));
+    }
+
+    #[test]
+    fn hosted_raw_export_uploads_encrypted_bundle_only_and_records_linkage() {
+        let root = temp_vault_root("hosted-export");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { secret(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        let mut client = AcceptingHostedRawExport {
+            saw_plaintext: false,
+        };
+        let linkage = vault
+            .export_encrypted_bundle_hosted(
+                &descriptor.bundle_id,
+                hosted_export_consent(),
+                hosted_endpoint(),
+                &mut client,
+            )
+            .expect("hosted export");
+        assert_eq!(linkage.bundle_id, descriptor.bundle_id);
+        assert!(linkage.raw_source_consent_verified);
+        assert!(!client.saw_plaintext);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hosted_raw_export_requires_allowlisted_https_and_current_consent() {
+        let root = temp_vault_root("hosted-export-denied");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() {}".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        let mut client = AcceptingHostedRawExport {
+            saw_plaintext: false,
+        };
+        assert!(matches!(
+            vault.export_encrypted_bundle_hosted(
+                &descriptor.bundle_id,
+                RawSourceHostedExportConsent {
+                    revoked: true,
+                    ..hosted_export_consent()
+                },
+                hosted_endpoint(),
+                &mut client,
+            ),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        assert!(matches!(
+            vault.export_encrypted_bundle_hosted(
+                &descriptor.bundle_id,
+                hosted_export_consent(),
+                HostedTelemetryEndpointDescriptor {
+                    endpoint_label: "http://support.invalid/raw".to_string(),
+                    ..hosted_endpoint()
+                },
+                &mut client,
+            ),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        assert!(matches!(
+            vault.export_encrypted_bundle_hosted(
+                &descriptor.bundle_id,
+                RawSourceHostedExportConsent {
+                    endpoint_id: "other-endpoint".to_string(),
+                    ..hosted_export_consent()
+                },
+                hosted_endpoint(),
+                &mut client,
+            ),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        assert!(matches!(
+            vault.export_encrypted_bundle_hosted(
+                &descriptor.bundle_id,
+                RawSourceHostedExportConsent {
+                    issued_at: TimestampMillis(1),
+                    expires_at: TimestampMillis(2),
+                    ..hosted_export_consent()
+                },
+                hosted_endpoint(),
+                &mut client,
+            ),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
         let _ = fs::remove_dir_all(root);
     }
 

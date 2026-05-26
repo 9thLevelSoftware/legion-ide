@@ -602,8 +602,7 @@ fn symlink_escape_outside_root_is_rejected() {
 
     let err = actor
         .read_file_text(opened.workspace_id, link_path.to_string_lossy())
-        .err()
-        .expect("symlink escape should fail");
+        .expect_err("symlink escape should fail");
     assert!(matches!(err, WorkspaceError::PathOutsideRoot { .. }));
 
     let _ = std::fs::remove_file(outside);

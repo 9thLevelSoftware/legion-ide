@@ -20,6 +20,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux native keyring system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
 
@@ -42,6 +48,7 @@ jobs:
         run: cargo run -p devil-cli -- evidence check --phase phase8
 
       - name: Cargo deny check
+        if: runner.os == 'Linux'
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

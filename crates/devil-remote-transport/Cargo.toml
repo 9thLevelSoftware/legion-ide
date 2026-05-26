@@ -7,5 +7,10 @@ publish.workspace = true
 
 [dependencies]
 devil-protocol = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
+tokio-rustls = { workspace = true }
 uuid = { workspace = true }
