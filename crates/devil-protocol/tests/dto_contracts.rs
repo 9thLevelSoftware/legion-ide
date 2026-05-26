@@ -6532,6 +6532,202 @@ fn dto_contracts_collaboration_replay_manifest_is_metadata_only_and_audit_valida
     assert!(validate_collaboration_audit_record(&invalid_audit).is_err());
 }
 
+fn remote_capability_decision(capability: &str) -> CapabilityDecision {
+    CapabilityDecision {
+        decision_id: CapabilityDecisionId(1701),
+        granted: true,
+        capability: CapabilityId(capability.to_string()),
+        reason: None,
+    }
+}
+
+fn remote_session_descriptor(
+    state: RemoteWorkspaceLifecycleState,
+) -> RemoteWorkspaceSessionDescriptor {
+    RemoteWorkspaceSessionDescriptor {
+        session_id: RemoteWorkspaceSessionId(7001),
+        authority: RemoteAuthorityDescriptor {
+            authority_id: RemoteAuthorityId(7101),
+            authority_label: "edge-authority:hash".to_string(),
+            workspace_id: WorkspaceId(11),
+            trust_state: WorkspaceTrustState::Trusted,
+            principal_id: PrincipalId("principal-remote".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        agent: RemoteAgentDescriptor {
+            agent_id: RemoteAgentId(7201),
+            authority_id: RemoteAuthorityId(7101),
+            agent_version: "devil-remote-test-agent/1".to_string(),
+            runtime_enabled: true,
+            schema_version: 1,
+        },
+        state,
+        granted_capabilities: vec![
+            RemoteCapabilityKind::Connect,
+            RemoteCapabilityKind::FilesystemRead,
+            RemoteCapabilityKind::FilesystemWrite,
+        ],
+        created_at: TimestampMillis(1700),
+        last_heartbeat_at: Some(TimestampMillis(1800)),
+        schema_version: 1,
+    }
+}
+
+#[test]
+fn dto_contracts_remote_session_activation_is_fail_closed_until_trusted_enabled_and_active() {
+    let active = remote_session_descriptor(RemoteWorkspaceLifecycleState::Active);
+    assert!(active.activation_is_policy_ready());
+
+    let degraded = RemoteWorkspaceSessionDescriptor {
+        state: RemoteWorkspaceLifecycleState::Degraded,
+        ..active.clone()
+    };
+    assert!(!degraded.activation_is_policy_ready());
+
+    let disabled = RemoteWorkspaceSessionDescriptor {
+        agent: RemoteAgentDescriptor {
+            runtime_enabled: false,
+            ..active.agent.clone()
+        },
+        ..active.clone()
+    };
+    assert!(!disabled.activation_is_policy_ready());
+
+    let untrusted = RemoteWorkspaceSessionDescriptor {
+        authority: RemoteAuthorityDescriptor {
+            trust_state: WorkspaceTrustState::Untrusted,
+            ..active.authority.clone()
+        },
+        ..active
+    };
+    assert!(!untrusted.activation_is_policy_ready());
+}
+
+#[test]
+fn dto_contracts_remote_transport_envelope_serializes_metadata_only_payloads() {
+    let snapshot = RemoteFilesystemSnapshot {
+        session_id: RemoteWorkspaceSessionId(7001),
+        workspace_id: WorkspaceId(11),
+        workspace_generation: WorkspaceGeneration(77),
+        snapshot_id: SnapshotId(66),
+        file_id: Some(FileId(33)),
+        file_content_version: Some(FileContentVersion(44)),
+        fingerprint: Some(fingerprint("remote-snapshot")),
+        byte_len: Some(2048),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let envelope = RemoteTransportEnvelope {
+        session_id: RemoteWorkspaceSessionId(7001),
+        operation_id: RemoteOperationId(7301),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        event_sequence: EventSequence(42),
+        principal_id: PrincipalId("principal-remote".to_string()),
+        payload: RemoteTransportPayload::FilesystemSnapshot(snapshot),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    assert!(envelope.has_valid_event_identity());
+    let value = serde_json::to_value(&envelope).expect("remote envelope should serialize");
+
+    assert_eq!(value["session_id"], json!(7001));
+    assert_eq!(
+        value["payload"]["FilesystemSnapshot"]["byte_len"],
+        json!(2048)
+    );
+    assert!(!value.to_string().contains("raw_source"));
+    assert!(!value.to_string().contains("terminal_transcript"));
+
+    let roundtrip: RemoteTransportEnvelope =
+        serde_json::from_value(value.clone()).expect("remote envelope should round trip");
+    assert_eq!(roundtrip.operation_id, RemoteOperationId(7301));
+
+    let mut missing = value;
+    remove_required_field::<RemoteTransportEnvelope>(&mut missing, "schema_version");
+}
+
+#[test]
+fn dto_contracts_remote_write_preconditions_reject_missing_guards() {
+    let valid = RemoteWritePreconditions {
+        capability_decision: remote_capability_decision("remote.fs.write"),
+        principal_id: PrincipalId("principal-remote".to_string()),
+        expected_fingerprint: Some(fingerprint("expected")),
+        file_content_version: FileContentVersion(44),
+        workspace_generation: WorkspaceGeneration(77),
+        buffer_version: Some(BufferVersion(55)),
+        snapshot_id: SnapshotId(66),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+    };
+    assert!(valid.has_required_write_guards());
+
+    let zero_correlation = RemoteWritePreconditions {
+        correlation_id: CorrelationId(0),
+        ..valid.clone()
+    };
+    assert!(!zero_correlation.has_required_write_guards());
+
+    let nil_causality = RemoteWritePreconditions {
+        causality_id: CausalityId(Uuid::nil()),
+        ..valid.clone()
+    };
+    assert!(!nil_causality.has_required_write_guards());
+
+    let denied_capability = RemoteWritePreconditions {
+        capability_decision: CapabilityDecision {
+            granted: false,
+            reason: Some("remote write denied".to_string()),
+            ..remote_capability_decision("remote.fs.write")
+        },
+        ..valid
+    };
+    assert!(!denied_capability.has_required_write_guards());
+}
+
+#[test]
+fn dto_contracts_remote_audit_records_require_metadata_only_redaction() {
+    let valid = RemoteAuditRecord {
+        session_id: RemoteWorkspaceSessionId(7001),
+        operation_id: Some(RemoteOperationId(7301)),
+        proposal_id: Some(ProposalId(700)),
+        event_sequence: EventSequence(42),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        retention_label: RetentionLabel::Audit,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        metadata_summary: "remote write proposal_id=700 byte_len=2048".to_string(),
+        schema_version: 1,
+    };
+    assert!(valid.is_metadata_only_valid());
+
+    let serialized = serde_json::to_string(&valid).expect("remote audit should serialize");
+    assert!(serialized.contains("MetadataOnly"));
+    assert!(!serialized.contains("raw_source"));
+    assert!(!serialized.contains("raw_transcript"));
+    assert!(!serialized.contains("process_output"));
+
+    let raw_allowed = RemoteAuditRecord {
+        redaction_hints: vec![RedactionHint::None],
+        ..valid.clone()
+    };
+    assert!(!raw_allowed.is_metadata_only_valid());
+
+    let zero_sequence = RemoteAuditRecord {
+        event_sequence: EventSequence(0),
+        ..valid
+    };
+    assert!(!zero_sequence.is_metadata_only_valid());
+
+    let raw_marker = RemoteAuditRecord {
+        metadata_summary: "raw_source=fn main() {}".to_string(),
+        ..zero_sequence
+    };
+    assert!(validate_remote_audit_record(&raw_marker).is_err());
+}
+
 #[test]
 fn dto_contracts_phase4_runtime_surfaces_are_protocol_mediated() {
     let agent_src = include_str!("../../devil-agent/src/lib.rs");

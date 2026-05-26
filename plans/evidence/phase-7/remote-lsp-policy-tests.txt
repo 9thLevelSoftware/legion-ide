@@ -1,0 +1,10 @@
+Phase 7 remote LSP policy evidence
+
+Status: Passed.
+
+Command:
+- cargo test -p devil-remote remote_execution_surfaces_are_policy_gated_and_bounded
+
+Observed result:
+- Remote LSP descriptor is accepted only with `remote.lsp.launch`, non-zero language server id, non-nil request id, non-empty language id, non-nil cancellation token, valid session, and schema version.
+- Remote LSP descriptors do not carry raw source bodies and cannot directly apply local mutations.

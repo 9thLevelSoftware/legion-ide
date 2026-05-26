@@ -1754,6 +1754,481 @@ pub enum CollaborationTransportPayload {
     Audit(CollaborationAuditRecord),
 }
 
+/// Remote workspace authority identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteAuthorityId(pub u128);
+
+/// Remote edge agent identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteAgentId(pub u128);
+
+/// Remote workspace session identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteWorkspaceSessionId(pub u128);
+
+/// Remote operation identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteOperationId(pub u128);
+
+/// Remote operation-log checkpoint identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteOperationLogCheckpointId(pub u128);
+
+/// Remote workspace session lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteWorkspaceLifecycleState {
+    /// Session has been requested but not connected.
+    Created,
+    /// Session is connecting transport and identity.
+    Connecting,
+    /// Session is authenticating the principal and authority.
+    Authenticating,
+    /// Session is authorizing requested capabilities.
+    Authorizing,
+    /// Session is active and accepts policy-validated requests.
+    Active,
+    /// Session is active with degraded transport or remote health.
+    Degraded,
+    /// Session is reconnecting after transport loss.
+    Reconnecting,
+    /// Session is offline and can only resume from accepted manifests.
+    Offline,
+    /// Session is closing.
+    Closing,
+    /// Session is closed.
+    Closed,
+    /// Session was denied by trust, identity, capability, or policy checks.
+    Denied,
+}
+
+/// Remote capability class requested from policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteCapabilityKind {
+    /// Connect to a remote authority.
+    Connect,
+    /// Read remote filesystem metadata or content through approved ports.
+    FilesystemRead,
+    /// Write remote filesystem state through proposal-mediated ports.
+    FilesystemWrite,
+    /// Launch a remote process.
+    ProcessLaunch,
+    /// Send PTY input.
+    PtyInput,
+    /// Access a remote terminal session.
+    TerminalAccess,
+    /// Launch or attach to a remote language server.
+    LspLaunch,
+    /// Execute a remote semantic query.
+    SemanticQuery,
+    /// Read remote cache metadata.
+    CacheAccess,
+    /// Use remote egress.
+    Egress,
+    /// Export metadata-only audit records.
+    AuditExport,
+    /// Resume from an offline manifest.
+    OfflineResume,
+}
+
+/// Remote workspace authority descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAuthorityDescriptor {
+    /// Remote authority identifier.
+    pub authority_id: RemoteAuthorityId,
+    /// Redacted authority label or stable hash.
+    pub authority_label: String,
+    /// Workspace identifier projected locally for this authority.
+    pub workspace_id: WorkspaceId,
+    /// Workspace trust state observed before activation.
+    pub trust_state: WorkspaceTrustState,
+    /// Principal requesting the authority.
+    pub principal_id: PrincipalId,
+    /// Redaction hints for authority metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Remote edge agent descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentDescriptor {
+    /// Remote agent identifier.
+    pub agent_id: RemoteAgentId,
+    /// Owning remote authority.
+    pub authority_id: RemoteAuthorityId,
+    /// Agent version or build label.
+    pub agent_version: String,
+    /// Whether runtime behavior is explicitly enabled by app-owned composition.
+    pub runtime_enabled: bool,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Remote workspace session descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteWorkspaceSessionDescriptor {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Remote authority descriptor.
+    pub authority: RemoteAuthorityDescriptor,
+    /// Remote agent descriptor.
+    pub agent: RemoteAgentDescriptor,
+    /// Lifecycle state.
+    pub state: RemoteWorkspaceLifecycleState,
+    /// Granted remote capability kinds.
+    pub granted_capabilities: Vec<RemoteCapabilityKind>,
+    /// Creation timestamp.
+    pub created_at: TimestampMillis,
+    /// Last heartbeat timestamp.
+    pub last_heartbeat_at: Option<TimestampMillis>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+impl RemoteWorkspaceSessionDescriptor {
+    /// Returns true when the session is explicitly enabled and trusted.
+    pub fn activation_is_policy_ready(&self) -> bool {
+        self.agent.runtime_enabled
+            && self.authority.trust_state == WorkspaceTrustState::Trusted
+            && !self.authority.principal_id.0.is_empty()
+            && matches!(self.state, RemoteWorkspaceLifecycleState::Active)
+    }
+}
+
+/// Remote transport envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTransportEnvelope {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Remote operation identifier.
+    pub operation_id: RemoteOperationId,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Sender principal.
+    pub principal_id: PrincipalId,
+    /// Envelope payload.
+    pub payload: RemoteTransportPayload,
+    /// Redaction hints for envelope metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Envelope schema version.
+    pub schema_version: u16,
+}
+
+impl RemoteTransportEnvelope {
+    /// Returns true when required audit identifiers are non-zero and non-nil.
+    pub fn has_valid_event_identity(&self) -> bool {
+        self.correlation_id.0 != 0
+            && !self.causality_id.0.is_nil()
+            && self.event_sequence.0 != 0
+            && !self.principal_id.0.is_empty()
+    }
+}
+
+/// Remote transport payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteTransportPayload {
+    /// Session descriptor payload.
+    Session(RemoteWorkspaceSessionDescriptor),
+    /// Remote filesystem snapshot payload.
+    FilesystemSnapshot(RemoteFilesystemSnapshot),
+    /// Remote filesystem operation payload.
+    FilesystemOperation(RemoteFilesystemOperation),
+    /// Remote process descriptor payload.
+    Process(RemoteProcessDescriptor),
+    /// Remote PTY descriptor payload.
+    Pty(RemotePtyDescriptor),
+    /// Remote LSP descriptor payload.
+    Lsp(RemoteLspDescriptor),
+    /// Remote semantic query descriptor payload.
+    SemanticQuery(RemoteSemanticQueryDescriptor),
+    /// Remote operation checkpoint payload.
+    OperationLogCheckpoint(RemoteOperationLogCheckpoint),
+    /// Offline resume manifest payload.
+    OfflineResume(RemoteOfflineResumeManifest),
+    /// Metadata-only audit record payload.
+    Audit(RemoteAuditRecord),
+}
+
+/// Remote filesystem operation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteFilesystemOperationKind {
+    /// Read file metadata or content through an approved port.
+    Read,
+    /// List a directory.
+    List,
+    /// Stat a path.
+    Stat,
+    /// Write file content through a proposal-mediated path.
+    Write,
+    /// Create a file through a proposal-mediated path.
+    Create,
+    /// Delete a file through a proposal-mediated path.
+    Delete,
+    /// Rename a file through a proposal-mediated path.
+    Rename,
+}
+
+/// Remote filesystem snapshot metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteFilesystemSnapshot {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Workspace generation.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Snapshot identifier.
+    pub snapshot_id: SnapshotId,
+    /// File identifier when snapshot is file-scoped.
+    pub file_id: Option<FileId>,
+    /// File content version when known.
+    pub file_content_version: Option<FileContentVersion>,
+    /// Metadata fingerprint.
+    pub fingerprint: Option<FileFingerprint>,
+    /// Byte length without source payload.
+    pub byte_len: Option<u64>,
+    /// Redaction hints for snapshot metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Snapshot schema version.
+    pub schema_version: u16,
+}
+
+/// Remote write and filesystem-operation preconditions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteWritePreconditions {
+    /// Required capability decision.
+    pub capability_decision: CapabilityDecision,
+    /// Principal requesting the operation.
+    pub principal_id: PrincipalId,
+    /// Expected disk or remote fingerprint.
+    pub expected_fingerprint: Option<FileFingerprint>,
+    /// Expected file content version.
+    pub file_content_version: FileContentVersion,
+    /// Expected workspace generation.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Expected buffer version when operation originates from a buffer.
+    pub buffer_version: Option<BufferVersion>,
+    /// Expected snapshot identifier.
+    pub snapshot_id: SnapshotId,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+}
+
+impl RemoteWritePreconditions {
+    /// Returns true when mandatory proposal-style write preconditions are present.
+    pub fn has_required_write_guards(&self) -> bool {
+        self.capability_decision.decision_id.0 != 0
+            && self.capability_decision.granted
+            && !self.principal_id.0.is_empty()
+            && self.file_content_version.0 != 0
+            && self.workspace_generation.0 != 0
+            && self.snapshot_id.0 != 0
+            && self.correlation_id.0 != 0
+            && !self.causality_id.0.is_nil()
+    }
+}
+
+/// Remote filesystem operation metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteFilesystemOperation {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Operation identifier.
+    pub operation_id: RemoteOperationId,
+    /// Operation kind.
+    pub kind: RemoteFilesystemOperationKind,
+    /// Target path metadata.
+    pub path: CanonicalPath,
+    /// Destination path for rename operations.
+    pub destination: Option<CanonicalPath>,
+    /// Preconditions for mutating operations.
+    pub write_preconditions: Option<RemoteWritePreconditions>,
+    /// Proposal linked to the operation when mutation is requested.
+    pub proposal_id: Option<ProposalId>,
+    /// Operation schema version.
+    pub schema_version: u16,
+}
+
+/// Remote process descriptor without raw output bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteProcessDescriptor {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Operation identifier.
+    pub operation_id: RemoteOperationId,
+    /// Redacted command label or hash.
+    pub command_label: String,
+    /// Working directory metadata.
+    pub cwd: Option<CanonicalPath>,
+    /// Capability decision for process launch.
+    pub capability_decision: CapabilityDecision,
+    /// Cancellation token.
+    pub cancellation_token_id: CancellationTokenId,
+    /// Output byte limit.
+    pub output_byte_limit: u64,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Remote PTY descriptor without raw transcript bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePtyDescriptor {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Terminal session identifier.
+    pub terminal_session_id: TerminalSessionId,
+    /// Terminal size in columns.
+    pub columns: u16,
+    /// Terminal size in rows.
+    pub rows: u16,
+    /// Bounded transcript byte limit.
+    pub transcript_byte_limit: u64,
+    /// Capability decision for terminal access.
+    pub capability_decision: CapabilityDecision,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Remote LSP descriptor without raw source payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteLspDescriptor {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Language server identifier.
+    pub language_server_id: LanguageServerId,
+    /// Request identifier.
+    pub request_id: LspRequestId,
+    /// Language identifier.
+    pub language_id: LanguageId,
+    /// Capability decision for LSP launch or request execution.
+    pub capability_decision: CapabilityDecision,
+    /// Cancellation token.
+    pub cancellation_token_id: CancellationTokenId,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Remote semantic-query descriptor without vector or raw-source activation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteSemanticQueryDescriptor {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Semantic query identifier.
+    pub query_id: SemanticQueryId,
+    /// Query purpose label.
+    pub purpose: String,
+    /// Maximum result count.
+    pub max_results: u32,
+    /// Capability decision for semantic query execution.
+    pub capability_decision: CapabilityDecision,
+    /// Redaction hints for query metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Remote network health state for latency and reconnect projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteNetworkHealthState {
+    /// Remote transport is healthy.
+    Healthy,
+    /// Transport latency is elevated.
+    Latent,
+    /// Transport is degraded by loss, duplication, or reordering.
+    Degraded,
+    /// Transport is disconnected.
+    Disconnected,
+    /// Remote state is offline.
+    Offline,
+}
+
+/// Remote operation-log checkpoint metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteOperationLogCheckpoint {
+    /// Checkpoint identifier.
+    pub checkpoint_id: RemoteOperationLogCheckpointId,
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Last operation included in the checkpoint.
+    pub last_operation_id: RemoteOperationId,
+    /// Collaboration-compatible version vector entries.
+    pub version_vector: CollaborationVersionVector,
+    /// Network health at checkpoint time.
+    pub network_health: RemoteNetworkHealthState,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Checkpoint schema version.
+    pub schema_version: u16,
+}
+
+/// Offline resume manifest for remote sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteOfflineResumeManifest {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Checkpoints available for resume.
+    pub checkpoints: Vec<RemoteOperationLogCheckpointId>,
+    /// Last known workspace generation.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Last known filesystem snapshot identifier.
+    pub snapshot_id: SnapshotId,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Manifest schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only remote audit record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAuditRecord {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Operation identifier when scoped to an operation.
+    pub operation_id: Option<RemoteOperationId>,
+    /// Proposal identifier when scoped to a proposal-mediated mutation.
+    pub proposal_id: Option<ProposalId>,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Retention label.
+    pub retention_label: RetentionLabel,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Metadata summary without raw source, transcript, process output, or secrets.
+    pub metadata_summary: String,
+    /// Audit schema version.
+    pub schema_version: u16,
+}
+
+impl RemoteAuditRecord {
+    /// Returns true when the record is metadata-only and has valid event identifiers.
+    pub fn is_metadata_only_valid(&self) -> bool {
+        self.event_sequence.0 != 0
+            && self.correlation_id.0 != 0
+            && !self.causality_id.0.is_nil()
+            && self.redaction_hints.contains(&RedactionHint::MetadataOnly)
+            && !self.redaction_hints.contains(&RedactionHint::None)
+    }
+}
+
 /// Transaction source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransactionSource {
@@ -14674,6 +15149,8 @@ pub enum StorageRepositoryRequest {
     SaveAgentReplayManifest(AgentReplayManifest),
     /// Save metadata-only collaboration audit record.
     SaveCollaborationAuditRecord(CollaborationAuditRecord),
+    /// Save metadata-only remote-development audit record.
+    SaveRemoteAuditRecord(RemoteAuditRecord),
     /// Save durable event metadata.
     SaveEventMetadata(EventMetadataRecord),
     /// Save metadata-only semantic records and tombstones.
@@ -14712,6 +15189,13 @@ pub enum StorageRepositoryRequest {
     ReadCollaborationAuditRecord {
         /// Collaboration session identifier.
         session_id: CollaborationSessionId,
+        /// Event sequence for the audit record.
+        event_sequence: EventSequence,
+    },
+    /// Read metadata-only remote-development audit record.
+    ReadRemoteAuditRecord {
+        /// Remote workspace session identifier.
+        session_id: RemoteWorkspaceSessionId,
         /// Event sequence for the audit record.
         event_sequence: EventSequence,
     },
@@ -14756,6 +15240,8 @@ pub enum StorageRepositoryResponse {
     AgentReplayManifest(Box<Option<AgentReplayManifest>>),
     /// Metadata-only collaboration audit record.
     CollaborationAuditRecord(Box<Option<CollaborationAuditRecord>>),
+    /// Metadata-only remote-development audit record.
+    RemoteAuditRecord(Box<Option<RemoteAuditRecord>>),
     /// Event metadata.
     EventMetadata(Option<EventMetadataRecord>),
     /// Freshness-gated semantic metadata read result.
@@ -14923,6 +15409,34 @@ pub fn validate_collaboration_audit_record(
     Ok(())
 }
 
+/// Validate metadata-only remote-development audit records before persistence.
+pub fn validate_remote_audit_record(record: &RemoteAuditRecord) -> ProtocolResult<()> {
+    if record.session_id.0 == 0
+        || record.event_sequence.0 == 0
+        || record.correlation_id.0 == 0
+        || record.causality_id.0 == Uuid::nil()
+        || record.schema_version == 0
+    {
+        return Err(ProtocolError {
+            code: "remote_audit_invalid".to_string(),
+            message: "session, event sequence, correlation, causality, and schema metadata must be non-zero".to_string(),
+        });
+    }
+    if !record.is_metadata_only_valid() && record.retention_label == RetentionLabel::Audit {
+        return Err(ProtocolError {
+            code: "remote_audit_invalid".to_string(),
+            message: "audit-retained remote records must be metadata-only".to_string(),
+        });
+    }
+    if contains_forbidden_remote_payload(&record.metadata_summary) {
+        return Err(ProtocolError {
+            code: "remote_audit_invalid".to_string(),
+            message: "remote audit metadata contains forbidden source, transcript, output, transport, or secret marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn contains_forbidden_collaboration_payload(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     [
@@ -14932,6 +15446,27 @@ fn contains_forbidden_collaboration_payload(value: &str) -> bool {
         "raw_transcript",
         "full_snapshot",
         "secret",
+        "api_key",
+        "unbounded_payload",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn contains_forbidden_remote_payload(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "source_text",
+        "source_body",
+        "raw_source",
+        "raw_transcript",
+        "terminal_output",
+        "process_output",
+        "transport_payload",
+        "full_snapshot",
+        "secret",
+        "token",
+        "password",
         "api_key",
         "unbounded_payload",
     ]

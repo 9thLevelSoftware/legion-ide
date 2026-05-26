@@ -22,7 +22,8 @@ use devil_observability::{
     proposal_applied_event, proposal_approved_event, proposal_audit_record,
     proposal_audit_recorded_event, proposal_created_event, proposal_failed_event,
     proposal_previewed_event, proposal_rejected_event, proposal_rolled_back_event,
-    proposal_validated_event, save_denied_event, stale_proposal_rejected_event, transaction_event,
+    proposal_validated_event, remote_audit_recorded_event, save_denied_event,
+    stale_proposal_rejected_event, transaction_event,
 };
 use devil_platform::{NativeFileSystem, NativeWatcherService};
 use devil_plugin::PluginRuntimeHost;
@@ -54,12 +55,16 @@ use devil_protocol::{
     ProposalResponse, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
     ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, RedactionHint,
-    SaveConflictPolicy, SaveFileProposal, SaveIntent, StorageRepositoryPort,
-    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor,
-    TimestampMillis, TransactionSource, TrustDecisionContext, VersionContext,
-    WorkspaceCloseRequest, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened,
-    WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
+    RemoteAgentDescriptor, RemoteAuditRecord, RemoteAuthorityDescriptor, RemoteTransportEnvelope,
+    RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor,
+    RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal, SaveIntent,
+    StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate,
+    TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
+    VersionContext, WorkspaceCloseRequest, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
+    WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
+    WorkspaceTrustState,
 };
+use devil_remote::{RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig};
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
 use devil_tracker::{TrackerLedger, TrackerRunLedgerRecord};
@@ -124,6 +129,9 @@ pub enum AppCompositionError {
     /// Collaboration runtime or app gate rejected a request.
     #[error("collaboration request failed: {0}")]
     Collaboration(String),
+    /// Remote runtime or app gate rejected a request.
+    #[error("remote request failed: {0}")]
+    Remote(String),
 }
 
 /// Typed save result returned by application save routing.
@@ -3014,6 +3022,25 @@ impl ActiveDocumentController {
             .ok_or(AppCompositionError::WorkspaceNotOpen)
     }
 
+    fn require_workspace_context(&self) -> Result<ActiveWorkspaceContext, AppCompositionError> {
+        let opened = self
+            .opened_workspace
+            .clone()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+        Ok(ActiveWorkspaceContext {
+            workspace_id: opened.workspace_id,
+            workspace_generation: opened.generation,
+            principal: self
+                .active_principal_id
+                .clone()
+                .ok_or(AppCompositionError::WorkspaceNotOpen)?,
+            trust: self
+                .active_workspace_trust
+                .clone()
+                .ok_or(AppCompositionError::WorkspaceNotOpen)?,
+        })
+    }
+
     fn require_active_buffer(&self) -> Result<BufferId, AppCompositionError> {
         self.active_buffer_id
             .ok_or(AppCompositionError::ActiveBufferMissing)
@@ -3037,6 +3064,14 @@ impl ActiveDocumentController {
                 .ok_or(AppCompositionError::WorkspaceNotOpen)?,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct ActiveWorkspaceContext {
+    workspace_id: WorkspaceId,
+    workspace_generation: WorkspaceGeneration,
+    principal: PrincipalId,
+    trust: WorkspaceTrustState,
 }
 
 #[derive(Debug, Clone)]
@@ -4880,6 +4915,27 @@ impl CollaborationComposition {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct RemoteComposition {
+    runtime_sessions_enabled: bool,
+    runtime: RemoteDevelopmentRuntime,
+}
+
+impl RemoteComposition {
+    fn enable(&mut self) {
+        self.runtime_sessions_enabled = true;
+        self.runtime = RemoteDevelopmentRuntime::new(RemoteRuntimeConfig::enabled());
+    }
+
+    fn session_descriptors(&self) -> Vec<RemoteWorkspaceSessionDescriptor> {
+        self.runtime.session_descriptors()
+    }
+}
+
+fn remote_error(error: impl ToString) -> AppCompositionError {
+    AppCompositionError::Remote(error.to_string())
+}
+
 /// Root application composition.
 pub struct AppComposition {
     workspace: WorkspaceActor,
@@ -4897,6 +4953,7 @@ pub struct AppComposition {
     plugin_runtime: PluginRuntimeHost,
     plugin_contribution_projections: Vec<PluginContributionProjection>,
     collaboration: CollaborationComposition,
+    remote: RemoteComposition,
 }
 
 impl AppComposition {
@@ -4935,6 +4992,7 @@ impl AppComposition {
             plugin_runtime: PluginRuntimeHost::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration: CollaborationComposition::default(),
+            remote: RemoteComposition::default(),
         }
     }
 
@@ -5407,6 +5465,140 @@ impl AppComposition {
             .map_err(AppCompositionError::Protocol)?;
         let envelope = collaboration_audit_recorded_event(&record)
             .map_err(|error| AppCompositionError::Collaboration(error.to_string()))?;
+        self.emit_event(envelope);
+        Ok(())
+    }
+
+    /// Enable deterministic Phase 7 remote development runtime for app-owned sessions.
+    pub fn enable_remote_development_runtime(&mut self) {
+        self.remote.enable();
+    }
+
+    /// Connect a remote workspace session through app-owned composition.
+    pub fn connect_remote_workspace_session(
+        &mut self,
+        session_id: RemoteWorkspaceSessionId,
+        authority_label: impl Into<String>,
+    ) -> Result<RemoteWorkspaceSessionDescriptor, AppCompositionError> {
+        if !self.remote.runtime_sessions_enabled {
+            return Err(AppCompositionError::Remote(
+                "remote runtime sessions are disabled by policy".to_string(),
+            ));
+        }
+        let context = self.active_documents.require_workspace_context()?;
+        if context.trust != WorkspaceTrustState::Trusted {
+            return Err(AppCompositionError::Remote(
+                "untrusted workspaces cannot connect remote sessions".to_string(),
+            ));
+        }
+
+        let authority_id = devil_protocol::RemoteAuthorityId(session_id.0.saturating_add(100));
+        let descriptor = RemoteWorkspaceSessionDescriptor {
+            session_id,
+            authority: RemoteAuthorityDescriptor {
+                authority_id,
+                authority_label: authority_label.into(),
+                workspace_id: context.workspace_id,
+                trust_state: context.trust,
+                principal_id: context.principal,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            agent: RemoteAgentDescriptor {
+                agent_id: devil_protocol::RemoteAgentId(session_id.0.saturating_add(200)),
+                authority_id,
+                agent_version: "devil-remote-deterministic/1".to_string(),
+                runtime_enabled: true,
+                schema_version: 1,
+            },
+            state: RemoteWorkspaceLifecycleState::Active,
+            granted_capabilities: vec![
+                devil_protocol::RemoteCapabilityKind::Connect,
+                devil_protocol::RemoteCapabilityKind::FilesystemRead,
+                devil_protocol::RemoteCapabilityKind::FilesystemWrite,
+                devil_protocol::RemoteCapabilityKind::ProcessLaunch,
+                devil_protocol::RemoteCapabilityKind::PtyInput,
+                devil_protocol::RemoteCapabilityKind::LspLaunch,
+                devil_protocol::RemoteCapabilityKind::SemanticQuery,
+                devil_protocol::RemoteCapabilityKind::OfflineResume,
+                devil_protocol::RemoteCapabilityKind::AuditExport,
+            ],
+            created_at: TimestampMillis::now(),
+            last_heartbeat_at: Some(TimestampMillis::now()),
+            schema_version: 1,
+        };
+        self.remote
+            .runtime
+            .create_session(descriptor.clone(), context.workspace_generation)
+            .map_err(|error| AppCompositionError::Remote(error.to_string()))?;
+        Ok(descriptor)
+    }
+
+    /// Return projection-safe remote session descriptors.
+    pub fn remote_session_projections(&self) -> Vec<RemoteWorkspaceSessionDescriptor> {
+        self.remote.session_descriptors()
+    }
+
+    /// Seed an ephemeral deterministic remote fixture file for Phase 7 validation.
+    pub fn seed_remote_fixture_file(
+        &mut self,
+        session_id: RemoteWorkspaceSessionId,
+        path: CanonicalPath,
+        file_id: FileId,
+        content: impl Into<String>,
+    ) -> Result<devil_protocol::RemoteFilesystemSnapshot, AppCompositionError> {
+        self.remote
+            .runtime
+            .session_mut(session_id)
+            .map_err(remote_error)?
+            .seed_file(path, file_id, content)
+            .map_err(remote_error)
+    }
+
+    /// Receive a remote transport envelope and persist metadata-only app-owned audit.
+    pub fn receive_remote_transport_envelope(
+        &mut self,
+        envelope: RemoteTransportEnvelope,
+    ) -> Result<RemoteOperationOutcome, AppCompositionError> {
+        let session_id = envelope.session_id;
+        let operation_id = envelope.operation_id;
+        let correlation_id = envelope.correlation_id;
+        let causality_id = envelope.causality_id;
+        let proposal_id = match &envelope.payload {
+            RemoteTransportPayload::FilesystemOperation(operation) => operation.proposal_id,
+            RemoteTransportPayload::Audit(record) => record.proposal_id,
+            _ => None,
+        };
+
+        let outcome = self
+            .remote
+            .runtime
+            .handle_transport_envelope(envelope)
+            .map_err(remote_error)?;
+        let audit = self
+            .remote
+            .runtime
+            .session(session_id)
+            .map_err(remote_error)?
+            .audit_record(
+                Some(operation_id),
+                proposal_id,
+                self.event_sequence_generator.next(),
+                correlation_id,
+                causality_id,
+            );
+        self.persist_remote_audit(audit)?;
+        Ok(outcome)
+    }
+
+    fn persist_remote_audit(&self, record: RemoteAuditRecord) -> Result<(), AppCompositionError> {
+        self.storage
+            .handle(StorageRepositoryRequest::SaveRemoteAuditRecord(
+                record.clone(),
+            ))
+            .map_err(AppCompositionError::Protocol)?;
+        let envelope = remote_audit_recorded_event(&record)
+            .map_err(|error| AppCompositionError::Remote(error.to_string()))?;
         self.emit_event(envelope);
         Ok(())
     }

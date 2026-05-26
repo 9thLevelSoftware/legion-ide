@@ -1,0 +1,12 @@
+Phase 7 remote filesystem proposal evidence
+
+Status: Passed.
+
+Commands:
+- cargo test -p devil-remote remote_filesystem_write_requires_proposal_and_preconditions
+- cargo test -p devil-app --test workspace_vfs_integration remote_write
+
+Observed results:
+- Remote fixture writes are denied without proposal IDs.
+- Proposal-mediated remote fixture writes require capability decision, principal, fingerprint, file content version, workspace generation, buffer version, snapshot id, correlation id, and causality id.
+- Accepted remote fixture writes do not mutate local disk.

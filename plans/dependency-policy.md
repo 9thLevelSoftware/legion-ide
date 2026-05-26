@@ -74,6 +74,7 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `devil-plugin`
   - `devil-project`
   - `devil-protocol`
+  - `devil-remote`
   - `devil-security`
   - `devil-storage`
   - `devil-tracker`
@@ -160,6 +161,8 @@ Phase 6 collaboration activation is currently limited to accepted protocol DTOs,
   - `devil-protocol`
   - `devil-security`
   - `devil-storage`
+
+Phase 7 activates `devil-remote` only as a deterministic, metadata-first edge workspace runtime harness using protocol DTOs, capability/write precondition validation, proposal IDs for remote-side mutation requests, bounded execution descriptors, reconnect/offline metadata, and metadata-only audit records. It must not depend on app, UI, editor, project, collaboration, terminal, LSP, AI, plugin, tracker, memory, or semantic-index internals. Durable local workspace writes remain app/workspace proposal-mediated; `devil-remote` must not gain direct local filesystem or editor authority.
 
 ### 2. Shared Contracts Boundary
 
@@ -514,6 +517,30 @@ Phase 6 collaboration activation is currently limited to accepted protocol DTOs,
   - `CollaborationReplayManifest`
   - `CollaborationTransportEnvelope`
   - `CollaborationTransportPayload`
+  - `RemoteAuthorityId`
+  - `RemoteAgentId`
+  - `RemoteWorkspaceSessionId`
+  - `RemoteOperationId`
+  - `RemoteOperationLogCheckpointId`
+  - `RemoteWorkspaceLifecycleState`
+  - `RemoteCapabilityKind`
+  - `RemoteAuthorityDescriptor`
+  - `RemoteAgentDescriptor`
+  - `RemoteWorkspaceSessionDescriptor`
+  - `RemoteTransportEnvelope`
+  - `RemoteTransportPayload`
+  - `RemoteFilesystemOperationKind`
+  - `RemoteFilesystemSnapshot`
+  - `RemoteWritePreconditions`
+  - `RemoteFilesystemOperation`
+  - `RemoteProcessDescriptor`
+  - `RemotePtyDescriptor`
+  - `RemoteLspDescriptor`
+  - `RemoteSemanticQueryDescriptor`
+  - `RemoteNetworkHealthState`
+  - `RemoteOperationLogCheckpoint`
+  - `RemoteOfflineResumeManifest`
+  - `RemoteAuditRecord`
 
 ### 3. Forbidden/Deferred Edges
 
@@ -532,7 +559,7 @@ Phase 6 collaboration activation is currently limited to accepted protocol DTOs,
 ### 4. Runtime Surface Activation Gates
 
 - Phase 3 activates `devil-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
-- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-collaboration` is Phase 6 scaffold-gated for protocol DTOs and evidence governance only; runtime behavior remains blocked until accepted collaboration ADRs, convergence tests, ownership tests, and Phase 6 evidence are complete. `devil-lsp`, `devil-terminal`, and `devil-remote` remain ADR-gated. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-collaboration` is activated for the limited Phase 6 deterministic local collaboration runtime described above. `devil-remote` is activated for the limited Phase 7 deterministic edge workspace harness described above. Standalone `devil-lsp` and `devil-terminal` crates remain ADR-gated outside accepted semantic/LSP supervision contracts and Phase 7 remote execution descriptors. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
 - Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated
   - an explicit dependency-policy entry in this document

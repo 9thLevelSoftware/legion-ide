@@ -1,0 +1,18 @@
+Phase 7 transport and security test evidence
+
+Status: Passed.
+
+Commands:
+- cargo test -p devil-security remote
+- cargo test -p devil-remote remote_runtime_is_default_off remote_session_requires_trusted_active_enabled_descriptor remote_reconnect_and_offline_resume_are_explicit
+
+Observed results:
+- 4 remote-filtered security tests passed.
+- Remote runtime lifecycle and reconnect/offline tests passed in devil-remote.
+
+Covered cases:
+- Remote capabilities are disabled by default.
+- Remote capabilities require trusted workspace.
+- Remote filesystem can be enabled without enabling execution.
+- Remote connect denies non-loopback air-gap egress.
+- Remote transport envelopes require non-zero correlation, causality, event sequence, principal, and metadata-only redaction hints.

@@ -1,0 +1,11 @@
+Phase 7 remote process and terminal policy evidence
+
+Status: Passed.
+
+Command:
+- cargo test -p devil-remote remote_execution_surfaces_are_policy_gated_and_bounded
+
+Observed result:
+- Remote process descriptor is accepted only with `remote.process.launch`, non-nil cancellation token, valid identity, and bounded output.
+- Remote PTY descriptor is accepted only with `remote.pty.input`, valid terminal size, valid session identity, and bounded transcript limit.
+- Remote execution remains descriptor-only and does not spawn local processes or persist output bodies.

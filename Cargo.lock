@@ -240,6 +240,7 @@ dependencies = [
  "devil-plugin",
  "devil-project",
  "devil-protocol",
+ "devil-remote",
  "devil-security",
  "devil-storage",
  "devil-tracker",
@@ -350,6 +351,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "devil-remote"
+version = "0.1.0"
+dependencies = [
+ "devil-protocol",
  "thiserror 2.0.18",
  "uuid",
 ]

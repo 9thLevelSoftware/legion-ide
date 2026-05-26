@@ -20,6 +20,7 @@ members = [
     "crates/devil-observability",
     "crates/devil-plugin",
     "crates/devil-collaboration",
+    "crates/devil-remote",
     "crates/devil-cli",
 ]
 
@@ -60,3 +61,4 @@ devil-agent = { path = "crates/devil-agent" }
 devil-ui = { path = "crates/devil-ui" }
 devil-plugin = { path = "crates/devil-plugin" }
 devil-collaboration = { path = "crates/devil-collaboration" }
+devil-remote = { path = "crates/devil-remote" }

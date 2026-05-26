@@ -1,0 +1,7 @@
+Command: cargo check --workspace --all-targets
+Status: Passed
+Captured: 2026-05-25
+
+Result:
+- Finished dev profile successfully.
+- Workspace check included devil-remote and app-owned remote composition changes.

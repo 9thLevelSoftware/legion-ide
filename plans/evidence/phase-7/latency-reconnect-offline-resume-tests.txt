@@ -1,0 +1,12 @@
+Phase 7 latency, reconnect, and offline resume evidence
+
+Status: Passed.
+
+Command:
+- cargo test -p devil-remote remote_reconnect_and_offline_resume_are_explicit
+
+Observed result:
+- Checkpoint handling records network health and operation-log checkpoint metadata.
+- Reconnect transitions are explicit and preserve remote fixture state.
+- Offline resume manifests validate known checkpoint IDs, workspace generation, snapshot id, correlation id, causality id, and event sequence.
+- Unknown checkpoints surface gap outcomes instead of silent reconciliation.

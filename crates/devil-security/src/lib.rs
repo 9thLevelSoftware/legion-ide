@@ -352,6 +352,58 @@ pub struct CollaborationCapabilityPolicy {
     pub audit_export_enabled: bool,
 }
 
+/// Remote-development capability policy controls.
+#[derive(Debug, Clone)]
+pub struct RemoteDevelopmentPolicy {
+    /// Allowed remote capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
+    /// Require trusted workspace for all remote-development actions.
+    pub require_trusted_workspace: bool,
+    /// Whether remote workspace sessions may connect.
+    pub runtime_sessions_enabled: bool,
+    /// Whether remote filesystem read and proposal-mediated mutation requests are enabled.
+    pub filesystem_enabled: bool,
+    /// Whether remote process, PTY, and terminal descriptors are enabled.
+    pub execution_enabled: bool,
+    /// Whether remote LSP descriptors are enabled.
+    pub lsp_enabled: bool,
+    /// Whether remote semantic-query descriptors are enabled.
+    pub semantic_query_enabled: bool,
+    /// Whether metadata-only remote audit export is enabled.
+    pub audit_export_enabled: bool,
+    /// Whether offline resume manifests are enabled.
+    pub offline_resume_enabled: bool,
+}
+
+impl Default for RemoteDevelopmentPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_capabilities: HashSet::from([
+                "remote.session.connect".to_string(),
+                "remote.fs.read".to_string(),
+                "remote.fs.write".to_string(),
+                "remote.process.launch".to_string(),
+                "remote.pty.input".to_string(),
+                "remote.terminal.access".to_string(),
+                "remote.lsp.launch".to_string(),
+                "remote.semantic.query".to_string(),
+                "remote.cache.access".to_string(),
+                "remote.egress".to_string(),
+                "remote.audit.export".to_string(),
+                "remote.offline.resume".to_string(),
+            ]),
+            require_trusted_workspace: true,
+            runtime_sessions_enabled: false,
+            filesystem_enabled: false,
+            execution_enabled: false,
+            lsp_enabled: false,
+            semantic_query_enabled: false,
+            audit_export_enabled: false,
+            offline_resume_enabled: false,
+        }
+    }
+}
+
 impl Default for CollaborationCapabilityPolicy {
     fn default() -> Self {
         Self {
@@ -466,6 +518,8 @@ pub struct SecurityPolicy {
     pub ai_provider_policy: AiProviderPolicy,
     /// Collaboration policy.
     pub collaboration_policy: CollaborationCapabilityPolicy,
+    /// Remote-development policy.
+    pub remote_policy: RemoteDevelopmentPolicy,
 }
 
 /// Security errors.
@@ -822,6 +876,108 @@ impl DenyByDefaultBroker {
         }
     }
 
+    fn remote_capability_decision(
+        &self,
+        trust: TrustState,
+        capability: &str,
+        context: &CapabilityRequestContext,
+    ) -> SecurityDecision {
+        if self.policy.remote_policy.require_trusted_workspace && trust != TrustState::Trusted {
+            return SecurityDecision::deny("remote capability denied for untrusted workspace");
+        }
+        if !self
+            .policy
+            .remote_policy
+            .allowed_capabilities
+            .contains(capability)
+        {
+            return SecurityDecision::deny(format!(
+                "capability {capability} denied by deny-by-default"
+            ));
+        }
+        if let Some(target) = &context.network_target
+            && (self.policy.network_policy.air_gap
+                || self.policy.network_policy.local_provider_only)
+            && !Self::is_loopback_host(&target.host)
+        {
+            return SecurityDecision::deny(
+                "remote transport cannot use non-loopback egress in air-gap policy",
+            );
+        }
+
+        match capability {
+            "remote.session.connect" => {
+                if !self.policy.remote_policy.runtime_sessions_enabled {
+                    return SecurityDecision::deny("remote sessions are disabled by policy");
+                }
+                self.network_target_decision(context)
+            }
+            "remote.fs.read" | "remote.fs.write" => {
+                if self.policy.remote_policy.runtime_sessions_enabled
+                    && self.policy.remote_policy.filesystem_enabled
+                {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote filesystem is disabled by policy")
+                }
+            }
+            "remote.process.launch" | "remote.pty.input" | "remote.terminal.access" => {
+                if self.policy.remote_policy.runtime_sessions_enabled
+                    && self.policy.remote_policy.execution_enabled
+                {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote execution is disabled by policy")
+                }
+            }
+            "remote.lsp.launch" => {
+                if self.policy.remote_policy.runtime_sessions_enabled
+                    && self.policy.remote_policy.lsp_enabled
+                {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote LSP is disabled by policy")
+                }
+            }
+            "remote.semantic.query" => {
+                if self.policy.remote_policy.runtime_sessions_enabled
+                    && self.policy.remote_policy.semantic_query_enabled
+                {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote semantic query is disabled by policy")
+                }
+            }
+            "remote.cache.access" => {
+                if self.policy.remote_policy.runtime_sessions_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote sessions are disabled by policy")
+                }
+            }
+            "remote.egress" => self.network_target_decision(context),
+            "remote.audit.export" => {
+                if self.policy.remote_policy.audit_export_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote audit export is disabled by policy")
+                }
+            }
+            "remote.offline.resume" => {
+                if self.policy.remote_policy.runtime_sessions_enabled
+                    && self.policy.remote_policy.offline_resume_enabled
+                {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote offline resume is disabled by policy")
+                }
+            }
+            _ => {
+                SecurityDecision::deny(format!("capability {capability} denied by deny-by-default"))
+            }
+        }
+    }
+
     fn decide_with_context(
         &self,
         trust: TrustState,
@@ -843,6 +999,10 @@ impl DenyByDefaultBroker {
 
         if capability.starts_with("collaboration.") {
             return self.collaboration_capability_decision(trust, &capability, context);
+        }
+
+        if capability.starts_with("remote.") {
+            return self.remote_capability_decision(trust, &capability, context);
         }
 
         if capability.starts_with("plugin.") {
@@ -1001,6 +1161,7 @@ impl DenyByDefaultBroker {
             || capability.starts_with("tracker.")
             || capability.starts_with("memory.")
             || capability.starts_with("collaboration.")
+            || capability.starts_with("remote.")
         {
             return true;
         }
@@ -1264,6 +1425,83 @@ mod tests {
                 network_target: Some(devil_protocol::NetworkTarget {
                     scheme: "https".to_string(),
                     host: "collab.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(decision, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn remote_capabilities_are_disabled_by_default_and_require_trust() {
+        let mut broker = DenyByDefaultBroker::default();
+        let fs_read = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.fs.read".to_string()),
+            None,
+        );
+        assert!(matches!(fs_read, SecurityDecision::Deny(_)));
+
+        let untrusted = broker.decide(
+            TrustState::Untrusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.session.connect".to_string()),
+            None,
+        );
+        assert!(matches!(untrusted, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn remote_policy_allows_filesystem_without_execution() {
+        let policy = SecurityPolicy {
+            remote_policy: RemoteDevelopmentPolicy {
+                runtime_sessions_enabled: true,
+                filesystem_enabled: true,
+                ..RemoteDevelopmentPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+
+        let fs_write = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.fs.write".to_string()),
+            None,
+        );
+        let process = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.process.launch".to_string()),
+            None,
+        );
+
+        assert!(matches!(fs_write, SecurityDecision::Allow));
+        assert!(matches!(process, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn remote_connect_denies_non_loopback_air_gap_egress() {
+        let policy = SecurityPolicy {
+            remote_policy: RemoteDevelopmentPolicy {
+                runtime_sessions_enabled: true,
+                ..RemoteDevelopmentPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let decision = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.session.connect".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "remote.example.com".to_string(),
                     port: Some(443),
                 }),
                 ..Default::default()

@@ -1,0 +1,18 @@
+Phase 7 remote agent lifecycle evidence
+
+Status: Passed.
+
+Command:
+- cargo test -p devil-remote
+
+Observed result:
+- 7 tests passed.
+
+Covered lifecycle states:
+- Default-off runtime denial.
+- Trusted active enabled session creation.
+- Untrusted and degraded activation denial.
+- Reconnecting transition.
+- Reconnect completion.
+- Offline marking.
+- Offline resume manifest validation.

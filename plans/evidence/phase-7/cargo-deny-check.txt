@@ -1,0 +1,8 @@
+Command: cargo deny check
+Status: Passed with accepted warning-level baseline notes
+Captured: 2026-05-25
+
+Result:
+- `cargo deny check` completed successfully.
+- Cargo-deny reported existing warning-level duplicate dependency baseline notes for `thiserror`, `thiserror-impl`, and `wit-bindgen`.
+- Advisories, bans, licenses, and sources all reported `ok`.

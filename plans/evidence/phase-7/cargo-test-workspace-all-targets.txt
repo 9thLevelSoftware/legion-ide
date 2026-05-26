@@ -1,0 +1,9 @@
+Command: cargo test --workspace --all-targets
+Status: Passed
+Captured: 2026-05-25
+
+Result:
+- `cargo test --workspace --all-targets` completed successfully after Phase 7 evidence artifacts were added.
+- Workspace integration included 59 `devil-app` integration tests, including the new remote app-owned composition and local disk preservation tests.
+- `devil-remote` reported 7 passed unit tests.
+- `xtask` reported 30 passed unit tests, including the accepted Phase 7 evidence gate.

@@ -22,11 +22,12 @@ use devil_protocol::{
     ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
     ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
     ProposalPrivacyLabel, ProposalRejectionReason, ProposalRollbackReason, ProposalStaleReason,
-    ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint, RetentionLabel,
-    TextTransactionDescriptor, TimestampMillis, WorkspaceId, WorkspaceProposal,
+    ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint, RemoteAuditRecord,
+    RetentionLabel, TextTransactionDescriptor, TimestampMillis, WorkspaceId, WorkspaceProposal,
     delegated_task_audit_linkage_record, validate_agent_replay_manifest,
     validate_assisted_ai_audit_record, validate_collaboration_audit_record,
     validate_delegated_task_audit_linkage_record, validate_phase4_runtime_audit_record,
+    validate_remote_audit_record,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -105,6 +106,31 @@ pub fn collaboration_audit_recorded_event(
             .metadata("session_id", json!(record.session_id.0.to_string()))
             .metadata("payload_class", json!("metadata_only"))
             .metadata("metadata_summary", json!(record.metadata_summary));
+    if let Some(operation_id) = record.operation_id {
+        builder = builder.metadata("operation_id", json!(operation_id.0.to_string()));
+    }
+    if let Some(proposal_id) = record.proposal_id {
+        builder = builder.metadata("proposal_id", json!(proposal_id.0));
+    }
+
+    let envelope = builder.build();
+    validate_envelope(&envelope, EventSinkConfig::default())?;
+    Ok(envelope)
+}
+
+/// Build a metadata-only remote-development audit event envelope.
+pub fn remote_audit_recorded_event(
+    record: &RemoteAuditRecord,
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_remote_audit_record(record).map_err(|_| ObservabilityError::InvalidPayload)?;
+    let mut builder = EventEnvelopeBuilder::new("remote.audit_recorded", record.causality_id)
+        .retention(record.retention_label)
+        .redaction(RedactionHint::MetadataOnly)
+        .correlation_id(record.correlation_id)
+        .sequence(record.event_sequence)
+        .metadata("session_id", json!(record.session_id.0.to_string()))
+        .metadata("payload_class", json!("metadata_only"))
+        .metadata("metadata_summary", json!(record.metadata_summary));
     if let Some(operation_id) = record.operation_id {
         builder = builder.metadata("operation_id", json!(operation_id.0.to_string()));
     }
@@ -2232,6 +2258,48 @@ mod tests {
         invalid.metadata_summary = "source_text=fn main()".to_string();
         assert!(matches!(
             collaboration_audit_recorded_event(&invalid),
+            Err(ObservabilityError::InvalidPayload)
+        ));
+    }
+
+    #[test]
+    fn remote_audit_event_is_metadata_only_and_validated() {
+        let record = RemoteAuditRecord {
+            session_id: devil_protocol::RemoteWorkspaceSessionId(7001),
+            operation_id: Some(devil_protocol::RemoteOperationId(8001)),
+            proposal_id: Some(devil_protocol::ProposalId(42)),
+            event_sequence: EventSequence(88),
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            retention_label: RetentionLabel::Audit,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            metadata_summary: "state=Active files=1 checkpoints=0".to_string(),
+            schema_version: 1,
+        };
+
+        let event = remote_audit_recorded_event(&record).expect("remote event");
+
+        assert_eq!(event.event, "remote.audit_recorded");
+        assert_eq!(event.redaction, RedactionHint::MetadataOnly);
+        assert_eq!(event.retention, RetentionLabel::Audit);
+        assert_eq!(event.payload["payload_class"], "metadata_only");
+        assert_eq!(event.payload["proposal_id"], 42);
+
+        let sink = InMemoryEventSink::new();
+        sink.try_emit(EventSinkRequest { envelope: event })
+            .expect("remote event stores");
+        let serialized = serde_json::to_string(&sink.events().expect("stored events"))
+            .expect("serialize stored remote event");
+        assert!(!serialized.contains("source_text"));
+        assert!(!serialized.contains("raw_transcript"));
+        assert!(!serialized.contains("process_output"));
+        assert!(!serialized.contains("transport_payload"));
+        assert!(!serialized.contains("secret"));
+
+        let mut invalid = record;
+        invalid.metadata_summary = "process_output=secret".to_string();
+        assert!(matches!(
+            remote_audit_recorded_event(&invalid),
             Err(ObservabilityError::InvalidPayload)
         ));
     }

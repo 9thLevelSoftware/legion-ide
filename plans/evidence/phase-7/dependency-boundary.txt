@@ -1,0 +1,14 @@
+Phase 7 dependency-boundary evidence
+
+Status: Passed.
+
+Command coverage:
+- cargo run -p xtask -- check-deps
+- cargo check --workspace --all-targets
+
+Findings:
+- devil-remote is an active workspace crate.
+- devil-remote depends on devil-protocol plus utility crates thiserror and uuid.
+- devil-remote does not depend on devil-app, devil-ui, devil-editor, devil-project, devil-collaboration, devil-terminal, devil-lsp, devil-ai, devil-plugin, devil-index, devil-tracker, or devil-memory internals.
+- devil-app composes remote sessions through app-owned public methods and keeps local editor/workspace mutation outside devil-remote.
+- devil-ui dependency policy remains projection-only and has no dependency on devil-remote.

@@ -1,0 +1,15 @@
+Phase 7 performance budget evidence
+
+Status: Passed for deterministic harness scope.
+
+Commands:
+- cargo check --workspace --all-targets
+- cargo test -p devil-app --test workspace_vfs_integration remote
+
+Findings:
+- Remote runtime is deterministic and in-memory for Phase 7 validation.
+- UI remains projection-only and no renderer or editor hot path receives remote source payloads.
+- Remote app integration tests complete without local disk mutation or editor transaction overhead from remote fixture writes.
+
+Reservation:
+- Production remote latency p95/p99 renderer evidence remains Phase 8 hardening because Phase 7 activates a deterministic harness, not a network transport backend.

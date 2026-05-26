@@ -32,12 +32,15 @@ use devil_protocol::{
     ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackAction,
     ProposalRollbackReason, ProposalRollbackStep, ProposalStaleReason, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions, RedactionHint,
-    SaveConflictPolicy, SaveFileProposal, SaveIntent, SnapshotId, StorageRepositoryRequest,
-    StorageRepositoryResponse, TextCoordinate, TextOffset, TextRange, TextTransactionDescriptor,
-    TimestampMillis, TransactionSource, TrustDecisionContext, ViewportProjectionMode,
-    WorkspaceGeneration, WorkspaceId, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
-    WorkspaceResponse, WorkspaceTrustState,
+    RemoteFilesystemOperation, RemoteFilesystemOperationKind, RemoteOperationId,
+    RemoteTransportEnvelope, RemoteTransportPayload, RemoteWorkspaceSessionId,
+    RemoteWritePreconditions, SaveConflictPolicy, SaveFileProposal, SaveIntent, SnapshotId,
+    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextOffset, TextRange,
+    TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
+    ViewportProjectionMode, WorkspaceGeneration, WorkspaceId, WorkspacePort, WorkspaceProposal,
+    WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
 };
+use devil_remote::RemoteOperationDisposition;
 use devil_ui::{CommandDispatchIntent, ShellLayoutProjection};
 use uuid::Uuid;
 
@@ -67,6 +70,37 @@ fn app_with_events() -> (AppComposition, InMemoryEventSink) {
     let sink = InMemoryEventSink::new();
     let app = AppComposition::with_event_sink(SharedEventSink::new(sink.clone()));
     (app, sink)
+}
+
+fn causality_id() -> CausalityId {
+    CausalityId(Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap())
+}
+
+fn remote_capability_decision(capability: &str) -> CapabilityDecision {
+    CapabilityDecision {
+        decision_id: CapabilityDecisionId(1701),
+        granted: true,
+        capability: CapabilityId(capability.to_string()),
+        reason: None,
+    }
+}
+
+fn remote_envelope(
+    session_id: RemoteWorkspaceSessionId,
+    operation_id: RemoteOperationId,
+    payload: RemoteTransportPayload,
+) -> RemoteTransportEnvelope {
+    RemoteTransportEnvelope {
+        session_id,
+        operation_id,
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        event_sequence: devil_protocol::EventSequence(operation_id.0 as u64),
+        principal_id: PrincipalId("principal-remote".to_string()),
+        payload,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
 }
 
 fn assert_non_zero_core_ids(event: &EventEnvelope) {
@@ -4729,6 +4763,176 @@ fn workspace_vfs_integration_collaboration_presence_is_app_owned_projection() {
         .expect("small preview");
     assert!(text.contains("seed"));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_remote_session_is_app_owned_projection_and_metadata_audited() {
+    let root = create_root();
+    let (mut app, sink) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-remote".to_string()),
+    )
+    .expect("open trusted workspace");
+
+    assert!(
+        app.connect_remote_workspace_session(RemoteWorkspaceSessionId(7001), "edge:test")
+            .is_err(),
+        "remote sessions stay disabled until app explicitly enables runtime"
+    );
+
+    app.enable_remote_development_runtime();
+    let descriptor = app
+        .connect_remote_workspace_session(RemoteWorkspaceSessionId(7001), "edge:test")
+        .expect("connect remote session");
+    assert_eq!(descriptor.session_id, RemoteWorkspaceSessionId(7001));
+    assert_eq!(app.remote_session_projections().len(), 1);
+
+    let path = CanonicalPath("/remote/workspace/src/main.rs".to_string());
+    app.seed_remote_fixture_file(
+        RemoteWorkspaceSessionId(7001),
+        path.clone(),
+        FileId(33),
+        "fn main() {}",
+    )
+    .expect("seed remote fixture");
+    let operation = RemoteFilesystemOperation {
+        session_id: RemoteWorkspaceSessionId(7001),
+        operation_id: RemoteOperationId(8001),
+        kind: RemoteFilesystemOperationKind::Read,
+        path,
+        destination: None,
+        write_preconditions: None,
+        proposal_id: None,
+        schema_version: 1,
+    };
+    let outcome = app
+        .receive_remote_transport_envelope(remote_envelope(
+            RemoteWorkspaceSessionId(7001),
+            RemoteOperationId(8001),
+            RemoteTransportPayload::FilesystemOperation(operation),
+        ))
+        .expect("receive remote read");
+    assert_eq!(outcome.disposition, RemoteOperationDisposition::Accepted);
+    assert!(outcome.snapshot.is_some());
+
+    let events = sink.events().expect("events available");
+    let remote_event = events
+        .iter()
+        .find(|event| event.event == "remote.audit_recorded")
+        .expect("remote audit event emitted");
+    assert_non_zero_core_ids(remote_event);
+    assert_eq!(remote_event.redaction, RedactionHint::MetadataOnly);
+    assert!(remote_event.payload.get("payload_class").is_some());
+    let serialized = format!("{events:?}");
+    assert!(!serialized.contains("fn main"));
+    assert!(!serialized.contains("raw_source"));
+    assert!(!serialized.contains("raw_transcript"));
+
+    let loaded = app
+        .storage_port()
+        .handle(StorageRepositoryRequest::ReadRemoteAuditRecord {
+            session_id: RemoteWorkspaceSessionId(7001),
+            event_sequence: remote_event.sequence,
+        })
+        .expect("read remote audit");
+    match loaded {
+        StorageRepositoryResponse::RemoteAuditRecord(record) => {
+            let record = record.expect("remote audit record exists");
+            assert_eq!(record.session_id, RemoteWorkspaceSessionId(7001));
+            assert!(
+                record
+                    .redaction_hints
+                    .contains(&RedactionHint::MetadataOnly)
+            );
+        }
+        other => panic!("unexpected remote audit response: {other:?}"),
+    }
+}
+
+#[test]
+fn workspace_vfs_integration_remote_write_requires_proposal_and_preserves_local_disk() {
+    let root = create_root();
+    let local_path = root.join("local.rs");
+    std::fs::write(&local_path, "local disk text").expect("write local fixture");
+    let (mut app, _sink) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-remote".to_string()),
+    )
+    .expect("open trusted workspace");
+    app.enable_remote_development_runtime();
+    app.connect_remote_workspace_session(RemoteWorkspaceSessionId(7002), "edge:test")
+        .expect("connect remote session");
+    let remote_path = CanonicalPath("/remote/workspace/local.rs".to_string());
+    let snapshot = app
+        .seed_remote_fixture_file(
+            RemoteWorkspaceSessionId(7002),
+            remote_path.clone(),
+            FileId(44),
+            "remote fixture text",
+        )
+        .expect("seed remote fixture");
+    let preconditions = RemoteWritePreconditions {
+        capability_decision: remote_capability_decision("remote.fs.write"),
+        principal_id: PrincipalId("principal-remote".to_string()),
+        expected_fingerprint: snapshot.fingerprint.clone(),
+        file_content_version: snapshot.file_content_version.expect("version present"),
+        workspace_generation: snapshot.workspace_generation,
+        buffer_version: Some(BufferVersion(1)),
+        snapshot_id: snapshot.snapshot_id,
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+    };
+    let denied_operation = RemoteFilesystemOperation {
+        session_id: RemoteWorkspaceSessionId(7002),
+        operation_id: RemoteOperationId(8101),
+        kind: RemoteFilesystemOperationKind::Write,
+        path: remote_path.clone(),
+        destination: None,
+        write_preconditions: Some(preconditions.clone()),
+        proposal_id: None,
+        schema_version: 1,
+    };
+    let denied = app
+        .receive_remote_transport_envelope(remote_envelope(
+            RemoteWorkspaceSessionId(7002),
+            RemoteOperationId(8101),
+            RemoteTransportPayload::FilesystemOperation(denied_operation),
+        ))
+        .expect("denied remote write returns outcome");
+    assert_eq!(denied.disposition, RemoteOperationDisposition::Denied);
+    assert_eq!(
+        std::fs::read_to_string(&local_path).expect("local file readable"),
+        "local disk text",
+        "remote denial must not mutate local disk"
+    );
+
+    let accepted_operation = RemoteFilesystemOperation {
+        session_id: RemoteWorkspaceSessionId(7002),
+        operation_id: RemoteOperationId(8102),
+        kind: RemoteFilesystemOperationKind::Write,
+        path: remote_path,
+        destination: None,
+        write_preconditions: Some(preconditions),
+        proposal_id: Some(ProposalId(700)),
+        schema_version: 1,
+    };
+    let accepted = app
+        .receive_remote_transport_envelope(remote_envelope(
+            RemoteWorkspaceSessionId(7002),
+            RemoteOperationId(8102),
+            RemoteTransportPayload::FilesystemOperation(accepted_operation),
+        ))
+        .expect("accepted remote write returns outcome");
+    assert_eq!(accepted.disposition, RemoteOperationDisposition::Accepted);
+    assert_eq!(
+        std::fs::read_to_string(&local_path).expect("local file readable"),
+        "local disk text",
+        "remote accepted fixture write still cannot bypass local workspace authority"
+    );
 }
 
 #[test]

@@ -1,0 +1,12 @@
+Phase 7 remote stale/conflict evidence
+
+Status: Passed.
+
+Command:
+- cargo test -p devil-remote remote_filesystem_stale_fingerprint_preserves_fixture_text
+
+Observed result:
+- Stale remote fingerprint rejects the write and preserves existing remote fixture text.
+
+Additional checked paths:
+- Snapshot mismatch, file-content version mismatch, workspace-generation mismatch, missing file, existing destination, and missing destination are represented as stale or conflict outcomes in the deterministic runtime.
