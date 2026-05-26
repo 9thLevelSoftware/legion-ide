@@ -4,6 +4,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -363,15 +364,30 @@ impl RemoteTransportCarrier for RustlsMtlsCarrier {
 
 fn tls_server_identity_name(identity: &str) -> Result<String, RemoteTransportCarrierError> {
     let trimmed = identity.trim();
-    let name = trimmed
-        .strip_prefix("dns:")
-        .or_else(|| trimmed.strip_prefix("ip:"))
-        .unwrap_or(trimmed)
-        .trim();
+    let (identity_kind, name) = if let Some(name) = trimmed.strip_prefix("dns:") {
+        ("dns", name.trim())
+    } else if let Some(name) = trimmed.strip_prefix("ip:") {
+        ("ip", name.trim())
+    } else {
+        ("untyped", trimmed)
+    };
     if name.is_empty() || name.contains('/') {
         return Err(RemoteTransportCarrierError::InvalidPolicy {
             reason: "TLS policy server identity must be a DNS name or IP address".to_string(),
         });
+    }
+    match identity_kind {
+        "ip" if name.parse::<IpAddr>().is_err() => {
+            return Err(RemoteTransportCarrierError::InvalidPolicy {
+                reason: "TLS policy ip: server identity must be an IP literal".to_string(),
+            });
+        }
+        "dns" if name.parse::<IpAddr>().is_ok() => {
+            return Err(RemoteTransportCarrierError::InvalidPolicy {
+                reason: "TLS policy dns: server identity must be a DNS name".to_string(),
+            });
+        }
+        _ => {}
     }
     Ok(name.to_string())
 }
@@ -1263,6 +1279,18 @@ mod tests {
             tls_server_identity_name("ip:127.0.0.1").expect("ip identity"),
             "127.0.0.1"
         );
+        assert_eq!(
+            tls_server_identity_name("ip:::1").expect("ipv6 identity"),
+            "::1"
+        );
+        assert!(matches!(
+            tls_server_identity_name("ip:example.com"),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+        assert!(matches!(
+            tls_server_identity_name("dns:127.0.0.1"),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
         assert!(matches!(
             tls_server_identity_name("spiffe://example/workload"),
             Err(RemoteTransportCarrierError::InvalidPolicy { .. })

@@ -7,7 +7,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use devil_protocol::{
     HostedTelemetryConsentGrant, HostedTelemetryEndpointDescriptor, HostedTelemetryExportBatch,
@@ -348,13 +348,164 @@ impl TelemetryExportClient for ReqwestTelemetryExportClient {
                     .headers()
                     .get("retry-after")
                     .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map(|seconds| seconds.saturating_mul(1_000)),
+                    .and_then(|value| parse_retry_after_ms(value, SystemTime::now())),
                 status: format!("http_{}", status.as_u16()),
                 schema_version: 1,
             })
         }
     }
+}
+
+fn parse_retry_after_ms(value: &str, now: SystemTime) -> Option<u64> {
+    let trimmed = value.trim();
+    if let Ok(seconds) = trimmed.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
+    }
+    parse_http_date(trimmed).map(|retry_at| {
+        let delay = retry_at.duration_since(now).unwrap_or(Duration::ZERO);
+        let millis = delay.as_millis();
+        millis.min(u128::from(u64::MAX)) as u64
+    })
+}
+
+fn parse_http_date(value: &str) -> Option<SystemTime> {
+    parse_imf_fixdate(value)
+        .or_else(|| parse_rfc850_date(value))
+        .or_else(|| parse_asctime_date(value))
+}
+
+fn parse_imf_fixdate(value: &str) -> Option<SystemTime> {
+    let (_, rest) = value.split_once(',')?;
+    let parts = rest.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 5 || !parts[4].eq_ignore_ascii_case("GMT") {
+        return None;
+    }
+    let day = parts[0].parse::<u32>().ok()?;
+    let month = month_number(parts[1])?;
+    let year = parts[2].parse::<i32>().ok()?;
+    let (hour, minute, second) = parse_hms(parts[3])?;
+    system_time_utc(year, month, day, hour, minute, second)
+}
+
+fn parse_rfc850_date(value: &str) -> Option<SystemTime> {
+    let (_, rest) = value.split_once(',')?;
+    let parts = rest.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 3 || !parts[2].eq_ignore_ascii_case("GMT") {
+        return None;
+    }
+    let date = parts[0].split('-').collect::<Vec<_>>();
+    if date.len() != 3 {
+        return None;
+    }
+    let day = date[0].parse::<u32>().ok()?;
+    let month = month_number(date[1])?;
+    let short_year = date[2].parse::<i32>().ok()?;
+    let year = if short_year >= 70 {
+        1900 + short_year
+    } else {
+        2000 + short_year
+    };
+    let (hour, minute, second) = parse_hms(parts[1])?;
+    system_time_utc(year, month, day, hour, minute, second)
+}
+
+fn parse_asctime_date(value: &str) -> Option<SystemTime> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 5 {
+        return None;
+    }
+    let month = month_number(parts[1])?;
+    let day = parts[2].parse::<u32>().ok()?;
+    let (hour, minute, second) = parse_hms(parts[3])?;
+    let year = parts[4].parse::<i32>().ok()?;
+    system_time_utc(year, month, day, hour, minute, second)
+}
+
+fn month_number(value: &str) -> Option<u32> {
+    match value.to_ascii_lowercase().as_str() {
+        "jan" => Some(1),
+        "feb" => Some(2),
+        "mar" => Some(3),
+        "apr" => Some(4),
+        "may" => Some(5),
+        "jun" => Some(6),
+        "jul" => Some(7),
+        "aug" => Some(8),
+        "sep" => Some(9),
+        "oct" => Some(10),
+        "nov" => Some(11),
+        "dec" => Some(12),
+        _ => None,
+    }
+}
+
+fn parse_hms(value: &str) -> Option<(u32, u32, u32)> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
+    }
+    let hour = parts[0].parse::<u32>().ok()?;
+    let minute = parts[1].parse::<u32>().ok()?;
+    let second = parts[2].parse::<u32>().ok()?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some((hour, minute, second))
+}
+
+fn system_time_utc(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<SystemTime> {
+    if !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = days
+        .saturating_mul(86_400)
+        .saturating_add(i64::from(hour) * 3_600)
+        .saturating_add(i64::from(minute) * 60)
+        .saturating_add(i64::from(second));
+    if seconds <= 0 {
+        return Some(UNIX_EPOCH);
+    }
+    UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let month = month as i32;
+    let day = day as i32;
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * month_prime + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    i64::from(era * 146_097 + doe - 719_468)
 }
 
 fn ensure_rustls_crypto_provider() -> Result<(), TelemetrySpoolError> {
@@ -832,6 +983,29 @@ mod tests {
             records: vec![record()],
             schema_version: 1,
         }
+    }
+
+    #[test]
+    fn retry_after_parser_accepts_seconds_and_http_dates() {
+        let now = system_time_utc(2026, 5, 26, 18, 0, 0).expect("fixed now");
+        assert_eq!(parse_retry_after_ms("7", now), Some(7_000));
+        assert_eq!(
+            parse_retry_after_ms("Tue, 26 May 2026 18:00:05 GMT", now),
+            Some(5_000)
+        );
+        assert_eq!(
+            parse_retry_after_ms("Tuesday, 26-May-26 18:00:09 GMT", now),
+            Some(9_000)
+        );
+        assert_eq!(
+            parse_retry_after_ms("Tue May 26 18:00:11 2026", now),
+            Some(11_000)
+        );
+        assert_eq!(
+            parse_retry_after_ms("Tue, 26 May 2026 17:59:59 GMT", now),
+            Some(0)
+        );
+        assert_eq!(parse_retry_after_ms("not-a-date", now), None);
     }
 
     #[test]
