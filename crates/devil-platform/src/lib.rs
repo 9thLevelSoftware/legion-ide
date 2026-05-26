@@ -1110,7 +1110,11 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
     unsafe {
         command.pre_exec(move || {
             nix::unistd::setsid().map_err(|err| io::Error::from_raw_os_error(err as i32))?;
-            let result = nix::libc::ioctl(slave_stdin_fd, nix::libc::TIOCSCTTY, 0);
+            let result = nix::libc::ioctl(
+                slave_stdin_fd,
+                nix::libc::TIOCSCTTY as nix::libc::c_ulong,
+                0,
+            );
             if result < 0 {
                 return Err(io::Error::last_os_error());
             }
