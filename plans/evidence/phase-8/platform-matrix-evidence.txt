@@ -1,19 +1,19 @@
 Status: final platform matrix evidence archived; release signoff remains required before GA acceptance.
 
 Workflow: .github/workflows/ci.yml
-Run URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593
-Head SHA: 6e5fb6734bfae54365a98a063d48cc847988c1f1
-Completed: 2026-05-26T17:48:33Z
+Run URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26469404786
+Head SHA: 9dbfff47b1246d1e2b1305de023089d6c43b47a3
+Completed: 2026-05-26T19:16:16Z
 
 Matrix jobs:
 - ubuntu-latest: passed
-  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593/job/77922469355
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26469404786/job/77938446097
 - windows-latest: passed
-  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593/job/77922469486
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26469404786/job/77938446175
 - macos-latest: passed
-  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593/job/77922469527
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26469404786/job/77938446094
 
-Archived gate outputs from CI run 26464913593:
+Archived gate outputs from CI run 26469404786:
 - cargo fmt --all --check: passed
 - cargo check --workspace --all-targets: passed
 - cargo test --workspace --all-targets: passed

@@ -2,6 +2,12 @@
 
 Status: implementation evidence and platform matrix evidence are archived; final GA signoff still pending release-owner approval.
 
+Latest archived CI matrix:
+- Run URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26469404786
+- Head SHA: 9dbfff47b1246d1e2b1305de023089d6c43b47a3
+- Completed: 2026-05-26T19:16:16Z
+- Matrix: ubuntu-latest, windows-latest, and macos-latest passed.
+
 Validated commands:
 - `cargo fmt --all --check`
 - `cargo check --workspace --all-targets`
