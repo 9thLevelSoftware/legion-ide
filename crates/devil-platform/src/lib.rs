@@ -1437,14 +1437,37 @@ fn windows_command_line(request: &PtyRequest) -> Vec<u16> {
 
 #[cfg(windows)]
 fn quote_windows_arg(value: &str) -> String {
-    if value.is_empty()
-        || value
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\\'))
-    {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        value.to_string()
+    if !value.is_empty() && !value.chars().any(|ch| ch.is_whitespace() || ch == '"') {
+        return value.to_string();
+    }
+
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut pending_backslashes = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => pending_backslashes += 1,
+            '"' => {
+                push_windows_backslashes(&mut quoted, pending_backslashes.saturating_mul(2) + 1);
+                quoted.push('"');
+                pending_backslashes = 0;
+            }
+            _ => {
+                push_windows_backslashes(&mut quoted, pending_backslashes);
+                pending_backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    push_windows_backslashes(&mut quoted, pending_backslashes.saturating_mul(2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(windows)]
+fn push_windows_backslashes(output: &mut String, count: usize) {
+    for _ in 0..count {
+        output.push('\\');
     }
 }
 
@@ -2103,6 +2126,25 @@ mod tests {
             "native PTY output did not contain hello; output={output:?}; reads={reads:?}"
         );
         let _ = service.cleanup_orphaned_ptys();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_argument_quoting_preserves_backslashes() {
+        assert_eq!(
+            quote_windows_arg("C:\\repo\\file.txt"),
+            "C:\\repo\\file.txt"
+        );
+        assert_eq!(
+            quote_windows_arg("C:\\Program Files\\devil\\file.txt"),
+            "\"C:\\Program Files\\devil\\file.txt\""
+        );
+        assert_eq!(quote_windows_arg("say \"hello\""), "\"say \\\"hello\\\"\"");
+        assert_eq!(quote_windows_arg("C:\\path\\"), "C:\\path\\");
+        assert_eq!(
+            quote_windows_arg("C:\\path with space\\"),
+            "\"C:\\path with space\\\\\""
+        );
     }
 
     #[test]
