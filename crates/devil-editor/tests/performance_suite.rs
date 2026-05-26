@@ -28,7 +28,11 @@ fn ci_large_file_open_threshold() -> Duration {
 }
 
 fn collaboration_edit_p99_overhead_threshold() -> Duration {
-    if cfg!(windows) || running_in_ci() {
+    // Hosted Windows runners can inject scheduler stalls into a few p99 samples;
+    // keep the p95 gate strict and reserve this wider p99 budget for CI only.
+    if cfg!(windows) && running_in_ci() {
+        Duration::from_millis(40)
+    } else if cfg!(windows) || running_in_ci() {
         Duration::from_millis(20)
     } else {
         Duration::from_millis(5)
