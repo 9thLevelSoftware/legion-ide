@@ -1,0 +1,19 @@
+Status: pending final GA matrix archive.
+
+Required accepted-form markers:
+- Workflow: .github/workflows/ci.yml
+- Run URL: pending
+- ubuntu-latest: pending
+- windows-latest: pending
+- macos-latest: pending
+- cargo fmt --all --check: pending
+- cargo check --workspace --all-targets: pending
+- cargo test --workspace --all-targets: pending
+- cargo clippy --workspace --all-targets -- -D warnings: pending
+- cargo deny check: pending
+- cargo run -p devil-cli -- evidence check --phase phase8: pending
+- cargo run -p xtask -- check-deps: pending
+
+Notes:
+- This file is intentionally not final GA evidence yet.
+- Replace each pending marker with a passed marker and the hosted CI run URL only after the Linux, Windows, and macOS matrix has run against the final Phase 8 dependency/runtime rebaseline.

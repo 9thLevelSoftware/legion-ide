@@ -5,6 +5,9 @@ Commands:
 Result: passed
 
 Implemented coverage:
+- rustls/tokio outbound carrier remains disabled by default until an accepted policy enables it
+- TLS/mTLS client configuration uses certificate/key file references and never places key material in diagnostics
+- required mTLS rejects missing client certificate or private key before opening a network connection
 - ordered handshake before frames
 - agent package required before frame acceptance
 - flow-control credit and backpressure

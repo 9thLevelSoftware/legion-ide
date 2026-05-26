@@ -50,10 +50,46 @@ const PHASE8_ACCEPTED_REQUIRED_MARKERS: &[&str] = &[
     "Release readiness: Security, privacy, operations, rollback, canary, incident, and supply-chain signoff complete.",
     "Final gate outputs archived from current commands.",
 ];
+const PHASE8_PLATFORM_MATRIX_ARTIFACT: &str = "platform-matrix-evidence.txt";
+const PHASE8_RELEASE_READINESS_ARTIFACT: &str = "release-readiness-review.md";
+const PHASE8_PLATFORM_MATRIX_REQUIRED_MARKERS: &[&str] = &[
+    "Workflow: .github/workflows/ci.yml",
+    "Run URL:",
+    "ubuntu-latest: passed",
+    "windows-latest: passed",
+    "macos-latest: passed",
+    "cargo fmt --all --check: passed",
+    "cargo check --workspace --all-targets: passed",
+    "cargo test --workspace --all-targets: passed",
+    "cargo clippy --workspace --all-targets -- -D warnings: passed",
+    "cargo deny check: passed",
+    "cargo run -p devil-cli -- evidence check --phase phase8: passed",
+    "cargo run -p xtask -- check-deps: passed",
+];
+const PHASE8_RELEASE_SIGNOFF_REQUIRED_MARKERS: &[&str] = &[
+    "Signoff date:",
+    "Security signoff: Complete.",
+    "Privacy signoff: Complete.",
+    "Operations signoff: Complete.",
+    "Rollback signoff: Complete.",
+    "Canary signoff: Complete.",
+    "Incident response signoff: Complete.",
+    "Supply-chain signoff: Complete.",
+];
 const PHASE8_STALE_DEFERRED_MARKERS: &[&str] = &[
     "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred",
     "not final GA acceptance evidence",
     "fixture slice is active",
+];
+const PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS: &[&str] = &[
+    "pending",
+    "Pending",
+    "TODO",
+    "Not accepted",
+    "not accepted",
+    "not final GA acceptance evidence",
+    "still pending",
+    "final GA signoff still pending",
 ];
 const PHASE3_REQUIRED_ARTIFACTS: &[&str] = &[
     "semantic-fabric-architecture-map.md",
@@ -168,6 +204,7 @@ const PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
     "performance-budget-tests.txt",
     "metadata-replay-drills.txt",
     "fault-drill-results.txt",
+    "platform-matrix-evidence.txt",
     "release-readiness-review.md",
     "cargo-fmt-check.txt",
     "cargo-check-workspace-all-targets.txt",
@@ -310,9 +347,11 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     let phase8_evidence_dir = phase8_evidence_path
         .parent()
         .ok_or_else(|| "unable to resolve Phase 8 evidence directory".to_string())?;
-    let phase8_violations = validate_phase8_acceptance_governance(&phase8_evidence, |artifact| {
-        phase8_evidence_dir.join(artifact).is_file()
-    });
+    let phase8_violations = validate_phase8_acceptance_governance(
+        &phase8_evidence,
+        |artifact| phase8_evidence_dir.join(artifact).is_file(),
+        |artifact| fs::read_to_string(phase8_evidence_dir.join(artifact)).ok(),
+    );
 
     let mut all = violations;
     all.extend(protocol_violations);
@@ -918,9 +957,14 @@ where
     issues
 }
 
-fn validate_phase8_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+fn validate_phase8_acceptance_governance<F, G>(
+    evidence: &str,
+    artifact_exists: F,
+    artifact_text: G,
+) -> Vec<String>
 where
     F: Fn(&str) -> bool,
+    G: Fn(&str) -> Option<String>,
 {
     let mut issues = Vec::new();
 
@@ -947,6 +991,7 @@ where
         issues.extend(validate_phase8_completion_evidence(
             evidence,
             &artifact_exists,
+            &artifact_text,
         ));
     }
 
@@ -954,9 +999,14 @@ where
     issues
 }
 
-fn validate_phase8_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+fn validate_phase8_completion_evidence<F, G>(
+    evidence: &str,
+    artifact_exists: &F,
+    artifact_text: &G,
+) -> Vec<String>
 where
     F: Fn(&str) -> bool,
+    G: Fn(&str) -> Option<String>,
 {
     let mut issues = Vec::new();
 
@@ -1010,6 +1060,60 @@ where
                 "`{DEFAULT_PHASE8_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing from `plans/evidence/phase-8`"
             ));
         }
+    }
+
+    issues.extend(validate_phase8_final_artifact_contents(artifact_text));
+
+    issues
+}
+
+fn validate_phase8_final_artifact_contents<G>(artifact_text: &G) -> Vec<String>
+where
+    G: Fn(&str) -> Option<String>,
+{
+    let mut issues = Vec::new();
+    match artifact_text(PHASE8_PLATFORM_MATRIX_ARTIFACT) {
+        Some(matrix) => {
+            for marker in PHASE8_PLATFORM_MATRIX_REQUIRED_MARKERS {
+                if !matrix.contains(marker) {
+                    issues.push(format!(
+                        "`{PHASE8_PLATFORM_MATRIX_ARTIFACT}` is required for accepted Phase 8 but marker `{marker}` is missing"
+                    ));
+                }
+            }
+            for marker in PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS {
+                if matrix.contains(marker) {
+                    issues.push(format!(
+                        "`{PHASE8_PLATFORM_MATRIX_ARTIFACT}` is required for accepted Phase 8 but still contains stale marker `{marker}`"
+                    ));
+                }
+            }
+        }
+        None => issues.push(format!(
+            "`{PHASE8_PLATFORM_MATRIX_ARTIFACT}` is required for accepted Phase 8 but could not be read"
+        )),
+    }
+
+    match artifact_text(PHASE8_RELEASE_READINESS_ARTIFACT) {
+        Some(release) => {
+            for marker in PHASE8_RELEASE_SIGNOFF_REQUIRED_MARKERS {
+                if !release.contains(marker) {
+                    issues.push(format!(
+                        "`{PHASE8_RELEASE_READINESS_ARTIFACT}` is required for accepted Phase 8 but signoff marker `{marker}` is missing"
+                    ));
+                }
+            }
+            for marker in PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS {
+                if release.contains(marker) {
+                    issues.push(format!(
+                        "`{PHASE8_RELEASE_READINESS_ARTIFACT}` is required for accepted Phase 8 but still contains stale marker `{marker}`"
+                    ));
+                }
+            }
+        }
+        None => issues.push(format!(
+            "`{PHASE8_RELEASE_READINESS_ARTIFACT}` is required for accepted Phase 8 but could not be read"
+        )),
     }
 
     issues
@@ -1402,6 +1506,42 @@ Final gate outputs archived from current commands.
 - [{checklist_marker}] Required validation is complete.
 "#
         )
+    }
+
+    fn accepted_phase8_artifact_text(artifact: &str) -> Option<String> {
+        match artifact {
+            PHASE8_PLATFORM_MATRIX_ARTIFACT => Some(
+                [
+                    "Workflow: .github/workflows/ci.yml",
+                    "Run URL: https://github.example/devil-ide/actions/runs/1",
+                    "ubuntu-latest: passed",
+                    "windows-latest: passed",
+                    "macos-latest: passed",
+                    "cargo fmt --all --check: passed",
+                    "cargo check --workspace --all-targets: passed",
+                    "cargo test --workspace --all-targets: passed",
+                    "cargo clippy --workspace --all-targets -- -D warnings: passed",
+                    "cargo deny check: passed",
+                    "cargo run -p devil-cli -- evidence check --phase phase8: passed",
+                    "cargo run -p xtask -- check-deps: passed",
+                ]
+                .join("\n"),
+            ),
+            PHASE8_RELEASE_READINESS_ARTIFACT => Some(
+                [
+                    "Signoff date: 2026-05-26",
+                    "Security signoff: Complete.",
+                    "Privacy signoff: Complete.",
+                    "Operations signoff: Complete.",
+                    "Rollback signoff: Complete.",
+                    "Canary signoff: Complete.",
+                    "Incident response signoff: Complete.",
+                    "Supply-chain signoff: Complete.",
+                ]
+                .join("\n"),
+            ),
+            _ => Some("Result: passed".to_string()),
+        }
     }
 
     #[test]
@@ -1872,7 +2012,7 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
 "#
         );
 
-        let issues = validate_phase8_acceptance_governance(&evidence, |_| false);
+        let issues = validate_phase8_acceptance_governance(&evidence, |_| false, |_| None);
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
     }
@@ -1880,7 +2020,7 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     #[test]
     fn phase8_acceptance_claim_requires_artifacts_and_checked_checklist() {
         let evidence = accepted_phase8_evidence(true, false);
-        let issues = validate_phase8_acceptance_governance(&evidence, |_| false);
+        let issues = validate_phase8_acceptance_governance(&evidence, |_| false, |_| None);
 
         assert!(issues.iter().any(|issue| issue.contains(
             "claims acceptance while final validation checklist items remain unchecked"
@@ -1898,7 +2038,11 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     #[test]
     fn phase8_acceptance_claim_passes_with_checked_checklist_and_artifacts() {
         let evidence = accepted_phase8_evidence(false, true);
-        let issues = validate_phase8_acceptance_governance(&evidence, |_| true);
+        let issues = validate_phase8_acceptance_governance(
+            &evidence,
+            |_| true,
+            accepted_phase8_artifact_text,
+        );
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
     }
@@ -1910,7 +2054,11 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
             "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred\n",
         );
 
-        let issues = validate_phase8_acceptance_governance(&evidence, |_| true);
+        let issues = validate_phase8_acceptance_governance(
+            &evidence,
+            |_| true,
+            accepted_phase8_artifact_text,
+        );
 
         assert!(issues.iter().any(|issue| {
             issue.contains("claims acceptance while still containing stale deferred marker")
@@ -1924,7 +2072,11 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
             "Platform matrix: pending.",
         );
 
-        let issues = validate_phase8_acceptance_governance(&evidence, |_| true);
+        let issues = validate_phase8_acceptance_governance(
+            &evidence,
+            |_| true,
+            accepted_phase8_artifact_text,
+        );
 
         assert!(issues.iter().any(|issue| {
             issue.contains("final GA marker `Platform matrix: Linux, Windows, and macOS validated.` is missing")
@@ -1932,19 +2084,74 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     }
 
     #[test]
-    fn phase8_evidence_declares_not_accepted_fixture_status() {
+    fn phase8_acceptance_claim_requires_matrix_artifact_contents() {
+        let evidence = accepted_phase8_evidence(false, true);
+        let issues = validate_phase8_acceptance_governance(
+            &evidence,
+            |_| true,
+            |artifact| {
+                if artifact == PHASE8_PLATFORM_MATRIX_ARTIFACT {
+                    Some("Workflow: .github/workflows/ci.yml\nwindows-latest: pending".to_string())
+                } else {
+                    accepted_phase8_artifact_text(artifact)
+                }
+            },
+        );
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains("`platform-matrix-evidence.txt`")
+                && issue.contains("ubuntu-latest: passed")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("`platform-matrix-evidence.txt`")
+                && issue.contains("stale marker `pending`")
+        }));
+    }
+
+    #[test]
+    fn phase8_acceptance_claim_requires_release_signoff_artifact_contents() {
+        let evidence = accepted_phase8_evidence(false, true);
+        let issues = validate_phase8_acceptance_governance(
+            &evidence,
+            |_| true,
+            |artifact| {
+                if artifact == PHASE8_RELEASE_READINESS_ARTIFACT {
+                    Some(
+                        "Status: final GA signoff still pending platform matrix evidence"
+                            .to_string(),
+                    )
+                } else {
+                    accepted_phase8_artifact_text(artifact)
+                }
+            },
+        );
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains("`release-readiness-review.md`")
+                && issue.contains("Security signoff: Complete.")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("`release-readiness-review.md`")
+                && issue.contains("final GA signoff still pending")
+        }));
+    }
+
+    #[test]
+    fn phase8_evidence_declares_not_accepted_production_gated_status() {
         let source = read_workspace_file(DEFAULT_PHASE8_EVIDENCE_PATH);
         let evidence_path = workspace_root().join(DEFAULT_PHASE8_EVIDENCE_PATH);
         let evidence_dir = evidence_path
             .parent()
             .expect("Phase 8 evidence path should have a parent directory");
-        let issues = validate_phase8_acceptance_governance(&source, |artifact| {
-            evidence_dir.join(artifact).is_file()
-        });
+        let issues = validate_phase8_acceptance_governance(
+            &source,
+            |artifact| evidence_dir.join(artifact).is_file(),
+            |artifact| fs::read_to_string(evidence_dir.join(artifact)).ok(),
+        );
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
         assert!(source.contains(PHASE8_NOT_ACCEPTED_MARKER));
-        assert!(source.contains("Deterministic metadata-only fixture slice is active"));
+        assert!(source.contains("Production-gated Phase 8 runtime surfaces now include"));
         for artifact in PHASE8_REQUIRED_ARTIFACTS {
             assert!(
                 source.contains(artifact),

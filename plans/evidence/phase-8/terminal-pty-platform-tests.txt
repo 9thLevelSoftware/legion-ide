@@ -1,7 +1,18 @@
-Command: cargo test -p devil-terminal --all-targets
+Commands:
+- cargo test -p devil-platform native_pty_service_uses_platform_backend_for_one_shot_output
+- cargo test -p devil-platform --all-targets
+- cargo test -p devil-terminal --all-targets
 Result: passed
 
 Implemented platform behavior:
-- `NativePtyService::spawn_pty` no longer returns unconditional `PtyUnavailable`.
-- platform PTY boundary now provides a degraded process-backed session descriptor with bounded output capture.
-- `devil-terminal::TerminalRuntime` consumes the PTY boundary and records `TerminalRuntimeState::Degraded` metadata for process-backed sessions.
+- `NativePtyService::spawn_pty` no longer returns unconditional `PtyUnavailable` on supported platforms.
+- Windows creates a ConPTY session through the `windows` crate, attaches the hosted process with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, isolates standard handles with `STARTF_USESTDHANDLES`, and keeps bounded output in the PTY projection buffer instead of leaking to parent stdout.
+- Unix uses `nix` `openpty`, process-session setup, nonblocking master reads, resize ioctl, and process/process-group termination for native command execution through a pseudoterminal.
+- `PtyService` now exposes spawn, input, resize, output polling, close, kill, and orphan cleanup operations.
+- Platform output projections remain bounded and metadata-only.
+- `devil-terminal::TerminalRuntime` keeps a session map for native PTY lifecycle dispatch and distinguishes native sessions from degraded/fake sessions in audit metadata.
+- Local Windows evidence covers ConPTY launch/output capture through `native_pty_service_uses_platform_backend_for_one_shot_output`.
+- Runtime unit evidence covers lifecycle input, resize, output polling, close, kill/session removal, orphan cleanup, and exited-session removal.
+
+Remaining GA evidence gap:
+- Final Linux, Windows, and macOS CI matrix artifacts must still run and archive the platform PTY lifecycle suite before Phase 8 can be accepted.

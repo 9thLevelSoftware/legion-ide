@@ -1,21 +1,32 @@
-//! Deterministic Phase 8 remote transport fixture harness.
+//! Deterministic and production-gated Phase 8 remote transport carriers.
 
 #![warn(missing_docs)]
 
 use std::collections::{HashSet, VecDeque};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
 use devil_protocol::{
     CausalityId, EventSequence, RedactionHint, RemoteAgentPackageDescriptor,
     RemoteNetworkHealthState, RemoteOfflineResumeManifest, RemoteOperationId,
     RemoteOperationLogCheckpoint, RemoteOperationLogCheckpointId, RemoteTransportAuditSummary,
+    RemoteTransportCarrierDiagnostic, RemoteTransportConnectionAttempt,
     RemoteTransportFlowControlWindow, RemoteTransportFrameMetadata, RemoteTransportHandshake,
-    RemoteTransportHealthSummary, RemoteTransportLifecycleState, RemoteTransportPeerIdentity,
-    RemoteTransportReplayWindow, RemoteTransportResumeToken, RemoteWorkspaceSessionId,
-    TimestampMillis, validate_remote_agent_package_descriptor,
-    validate_remote_transport_audit_summary, validate_remote_transport_flow_control_window,
+    RemoteTransportHealthSummary, RemoteTransportLifecycleState, RemoteTransportMutualTlsMode,
+    RemoteTransportPeerIdentity, RemoteTransportReplayWindow, RemoteTransportResumeToken,
+    RemoteWorkspaceSessionId, TimestampMillis, validate_remote_agent_package_descriptor,
+    validate_remote_transport_audit_summary, validate_remote_transport_carrier_diagnostic,
+    validate_remote_transport_connection_attempt, validate_remote_transport_flow_control_window,
     validate_remote_transport_handshake, validate_remote_transport_replay_window,
 };
+use rustls::{ClientConfig, RootCertStore};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 /// Remote transport fixture error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -82,6 +93,234 @@ pub enum RemoteTransportCoreError {
         /// Rejection reason.
         reason: String,
     },
+}
+
+/// Production remote transport carrier error.
+#[derive(Debug, Error)]
+pub enum RemoteTransportCarrierError {
+    /// Carrier is disabled.
+    #[error("remote transport carrier is disabled")]
+    Disabled,
+    /// Protocol or policy metadata was invalid.
+    #[error("invalid remote transport carrier policy: {reason}")]
+    InvalidPolicy {
+        /// Rejection reason.
+        reason: String,
+    },
+    /// TLS credential material was missing or invalid.
+    #[error("remote transport TLS credential error: {reason}")]
+    Credential {
+        /// Failure reason.
+        reason: String,
+    },
+    /// Network connection failed.
+    #[error("remote transport network error: {reason}")]
+    Network {
+        /// Failure reason.
+        reason: String,
+    },
+    /// TLS handshake failed.
+    #[error("remote transport TLS error: {reason}")]
+    Tls {
+        /// Failure reason.
+        reason: String,
+    },
+}
+
+/// Production remote transport carrier.
+pub trait RemoteTransportCarrier {
+    /// Connect to a policy-validated endpoint and return metadata-only diagnostics.
+    fn connect<'a>(
+        &'a self,
+        attempt: RemoteTransportConnectionAttempt,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<RemoteTransportCarrierDiagnostic, RemoteTransportCarrierError>,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Rustls-backed outbound TLS/mTLS carrier configuration.
+#[derive(Debug, Clone, Default)]
+pub struct RustlsMtlsCarrierConfig {
+    /// Whether outbound carrier use is enabled.
+    pub enabled: bool,
+    /// PEM files containing trusted server roots. Empty uses the rustls empty root store.
+    pub root_ca_pem_paths: Vec<PathBuf>,
+    /// PEM file containing the client certificate chain for required mTLS.
+    pub client_cert_chain_pem_path: Option<PathBuf>,
+    /// PEM file containing the client private key for required mTLS.
+    pub client_private_key_pem_path: Option<PathBuf>,
+}
+
+impl RustlsMtlsCarrierConfig {
+    /// Return an enabled carrier configuration.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Rustls-backed production outbound TLS/mTLS carrier.
+#[derive(Debug, Clone)]
+pub struct RustlsMtlsCarrier {
+    config: RustlsMtlsCarrierConfig,
+}
+
+impl RustlsMtlsCarrier {
+    /// Construct a carrier from explicit configuration.
+    pub fn new(config: RustlsMtlsCarrierConfig) -> Self {
+        Self { config }
+    }
+
+    /// Build a rustls client configuration after policy validation.
+    pub fn build_client_config(
+        &self,
+        attempt: &RemoteTransportConnectionAttempt,
+    ) -> Result<ClientConfig, RemoteTransportCarrierError> {
+        self.ensure_enabled()?;
+        validate_remote_transport_connection_attempt(attempt).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: err.message,
+            }
+        })?;
+
+        let mut roots = RootCertStore::empty();
+        for path in &self.config.root_ca_pem_paths {
+            for cert in load_certs(path)? {
+                roots
+                    .add(cert)
+                    .map_err(|err| RemoteTransportCarrierError::Credential {
+                        reason: format!("root certificate rejected: {err}"),
+                    })?;
+            }
+        }
+
+        let wants_mtls = attempt.tls_policy.mtls_mode == RemoteTransportMutualTlsMode::Required;
+        let mut client_config = if wants_mtls {
+            let cert_path = self
+                .config
+                .client_cert_chain_pem_path
+                .as_ref()
+                .ok_or_else(|| RemoteTransportCarrierError::Credential {
+                    reason: "required mTLS has no client certificate chain path".to_string(),
+                })?;
+            let key_path = self
+                .config
+                .client_private_key_pem_path
+                .as_ref()
+                .ok_or_else(|| RemoteTransportCarrierError::Credential {
+                    reason: "required mTLS has no client private key path".to_string(),
+                })?;
+            let certs = load_certs(cert_path)?;
+            let key = load_private_key(key_path)?;
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certs, key)
+                .map_err(|err| RemoteTransportCarrierError::Credential {
+                    reason: format!("client certificate rejected: {err}"),
+                })?
+        } else {
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        };
+        client_config.alpn_protocols = attempt
+            .tls_policy
+            .alpn_protocols
+            .iter()
+            .map(|protocol| protocol.as_bytes().to_vec())
+            .collect();
+        Ok(client_config)
+    }
+
+    async fn connect_inner(
+        &self,
+        attempt: RemoteTransportConnectionAttempt,
+    ) -> Result<RemoteTransportCarrierDiagnostic, RemoteTransportCarrierError> {
+        let client_config = self.build_client_config(&attempt)?;
+        let endpoint = &attempt.endpoint_policy.endpoint;
+        let port = endpoint.port.unwrap_or(443);
+        let address = format!("{}:{port}", endpoint.host);
+        let stream = tokio::time::timeout(
+            Duration::from_millis(attempt.timeout_ms),
+            TcpStream::connect(address),
+        )
+        .await
+        .map_err(|_| RemoteTransportCarrierError::Network {
+            reason: "tcp connect timed out".to_string(),
+        })?
+        .map_err(|err| RemoteTransportCarrierError::Network {
+            reason: err.to_string(),
+        })?;
+        let server_name = ServerName::try_from(endpoint.host.clone()).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: format!("invalid TLS server name: {err}"),
+            }
+        })?;
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let _tls_stream = tokio::time::timeout(
+            Duration::from_millis(attempt.timeout_ms),
+            connector.connect(server_name, stream),
+        )
+        .await
+        .map_err(|_| RemoteTransportCarrierError::Tls {
+            reason: "tls handshake timed out".to_string(),
+        })?
+        .map_err(|err| RemoteTransportCarrierError::Tls {
+            reason: err.to_string(),
+        })?;
+        let diagnostic = RemoteTransportCarrierDiagnostic {
+            session_id: None,
+            state: RemoteTransportLifecycleState::Active,
+            event_sequence: attempt.event_sequence,
+            correlation_id: attempt.correlation_id,
+            causality_id: attempt.causality_id,
+            metadata_summary: format!(
+                "tls_handshake=ok mtls={:?} alpn={} schema={}",
+                attempt.tls_policy.mtls_mode,
+                attempt.selected_alpn,
+                attempt.selected_schema_version
+            ),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_remote_transport_carrier_diagnostic(&diagnostic).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: err.message,
+            }
+        })?;
+        Ok(diagnostic)
+    }
+
+    fn ensure_enabled(&self) -> Result<(), RemoteTransportCarrierError> {
+        if self.config.enabled {
+            Ok(())
+        } else {
+            Err(RemoteTransportCarrierError::Disabled)
+        }
+    }
+}
+
+impl RemoteTransportCarrier for RustlsMtlsCarrier {
+    fn connect<'a>(
+        &'a self,
+        attempt: RemoteTransportConnectionAttempt,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<RemoteTransportCarrierDiagnostic, RemoteTransportCarrierError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(self.connect_inner(attempt))
+    }
 }
 
 /// Production transport-core configuration.
@@ -664,15 +903,43 @@ fn uuid_from_sequence(sequence: u64) -> uuid::Uuid {
     uuid::Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0000_u128 + sequence as u128)
 }
 
+fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>, RemoteTransportCarrierError> {
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|err| RemoteTransportCarrierError::Credential {
+            reason: format!("open certificate PEM `{}`: {err}", path.display()),
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| RemoteTransportCarrierError::Credential {
+            reason: format!("decode certificate PEM `{}`: {err}", path.display()),
+        })?;
+    if certs.is_empty() {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "certificate PEM `{}` contained no certificates",
+                path.display()
+            ),
+        });
+    }
+    Ok(certs)
+}
+
+fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, RemoteTransportCarrierError> {
+    PrivateKeyDer::from_pem_file(path).map_err(|err| RemoteTransportCarrierError::Credential {
+        reason: format!("decode private key PEM `{}`: {err}", path.display()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use devil_protocol::{
         CapabilityDecision, CapabilityDecisionId, CapabilityId, CollaborationVersionVector,
         CorrelationId, FileFingerprint, PrincipalId, RemoteAgentId, RemoteAuthorityId,
         RemoteOperationLogCheckpoint, RemoteOperationLogCheckpointId,
-        RemoteTransportEndpointDescriptor, RemoteTransportPeerIdentity,
-        RemoteTransportSchemaCompatibility, SnapshotId, TimestampMillis, WorkspaceGeneration,
-        WorkspaceTrustState,
+        RemoteTransportConnectionAttempt, RemoteTransportCredentialReference,
+        RemoteTransportEndpointDescriptor, RemoteTransportEndpointPolicy,
+        RemoteTransportMutualTlsMode, RemoteTransportPeerIdentity,
+        RemoteTransportSchemaCompatibility, RemoteTransportTlsPolicy, SnapshotId, TimestampMillis,
+        WorkspaceGeneration, WorkspaceTrustState,
     };
 
     use super::*;
@@ -748,6 +1015,52 @@ mod tests {
                 capability: CapabilityId("remote.agent.package.activate".to_string()),
                 reason: None,
             },
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn connection_attempt() -> RemoteTransportConnectionAttempt {
+        RemoteTransportConnectionAttempt {
+            endpoint_policy: RemoteTransportEndpointPolicy {
+                endpoint: RemoteTransportEndpointDescriptor {
+                    endpoint_id: "loopback".to_string(),
+                    scheme: "https".to_string(),
+                    host: "localhost".to_string(),
+                    port: Some(9443),
+                    loopback_only: true,
+                    schema_version: 1,
+                },
+                allowed_schemes: vec!["https".to_string()],
+                redirects_allowed: false,
+                schema_version: 1,
+            },
+            tls_policy: RemoteTransportTlsPolicy {
+                require_tls: true,
+                server_identity: "dns:localhost".to_string(),
+                root_store_reference: None,
+                certificate_pin_reference: None,
+                mtls_mode: RemoteTransportMutualTlsMode::Optional,
+                client_credential_reference: None,
+                alpn_protocols: vec!["devil-remote/phase8".to_string()],
+                min_schema_version: 1,
+                max_schema_version: 1,
+                schema_version: 1,
+            },
+            selected_alpn: "devil-remote/phase8".to_string(),
+            selected_schema_version: 1,
+            timeout_ms: 100,
+            cancellation_requested: false,
+            capability_decision: CapabilityDecision {
+                decision_id: CapabilityDecisionId(55),
+                granted: true,
+                capability: CapabilityId("remote.transport.connect".to_string()),
+                reason: None,
+            },
+            event_sequence: EventSequence(9),
+            correlation_id: CorrelationId(9),
+            causality_id: CausalityId(uuid_from_sequence(9)),
+            metadata_summary: "tls=required mtls=optional".to_string(),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         }
@@ -859,6 +1172,49 @@ mod tests {
         let audit = machine.audit_summary().expect("audit");
         assert!(audit.metadata_summary.contains("duplicates=1"));
         assert!(!audit.metadata_summary.contains("transport_payload"));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_is_default_off() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::default());
+        assert!(matches!(
+            carrier.build_client_config(&connection_attempt()),
+            Err(RemoteTransportCarrierError::Disabled)
+        ));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_builds_optional_mtls_config_without_inline_material() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let config = carrier
+            .build_client_config(&connection_attempt())
+            .expect("optional mTLS config");
+        assert_eq!(config.alpn_protocols, vec![b"devil-remote/phase8".to_vec()]);
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_rejects_required_mtls_without_files_before_network() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let attempt = RemoteTransportConnectionAttempt {
+            tls_policy: RemoteTransportTlsPolicy {
+                mtls_mode: RemoteTransportMutualTlsMode::Required,
+                client_credential_reference: Some(RemoteTransportCredentialReference {
+                    reference_id: "client-cert-ref".to_string(),
+                    kind: "client-cert".to_string(),
+                    digest: FileFingerprint {
+                        algorithm: "sha256".to_string(),
+                        value: "abc123".to_string(),
+                    },
+                    schema_version: 1,
+                }),
+                ..connection_attempt().tls_policy
+            },
+            ..connection_attempt()
+        };
+        assert!(matches!(
+            carrier.build_client_config(&attempt),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
     }
 
     #[test]

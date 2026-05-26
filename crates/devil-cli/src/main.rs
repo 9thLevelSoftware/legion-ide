@@ -57,6 +57,7 @@ const PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
     "performance-budget-tests.txt",
     "metadata-replay-drills.txt",
     "fault-drill-results.txt",
+    "platform-matrix-evidence.txt",
     "release-readiness-review.md",
     "cargo-fmt-check.txt",
     "cargo-check-workspace-all-targets.txt",
@@ -73,10 +74,48 @@ const PHASE8_ACCEPTED_REQUIRED_MARKERS: &[&str] = &[
     "Final gate outputs archived from current commands.",
 ];
 
+const PHASE8_PLATFORM_MATRIX_ARTIFACT: &str = "platform-matrix-evidence.txt";
+const PHASE8_RELEASE_READINESS_ARTIFACT: &str = "release-readiness-review.md";
+const PHASE8_PLATFORM_MATRIX_REQUIRED_MARKERS: &[&str] = &[
+    "Workflow: .github/workflows/ci.yml",
+    "Run URL:",
+    "ubuntu-latest: passed",
+    "windows-latest: passed",
+    "macos-latest: passed",
+    "cargo fmt --all --check: passed",
+    "cargo check --workspace --all-targets: passed",
+    "cargo test --workspace --all-targets: passed",
+    "cargo clippy --workspace --all-targets -- -D warnings: passed",
+    "cargo deny check: passed",
+    "cargo run -p devil-cli -- evidence check --phase phase8: passed",
+    "cargo run -p xtask -- check-deps: passed",
+];
+const PHASE8_RELEASE_SIGNOFF_REQUIRED_MARKERS: &[&str] = &[
+    "Signoff date:",
+    "Security signoff: Complete.",
+    "Privacy signoff: Complete.",
+    "Operations signoff: Complete.",
+    "Rollback signoff: Complete.",
+    "Canary signoff: Complete.",
+    "Incident response signoff: Complete.",
+    "Supply-chain signoff: Complete.",
+];
+
 const PHASE8_STALE_DEFERRED_MARKERS: &[&str] = &[
     "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred",
     "not final GA acceptance evidence",
     "fixture slice is active",
+];
+
+const PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS: &[&str] = &[
+    "pending",
+    "Pending",
+    "TODO",
+    "Not accepted",
+    "not accepted",
+    "not final GA acceptance evidence",
+    "still pending",
+    "final GA signoff still pending",
 ];
 
 const PHASE8_NOT_ACCEPTED_ALLOWED_MARKERS: &[&str] = &[
@@ -603,6 +642,7 @@ fn check_phase8_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) 
                 issues,
             );
         }
+        validate_phase8_final_artifact_contents(workspace, issues);
     } else {
         require_text(
             &phase8,
@@ -618,6 +658,54 @@ fn check_phase8_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) 
                 "Phase 8 is not accepted but does not describe the current gated runtime posture"
                     .to_string(),
             );
+        }
+    }
+}
+
+fn validate_phase8_final_artifact_contents(workspace: &std::path::Path, issues: &mut Vec<String>) {
+    validate_artifact_markers(
+        workspace,
+        PHASE8_PLATFORM_MATRIX_ARTIFACT,
+        PHASE8_PLATFORM_MATRIX_REQUIRED_MARKERS,
+        "Phase 8 platform matrix evidence",
+        issues,
+    );
+    validate_artifact_markers(
+        workspace,
+        PHASE8_RELEASE_READINESS_ARTIFACT,
+        PHASE8_RELEASE_SIGNOFF_REQUIRED_MARKERS,
+        "Phase 8 release signoff evidence",
+        issues,
+    );
+}
+
+fn validate_artifact_markers(
+    workspace: &std::path::Path,
+    artifact: &str,
+    markers: &[&str],
+    label: &str,
+    issues: &mut Vec<String>,
+) {
+    let path = workspace.join("plans/evidence/phase-8").join(artifact);
+    let Ok(source) = fs::read_to_string(&path) else {
+        issues.push(format!(
+            "{label} artifact `{}` could not be read",
+            path.display()
+        ));
+        return;
+    };
+    for marker in markers {
+        if !source.contains(marker) {
+            issues.push(format!(
+                "{label} artifact `{artifact}` is missing required marker `{marker}`"
+            ));
+        }
+    }
+    for marker in PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS {
+        if source.contains(marker) {
+            issues.push(format!(
+                "{label} artifact `{artifact}` still contains stale marker `{marker}`"
+            ));
         }
     }
 }

@@ -7,3 +7,6 @@ Implemented coverage:
 - retry upload preserves records and records retry-after metadata
 - max-record capacity increments drop summary and fails closed
 - exporter is client-trait based and non-blocking with respect to editor/workspace mutation paths
+- rustls-only reqwest hosted HTTP exporter is present but disabled by default
+- exporter rejects oversized serialized batches before opening HTTP
+- hosted upload acknowledgements must match the exported batch id before spool records are accepted

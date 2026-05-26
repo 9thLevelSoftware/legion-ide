@@ -7,6 +7,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use devil_protocol::{
     HostedTelemetryConsentGrant, HostedTelemetryEndpointDescriptor, HostedTelemetryExportBatch,
@@ -54,6 +55,12 @@ pub enum TelemetrySpoolError {
     /// Filesystem operation failed.
     #[error("telemetry spool I/O failed: {message}")]
     Io {
+        /// Failure details.
+        message: String,
+    },
+    /// Hosted HTTP export failed.
+    #[error("hosted telemetry HTTP export failed: {message}")]
+    Http {
         /// Failure details.
         message: String,
     },
@@ -232,6 +239,123 @@ pub trait TelemetryExportClient {
         &mut self,
         batch: &HostedTelemetryExportBatch,
     ) -> Result<HostedTelemetryUploadOutcome, TelemetrySpoolError>;
+}
+
+/// Rustls-only hosted HTTP telemetry exporter configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReqwestTelemetryExportConfig {
+    /// Whether hosted HTTP export is enabled.
+    pub enabled: bool,
+    /// Request timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Maximum serialized body size accepted before upload.
+    pub max_body_bytes: usize,
+}
+
+impl ReqwestTelemetryExportConfig {
+    /// Return an enabled hosted HTTP telemetry exporter configuration.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for ReqwestTelemetryExportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_ms: 5_000,
+            max_body_bytes: 64 * 1024,
+        }
+    }
+}
+
+/// Hosted HTTP telemetry exporter using a rustls-only reqwest client.
+pub struct ReqwestTelemetryExportClient {
+    config: ReqwestTelemetryExportConfig,
+    client: reqwest::blocking::Client,
+}
+
+impl ReqwestTelemetryExportClient {
+    /// Construct a rustls-only HTTP exporter.
+    pub fn new(config: ReqwestTelemetryExportConfig) -> Result<Self, TelemetrySpoolError> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::blocking::Client::builder()
+            .tls_backend_rustls()
+            .https_only(true)
+            .timeout(Duration::from_millis(config.timeout_ms))
+            .build()
+            .map_err(|err| TelemetrySpoolError::Http {
+                message: format!("build reqwest rustls client: {err}"),
+            })?;
+        Ok(Self { config, client })
+    }
+}
+
+impl TelemetryExportClient for ReqwestTelemetryExportClient {
+    fn upload(
+        &mut self,
+        batch: &HostedTelemetryExportBatch,
+    ) -> Result<HostedTelemetryUploadOutcome, TelemetrySpoolError> {
+        if !self.config.enabled {
+            return Err(TelemetrySpoolError::Disabled);
+        }
+        validate_hosted_telemetry_export_batch(batch).map_err(|err| {
+            TelemetrySpoolError::InvalidMetadata {
+                reason: err.message,
+            }
+        })?;
+        let body = serde_json::to_vec(batch).map_err(|err| TelemetrySpoolError::Http {
+            message: format!("encode hosted telemetry batch: {err}"),
+        })?;
+        if body.len() > self.config.max_body_bytes {
+            return Err(TelemetrySpoolError::InvalidMetadata {
+                reason: "hosted telemetry batch exceeds configured body limit".to_string(),
+            });
+        }
+        let response = self
+            .client
+            .post(&batch.endpoint.endpoint_label)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .map_err(|err| TelemetrySpoolError::Http {
+                message: format!("send hosted telemetry batch: {err}"),
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            let outcome = response
+                .json::<HostedTelemetryUploadOutcome>()
+                .unwrap_or_else(|_| HostedTelemetryUploadOutcome {
+                    batch_id: batch.batch_id.clone(),
+                    accepted: true,
+                    retry_after_ms: None,
+                    status: format!("http_{}", status.as_u16()),
+                    schema_version: 1,
+                });
+            if outcome.batch_id != batch.batch_id {
+                return Err(TelemetrySpoolError::InvalidMetadata {
+                    reason: "hosted telemetry ack batch id did not match upload".to_string(),
+                });
+            }
+            Ok(outcome)
+        } else {
+            Ok(HostedTelemetryUploadOutcome {
+                batch_id: batch.batch_id.clone(),
+                accepted: false,
+                retry_after_ms: response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(|seconds| seconds.saturating_mul(1_000)),
+                status: format!("http_{}", status.as_u16()),
+                schema_version: 1,
+            })
+        }
+    }
 }
 
 /// File-backed durable metadata-only telemetry spool.
@@ -858,6 +982,30 @@ mod tests {
         ));
         assert_eq!(spool.stats().pending_records, 1);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reqwest_exporter_is_default_off_and_rustls_configured() {
+        let mut client = ReqwestTelemetryExportClient::new(ReqwestTelemetryExportConfig::default())
+            .expect("build rustls reqwest client");
+        assert!(matches!(
+            client.upload(&batch()),
+            Err(TelemetrySpoolError::Disabled)
+        ));
+    }
+
+    #[test]
+    fn reqwest_exporter_rejects_oversized_batches_before_http() {
+        let mut client = ReqwestTelemetryExportClient::new(ReqwestTelemetryExportConfig {
+            enabled: true,
+            timeout_ms: 100,
+            max_body_bytes: 8,
+        })
+        .expect("build rustls reqwest client");
+        assert!(matches!(
+            client.upload(&batch()),
+            Err(TelemetrySpoolError::InvalidMetadata { .. })
+        ));
     }
 
     #[test]

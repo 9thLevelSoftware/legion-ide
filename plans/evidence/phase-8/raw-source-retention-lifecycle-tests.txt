@@ -13,3 +13,7 @@ Implemented coverage:
 - local bundle key rotation re-encrypts under a new metadata-only key reference and leaves the previous provider unable to read the rotated bundle
 - rotation fails closed when the previous key bytes cannot authenticate the existing bundle
 - metadata-only recovery reports mark healthy bundles recovered, corrupt ciphertext quarantined, and missing ciphertext failed closed without plaintext leakage
+- OS keyring provider stores only referenced raw-source vault keys and exposes metadata-only key references
+- KMS envelope-provider contract tests wrap/unwrap by reference without bundling a cloud SDK
+- hosted raw-source export uploads encrypted bundles only and records `HostedRetentionExportLinkage` metadata after ack validation
+- hosted raw-source export rejects non-allowlisted, non-HTTPS, expired, or mismatched consent before upload

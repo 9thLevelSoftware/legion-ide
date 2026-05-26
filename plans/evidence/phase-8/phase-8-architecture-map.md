@@ -4,20 +4,20 @@
 
 - Phase 8 acceptance: Not accepted.
 
-Runtime surface status: Deterministic metadata-only fixture slice is active; production-capable transport, terminal, telemetry, retention, and storage migration cores are implemented behind default-deny gates; production transport, native terminal, hosted export, raw-source vault GA, and operational GA remain deferred until final release signoff.
+Runtime surface status: Production-gated Phase 8 runtime surfaces now include a rustls/tokio outbound TLS/mTLS carrier, native PTY platform boundary evidence, rustls-only hosted HTTP telemetry exporter, OS-keyring raw-source key-provider, KMS envelope-provider contract, and hosted encrypted raw-source export linkage. Phase 8 GA remains deferred until final Linux/Windows/macOS matrix evidence and release signoff are archived.
 
 This document is Phase 8 implementation evidence. It is not final GA acceptance evidence until release signoff changes the acceptance status.
 
 ## Scope
 
-Phase 8 remains future-gated for production remote network transport, native local terminal runtime, hosted telemetry export, raw-source content retention, and operational hardening. ADR-0025 through ADR-0029 now record production implementation direction, and the current repository records protocol contracts, default-deny policy surfaces, metadata-only storage/observability paths, and deterministic fixture crates. Production activation must still provide runtime implementations, ownership tests, platform/security/privacy evidence, storage migration/recovery evidence, fault drills, and release evidence.
+Phase 8 remains future-gated for final GA release acceptance, not for the primary implementation slices. ADR-0025 through ADR-0029 now record production implementation direction, and the current repository records protocol contracts, default-deny policy surfaces, metadata-only storage/observability paths, deterministic fixture crates, and production-gated runtime adapters. Production activation still requires archived cross-platform matrix evidence and release signoff.
 
 ## Boundary Summary
 
-- Production remote transport core is typed-envelope-only, flow-controlled, replay-aware, package-gated, and cannot mutate workspace, editor, UI, or disk state directly.
-- Standalone terminal runtime is policy-gated and platform-composed through the PTY boundary, with degraded process-backed sessions recorded as metadata-only audit.
-- Hosted telemetry has a durable local metadata spool/exporter path and remains disabled by default and denied by air-gap/non-allowlisted endpoint policy.
-- Raw-source retention has a ChaCha20-Poly1305 AEAD file-backed vault path and remains disabled by default with explicit scoped consent required before capture.
+- Production remote transport core is typed-envelope-only, flow-controlled, replay-aware, package-gated, and cannot mutate workspace, editor, UI, or disk state directly. The outbound carrier uses rustls/tokio with TLS/mTLS credential references and metadata-only diagnostics.
+- Standalone terminal runtime is policy-gated and platform-composed through the PTY boundary. Windows uses ConPTY process attachment and isolated standard handles, Unix uses PTY/process-group plumbing through `nix`, and runtime sessions expose spawn/input/resize/output/close/kill/orphan cleanup while keeping non-native/degraded sessions distinguishable in metadata.
+- Hosted telemetry has a durable local metadata spool/exporter path plus a rustls-only reqwest HTTP exporter and remains disabled by default and denied by air-gap/non-allowlisted endpoint policy.
+- Raw-source retention has a ChaCha20-Poly1305 AEAD file-backed vault path, OS-keyring key-provider support, a KMS envelope-provider contract, and hosted encrypted-bundle export linkage. It remains disabled by default with explicit scoped local and hosted consent required before capture/export.
 - Deterministic fixture crates are active for contract validation only: `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention`.
 - Normal observability, storage, remote, terminal, telemetry, plugin, AI, and collaboration metadata continue to reject raw source, raw transcripts, process output, transport payload bodies, prompts, provider payloads, and secrets by default.
 
@@ -25,10 +25,10 @@ Phase 8 remains future-gated for production remote network transport, native loc
 
 | Area | Owner role | Activation gate | Current posture |
 | --- | --- | --- | --- |
-| Remote transport | Remote runtime owner | `remote.transport.connect`, endpoint allowlist, credential reference, schema compatibility, replay/duplicate defense, agent package manifest, and proposal-mediated mutation evidence. | Default-off production core implemented and tested. |
-| Terminal/PTTY | Platform runtime owner | `terminal.launch`, `terminal.input`, `terminal.resize`, `terminal.close`, `terminal.kill`, trusted workspace, cwd/shell/env policy, bounded output, cleanup/orphan evidence. | Default-off process-backed degraded runtime implemented and tested. |
-| Hosted telemetry | Privacy and observability owner | `telemetry.export.hosted`, explicit consent, category/endpoint allowlist, air-gap denial, durable bounded spool, classifier audit, retry/drop evidence. | Durable metadata spool/exporter implemented and tested. |
-| Raw-source retention | Security/privacy owner | `retention.raw_source.capture/read/delete/export.hosted`, scoped consent, TTL, max bytes, path scope, AEAD vault, audit, delete/revoke evidence, key-provider review, and recovery drills. | AEAD file-backed vault, local key rotation, and metadata-only recovery reports implemented and tested; reviewed OS/KMS key-provider and hosted-export evidence remain deferred. |
+| Remote transport | Remote runtime owner | `remote.transport.connect`, endpoint allowlist, credential reference, schema compatibility, replay/duplicate defense, agent package manifest, and proposal-mediated mutation evidence. | Default-off production core plus rustls/tokio TLS/mTLS carrier implemented and tested. |
+| Terminal/PTTY | Platform runtime owner | `terminal.launch`, `terminal.input`, `terminal.resize`, `terminal.close`, `terminal.kill`, trusted workspace, cwd/shell/env policy, bounded output, cleanup/orphan evidence. | Native platform boundary implemented with Windows ConPTY session lifecycle and Unix PTY/process-group lifecycle path; final CI matrix remains required. |
+| Hosted telemetry | Privacy and observability owner | `telemetry.export.hosted`, explicit consent, category/endpoint allowlist, air-gap denial, durable bounded spool, classifier audit, retry/drop evidence. | Durable metadata spool/exporter plus rustls-only HTTP exporter implemented and tested. |
+| Raw-source retention | Security/privacy owner | `retention.raw_source.capture/read/delete/export.hosted`, scoped consent, TTL, max bytes, path scope, AEAD vault, audit, delete/revoke evidence, key-provider review, and recovery drills. | AEAD file-backed vault, OS-keyring provider, KMS envelope contract, hosted encrypted export linkage, local key rotation, and metadata-only recovery reports implemented and tested. |
 | Storage migrations | Storage owner | Explicit registry, dry-run, backup, checksum, recovery, quarantine, replay evidence, explicit repair flags. | Metadata registry, dry-run, backup, checksum, and recovery implemented and tested. |
 | Release operations | Release owner | Full artifact set, archived gates, platform matrix, fault/performance drills, cargo-deny review, rollback/canary/incident signoff. | Not accepted. |
 
@@ -61,6 +61,7 @@ Phase 8 remains future-gated for production remote network transport, native loc
 - `performance-budget-tests.txt`
 - `metadata-replay-drills.txt`
 - `fault-drill-results.txt`
+- `platform-matrix-evidence.txt`
 - `release-readiness-review.md`
 - `cargo-fmt-check.txt`
 - `cargo-check-workspace-all-targets.txt`
@@ -76,3 +77,5 @@ Phase 8 remains future-gated for production remote network transport, native loc
 - [x] Protocol DTO contract tests pass for all Phase 8 contracts in this implementation slice.
 - [x] Security, privacy, storage, migration, fault-injection, and ownership tests pass for this implementation slice.
 - [x] Full workspace gates pass and outputs are archived.
+- [ ] Linux, Windows, and macOS CI matrix evidence is archived after the production runtime dependency rebaseline.
+- [ ] Release readiness signoff is updated after the final matrix run.

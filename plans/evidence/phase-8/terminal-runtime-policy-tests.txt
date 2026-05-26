@@ -8,6 +8,8 @@ Implemented coverage:
 - terminal runtime remains default-off
 - launch policy rejects untrusted workspace metadata
 - launch creates metadata-only degraded audit records through platform PTY boundary
-- redacted projection chunk does not persist raw transcript metadata
+- native launch creates running session metadata and stores only the platform PTY handle reference needed for lifecycle dispatch
+- lifecycle input, resize, output polling, close, kill, orphan cleanup, and exited-session removal are covered through the runtime boundary
+- redacted projection chunk does not persist raw transcript metadata or include raw output in audit summaries
 - terminal capabilities remain disabled by default in security policy
 - empty-principal and unknown-trust denial paths are covered
