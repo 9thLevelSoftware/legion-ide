@@ -10,11 +10,14 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{
-        Arc, Mutex, OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::sync::Arc;
 
 use devil_protocol::{CanonicalPath, EventSequence, WatcherEvent, WatcherEventKind, WorkspaceId};
 use thiserror::Error;
@@ -537,6 +540,19 @@ fn atomic_replace(temp: &Path, target: &Path) -> Result<(), PlatformError> {
     })
 }
 
+#[cfg(not(windows))]
+fn unsupported_operation(
+    operation: impl Into<String>,
+    path: impl Into<PathBuf>,
+    reason: impl Into<String>,
+) -> PlatformError {
+    PlatformError::UnsupportedOperation {
+        operation: operation.into(),
+        path: path.into(),
+        reason: reason.into(),
+    }
+}
+
 /// Process abstraction.
 pub trait ProcessService {
     /// Executes a command and returns the output.
@@ -1051,7 +1067,6 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
 #[cfg(unix)]
 fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
     use std::fs::File;
-    use std::io::Read as _;
     use std::os::fd::{FromRawFd, IntoRawFd};
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -1086,7 +1101,7 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
                 .map_err(|err| io::Error::from_raw_os_error(err as i32))
         });
     }
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|err| PlatformError::ProcessSpawnFailure {
             operation: "spawn Unix PTY command".to_string(),
@@ -1326,12 +1341,12 @@ fn close_windows_session(handle: WindowsPtySessionHandle, terminate: bool) {
     }
 }
 
-fn close_removed_pty_session(handle: NativePtySessionHandle, terminate: bool) {
+fn close_removed_pty_session(handle: NativePtySessionHandle, _terminate: bool) {
     match handle {
         #[cfg(unix)]
         NativePtySessionHandle::Unix { .. } => {}
         #[cfg(windows)]
-        NativePtySessionHandle::Windows(handle) => close_windows_session(handle, terminate),
+        NativePtySessionHandle::Windows(handle) => close_windows_session(handle, _terminate),
     }
 }
 

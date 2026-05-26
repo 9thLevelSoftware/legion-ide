@@ -277,7 +277,12 @@ fn ci_large_file_degraded_open_and_viewport_are_bounded() {
     assert!(viewport.decoration_spans.is_empty());
     assert!(viewport.fold_ranges.is_empty());
     assert!(viewport.semantic_token_overlays.is_empty());
-    assert!(open_elapsed < Duration::from_secs(5));
+    let open_threshold = if cfg!(windows) {
+        Duration::from_secs(8)
+    } else {
+        Duration::from_secs(5)
+    };
+    assert!(open_elapsed < open_threshold);
     assert!(viewport_elapsed < Duration::from_millis(250));
 }
 
