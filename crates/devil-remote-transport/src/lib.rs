@@ -235,6 +235,10 @@ impl RustlsMtlsCarrier {
                     reason: "required mTLS has no client private key path".to_string(),
                 })?;
             let certs = load_certs(cert_path)?;
+            enforce_client_credential_reference(
+                attempt.tls_policy.client_credential_reference.as_ref(),
+                &certs,
+            )?;
             let key = load_private_key(key_path)?;
             ClientConfig::builder()
                 .with_root_certificates(roots)
@@ -1056,6 +1060,43 @@ fn validate_certificate_pin_reference(
     Ok(())
 }
 
+fn enforce_client_credential_reference(
+    reference: Option<&RemoteTransportCredentialReference>,
+    client_certs: &[CertificateDer<'static>],
+) -> Result<(), RemoteTransportCarrierError> {
+    let Some(reference) = reference else {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: "required mTLS has no client credential reference".to_string(),
+        });
+    };
+    if reference.kind != "client-cert" {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "client credential reference `{}` used unsupported kind `{}`",
+                reference.reference_id, reference.kind
+            ),
+        });
+    }
+    if client_certs.is_empty() {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "client credential reference `{}` has no configured certificate chain",
+                reference.reference_id
+            ),
+        });
+    }
+    let configured_digest = certificate_chain_fingerprint(client_certs);
+    if !fingerprint_matches(&reference.digest, &configured_digest) {
+        return Err(RemoteTransportCarrierError::Credential {
+            reason: format!(
+                "client credential reference `{}` digest mismatch",
+                reference.reference_id
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn verify_peer_certificate_pin(
     reference: Option<&RemoteTransportCredentialReference>,
     peer_certs: Option<&[CertificateDer<'static>]>,
@@ -1085,6 +1126,10 @@ fn verify_peer_certificate_pin(
 }
 
 fn root_store_fingerprint(certs: &[CertificateDer<'static>]) -> FileFingerprint {
+    certificate_chain_fingerprint(certs)
+}
+
+fn certificate_chain_fingerprint(certs: &[CertificateDer<'static>]) -> FileFingerprint {
     let mut hasher = Sha256::new();
     for cert in certs {
         let bytes = cert.as_ref();
@@ -1588,6 +1633,42 @@ mod tests {
         assert!(matches!(
             enforce_root_store_reference(Some(&mismatched), &[root]),
             Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+    }
+
+    #[test]
+    fn client_credential_reference_must_match_configured_client_chain_digest() {
+        let leaf = CertificateDer::from(vec![1, 1, 2, 3, 5, 8]);
+        let intermediate = CertificateDer::from(vec![13, 21, 34]);
+        let chain = vec![leaf, intermediate];
+        let matching = RemoteTransportCredentialReference {
+            reference_id: "client-cert-ref".to_string(),
+            kind: "client-cert".to_string(),
+            digest: certificate_chain_fingerprint(&chain),
+            schema_version: 1,
+        };
+        assert!(enforce_client_credential_reference(Some(&matching), &chain).is_ok());
+
+        let mismatched = RemoteTransportCredentialReference {
+            reference_id: "client-cert-ref".to_string(),
+            kind: "client-cert".to_string(),
+            digest: sha256_fingerprint(b"other-client-cert"),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            enforce_client_credential_reference(Some(&mismatched), &chain),
+            Err(RemoteTransportCarrierError::Credential { .. })
+        ));
+
+        let wrong_kind = RemoteTransportCredentialReference {
+            reference_id: "client-cert-ref".to_string(),
+            kind: "private-key".to_string(),
+            digest: certificate_chain_fingerprint(&chain),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            enforce_client_credential_reference(Some(&wrong_kind), &chain),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
         ));
     }
 
