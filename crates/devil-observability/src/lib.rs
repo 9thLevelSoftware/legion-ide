@@ -18,16 +18,19 @@ use devil_protocol::{
     DelegatedTaskAssistedAiAuditReference, DelegatedTaskAuditLinkageRecord,
     DelegatedTaskPlanContract, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
     EventSeverity, EventSinkPort, EventSinkRequest, FileFingerprint, FileId,
-    PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord, PluginId, PrincipalId,
-    ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
+    HostedTelemetrySpoolRecord, PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord,
+    PluginId, PrincipalId, ProposalAuditRecord, ProposalFailureReason, ProposalLifecycleState,
     ProposalLifecycleTransition, ProposalPayload, ProposalPayloadKind, ProposalPayloadSummary,
     ProposalPrivacyLabel, ProposalRejectionReason, ProposalRollbackReason, ProposalStaleReason,
-    ProtocolDiagnostic, ProtocolError, ProtocolResult, RedactionHint, RemoteAuditRecord,
-    RetentionLabel, TextTransactionDescriptor, TimestampMillis, WorkspaceId, WorkspaceProposal,
-    delegated_task_audit_linkage_record, validate_agent_replay_manifest,
+    ProtocolDiagnostic, ProtocolError, ProtocolResult, RawSourceRetentionAccessAudit,
+    RedactionHint, RemoteAuditRecord, RemoteTransportAuditSummary, RetentionLabel,
+    TerminalAuditRecord, TextTransactionDescriptor, TimestampMillis, WorkspaceId,
+    WorkspaceProposal, delegated_task_audit_linkage_record, validate_agent_replay_manifest,
     validate_assisted_ai_audit_record, validate_collaboration_audit_record,
-    validate_delegated_task_audit_linkage_record, validate_phase4_runtime_audit_record,
-    validate_remote_audit_record,
+    validate_delegated_task_audit_linkage_record, validate_hosted_telemetry_spool_record,
+    validate_phase4_runtime_audit_record, validate_raw_source_retention_access_audit,
+    validate_remote_audit_record, validate_remote_transport_audit_summary,
+    validate_terminal_audit_record,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -139,6 +142,91 @@ pub fn remote_audit_recorded_event(
     }
 
     let envelope = builder.build();
+    validate_envelope(&envelope, EventSinkConfig::default())?;
+    Ok(envelope)
+}
+
+/// Build a metadata-only Phase 8 remote transport audit event envelope.
+pub fn remote_transport_audit_recorded_event(
+    summary: &RemoteTransportAuditSummary,
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_remote_transport_audit_summary(summary)
+        .map_err(|_| ObservabilityError::InvalidPayload)?;
+    let envelope =
+        EventEnvelopeBuilder::new("remote.transport.audit_recorded", summary.causality_id)
+            .retention(RetentionLabel::Audit)
+            .redaction(RedactionHint::MetadataOnly)
+            .correlation_id(summary.correlation_id)
+            .sequence(summary.event_sequence)
+            .metadata("session_id", json!(summary.session_id.0.to_string()))
+            .metadata("payload_class", json!("metadata_only"))
+            .metadata("metadata_summary", json!(summary.metadata_summary))
+            .build();
+    validate_envelope(&envelope, EventSinkConfig::default())?;
+    Ok(envelope)
+}
+
+/// Build a metadata-only Phase 8 terminal audit event envelope.
+pub fn terminal_audit_recorded_event(
+    record: &TerminalAuditRecord,
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_terminal_audit_record(record).map_err(|_| ObservabilityError::InvalidPayload)?;
+    let envelope = EventEnvelopeBuilder::new("terminal.audit_recorded", record.causality_id)
+        .retention(RetentionLabel::Audit)
+        .redaction(RedactionHint::MetadataOnly)
+        .correlation_id(record.correlation_id)
+        .sequence(record.event_sequence)
+        .metadata("session_id", json!(record.session_id.0))
+        .metadata("state", json!(format!("{:?}", record.state)))
+        .metadata("payload_class", json!("metadata_only"))
+        .metadata("metadata_summary", json!(record.metadata_summary))
+        .build();
+    validate_envelope(&envelope, EventSinkConfig::default())?;
+    Ok(envelope)
+}
+
+/// Build a metadata-only hosted telemetry spool event envelope.
+pub fn hosted_telemetry_spool_recorded_event(
+    record: &HostedTelemetrySpoolRecord,
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_hosted_telemetry_spool_record(record)
+        .map_err(|_| ObservabilityError::InvalidPayload)?;
+    let envelope = EventEnvelopeBuilder::new("telemetry.spool_recorded", record.causality_id)
+        .retention(RetentionLabel::Warm)
+        .redaction(RedactionHint::MetadataOnly)
+        .workspace_id(record.workspace_id)
+        .correlation_id(record.correlation_id)
+        .sequence(record.event_sequence)
+        .metadata("record_id", json!(record.record_id))
+        .metadata("category", json!(format!("{:?}", record.category)))
+        .metadata(
+            "classification",
+            json!(format!("{:?}", record.classification)),
+        )
+        .metadata("payload_class", json!("metadata_only"))
+        .metadata("metadata_summary", json!(record.metadata_summary))
+        .build();
+    validate_envelope(&envelope, EventSinkConfig::default())?;
+    Ok(envelope)
+}
+
+/// Build a metadata-only raw-source retention access-audit event envelope.
+pub fn raw_source_retention_access_audit_event(
+    audit: &RawSourceRetentionAccessAudit,
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_raw_source_retention_access_audit(audit)
+        .map_err(|_| ObservabilityError::InvalidPayload)?;
+    let envelope =
+        EventEnvelopeBuilder::new("retention.raw_source.access_audit", audit.causality_id)
+            .retention(RetentionLabel::Audit)
+            .redaction(RedactionHint::MetadataOnly)
+            .correlation_id(audit.correlation_id)
+            .sequence(audit.event_sequence)
+            .principal_id(audit.principal_id.clone())
+            .metadata("bundle_id", json!(audit.bundle_id))
+            .metadata("action", json!(audit.action))
+            .metadata("payload_class", json!("metadata_only"))
+            .build();
     validate_envelope(&envelope, EventSinkConfig::default())?;
     Ok(envelope)
 }
@@ -2300,6 +2388,89 @@ mod tests {
         invalid.metadata_summary = "process_output=secret".to_string();
         assert!(matches!(
             remote_audit_recorded_event(&invalid),
+            Err(ObservabilityError::InvalidPayload)
+        ));
+    }
+
+    #[test]
+    fn phase8_audit_events_are_metadata_only_and_validated() {
+        let transport = RemoteTransportAuditSummary {
+            session_id: devil_protocol::RemoteWorkspaceSessionId(7001),
+            event_sequence: EventSequence(90),
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            metadata_summary: "handshake=accepted frames=3".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let terminal = TerminalAuditRecord {
+            session_id: devil_protocol::TerminalSessionId(42),
+            state: devil_protocol::TerminalRuntimeState::Exited,
+            event_sequence: EventSequence(91),
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            metadata_summary: "exit_code=0 output_bytes=128".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let spool = HostedTelemetrySpoolRecord {
+            record_id: "spool-1".to_string(),
+            workspace_id: WorkspaceId(1),
+            category: devil_protocol::HostedTelemetryCategory::Diagnostics,
+            classification: devil_protocol::PrivacyClassification::Metadata,
+            metadata_summary: "event_count=1".to_string(),
+            event_sequence: EventSequence(92),
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let retention = RawSourceRetentionAccessAudit {
+            bundle_id: "bundle-1".to_string(),
+            principal_id: PrincipalId("tester".to_string()),
+            action: "read_descriptor".to_string(),
+            event_sequence: EventSequence(93),
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(Uuid::now_v7()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+
+        let events = vec![
+            remote_transport_audit_recorded_event(&transport).expect("transport event"),
+            terminal_audit_recorded_event(&terminal).expect("terminal event"),
+            hosted_telemetry_spool_recorded_event(&spool).expect("spool event"),
+            raw_source_retention_access_audit_event(&retention).expect("retention event"),
+        ];
+        for event in &events {
+            assert_eq!(event.redaction, RedactionHint::MetadataOnly);
+            assert_ne!(event.correlation_id.0, 0);
+            assert_ne!(event.causality_id.0, Uuid::nil());
+            assert_ne!(event.sequence.0, 0);
+            assert_eq!(event.payload["payload_class"], "metadata_only");
+        }
+
+        let sink = InMemoryEventSink::new();
+        for event in events {
+            sink.try_emit(EventSinkRequest { envelope: event })
+                .expect("phase8 metadata-only event stores");
+        }
+        let serialized = serde_json::to_string(&sink.events().expect("stored events"))
+            .expect("serialize phase8 events");
+        assert!(serialized.contains("remote.transport.audit_recorded"));
+        assert!(serialized.contains("terminal.audit_recorded"));
+        assert!(serialized.contains("telemetry.spool_recorded"));
+        assert!(serialized.contains("retention.raw_source.access_audit"));
+        assert!(!serialized.contains("raw_source=fn"));
+        assert!(!serialized.contains("source_body"));
+        assert!(!serialized.contains("terminal_output"));
+        assert!(!serialized.contains("transport_payload"));
+        assert!(!serialized.contains("process_output"));
+
+        let mut invalid = terminal;
+        invalid.metadata_summary = "terminal_output=secret".to_string();
+        assert!(matches!(
+            terminal_audit_recorded_event(&invalid),
             Err(ObservabilityError::InvalidPayload)
         ));
     }

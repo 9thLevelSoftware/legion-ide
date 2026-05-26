@@ -932,12 +932,35 @@ impl ProcessService for NativeProcessService {
 
 impl PtyService for NativePtyService {
     fn spawn_pty(&self, request: &PtyRequest) -> Result<PtySession, PlatformError> {
-        let _ = &request.command;
-        let _ = &request.args;
-        let _ = &request.cwd;
+        const PTY_SHIM_OUTPUT_LIMIT: usize = 256 * 1024;
 
-        Err(PlatformError::PtyUnavailable {
-            reason: "PTY service is phase-gated and not wired into terminal behavior".to_string(),
+        let mut command = Command::new(&request.command);
+        command.args(&request.args);
+        if let Some(cwd) = &request.cwd {
+            command.current_dir(cwd);
+        }
+
+        let output = command
+            .output()
+            .map_err(|err| PlatformError::ProcessSpawnFailure {
+                operation: "spawn degraded PTY".to_string(),
+                command: request.command.clone(),
+                message: err.to_string(),
+            })?;
+        let mut bytes = output.stdout;
+        if !output.stderr.is_empty() {
+            bytes.extend_from_slice(b"\n");
+            bytes.extend_from_slice(&output.stderr);
+        }
+        if bytes.len() > PTY_SHIM_OUTPUT_LIMIT {
+            bytes.truncate(PTY_SHIM_OUTPUT_LIMIT);
+        }
+        Ok(PtySession {
+            id: format!(
+                "degraded-pty-{}",
+                stable_hash_bytes(request.command.as_bytes())
+            ),
+            output: String::from_utf8_lossy(&bytes).into_owned(),
         })
     }
 }

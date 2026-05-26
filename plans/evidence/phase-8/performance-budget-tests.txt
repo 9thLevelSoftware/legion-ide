@@ -1,0 +1,9 @@
+Command: cargo test --workspace --all-targets
+Result: passed
+
+Relevant budget coverage from workspace tests:
+- editor CI performance suite passed for bounded/degraded workloads
+- terminal output projection is bounded by runtime config
+- remote transport flow control enforces in-flight frame limits
+- telemetry spool enforces max records and records drop summary
+- raw-source vault enforces max bundle bytes

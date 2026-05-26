@@ -1,0 +1,7 @@
+Command: cargo test -p devil-remote-transport --all-targets
+Result: passed
+
+Implemented coverage:
+- `RemoteAgentPackageDescriptor` validation requires package id, version, integrity digest, signature reference, declared capabilities, metadata-only redaction, and granted `remote.agent.package.activate` capability.
+- transport state machine rejects package metadata whose authority or agent id does not match the accepted peer identity.
+- frame acceptance is denied until required package activation succeeds.

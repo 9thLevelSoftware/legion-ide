@@ -365,6 +365,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "devil-remote-transport"
+version = "0.1.0"
+dependencies = [
+ "devil-protocol",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "devil-retention"
+version = "0.1.0"
+dependencies = [
+ "devil-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "devil-security"
 version = "0.1.0"
 dependencies = [
@@ -382,6 +402,27 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "devil-telemetry"
+version = "0.1.0"
+dependencies = [
+ "devil-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "devil-terminal"
+version = "0.1.0"
+dependencies = [
+ "devil-platform",
+ "devil-protocol",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

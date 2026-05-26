@@ -1,0 +1,8 @@
+Command: cargo run -p xtask -- check-deps
+Result: passed
+
+Implemented boundary updates:
+- Phase 8 runtime crates remain protocol-mediated and default-deny.
+- `devil-terminal` now depends on `devil-platform` for platform PTY/process boundary use.
+- `devil-telemetry` and `devil-retention` use `serde`/`serde_json` for durable local metadata indexes.
+- No UI ownership of Phase 8 runtimes was introduced.

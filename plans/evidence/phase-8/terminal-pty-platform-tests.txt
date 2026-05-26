@@ -1,0 +1,7 @@
+Command: cargo test -p devil-terminal --all-targets
+Result: passed
+
+Implemented platform behavior:
+- `NativePtyService::spawn_pty` no longer returns unconditional `PtyUnavailable`.
+- platform PTY boundary now provides a degraded process-backed session descriptor with bounded output capture.
+- `devil-terminal::TerminalRuntime` consumes the PTY boundary and records `TerminalRuntimeState::Degraded` metadata for process-backed sessions.

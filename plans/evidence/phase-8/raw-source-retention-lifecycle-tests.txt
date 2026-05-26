@@ -1,0 +1,9 @@
+Command: cargo test -p devil-retention --all-targets
+Result: passed
+
+Implemented coverage:
+- encrypted vault content does not store plaintext bytes
+- authorized read decrypts through audit-validated path
+- delete removes ciphertext and retains tombstone metadata
+- reopen recovers descriptors from `index.json` without plaintext leakage
+- TTL purge path records tombstones for expired bundles

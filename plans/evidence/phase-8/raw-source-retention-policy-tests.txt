@@ -1,0 +1,9 @@
+Command: cargo test -p devil-retention --all-targets
+Result: passed
+
+Implemented coverage:
+- descriptor fixture remains default-deny
+- file-backed raw-source vault requires enabled policy and scoped consent
+- out-of-scope paths are rejected
+- vault key reference and key bytes are required before capture
+- metadata descriptor does not include plaintext source content

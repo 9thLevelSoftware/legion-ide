@@ -1,0 +1,9 @@
+Command: cargo test -p devil-telemetry --all-targets
+Result: passed
+
+Implemented coverage:
+- durable spool survives reopen
+- accepted upload removes records from spool
+- retry upload preserves records and records retry-after metadata
+- max-record capacity increments drop summary and fails closed
+- exporter is client-trait based and non-blocking with respect to editor/workspace mutation paths

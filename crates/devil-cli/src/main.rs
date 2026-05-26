@@ -36,6 +36,35 @@ const PHASE3_REQUIRED_ARTIFACTS: &[&str] = &[
     "vector-deferral-audit.md",
 ];
 
+const PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
+    "phase-8-architecture-map.md",
+    "phase-8-threat-model.md",
+    "dependency-boundary.txt",
+    "protocol-dto-contract-tests.txt",
+    "remote-production-transport-security-tests.txt",
+    "remote-agent-packaging-tests.txt",
+    "terminal-runtime-policy-tests.txt",
+    "terminal-pty-platform-tests.txt",
+    "hosted-telemetry-consent-policy-tests.txt",
+    "hosted-telemetry-failure-mode-tests.txt",
+    "privacy-redaction-classifier-audit.md",
+    "raw-source-retention-policy-tests.txt",
+    "raw-source-retention-lifecycle-tests.txt",
+    "storage-migration-recovery-tests.txt",
+    "operational-health-diagnostics.txt",
+    "enterprise-policy-profile-ci.txt",
+    "performance-budget-tests.txt",
+    "metadata-replay-drills.txt",
+    "fault-drill-results.txt",
+    "release-readiness-review.md",
+    "cargo-fmt-check.txt",
+    "cargo-check-workspace-all-targets.txt",
+    "cargo-test-workspace-all-targets.txt",
+    "cargo-clippy-workspace-all-targets.txt",
+    "cargo-deny-check.txt",
+    "xtask-check-deps.txt",
+];
+
 const STORAGE_FORBIDDEN_MARKERS: &[&str] = &[
     "raw_source",
     "source_text",
@@ -115,6 +144,8 @@ enum EvidencePhase {
     Phase0,
     /// Phase 3 scaffold or acceptance evidence.
     Phase3,
+    /// Phase 8 production GA scaffold or acceptance evidence.
+    Phase8,
 }
 
 #[derive(Debug, Subcommand)]
@@ -248,8 +279,8 @@ fn run_doctor(workspace: PathBuf) -> Result<()> {
         );
         require_text(
             &ledger,
-            "Partially accepted",
-            "Phase 2 remains partial",
+            "Phase 2 — Proposal mutation substrate | **Accepted**",
+            "Phase 2 accepted status",
             &mut issues,
         );
         require_text(
@@ -260,14 +291,14 @@ fn run_doctor(workspace: PathBuf) -> Result<()> {
         );
         require_text(
             &ledger,
-            "Not accepted",
-            "Phase 3 remains not accepted",
+            "Phase 3 — Semantic fabric and LSP supervision | **Accepted**",
+            "Phase 3 accepted status",
             &mut issues,
         );
         require_text(
             &ledger,
             "Future-gated",
-            "future phases remain gated",
+            "Phase 8 remains future-gated",
             &mut issues,
         );
     }
@@ -280,14 +311,14 @@ fn run_doctor(workspace: PathBuf) -> Result<()> {
     if let Some(phase3) = phase3 {
         require_text(
             &phase3,
-            "Phase 3 acceptance: Not accepted.",
-            "Phase 3 acceptance is still gated",
+            "Phase 3 acceptance: Accepted.",
+            "Phase 3 acceptance is accepted",
             &mut issues,
         );
         require_text(
             &phase3,
-            "LSP supervision acceptance: Not accepted.",
-            "LSP supervision is still gated",
+            "LSP supervision acceptance: Accepted.",
+            "LSP supervision is accepted",
             &mut issues,
         );
         require_text(
@@ -298,10 +329,10 @@ fn run_doctor(workspace: PathBuf) -> Result<()> {
         );
     }
 
-    // Plan Phase 2 and future phases: placeholder runtime crates must stay inert.
-    require_placeholder_runtime_inert(&workspace, "crates/devil-agent/src/lib.rs", &mut issues);
-    require_placeholder_runtime_inert(&workspace, "crates/devil-tracker/src/lib.rs", &mut issues);
-    require_placeholder_runtime_inert(&workspace, "crates/devil-memory/src/lib.rs", &mut issues);
+    // Accepted Phase 4 crates may contain runtime code, but must stay protocol-mediated.
+    require_phase4_runtime_boundaries(&workspace, "crates/devil-agent", &mut issues);
+    require_phase4_runtime_boundaries(&workspace, "crates/devil-tracker", &mut issues);
+    require_phase4_runtime_boundaries(&workspace, "crates/devil-memory", &mut issues);
 
     if issues.is_empty() {
         println!("Devil CLI doctor: OK");
@@ -333,6 +364,7 @@ fn run_evidence_check(workspace: PathBuf, phase: EvidencePhase) -> Result<()> {
     match phase {
         EvidencePhase::Phase0 => check_phase0_evidence(&workspace, &mut issues),
         EvidencePhase::Phase3 => check_phase3_evidence(&workspace, &mut issues),
+        EvidencePhase::Phase8 => check_phase8_evidence(&workspace, &mut issues),
     }
     finish_issue_report("Evidence check", &workspace, issues)
 }
@@ -340,9 +372,9 @@ fn run_evidence_check(workspace: PathBuf, phase: EvidencePhase) -> Result<()> {
 fn run_activation_check(workspace: PathBuf) -> Result<()> {
     let workspace = canonical_workspace(workspace)?;
     let mut issues = Vec::new();
-    require_placeholder_runtime_inert(&workspace, "crates/devil-agent/src/lib.rs", &mut issues);
-    require_placeholder_runtime_inert(&workspace, "crates/devil-tracker/src/lib.rs", &mut issues);
-    require_placeholder_runtime_inert(&workspace, "crates/devil-memory/src/lib.rs", &mut issues);
+    require_phase4_runtime_boundaries(&workspace, "crates/devil-agent", &mut issues);
+    require_phase4_runtime_boundaries(&workspace, "crates/devil-tracker", &mut issues);
+    require_phase4_runtime_boundaries(&workspace, "crates/devil-memory", &mut issues);
     let policy = read_optional(&workspace, "plans/dependency-policy.md", &mut issues);
     if let Some(policy) = policy {
         require_text(
@@ -353,8 +385,8 @@ fn run_activation_check(workspace: PathBuf) -> Result<()> {
         );
         require_text(
             &policy,
-            "remain ADR-gated",
-            "placeholder runtime surfaces remain ADR-gated",
+            "remain ADR/evidence gated",
+            "placeholder runtime surfaces remain ADR/evidence gated",
             &mut issues,
         );
     }
@@ -421,7 +453,11 @@ fn run_setup_status(workspace: PathBuf) -> Result<()> {
             "Phase 1 — Editor and text substrate",
             "Phase 2 — Proposal mutation substrate",
             "Phase 3 — Semantic fabric and LSP supervision",
-            "Phases 4–8 — AI, plugins, collaboration, remote, hardening",
+            "Phase 4 — Native agentic AI execution context",
+            "Phase 5 — WASM isolated extension ecosystem",
+            "Phase 6 — Collaboration substrate",
+            "Phase 7 — Remote development",
+            "Phase 8 — Hardening",
         ] {
             if let Some(line) = ledger.lines().find(|line| line.contains(marker)) {
                 println!("{line}");
@@ -432,6 +468,7 @@ fn run_setup_status(workspace: PathBuf) -> Result<()> {
     println!("cargo run -p devil-cli -- doctor");
     println!("cargo run -p devil-cli -- evidence check --phase phase0");
     println!("cargo run -p devil-cli -- evidence check --phase phase3");
+    println!("cargo run -p devil-cli -- evidence check --phase phase8");
     println!("pwsh ./scripts/run-phase-gates.ps1");
     finish_issue_report("Setup status", &workspace, issues)
 }
@@ -495,6 +532,53 @@ fn check_phase3_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) 
             &phase3,
             "LSP supervision acceptance: Not accepted.",
             "LSP supervision remains gated until evidence is complete",
+            issues,
+        );
+    }
+}
+
+fn check_phase8_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) {
+    let relative = "plans/evidence/phase-8/phase-8-architecture-map.md";
+    let Some(phase8) = read_optional(workspace, relative, issues) else {
+        return;
+    };
+    for artifact in PHASE8_REQUIRED_ARTIFACTS {
+        require_text(
+            &phase8,
+            artifact,
+            &format!("Phase 8 required artifact `{artifact}` is listed"),
+            issues,
+        );
+    }
+    if phase8.contains("Phase 8 acceptance: Accepted.") {
+        for artifact in PHASE8_REQUIRED_ARTIFACTS {
+            require_file(
+                workspace,
+                &format!("plans/evidence/phase-8/{artifact}"),
+                issues,
+            );
+        }
+        if phase8.contains("- [ ]") {
+            issues.push(
+                "Phase 8 is marked accepted but checklist still has unchecked items".to_string(),
+            );
+        }
+        if phase8.contains("This document is Phase 8 scaffold evidence") {
+            issues.push(
+                "Phase 8 is marked accepted but still declares scaffold evidence".to_string(),
+            );
+        }
+    } else {
+        require_text(
+            &phase8,
+            "Phase 8 acceptance: Not accepted.",
+            "Phase 8 remains gated until GA evidence is complete",
+            issues,
+        );
+        require_text(
+            &phase8,
+            "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred",
+            "Phase 8 production runtime surfaces remain deferred",
             issues,
         );
     }
@@ -591,27 +675,38 @@ fn require_text(contents: &str, needle: &str, label: &str, issues: &mut Vec<Stri
     }
 }
 
-fn require_placeholder_runtime_inert(
+fn require_phase4_runtime_boundaries(
     workspace: &std::path::Path,
-    relative: &str,
+    crate_dir: &str,
     issues: &mut Vec<String>,
 ) {
-    let Some(contents) = read_optional(workspace, relative, issues) else {
+    let lib_path = format!("{crate_dir}/src/lib.rs");
+    let manifest_path = format!("{crate_dir}/Cargo.toml");
+    let Some(source) = read_optional(workspace, &lib_path, issues) else {
+        return;
+    };
+    let Some(manifest) = read_optional(workspace, &manifest_path, issues) else {
         return;
     };
 
-    let implementation_lines = contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.starts_with("//!"))
-        .filter(|line| !line.starts_with("#![warn(missing_docs)]"))
-        .count();
-
-    if implementation_lines > 0 {
+    if !source.contains("devil_protocol") {
         issues.push(format!(
-            "placeholder runtime `{relative}` contains implementation code before activation gates"
+            "Phase 4 runtime `{crate_dir}` must use protocol DTOs as its boundary"
         ));
+    }
+    for forbidden in [
+        "devil-app",
+        "devil-ui",
+        "devil-editor",
+        "devil-project",
+        "WorkspaceActor",
+        "EditorSession",
+    ] {
+        if source.contains(forbidden) || manifest.contains(forbidden) {
+            issues.push(format!(
+                "Phase 4 runtime `{crate_dir}` must not depend on `{forbidden}` ownership"
+            ));
+        }
     }
 }
 

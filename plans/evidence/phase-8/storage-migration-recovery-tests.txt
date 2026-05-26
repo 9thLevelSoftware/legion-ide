@@ -1,0 +1,9 @@
+Command: cargo test -p devil-storage migration_registry
+Result: passed
+
+Implemented coverage:
+- explicit migration registry registers forward-only steps
+- dry-run report is metadata-only and validated
+- file backup writes checksum-bearing backup marker
+- recovery requires explicit `StorageRepairRequest`
+- backup checksum is verified before restore

@@ -16,17 +16,24 @@ use devil_protocol::{
     AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
     CollaborationAuditRecord, CollaborationSessionId, CorrelationId,
     DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
-    EventSinkPort, EventSinkRequest, FileId, FileMetadata, Phase4RuntimeAuditRecord,
-    PluginDenialReason, PluginStorageOperation, PluginStorageRecord, PrincipalId,
-    ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult, RemoteAuditRecord,
+    EventSinkPort, EventSinkRequest, FileId, FileMetadata, HostedTelemetrySpoolRecord,
+    Phase4RuntimeAuditRecord, PluginDenialReason, PluginStorageOperation, PluginStorageRecord,
+    PrincipalId, ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult,
+    RawSourceRetentionAccessAudit, RemoteAuditRecord, RemoteTransportAuditSummary,
     RemoteWorkspaceSessionId, SemanticMetadataBatch, SemanticMetadataFreshnessKey,
     SemanticMetadataQuery, SemanticMetadataReadResult, SemanticMetadataRecord,
-    SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId, StorageRepositoryPort,
-    StorageRepositoryRequest, StorageRepositoryResponse, TrustRecord, WorkspaceConfigSnapshot,
-    WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState, validate_agent_replay_manifest,
-    validate_assisted_ai_audit_record, validate_collaboration_audit_record,
-    validate_delegated_task_audit_linkage_record, validate_phase4_runtime_audit_record,
-    validate_plugin_storage_record, validate_remote_audit_record,
+    SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId, StorageBackupMarker,
+    StorageChecksum, StorageMigrationDryRunReport, StorageMigrationStep, StorageRecoveryOutcome,
+    StorageRepairRequest, StorageRepositoryPort, StorageRepositoryRequest,
+    StorageRepositoryResponse, StorageSchemaManifest, TerminalAuditRecord, TerminalSessionId,
+    TrustRecord, WorkspaceConfigSnapshot, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
+    validate_agent_replay_manifest, validate_assisted_ai_audit_record,
+    validate_collaboration_audit_record, validate_delegated_task_audit_linkage_record,
+    validate_hosted_telemetry_spool_record, validate_phase4_runtime_audit_record,
+    validate_plugin_storage_record, validate_raw_source_retention_access_audit,
+    validate_remote_audit_record, validate_remote_transport_audit_summary,
+    validate_storage_migration_dry_run_report, validate_storage_repair_request,
+    validate_storage_schema_manifest, validate_terminal_audit_record,
 };
 use devil_security::TrustState;
 use serde::{Deserialize, Serialize};
@@ -93,6 +100,14 @@ pub enum StorageError {
         /// Quarantine destination path.
         quarantine_path: String,
     },
+}
+
+impl StorageError {
+    fn from_protocol(error: ProtocolError) -> Self {
+        Self::Failed {
+            message: error.message,
+        }
+    }
 }
 
 type StorageResult<T> = Result<T, StorageError>;
@@ -197,6 +212,10 @@ pub struct InMemoryStorage {
     protocol_agent_replay_manifests: HashMap<AgentRunId, AgentReplayManifest>,
     protocol_collaboration_audit: HashMap<String, CollaborationAuditRecord>,
     protocol_remote_audit: HashMap<String, RemoteAuditRecord>,
+    protocol_remote_transport_audit: HashMap<String, RemoteTransportAuditSummary>,
+    protocol_terminal_audit: HashMap<String, TerminalAuditRecord>,
+    protocol_hosted_telemetry_spool: HashMap<String, HostedTelemetrySpoolRecord>,
+    protocol_raw_source_retention_access_audit: HashMap<String, RawSourceRetentionAccessAudit>,
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     protocol_semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     protocol_semantic_tombstones: Vec<SemanticMetadataTombstone>,
@@ -208,6 +227,164 @@ pub struct InMemoryStorage {
 pub struct FileBackedStorage {
     path: PathBuf,
     state: InMemoryStorage,
+}
+
+/// Explicit metadata-only storage migration registry.
+#[derive(Debug, Clone)]
+pub struct StorageMigrationRegistry {
+    active_schema_version: u16,
+    steps: Vec<StorageMigrationStep>,
+}
+
+/// Outcome of applying or recovering storage migration files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageMigrationApplyOutcome {
+    /// Backup marker written before mutation.
+    pub backup: StorageBackupMarker,
+    /// Recovery outcome metadata after apply or recovery.
+    pub recovery: StorageRecoveryOutcome,
+}
+
+impl StorageMigrationRegistry {
+    /// Create a migration registry for the current active schema version.
+    pub fn new(active_schema_version: u16) -> Self {
+        Self {
+            active_schema_version,
+            steps: Vec::new(),
+        }
+    }
+
+    /// Register one explicit forward migration step.
+    pub fn register(&mut self, step: StorageMigrationStep) -> StorageResult<()> {
+        if step.from_schema_version == 0
+            || step.to_schema_version <= step.from_schema_version
+            || step.migration_id.trim().is_empty()
+            || step.subsystem_id.trim().is_empty()
+            || step.schema_version == 0
+        {
+            return Err(StorageError::Failed {
+                message: "storage migration step must be explicit and forward-only".to_string(),
+            });
+        }
+        self.steps.push(step);
+        Ok(())
+    }
+
+    /// Produce a metadata-only dry-run report for a manifest and registered step.
+    pub fn dry_run(
+        &self,
+        manifest: StorageSchemaManifest,
+        target_schema_version: u16,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> StorageResult<StorageMigrationDryRunReport> {
+        validate_storage_schema_manifest(&manifest).map_err(StorageError::from_protocol)?;
+        let step = self
+            .steps
+            .iter()
+            .find(|step| {
+                step.subsystem_id == manifest.subsystem_id
+                    && step.from_schema_version == manifest.active_schema_version
+                    && step.to_schema_version == target_schema_version
+            })
+            .cloned()
+            .ok_or_else(|| StorageError::Failed {
+                message: "no registered storage migration step matches manifest".to_string(),
+            })?;
+        let report = StorageMigrationDryRunReport {
+            step,
+            compatible: target_schema_version >= self.active_schema_version,
+            estimated_record_count: 1,
+            metadata_summary: format!(
+                "subsystem={} from={} to={} dry_run=true",
+                manifest.subsystem_id, manifest.active_schema_version, target_schema_version
+            ),
+            event_sequence: EventSequence(correlation_id.0.max(1)),
+            correlation_id,
+            causality_id,
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_storage_migration_dry_run_report(&report).map_err(StorageError::from_protocol)?;
+        Ok(report)
+    }
+
+    /// Backup a storage file and return a checksum-bearing marker.
+    pub fn backup_file(
+        &self,
+        path: &Path,
+        backup_dir: &Path,
+        subsystem_id: impl Into<String>,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> StorageResult<StorageBackupMarker> {
+        fs::create_dir_all(backup_dir).map_err(|err| StorageError::Failed {
+            message: format!("create backup directory: {err}"),
+        })?;
+        let bytes = fs::read(path).map_err(|err| StorageError::Failed {
+            message: format!("read storage before backup: {err}"),
+        })?;
+        let backup_id = format!("backup-{}", correlation_id.0.max(1));
+        let backup_path = backup_dir.join(format!("{backup_id}.json"));
+        fs::write(&backup_path, &bytes).map_err(|err| StorageError::Failed {
+            message: format!("write storage backup: {err}"),
+        })?;
+        Ok(StorageBackupMarker {
+            backup_id,
+            subsystem_id: subsystem_id.into(),
+            location_label: backup_path.to_string_lossy().into_owned(),
+            checksum: StorageChecksum {
+                algorithm: "devil-storage-stable-sum-v1".to_string(),
+                value: stable_storage_sum(&bytes),
+                schema_version: 1,
+            },
+            event_sequence: EventSequence(correlation_id.0.max(1)),
+            correlation_id,
+            causality_id,
+            schema_version: 1,
+        })
+    }
+
+    /// Recover a storage file from an explicit backup marker and repair request.
+    pub fn recover_from_backup(
+        &self,
+        destination: &Path,
+        backup: &StorageBackupMarker,
+        repair: &StorageRepairRequest,
+    ) -> StorageResult<StorageRecoveryOutcome> {
+        validate_storage_repair_request(repair).map_err(StorageError::from_protocol)?;
+        let bytes = fs::read(&backup.location_label).map_err(|err| StorageError::Failed {
+            message: format!("read storage backup: {err}"),
+        })?;
+        if stable_storage_sum(&bytes) != backup.checksum.value {
+            return Err(StorageError::Failed {
+                message: "storage backup checksum mismatch".to_string(),
+            });
+        }
+        fs::write(destination, bytes).map_err(|err| StorageError::Failed {
+            message: format!("restore storage backup: {err}"),
+        })?;
+        Ok(StorageRecoveryOutcome {
+            recovery_id: format!("recovery-{}", repair.correlation_id.0.max(1)),
+            subsystem_id: backup.subsystem_id.clone(),
+            recovered: true,
+            quarantined: false,
+            backup_id: Some(backup.backup_id.clone()),
+            metadata_summary: "recovered=true source=backup checksum=verified".to_string(),
+            event_sequence: repair.event_sequence,
+            correlation_id: repair.correlation_id,
+            causality_id: repair.causality_id,
+            redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
+            schema_version: 1,
+        })
+    }
+}
+
+fn stable_storage_sum(bytes: &[u8]) -> String {
+    let sum = bytes
+        .iter()
+        .fold(0u64, |acc, byte| acc.wrapping_add(*byte as u64));
+    format!("sum:{sum}:len:{}", bytes.len())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +408,14 @@ struct PersistedState {
     protocol_collaboration_audit: HashMap<String, CollaborationAuditRecord>,
     #[serde(default)]
     protocol_remote_audit: HashMap<String, RemoteAuditRecord>,
+    #[serde(default)]
+    protocol_remote_transport_audit: HashMap<String, RemoteTransportAuditSummary>,
+    #[serde(default)]
+    protocol_terminal_audit: HashMap<String, TerminalAuditRecord>,
+    #[serde(default)]
+    protocol_hosted_telemetry_spool: HashMap<String, HostedTelemetrySpoolRecord>,
+    #[serde(default)]
+    protocol_raw_source_retention_access_audit: HashMap<String, RawSourceRetentionAccessAudit>,
     #[serde(default)]
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     semantic_metadata: HashMap<String, SemanticMetadataRecord>,
@@ -256,6 +441,12 @@ impl From<&InMemoryStorage> for PersistedState {
             protocol_agent_replay_manifests: value.protocol_agent_replay_manifests.clone(),
             protocol_collaboration_audit: value.protocol_collaboration_audit.clone(),
             protocol_remote_audit: value.protocol_remote_audit.clone(),
+            protocol_remote_transport_audit: value.protocol_remote_transport_audit.clone(),
+            protocol_terminal_audit: value.protocol_terminal_audit.clone(),
+            protocol_hosted_telemetry_spool: value.protocol_hosted_telemetry_spool.clone(),
+            protocol_raw_source_retention_access_audit: value
+                .protocol_raw_source_retention_access_audit
+                .clone(),
             protocol_event_metadata: value.protocol_event_metadata.clone(),
             semantic_metadata: value.protocol_semantic_metadata.clone(),
             semantic_tombstones: value.protocol_semantic_tombstones.clone(),
@@ -284,6 +475,12 @@ impl Clone for InMemoryStorage {
             protocol_agent_replay_manifests: self.protocol_agent_replay_manifests.clone(),
             protocol_collaboration_audit: self.protocol_collaboration_audit.clone(),
             protocol_remote_audit: self.protocol_remote_audit.clone(),
+            protocol_remote_transport_audit: self.protocol_remote_transport_audit.clone(),
+            protocol_terminal_audit: self.protocol_terminal_audit.clone(),
+            protocol_hosted_telemetry_spool: self.protocol_hosted_telemetry_spool.clone(),
+            protocol_raw_source_retention_access_audit: self
+                .protocol_raw_source_retention_access_audit
+                .clone(),
             protocol_event_metadata: self.protocol_event_metadata.clone(),
             protocol_semantic_metadata: self.protocol_semantic_metadata.clone(),
             protocol_semantic_tombstones: self.protocol_semantic_tombstones.clone(),
@@ -440,6 +637,11 @@ impl From<PersistedState> for InMemoryStorage {
             protocol_agent_replay_manifests: value.protocol_agent_replay_manifests,
             protocol_collaboration_audit: value.protocol_collaboration_audit,
             protocol_remote_audit: value.protocol_remote_audit,
+            protocol_remote_transport_audit: value.protocol_remote_transport_audit,
+            protocol_terminal_audit: value.protocol_terminal_audit,
+            protocol_hosted_telemetry_spool: value.protocol_hosted_telemetry_spool,
+            protocol_raw_source_retention_access_audit: value
+                .protocol_raw_source_retention_access_audit,
             protocol_event_metadata: value.protocol_event_metadata,
             protocol_semantic_metadata: value.semantic_metadata,
             protocol_semantic_tombstones: value.semantic_tombstones,
@@ -839,6 +1041,43 @@ impl InMemoryStorage {
                 self.protocol_remote_audit.insert(key.clone(), record);
                 Ok(Self::protocol_saved(format!("remote_audit:{key}")))
             }
+            StorageRepositoryRequest::SaveRemoteTransportAuditSummary(summary) => {
+                Self::validate_remote_transport_audit_summary(&summary)?;
+                let key =
+                    remote_transport_audit_storage_key(summary.session_id, summary.event_sequence);
+                self.protocol_remote_transport_audit
+                    .insert(key.clone(), summary);
+                Ok(Self::protocol_saved(format!(
+                    "remote_transport_audit:{key}"
+                )))
+            }
+            StorageRepositoryRequest::SaveTerminalAuditRecord(record) => {
+                Self::validate_terminal_audit_record(&record)?;
+                let key = terminal_audit_storage_key(record.session_id, record.event_sequence);
+                self.protocol_terminal_audit.insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!("terminal_audit:{key}")))
+            }
+            StorageRepositoryRequest::SaveHostedTelemetrySpoolRecord(record) => {
+                Self::validate_hosted_telemetry_spool_record(&record)?;
+                let key = record.record_id.clone();
+                self.protocol_hosted_telemetry_spool
+                    .insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!(
+                    "hosted_telemetry_spool:{key}"
+                )))
+            }
+            StorageRepositoryRequest::SaveRawSourceRetentionAccessAudit(audit) => {
+                Self::validate_raw_source_retention_access_audit(&audit)?;
+                let key = raw_source_retention_access_audit_storage_key(
+                    &audit.bundle_id,
+                    audit.event_sequence,
+                );
+                self.protocol_raw_source_retention_access_audit
+                    .insert(key.clone(), audit);
+                Ok(Self::protocol_saved(format!(
+                    "raw_source_retention_access_audit:{key}"
+                )))
+            }
             StorageRepositoryRequest::SaveEventMetadata(record) => {
                 Self::validate_event_metadata(&record)?;
                 let key = record.event_id;
@@ -925,6 +1164,47 @@ impl InMemoryStorage {
                     .get(&remote_audit_storage_key(session_id, event_sequence))
                     .cloned(),
             ))),
+            StorageRepositoryRequest::ReadRemoteTransportAuditSummary {
+                session_id,
+                event_sequence,
+            } => Ok(StorageRepositoryResponse::RemoteTransportAuditSummary(
+                Box::new(
+                    self.protocol_remote_transport_audit
+                        .get(&remote_transport_audit_storage_key(
+                            session_id,
+                            event_sequence,
+                        ))
+                        .cloned(),
+                ),
+            )),
+            StorageRepositoryRequest::ReadTerminalAuditRecord {
+                session_id,
+                event_sequence,
+            } => Ok(StorageRepositoryResponse::TerminalAuditRecord(Box::new(
+                self.protocol_terminal_audit
+                    .get(&terminal_audit_storage_key(session_id, event_sequence))
+                    .cloned(),
+            ))),
+            StorageRepositoryRequest::ReadHostedTelemetrySpoolRecord(record_id) => Ok(
+                StorageRepositoryResponse::HostedTelemetrySpoolRecord(Box::new(
+                    self.protocol_hosted_telemetry_spool
+                        .get(&record_id)
+                        .cloned(),
+                )),
+            ),
+            StorageRepositoryRequest::ReadRawSourceRetentionAccessAudit {
+                bundle_id,
+                event_sequence,
+            } => Ok(StorageRepositoryResponse::RawSourceRetentionAccessAudit(
+                Box::new(
+                    self.protocol_raw_source_retention_access_audit
+                        .get(&raw_source_retention_access_audit_storage_key(
+                            &bundle_id,
+                            event_sequence,
+                        ))
+                        .cloned(),
+                ),
+            )),
             StorageRepositoryRequest::ReadEventMetadata(event_id) => {
                 Ok(StorageRepositoryResponse::EventMetadata(
                     self.protocol_event_metadata.get(&event_id).cloned(),
@@ -1207,6 +1487,36 @@ impl InMemoryStorage {
         })
     }
 
+    fn validate_remote_transport_audit_summary(
+        summary: &RemoteTransportAuditSummary,
+    ) -> StorageResult<()> {
+        validate_remote_transport_audit_summary(summary).map_err(|error| StorageError::Failed {
+            message: error.message,
+        })
+    }
+
+    fn validate_terminal_audit_record(record: &TerminalAuditRecord) -> StorageResult<()> {
+        validate_terminal_audit_record(record).map_err(|error| StorageError::Failed {
+            message: error.message,
+        })
+    }
+
+    fn validate_hosted_telemetry_spool_record(
+        record: &HostedTelemetrySpoolRecord,
+    ) -> StorageResult<()> {
+        validate_hosted_telemetry_spool_record(record).map_err(|error| StorageError::Failed {
+            message: error.message,
+        })
+    }
+
+    fn validate_raw_source_retention_access_audit(
+        audit: &RawSourceRetentionAccessAudit,
+    ) -> StorageResult<()> {
+        validate_raw_source_retention_access_audit(audit).map_err(|error| StorageError::Failed {
+            message: error.message,
+        })
+    }
+
     fn validate_delegated_task_audit_linkage_record(
         record: &DelegatedTaskAuditLinkageRecord,
     ) -> StorageResult<()> {
@@ -1274,6 +1584,27 @@ fn remote_audit_storage_key(
     event_sequence: EventSequence,
 ) -> String {
     format!("{}:{}", session_id.0, event_sequence.0)
+}
+
+fn remote_transport_audit_storage_key(
+    session_id: RemoteWorkspaceSessionId,
+    event_sequence: EventSequence,
+) -> String {
+    format!("{}:{}", session_id.0, event_sequence.0)
+}
+
+fn terminal_audit_storage_key(
+    session_id: TerminalSessionId,
+    event_sequence: EventSequence,
+) -> String {
+    format!("{}:{}", session_id.0, event_sequence.0)
+}
+
+fn raw_source_retention_access_audit_storage_key(
+    bundle_id: &str,
+    event_sequence: EventSequence,
+) -> String {
+    format!("{}:{}", bundle_id, event_sequence.0)
 }
 
 fn semantic_metadata_matches_query(
@@ -1626,6 +1957,80 @@ mod tests {
             .expect("valid event id")
     }
 
+    fn storage_repair_request() -> StorageRepairRequest {
+        StorageRepairRequest {
+            subsystem_id: "file-backed-storage".to_string(),
+            principal_id: PrincipalId("storage-owner".to_string()),
+            capability_decision: devil_protocol::CapabilityDecision {
+                decision_id: devil_protocol::CapabilityDecisionId(99),
+                granted: true,
+                capability: CapabilityId("storage.migration.repair".to_string()),
+                reason: Some("repair approved".to_string()),
+            },
+            explicit_repair_flag: true,
+            metadata_summary: "repair=restore_backup".to_string(),
+            event_sequence: EventSequence(99),
+            correlation_id: CorrelationId(99),
+            causality_id: non_nil_causality_id(),
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn migration_registry_dry_run_backup_and_recovery_are_metadata_only() {
+        let mut registry = StorageMigrationRegistry::new(2);
+        registry
+            .register(StorageMigrationStep {
+                migration_id: "file-backed-v1-to-v2".to_string(),
+                subsystem_id: "file-backed-storage".to_string(),
+                from_schema_version: 1,
+                to_schema_version: 2,
+                destructive: false,
+                requires_backup: true,
+                schema_version: 1,
+            })
+            .expect("register step");
+        let manifest = StorageSchemaManifest {
+            subsystem_id: "file-backed-storage".to_string(),
+            store_id: "primary".to_string(),
+            active_schema_version: 1,
+            min_supported_schema_version: 1,
+            max_supported_schema_version: 2,
+            metadata_summary: "records=1".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let report = registry
+            .dry_run(manifest, 2, CorrelationId(42), non_nil_causality_id())
+            .expect("dry run");
+        assert!(report.compatible);
+        assert!(!report.metadata_summary.contains("raw_source"));
+
+        let path = temp_storage_path("migration-source");
+        let backup_dir = path.with_extension("backup");
+        fs::write(&path, "{\"schema_version\":1}").expect("write source");
+        let backup = registry
+            .backup_file(
+                &path,
+                &backup_dir,
+                "file-backed-storage",
+                CorrelationId(43),
+                non_nil_causality_id(),
+            )
+            .expect("backup");
+        fs::write(&path, "{\"schema_version\":2}").expect("mutate source");
+        let outcome = registry
+            .recover_from_backup(&path, &backup, &storage_repair_request())
+            .expect("recover");
+        assert!(outcome.recovered);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read recovered"),
+            "{\"schema_version\":1}"
+        );
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(backup_dir);
+    }
+
     fn audit_record() -> ProposalAuditRecord {
         ProposalAuditRecord {
             proposal_id: ProposalId(1),
@@ -1690,6 +2095,59 @@ mod tests {
             retention_label: RetentionLabel::Audit,
             redaction_hints: vec![RedactionHint::MetadataOnly],
             metadata_summary: "state=Active files=1 checkpoints=0".to_string(),
+            schema_version: 1,
+        }
+    }
+
+    fn remote_transport_audit_summary() -> RemoteTransportAuditSummary {
+        RemoteTransportAuditSummary {
+            session_id: RemoteWorkspaceSessionId(7001),
+            event_sequence: EventSequence(11),
+            correlation_id: CorrelationId(7),
+            causality_id: non_nil_causality_id(),
+            metadata_summary: "handshake=accepted frames=3".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn terminal_audit_record() -> TerminalAuditRecord {
+        TerminalAuditRecord {
+            session_id: TerminalSessionId(42),
+            state: devil_protocol::TerminalRuntimeState::Exited,
+            event_sequence: EventSequence(12),
+            correlation_id: CorrelationId(7),
+            causality_id: non_nil_causality_id(),
+            metadata_summary: "exit_code=0 output_bytes=128 truncated=false".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn hosted_telemetry_spool_record() -> HostedTelemetrySpoolRecord {
+        HostedTelemetrySpoolRecord {
+            record_id: "spool-1".to_string(),
+            workspace_id: WorkspaceId(1),
+            category: devil_protocol::HostedTelemetryCategory::Diagnostics,
+            classification: devil_protocol::PrivacyClassification::Metadata,
+            metadata_summary: "event_count=1 drop_count=0".to_string(),
+            event_sequence: EventSequence(13),
+            correlation_id: CorrelationId(7),
+            causality_id: non_nil_causality_id(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn raw_source_retention_access_audit() -> RawSourceRetentionAccessAudit {
+        RawSourceRetentionAccessAudit {
+            bundle_id: "bundle-1".to_string(),
+            principal_id: PrincipalId("tester".to_string()),
+            action: "read_descriptor".to_string(),
+            event_sequence: EventSequence(14),
+            correlation_id: CorrelationId(7),
+            causality_id: non_nil_causality_id(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         }
     }
@@ -2089,6 +2547,132 @@ mod tests {
             storage
                 .handle(StorageRepositoryRequest::SaveRemoteAuditRecord(
                     zero_sequence
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn phase8_metadata_storage_roundtrips_and_rejects_raw_markers() {
+        let storage = InMemoryStorageRepositoryPort::new();
+
+        let transport = remote_transport_audit_summary();
+        storage
+            .handle(StorageRepositoryRequest::SaveRemoteTransportAuditSummary(
+                transport.clone(),
+            ))
+            .expect("save transport audit summary");
+        let loaded = storage
+            .handle(StorageRepositoryRequest::ReadRemoteTransportAuditSummary {
+                session_id: transport.session_id,
+                event_sequence: transport.event_sequence,
+            })
+            .expect("read transport audit summary");
+        match loaded {
+            StorageRepositoryResponse::RemoteTransportAuditSummary(loaded) => {
+                let loaded = loaded.expect("transport audit should exist");
+                assert_eq!(loaded.metadata_summary, transport.metadata_summary);
+            }
+            other => panic!("unexpected transport audit response: {other:?}"),
+        }
+
+        let terminal = terminal_audit_record();
+        storage
+            .handle(StorageRepositoryRequest::SaveTerminalAuditRecord(
+                terminal.clone(),
+            ))
+            .expect("save terminal audit record");
+        let loaded = storage
+            .handle(StorageRepositoryRequest::ReadTerminalAuditRecord {
+                session_id: terminal.session_id,
+                event_sequence: terminal.event_sequence,
+            })
+            .expect("read terminal audit record");
+        match loaded {
+            StorageRepositoryResponse::TerminalAuditRecord(loaded) => {
+                let loaded = loaded.expect("terminal audit should exist");
+                assert_eq!(loaded.session_id, terminal.session_id);
+            }
+            other => panic!("unexpected terminal audit response: {other:?}"),
+        }
+
+        let spool = hosted_telemetry_spool_record();
+        storage
+            .handle(StorageRepositoryRequest::SaveHostedTelemetrySpoolRecord(
+                spool.clone(),
+            ))
+            .expect("save hosted telemetry spool record");
+        let loaded = storage
+            .handle(StorageRepositoryRequest::ReadHostedTelemetrySpoolRecord(
+                spool.record_id.clone(),
+            ))
+            .expect("read hosted telemetry spool record");
+        match loaded {
+            StorageRepositoryResponse::HostedTelemetrySpoolRecord(loaded) => {
+                let loaded = loaded.expect("telemetry spool record should exist");
+                assert_eq!(loaded.record_id, spool.record_id);
+            }
+            other => panic!("unexpected telemetry spool response: {other:?}"),
+        }
+
+        let access = raw_source_retention_access_audit();
+        storage
+            .handle(StorageRepositoryRequest::SaveRawSourceRetentionAccessAudit(
+                access.clone(),
+            ))
+            .expect("save retention access audit");
+        let loaded = storage
+            .handle(
+                StorageRepositoryRequest::ReadRawSourceRetentionAccessAudit {
+                    bundle_id: access.bundle_id.clone(),
+                    event_sequence: access.event_sequence,
+                },
+            )
+            .expect("read retention access audit");
+        match loaded {
+            StorageRepositoryResponse::RawSourceRetentionAccessAudit(loaded) => {
+                let loaded = loaded.expect("retention access audit should exist");
+                assert_eq!(loaded.bundle_id, access.bundle_id);
+            }
+            other => panic!("unexpected retention access audit response: {other:?}"),
+        }
+
+        let mut invalid_transport = remote_transport_audit_summary();
+        invalid_transport.metadata_summary = "transport_payload=raw bytes".to_string();
+        assert!(
+            storage
+                .handle(StorageRepositoryRequest::SaveRemoteTransportAuditSummary(
+                    invalid_transport
+                ))
+                .is_err()
+        );
+
+        let mut invalid_terminal = terminal_audit_record();
+        invalid_terminal.metadata_summary = "terminal_output=secret".to_string();
+        assert!(
+            storage
+                .handle(StorageRepositoryRequest::SaveTerminalAuditRecord(
+                    invalid_terminal
+                ))
+                .is_err()
+        );
+
+        let mut invalid_spool = hosted_telemetry_spool_record();
+        invalid_spool.metadata_summary = "raw_source=fn main".to_string();
+        assert!(
+            storage
+                .handle(StorageRepositoryRequest::SaveHostedTelemetrySpoolRecord(
+                    invalid_spool
+                ))
+                .is_err()
+        );
+
+        let mut invalid_access = raw_source_retention_access_audit();
+        invalid_access.action = "raw_source=fn main".to_string();
+        assert!(
+            storage
+                .handle(StorageRepositoryRequest::SaveRawSourceRetentionAccessAudit(
+                    invalid_access
                 ))
                 .is_err()
         );

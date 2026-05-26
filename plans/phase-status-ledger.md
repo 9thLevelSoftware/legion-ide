@@ -46,6 +46,11 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | ADR-0022 — Remote edge workspace agent | Accepted | Phase 7 evidence accepts a default-off deterministic edge workspace runtime harness with app-owned composition and proposal-mediated mutation boundaries. |
 | ADR-0023 — Remote transport security | Accepted | Phase 7 evidence accepts metadata-only transport envelopes, trust/capability gating, and deferred production network hardening. |
 | ADR-0024 — Remote execution boundary | Accepted | Phase 7 evidence accepts bounded descriptor-only process, PTY, LSP, and semantic-query surfaces without activating standalone local terminal or LSP runtimes. |
+| ADR-0025 — Production remote network transport | Accepted for production implementation direction | Phase 8 GA acceptance remains deferred until production transport runtime, security, platform, fault, ownership, and release evidence are archived. |
+| ADR-0026 — Standalone local terminal runtime | Accepted for production implementation direction | Phase 8 GA acceptance remains deferred until native PTY runtime, policy, cleanup, platform, privacy, and release evidence are archived. |
+| ADR-0027 — Hosted telemetry and egress | Accepted for production implementation direction | Phase 8 GA acceptance remains deferred until durable spool, hosted exporter, consent, classifier, failure-mode, and operations evidence are archived. |
+| ADR-0028 — Raw-source retention | Accepted for production implementation direction | Phase 8 GA acceptance remains deferred until encrypted vault, consent, deletion, recovery, privacy, and release evidence are archived. |
+| ADR-0029 — Phase 8 operational hardening | Accepted for production implementation direction | Phase 8 GA acceptance remains deferred until migration/recovery, diagnostics, platform, performance, fault, cargo-deny, rollback, canary, incident, and final gate evidence are archived. |
 
 ---
 
@@ -68,9 +73,10 @@ The following older architecture-review findings describe pre-rebaseline behavio
   - required protocol symbol presence in `crates/devil-protocol/src/lib.rs`
   - Phase 3 evidence artifact existence
   - Phase 3 / LSP acceptance-state marker validation
+  - Phase 8 evidence artifact names and accepted/not-accepted governance validation
   - required internal dependencies that are easier to express in code than markdown parsing
 
-Rationale: the markdown file is the source of truth for crate-level allowed-dependency sets, but literal string checks (e.g., `PHASE3_NOT_ACCEPTED_MARKER`) and symbol regexes are more maintainable as code. This is documented and accepted.
+Rationale: the markdown file is the source of truth for crate-level allowed-dependency sets, but literal string checks (e.g., `PHASE3_NOT_ACCEPTED_MARKER`, `PHASE8_NOT_ACCEPTED_MARKER`) and symbol regexes are more maintainable as code. This is documented and accepted.
 
 ---
 

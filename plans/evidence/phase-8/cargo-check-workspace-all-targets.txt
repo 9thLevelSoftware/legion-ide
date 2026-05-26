@@ -1,0 +1,2 @@
+Command: cargo check --workspace --all-targets
+Result: passed

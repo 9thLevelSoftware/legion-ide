@@ -264,6 +264,10 @@ pub struct TerminalPolicy {
     pub max_output_bytes: usize,
     /// Whether untrusted trust states may launch terminal.
     pub allow_untrusted: bool,
+    /// Allowed terminal capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
+    /// Whether standalone terminal runtime operations are enabled.
+    pub runtime_enabled: bool,
     /// Maximum command timeout in seconds.
     pub max_command_timeout_seconds: u64,
 }
@@ -273,6 +277,14 @@ impl Default for TerminalPolicy {
         Self {
             max_output_bytes: 256 * 1024,
             allow_untrusted: false,
+            allowed_capabilities: HashSet::from([
+                "terminal.launch".to_string(),
+                "terminal.input".to_string(),
+                "terminal.resize".to_string(),
+                "terminal.close".to_string(),
+                "terminal.kill".to_string(),
+            ]),
+            runtime_enabled: false,
             max_command_timeout_seconds: 60,
         }
     }
@@ -391,6 +403,9 @@ impl Default for RemoteDevelopmentPolicy {
                 "remote.egress".to_string(),
                 "remote.audit.export".to_string(),
                 "remote.offline.resume".to_string(),
+                "remote.transport.connect".to_string(),
+                "remote.transport.listen".to_string(),
+                "remote.agent.package.activate".to_string(),
             ]),
             require_trusted_workspace: true,
             runtime_sessions_enabled: false,
@@ -400,6 +415,88 @@ impl Default for RemoteDevelopmentPolicy {
             semantic_query_enabled: false,
             audit_export_enabled: false,
             offline_resume_enabled: false,
+        }
+    }
+}
+
+/// Hosted telemetry policy controls.
+#[derive(Debug, Clone)]
+pub struct HostedTelemetryPolicy {
+    /// Whether hosted export is enabled at all.
+    pub export_enabled: bool,
+    /// Whether metadata-only spool writes are enabled at all.
+    pub spool_write_enabled: bool,
+    /// Whether explicit consent is required before export.
+    pub require_explicit_consent: bool,
+    /// Allowed telemetry capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
+}
+
+impl Default for HostedTelemetryPolicy {
+    fn default() -> Self {
+        Self {
+            export_enabled: false,
+            spool_write_enabled: false,
+            require_explicit_consent: true,
+            allowed_capabilities: HashSet::from([
+                "telemetry.export.hosted".to_string(),
+                "telemetry.spool.write".to_string(),
+                "telemetry.consent.revoke".to_string(),
+            ]),
+        }
+    }
+}
+
+/// Raw-source retention policy controls.
+#[derive(Debug, Clone)]
+pub struct RawSourceRetentionSecurityPolicy {
+    /// Whether raw-source capture is enabled at all.
+    pub capture_enabled: bool,
+    /// Whether explicit consent is required before capture or access.
+    pub require_explicit_consent: bool,
+    /// Allowed retention capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
+}
+
+impl Default for RawSourceRetentionSecurityPolicy {
+    fn default() -> Self {
+        Self {
+            capture_enabled: false,
+            require_explicit_consent: true,
+            allowed_capabilities: HashSet::from([
+                "retention.raw_source.capture".to_string(),
+                "retention.raw_source.read".to_string(),
+                "retention.raw_source.delete".to_string(),
+                "retention.raw_source.export".to_string(),
+                "retention.raw_source.export.hosted".to_string(),
+            ]),
+        }
+    }
+}
+
+/// Storage migration and repair policy controls.
+#[derive(Debug, Clone)]
+pub struct StorageMigrationSecurityPolicy {
+    /// Allowed storage migration capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
+    /// Whether mutation-capable migration apply is enabled.
+    pub apply_enabled: bool,
+    /// Whether repair operations are enabled.
+    pub repair_enabled: bool,
+    /// Whether repair requires an explicit operator repair flag.
+    pub explicit_repair_required: bool,
+}
+
+impl Default for StorageMigrationSecurityPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_capabilities: HashSet::from([
+                "storage.migration.apply".to_string(),
+                "storage.migration.repair".to_string(),
+            ]),
+            apply_enabled: false,
+            repair_enabled: false,
+            explicit_repair_required: true,
         }
     }
 }
@@ -520,6 +617,12 @@ pub struct SecurityPolicy {
     pub collaboration_policy: CollaborationCapabilityPolicy,
     /// Remote-development policy.
     pub remote_policy: RemoteDevelopmentPolicy,
+    /// Hosted telemetry policy.
+    pub telemetry_policy: HostedTelemetryPolicy,
+    /// Raw-source retention policy.
+    pub retention_policy: RawSourceRetentionSecurityPolicy,
+    /// Storage migration and repair policy.
+    pub storage_migration_policy: StorageMigrationSecurityPolicy,
 }
 
 /// Security errors.
@@ -906,11 +1009,21 @@ impl DenyByDefaultBroker {
         }
 
         match capability {
-            "remote.session.connect" => {
+            "remote.session.connect" | "remote.transport.connect" => {
                 if !self.policy.remote_policy.runtime_sessions_enabled {
                     return SecurityDecision::deny("remote sessions are disabled by policy");
                 }
                 self.network_target_decision(context)
+            }
+            "remote.transport.listen" => SecurityDecision::deny(
+                "remote inbound transport listen is not enabled in Phase 8 policy",
+            ),
+            "remote.agent.package.activate" => {
+                if self.policy.remote_policy.runtime_sessions_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("remote agent package activation is disabled by policy")
+                }
             }
             "remote.fs.read" | "remote.fs.write" => {
                 if self.policy.remote_policy.runtime_sessions_enabled
@@ -978,16 +1091,163 @@ impl DenyByDefaultBroker {
         }
     }
 
+    fn telemetry_capability_decision(
+        &self,
+        trust: TrustState,
+        capability: &str,
+        context: &CapabilityRequestContext,
+    ) -> SecurityDecision {
+        if trust != TrustState::Trusted {
+            return SecurityDecision::deny("hosted telemetry denied for untrusted workspace");
+        }
+        if !self
+            .policy
+            .telemetry_policy
+            .allowed_capabilities
+            .contains(capability)
+        {
+            return SecurityDecision::deny(format!(
+                "capability {capability} denied by deny-by-default"
+            ));
+        }
+        match capability {
+            "telemetry.export.hosted" => {
+                if !self.policy.telemetry_policy.export_enabled {
+                    return SecurityDecision::deny("hosted telemetry export is disabled by policy");
+                }
+                self.network_target_decision(context)
+            }
+            "telemetry.spool.write" => {
+                if self.policy.telemetry_policy.spool_write_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("hosted telemetry spool writes are disabled by policy")
+                }
+            }
+            "telemetry.consent.revoke" => SecurityDecision::allow(),
+            _ => {
+                SecurityDecision::deny(format!("capability {capability} denied by deny-by-default"))
+            }
+        }
+    }
+
+    fn retention_capability_decision(
+        &self,
+        trust: TrustState,
+        capability: &str,
+        context: &CapabilityRequestContext,
+    ) -> SecurityDecision {
+        if trust != TrustState::Trusted {
+            return SecurityDecision::deny("raw-source retention denied for untrusted workspace");
+        }
+        if !self
+            .policy
+            .retention_policy
+            .allowed_capabilities
+            .contains(capability)
+        {
+            return SecurityDecision::deny(format!(
+                "capability {capability} denied by deny-by-default"
+            ));
+        }
+        match capability {
+            "retention.raw_source.capture"
+            | "retention.raw_source.read"
+            | "retention.raw_source.export" => {
+                if self.policy.retention_policy.capture_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("raw-source retention is disabled by policy")
+                }
+            }
+            "retention.raw_source.export.hosted" => {
+                if !self.policy.retention_policy.capture_enabled {
+                    return SecurityDecision::deny(
+                        "raw-source hosted export is disabled by policy",
+                    );
+                }
+                self.network_target_decision(context)
+            }
+            "retention.raw_source.delete" => SecurityDecision::allow(),
+            _ => {
+                SecurityDecision::deny(format!("capability {capability} denied by deny-by-default"))
+            }
+        }
+    }
+
+    fn storage_migration_capability_decision(
+        &self,
+        trust: TrustState,
+        capability: &str,
+        context: &CapabilityRequestContext,
+    ) -> SecurityDecision {
+        if trust != TrustState::Trusted {
+            return SecurityDecision::deny("storage migration denied for untrusted workspace");
+        }
+        if !self
+            .policy
+            .storage_migration_policy
+            .allowed_capabilities
+            .contains(capability)
+        {
+            return SecurityDecision::deny(format!(
+                "capability {capability} denied by deny-by-default"
+            ));
+        }
+        match capability {
+            "storage.migration.apply" => {
+                if self.policy.storage_migration_policy.apply_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("storage migration apply is disabled by policy")
+                }
+            }
+            "storage.migration.repair" => {
+                if !self.policy.storage_migration_policy.repair_enabled {
+                    return SecurityDecision::deny(
+                        "storage migration repair is disabled by policy",
+                    );
+                }
+                if self
+                    .policy
+                    .storage_migration_policy
+                    .explicit_repair_required
+                {
+                    if context.storage_explicit_repair {
+                        SecurityDecision::allow()
+                    } else {
+                        SecurityDecision::deny(
+                            "storage migration repair requires explicit repair flag",
+                        )
+                    }
+                } else {
+                    SecurityDecision::allow()
+                }
+            }
+            _ => {
+                SecurityDecision::deny(format!("capability {capability} denied by deny-by-default"))
+            }
+        }
+    }
+
     fn decide_with_context(
         &self,
         trust: TrustState,
-        _principal: PrincipalId,
+        principal: PrincipalId,
         capability: CapabilityId,
         path: Option<&str>,
         context: &CapabilityRequestContext,
         _decision_id: CapabilityDecisionId,
     ) -> SecurityDecision {
         let capability = capability.0;
+
+        if Self::phase8_sensitive_capability_requires_principal(&capability)
+            && principal.0.trim().is_empty()
+        {
+            return SecurityDecision::deny(format!(
+                "capability {capability} denied: principal is required"
+            ));
+        }
 
         if capability.starts_with("ai.")
             || capability.starts_with("tracker.")
@@ -1003,6 +1263,18 @@ impl DenyByDefaultBroker {
 
         if capability.starts_with("remote.") {
             return self.remote_capability_decision(trust, &capability, context);
+        }
+
+        if capability.starts_with("telemetry.") {
+            return self.telemetry_capability_decision(trust, &capability, context);
+        }
+
+        if capability.starts_with("retention.raw_source.") {
+            return self.retention_capability_decision(trust, &capability, context);
+        }
+
+        if capability.starts_with("storage.migration.") {
+            return self.storage_migration_capability_decision(trust, &capability, context);
         }
 
         if capability.starts_with("plugin.") {
@@ -1098,10 +1370,23 @@ impl DenyByDefaultBroker {
         }
 
         if capability.starts_with("terminal.") {
-            return if !self.policy.terminal_policy.allow_untrusted && trust != TrustState::Trusted {
-                SecurityDecision::deny("terminal denied for untrusted workspace")
-            } else {
+            if !self
+                .policy
+                .terminal_policy
+                .allowed_capabilities
+                .contains(&capability)
+            {
+                return SecurityDecision::deny(format!(
+                    "capability {capability} denied by deny-by-default"
+                ));
+            }
+            if !self.policy.terminal_policy.allow_untrusted && trust != TrustState::Trusted {
+                return SecurityDecision::deny("terminal denied for untrusted workspace");
+            }
+            return if self.policy.terminal_policy.runtime_enabled {
                 SecurityDecision::allow()
+            } else {
+                SecurityDecision::deny("terminal runtime is disabled by policy")
             };
         }
 
@@ -1162,6 +1447,9 @@ impl DenyByDefaultBroker {
             || capability.starts_with("memory.")
             || capability.starts_with("collaboration.")
             || capability.starts_with("remote.")
+            || capability.starts_with("telemetry.")
+            || capability.starts_with("retention.raw_source.")
+            || capability.starts_with("storage.migration.")
         {
             return true;
         }
@@ -1177,6 +1465,15 @@ impl DenyByDefaultBroker {
         }
 
         false
+    }
+
+    fn phase8_sensitive_capability_requires_principal(capability: &str) -> bool {
+        capability.starts_with("remote.transport.")
+            || capability == "remote.agent.package.activate"
+            || capability.starts_with("terminal.")
+            || capability.starts_with("telemetry.")
+            || capability.starts_with("retention.raw_source.")
+            || capability.starts_with("storage.migration.")
     }
 }
 
@@ -1632,6 +1929,355 @@ mod tests {
                 },
             );
             assert!(matches!(decision, SecurityDecision::Deny(_)));
+        }
+    }
+
+    #[test]
+    fn phase8_hosted_telemetry_is_disabled_by_default_and_air_gap_denied() {
+        let mut broker = DenyByDefaultBroker::default();
+        let default_denied = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("telemetry.export.hosted".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "telemetry.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(default_denied, SecurityDecision::Deny(_)));
+
+        let policy = SecurityPolicy {
+            telemetry_policy: HostedTelemetryPolicy {
+                export_enabled: true,
+                ..HostedTelemetryPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let air_gap_denied = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("telemetry.export.hosted".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "telemetry.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(air_gap_denied, SecurityDecision::Deny(reason) if reason.contains("air-gap"))
+        );
+    }
+
+    #[test]
+    fn phase8_telemetry_spool_write_is_disabled_by_default() {
+        let mut broker = DenyByDefaultBroker::default();
+        let spool_write = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("telemetry.spool.write".to_string()),
+            None,
+        );
+        assert!(
+            matches!(spool_write, SecurityDecision::Deny(reason) if reason.contains("spool writes are disabled"))
+        );
+
+        let revoke_untrusted = broker.decide(
+            TrustState::Untrusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("telemetry.consent.revoke".to_string()),
+            None,
+        );
+        assert!(matches!(revoke_untrusted, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn phase8_raw_source_retention_is_disabled_by_default() {
+        let mut broker = DenyByDefaultBroker::default();
+        let capture = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("retention.raw_source.capture".to_string()),
+            None,
+        );
+        assert!(matches!(capture, SecurityDecision::Deny(reason) if reason.contains("disabled")));
+
+        let untrusted_delete = broker.decide(
+            TrustState::Untrusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("retention.raw_source.delete".to_string()),
+            None,
+        );
+        assert!(matches!(untrusted_delete, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn phase8_raw_source_read_export_and_delete_policy_paths_are_explicit() {
+        let mut broker = DenyByDefaultBroker::default();
+        for capability in [
+            "retention.raw_source.read",
+            "retention.raw_source.export",
+            "retention.raw_source.export.hosted",
+        ] {
+            let decision = broker.decide(
+                TrustState::Trusted,
+                PrincipalId("principal-1".to_string()),
+                CapabilityId(capability.to_string()),
+                None,
+            );
+            assert!(
+                matches!(&decision, SecurityDecision::Deny(reason) if reason.contains("disabled")),
+                "{capability} should deny by default, got {decision:?}"
+            );
+        }
+
+        let delete = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("retention.raw_source.delete".to_string()),
+            None,
+        );
+        assert!(matches!(delete, SecurityDecision::Allow));
+    }
+
+    #[test]
+    fn phase8_terminal_runtime_capabilities_are_disabled_by_default() {
+        let mut broker = DenyByDefaultBroker::default();
+
+        for capability in [
+            "terminal.launch",
+            "terminal.input",
+            "terminal.resize",
+            "terminal.close",
+            "terminal.kill",
+        ] {
+            let decision = broker.decide(
+                TrustState::Trusted,
+                PrincipalId("principal-1".to_string()),
+                CapabilityId(capability.to_string()),
+                None,
+            );
+            assert!(
+                matches!(&decision, SecurityDecision::Deny(reason) if reason.contains("disabled")),
+                "{capability} should deny by default, got {decision:?}"
+            );
+        }
+
+        let unknown = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("terminal.spawn".to_string()),
+            None,
+        );
+        assert!(
+            matches!(unknown, SecurityDecision::Deny(reason) if reason.contains("deny-by-default"))
+        );
+    }
+
+    #[test]
+    fn phase8_remote_transport_and_retention_hosted_export_fail_closed() {
+        let mut broker = DenyByDefaultBroker::default();
+
+        let remote_connect = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.transport.connect".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "remote.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(remote_connect, SecurityDecision::Deny(_)));
+
+        let remote_connect_default = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.transport.connect".to_string()),
+            None,
+        );
+        assert!(
+            matches!(remote_connect_default, SecurityDecision::Deny(reason) if reason.contains("disabled"))
+        );
+
+        let hosted_export = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("retention.raw_source.export.hosted".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "support.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(hosted_export, SecurityDecision::Deny(reason) if reason.contains("disabled"))
+        );
+
+        let listen = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.transport.listen".to_string()),
+            None,
+        );
+        assert!(matches!(listen, SecurityDecision::Deny(reason) if reason.contains("not enabled")));
+    }
+
+    #[test]
+    fn phase8_remote_agent_package_activation_is_disabled_by_default() {
+        let mut broker = DenyByDefaultBroker::default();
+        let default_denied = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.agent.package.activate".to_string()),
+            None,
+        );
+        assert!(
+            matches!(default_denied, SecurityDecision::Deny(reason) if reason.contains("disabled"))
+        );
+
+        let policy = SecurityPolicy {
+            remote_policy: RemoteDevelopmentPolicy {
+                runtime_sessions_enabled: true,
+                ..RemoteDevelopmentPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let untrusted = broker.decide(
+            TrustState::Untrusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.agent.package.activate".to_string()),
+            None,
+        );
+        assert!(
+            matches!(untrusted, SecurityDecision::Deny(reason) if reason.contains("untrusted"))
+        );
+    }
+
+    #[test]
+    fn phase8_storage_migration_apply_and_repair_are_disabled_by_default() {
+        let mut broker = DenyByDefaultBroker::default();
+        for capability in ["storage.migration.apply", "storage.migration.repair"] {
+            let decision = broker.decide(
+                TrustState::Trusted,
+                PrincipalId("principal-1".to_string()),
+                CapabilityId(capability.to_string()),
+                None,
+            );
+            assert!(
+                matches!(&decision, SecurityDecision::Deny(reason) if reason.contains("disabled")),
+                "{capability} should deny by default, got {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase8_storage_migration_repair_requires_explicit_flag() {
+        let policy = SecurityPolicy {
+            storage_migration_policy: StorageMigrationSecurityPolicy {
+                repair_enabled: true,
+                explicit_repair_required: true,
+                ..StorageMigrationSecurityPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let repair = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("storage.migration.repair".to_string()),
+            None,
+        );
+        assert!(
+            matches!(repair, SecurityDecision::Deny(reason) if reason.contains("explicit repair flag"))
+        );
+        let allowed = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("storage.migration.repair".to_string()),
+            None,
+            CapabilityRequestContext {
+                storage_explicit_repair: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(allowed, SecurityDecision::Allow));
+    }
+
+    #[test]
+    fn phase8_sensitive_capabilities_deny_empty_principal() {
+        let mut broker = DenyByDefaultBroker::default();
+        for capability in [
+            "remote.transport.connect",
+            "remote.agent.package.activate",
+            "terminal.launch",
+            "telemetry.export.hosted",
+            "retention.raw_source.capture",
+            "storage.migration.apply",
+        ] {
+            let decision = broker.decide(
+                TrustState::Trusted,
+                PrincipalId(String::new()),
+                CapabilityId(capability.to_string()),
+                None,
+            );
+            assert!(
+                matches!(&decision, SecurityDecision::Deny(reason) if reason.contains("principal is required")),
+                "{capability} should deny empty principal, got {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase8_capability_families_reject_unknown_workspace_trust() {
+        let broker = DenyByDefaultBroker::default();
+        for capability in [
+            "remote.transport.connect",
+            "terminal.launch",
+            "telemetry.export.hosted",
+            "retention.raw_source.capture",
+            "storage.migration.apply",
+        ] {
+            let response = broker
+                .handle(CapabilityRequest::Request {
+                    principal_id: PrincipalId("principal-1".to_string()),
+                    capability_id: CapabilityId(capability.to_string()),
+                    workspace_trust_state: WorkspaceTrustState::Unknown,
+                    target_path: None,
+                    decision_id: None,
+                    context: Default::default(),
+                    correlation_id: CorrelationId(10),
+                })
+                .expect("decision");
+            match response {
+                CapabilityResponse::Decision(decision) => {
+                    assert!(!decision.granted, "{capability} should deny unknown trust");
+                    assert!(
+                        decision.reason.as_deref().is_some_and(
+                            |reason| reason.contains("workspace trust state is unknown")
+                        )
+                    );
+                }
+                other => panic!("unexpected response for {capability}: {other:?}"),
+            }
         }
     }
 

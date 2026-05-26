@@ -1,0 +1,9 @@
+Command: cargo deny check
+Result: completed
+
+Findings:
+- warning[duplicate]: thiserror / thiserror-impl duplicate major versions through `cargo_metadata` and workspace crates.
+- warning[duplicate]: wit-bindgen duplicate versions through WASI dependency chain.
+- advisories ok, bans ok, licenses ok, sources ok.
+
+Policy note: repository `deny.toml` treats duplicate versions as warning-level baseline.

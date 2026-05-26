@@ -1,0 +1,13 @@
+Commands:
+- cargo test -p devil-terminal --all-targets
+- cargo test -p devil-security phase8
+
+Result: passed
+
+Implemented coverage:
+- terminal runtime remains default-off
+- launch policy rejects untrusted workspace metadata
+- launch creates metadata-only degraded audit records through platform PTY boundary
+- redacted projection chunk does not persist raw transcript metadata
+- terminal capabilities remain disabled by default in security policy
+- empty-principal and unknown-trust denial paths are covered

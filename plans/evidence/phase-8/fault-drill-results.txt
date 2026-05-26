@@ -1,0 +1,9 @@
+Command: cargo test --workspace --all-targets
+Result: passed
+
+Fault drills covered in automated tests:
+- remote sequence gap, replay, duplicate, backpressure, package mismatch, and resume mismatch
+- telemetry retry, spool full, raw/sensitive record rejection, and consent purge
+- retention out-of-scope capture, ciphertext delete, descriptor recovery, and plaintext leak checks
+- storage missing migration step, checksum backup/recovery, and explicit repair requirement
+- terminal untrusted/default-off/backend-degraded audit behavior

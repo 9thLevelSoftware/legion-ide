@@ -1,0 +1,16 @@
+Commands:
+- cargo test -p devil-remote-transport --all-targets
+- cargo test -p devil-security phase8
+
+Result: passed
+
+Implemented coverage:
+- ordered handshake before frames
+- agent package required before frame acceptance
+- flow-control credit and backpressure
+- contiguous sequence and replay rejection
+- duplicate operation idempotence
+- checkpoint-bound resume token validation
+- metadata-only audit summaries
+- default-deny remote transport security policy
+- empty-principal and unknown-trust denial for sensitive Phase 8 capabilities
