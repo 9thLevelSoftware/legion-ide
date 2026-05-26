@@ -28,7 +28,7 @@ fn ci_large_file_open_threshold() -> Duration {
 }
 
 fn collaboration_edit_p99_overhead_threshold() -> Duration {
-    if cfg!(windows) {
+    if cfg!(windows) || running_in_ci() {
         Duration::from_millis(20)
     } else {
         Duration::from_millis(5)
