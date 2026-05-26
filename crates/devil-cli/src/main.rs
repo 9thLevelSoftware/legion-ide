@@ -109,7 +109,6 @@ const PHASE8_STALE_DEFERRED_MARKERS: &[&str] = &[
 
 const PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS: &[&str] = &[
     "pending",
-    "Pending",
     "TODO",
     "Not accepted",
     "not accepted",
@@ -702,12 +701,43 @@ fn validate_artifact_markers(
         }
     }
     for marker in PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS {
-        if source.contains(marker) {
+        if contains_phase8_accepted_artifact_stale_marker(&source, marker) {
             issues.push(format!(
                 "{label} artifact `{artifact}` still contains stale marker `{marker}`"
             ));
         }
     }
+}
+
+fn contains_phase8_accepted_artifact_stale_marker(source: &str, marker: &str) -> bool {
+    match marker {
+        "pending" => contains_ascii_token_case_insensitive(source, "pending"),
+        "TODO" => contains_ascii_token(source, "TODO"),
+        _ => source.contains(marker),
+    }
+}
+
+fn contains_ascii_token_case_insensitive(source: &str, token: &str) -> bool {
+    contains_ascii_token(&source.to_ascii_lowercase(), &token.to_ascii_lowercase())
+}
+
+fn contains_ascii_token(source: &str, token: &str) -> bool {
+    source.match_indices(token).any(|(start, _)| {
+        let end = start + token.len();
+        let before_is_boundary = source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_ascii_word_char(ch));
+        let after_is_boundary = source[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !is_ascii_word_char(ch));
+        before_is_boundary && after_is_boundary
+    })
+}
+
+fn is_ascii_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn finish_issue_report(

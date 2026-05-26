@@ -83,7 +83,6 @@ const PHASE8_STALE_DEFERRED_MARKERS: &[&str] = &[
 ];
 const PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS: &[&str] = &[
     "pending",
-    "Pending",
     "TODO",
     "Not accepted",
     "not accepted",
@@ -1082,7 +1081,7 @@ where
                 }
             }
             for marker in PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS {
-                if matrix.contains(marker) {
+                if contains_phase8_accepted_artifact_stale_marker(&matrix, marker) {
                     issues.push(format!(
                         "`{PHASE8_PLATFORM_MATRIX_ARTIFACT}` is required for accepted Phase 8 but still contains stale marker `{marker}`"
                     ));
@@ -1104,7 +1103,7 @@ where
                 }
             }
             for marker in PHASE8_ACCEPTED_ARTIFACT_STALE_MARKERS {
-                if release.contains(marker) {
+                if contains_phase8_accepted_artifact_stale_marker(&release, marker) {
                     issues.push(format!(
                         "`{PHASE8_RELEASE_READINESS_ARTIFACT}` is required for accepted Phase 8 but still contains stale marker `{marker}`"
                     ));
@@ -1117,6 +1116,37 @@ where
     }
 
     issues
+}
+
+fn contains_phase8_accepted_artifact_stale_marker(source: &str, marker: &str) -> bool {
+    match marker {
+        "pending" => contains_ascii_token_case_insensitive(source, "pending"),
+        "TODO" => contains_ascii_token(source, "TODO"),
+        _ => source.contains(marker),
+    }
+}
+
+fn contains_ascii_token_case_insensitive(source: &str, token: &str) -> bool {
+    contains_ascii_token(&source.to_ascii_lowercase(), &token.to_ascii_lowercase())
+}
+
+fn contains_ascii_token(source: &str, token: &str) -> bool {
+    source.match_indices(token).any(|(start, _)| {
+        let end = start + token.len();
+        let before_is_boundary = source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_ascii_word_char(ch));
+        let after_is_boundary = source[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !is_ascii_word_char(ch));
+        before_is_boundary && after_is_boundary
+    })
+}
+
+fn is_ascii_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn markdown_section<'a>(source: &'a str, heading: &str) -> Option<&'a str> {
@@ -2106,6 +2136,22 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
             issue.contains("`platform-matrix-evidence.txt`")
                 && issue.contains("stale marker `pending`")
         }));
+    }
+
+    #[test]
+    fn phase8_artifact_stale_marker_matching_rejects_pending_token_not_substrings() {
+        assert!(contains_phase8_accepted_artifact_stale_marker(
+            "windows-latest: pending.",
+            "pending",
+        ));
+        assert!(contains_phase8_accepted_artifact_stale_marker(
+            "Status: Pending signoff.",
+            "pending",
+        ));
+        assert!(!contains_phase8_accepted_artifact_stale_marker(
+            "Status: accepted depending on archived CI evidence.",
+            "pending",
+        ));
     }
 
     #[test]

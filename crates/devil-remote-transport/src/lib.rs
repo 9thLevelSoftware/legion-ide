@@ -125,6 +125,12 @@ pub enum RemoteTransportCarrierError {
         /// Failure reason.
         reason: String,
     },
+    /// Connection attempt was canceled before activation.
+    #[error("remote transport connection canceled: {reason}")]
+    Canceled {
+        /// Failure reason.
+        reason: String,
+    },
 }
 
 /// Production remote transport carrier.
@@ -243,6 +249,17 @@ impl RustlsMtlsCarrier {
         &self,
         attempt: RemoteTransportConnectionAttempt,
     ) -> Result<RemoteTransportCarrierDiagnostic, RemoteTransportCarrierError> {
+        self.ensure_enabled()?;
+        validate_remote_transport_connection_attempt(&attempt).map_err(|err| {
+            RemoteTransportCarrierError::InvalidPolicy {
+                reason: err.message,
+            }
+        })?;
+        if attempt.cancellation_requested {
+            return Err(RemoteTransportCarrierError::Canceled {
+                reason: "connection attempt canceled before activation".to_string(),
+            });
+        }
         let client_config = self.build_client_config(&attempt)?;
         let endpoint = &attempt.endpoint_policy.endpoint;
         let port = endpoint.port.unwrap_or(443);
@@ -1260,6 +1277,36 @@ mod tests {
             carrier.build_client_config(&attempt),
             Err(RemoteTransportCarrierError::Credential { .. })
         ));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_short_circuits_canceled_attempt_before_credentials_or_network() {
+        let carrier = RustlsMtlsCarrier::new(RustlsMtlsCarrierConfig::enabled());
+        let attempt = RemoteTransportConnectionAttempt {
+            cancellation_requested: true,
+            tls_policy: RemoteTransportTlsPolicy {
+                mtls_mode: RemoteTransportMutualTlsMode::Required,
+                client_credential_reference: Some(RemoteTransportCredentialReference {
+                    reference_id: "client-cert-ref".to_string(),
+                    kind: "client-cert".to_string(),
+                    digest: FileFingerprint {
+                        algorithm: "sha256".to_string(),
+                        value: "abc123".to_string(),
+                    },
+                    schema_version: 1,
+                }),
+                ..connection_attempt().tls_policy
+            },
+            ..connection_attempt()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let err = runtime
+            .block_on(carrier.connect(attempt))
+            .expect_err("canceled before credential loading or network dial");
+        assert!(matches!(err, RemoteTransportCarrierError::Canceled { .. }));
     }
 
     #[test]
