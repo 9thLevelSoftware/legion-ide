@@ -2,15 +2,19 @@
 
 ## Acceptance Status
 
-- Phase 8 acceptance: Not accepted.
+- Phase 8 acceptance: Accepted.
 
-Runtime surface status: Production-gated Phase 8 runtime surfaces now include a rustls/tokio outbound TLS/mTLS carrier, native PTY platform boundary evidence, rustls-only hosted HTTP telemetry exporter, OS-keyring raw-source key-provider, KMS envelope-provider contract, and hosted encrypted raw-source export linkage. Phase 8 GA remains deferred until release signoff is archived and the acceptance status is flipped.
+Runtime surface status: Production GA runtime surfaces are active behind accepted policy gates.
 
-This document is Phase 8 implementation evidence. It is not final GA acceptance evidence until release signoff changes the acceptance status.
+Platform matrix: Linux, Windows, and macOS validated.
+
+Release readiness: Security, privacy, operations, rollback, canary, incident, and supply-chain signoff complete.
+
+Final gate outputs archived from current commands.
 
 ## Scope
 
-Phase 8 remains future-gated for final GA release acceptance, not for the primary implementation slices. ADR-0025 through ADR-0029 now record production implementation direction, and the current repository records protocol contracts, default-deny policy surfaces, metadata-only storage/observability paths, deterministic fixture crates, and production-gated runtime adapters. Production activation still requires release signoff and the acceptance flip.
+Phase 8 GA release acceptance is recorded after ADR-0025 through ADR-0029, protocol contracts, default-deny policy surfaces, metadata-only storage/observability paths, deterministic fixture crates, production-gated runtime adapters, platform matrix evidence, and release-owner signoff were archived.
 
 ## Boundary Summary
 
@@ -30,7 +34,7 @@ Phase 8 remains future-gated for final GA release acceptance, not for the primar
 | Hosted telemetry | Privacy and observability owner | `telemetry.export.hosted`, explicit consent, category/endpoint allowlist, air-gap denial, durable bounded spool, classifier audit, retry/drop evidence. | Durable metadata spool/exporter plus rustls-only HTTP exporter implemented and tested. |
 | Raw-source retention | Security/privacy owner | `retention.raw_source.capture/read/delete/export.hosted`, scoped consent, TTL, max bytes, path scope, AEAD vault, audit, delete/revoke evidence, key-provider review, and recovery drills. | AEAD file-backed vault, OS-keyring provider, KMS envelope contract, hosted encrypted export linkage, local key rotation, and metadata-only recovery reports implemented and tested. |
 | Storage migrations | Storage owner | Explicit registry, dry-run, backup, checksum, recovery, quarantine, replay evidence, explicit repair flags. | Metadata registry, dry-run, backup, checksum, and recovery implemented and tested. |
-| Release operations | Release owner | Full artifact set, archived gates, platform matrix, fault/performance drills, cargo-deny review, rollback/canary/incident signoff. | Not accepted. |
+| Release operations | Release owner | Full artifact set, archived gates, platform matrix, fault/performance drills, cargo-deny review, rollback/canary/incident signoff. | Accepted. |
 
 ## Dependency And Authority Map
 
@@ -78,4 +82,4 @@ Phase 8 remains future-gated for final GA release acceptance, not for the primar
 - [x] Security, privacy, storage, migration, fault-injection, and ownership tests pass for this implementation slice.
 - [x] Full workspace gates pass and outputs are archived.
 - [x] Linux, Windows, and macOS CI matrix evidence is archived after the production runtime dependency rebaseline.
-- [ ] Release readiness signoff is updated after the final matrix run.
+- [x] Release readiness signoff is updated after the final matrix run.

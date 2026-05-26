@@ -2183,7 +2183,7 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     }
 
     #[test]
-    fn phase8_evidence_declares_not_accepted_production_gated_status() {
+    fn phase8_evidence_declares_accepted_ga_status() {
         let source = read_workspace_file(DEFAULT_PHASE8_EVIDENCE_PATH);
         let evidence_path = workspace_root().join(DEFAULT_PHASE8_EVIDENCE_PATH);
         let evidence_dir = evidence_path
@@ -2196,8 +2196,13 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
         );
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
-        assert!(source.contains(PHASE8_NOT_ACCEPTED_MARKER));
-        assert!(source.contains("Production-gated Phase 8 runtime surfaces now include"));
+        assert!(source.contains(PHASE8_ACCEPTED_MARKER));
+        for marker in PHASE8_ACCEPTED_REQUIRED_MARKERS {
+            assert!(
+                source.contains(marker),
+                "Phase 8 evidence must contain accepted marker `{marker}`"
+            );
+        }
         for artifact in PHASE8_REQUIRED_ARTIFACTS {
             assert!(
                 source.contains(artifact),
