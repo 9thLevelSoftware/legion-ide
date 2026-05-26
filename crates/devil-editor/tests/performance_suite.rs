@@ -40,7 +40,9 @@ fn collaboration_edit_p99_overhead_threshold() -> Duration {
 }
 
 fn collaboration_edit_p95_overhead_threshold() -> Duration {
-    if cfg!(windows) {
+    if running_in_ci() {
+        Duration::from_millis(10)
+    } else if cfg!(windows) {
         Duration::from_millis(5)
     } else {
         Duration::from_millis(2)

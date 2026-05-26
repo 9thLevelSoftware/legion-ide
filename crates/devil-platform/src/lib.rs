@@ -1338,6 +1338,37 @@ fn poll_windows_output(
 }
 
 #[cfg(windows)]
+fn poll_windows_output_until_quiet(
+    handle: &WindowsPtySessionHandle,
+    max_bytes: usize,
+    timeout: Duration,
+    quiet_period: Duration,
+) -> Result<String, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    let mut output = String::new();
+    let mut last_output_at = None;
+    loop {
+        let remaining = max_bytes.saturating_sub(output.len());
+        if remaining == 0 {
+            return Ok(output);
+        }
+        let chunk = drain_windows_output(handle, remaining)?;
+        if !chunk.is_empty() {
+            output.push_str(&chunk);
+            last_output_at = Some(Instant::now());
+            continue;
+        }
+        let now = Instant::now();
+        if now >= deadline
+            || last_output_at.is_some_and(|last| now.duration_since(last) >= quiet_period)
+        {
+            return Ok(output);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(windows)]
 fn write_windows_conpty_input(
     handle: &WindowsPtySessionHandle,
     bytes: &[u8],
@@ -1717,7 +1748,12 @@ impl PtyService for NativePtyService {
             NativePtySessionHandle::Windows(handle) => {
                 let (exited, exit_code) = windows_session_exited(handle)?;
                 let output = if exited {
-                    poll_windows_output(handle, max_bytes, Duration::from_millis(50))?
+                    poll_windows_output_until_quiet(
+                        handle,
+                        max_bytes,
+                        Duration::from_millis(250),
+                        Duration::from_millis(20),
+                    )?
                 } else {
                     drain_windows_output(handle, max_bytes)?
                 };
