@@ -18,7 +18,7 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | Phase 5 — WASM isolated extension ecosystem | **Accepted** | [`plans/evidence/phase-5/plugin-architecture-map.md`](evidence/phase-5/plugin-architecture-map.md) | Manifest-validated, capability-checked, quota-bound, metadata-only plugin runtime boundary is accepted. Plugin command invocation is app-owned and protocol-mediated; UI remains projection-only. Marketplace, VS Code compatibility, Node extensions, arbitrary host scripting, network/process/filesystem/terminal authority, collaboration, and remote development remain deferred. |
 | Phase 6 — Collaboration substrate | **Accepted** | [`plans/evidence/phase-6/collaboration-architecture-map.md`](evidence/phase-6/collaboration-architecture-map.md) | Local deterministic collaboration runtime, app-owned session composition/transport envelopes, shared proposal approval gates, reconnect/shutdown lifecycle semantics, metadata-only audit/replay, projection-only UI, and p95/p99 editor overhead evidence are accepted. Production remote network transport, standalone terminal/process execution, hosted telemetry, and raw-source retention remain deferred. |
 | Phase 7 — Remote development | **Accepted** | [`plans/evidence/phase-7/remote-architecture-map.md`](evidence/phase-7/remote-architecture-map.md) | Deterministic edge workspace runtime harness, app-owned remote session composition, proposal-gated remote fixture filesystem mutation, bounded process/PTY/LSP/semantic descriptors, reconnect/offline metadata, security policy gates, and metadata-only audit/storage are accepted. Production network transport, standalone local terminal runtime, hosted telemetry, raw-source retention, and Phase 8 operational hardening remain deferred. |
-| Phase 8 — Hardening | **Future-gated** | None accepted | Phase 8 requires its own ADR, dependency-policy entry, protocol contracts, contract tests, ownership tests, and evidence. |
+| Phase 8 — Hardening | **Accepted** | [`plans/evidence/phase-8/`](evidence/phase-8/) | Phase 8 acceptance: Accepted. The accepted GA evidence includes `phase-8-architecture-map.md`, `platform-matrix-evidence.txt`, and `release-readiness-review.md`. GUI productization is a new post-substrate track; renderer-backed latency, IME, clipboard, focus, and accessibility remain GUI follow-up evidence, not reopened Phase 8 substrate blockers. |
 
 ---
 
@@ -90,7 +90,7 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 6. **R5 — Phase 5 WASM isolated extension ecosystem** — complete and accepted for the manifest-validated, capability-checked, metadata-only plugin runtime boundary.
 7. **R6 — Collaboration substrate** — complete and accepted for the local deterministic, app-owned, metadata-only collaboration substrate.
 8. **R7 — Remote development** — complete and accepted for the deterministic edge workspace runtime harness and app-owned local projection scope.
-9. **R8 — Hardening** — blocked on individual ADR/policy gates, not on accepted Phase 2 through Phase 7 scope.
+9. **R8 — Hardening** — complete and accepted for the archived Phase 8 GA runtime evidence. GUI productization starts after this substrate acceptance and does not reopen accepted Phase 8 runtime hardening.
 
 ---
 
@@ -104,7 +104,8 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 - [x] Phase 5 is explicitly accepted.
 - [x] Phase 6 is explicitly accepted.
 - [x] Phase 7 is explicitly accepted for deterministic edge workspace runtime scope.
-- [x] Phase 8 is explicitly future-gated.
+- [x] Phase 8 acceptance: Accepted.
+- [x] GUI productization follow-up evidence is tracked as post-substrate work, not as a Phase 8 acceptance blocker.
 - [x] ADR-0002 and ADR-0005 ambiguity is resolved.
 - [x] Historical claims are annotated as historical.
 - [x] Dependency-policy / `xtask` duplication decision is recorded.

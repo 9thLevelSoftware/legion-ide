@@ -1,0 +1,273 @@
+{
+  "metadata": {
+    "map_schema_version": "2.0",
+    "generated_at": "2026-05-26T17:48:31.3852290-04:00",
+    "analyzed_commit": "b521ab5e64696b9017f02595183de9ed1614f8eb",
+    "source_file_count": 141,
+    "source_fingerprint": "aa7e4fc1bdc9885f51b8fdf7ea44544239706d2dff6f02791f40c05d30e013d7",
+    "source_fingerprint_kind": "sha256:path-size-mtime",
+    "scope": "project-root"
+  },
+  "entry_points": [
+    {
+      "name": "devil-app CLI proof",
+      "path": "crates/devil-app/src/main.rs",
+      "kind": "binary",
+      "summary": "Current runnable app entry point; opens workspace/file and accepts :w/:q.",
+      "related_chunks": ["map:app-main:001"]
+    },
+    {
+      "name": "xtask check-deps",
+      "path": "xtask/src/main.rs",
+      "kind": "binary",
+      "summary": "Governance command for dependency policy, protocol symbols, phase evidence, and boundary checks.",
+      "related_chunks": ["map:xtask:001"]
+    }
+  ],
+  "routes": [],
+  "apis": [
+    {
+      "name": "AppComposition",
+      "path": "crates/devil-app/src/lib.rs",
+      "kind": "rust-api",
+      "summary": "Composition root exposing workspace/file open, edit, dispatch, save, projection, AI, plugin, collaboration, and remote helpers.",
+      "related_chunks": ["map:app-runtime:001", "map:app-save-workflow:001", "map:app-projection:001"]
+    },
+    {
+      "name": "CommandDispatchIntent",
+      "path": "crates/devil-ui/src/ui.rs",
+      "kind": "rust-api",
+      "summary": "Typed UI intent enum emitted by projection-only shell input handling.",
+      "related_chunks": ["map:ui-projection:001"]
+    },
+    {
+      "name": "ShellProjectionSnapshot",
+      "path": "crates/devil-ui/src/ui.rs",
+      "kind": "rust-api",
+      "summary": "Top-level UI projection snapshot consumed by shell/rendering surfaces.",
+      "related_chunks": ["map:ui-shell:001"]
+    },
+    {
+      "name": "WorkspaceActor",
+      "path": "crates/devil-project/src/lib.rs",
+      "kind": "rust-api",
+      "summary": "Workspace authority for VFS, path checks, watcher state, and proposal-mediated file mutations.",
+      "related_chunks": ["map:project-actor:001"]
+    },
+    {
+      "name": "EditorEngine",
+      "path": "crates/devil-editor/src/lib.rs",
+      "kind": "rust-api",
+      "summary": "Editor engine for buffers, transactions, undo/redo, save DTOs, and viewport projections.",
+      "related_chunks": ["map:editor-core:001"]
+    },
+    {
+      "name": "ModelProvider",
+      "path": "crates/devil-ai/src/lib.rs",
+      "kind": "rust-api",
+      "summary": "Provider-agnostic completion/embedding abstraction.",
+      "related_chunks": ["map:ai-router:001"]
+    }
+  ],
+  "modules": [
+    {
+      "name": "devil-protocol",
+      "path": "crates/devil-protocol/src/lib.rs",
+      "kind": "crate",
+      "summary": "Shared DTO and port contract layer.",
+      "related_chunks": ["map:protocol-contracts:001"]
+    },
+    {
+      "name": "devil-ui",
+      "path": "crates/devil-ui/src/ui.rs",
+      "kind": "crate",
+      "summary": "Projection-only UI state and command intent crate.",
+      "related_chunks": ["map:ui-projection:001", "map:ui-shell:001"]
+    },
+    {
+      "name": "devil-app",
+      "path": "crates/devil-app/src/lib.rs",
+      "kind": "crate",
+      "summary": "Application composition root and CLI proof support.",
+      "related_chunks": ["map:app-composition:001", "map:app-runtime:001"]
+    },
+    {
+      "name": "devil-project",
+      "path": "crates/devil-project/src/lib.rs",
+      "kind": "crate",
+      "summary": "Workspace VFS, path policy integration, tree, watcher, and proposal-mediated file mutation authority.",
+      "related_chunks": ["map:project-workspace:001", "map:project-actor:001"]
+    },
+    {
+      "name": "devil-editor",
+      "path": "crates/devil-editor/src/lib.rs",
+      "kind": "crate",
+      "summary": "Editor buffer, transaction, viewport, snapshot, and save request engine.",
+      "related_chunks": ["map:editor-core:001"]
+    },
+    {
+      "name": "devil-text",
+      "path": "crates/devil-text/src/lib.rs",
+      "kind": "crate",
+      "summary": "Rope-backed text model and immutable snapshot substrate.",
+      "related_chunks": ["map:text-core:001"]
+    },
+    {
+      "name": "devil-security",
+      "path": "crates/devil-security/src/lib.rs",
+      "kind": "crate",
+      "summary": "Trust, path, command, provider, network, and capability policies.",
+      "related_chunks": ["map:security-policy:001"]
+    },
+    {
+      "name": "devil-observability",
+      "path": "crates/devil-observability/src/lib.rs",
+      "kind": "crate",
+      "summary": "Metadata-only audit and event envelope helpers.",
+      "related_chunks": ["map:observability:001"]
+    },
+    {
+      "name": "devil-storage",
+      "path": "crates/devil-storage/src/lib.rs",
+      "kind": "crate",
+      "summary": "Storage repository abstractions and in-memory/file-backed persistence.",
+      "related_chunks": ["map:storage:001"]
+    },
+    {
+      "name": "devil-index",
+      "path": "crates/devil-index/src/lib.rs",
+      "kind": "crate",
+      "summary": "Semantic indexing and query metadata fabric.",
+      "related_chunks": ["map:indexing:001"]
+    }
+  ],
+  "tests": [
+    {
+      "name": "workspace_vfs_integration",
+      "path": "crates/devil-app/tests/workspace_vfs_integration.rs",
+      "kind": "integration-test",
+      "summary": "App/workspace/editor/proposal integration tests for VFS, save, conflict, projections, AI/plugin/collaboration/remote surfaces.",
+      "related_chunks": ["map:app-save-workflow:001"]
+    },
+    {
+      "name": "dto_contracts",
+      "path": "crates/devil-protocol/tests/dto_contracts.rs",
+      "kind": "integration-test",
+      "summary": "Protocol DTO and validation contract tests.",
+      "related_chunks": ["map:protocol-contracts:001"]
+    },
+    {
+      "name": "editor performance and retention",
+      "path": "crates/devil-editor/tests",
+      "kind": "integration-test",
+      "summary": "Editor atomicity, retention, snapshot lease, and performance tests.",
+      "related_chunks": ["map:editor-core:001", "map:text-core:001"]
+    },
+    {
+      "name": "path policy and watcher recovery",
+      "path": "crates/devil-project/tests",
+      "kind": "integration-test",
+      "summary": "Workspace path boundary and watcher overflow/recovery tests.",
+      "related_chunks": ["map:project-actor:001", "map:security-policy:001"]
+    },
+    {
+      "name": "xtask governance tests",
+      "path": "xtask/src/main.rs",
+      "kind": "unit-test",
+      "summary": "Dependency policy, phase acceptance, projection-only UI, and proposal-mediated save guard tests.",
+      "related_chunks": ["map:xtask:001"]
+    }
+  ],
+  "config": [
+    {
+      "name": "workspace manifest",
+      "path": "Cargo.toml",
+      "kind": "cargo",
+      "summary": "Workspace members and shared dependencies.",
+      "related_chunks": ["map:root-workspace:001"]
+    },
+    {
+      "name": "dependency policy",
+      "path": "plans/dependency-policy.md",
+      "kind": "policy",
+      "summary": "Parsed by xtask; keep synchronized with allowed dependencies and protocol symbols.",
+      "related_chunks": ["map:dependency-policy:001"]
+    },
+    {
+      "name": "repository instructions",
+      "path": "AGENTS.md",
+      "kind": "agent-config",
+      "summary": "Authoritative local instructions for phase gates and architectural boundaries.",
+      "related_chunks": ["map:agents-instructions:001"]
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "devil-protocol fan-in",
+      "path": "crates/devil-protocol/src/lib.rs",
+      "kind": "internal",
+      "summary": "Central shared dependency for almost all crates.",
+      "related_chunks": ["map:protocol-contracts:001"]
+    },
+    {
+      "name": "devil-app fan-in",
+      "path": "crates/devil-app/src/lib.rs",
+      "kind": "internal",
+      "summary": "Composition root depending on most runtime crates.",
+      "related_chunks": ["map:app-runtime:001"]
+    },
+    {
+      "name": "GUI dependency gap",
+      "path": "crates/devil-ui/Cargo.toml",
+      "kind": "missing-runtime-dependency",
+      "summary": "No active GUI renderer dependency exists in UI or app crates.",
+      "related_chunks": ["map:ui-projection:001"]
+    }
+  ],
+  "ownership": [
+    {
+      "name": "UI projection boundary",
+      "path": "crates/devil-ui/src/ui.rs",
+      "kind": "boundary",
+      "summary": "UI consumes snapshots and emits intents only.",
+      "related_chunks": ["map:ui-projection:001"]
+    },
+    {
+      "name": "Proposal-mediated save boundary",
+      "path": "crates/devil-app/src/lib.rs",
+      "kind": "boundary",
+      "summary": "Save path flows through editor DTO, app proposal, workspace proposal apply, and audit.",
+      "related_chunks": ["map:app-save-workflow:001"]
+    },
+    {
+      "name": "Workspace path authority",
+      "path": "crates/devil-project/src/lib.rs",
+      "kind": "boundary",
+      "summary": "WorkspaceActor owns root normalization and path containment checks.",
+      "related_chunks": ["map:project-actor:001"]
+    }
+  ],
+  "risk_areas": [
+    {
+      "name": "No GUI renderer",
+      "path": "crates/devil-ui/Cargo.toml",
+      "kind": "product-gap",
+      "summary": "Fully functional IDE requires a renderer-backed desktop shell; current UI is projection/plain shell only.",
+      "related_chunks": ["map:ui-projection:001", "map:renderer-adr:001"]
+    },
+    {
+      "name": "Large protocol/app monoliths",
+      "path": "crates/devil-protocol/src/lib.rs",
+      "kind": "complexity",
+      "summary": "High fan-in large files make broad refactors risky.",
+      "related_chunks": ["map:protocol-contracts:001", "map:app-composition:001"]
+    },
+    {
+      "name": "Renderer ADR/evidence reconciliation",
+      "path": "plans/adrs/ADR-0002-ui-editor-rendering.md",
+      "kind": "decision-risk",
+      "summary": "Planning docs and SPIKE-001A evidence require reconciliation before production GUI work.",
+      "related_chunks": ["map:renderer-adr:001", "map:spike-001a:001"]
+    }
+  ]
+}

@@ -1,0 +1,174 @@
+generated: "2026-05-26T17:48:31.3852290-04:00"
+source: "CODEBASE.md"
+version: "1.0"
+map_schema_version: "2.0"
+scope: "project-root"
+
+mappings:
+  source:
+    paths:
+      - "crates/*/src"
+      - "xtask/src"
+    priority: 10
+    pattern: "**/*.rs"
+    description: "Rust source files for workspace crates and xtask"
+    lastKnownFileCount: 27
+  tests:
+    paths:
+      - "crates/*/tests"
+      - "crates/*/src"
+      - "xtask/src"
+    priority: 10
+    pattern: "**/*.rs"
+    description: "Integration tests plus inline cfg(test) modules"
+    lastKnownFileCount: 9
+  app:
+    paths:
+      - "crates/devil-app/src"
+    priority: 10
+    pattern: "crates/devil-app/src/*.rs"
+    description: "Application composition root and CLI proof"
+    lastKnownFileCount: 2
+  ui:
+    paths:
+      - "crates/devil-ui/src"
+    priority: 10
+    pattern: "crates/devil-ui/src/*.rs"
+    description: "Projection-only UI shell and intent contracts"
+    lastKnownFileCount: 2
+  protocol:
+    paths:
+      - "crates/devil-protocol/src"
+      - "crates/devil-protocol/tests"
+    priority: 10
+    pattern: "crates/devil-protocol/**/*.rs"
+    description: "Shared DTO, validation, port, and contract tests"
+    lastKnownFileCount: 2
+  workspace:
+    paths:
+      - "crates/devil-project/src"
+      - "crates/devil-project/tests"
+    priority: 10
+    pattern: "crates/devil-project/**/*.rs"
+    description: "Workspace VFS, file authority, path boundary, watcher tests"
+    lastKnownFileCount: 3
+  editor:
+    paths:
+      - "crates/devil-editor/src"
+      - "crates/devil-editor/tests"
+      - "crates/devil-text/src"
+    priority: 10
+    pattern: "crates/devil-{editor,text}/**/*.rs"
+    description: "Editor engine, text model, performance, atomicity, retention tests"
+    lastKnownFileCount: 4
+  security:
+    paths:
+      - "crates/devil-security/src"
+      - "crates/devil-security/tests"
+    priority: 10
+    pattern: "crates/devil-security/**/*.rs"
+    description: "Trust, path, command, provider, and capability policy"
+    lastKnownFileCount: 2
+  storage_observability:
+    paths:
+      - "crates/devil-storage/src"
+      - "crates/devil-observability/src"
+    priority: 8
+    pattern: "crates/devil-{storage,observability}/src/*.rs"
+    description: "Storage repositories, event sinks, and metadata-only audit"
+    lastKnownFileCount: 2
+  feature_surfaces:
+    paths:
+      - "crates/devil-index/src"
+      - "crates/devil-ai/src"
+      - "crates/devil-ai-providers/src"
+      - "crates/devil-agent/src"
+      - "crates/devil-memory/src"
+      - "crates/devil-tracker/src"
+      - "crates/devil-plugin/src"
+      - "crates/devil-collaboration/src"
+      - "crates/devil-remote/src"
+      - "crates/devil-remote-transport/src"
+      - "crates/devil-terminal/src"
+      - "crates/devil-telemetry/src"
+      - "crates/devil-retention/src"
+    priority: 8
+    pattern: "crates/devil-*/src/*.rs"
+    description: "Gated or bounded feature runtimes and future product surfaces"
+    lastKnownFileCount: 13
+  planning_docs:
+    paths:
+      - "plans"
+      - ".planning"
+    priority: 8
+    pattern: "**/*.md"
+    description: "ADRs, phase evidence, generated Legion artifacts, and roadmap state"
+    lastKnownFileCount: 78
+  governance:
+    paths:
+      - "xtask"
+      - "plans/dependency-policy.md"
+      - "deny.toml"
+      - "AGENTS.md"
+    priority: 10
+    pattern: "{xtask/**,plans/dependency-policy.md,deny.toml,AGENTS.md}"
+    description: "Repository gates, dependency policy, and local agent constraints"
+    lastKnownFileCount: 4
+  scripts:
+    paths:
+      - "scripts"
+    priority: 5
+    pattern: "scripts/**"
+    description: "Utility scripts"
+    lastKnownFileCount: 2
+
+packages:
+  devil-app:
+    source:
+      paths: ["crates/devil-app/src"]
+      priority: 10
+    tests:
+      paths: ["crates/devil-app/tests"]
+      priority: 10
+  devil-ui:
+    source:
+      paths: ["crates/devil-ui/src"]
+      priority: 10
+  devil-protocol:
+    source:
+      paths: ["crates/devil-protocol/src"]
+      priority: 10
+    tests:
+      paths: ["crates/devil-protocol/tests"]
+      priority: 10
+  devil-editor:
+    source:
+      paths: ["crates/devil-editor/src"]
+      priority: 10
+    tests:
+      paths: ["crates/devil-editor/tests"]
+      priority: 10
+  devil-project:
+    source:
+      paths: ["crates/devil-project/src"]
+      priority: 10
+    tests:
+      paths: ["crates/devil-project/tests"]
+      priority: 10
+
+rules:
+  strictness: "warn"
+  exceptions:
+    - "Generated Legion artifacts may be written under .planning"
+    - "Inline Rust tests may live beside source under cfg(test)"
+
+autoUpdate:
+  enabled: true
+  mode: "prompt"
+  threshold:
+    newDirectoryFiles: 3
+    newCategoryFiles: 10
+    categoryChangePercent: 20
+  backup:
+    enabled: true
+    keepCount: 5

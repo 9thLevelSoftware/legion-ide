@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 
 const DEFAULT_POLICY_PATH: &str = "plans/dependency-policy.md";
 const DEFAULT_PROTOCOL_PATH: &str = "crates/devil-protocol/src/lib.rs";
+const DEFAULT_UI_MANIFEST_PATH: &str = "crates/devil-ui/Cargo.toml";
 const DEFAULT_PHASE3_EVIDENCE_PATH: &str = "plans/evidence/phase-3/predictive-semantic-fabric.md";
 const DEFAULT_PHASE4_EVIDENCE_PATH: &str = "plans/evidence/phase-4/agentic-ai-architecture-map.md";
 const DEFAULT_PHASE5_EVIDENCE_PATH: &str = "plans/evidence/phase-5/plugin-architecture-map.md";
@@ -212,6 +213,27 @@ const PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
     "cargo-deny-check.txt",
     "xtask-check-deps.txt",
 ];
+const RENDERER_BOUNDARY_POLICY_MARKERS: &[&str] = &[
+    "`devil-desktop` may depend on:",
+    "`eframe`",
+    "`egui`",
+    "renderer dependencies",
+    "adapter-only",
+];
+const DEVIL_UI_FORBIDDEN_RENDERER_DEPS: &[&str] = &[
+    "eframe",
+    "egui",
+    "egui-winit",
+    "egui-wgpu",
+    "winit",
+    "wgpu",
+    "accesskit",
+    "slint",
+    "tauri",
+    "wry",
+    "tao",
+    "gpui",
+];
 
 #[derive(Parser)]
 #[command(author, version, about = "Repository maintenance and validation tasks")]
@@ -260,6 +282,10 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     let metadata = load_workspace_metadata(&workspace_root)?;
     let packages = workspace_packages(&metadata);
     let violations = validate_dependency_policy(&packages, &policy);
+    let renderer_violations = validate_renderer_dependency_gate(
+        &policy_text,
+        &package_dependency_names(&metadata, "devil-ui"),
+    );
 
     let protocol_violations = validate_protocol_contracts(
         &workspace_root.join(DEFAULT_PROTOCOL_PATH),
@@ -353,6 +379,7 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     );
 
     let mut all = violations;
+    all.extend(renderer_violations);
     all.extend(protocol_violations);
     all.extend(phase3_violations);
     all.extend(phase4_violations);
@@ -406,6 +433,21 @@ fn workspace_packages(metadata: &Metadata) -> HashMap<String, HashSet<String>> {
             (package.name.clone(), package_deps)
         })
         .collect()
+}
+
+fn package_dependency_names(metadata: &Metadata, package_name: &str) -> HashSet<String> {
+    metadata
+        .packages
+        .iter()
+        .find(|package| package.name == package_name)
+        .map(|package| {
+            package
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn validate_dependency_policy(
@@ -470,6 +512,38 @@ fn validate_dependency_policy(
                 issues.push(format!("`{source}` is required to depend on `{required}`"));
             }
         }
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_renderer_dependency_gate(
+    policy_text: &str,
+    devil_ui_dependencies: &HashSet<String>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    for marker in RENDERER_BOUNDARY_POLICY_MARKERS {
+        if !policy_text.contains(marker) {
+            issues.push(format!(
+                "`plans/dependency-policy.md` must document renderer boundary marker `{marker}`"
+            ));
+        }
+    }
+
+    let mut forbidden_declared = DEVIL_UI_FORBIDDEN_RENDERER_DEPS
+        .iter()
+        .filter(|dependency| devil_ui_dependencies.contains(**dependency))
+        .copied()
+        .collect::<Vec<_>>();
+    forbidden_declared.sort();
+
+    if !forbidden_declared.is_empty() {
+        issues.push(format!(
+            "`{DEFAULT_UI_MANIFEST_PATH}` must not declare renderer/windowing dependencies: {}",
+            forbidden_declared.join(", ")
+        ));
     }
 
     issues.sort();
@@ -1306,6 +1380,33 @@ fn extract_backticked_items(line: &str) -> Vec<String> {
     values
 }
 
+#[test]
+fn renderer_dependency_gate_preserves_projection_boundary() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask manifest should live under workspace root");
+    let policy = fs::read_to_string(workspace_root.join(DEFAULT_POLICY_PATH))
+        .expect("policy should be readable");
+    let devil_ui_dependencies = HashSet::from([
+        "devil-protocol".to_string(),
+        "thiserror".to_string(),
+        "uuid".to_string(),
+    ]);
+
+    let issues = validate_renderer_dependency_gate(&policy, &devil_ui_dependencies);
+    assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+
+    let mut violating_dependencies = devil_ui_dependencies;
+    violating_dependencies.insert("eframe".to_string());
+    let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("eframe")),
+        "renderer dependency violation should be reported, got: {issues:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1626,6 +1727,29 @@ Final gate outputs archived from current commands.
                 .contains(&("devil-ui".to_string(), "devil-project".to_string()))
         );
         assert!(policy.protocol_symbols().contains("WorkspaceId"));
+    }
+
+    #[test]
+    fn renderer_dependency_gate_preserves_projection_boundary() {
+        let policy = read_workspace_file(DEFAULT_POLICY_PATH);
+        let devil_ui_dependencies = HashSet::from([
+            "devil-protocol".to_string(),
+            "thiserror".to_string(),
+            "uuid".to_string(),
+        ]);
+
+        let issues = validate_renderer_dependency_gate(&policy, &devil_ui_dependencies);
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+
+        let mut violating_dependencies = devil_ui_dependencies;
+        violating_dependencies.insert("eframe".to_string());
+        let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
+        assert!(
+            issues.iter().any(|issue| {
+                issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("eframe")
+            }),
+            "renderer dependency violation should be reported, got: {issues:?}"
+        );
     }
 
     #[test]

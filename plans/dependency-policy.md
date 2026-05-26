@@ -61,6 +61,27 @@ Every current workspace crate must have an explicit internal dependency policy e
 - `devil-ui` MUST NOT depend on `devil-editor`.
 - `devil-ui` MUST NOT depend on `devil-project`.
 - `devil-ui` MUST NOT depend on `devil-storage`.
+- `devil-ui` MUST NOT depend on `eframe`.
+- `devil-ui` MUST NOT depend on `egui`.
+- `devil-ui` MUST NOT depend on `egui-winit`.
+- `devil-ui` MUST NOT depend on `egui-wgpu`.
+- `devil-ui` MUST NOT depend on `winit`.
+- `devil-ui` MUST NOT depend on `wgpu`.
+- `devil-ui` MUST NOT depend on `accesskit`.
+- `devil-ui` MUST NOT depend on `slint`.
+- `devil-ui` MUST NOT depend on `tauri`.
+- `devil-ui` MUST NOT depend on `wry`.
+- `devil-ui` MUST NOT depend on `tao`.
+- `devil-ui` MUST NOT depend on `gpui`.
+
+- `devil-desktop` may depend on:
+  - `devil-app`
+  - `devil-protocol`
+  - `devil-ui`
+
+`devil-desktop` is the only planned crate authorized to host GUI renderer dependencies. Phase 2 may use `eframe` and `egui` for the Windows-first desktop foundation proof, including their renderer/windowing/accessibility integration stack such as `egui-winit`, `egui-wgpu`, `winit`, `wgpu`, and `accesskit` when pulled in by or needed for the adapter. Slint is an explicit fallback candidate for native panel rendering if Phase 2 evidence shows the egui path cannot satisfy IME, clipboard, focus, accessibility, or high-DPI requirements. Tauri/WRY/TAO and GPUI are not approved for the core editor shell in Phase 2; Tauri/WRY remain auxiliary-only unless a later ADR supersedes ADR-0002, and GPUI remains a long-term architecture influence until its official Windows-first support is suitable for this project.
+
+Renderer crates are adapter-only. They must not appear in `devil-ui`, app/editor/project/protocol/storage/security/observability/provider/runtime crates, or any core substrate crate until a later ADR and dependency-policy update explicitly authorize that edge.
 
 - `devil-app` may depend on:
   - `devil-agent`
@@ -649,6 +670,8 @@ Phase 8 production capability names are reserved for security-broker decisions b
   - `devil-ui` -> `devil-editor`
   - `devil-ui` -> `devil-project`
   - `devil-ui` -> `devil-storage`
+  - `devil-ui` -> renderer/windowing crates, including `eframe`, `egui`, `egui-winit`, `egui-wgpu`, `winit`, `wgpu`, `accesskit`, `slint`, `tauri`, `wry`, `tao`, and `gpui`
+  - core crates -> `devil-desktop`
   - `devil-ui` -> feature crates beyond declared contracts
   - `devil-tracker` -> feature crates that are not storage-protocol mediated
   - `devil-memory` -> non-storage non-protocol feature domains without explicit planning
@@ -676,3 +699,4 @@ Phase 8 production capability names are reserved for security-broker decisions b
 - `xtask check-deps` fails when forbidden edges are detected.
 - `xtask check-deps` fails when required internal dependencies are missing.
 - `xtask check-deps` fails when required protocol symbols are absent from `crates/devil-protocol/src/lib.rs`.
+- `xtask check-deps` fails when `devil-ui` declares renderer/windowing dependencies or when this policy stops documenting the `devil-desktop` renderer boundary.
