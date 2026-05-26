@@ -1,0 +1,15 @@
+[package]
+name = "devil-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+devil-app = { workspace = true }
+devil-protocol = { workspace = true }
+devil-ui = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+thiserror = { workspace = true }
