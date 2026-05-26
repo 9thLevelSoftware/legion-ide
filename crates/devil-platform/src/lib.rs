@@ -1079,7 +1079,7 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
 #[cfg(unix)]
 fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
     use std::fs::File;
-    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
@@ -1092,6 +1092,7 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
     let stdin = slave
         .try_clone()
         .map_err(|err| PlatformError::from_io_error("clone PTY stdin", PathBuf::from("."), err))?;
+    let slave_stdin_fd = stdin.as_raw_fd();
     let stdout = slave
         .try_clone()
         .map_err(|err| PlatformError::from_io_error("clone PTY stdout", PathBuf::from("."), err))?;
@@ -1107,10 +1108,13 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     unsafe {
-        command.pre_exec(|| {
-            nix::unistd::setsid()
-                .map(|_| ())
-                .map_err(|err| io::Error::from_raw_os_error(err as i32))
+        command.pre_exec(move || {
+            nix::unistd::setsid().map_err(|err| io::Error::from_raw_os_error(err as i32))?;
+            let result = nix::libc::ioctl(slave_stdin_fd, nix::libc::TIOCSCTTY, 0);
+            if result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         });
     }
     let child = command
@@ -2124,6 +2128,47 @@ mod tests {
         assert!(
             output.to_ascii_lowercase().contains("hello"),
             "native PTY output did not contain hello; output={output:?}; reads={reads:?}"
+        );
+        let _ = service.cleanup_orphaned_ptys();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn native_unix_pty_child_has_controlling_terminal() {
+        let service = NativePtyService;
+        let request = PtyRequest {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "if : </dev/tty 2>/dev/null; then printf ctty; else printf no-ctty; fi".to_string(),
+            ],
+            cwd: None,
+        };
+        let session = service
+            .spawn_pty(&request)
+            .expect("spawn native unix pty with controlling terminal");
+        let mut output = session.output;
+        let mut reads = Vec::new();
+        for _ in 0..20 {
+            if output.contains("ctty") || output.contains("no-ctty") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            let chunk = service
+                .read_pty(&session.id, PTY_OUTPUT_LIMIT)
+                .expect("read native unix pty output");
+            reads.push(format!(
+                "output={:?}; exited={}; exit_code={:?}; truncated={}",
+                chunk.output, chunk.exited, chunk.exit_code, chunk.truncated
+            ));
+            output.push_str(&chunk.output);
+            if chunk.exited {
+                break;
+            }
+        }
+        assert!(
+            output.contains("ctty") && !output.contains("no-ctty"),
+            "native Unix PTY child did not have controlling terminal; output={output:?}; reads={reads:?}"
         );
         let _ = service.cleanup_orphaned_ptys();
     }

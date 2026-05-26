@@ -4,7 +4,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -265,13 +265,20 @@ impl RustlsMtlsCarrier {
         let endpoint = &attempt.endpoint_policy.endpoint;
         let port = endpoint.port.unwrap_or(443);
         let deadline = Instant::now() + Duration::from_millis(attempt.timeout_ms);
+        let target_addr = resolve_endpoint_socket_addr(
+            endpoint.host.as_str(),
+            port,
+            endpoint.loopback_only,
+            deadline,
+        )
+        .await?;
         let stream = tokio::time::timeout(
             remaining_attempt_budget(deadline).ok_or_else(|| {
                 RemoteTransportCarrierError::Network {
                     reason: "tcp connect timed out".to_string(),
                 }
             })?,
-            TcpStream::connect((endpoint.host.as_str(), port)),
+            TcpStream::connect(target_addr),
         )
         .await
         .map_err(|_| RemoteTransportCarrierError::Network {
@@ -1006,6 +1013,50 @@ fn remaining_attempt_budget(deadline: Instant) -> Option<Duration> {
     Some(remaining)
 }
 
+async fn resolve_endpoint_socket_addr(
+    host: &str,
+    port: u16,
+    loopback_only: bool,
+    deadline: Instant,
+) -> Result<SocketAddr, RemoteTransportCarrierError> {
+    let addrs = tokio::time::timeout(
+        remaining_attempt_budget(deadline).ok_or_else(|| RemoteTransportCarrierError::Network {
+            reason: "endpoint resolution timed out".to_string(),
+        })?,
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    .map_err(|_| RemoteTransportCarrierError::Network {
+        reason: "endpoint resolution timed out".to_string(),
+    })?
+    .map_err(|err| RemoteTransportCarrierError::Network {
+        reason: err.to_string(),
+    })?
+    .collect::<Vec<_>>();
+    select_endpoint_socket_addr(host, loopback_only, addrs)
+}
+
+fn select_endpoint_socket_addr(
+    host: &str,
+    loopback_only: bool,
+    addrs: Vec<SocketAddr>,
+) -> Result<SocketAddr, RemoteTransportCarrierError> {
+    let Some(addr) = addrs.first().copied() else {
+        return Err(RemoteTransportCarrierError::Network {
+            reason: format!("endpoint `{host}` resolved no socket addresses"),
+        });
+    };
+    if loopback_only && let Some(non_loopback) = addrs.iter().find(|addr| !addr.ip().is_loopback())
+    {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: format!(
+                "loopback-only endpoint `{host}` resolved non-loopback address {non_loopback}"
+            ),
+        });
+    }
+    Ok(addr)
+}
+
 #[cfg(test)]
 mod tests {
     use devil_protocol::{
@@ -1356,6 +1407,41 @@ mod tests {
     fn rustls_mtls_carrier_uses_single_attempt_timeout_budget() {
         let expired = Instant::now() - Duration::from_millis(1);
         assert_eq!(remaining_attempt_budget(expired), None);
+    }
+
+    #[test]
+    fn loopback_only_endpoint_rejects_external_resolution_before_dial() {
+        assert!(matches!(
+            select_endpoint_socket_addr(
+                "example.com",
+                true,
+                vec!["93.184.216.34:443".parse().expect("external socket addr")],
+            ),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+        assert!(matches!(
+            select_endpoint_socket_addr(
+                "localhost",
+                true,
+                vec![
+                    "127.0.0.1:443".parse().expect("loopback socket addr"),
+                    "93.184.216.34:443".parse().expect("external socket addr"),
+                ],
+            ),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
+        assert_eq!(
+            select_endpoint_socket_addr(
+                "localhost",
+                true,
+                vec![
+                    "127.0.0.1:443".parse().expect("loopback socket addr"),
+                    "[::1]:443".parse().expect("ipv6 loopback socket addr"),
+                ],
+            )
+            .expect("loopback-only socket addr"),
+            "127.0.0.1:443".parse().expect("loopback socket addr")
+        );
     }
 
     #[test]
