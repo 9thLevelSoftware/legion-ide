@@ -5,5 +5,7 @@ Implemented coverage:
 - descriptor fixture remains default-deny
 - file-backed raw-source vault requires enabled policy and scoped consent
 - out-of-scope paths are rejected
-- vault key reference and key bytes are required before capture
+- vault key reference metadata and key bytes are required before capture
+- structured key references are validated as metadata-only protocol DTOs
 - metadata descriptor does not include plaintext source content
+- vault index does not persist raw source or raw key bytes

@@ -2265,6 +2265,120 @@ pub struct RemoteTransportPeerIdentity {
     pub schema_version: u16,
 }
 
+/// Metadata-only credential reference for remote transport TLS/mTLS material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTransportCredentialReference {
+    /// Stable credential reference identifier.
+    pub reference_id: String,
+    /// Credential kind label, such as `root-store`, `pin`, or `client-cert`.
+    pub kind: String,
+    /// Digest of the referenced credential material, never the credential bytes.
+    pub digest: FileFingerprint,
+    /// Credential reference schema version.
+    pub schema_version: u16,
+}
+
+/// Mutual TLS mode required by a remote transport carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteTransportMutualTlsMode {
+    /// Client authentication is disabled.
+    Disabled,
+    /// Client authentication may be used when configured.
+    Optional,
+    /// Client authentication is mandatory before production carrier activation.
+    Required,
+}
+
+/// TLS policy metadata for a production remote transport connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTransportTlsPolicy {
+    /// Whether TLS is required for this carrier.
+    pub require_tls: bool,
+    /// Server identity expected by policy.
+    pub server_identity: String,
+    /// Optional root store reference.
+    pub root_store_reference: Option<RemoteTransportCredentialReference>,
+    /// Optional certificate pin reference.
+    pub certificate_pin_reference: Option<RemoteTransportCredentialReference>,
+    /// Mutual TLS policy.
+    pub mtls_mode: RemoteTransportMutualTlsMode,
+    /// Client credential reference required for mTLS.
+    pub client_credential_reference: Option<RemoteTransportCredentialReference>,
+    /// Accepted ALPN protocol identifiers.
+    pub alpn_protocols: Vec<String>,
+    /// Minimum accepted transport schema version.
+    pub min_schema_version: u16,
+    /// Maximum accepted transport schema version.
+    pub max_schema_version: u16,
+    /// TLS policy schema version.
+    pub schema_version: u16,
+}
+
+/// Endpoint policy metadata for production remote transport activation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTransportEndpointPolicy {
+    /// Endpoint descriptor under policy.
+    pub endpoint: RemoteTransportEndpointDescriptor,
+    /// Allowed endpoint schemes; production policy must include only TLS schemes.
+    pub allowed_schemes: Vec<String>,
+    /// Whether redirect/downgrade behavior is allowed.
+    pub redirects_allowed: bool,
+    /// Endpoint policy schema version.
+    pub schema_version: u16,
+}
+
+/// Remote transport connection attempt metadata before network side effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTransportConnectionAttempt {
+    /// Endpoint policy applied to the attempt.
+    pub endpoint_policy: RemoteTransportEndpointPolicy,
+    /// TLS policy applied to the attempt.
+    pub tls_policy: RemoteTransportTlsPolicy,
+    /// Selected ALPN protocol after negotiation.
+    pub selected_alpn: String,
+    /// Selected transport schema version after negotiation.
+    pub selected_schema_version: u16,
+    /// Connection timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Whether cancellation was requested before activation.
+    pub cancellation_requested: bool,
+    /// Capability decision for `remote.transport.connect`.
+    pub capability_decision: CapabilityDecision,
+    /// Audit event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only attempt summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Attempt schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only remote transport carrier diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTransportCarrierDiagnostic {
+    /// Workspace session identifier when known.
+    pub session_id: Option<RemoteWorkspaceSessionId>,
+    /// Carrier lifecycle state.
+    pub state: RemoteTransportLifecycleState,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only diagnostic summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Diagnostic schema version.
+    pub schema_version: u16,
+}
+
 /// Schema negotiation mode for Phase 8 transport handshakes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteTransportSchemaCompatibility {
@@ -2425,6 +2539,56 @@ pub struct RemoteAgentPackageDescriptor {
     pub schema_version: u16,
 }
 
+/// Remote agent package lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteAgentPackageLifecycleState {
+    /// Package was staged but not yet activated.
+    Staged,
+    /// Package integrity/signature metadata was verified.
+    Verified,
+    /// Package health check passed.
+    Healthy,
+    /// Package was activated.
+    Activated,
+    /// Package was shut down.
+    Shutdown,
+    /// Package activation or upgrade failed.
+    Failed,
+    /// Package was rolled back.
+    RolledBack,
+}
+
+/// Metadata-only remote agent package lifecycle record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgentPackageLifecycleRecord {
+    /// Remote agent identifier.
+    pub agent_id: RemoteAgentId,
+    /// Remote authority identifier.
+    pub authority_id: RemoteAuthorityId,
+    /// Stable package identifier.
+    pub package_id: String,
+    /// Package integrity digest.
+    pub package_digest: FileFingerprint,
+    /// Current lifecycle state.
+    pub state: RemoteAgentPackageLifecycleState,
+    /// Previous lifecycle state when known.
+    pub previous_state: Option<RemoteAgentPackageLifecycleState>,
+    /// Optional rollback reference, never a payload body.
+    pub rollback_reference: Option<String>,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only lifecycle summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Lifecycle record schema version.
+    pub schema_version: u16,
+}
+
 /// Metadata-only production remote transport health summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteTransportHealthSummary {
@@ -2528,6 +2692,69 @@ pub struct TerminalOutputChunk {
     pub schema_version: u16,
 }
 
+/// Terminal kill escalation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TerminalKillEscalation {
+    /// Request graceful interrupt.
+    Interrupt,
+    /// Request process termination.
+    Terminate,
+    /// Request process-tree kill; requires explicit policy approval.
+    KillTree,
+}
+
+/// Typed terminal close request metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCloseRequest {
+    /// Terminal session identifier.
+    pub session_id: TerminalSessionId,
+    /// Principal requesting close.
+    pub principal_id: PrincipalId,
+    /// Required terminal capability.
+    pub capability_id: CapabilityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only close summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Close request schema version.
+    pub schema_version: u16,
+}
+
+/// Typed terminal kill request metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalKillRequest {
+    /// Terminal session identifier.
+    pub session_id: TerminalSessionId,
+    /// Principal requesting kill.
+    pub principal_id: PrincipalId,
+    /// Required terminal capability.
+    pub capability_id: CapabilityId,
+    /// Requested escalation mode.
+    pub escalation: TerminalKillEscalation,
+    /// Whether kill-tree escalation was explicitly authorized.
+    pub kill_tree_authorized: bool,
+    /// Maximum wait time before escalation in milliseconds.
+    pub escalation_timeout_ms: u64,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only kill summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Kill request schema version.
+    pub schema_version: u16,
+}
+
 /// Metadata-only terminal audit summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalAuditRecord {
@@ -2597,6 +2824,137 @@ pub struct HostedTelemetryConsentGrant {
     /// Correlation identifier.
     pub correlation_id: CorrelationId,
     /// Consent schema version.
+    pub schema_version: u16,
+}
+
+/// Hosted telemetry consent state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HostedTelemetryConsentState {
+    /// Consent is current and may be used for policy-bound export.
+    Current,
+    /// Consent was revoked.
+    Revoked,
+    /// Consent expired.
+    Expired,
+}
+
+/// Hosted telemetry consent binding metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedTelemetryConsentBinding {
+    /// Stable consent grant identifier.
+    pub grant_id: String,
+    /// Principal bound to the grant.
+    pub principal_id: PrincipalId,
+    /// Workspace bound to the grant.
+    pub workspace_id: WorkspaceId,
+    /// Endpoint identifier bound to the grant.
+    pub endpoint_id: String,
+    /// Region bound to the grant.
+    pub region: String,
+    /// Categories covered by the grant.
+    pub categories: Vec<HostedTelemetryCategory>,
+    /// Grant issue timestamp.
+    pub issued_at: TimestampMillis,
+    /// Revocation generation observed when issued.
+    pub revocation_generation: u64,
+    /// Current consent state.
+    pub state: HostedTelemetryConsentState,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Consent binding schema version.
+    pub schema_version: u16,
+}
+
+/// Hosted telemetry TLS policy metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedTelemetryTlsPolicy {
+    /// Whether HTTPS is mandatory for production export.
+    pub https_required: bool,
+    /// Minimum TLS version label.
+    pub min_tls_version: String,
+    /// Whether certificate validation is required.
+    pub certificate_validation_required: bool,
+    /// TLS policy schema version.
+    pub schema_version: u16,
+}
+
+/// Hosted telemetry proxy policy metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedTelemetryProxyPolicy {
+    /// Whether proxy routing is allowed.
+    pub proxy_allowed: bool,
+    /// Optional proxy endpoint reference.
+    pub proxy_endpoint_id: Option<String>,
+    /// Whether proxy bypass is allowed.
+    pub bypass_allowed: bool,
+    /// Proxy policy schema version.
+    pub schema_version: u16,
+}
+
+/// Hosted telemetry retry policy metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedTelemetryRetryPolicy {
+    /// Maximum upload attempts.
+    pub max_attempts: u8,
+    /// Initial backoff in milliseconds.
+    pub initial_backoff_ms: u64,
+    /// Maximum backoff in milliseconds.
+    pub max_backoff_ms: u64,
+    /// Whether `Retry-After` metadata may be honored.
+    pub retry_after_allowed: bool,
+    /// Retry policy schema version.
+    pub schema_version: u16,
+}
+
+/// Hosted telemetry endpoint policy metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedTelemetryEndpointPolicy {
+    /// Endpoint descriptor.
+    pub endpoint: HostedTelemetryEndpointDescriptor,
+    /// TLS policy.
+    pub tls_policy: HostedTelemetryTlsPolicy,
+    /// Proxy policy.
+    pub proxy_policy: HostedTelemetryProxyPolicy,
+    /// Retry policy.
+    pub retry_policy: HostedTelemetryRetryPolicy,
+    /// Categories allowed at this endpoint.
+    pub allowed_categories: Vec<HostedTelemetryCategory>,
+    /// Maximum JSON body size in bytes.
+    pub max_body_bytes: u64,
+    /// Endpoint policy schema version.
+    pub schema_version: u16,
+}
+
+/// Hosted telemetry diagnostics snapshot metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedTelemetryDiagnosticsSnapshot {
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Number of pending records.
+    pub pending_record_count: u64,
+    /// Number of dropped records.
+    pub dropped_record_count: u64,
+    /// Age of oldest pending record in milliseconds.
+    pub oldest_record_age_ms: Option<u64>,
+    /// Metadata-only upload status label.
+    pub last_upload_status: String,
+    /// Next retry delay in milliseconds.
+    pub next_retry_after_ms: Option<u64>,
+    /// Air-gap denial count.
+    pub air_gap_denial_count: u64,
+    /// Redaction rejection count.
+    pub redaction_rejection_count: u64,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only diagnostic summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Diagnostics schema version.
     pub schema_version: u16,
 }
 
@@ -2821,6 +3179,139 @@ pub struct HostedRetentionExportLinkage {
     pub schema_version: u16,
 }
 
+/// Production raw-source vault algorithm identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RawSourceVaultAlgorithm {
+    /// AES-256-GCM authenticated encryption.
+    Aes256Gcm,
+    /// ChaCha20-Poly1305 authenticated encryption.
+    ChaCha20Poly1305,
+}
+
+/// Metadata-only raw-source key reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawSourceKeyReference {
+    /// Stable key reference identifier.
+    pub key_id: String,
+    /// Key version label.
+    pub key_version: String,
+    /// Provider label, never provider credentials or key bytes.
+    pub provider_label: String,
+    /// Rotation generation.
+    pub rotation_generation: u64,
+    /// Key reference schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only raw-source vault envelope descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawSourceVaultEnvelope {
+    /// Bundle identifier.
+    pub bundle_id: String,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Purpose bound to the envelope.
+    pub purpose: RawSourceRetentionPurpose,
+    /// Authenticated encryption algorithm.
+    pub algorithm: RawSourceVaultAlgorithm,
+    /// Key reference.
+    pub key_reference: RawSourceKeyReference,
+    /// Nonce digest or nonce reference, never raw nonce bytes.
+    pub nonce_digest: String,
+    /// Ciphertext digest.
+    pub ciphertext_digest: FileFingerprint,
+    /// Authentication tag digest or tag reference, never raw tag bytes.
+    pub tag_digest: String,
+    /// Additional authenticated data digest.
+    pub aad_digest: String,
+    /// Encrypted byte length.
+    pub encrypted_byte_len: u64,
+    /// Envelope schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only raw-source key rotation record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawSourceKeyRotationRecord {
+    /// Bundle identifier rotated.
+    pub bundle_id: String,
+    /// Previous key reference.
+    pub previous_key_reference: RawSourceKeyReference,
+    /// New key reference.
+    pub new_key_reference: RawSourceKeyReference,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only rotation summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Rotation record schema version.
+    pub schema_version: u16,
+}
+
+/// Raw-source vault recovery state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RawSourceVaultRecoveryState {
+    /// Recovery was denied and data remained inaccessible.
+    FailedClosed,
+    /// Corrupt or suspect metadata was quarantined.
+    Quarantined,
+    /// Metadata was recovered without exposing raw source.
+    Recovered,
+}
+
+/// Metadata-only raw-source vault recovery report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawSourceVaultRecoveryReport {
+    /// Stable recovery identifier.
+    pub recovery_id: String,
+    /// Bundle identifier when scoped to one bundle.
+    pub bundle_id: Option<String>,
+    /// Recovery state.
+    pub state: RawSourceVaultRecoveryState,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only recovery summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Recovery report schema version.
+    pub schema_version: u16,
+}
+
+/// Separate hosted raw-source export consent metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawSourceHostedExportConsent {
+    /// Hosted raw-source export grant identifier.
+    pub grant_id: String,
+    /// Principal granting hosted raw-source export.
+    pub principal_id: PrincipalId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Endpoint identifier bound to this grant.
+    pub endpoint_id: String,
+    /// Purpose bound to this grant.
+    pub purpose: RawSourceRetentionPurpose,
+    /// Grant issue timestamp.
+    pub issued_at: TimestampMillis,
+    /// Grant expiry timestamp.
+    pub expires_at: TimestampMillis,
+    /// Whether the grant has been revoked.
+    pub revoked: bool,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Hosted export consent schema version.
+    pub schema_version: u16,
+}
+
 /// Metadata-only schema manifest for a persisted Phase 8 store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageSchemaManifest {
@@ -3024,6 +3515,68 @@ pub struct StorageEvidenceSummary {
     /// Redaction hints for evidence records.
     pub redaction_hints: Vec<RedactionHint>,
     /// Evidence summary contract schema version.
+    pub schema_version: u16,
+}
+
+/// Explicit request to apply a storage migration after dry-run and backup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageMigrationApplyRequest {
+    /// Migration step to apply.
+    pub step: StorageMigrationStep,
+    /// Principal requesting apply.
+    pub principal_id: PrincipalId,
+    /// Capability decision for `storage.migration.apply`.
+    pub capability_decision: CapabilityDecision,
+    /// Preflight dry-run report.
+    pub preflight_report: StorageMigrationDryRunReport,
+    /// Backup marker required before apply.
+    pub backup_marker: StorageBackupMarker,
+    /// Durable migration journal identifier.
+    pub journal_id: String,
+    /// Explicit operator apply flag.
+    pub explicit_apply_flag: bool,
+    /// Metadata-only apply summary.
+    pub metadata_summary: String,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Apply request schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only storage migration apply outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageMigrationApplyOutcome {
+    /// Migration identifier.
+    pub migration_id: String,
+    /// Subsystem identifier.
+    pub subsystem_id: String,
+    /// Whether the migration was applied.
+    pub applied: bool,
+    /// Backup identifier used for apply.
+    pub backup_id: String,
+    /// Durable migration journal identifier.
+    pub journal_id: String,
+    /// Optional recovery reference if apply failed closed.
+    pub recovery_id: Option<String>,
+    /// Post-apply checksum.
+    pub checksum: StorageChecksum,
+    /// Metadata-only outcome summary.
+    pub metadata_summary: String,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Apply outcome schema version.
     pub schema_version: u16,
 }
 
@@ -15148,6 +15701,18 @@ pub struct CapabilityRequestContext {
     /// Explicit operator repair flag for storage migration repair requests.
     #[serde(default)]
     pub storage_explicit_repair: bool,
+    /// Explicit operator apply flag for storage migration apply requests.
+    #[serde(default)]
+    pub storage_explicit_apply: bool,
+    /// Whether current hosted telemetry consent has been verified for this request.
+    #[serde(default)]
+    pub hosted_telemetry_consent_current: bool,
+    /// Whether current raw-source retention consent has been verified for this request.
+    #[serde(default)]
+    pub raw_source_retention_consent_current: bool,
+    /// Whether separate hosted raw-source export consent has been verified.
+    #[serde(default)]
+    pub raw_source_hosted_export_consent_current: bool,
 }
 
 /// Plugin action proposal.
@@ -15522,6 +16087,8 @@ pub enum TerminalRequest {
         /// Session id to close.
         session_id: TerminalSessionId,
     },
+    /// Kill terminal process/session.
+    Kill(TerminalKillRequest),
 }
 
 /// Terminal response envelope.
@@ -16318,6 +16885,156 @@ pub fn validate_remote_transport_handshake(
     Ok(())
 }
 
+/// Validate remote transport credential references do not contain inline TLS material.
+pub fn validate_remote_transport_credential_reference(
+    reference: &RemoteTransportCredentialReference,
+) -> ProtocolResult<()> {
+    if reference.reference_id.trim().is_empty()
+        || reference.kind.trim().is_empty()
+        || reference.digest.algorithm.trim().is_empty()
+        || reference.digest.value.trim().is_empty()
+        || reference.schema_version == 0
+        || contains_forbidden_phase8_payload(&reference.reference_id)
+        || contains_forbidden_phase8_payload(&reference.kind)
+        || contains_forbidden_phase8_payload(&reference.digest.value)
+    {
+        return Err(ProtocolError {
+            code: "remote_transport_credential_invalid".to_string(),
+            message:
+                "remote transport credential references must be metadata-only digest references"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate remote transport TLS/mTLS policy before carrier connection.
+pub fn validate_remote_transport_tls_policy(
+    policy: &RemoteTransportTlsPolicy,
+) -> ProtocolResult<()> {
+    if !policy.require_tls
+        || policy.server_identity.trim().is_empty()
+        || policy.alpn_protocols.is_empty()
+        || policy.min_schema_version == 0
+        || policy.max_schema_version < policy.min_schema_version
+        || policy.schema_version == 0
+        || contains_forbidden_phase8_payload(&policy.server_identity)
+        || policy
+            .alpn_protocols
+            .iter()
+            .any(|alpn| alpn.trim().is_empty() || contains_forbidden_phase8_payload(alpn))
+    {
+        return Err(ProtocolError {
+            code: "remote_transport_tls_policy_invalid".to_string(),
+            message:
+                "remote transport TLS policy must require TLS with bounded ALPN/schema metadata"
+                    .to_string(),
+        });
+    }
+    for reference in [
+        policy.root_store_reference.as_ref(),
+        policy.certificate_pin_reference.as_ref(),
+        policy.client_credential_reference.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_remote_transport_credential_reference(reference)?;
+    }
+    if policy.mtls_mode == RemoteTransportMutualTlsMode::Required
+        && policy.client_credential_reference.is_none()
+    {
+        return Err(ProtocolError {
+            code: "remote_transport_tls_policy_invalid".to_string(),
+            message: "required mTLS must include a client credential reference".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate remote transport endpoint policy rejects plaintext/downgrade metadata.
+pub fn validate_remote_transport_endpoint_policy(
+    policy: &RemoteTransportEndpointPolicy,
+) -> ProtocolResult<()> {
+    if policy.endpoint.endpoint_id.trim().is_empty()
+        || policy.endpoint.host.trim().is_empty()
+        || policy.endpoint.schema_version == 0
+        || policy.allowed_schemes.is_empty()
+        || policy.redirects_allowed
+        || policy.schema_version == 0
+        || policy.endpoint.scheme != "https"
+        || !policy
+            .allowed_schemes
+            .iter()
+            .any(|scheme| scheme == "https")
+        || policy.allowed_schemes.iter().any(|scheme| scheme == "http")
+        || contains_forbidden_phase8_payload(&policy.endpoint.endpoint_id)
+        || contains_forbidden_phase8_payload(&policy.endpoint.host)
+    {
+        return Err(ProtocolError {
+            code: "remote_transport_endpoint_policy_invalid".to_string(),
+            message: "remote transport endpoint policy must be https-only and downgrade-safe"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a remote transport connection attempt before any network side effects.
+pub fn validate_remote_transport_connection_attempt(
+    attempt: &RemoteTransportConnectionAttempt,
+) -> ProtocolResult<()> {
+    validate_remote_transport_endpoint_policy(&attempt.endpoint_policy)?;
+    validate_remote_transport_tls_policy(&attempt.tls_policy)?;
+    if attempt.selected_alpn.trim().is_empty()
+        || !attempt
+            .tls_policy
+            .alpn_protocols
+            .contains(&attempt.selected_alpn)
+        || attempt.selected_schema_version < attempt.tls_policy.min_schema_version
+        || attempt.selected_schema_version > attempt.tls_policy.max_schema_version
+        || attempt.timeout_ms == 0
+        || attempt.timeout_ms > 120_000
+        || attempt.capability_decision.decision_id.0 == 0
+        || attempt.capability_decision.capability.0 != "remote.transport.connect"
+        || !attempt.capability_decision.granted
+        || attempt.event_sequence.0 == 0
+        || attempt.correlation_id.0 == 0
+        || attempt.causality_id.0 == Uuid::nil()
+        || attempt.schema_version == 0
+        || !phase8_metadata_only_redaction(&attempt.redaction_hints)
+        || contains_forbidden_phase8_payload(&attempt.selected_alpn)
+        || contains_forbidden_phase8_payload(&attempt.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "remote_transport_connection_attempt_invalid".to_string(),
+            message: "remote transport connection attempts require granted capability, TLS negotiation, bounded timeout, and metadata-only audit".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate remote transport carrier diagnostics remain metadata-only.
+pub fn validate_remote_transport_carrier_diagnostic(
+    diagnostic: &RemoteTransportCarrierDiagnostic,
+) -> ProtocolResult<()> {
+    if diagnostic.session_id.is_some_and(|session| session.0 == 0)
+        || diagnostic.event_sequence.0 == 0
+        || diagnostic.correlation_id.0 == 0
+        || diagnostic.causality_id.0 == Uuid::nil()
+        || diagnostic.schema_version == 0
+        || !phase8_metadata_only_redaction(&diagnostic.redaction_hints)
+        || contains_forbidden_phase8_payload(&diagnostic.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "remote_transport_diagnostic_invalid".to_string(),
+            message: "remote transport diagnostics must be metadata-only with valid event identity"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Validate metadata-only remote transport flow-control state.
 pub fn validate_remote_transport_flow_control_window(
     window: &RemoteTransportFlowControlWindow,
@@ -16390,6 +17107,36 @@ pub fn validate_remote_agent_package_descriptor(
     Ok(())
 }
 
+/// Validate remote agent package lifecycle records remain metadata-only and ordered.
+pub fn validate_remote_agent_package_lifecycle_record(
+    record: &RemoteAgentPackageLifecycleRecord,
+) -> ProtocolResult<()> {
+    if record.agent_id.0 == 0
+        || record.authority_id.0 == 0
+        || record.package_id.trim().is_empty()
+        || record.package_digest.algorithm.trim().is_empty()
+        || record.package_digest.value.trim().is_empty()
+        || record.event_sequence.0 == 0
+        || record.correlation_id.0 == 0
+        || record.causality_id.0 == Uuid::nil()
+        || record.schema_version == 0
+        || !phase8_metadata_only_redaction(&record.redaction_hints)
+        || contains_forbidden_phase8_payload(&record.package_id)
+        || contains_forbidden_phase8_payload(&record.package_digest.value)
+        || contains_forbidden_phase8_payload(&record.metadata_summary)
+        || record
+            .rollback_reference
+            .as_deref()
+            .is_some_and(contains_forbidden_phase8_payload)
+    {
+        return Err(ProtocolError {
+            code: "remote_agent_package_lifecycle_invalid".to_string(),
+            message: "remote agent package lifecycle records must be metadata-only with package integrity and event identity".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Validate Phase 8 remote transport metadata summaries remain metadata-only.
 pub fn validate_remote_transport_audit_summary(
     summary: &RemoteTransportAuditSummary,
@@ -16446,6 +17193,112 @@ pub fn validate_terminal_audit_record(record: &TerminalAuditRecord) -> ProtocolR
     Ok(())
 }
 
+/// Validate terminal launch policy metadata before PTY activation.
+pub fn validate_terminal_launch_policy_contract(
+    contract: &TerminalLaunchPolicyContract,
+) -> ProtocolResult<()> {
+    if contract.principal_id.0.trim().is_empty()
+        || contract.workspace_id.0 == 0
+        || contract.trust_state != WorkspaceTrustState::Trusted
+        || contract.capability_id.0 != "terminal.launch"
+        || contract.cwd_policy.trim().is_empty()
+        || contract.output_byte_limit == 0
+        || contract.timeout_seconds == 0
+        || contract.schema_version == 0
+        || contains_forbidden_phase8_payload(&contract.cwd_policy)
+    {
+        return Err(ProtocolError {
+            code: "terminal_launch_policy_invalid".to_string(),
+            message: "terminal launch requires trusted workspace, terminal.launch capability, and bounded metadata".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate terminal input remains bounded before runtime dispatch.
+pub fn validate_terminal_input(input: &TerminalInput) -> ProtocolResult<()> {
+    if input.session_id.0 == 0
+        || input.correlation_id.0 == 0
+        || input.payload.is_empty()
+        || input.payload.len() > 64 * 1024
+        || contains_forbidden_phase8_payload(&input.payload)
+    {
+        return Err(ProtocolError {
+            code: "terminal_input_invalid".to_string(),
+            message:
+                "terminal input must be session-scoped, bounded, and free of raw/secret markers"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate terminal resize requests are bounded.
+pub fn validate_terminal_resize(resize: &TerminalResize) -> ProtocolResult<()> {
+    if resize.session_id.0 == 0
+        || resize.cols == 0
+        || resize.rows == 0
+        || resize.cols > 1_000
+        || resize.rows > 1_000
+    {
+        return Err(ProtocolError {
+            code: "terminal_resize_invalid".to_string(),
+            message:
+                "terminal resize must be session-scoped with non-zero bounded rows and columns"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate typed terminal close requests.
+pub fn validate_terminal_close_request(request: &TerminalCloseRequest) -> ProtocolResult<()> {
+    if request.session_id.0 == 0
+        || request.principal_id.0.trim().is_empty()
+        || request.capability_id.0 != "terminal.close"
+        || request.event_sequence.0 == 0
+        || request.correlation_id.0 == 0
+        || request.causality_id.0 == Uuid::nil()
+        || request.schema_version == 0
+        || !phase8_metadata_only_redaction(&request.redaction_hints)
+        || contains_forbidden_phase8_payload(&request.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "terminal_close_invalid".to_string(),
+            message: "terminal close requires principal, terminal.close capability, and metadata-only event identity".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate typed terminal kill requests.
+pub fn validate_terminal_kill_request(request: &TerminalKillRequest) -> ProtocolResult<()> {
+    if request.session_id.0 == 0
+        || request.principal_id.0.trim().is_empty()
+        || request.capability_id.0 != "terminal.kill"
+        || request.escalation_timeout_ms == 0
+        || request.escalation_timeout_ms > 30_000
+        || request.event_sequence.0 == 0
+        || request.correlation_id.0 == 0
+        || request.causality_id.0 == Uuid::nil()
+        || request.schema_version == 0
+        || !phase8_metadata_only_redaction(&request.redaction_hints)
+        || contains_forbidden_phase8_payload(&request.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "terminal_kill_invalid".to_string(),
+            message: "terminal kill requires principal, terminal.kill capability, bounded escalation, and metadata-only event identity".to_string(),
+        });
+    }
+    if request.escalation == TerminalKillEscalation::KillTree && !request.kill_tree_authorized {
+        return Err(ProtocolError {
+            code: "terminal_kill_invalid".to_string(),
+            message: "terminal kill-tree escalation requires explicit authorization".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Validate hosted telemetry export batches before hosted egress is considered.
 pub fn validate_hosted_telemetry_export_batch(
     batch: &HostedTelemetryExportBatch,
@@ -16494,6 +17347,95 @@ pub fn validate_hosted_telemetry_export_batch(
                 message: "hosted telemetry record category is not covered by consent".to_string(),
             });
         }
+    }
+    Ok(())
+}
+
+/// Validate hosted telemetry consent binding is current and scope-bound.
+pub fn validate_hosted_telemetry_consent_binding(
+    binding: &HostedTelemetryConsentBinding,
+) -> ProtocolResult<()> {
+    if binding.grant_id.trim().is_empty()
+        || binding.principal_id.0.trim().is_empty()
+        || binding.workspace_id.0 == 0
+        || binding.endpoint_id.trim().is_empty()
+        || binding.region.trim().is_empty()
+        || binding.categories.is_empty()
+        || binding.issued_at.0 == 0
+        || binding.correlation_id.0 == 0
+        || binding.schema_version == 0
+        || binding.state != HostedTelemetryConsentState::Current
+        || contains_forbidden_phase8_payload(&binding.grant_id)
+        || contains_forbidden_phase8_payload(&binding.endpoint_id)
+        || contains_forbidden_phase8_payload(&binding.region)
+    {
+        return Err(ProtocolError {
+            code: "hosted_telemetry_consent_invalid".to_string(),
+            message: "hosted telemetry consent must be current and bound to principal, workspace, endpoint, region, and categories".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate hosted telemetry endpoint, TLS, proxy, and retry policy metadata.
+pub fn validate_hosted_telemetry_endpoint_policy(
+    policy: &HostedTelemetryEndpointPolicy,
+) -> ProtocolResult<()> {
+    if policy.endpoint.endpoint_id.trim().is_empty()
+        || policy.endpoint.endpoint_label.trim().is_empty()
+        || policy.endpoint.region.trim().is_empty()
+        || !policy.endpoint.allowlisted
+        || policy.endpoint.schema_version == 0
+        || !policy.tls_policy.https_required
+        || policy.tls_policy.min_tls_version.trim().is_empty()
+        || !policy.tls_policy.certificate_validation_required
+        || policy.tls_policy.schema_version == 0
+        || policy.proxy_policy.bypass_allowed
+        || policy.proxy_policy.schema_version == 0
+        || policy.retry_policy.max_attempts == 0
+        || policy.retry_policy.initial_backoff_ms == 0
+        || policy.retry_policy.max_backoff_ms < policy.retry_policy.initial_backoff_ms
+        || policy.retry_policy.schema_version == 0
+        || policy.allowed_categories.is_empty()
+        || policy.max_body_bytes == 0
+        || policy.schema_version == 0
+        || !policy.endpoint.endpoint_label.starts_with("https://")
+        || contains_forbidden_phase8_payload(&policy.endpoint.endpoint_id)
+        || contains_forbidden_phase8_payload(&policy.endpoint.endpoint_label)
+        || contains_forbidden_phase8_payload(&policy.endpoint.region)
+        || policy
+            .proxy_policy
+            .proxy_endpoint_id
+            .as_deref()
+            .is_some_and(contains_forbidden_phase8_payload)
+    {
+        return Err(ProtocolError {
+            code: "hosted_telemetry_endpoint_policy_invalid".to_string(),
+            message: "hosted telemetry endpoint policy must be allowlisted HTTPS metadata with fail-closed proxy/retry bounds".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate hosted telemetry diagnostics snapshots are metadata-only.
+pub fn validate_hosted_telemetry_diagnostics_snapshot(
+    snapshot: &HostedTelemetryDiagnosticsSnapshot,
+) -> ProtocolResult<()> {
+    if snapshot.workspace_id.0 == 0
+        || snapshot.last_upload_status.trim().is_empty()
+        || snapshot.event_sequence.0 == 0
+        || snapshot.correlation_id.0 == 0
+        || snapshot.causality_id.0 == Uuid::nil()
+        || snapshot.schema_version == 0
+        || !phase8_metadata_only_redaction(&snapshot.redaction_hints)
+        || contains_forbidden_phase8_payload(&snapshot.last_upload_status)
+        || contains_forbidden_phase8_payload(&snapshot.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "hosted_telemetry_diagnostics_invalid".to_string(),
+            message: "hosted telemetry diagnostics must be metadata-only with valid event identity"
+                .to_string(),
+        });
     }
     Ok(())
 }
@@ -16596,6 +17538,145 @@ pub fn validate_raw_source_retention_access_audit(
     Ok(())
 }
 
+/// Validate hosted retention export linkage requires separate raw-source consent.
+pub fn validate_hosted_retention_export_linkage(
+    linkage: &HostedRetentionExportLinkage,
+) -> ProtocolResult<()> {
+    if linkage.telemetry_batch_id.trim().is_empty()
+        || linkage.bundle_id.trim().is_empty()
+        || !linkage.raw_source_consent_verified
+        || linkage.schema_version == 0
+        || contains_forbidden_phase8_payload(&linkage.telemetry_batch_id)
+        || contains_forbidden_phase8_payload(&linkage.bundle_id)
+    {
+        return Err(ProtocolError {
+            code: "hosted_retention_export_linkage_invalid".to_string(),
+            message: "hosted raw-source export linkage requires separate verified consent and metadata-only identifiers".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate raw-source key references never serialize key material.
+pub fn validate_raw_source_key_reference(reference: &RawSourceKeyReference) -> ProtocolResult<()> {
+    if reference.key_id.trim().is_empty()
+        || reference.key_version.trim().is_empty()
+        || reference.provider_label.trim().is_empty()
+        || reference.schema_version == 0
+        || contains_forbidden_phase8_payload(&reference.key_id)
+        || contains_forbidden_phase8_payload(&reference.key_version)
+        || contains_forbidden_phase8_payload(&reference.provider_label)
+    {
+        return Err(ProtocolError {
+            code: "raw_source_key_reference_invalid".to_string(),
+            message: "raw-source key references must be metadata-only and versioned".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate raw-source vault envelopes are AEAD metadata descriptors only.
+pub fn validate_raw_source_vault_envelope(envelope: &RawSourceVaultEnvelope) -> ProtocolResult<()> {
+    validate_raw_source_key_reference(&envelope.key_reference)?;
+    if envelope.bundle_id.trim().is_empty()
+        || envelope.workspace_id.0 == 0
+        || envelope.nonce_digest.trim().is_empty()
+        || envelope.ciphertext_digest.algorithm.trim().is_empty()
+        || envelope.ciphertext_digest.value.trim().is_empty()
+        || envelope.tag_digest.trim().is_empty()
+        || envelope.aad_digest.trim().is_empty()
+        || envelope.encrypted_byte_len == 0
+        || envelope.schema_version == 0
+        || contains_forbidden_phase8_payload(&envelope.bundle_id)
+        || contains_forbidden_phase8_payload(&envelope.nonce_digest)
+        || contains_forbidden_phase8_payload(&envelope.ciphertext_digest.value)
+        || contains_forbidden_phase8_payload(&envelope.tag_digest)
+        || contains_forbidden_phase8_payload(&envelope.aad_digest)
+        || envelope.ciphertext_digest.algorithm == "devil-vault-stable-sum-v1"
+    {
+        return Err(ProtocolError {
+            code: "raw_source_vault_envelope_invalid".to_string(),
+            message: "raw-source vault envelopes require AEAD metadata, key reference, cryptographic digest, and no raw content".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate raw-source key rotation records are metadata-only.
+pub fn validate_raw_source_key_rotation_record(
+    record: &RawSourceKeyRotationRecord,
+) -> ProtocolResult<()> {
+    validate_raw_source_key_reference(&record.previous_key_reference)?;
+    validate_raw_source_key_reference(&record.new_key_reference)?;
+    if record.bundle_id.trim().is_empty()
+        || record.previous_key_reference.key_id == record.new_key_reference.key_id
+            && record.previous_key_reference.key_version == record.new_key_reference.key_version
+        || record.event_sequence.0 == 0
+        || record.correlation_id.0 == 0
+        || record.causality_id.0 == Uuid::nil()
+        || record.schema_version == 0
+        || !phase8_metadata_only_redaction(&record.redaction_hints)
+        || contains_forbidden_phase8_payload(&record.bundle_id)
+        || contains_forbidden_phase8_payload(&record.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "raw_source_key_rotation_invalid".to_string(),
+            message: "raw-source key rotation records require changed key references and metadata-only event identity".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate raw-source vault recovery reports are metadata-only.
+pub fn validate_raw_source_vault_recovery_report(
+    report: &RawSourceVaultRecoveryReport,
+) -> ProtocolResult<()> {
+    if report.recovery_id.trim().is_empty()
+        || report.event_sequence.0 == 0
+        || report.correlation_id.0 == 0
+        || report.causality_id.0 == Uuid::nil()
+        || report.schema_version == 0
+        || !phase8_metadata_only_redaction(&report.redaction_hints)
+        || contains_forbidden_phase8_payload(&report.recovery_id)
+        || report
+            .bundle_id
+            .as_deref()
+            .is_some_and(contains_forbidden_phase8_payload)
+        || contains_forbidden_phase8_payload(&report.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "raw_source_vault_recovery_invalid".to_string(),
+            message: "raw-source vault recovery reports must be fail-closed metadata-only evidence"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate separate hosted raw-source export consent.
+pub fn validate_raw_source_hosted_export_consent(
+    consent: &RawSourceHostedExportConsent,
+) -> ProtocolResult<()> {
+    if consent.grant_id.trim().is_empty()
+        || consent.principal_id.0.trim().is_empty()
+        || consent.workspace_id.0 == 0
+        || consent.endpoint_id.trim().is_empty()
+        || consent.issued_at.0 == 0
+        || consent.expires_at.0 <= consent.issued_at.0
+        || consent.revoked
+        || consent.correlation_id.0 == 0
+        || consent.schema_version == 0
+        || contains_forbidden_phase8_payload(&consent.grant_id)
+        || contains_forbidden_phase8_payload(&consent.endpoint_id)
+    {
+        return Err(ProtocolError {
+            code: "raw_source_hosted_export_consent_invalid".to_string(),
+            message: "hosted raw-source export requires current separate consent bound to endpoint and purpose".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Validate a Phase 8 storage schema manifest before migration planning.
 pub fn validate_storage_schema_manifest(manifest: &StorageSchemaManifest) -> ProtocolResult<()> {
     if manifest.subsystem_id.trim().is_empty()
@@ -16617,6 +17698,112 @@ pub fn validate_storage_schema_manifest(manifest: &StorageSchemaManifest) -> Pro
             message:
                 "storage schema manifests must be bounded metadata with compatible schema versions"
                     .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_storage_checksum(checksum: &StorageChecksum) -> ProtocolResult<()> {
+    if checksum.algorithm.trim().is_empty()
+        || checksum.value.trim().is_empty()
+        || checksum.schema_version == 0
+        || checksum.algorithm == "stable_storage_sum"
+        || checksum.algorithm == "devil-vault-stable-sum-v1"
+        || contains_forbidden_phase8_payload(&checksum.algorithm)
+        || contains_forbidden_phase8_payload(&checksum.value)
+    {
+        return Err(ProtocolError {
+            code: "storage_checksum_invalid".to_string(),
+            message: "storage checksums must use cryptographic metadata descriptors".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate storage backup markers before mutation-capable apply.
+pub fn validate_storage_backup_marker(marker: &StorageBackupMarker) -> ProtocolResult<()> {
+    validate_storage_checksum(&marker.checksum)?;
+    if marker.backup_id.trim().is_empty()
+        || marker.subsystem_id.trim().is_empty()
+        || marker.location_label.trim().is_empty()
+        || marker.event_sequence.0 == 0
+        || marker.correlation_id.0 == 0
+        || marker.causality_id.0 == Uuid::nil()
+        || marker.schema_version == 0
+        || contains_forbidden_phase8_payload(&marker.backup_id)
+        || contains_forbidden_phase8_payload(&marker.subsystem_id)
+        || contains_forbidden_phase8_payload(&marker.location_label)
+    {
+        return Err(ProtocolError {
+            code: "storage_backup_marker_invalid".to_string(),
+            message: "storage backup markers require checksum, subsystem, location label, and event identity".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate storage recovery outcomes are metadata-only.
+pub fn validate_storage_recovery_outcome(outcome: &StorageRecoveryOutcome) -> ProtocolResult<()> {
+    if outcome.recovery_id.trim().is_empty()
+        || outcome.subsystem_id.trim().is_empty()
+        || (!outcome.recovered && !outcome.quarantined)
+        || outcome.event_sequence.0 == 0
+        || outcome.correlation_id.0 == 0
+        || outcome.causality_id.0 == Uuid::nil()
+        || outcome.schema_version == 0
+        || !phase8_metadata_only_redaction(&outcome.redaction_hints)
+        || contains_forbidden_phase8_payload(&outcome.recovery_id)
+        || contains_forbidden_phase8_payload(&outcome.subsystem_id)
+        || outcome
+            .backup_id
+            .as_deref()
+            .is_some_and(contains_forbidden_phase8_payload)
+        || contains_forbidden_phase8_payload(&outcome.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "storage_recovery_outcome_invalid".to_string(),
+            message: "storage recovery outcomes must be metadata-only and fail-closed/quarantined when not recovered".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate storage subsystem health summaries are metadata-only.
+pub fn validate_storage_subsystem_health_summary(
+    summary: &StorageSubsystemHealthSummary,
+) -> ProtocolResult<()> {
+    if summary.subsystem_id.trim().is_empty()
+        || summary.event_sequence.0 == 0
+        || summary.correlation_id.0 == 0
+        || summary.causality_id.0 == Uuid::nil()
+        || summary.schema_version == 0
+        || !phase8_metadata_only_redaction(&summary.redaction_hints)
+        || contains_forbidden_phase8_payload(&summary.subsystem_id)
+        || contains_forbidden_phase8_payload(&summary.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "storage_health_summary_invalid".to_string(),
+            message: "storage health summaries must be metadata-only with valid event identity"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate storage evidence summaries are metadata-only.
+pub fn validate_storage_evidence_summary(summary: &StorageEvidenceSummary) -> ProtocolResult<()> {
+    if summary.artifact_id.trim().is_empty()
+        || summary.command_label.trim().is_empty()
+        || summary.schema_version == 0
+        || !phase8_metadata_only_redaction(&summary.redaction_hints)
+        || contains_forbidden_phase8_payload(&summary.artifact_id)
+        || contains_forbidden_phase8_payload(&summary.command_label)
+        || contains_forbidden_phase8_payload(&summary.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "storage_evidence_summary_invalid".to_string(),
+            message: "storage evidence summaries must be metadata-only command evidence"
+                .to_string(),
         });
     }
     Ok(())
@@ -16653,6 +17840,69 @@ pub fn validate_storage_migration_dry_run_report(
         return Err(ProtocolError {
             code: "storage_migration_dry_run_invalid".to_string(),
             message: "destructive storage migrations require a backup marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate explicit storage migration apply requests.
+pub fn validate_storage_migration_apply_request(
+    request: &StorageMigrationApplyRequest,
+) -> ProtocolResult<()> {
+    validate_storage_migration_dry_run_report(&request.preflight_report)?;
+    validate_storage_backup_marker(&request.backup_marker)?;
+    if request.step != request.preflight_report.step
+        || request.step.subsystem_id != request.backup_marker.subsystem_id
+        || request.principal_id.0.trim().is_empty()
+        || request.capability_decision.decision_id.0 == 0
+        || request.capability_decision.capability.0 != "storage.migration.apply"
+        || !request.capability_decision.granted
+        || request.journal_id.trim().is_empty()
+        || !request.explicit_apply_flag
+        || request.event_sequence.0 == 0
+        || request.correlation_id.0 == 0
+        || request.causality_id.0 == Uuid::nil()
+        || request.schema_version == 0
+        || !phase8_metadata_only_redaction(&request.redaction_hints)
+        || contains_forbidden_phase8_payload(&request.journal_id)
+        || contains_forbidden_phase8_payload(&request.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "storage_migration_apply_request_invalid".to_string(),
+            message: "storage migration apply requires matching preflight, backup, journal, granted capability, and explicit operator intent".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate storage migration apply outcomes are metadata-only.
+pub fn validate_storage_migration_apply_outcome(
+    outcome: &StorageMigrationApplyOutcome,
+) -> ProtocolResult<()> {
+    validate_storage_checksum(&outcome.checksum)?;
+    if outcome.migration_id.trim().is_empty()
+        || outcome.subsystem_id.trim().is_empty()
+        || outcome.backup_id.trim().is_empty()
+        || outcome.journal_id.trim().is_empty()
+        || (!outcome.applied && outcome.recovery_id.is_none())
+        || outcome.event_sequence.0 == 0
+        || outcome.correlation_id.0 == 0
+        || outcome.causality_id.0 == Uuid::nil()
+        || outcome.schema_version == 0
+        || !phase8_metadata_only_redaction(&outcome.redaction_hints)
+        || contains_forbidden_phase8_payload(&outcome.migration_id)
+        || contains_forbidden_phase8_payload(&outcome.subsystem_id)
+        || contains_forbidden_phase8_payload(&outcome.backup_id)
+        || contains_forbidden_phase8_payload(&outcome.journal_id)
+        || outcome
+            .recovery_id
+            .as_deref()
+            .is_some_and(contains_forbidden_phase8_payload)
+        || contains_forbidden_phase8_payload(&outcome.metadata_summary)
+    {
+        return Err(ProtocolError {
+            code: "storage_migration_apply_outcome_invalid".to_string(),
+            message: "storage migration apply outcomes must be metadata-only and include recovery reference when apply fails".to_string(),
         });
     }
     Ok(())
@@ -16718,9 +17968,22 @@ fn contains_forbidden_collaboration_payload(value: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+fn phase8_metadata_only_redaction(redaction_hints: &[RedactionHint]) -> bool {
+    redaction_hints.contains(&RedactionHint::MetadataOnly)
+        && !redaction_hints.contains(&RedactionHint::None)
+}
+
 fn contains_forbidden_phase8_payload(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     [
+        "-----begin",
+        "-----end",
+        "private_key",
+        "private key",
+        "key_bytes",
+        "raw_key",
+        "raw_cert",
+        "pem_body",
         "source_text",
         "source_body",
         "raw_source",

@@ -32,12 +32,15 @@ use devil_protocol::{
     validate_hosted_telemetry_spool_record, validate_phase4_runtime_audit_record,
     validate_plugin_storage_record, validate_raw_source_retention_access_audit,
     validate_remote_audit_record, validate_remote_transport_audit_summary,
-    validate_storage_migration_dry_run_report, validate_storage_repair_request,
+    validate_storage_backup_marker, validate_storage_migration_dry_run_report,
+    validate_storage_recovery_outcome, validate_storage_repair_request,
     validate_storage_schema_manifest, validate_terminal_audit_record,
 };
 use devil_security::TrustState;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+const STORAGE_CHECKSUM_ALGORITHM: &str = "devil-storage-stable-sum-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Lightweight record for persisted workspace configuration snapshots.
@@ -324,17 +327,15 @@ impl StorageMigrationRegistry {
         let bytes = fs::read(path).map_err(|err| StorageError::Failed {
             message: format!("read storage before backup: {err}"),
         })?;
-        let backup_id = format!("backup-{}", correlation_id.0.max(1));
+        let backup_id = format!("backup-{}-{}", correlation_id.0.max(1), causality_id.0);
         let backup_path = backup_dir.join(format!("{backup_id}.json"));
-        fs::write(&backup_path, &bytes).map_err(|err| StorageError::Failed {
-            message: format!("write storage backup: {err}"),
-        })?;
-        Ok(StorageBackupMarker {
+        write_file_atomically(&backup_path, &bytes)?;
+        let marker = StorageBackupMarker {
             backup_id,
             subsystem_id: subsystem_id.into(),
             location_label: backup_path.to_string_lossy().into_owned(),
             checksum: StorageChecksum {
-                algorithm: "devil-storage-stable-sum-v1".to_string(),
+                algorithm: STORAGE_CHECKSUM_ALGORITHM.to_string(),
                 value: stable_storage_sum(&bytes),
                 schema_version: 1,
             },
@@ -342,7 +343,9 @@ impl StorageMigrationRegistry {
             correlation_id,
             causality_id,
             schema_version: 1,
-        })
+        };
+        validate_storage_backup_marker(&marker).map_err(StorageError::from_protocol)?;
+        Ok(marker)
     }
 
     /// Recover a storage file from an explicit backup marker and repair request.
@@ -352,7 +355,13 @@ impl StorageMigrationRegistry {
         backup: &StorageBackupMarker,
         repair: &StorageRepairRequest,
     ) -> StorageResult<StorageRecoveryOutcome> {
+        validate_storage_backup_marker(backup).map_err(StorageError::from_protocol)?;
         validate_storage_repair_request(repair).map_err(StorageError::from_protocol)?;
+        if backup.checksum.algorithm != STORAGE_CHECKSUM_ALGORITHM {
+            return Err(StorageError::Failed {
+                message: "storage backup checksum algorithm mismatch".to_string(),
+            });
+        }
         let bytes = fs::read(&backup.location_label).map_err(|err| StorageError::Failed {
             message: format!("read storage backup: {err}"),
         })?;
@@ -361,10 +370,8 @@ impl StorageMigrationRegistry {
                 message: "storage backup checksum mismatch".to_string(),
             });
         }
-        fs::write(destination, bytes).map_err(|err| StorageError::Failed {
-            message: format!("restore storage backup: {err}"),
-        })?;
-        Ok(StorageRecoveryOutcome {
+        write_file_atomically(destination, &bytes)?;
+        let outcome = StorageRecoveryOutcome {
             recovery_id: format!("recovery-{}", repair.correlation_id.0.max(1)),
             subsystem_id: backup.subsystem_id.clone(),
             recovered: true,
@@ -376,8 +383,58 @@ impl StorageMigrationRegistry {
             causality_id: repair.causality_id,
             redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
             schema_version: 1,
-        })
+        };
+        validate_storage_recovery_outcome(&outcome).map_err(StorageError::from_protocol)?;
+        Ok(outcome)
     }
+}
+
+fn write_file_atomically(path: &Path, body: &[u8]) -> StorageResult<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|err| StorageError::Failed {
+        message: format!("create storage directory failed: {err}"),
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("storage-file");
+    let temp = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    let result = (|| -> StorageResult<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|err| StorageError::Failed {
+                message: format!("create storage temp file failed: {err}"),
+            })?;
+        file.write_all(body).map_err(|err| StorageError::Failed {
+            message: format!("write storage temp file failed: {err}"),
+        })?;
+        file.flush().map_err(|err| StorageError::Failed {
+            message: format!("flush storage temp file failed: {err}"),
+        })?;
+        file.sync_all().map_err(|err| StorageError::Failed {
+            message: format!("sync storage temp file failed: {err}"),
+        })?;
+        drop(file);
+        atomic_replace(&temp, path).map_err(|err| StorageError::Failed {
+            message: format!("replace storage file failed: {err}"),
+        })?;
+        sync_parent_directory_when_supported(parent).map_err(|err| StorageError::Failed {
+            message: format!("sync storage directory failed: {err}"),
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 fn stable_storage_sum(bytes: &[u8]) -> String {
@@ -2027,6 +2084,96 @@ mod tests {
             fs::read_to_string(&path).expect("read recovered"),
             "{\"schema_version\":1}"
         );
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(backup_dir);
+    }
+
+    #[test]
+    fn migration_backup_uses_collision_safe_backup_ids() {
+        let registry = StorageMigrationRegistry::new(2);
+        let path = temp_storage_path("migration-collision-source");
+        let backup_dir = path.with_extension("backup");
+        fs::write(&path, "{\"schema_version\":1}").expect("write source");
+
+        let first = registry
+            .backup_file(
+                &path,
+                &backup_dir,
+                "file-backed-storage",
+                CorrelationId(43),
+                non_nil_causality_id(),
+            )
+            .expect("first backup");
+        let second = registry
+            .backup_file(
+                &path,
+                &backup_dir,
+                "file-backed-storage",
+                CorrelationId(43),
+                serde_json::from_value(json!("018f0000-0000-7000-8000-000000000002"))
+                    .expect("valid causality id"),
+            )
+            .expect("second backup");
+
+        assert_ne!(first.backup_id, second.backup_id);
+        assert_ne!(first.location_label, second.location_label);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(backup_dir);
+    }
+
+    #[test]
+    fn migration_recovery_rejects_invalid_backup_marker() {
+        let registry = StorageMigrationRegistry::new(2);
+        let path = temp_storage_path("migration-invalid-marker");
+        let backup_dir = path.with_extension("backup");
+        fs::write(&path, "{\"schema_version\":1}").expect("write source");
+        let backup = registry
+            .backup_file(
+                &path,
+                &backup_dir,
+                "file-backed-storage",
+                CorrelationId(44),
+                non_nil_causality_id(),
+            )
+            .expect("backup");
+        let invalid = StorageBackupMarker {
+            subsystem_id: String::new(),
+            ..backup
+        };
+        assert!(matches!(
+            registry.recover_from_backup(&path, &invalid, &storage_repair_request()),
+            Err(StorageError::Failed { .. })
+        ));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(backup_dir);
+    }
+
+    #[test]
+    fn migration_recovery_rejects_checksum_algorithm_mismatch() {
+        let registry = StorageMigrationRegistry::new(2);
+        let path = temp_storage_path("migration-algorithm-mismatch");
+        let backup_dir = path.with_extension("backup");
+        fs::write(&path, "{\"schema_version\":1}").expect("write source");
+        let backup = registry
+            .backup_file(
+                &path,
+                &backup_dir,
+                "file-backed-storage",
+                CorrelationId(45),
+                non_nil_causality_id(),
+            )
+            .expect("backup");
+        let mismatch = StorageBackupMarker {
+            checksum: StorageChecksum {
+                algorithm: "sha256".to_string(),
+                ..backup.checksum.clone()
+            },
+            ..backup
+        };
+        assert!(matches!(
+            registry.recover_from_backup(&path, &mismatch, &storage_repair_request()),
+            Err(StorageError::Failed { message }) if message.contains("algorithm mismatch")
+        ));
         let _ = fs::remove_file(path);
         let _ = fs::remove_dir_all(backup_dir);
     }

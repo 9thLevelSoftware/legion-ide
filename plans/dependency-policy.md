@@ -185,7 +185,16 @@ Phase 6 collaboration activation is currently limited to accepted protocol DTOs,
 
 Phase 7 activates `devil-remote` only as a deterministic, metadata-first edge workspace runtime harness using protocol DTOs, capability/write precondition validation, proposal IDs for remote-side mutation requests, bounded execution descriptors, reconnect/offline metadata, and metadata-only audit records. It must not depend on app, UI, editor, project, collaboration, terminal, LSP, AI, plugin, tracker, memory, or semantic-index internals. Durable local workspace writes remain app/workspace proposal-mediated; `devil-remote` must not gain direct local filesystem or editor authority.
 
-Phase 8 currently activates `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` only as deterministic metadata-only fixture harnesses for contract, default-deny policy, storage, observability, and evidence-gate validation. These crates must remain default-off, app-independent, protocol-mediated, and unable to perform production network transport, native PTY/process execution, hosted export, direct workspace/editor mutation, or raw-source persistence until the matching production gates pass. ADR-0025 through ADR-0029 now define the production implementation direction, but Phase 8 GA acceptance still requires ownership tests, security/privacy evidence, platform/fault evidence, storage migration/recovery evidence, and release gates.
+Phase 8 currently activates `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` as default-deny, protocol-mediated implementation slices. Production activation remains gated: remote transport, native PTY execution, hosted telemetry export, raw-source vault operation, storage migration apply, and operational GA are accepted only after the matching DTO contracts, security policy, platform parity, privacy evidence, recovery evidence, and archived release gates pass. Deterministic fixture paths may remain for tests, but production paths must be explicitly named/configured and impossible to confuse with GA behavior.
+
+Phase 8 production dependency rebaseline permits the following external crates only for the named gates and only when the same change updates manifests, tests, evidence, and `deny.toml` review notes:
+
+- Remote TLS/mTLS carrier (`devil-remote-transport`): `tokio` with network/I/O/runtime features, `rustls`, `tokio-rustls`, `rustls-pemfile`, and certificate/root handling crates that do not expose private key material in diagnostics.
+- Hosted telemetry HTTPS exporter (`devil-telemetry`): either `hyper` plus `hyper-rustls` or a rustls-only `reqwest` profile; native-tls/OpenSSL-backed production profiles are not approved by this policy.
+- Native terminal PTY (`devil-platform` and `devil-terminal`): `windows` for ConPTY and either `nix` or `rustix` for Unix PTY, process-group, and signal handling.
+- Raw-source production vault (`devil-retention`): `aes-gcm` or `chacha20poly1305`, `rand_core`/`getrandom`, `sha2`, and `zeroize`.
+
+These dependency entries are approval boundaries, not activation by themselves. A production runtime may not depend on app/UI/editor/project authority and must reject before network, process, filesystem, or crypto side effects when the security broker denies a request.
 
 Phase 8 production capability names are reserved for security-broker decisions before runtime activation: `remote.transport.connect`, `remote.transport.listen`, `remote.agent.package.activate`, `terminal.launch`, `terminal.input`, `terminal.resize`, `terminal.close`, `terminal.kill`, `telemetry.spool.write`, `telemetry.export.hosted`, `telemetry.consent.revoke`, `retention.raw_source.capture`, `retention.raw_source.read`, `retention.raw_source.delete`, `retention.raw_source.export.hosted`, `storage.migration.apply`, and `storage.migration.repair`. Unknown capability names remain denied, air-gap denies hosted egress and non-loopback remote transport, and terminal/runtime/retention/telemetry activation remains disabled by default.
 
@@ -568,19 +577,37 @@ Phase 8 production capability names are reserved for security-broker decisions b
   - `RemoteAuditRecord`
   - `RemoteTransportEndpointDescriptor`
   - `RemoteTransportPeerIdentity`
+  - `RemoteTransportCredentialReference`
+  - `RemoteTransportMutualTlsMode`
+  - `RemoteTransportTlsPolicy`
+  - `RemoteTransportEndpointPolicy`
+  - `RemoteTransportConnectionAttempt`
+  - `RemoteTransportCarrierDiagnostic`
   - `RemoteTransportSchemaCompatibility`
   - `RemoteTransportHandshake`
   - `RemoteTransportFrameMetadata`
   - `RemoteTransportResumeToken`
   - `RemoteTransportHealthSummary`
   - `RemoteTransportAuditSummary`
+  - `RemoteAgentPackageLifecycleState`
+  - `RemoteAgentPackageLifecycleRecord`
   - `TerminalRuntimeState`
   - `TerminalLaunchPolicyContract`
   - `TerminalOutputChunk`
+  - `TerminalKillEscalation`
+  - `TerminalCloseRequest`
+  - `TerminalKillRequest`
   - `TerminalAuditRecord`
   - `HostedTelemetryCategory`
   - `HostedTelemetryEndpointDescriptor`
   - `HostedTelemetryConsentGrant`
+  - `HostedTelemetryConsentState`
+  - `HostedTelemetryConsentBinding`
+  - `HostedTelemetryTlsPolicy`
+  - `HostedTelemetryProxyPolicy`
+  - `HostedTelemetryRetryPolicy`
+  - `HostedTelemetryEndpointPolicy`
+  - `HostedTelemetryDiagnosticsSnapshot`
   - `PrivacyClassification`
   - `HostedTelemetrySpoolRecord`
   - `HostedTelemetryExportBatch`
@@ -594,6 +621,13 @@ Phase 8 production capability names are reserved for security-broker decisions b
   - `RawSourceRetentionAccessAudit`
   - `RawSourceRetentionTombstone`
   - `HostedRetentionExportLinkage`
+  - `RawSourceVaultAlgorithm`
+  - `RawSourceKeyReference`
+  - `RawSourceVaultEnvelope`
+  - `RawSourceKeyRotationRecord`
+  - `RawSourceVaultRecoveryState`
+  - `RawSourceVaultRecoveryReport`
+  - `RawSourceHostedExportConsent`
   - `StorageSchemaManifest`
   - `StorageMigrationStep`
   - `StorageMigrationDryRunReport`
@@ -604,6 +638,8 @@ Phase 8 production capability names are reserved for security-broker decisions b
   - `StorageReplayManifest`
   - `StorageSubsystemHealthSummary`
   - `StorageEvidenceSummary`
+  - `StorageMigrationApplyRequest`
+  - `StorageMigrationApplyOutcome`
 
 ### 3. Forbidden/Deferred Edges
 
@@ -622,7 +658,7 @@ Phase 8 production capability names are reserved for security-broker decisions b
 ### 4. Runtime Surface Activation Gates
 
 - Phase 3 activates `devil-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
-- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-collaboration` is activated for the limited Phase 6 deterministic local collaboration runtime described above. `devil-remote` is activated for the limited Phase 7 deterministic edge workspace harness described above. `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` are activated only for the Phase 8 deterministic metadata-only fixture slice described above. Standalone production `devil-lsp`, production remote transport, native terminal/PTTY execution, hosted telemetry export, and raw-source retention remain ADR/evidence gated outside accepted semantic/LSP supervision contracts, Phase 7 remote execution descriptors, and Phase 8 fixture contracts. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-collaboration` is activated for the limited Phase 6 deterministic local collaboration runtime described above. `devil-remote` is activated for the limited Phase 7 deterministic edge workspace harness described above. `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` are activated only for the current Phase 8 default-deny implementation slice described above. Standalone production `devil-lsp`, production remote transport, native terminal/PTTY execution, hosted telemetry export, raw-source vault activation, and storage migration apply remain evidence gated until the Phase 8 GA checklist and archived release gates are accepted. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
 - Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated
   - an explicit dependency-policy entry in this document

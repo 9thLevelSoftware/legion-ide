@@ -383,6 +383,8 @@ pub struct RemoteDevelopmentPolicy {
     pub semantic_query_enabled: bool,
     /// Whether metadata-only remote audit export is enabled.
     pub audit_export_enabled: bool,
+    /// Whether remote agent package activation is enabled.
+    pub agent_package_activation_enabled: bool,
     /// Whether offline resume manifests are enabled.
     pub offline_resume_enabled: bool,
 }
@@ -414,6 +416,7 @@ impl Default for RemoteDevelopmentPolicy {
             lsp_enabled: false,
             semantic_query_enabled: false,
             audit_export_enabled: false,
+            agent_package_activation_enabled: false,
             offline_resume_enabled: false,
         }
     }
@@ -854,6 +857,25 @@ impl DenyByDefaultBroker {
         }
     }
 
+    fn require_https_network_target(
+        &self,
+        context: &CapabilityRequestContext,
+    ) -> Option<SecurityDecision> {
+        let Some(target) = &context.network_target else {
+            return Some(SecurityDecision::deny(
+                "network target metadata required by policy",
+            ));
+        };
+
+        if target.scheme != "https" {
+            return Some(SecurityDecision::deny(
+                "production Phase 8 egress requires HTTPS transport",
+            ));
+        }
+
+        None
+    }
+
     fn ai_capability_decision(
         &self,
         trust: TrustState,
@@ -1013,13 +1035,18 @@ impl DenyByDefaultBroker {
                 if !self.policy.remote_policy.runtime_sessions_enabled {
                     return SecurityDecision::deny("remote sessions are disabled by policy");
                 }
+                if let Some(decision) = self.require_https_network_target(context) {
+                    return decision;
+                }
                 self.network_target_decision(context)
             }
             "remote.transport.listen" => SecurityDecision::deny(
                 "remote inbound transport listen is not enabled in Phase 8 policy",
             ),
             "remote.agent.package.activate" => {
-                if self.policy.remote_policy.runtime_sessions_enabled {
+                if self.policy.remote_policy.runtime_sessions_enabled
+                    && self.policy.remote_policy.agent_package_activation_enabled
+                {
                     SecurityDecision::allow()
                 } else {
                     SecurityDecision::deny("remote agent package activation is disabled by policy")
@@ -1029,6 +1056,11 @@ impl DenyByDefaultBroker {
                 if self.policy.remote_policy.runtime_sessions_enabled
                     && self.policy.remote_policy.filesystem_enabled
                 {
+                    if capability == "remote.fs.write"
+                        && let Some(decision) = self.write_size_decision(context)
+                    {
+                        return decision;
+                    }
                     SecurityDecision::allow()
                 } else {
                     SecurityDecision::deny("remote filesystem is disabled by policy")
@@ -1068,7 +1100,12 @@ impl DenyByDefaultBroker {
                     SecurityDecision::deny("remote sessions are disabled by policy")
                 }
             }
-            "remote.egress" => self.network_target_decision(context),
+            "remote.egress" => {
+                if !self.policy.remote_policy.runtime_sessions_enabled {
+                    return SecurityDecision::deny("remote sessions are disabled by policy");
+                }
+                self.network_target_decision(context)
+            }
             "remote.audit.export" => {
                 if self.policy.remote_policy.audit_export_enabled {
                     SecurityDecision::allow()
@@ -1115,14 +1152,32 @@ impl DenyByDefaultBroker {
                 if !self.policy.telemetry_policy.export_enabled {
                     return SecurityDecision::deny("hosted telemetry export is disabled by policy");
                 }
+                if self.policy.telemetry_policy.require_explicit_consent
+                    && !context.hosted_telemetry_consent_current
+                {
+                    return SecurityDecision::deny(
+                        "hosted telemetry export requires current explicit consent",
+                    );
+                }
+                if let Some(decision) = self.require_https_network_target(context) {
+                    return decision;
+                }
                 self.network_target_decision(context)
             }
             "telemetry.spool.write" => {
-                if self.policy.telemetry_policy.spool_write_enabled {
-                    SecurityDecision::allow()
-                } else {
-                    SecurityDecision::deny("hosted telemetry spool writes are disabled by policy")
+                if !self.policy.telemetry_policy.spool_write_enabled {
+                    return SecurityDecision::deny(
+                        "hosted telemetry spool writes are disabled by policy",
+                    );
                 }
+                if self.policy.telemetry_policy.require_explicit_consent
+                    && !context.hosted_telemetry_consent_current
+                {
+                    return SecurityDecision::deny(
+                        "hosted telemetry spool write requires current explicit consent",
+                    );
+                }
+                SecurityDecision::allow()
             }
             "telemetry.consent.revoke" => SecurityDecision::allow(),
             _ => {
@@ -1154,17 +1209,34 @@ impl DenyByDefaultBroker {
             "retention.raw_source.capture"
             | "retention.raw_source.read"
             | "retention.raw_source.export" => {
-                if self.policy.retention_policy.capture_enabled {
-                    SecurityDecision::allow()
-                } else {
-                    SecurityDecision::deny("raw-source retention is disabled by policy")
+                if !self.policy.retention_policy.capture_enabled {
+                    return SecurityDecision::deny("raw-source retention is disabled by policy");
                 }
+                if self.policy.retention_policy.require_explicit_consent
+                    && !context.raw_source_retention_consent_current
+                {
+                    return SecurityDecision::deny(
+                        "raw-source retention requires current explicit consent",
+                    );
+                }
+                SecurityDecision::allow()
             }
             "retention.raw_source.export.hosted" => {
                 if !self.policy.retention_policy.capture_enabled {
                     return SecurityDecision::deny(
                         "raw-source hosted export is disabled by policy",
                     );
+                }
+                if self.policy.retention_policy.require_explicit_consent
+                    && (!context.raw_source_retention_consent_current
+                        || !context.raw_source_hosted_export_consent_current)
+                {
+                    return SecurityDecision::deny(
+                        "raw-source hosted export requires current local and hosted consent",
+                    );
+                }
+                if let Some(decision) = self.require_https_network_target(context) {
+                    return decision;
                 }
                 self.network_target_decision(context)
             }
@@ -1196,10 +1268,12 @@ impl DenyByDefaultBroker {
         }
         match capability {
             "storage.migration.apply" => {
-                if self.policy.storage_migration_policy.apply_enabled {
+                if !self.policy.storage_migration_policy.apply_enabled {
+                    SecurityDecision::deny("storage migration apply is disabled by policy")
+                } else if context.storage_explicit_apply {
                     SecurityDecision::allow()
                 } else {
-                    SecurityDecision::deny("storage migration apply is disabled by policy")
+                    SecurityDecision::deny("storage migration apply requires explicit apply flag")
                 }
             }
             "storage.migration.repair" => {
@@ -1383,11 +1457,23 @@ impl DenyByDefaultBroker {
             if !self.policy.terminal_policy.allow_untrusted && trust != TrustState::Trusted {
                 return SecurityDecision::deny("terminal denied for untrusted workspace");
             }
-            return if self.policy.terminal_policy.runtime_enabled {
-                SecurityDecision::allow()
-            } else {
-                SecurityDecision::deny("terminal runtime is disabled by policy")
-            };
+            if !self.policy.terminal_policy.runtime_enabled {
+                return SecurityDecision::deny("terminal runtime is disabled by policy");
+            }
+            if capability == "terminal.launch" {
+                let Some(command) = context.command_binary.as_deref() else {
+                    return SecurityDecision::deny("terminal launch requires command metadata");
+                };
+                if matches!(
+                    self.policy.command_taxonomy.classify(command),
+                    CommandClass::Network
+                ) {
+                    return SecurityDecision::deny(
+                        "terminal launch denied for network-capable command",
+                    );
+                }
+            }
+            return SecurityDecision::allow();
         }
 
         if let Some(rest) = capability.strip_prefix("lsp.") {
@@ -1781,6 +1867,52 @@ mod tests {
     }
 
     #[test]
+    fn phase8_remote_egress_requires_runtime_session() {
+        let mut broker = DenyByDefaultBroker::default();
+        let denied = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.egress".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "localhost".to_string(),
+                    port: Some(9443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(denied, SecurityDecision::Deny(reason) if reason.contains("remote sessions"))
+        );
+
+        let policy = SecurityPolicy {
+            remote_policy: RemoteDevelopmentPolicy {
+                runtime_sessions_enabled: true,
+                ..RemoteDevelopmentPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let allowed = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.egress".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "localhost".to_string(),
+                    port: Some(9443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(allowed, SecurityDecision::Allow));
+    }
+
+    #[test]
     fn remote_connect_denies_non_loopback_air_gap_egress() {
         let policy = SecurityPolicy {
             remote_policy: RemoteDevelopmentPolicy {
@@ -1941,6 +2073,7 @@ mod tests {
             CapabilityId("telemetry.export.hosted".to_string()),
             None,
             CapabilityRequestContext {
+                hosted_telemetry_consent_current: true,
                 network_target: Some(devil_protocol::NetworkTarget {
                     scheme: "https".to_string(),
                     host: "telemetry.example.com".to_string(),
@@ -1965,6 +2098,7 @@ mod tests {
             CapabilityId("telemetry.export.hosted".to_string()),
             None,
             CapabilityRequestContext {
+                hosted_telemetry_consent_current: true,
                 network_target: Some(devil_protocol::NetworkTarget {
                     scheme: "https".to_string(),
                     host: "telemetry.example.com".to_string(),
@@ -1998,6 +2132,72 @@ mod tests {
             None,
         );
         assert!(matches!(revoke_untrusted, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn phase8_hosted_telemetry_requires_current_consent_and_https() {
+        let policy = SecurityPolicy {
+            network_policy: NetworkPolicy {
+                air_gap: false,
+                local_provider_only: false,
+                allowlist: vec!["telemetry.example.com".to_string()],
+                ..NetworkPolicy::default()
+            },
+            telemetry_policy: HostedTelemetryPolicy {
+                export_enabled: true,
+                spool_write_enabled: true,
+                require_explicit_consent: true,
+                ..HostedTelemetryPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let missing_consent = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("telemetry.export.hosted".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "telemetry.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(missing_consent, SecurityDecision::Deny(reason) if reason.contains("consent"))
+        );
+
+        let plaintext = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("telemetry.export.hosted".to_string()),
+            None,
+            CapabilityRequestContext {
+                hosted_telemetry_consent_current: true,
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "http".to_string(),
+                    host: "telemetry.example.com".to_string(),
+                    port: Some(80),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(plaintext, SecurityDecision::Deny(reason) if reason.contains("HTTPS")));
+
+        let spool = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("telemetry.spool.write".to_string()),
+            None,
+            CapabilityRequestContext {
+                hosted_telemetry_consent_current: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(spool, SecurityDecision::Allow));
     }
 
     #[test]
@@ -2050,6 +2250,50 @@ mod tests {
     }
 
     #[test]
+    fn phase8_raw_source_retention_requires_current_consent() {
+        let policy = SecurityPolicy {
+            network_policy: NetworkPolicy {
+                air_gap: false,
+                local_provider_only: false,
+                allowlist: vec!["support.example.com".to_string()],
+                ..NetworkPolicy::default()
+            },
+            retention_policy: RawSourceRetentionSecurityPolicy {
+                capture_enabled: true,
+                require_explicit_consent: true,
+                ..RawSourceRetentionSecurityPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let capture = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("retention.raw_source.capture".to_string()),
+            None,
+        );
+        assert!(matches!(capture, SecurityDecision::Deny(reason) if reason.contains("consent")));
+
+        let hosted = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("retention.raw_source.export.hosted".to_string()),
+            None,
+            CapabilityRequestContext {
+                raw_source_retention_consent_current: true,
+                raw_source_hosted_export_consent_current: true,
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "https".to_string(),
+                    host: "support.example.com".to_string(),
+                    port: Some(443),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(hosted, SecurityDecision::Allow));
+    }
+
+    #[test]
     fn phase8_terminal_runtime_capabilities_are_disabled_by_default() {
         let mut broker = DenyByDefaultBroker::default();
 
@@ -2081,6 +2325,53 @@ mod tests {
         assert!(
             matches!(unknown, SecurityDecision::Deny(reason) if reason.contains("deny-by-default"))
         );
+    }
+
+    #[test]
+    fn phase8_terminal_launch_requires_command_metadata_and_denies_network_tools() {
+        let policy = SecurityPolicy {
+            terminal_policy: TerminalPolicy {
+                runtime_enabled: true,
+                ..TerminalPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let missing_command = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("terminal.launch".to_string()),
+            None,
+        );
+        assert!(
+            matches!(missing_command, SecurityDecision::Deny(reason) if reason.contains("command metadata"))
+        );
+
+        let network_tool = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("terminal.launch".to_string()),
+            None,
+            CapabilityRequestContext {
+                command_binary: Some("curl".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(network_tool, SecurityDecision::Deny(reason) if reason.contains("network-capable"))
+        );
+
+        let shell = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("terminal.launch".to_string()),
+            None,
+            CapabilityRequestContext {
+                command_binary: Some("bash".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(shell, SecurityDecision::Allow));
     }
 
     #[test]
@@ -2170,6 +2461,33 @@ mod tests {
         assert!(
             matches!(untrusted, SecurityDecision::Deny(reason) if reason.contains("untrusted"))
         );
+
+        let trusted_without_activation = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.agent.package.activate".to_string()),
+            None,
+        );
+        assert!(
+            matches!(trusted_without_activation, SecurityDecision::Deny(reason) if reason.contains("disabled"))
+        );
+
+        let policy = SecurityPolicy {
+            remote_policy: RemoteDevelopmentPolicy {
+                runtime_sessions_enabled: true,
+                agent_package_activation_enabled: true,
+                ..RemoteDevelopmentPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let allowed = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.agent.package.activate".to_string()),
+            None,
+        );
+        assert!(matches!(allowed, SecurityDecision::Allow));
     }
 
     #[test]
@@ -2216,6 +2534,38 @@ mod tests {
             None,
             CapabilityRequestContext {
                 storage_explicit_repair: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(allowed, SecurityDecision::Allow));
+    }
+
+    #[test]
+    fn phase8_storage_migration_apply_requires_explicit_flag() {
+        let policy = SecurityPolicy {
+            storage_migration_policy: StorageMigrationSecurityPolicy {
+                apply_enabled: true,
+                ..StorageMigrationSecurityPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let apply = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("storage.migration.apply".to_string()),
+            None,
+        );
+        assert!(
+            matches!(apply, SecurityDecision::Deny(reason) if reason.contains("explicit apply flag"))
+        );
+        let allowed = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("storage.migration.apply".to_string()),
+            None,
+            CapabilityRequestContext {
+                storage_explicit_apply: true,
                 ..Default::default()
             },
         );

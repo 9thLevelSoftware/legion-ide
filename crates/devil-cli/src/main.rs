@@ -14,6 +14,7 @@ const PHASE_GATE_COMMANDS: &[&str] = &[
     "cargo test --workspace --all-targets",
     "cargo clippy --workspace --all-targets -- -D warnings",
     "cargo deny check",
+    "cargo run -p devil-cli -- evidence check --phase phase8",
 ];
 
 const PHASE0_EVIDENCE_FILES: &[&str] = &[
@@ -63,6 +64,25 @@ const PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
     "cargo-clippy-workspace-all-targets.txt",
     "cargo-deny-check.txt",
     "xtask-check-deps.txt",
+];
+
+const PHASE8_ACCEPTED_REQUIRED_MARKERS: &[&str] = &[
+    "Runtime surface status: Production GA runtime surfaces are active behind accepted policy gates.",
+    "Platform matrix: Linux, Windows, and macOS validated.",
+    "Release readiness: Security, privacy, operations, rollback, canary, incident, and supply-chain signoff complete.",
+    "Final gate outputs archived from current commands.",
+];
+
+const PHASE8_STALE_DEFERRED_MARKERS: &[&str] = &[
+    "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred",
+    "not final GA acceptance evidence",
+    "fixture slice is active",
+];
+
+const PHASE8_NOT_ACCEPTED_ALLOWED_MARKERS: &[&str] = &[
+    "Runtime surface status:",
+    "Phase 8 remains future-gated",
+    "Deterministic metadata-only fixture slice",
 ];
 
 const STORAGE_FORBIDDEN_MARKERS: &[&str] = &[
@@ -568,6 +588,21 @@ fn check_phase8_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) 
                 "Phase 8 is marked accepted but still declares scaffold evidence".to_string(),
             );
         }
+        for marker in PHASE8_STALE_DEFERRED_MARKERS {
+            if phase8.contains(marker) {
+                issues.push(format!(
+                    "Phase 8 is marked accepted but still contains stale deferred marker `{marker}`"
+                ));
+            }
+        }
+        for marker in PHASE8_ACCEPTED_REQUIRED_MARKERS {
+            require_text(
+                &phase8,
+                marker,
+                &format!("Phase 8 final GA marker `{marker}`"),
+                issues,
+            );
+        }
     } else {
         require_text(
             &phase8,
@@ -575,12 +610,15 @@ fn check_phase8_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) 
             "Phase 8 remains gated until GA evidence is complete",
             issues,
         );
-        require_text(
-            &phase8,
-            "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred",
-            "Phase 8 production runtime surfaces remain deferred",
-            issues,
-        );
+        if !PHASE8_NOT_ACCEPTED_ALLOWED_MARKERS
+            .iter()
+            .any(|marker| phase8.contains(marker))
+        {
+            issues.push(
+                "Phase 8 is not accepted but does not describe the current gated runtime posture"
+                    .to_string(),
+            );
+        }
     }
 }
 

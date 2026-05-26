@@ -4230,6 +4230,10 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
             plugin_sandbox_operation_class: Some(PluginSandboxOperationClass::HostCall),
             lsp_server_binary: Some("rust-analyzer".to_string()),
             storage_explicit_repair: false,
+            storage_explicit_apply: false,
+            hosted_telemetry_consent_current: false,
+            raw_source_retention_consent_current: false,
+            raw_source_hosted_export_consent_current: false,
         },
         correlation_id: CorrelationId(91),
     };
@@ -4260,7 +4264,11 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                 "plugin_quota_class": "HostCall",
                 "plugin_sandbox_operation_class": "HostCall",
                 "lsp_server_binary": "rust-analyzer",
-                "storage_explicit_repair": false
+                "storage_explicit_repair": false,
+                "storage_explicit_apply": false,
+                "hosted_telemetry_consent_current": false,
+                "raw_source_retention_consent_current": false,
+                "raw_source_hosted_export_consent_current": false
             },
             "correlation_id": 91
         }
@@ -4306,6 +4314,10 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                 "rust-analyzer"
             );
             assert!(!context.storage_explicit_repair);
+            assert!(!context.storage_explicit_apply);
+            assert!(!context.hosted_telemetry_consent_current);
+            assert!(!context.raw_source_retention_consent_current);
+            assert!(!context.raw_source_hosted_export_consent_current);
         }
         _ => panic!("unexpected capability request variant"),
     }
@@ -6785,6 +6797,153 @@ fn dto_contracts_phase8_remote_transport_handshake_fails_closed() {
 }
 
 #[test]
+fn dto_contracts_phase8_remote_transport_tls_policy_rejects_plaintext_and_inline_keys() {
+    let credential = RemoteTransportCredentialReference {
+        reference_id: "client-cert-ref".to_string(),
+        kind: "client-cert".to_string(),
+        digest: FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: "abc123".to_string(),
+        },
+        schema_version: 1,
+    };
+    let tls_policy = RemoteTransportTlsPolicy {
+        require_tls: true,
+        server_identity: "dns:localhost".to_string(),
+        root_store_reference: None,
+        certificate_pin_reference: None,
+        mtls_mode: RemoteTransportMutualTlsMode::Required,
+        client_credential_reference: Some(credential.clone()),
+        alpn_protocols: vec!["devil-remote/phase8".to_string()],
+        min_schema_version: 1,
+        max_schema_version: 1,
+        schema_version: 1,
+    };
+    validate_remote_transport_tls_policy(&tls_policy).expect("mTLS policy uses references only");
+
+    let missing_client = RemoteTransportTlsPolicy {
+        client_credential_reference: None,
+        ..tls_policy.clone()
+    };
+    assert!(validate_remote_transport_tls_policy(&missing_client).is_err());
+
+    let inline_key = RemoteTransportTlsPolicy {
+        client_credential_reference: Some(RemoteTransportCredentialReference {
+            reference_id: "-----BEGIN PRIVATE KEY-----".to_string(),
+            ..credential
+        }),
+        ..tls_policy
+    };
+    assert!(validate_remote_transport_tls_policy(&inline_key).is_err());
+
+    let endpoint_policy = RemoteTransportEndpointPolicy {
+        endpoint: RemoteTransportEndpointDescriptor {
+            endpoint_id: "loopback".to_string(),
+            scheme: "http".to_string(),
+            host: "localhost".to_string(),
+            port: Some(8080),
+            loopback_only: true,
+            schema_version: 1,
+        },
+        allowed_schemes: vec!["http".to_string()],
+        redirects_allowed: false,
+        schema_version: 1,
+    };
+    assert!(validate_remote_transport_endpoint_policy(&endpoint_policy).is_err());
+}
+
+#[test]
+fn dto_contracts_phase8_remote_transport_connection_attempt_fails_closed() {
+    let credential = RemoteTransportCredentialReference {
+        reference_id: "client-cert-ref".to_string(),
+        kind: "client-cert".to_string(),
+        digest: FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: "abc123".to_string(),
+        },
+        schema_version: 1,
+    };
+    let attempt = RemoteTransportConnectionAttempt {
+        endpoint_policy: RemoteTransportEndpointPolicy {
+            endpoint: RemoteTransportEndpointDescriptor {
+                endpoint_id: "loopback".to_string(),
+                scheme: "https".to_string(),
+                host: "localhost".to_string(),
+                port: Some(9443),
+                loopback_only: true,
+                schema_version: 1,
+            },
+            allowed_schemes: vec!["https".to_string()],
+            redirects_allowed: false,
+            schema_version: 1,
+        },
+        tls_policy: RemoteTransportTlsPolicy {
+            require_tls: true,
+            server_identity: "dns:localhost".to_string(),
+            root_store_reference: None,
+            certificate_pin_reference: None,
+            mtls_mode: RemoteTransportMutualTlsMode::Required,
+            client_credential_reference: Some(credential),
+            alpn_protocols: vec!["devil-remote/phase8".to_string()],
+            min_schema_version: 1,
+            max_schema_version: 2,
+            schema_version: 1,
+        },
+        selected_alpn: "devil-remote/phase8".to_string(),
+        selected_schema_version: 1,
+        timeout_ms: 5_000,
+        cancellation_requested: false,
+        capability_decision: remote_capability_decision("remote.transport.connect"),
+        event_sequence: EventSequence(78),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "tls=ok mtls=required endpoint=loopback".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_remote_transport_connection_attempt(&attempt).expect("connection attempt is valid");
+
+    let downgrade = RemoteTransportConnectionAttempt {
+        selected_alpn: "plaintext".to_string(),
+        ..attempt.clone()
+    };
+    assert!(validate_remote_transport_connection_attempt(&downgrade).is_err());
+
+    let diagnostic = RemoteTransportCarrierDiagnostic {
+        session_id: Some(RemoteWorkspaceSessionId(7001)),
+        state: RemoteTransportLifecycleState::Active,
+        event_sequence: EventSequence(79),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "tls_handshake=ok frame_count=0".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_remote_transport_carrier_diagnostic(&diagnostic).expect("diagnostic is metadata-only");
+
+    let lifecycle = RemoteAgentPackageLifecycleRecord {
+        agent_id: RemoteAgentId(7201),
+        authority_id: RemoteAuthorityId(7101),
+        package_id: "pkg-devil-agent".to_string(),
+        package_digest: FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: "pkgdigest".to_string(),
+        },
+        state: RemoteAgentPackageLifecycleState::Activated,
+        previous_state: Some(RemoteAgentPackageLifecycleState::Healthy),
+        rollback_reference: Some("rollback-ref".to_string()),
+        event_sequence: EventSequence(80),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "package activated health=ok".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_remote_agent_package_lifecycle_record(&lifecycle)
+        .expect("package lifecycle is metadata-only");
+}
+
+#[test]
 fn dto_contracts_phase8_terminal_and_transport_audits_reject_raw_markers() {
     let transport = RemoteTransportAuditSummary {
         session_id: RemoteWorkspaceSessionId(7001),
@@ -6819,6 +6978,96 @@ fn dto_contracts_phase8_terminal_and_transport_audits_reject_raw_markers() {
         validate_terminal_audit_record(&TerminalAuditRecord {
             metadata_summary: "terminal_output=secret transcript".to_string(),
             ..terminal
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn dto_contracts_phase8_terminal_requests_validate_policy_and_bounds() {
+    let launch = TerminalLaunchPolicyContract {
+        principal_id: PrincipalId("terminal-principal".to_string()),
+        workspace_id: WorkspaceId(11),
+        trust_state: WorkspaceTrustState::Trusted,
+        capability_id: CapabilityId("terminal.launch".to_string()),
+        cwd_policy: "workspace-contained".to_string(),
+        output_byte_limit: 64 * 1024,
+        timeout_seconds: 30,
+        schema_version: 1,
+    };
+    validate_terminal_launch_policy_contract(&launch).expect("launch policy is valid");
+    assert!(
+        validate_terminal_launch_policy_contract(&TerminalLaunchPolicyContract {
+            trust_state: WorkspaceTrustState::Untrusted,
+            ..launch
+        })
+        .is_err()
+    );
+
+    let input = TerminalInput {
+        session_id: TerminalSessionId(42),
+        correlation_id: CorrelationId(901),
+        payload: "q".to_string(),
+    };
+    validate_terminal_input(&input).expect("bounded input is valid");
+    assert!(
+        validate_terminal_input(&TerminalInput {
+            payload: "secret=abc".to_string(),
+            ..input
+        })
+        .is_err()
+    );
+
+    validate_terminal_resize(&TerminalResize {
+        session_id: TerminalSessionId(42),
+        cols: 120,
+        rows: 30,
+    })
+    .expect("resize is valid");
+    assert!(
+        validate_terminal_resize(&TerminalResize {
+            session_id: TerminalSessionId(42),
+            cols: 0,
+            rows: 30,
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn dto_contracts_phase8_terminal_kill_request_rejects_unsupported_escalation() {
+    let close = TerminalCloseRequest {
+        session_id: TerminalSessionId(42),
+        principal_id: PrincipalId("terminal-principal".to_string()),
+        capability_id: CapabilityId("terminal.close".to_string()),
+        event_sequence: EventSequence(81),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "close requested state=running".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_terminal_close_request(&close).expect("close request is valid");
+
+    let kill = TerminalKillRequest {
+        session_id: TerminalSessionId(42),
+        principal_id: PrincipalId("terminal-principal".to_string()),
+        capability_id: CapabilityId("terminal.kill".to_string()),
+        escalation: TerminalKillEscalation::Terminate,
+        kill_tree_authorized: false,
+        escalation_timeout_ms: 1_000,
+        event_sequence: EventSequence(82),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "kill escalation=terminate".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_terminal_kill_request(&kill).expect("terminate kill is valid");
+    assert!(
+        validate_terminal_kill_request(&TerminalKillRequest {
+            escalation: TerminalKillEscalation::KillTree,
+            ..kill
         })
         .is_err()
     );
@@ -6872,6 +7121,103 @@ fn dto_contracts_phase8_hosted_telemetry_requires_consent_and_metadata_only_reco
         validate_hosted_telemetry_export_batch(&HostedTelemetryExportBatch {
             records: vec![raw_record],
             ..batch
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn dto_contracts_phase8_hosted_telemetry_policy_rejects_non_https_and_revoked_consent() {
+    let binding = HostedTelemetryConsentBinding {
+        grant_id: "grant-telemetry-1".to_string(),
+        principal_id: PrincipalId("principal-telemetry".to_string()),
+        workspace_id: WorkspaceId(11),
+        endpoint_id: "telemetry-local".to_string(),
+        region: "local-test".to_string(),
+        categories: vec![HostedTelemetryCategory::Diagnostics],
+        issued_at: TimestampMillis(100),
+        revocation_generation: 1,
+        state: HostedTelemetryConsentState::Current,
+        correlation_id: CorrelationId(901),
+        schema_version: 1,
+    };
+    validate_hosted_telemetry_consent_binding(&binding).expect("current consent is valid");
+    assert!(
+        validate_hosted_telemetry_consent_binding(&HostedTelemetryConsentBinding {
+            state: HostedTelemetryConsentState::Revoked,
+            ..binding
+        })
+        .is_err()
+    );
+
+    let policy = HostedTelemetryEndpointPolicy {
+        endpoint: HostedTelemetryEndpointDescriptor {
+            endpoint_id: "telemetry-local".to_string(),
+            endpoint_label: "https://telemetry.invalid".to_string(),
+            region: "local-test".to_string(),
+            allowlisted: true,
+            schema_version: 1,
+        },
+        tls_policy: HostedTelemetryTlsPolicy {
+            https_required: true,
+            min_tls_version: "TLS1.3".to_string(),
+            certificate_validation_required: true,
+            schema_version: 1,
+        },
+        proxy_policy: HostedTelemetryProxyPolicy {
+            proxy_allowed: false,
+            proxy_endpoint_id: None,
+            bypass_allowed: false,
+            schema_version: 1,
+        },
+        retry_policy: HostedTelemetryRetryPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 5_000,
+            retry_after_allowed: true,
+            schema_version: 1,
+        },
+        allowed_categories: vec![HostedTelemetryCategory::Diagnostics],
+        max_body_bytes: 64 * 1024,
+        schema_version: 1,
+    };
+    validate_hosted_telemetry_endpoint_policy(&policy).expect("https endpoint policy is valid");
+    assert!(
+        validate_hosted_telemetry_endpoint_policy(&HostedTelemetryEndpointPolicy {
+            endpoint: HostedTelemetryEndpointDescriptor {
+                endpoint_label: "http://telemetry.invalid".to_string(),
+                ..policy.endpoint.clone()
+            },
+            ..policy
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn dto_contracts_phase8_hosted_telemetry_diagnostics_are_metadata_only() {
+    let snapshot = HostedTelemetryDiagnosticsSnapshot {
+        workspace_id: WorkspaceId(11),
+        pending_record_count: 1,
+        dropped_record_count: 0,
+        oldest_record_age_ms: Some(100),
+        last_upload_status: "accepted".to_string(),
+        next_retry_after_ms: None,
+        air_gap_denial_count: 0,
+        redaction_rejection_count: 0,
+        event_sequence: EventSequence(83),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "pending=1 dropped=0".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_hosted_telemetry_diagnostics_snapshot(&snapshot)
+        .expect("telemetry diagnostics are metadata-only");
+    assert!(
+        validate_hosted_telemetry_diagnostics_snapshot(&HostedTelemetryDiagnosticsSnapshot {
+            metadata_summary: "terminal_output=raw".to_string(),
+            ..snapshot
         })
         .is_err()
     );
@@ -6935,6 +7281,124 @@ fn dto_contracts_phase8_raw_source_retention_is_scoped_and_default_denied() {
         validate_raw_source_retention_access_audit(&RawSourceRetentionAccessAudit {
             action: "raw_source=fn main".to_string(),
             ..audit
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn dto_contracts_phase8_raw_source_vault_envelope_rejects_key_material_and_raw_content() {
+    let key = RawSourceKeyReference {
+        key_id: "key-ref-1".to_string(),
+        key_version: "v1".to_string(),
+        provider_label: "local-os-keyring".to_string(),
+        rotation_generation: 1,
+        schema_version: 1,
+    };
+    let envelope = RawSourceVaultEnvelope {
+        bundle_id: "bundle-1".to_string(),
+        workspace_id: WorkspaceId(11),
+        purpose: RawSourceRetentionPurpose::SupportBundle,
+        algorithm: RawSourceVaultAlgorithm::Aes256Gcm,
+        key_reference: key.clone(),
+        nonce_digest: "nonce-digest".to_string(),
+        ciphertext_digest: FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: "ciphertext-digest".to_string(),
+        },
+        tag_digest: "tag-digest".to_string(),
+        aad_digest: "aad-digest".to_string(),
+        encrypted_byte_len: 512,
+        schema_version: 1,
+    };
+    validate_raw_source_vault_envelope(&envelope).expect("vault envelope is metadata-only");
+    assert!(
+        validate_raw_source_vault_envelope(&RawSourceVaultEnvelope {
+            key_reference: RawSourceKeyReference {
+                key_id: "key_bytes=abc".to_string(),
+                ..key.clone()
+            },
+            ..envelope.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        validate_raw_source_vault_envelope(&RawSourceVaultEnvelope {
+            ciphertext_digest: FileFingerprint {
+                algorithm: "devil-vault-stable-sum-v1".to_string(),
+                value: "42".to_string(),
+            },
+            ..envelope.clone()
+        })
+        .is_err()
+    );
+
+    let rotation = RawSourceKeyRotationRecord {
+        bundle_id: "bundle-1".to_string(),
+        previous_key_reference: key.clone(),
+        new_key_reference: RawSourceKeyReference {
+            key_id: "key-ref-2".to_string(),
+            key_version: "v2".to_string(),
+            rotation_generation: 2,
+            ..key
+        },
+        event_sequence: EventSequence(84),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "rotation=complete".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_raw_source_key_rotation_record(&rotation).expect("rotation is metadata-only");
+
+    let recovery = RawSourceVaultRecoveryReport {
+        recovery_id: "recovery-1".to_string(),
+        bundle_id: Some("bundle-1".to_string()),
+        state: RawSourceVaultRecoveryState::Quarantined,
+        event_sequence: EventSequence(85),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        metadata_summary: "quarantine=orphan_ciphertext".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_raw_source_vault_recovery_report(&recovery).expect("recovery report is metadata-only");
+}
+
+#[test]
+fn dto_contracts_phase8_hosted_retention_export_requires_separate_raw_source_consent() {
+    let consent = RawSourceHostedExportConsent {
+        grant_id: "raw-hosted-grant-1".to_string(),
+        principal_id: PrincipalId("principal-retention".to_string()),
+        workspace_id: WorkspaceId(11),
+        endpoint_id: "support-endpoint".to_string(),
+        purpose: RawSourceRetentionPurpose::SupportBundle,
+        issued_at: TimestampMillis(100),
+        expires_at: TimestampMillis(200),
+        revoked: false,
+        correlation_id: CorrelationId(901),
+        schema_version: 1,
+    };
+    validate_raw_source_hosted_export_consent(&consent).expect("hosted raw consent is valid");
+    assert!(
+        validate_raw_source_hosted_export_consent(&RawSourceHostedExportConsent {
+            revoked: true,
+            ..consent
+        })
+        .is_err()
+    );
+
+    let linkage = HostedRetentionExportLinkage {
+        telemetry_batch_id: "batch-raw-linkage".to_string(),
+        bundle_id: "bundle-1".to_string(),
+        raw_source_consent_verified: true,
+        schema_version: 1,
+    };
+    validate_hosted_retention_export_linkage(&linkage).expect("verified linkage is valid");
+    assert!(
+        validate_hosted_retention_export_linkage(&HostedRetentionExportLinkage {
+            raw_source_consent_verified: false,
+            ..linkage
         })
         .is_err()
     );
@@ -7007,7 +7471,7 @@ fn dto_contracts_phase8_storage_migration_contracts_fail_closed() {
 
     let raw_marker = StorageMigrationDryRunReport {
         metadata_summary: "raw_source=fn main".to_string(),
-        ..dry_run
+        ..dry_run.clone()
     };
     assert!(validate_storage_migration_dry_run_report(&raw_marker).is_err());
 
@@ -7055,13 +7519,69 @@ fn dto_contracts_phase8_storage_migration_contracts_fail_closed() {
         backup_id: "backup-1".to_string(),
         subsystem_id: "telemetry-spool".to_string(),
         location_label: "redacted-local-backup".to_string(),
-        checksum,
+        checksum: checksum.clone(),
         event_sequence: EventSequence(23),
         correlation_id: CorrelationId(901),
         causality_id: causality_id(),
         schema_version: 1,
     };
-    assert_eq!(backup.checksum.algorithm, "sha256");
+    validate_storage_backup_marker(&backup).expect("backup marker is valid");
+    assert!(
+        validate_storage_backup_marker(&StorageBackupMarker {
+            checksum: StorageChecksum {
+                algorithm: "stable_storage_sum".to_string(),
+                ..checksum.clone()
+            },
+            ..backup.clone()
+        })
+        .is_err()
+    );
+
+    let apply = StorageMigrationApplyRequest {
+        step: step.clone(),
+        principal_id: PrincipalId("storage-owner".to_string()),
+        capability_decision: CapabilityDecision {
+            decision_id: CapabilityDecisionId(1002),
+            granted: true,
+            capability: CapabilityId("storage.migration.apply".to_string()),
+            reason: Some("operator approved apply".to_string()),
+        },
+        preflight_report: dry_run.clone(),
+        backup_marker: backup.clone(),
+        journal_id: "journal-1".to_string(),
+        explicit_apply_flag: true,
+        metadata_summary: "apply=ready backup=present".to_string(),
+        event_sequence: EventSequence(24),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_storage_migration_apply_request(&apply).expect("apply request is valid");
+    assert!(
+        validate_storage_migration_apply_request(&StorageMigrationApplyRequest {
+            explicit_apply_flag: false,
+            ..apply
+        })
+        .is_err()
+    );
+
+    let outcome = StorageMigrationApplyOutcome {
+        migration_id: step.migration_id.clone(),
+        subsystem_id: step.subsystem_id.clone(),
+        applied: true,
+        backup_id: backup.backup_id.clone(),
+        journal_id: "journal-1".to_string(),
+        recovery_id: None,
+        checksum,
+        metadata_summary: "apply=complete".to_string(),
+        event_sequence: EventSequence(25),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_storage_migration_apply_outcome(&outcome).expect("apply outcome is valid");
 
     let replay = StorageReplayManifest {
         replay_id: "replay-1".to_string(),
@@ -7078,6 +7598,54 @@ fn dto_contracts_phase8_storage_migration_contracts_fail_closed() {
         validate_storage_replay_manifest(&StorageReplayManifest {
             last_event_sequence: EventSequence(0),
             ..replay
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn dto_contracts_phase8_storage_health_and_evidence_summaries_are_metadata_only() {
+    let recovery = StorageRecoveryOutcome {
+        recovery_id: "recovery-1".to_string(),
+        subsystem_id: "telemetry-spool".to_string(),
+        recovered: false,
+        quarantined: true,
+        backup_id: Some("backup-1".to_string()),
+        metadata_summary: "quarantine=corrupt_json".to_string(),
+        event_sequence: EventSequence(26),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_storage_recovery_outcome(&recovery).expect("recovery outcome is metadata-only");
+
+    let health = StorageSubsystemHealthSummary {
+        subsystem_id: "telemetry-spool".to_string(),
+        healthy: true,
+        degraded: false,
+        metadata_summary: "pending=0 oldest_ms=0".to_string(),
+        event_sequence: EventSequence(27),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_storage_subsystem_health_summary(&health).expect("health summary is metadata-only");
+
+    let evidence = StorageEvidenceSummary {
+        artifact_id: "storage-migration-recovery-tests.txt".to_string(),
+        command_label: "cargo test -p devil-storage migration_registry".to_string(),
+        passed: true,
+        metadata_summary: "result=passed".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_storage_evidence_summary(&evidence).expect("evidence summary is metadata-only");
+    assert!(
+        validate_storage_evidence_summary(&StorageEvidenceSummary {
+            metadata_summary: "raw_source=fn main".to_string(),
+            ..evidence
         })
         .is_err()
     );

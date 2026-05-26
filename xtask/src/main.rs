@@ -44,6 +44,17 @@ const PHASE7_NOT_ACCEPTED_MARKER: &str = "Phase 7 acceptance: Not accepted.";
 const PHASE7_ACCEPTED_MARKER: &str = "Phase 7 acceptance: Accepted.";
 const PHASE8_NOT_ACCEPTED_MARKER: &str = "Phase 8 acceptance: Not accepted.";
 const PHASE8_ACCEPTED_MARKER: &str = "Phase 8 acceptance: Accepted.";
+const PHASE8_ACCEPTED_REQUIRED_MARKERS: &[&str] = &[
+    "Runtime surface status: Production GA runtime surfaces are active behind accepted policy gates.",
+    "Platform matrix: Linux, Windows, and macOS validated.",
+    "Release readiness: Security, privacy, operations, rollback, canary, incident, and supply-chain signoff complete.",
+    "Final gate outputs archived from current commands.",
+];
+const PHASE8_STALE_DEFERRED_MARKERS: &[&str] = &[
+    "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred",
+    "not final GA acceptance evidence",
+    "fixture slice is active",
+];
 const PHASE3_REQUIRED_ARTIFACTS: &[&str] = &[
     "semantic-fabric-architecture-map.md",
     "index-dependency-boundary.txt",
@@ -956,6 +967,22 @@ where
         ));
     }
 
+    for marker in PHASE8_STALE_DEFERRED_MARKERS {
+        if evidence.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE8_EVIDENCE_PATH}` claims acceptance while still containing stale deferred marker `{marker}`"
+            ));
+        }
+    }
+
+    for marker in PHASE8_ACCEPTED_REQUIRED_MARKERS {
+        if !evidence.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE8_EVIDENCE_PATH}` claims acceptance but final GA marker `{marker}` is missing"
+            ));
+        }
+    }
+
     if let Some(checklist) = markdown_section(evidence, PHASE8_FINAL_CHECKLIST_HEADING) {
         if checklist
             .lines()
@@ -1359,6 +1386,14 @@ mod tests {
 - {PHASE8_ACCEPTED_MARKER}
 
 {disclaimer}
+Runtime surface status: Production GA runtime surfaces are active behind accepted policy gates.
+
+Platform matrix: Linux, Windows, and macOS validated.
+
+Release readiness: Security, privacy, operations, rollback, canary, incident, and supply-chain signoff complete.
+
+Final gate outputs archived from current commands.
+
 ## Expected Evidence Artifacts
 
 {artifacts}
@@ -1866,6 +1901,34 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
         let issues = validate_phase8_acceptance_governance(&evidence, |_| true);
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase8_acceptance_claim_rejects_stale_deferred_markers() {
+        let mut evidence = accepted_phase8_evidence(false, true);
+        evidence.push_str(
+            "production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred\n",
+        );
+
+        let issues = validate_phase8_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains("claims acceptance while still containing stale deferred marker")
+        }));
+    }
+
+    #[test]
+    fn phase8_acceptance_claim_requires_final_ga_markers() {
+        let evidence = accepted_phase8_evidence(false, true).replace(
+            "Platform matrix: Linux, Windows, and macOS validated.",
+            "Platform matrix: pending.",
+        );
+
+        let issues = validate_phase8_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains("final GA marker `Platform matrix: Linux, Windows, and macOS validated.` is missing")
+        }));
     }
 
     #[test]

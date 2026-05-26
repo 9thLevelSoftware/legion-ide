@@ -2,8 +2,10 @@
 
 #![warn(missing_docs)]
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use devil_protocol::{
@@ -306,7 +308,7 @@ impl FileBackedTelemetrySpool {
             .cloned()
             .collect::<Vec<_>>();
         let batch = HostedTelemetryExportBatch {
-            batch_id: format!("batch:{}:{}", consent.workspace_id.0, records.len()),
+            batch_id: telemetry_batch_id(consent.workspace_id, &records),
             endpoint,
             consent,
             records,
@@ -325,6 +327,21 @@ impl FileBackedTelemetrySpool {
         &mut self,
         accepted_record_ids: &[String],
     ) -> Result<usize, TelemetrySpoolError> {
+        let pending_ids = self
+            .state
+            .records
+            .iter()
+            .map(|record| record.record_id.as_str())
+            .collect::<HashSet<_>>();
+        if accepted_record_ids
+            .iter()
+            .any(|record_id| !pending_ids.contains(record_id.as_str()))
+        {
+            return Err(TelemetrySpoolError::InvalidMetadata {
+                reason: "hosted telemetry ack contained record id outside pending spool"
+                    .to_string(),
+            });
+        }
         let before = self.state.records.len();
         self.state
             .records
@@ -374,7 +391,7 @@ impl FileBackedTelemetrySpool {
             serde_json::to_string_pretty(&self.state).map_err(|err| TelemetrySpoolError::Io {
                 message: format!("encode durable spool: {err}"),
             })?;
-        fs::write(&self.path, text).map_err(io_error)
+        write_file_atomically(&self.path, text.as_bytes()).map_err(io_error)
     }
 }
 
@@ -399,6 +416,11 @@ impl<C: TelemetryExportClient> HostedTelemetryExporter<C> {
     ) -> Result<HostedTelemetryUploadOutcome, TelemetrySpoolError> {
         let batch = spool.pending_batch(consent, endpoint, max_records)?;
         let outcome = self.client.upload(&batch)?;
+        if outcome.batch_id != batch.batch_id {
+            return Err(TelemetrySpoolError::InvalidMetadata {
+                reason: "hosted telemetry ack batch id did not match pending batch".to_string(),
+            });
+        }
         if outcome.accepted {
             let accepted = batch
                 .records
@@ -411,6 +433,121 @@ impl<C: TelemetryExportClient> HostedTelemetryExporter<C> {
         }
         Ok(outcome)
     }
+}
+
+fn telemetry_batch_id(workspace_id: WorkspaceId, records: &[HostedTelemetrySpoolRecord]) -> String {
+    let first = records
+        .first()
+        .map(|record| record.record_id.as_str())
+        .unwrap_or("empty");
+    let last = records
+        .last()
+        .map(|record| record.record_id.as_str())
+        .unwrap_or(first);
+    let first_sequence = records
+        .first()
+        .map(|record| record.event_sequence.0)
+        .unwrap_or(0);
+    let last_sequence = records
+        .last()
+        .map(|record| record.event_sequence.0)
+        .unwrap_or(first_sequence);
+    format!(
+        "batch:{}:{}:{}:{}:{}:{}",
+        workspace_id.0,
+        records.len(),
+        first_sequence,
+        last_sequence,
+        safe_batch_component(first),
+        safe_batch_component(last)
+    )
+}
+
+fn safe_batch_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("telemetry-spool");
+    parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ))
+}
+
+fn write_file_atomically(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let temp = atomic_temp_path(path);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(body)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        atomic_replace(&temp, path)?;
+        sync_parent_directory_when_supported(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
+    }
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let ok = unsafe {
+        MoveFileExW(
+            wide(temp).as_ptr(),
+            wide(target).as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(temp, target)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory_when_supported(parent: &Path) -> std::io::Result<()> {
+    OpenOptions::new().read(true).open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory_when_supported(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn io_error(err: std::io::Error) -> TelemetrySpoolError {
@@ -514,6 +651,23 @@ mod tests {
                 accepted: false,
                 retry_after_ms: Some(1_000),
                 status: "retry".to_string(),
+                schema_version: 1,
+            })
+        }
+    }
+
+    struct MismatchedAckClient;
+
+    impl TelemetryExportClient for MismatchedAckClient {
+        fn upload(
+            &mut self,
+            _batch: &HostedTelemetryExportBatch,
+        ) -> Result<HostedTelemetryUploadOutcome, TelemetrySpoolError> {
+            Ok(HostedTelemetryUploadOutcome {
+                batch_id: "different-batch".to_string(),
+                accepted: true,
+                retry_after_ms: None,
+                status: "accepted".to_string(),
                 schema_version: 1,
             })
         }
@@ -648,6 +802,61 @@ mod tests {
             .expect("accepted export");
         assert!(outcome.accepted);
         assert_eq!(spool.stats().pending_records, 0);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_batch_ids_change_after_partial_upload() {
+        let path = temp_spool_path("batch-ids");
+        let mut spool = FileBackedTelemetrySpool::open(&path, TelemetrySpoolConfig::enabled())
+            .expect("open spool");
+        spool
+            .enqueue(record_with_id("record-1"))
+            .expect("enqueue 1");
+        let mut second = record_with_id("record-2");
+        second.event_sequence = EventSequence(2);
+        spool.enqueue(second).expect("enqueue 2");
+
+        let first_batch = spool
+            .pending_batch(consent(), endpoint(), 1)
+            .expect("first batch");
+        spool
+            .mark_uploaded(&["record-1".to_string()])
+            .expect("mark first uploaded");
+        let second_batch = spool
+            .pending_batch(consent(), endpoint(), 1)
+            .expect("second batch");
+
+        assert_ne!(first_batch.batch_id, second_batch.batch_id);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backed_spool_rejects_unknown_uploaded_record_ids() {
+        let path = temp_spool_path("unknown-ack");
+        let mut spool = FileBackedTelemetrySpool::open(&path, TelemetrySpoolConfig::enabled())
+            .expect("open spool");
+        spool.enqueue(record_with_id("record-1")).expect("enqueue");
+        assert!(matches!(
+            spool.mark_uploaded(&["record-missing".to_string()]),
+            Err(TelemetrySpoolError::InvalidMetadata { .. })
+        ));
+        assert_eq!(spool.stats().pending_records, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn exporter_rejects_mismatched_batch_ack_without_dropping_records() {
+        let path = temp_spool_path("mismatched-ack");
+        let mut spool = FileBackedTelemetrySpool::open(&path, TelemetrySpoolConfig::enabled())
+            .expect("open spool");
+        spool.enqueue(record_with_id("record-1")).expect("enqueue");
+        let mut exporter = HostedTelemetryExporter::new(MismatchedAckClient);
+        assert!(matches!(
+            exporter.export_once(&mut spool, consent(), endpoint(), 1),
+            Err(TelemetrySpoolError::InvalidMetadata { .. })
+        ));
+        assert_eq!(spool.stats().pending_records, 1);
         let _ = fs::remove_file(path);
     }
 

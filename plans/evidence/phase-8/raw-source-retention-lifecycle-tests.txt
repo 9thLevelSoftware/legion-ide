@@ -2,8 +2,14 @@ Command: cargo test -p devil-retention --all-targets
 Result: passed
 
 Implemented coverage:
+- production vault content is sealed with ChaCha20-Poly1305 AEAD and SHA-256 envelope digests
+- same plaintext captures produce distinct ciphertext/nonce digests
 - encrypted vault content does not store plaintext bytes
-- authorized read decrypts through audit-validated path
+- authorized read decrypts through audit-validated path and authenticated metadata binding
+- wrong key bytes, ciphertext tamper, and AAD metadata tamper fail closed
 - delete removes ciphertext and retains tombstone metadata
 - reopen recovers descriptors from `index.json` without plaintext leakage
 - TTL purge path records tombstones for expired bundles
+- local bundle key rotation re-encrypts under a new metadata-only key reference and leaves the previous provider unable to read the rotated bundle
+- rotation fails closed when the previous key bytes cannot authenticate the existing bundle
+- metadata-only recovery reports mark healthy bundles recovered, corrupt ciphertext quarantined, and missing ciphertext failed closed without plaintext leakage

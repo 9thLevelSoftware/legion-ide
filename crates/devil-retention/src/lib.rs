@@ -1,4 +1,4 @@
-//! Deterministic Phase 8 raw-source retention fixture vault.
+//! Phase 8 raw-source retention fixture and production vault primitives.
 
 #![warn(missing_docs)]
 
@@ -6,14 +6,34 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use devil_protocol::{
-    CanonicalPath, FileFingerprint, RawSourceCaptureRequest, RawSourceRetentionAccessAudit,
-    RawSourceRetentionBundleDescriptor, RawSourceRetentionConsentGrant, RawSourceRetentionLease,
-    RawSourceRetentionPolicy, RawSourceRetentionTombstone, TimestampMillis,
-    validate_raw_source_capture_request, validate_raw_source_retention_access_audit,
+use chacha20poly1305::{
+    ChaCha20Poly1305, Nonce,
+    aead::{Aead, AeadCore, KeyInit, Payload},
 };
+use devil_protocol::{
+    CanonicalPath, CausalityId, CorrelationId, EventSequence, FileFingerprint,
+    RawSourceCaptureRequest, RawSourceKeyReference, RawSourceKeyRotationRecord,
+    RawSourceRetentionAccessAudit, RawSourceRetentionBundleDescriptor,
+    RawSourceRetentionConsentGrant, RawSourceRetentionLease, RawSourceRetentionPolicy,
+    RawSourceRetentionPurpose, RawSourceRetentionTombstone, RawSourceVaultAlgorithm,
+    RawSourceVaultEnvelope, RawSourceVaultRecoveryReport, RawSourceVaultRecoveryState,
+    RedactionHint, TimestampMillis, WorkspaceId, validate_raw_source_capture_request,
+    validate_raw_source_key_reference, validate_raw_source_key_rotation_record,
+    validate_raw_source_retention_access_audit, validate_raw_source_vault_envelope,
+    validate_raw_source_vault_recovery_report,
+};
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use zeroize::Zeroizing;
+
+const VAULT_FILE_MAGIC: &[u8; 4] = b"DVLT";
+const VAULT_FILE_VERSION: u16 = 1;
+const CHACHA20_POLY1305_ALGORITHM_ID: u8 = 1;
+const CHACHA20_POLY1305_KEY_LEN: usize = 32;
+const CHACHA20_POLY1305_NONCE_LEN: usize = 12;
+const CHACHA20_POLY1305_TAG_LEN: usize = 16;
 
 /// Retention fixture error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -59,6 +79,12 @@ pub enum RawSourceVaultError {
         /// Failure details.
         message: String,
     },
+    /// Authenticated encryption operation failed.
+    #[error("raw-source vault cryptographic operation failed: {message}")]
+    Crypto {
+        /// Failure details.
+        message: String,
+    },
 }
 
 /// File payload supplied to the raw-source vault by an authorized caller.
@@ -100,31 +126,118 @@ impl Default for RawSourceVaultConfig {
 
 /// Key provider for isolated raw-source vault encryption.
 pub trait RawSourceVaultKeyProvider {
-    /// Return a metadata-safe key reference.
-    fn key_reference(&self) -> String;
+    /// Return a metadata-only key reference.
+    fn key_reference(&self) -> RawSourceKeyReference;
     /// Return key bytes used by the cipher implementation.
     fn key_bytes(&self) -> Vec<u8>;
 }
 
-/// Encryption abstraction for raw-source vault content.
-pub trait RawSourceVaultCipher {
-    /// Encrypt plaintext with key bytes.
-    fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> Vec<u8>;
-    /// Decrypt ciphertext with key bytes.
-    fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> Vec<u8>;
+/// Sealed raw-source vault payload and metadata digests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawSourceVaultSealedPayload {
+    /// Opaque bytes persisted in the vault content file.
+    pub bytes: Vec<u8>,
+    /// SHA-256 digest of the nonce bytes.
+    pub nonce_digest: String,
+    /// SHA-256 digest of the persisted sealed file bytes.
+    pub ciphertext_digest: FileFingerprint,
+    /// SHA-256 digest of the AEAD authentication tag.
+    pub tag_digest: String,
+    /// Persisted sealed file byte length.
+    pub encrypted_byte_len: u64,
 }
 
-/// Deterministic XOR cipher used by tests and local development until a reviewed crypto dependency lands.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct XorVaultCipher;
+/// Encryption abstraction for raw-source vault content.
+pub trait RawSourceVaultCipher {
+    /// Return the production algorithm represented by this cipher.
+    fn algorithm(&self) -> RawSourceVaultAlgorithm;
+    /// Encrypt plaintext with key bytes and additional authenticated data.
+    fn encrypt(
+        &self,
+        key: &[u8],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<RawSourceVaultSealedPayload, RawSourceVaultError>;
+    /// Decrypt sealed payload bytes with key bytes and additional authenticated data.
+    fn decrypt(
+        &self,
+        key: &[u8],
+        aad: &[u8],
+        sealed: &RawSourceVaultSealedPayload,
+    ) -> Result<Vec<u8>, RawSourceVaultError>;
+}
 
-impl RawSourceVaultCipher for XorVaultCipher {
-    fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> Vec<u8> {
-        xor_bytes(key, plaintext)
+/// Production ChaCha20-Poly1305 vault cipher.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChaCha20Poly1305VaultCipher;
+
+impl RawSourceVaultCipher for ChaCha20Poly1305VaultCipher {
+    fn algorithm(&self) -> RawSourceVaultAlgorithm {
+        RawSourceVaultAlgorithm::ChaCha20Poly1305
     }
 
-    fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> Vec<u8> {
-        xor_bytes(key, ciphertext)
+    fn encrypt(
+        &self,
+        key: &[u8],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<RawSourceVaultSealedPayload, RawSourceVaultError> {
+        let cipher = chacha20poly1305_cipher(key)?;
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext_and_tag = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| crypto_error("AEAD encryption failed"))?;
+        if ciphertext_and_tag.len() < CHACHA20_POLY1305_TAG_LEN {
+            return Err(crypto_error("AEAD tag was not produced"));
+        }
+
+        let tag = &ciphertext_and_tag[ciphertext_and_tag.len() - CHACHA20_POLY1305_TAG_LEN..];
+        let mut bytes = Vec::with_capacity(
+            VAULT_FILE_MAGIC.len() + 2 + 2 + CHACHA20_POLY1305_NONCE_LEN + ciphertext_and_tag.len(),
+        );
+        bytes.extend_from_slice(VAULT_FILE_MAGIC);
+        bytes.extend_from_slice(&VAULT_FILE_VERSION.to_le_bytes());
+        bytes.push(CHACHA20_POLY1305_ALGORITHM_ID);
+        bytes.push(nonce.len() as u8);
+        bytes.extend_from_slice(&nonce);
+        bytes.extend_from_slice(&ciphertext_and_tag);
+
+        Ok(RawSourceVaultSealedPayload {
+            nonce_digest: sha256_label(&nonce),
+            ciphertext_digest: sha256_fingerprint(&bytes),
+            tag_digest: sha256_label(tag),
+            encrypted_byte_len: bytes.len() as u64,
+            bytes,
+        })
+    }
+
+    fn decrypt(
+        &self,
+        key: &[u8],
+        aad: &[u8],
+        sealed: &RawSourceVaultSealedPayload,
+    ) -> Result<Vec<u8>, RawSourceVaultError> {
+        let cipher = chacha20poly1305_cipher(key)?;
+        let parsed = parse_sealed_vault_file(&sealed.bytes)?;
+        if parsed.algorithm_id != CHACHA20_POLY1305_ALGORITHM_ID {
+            return Err(crypto_error("unsupported vault cipher algorithm"));
+        }
+        let nonce = Nonce::from_slice(parsed.nonce);
+        cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: parsed.ciphertext_and_tag,
+                    aad,
+                },
+            )
+            .map_err(|_| crypto_error("AEAD authentication failed"))
     }
 }
 
@@ -134,6 +247,10 @@ struct PersistedVaultIndex {
     bundles: HashMap<String, RawSourceRetentionBundleDescriptor>,
     tombstones: HashMap<String, RawSourceRetentionTombstone>,
     key_references: HashMap<String, String>,
+    #[serde(default)]
+    envelopes: HashMap<String, RawSourceVaultEnvelope>,
+    #[serde(default)]
+    lease_expirations: HashMap<String, TimestampMillis>,
 }
 
 /// Deterministic metadata-only retention fixture vault.
@@ -242,6 +359,11 @@ impl RetentionFixtureVault {
                 reason: "retention tombstone metadata is invalid".to_string(),
             });
         }
+        if !self.bundles.contains_key(&tombstone.bundle_id) {
+            return Err(RetentionFixtureError::BundleMissing {
+                bundle_id: tombstone.bundle_id,
+            });
+        }
         self.bundles.remove(&tombstone.bundle_id);
         self.tombstones
             .insert(tombstone.bundle_id.clone(), tombstone.clone());
@@ -309,24 +431,28 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 reason: err.message,
             }
         })?;
-        let plaintext = self.pack_files(&request, files)?;
+        let plaintext = Zeroizing::new(self.pack_files(&request, files)?);
         if plaintext.is_empty() || plaintext.len() as u64 > self.config.max_bundle_bytes {
             return Err(RawSourceVaultError::Denied {
                 reason: "raw-source bundle is empty or exceeds configured vault limit".to_string(),
             });
         }
-        let key = self.key_provider.key_bytes();
-        if key.is_empty() || self.key_provider.key_reference().trim().is_empty() {
-            return Err(RawSourceVaultError::Denied {
-                reason: "raw-source vault key reference is required".to_string(),
-            });
-        }
-        let ciphertext = self.cipher.encrypt(&key, &plaintext);
         let bundle_id = format!(
             "bundle:{}:{}",
             request.workspace_id.0, request.correlation_id.0
         );
-        fs::write(self.bundle_path(&bundle_id), &ciphertext).map_err(io_error)?;
+        if self.index.bundles.contains_key(&bundle_id) {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault bundle id already exists".to_string(),
+            });
+        }
+        let key_reference = self.key_provider.key_reference();
+        validate_raw_source_key_reference(&key_reference).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        let key = self.key_bytes()?;
         let lease = RawSourceRetentionLease {
             lease_id: format!(
                 "lease:{}:{}",
@@ -336,21 +462,55 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             expires_at: TimestampMillis(self.policy.ttl_ms),
             schema_version: 1,
         };
+        let aad = vault_aad(
+            &bundle_id,
+            &lease.lease_id,
+            request.workspace_id,
+            request.purpose,
+            self.cipher.algorithm(),
+            &key_reference,
+        );
+        let sealed = self.cipher.encrypt(&key, &aad, &plaintext)?;
+        let envelope = RawSourceVaultEnvelope {
+            bundle_id: bundle_id.clone(),
+            workspace_id: request.workspace_id,
+            purpose: request.purpose,
+            algorithm: self.cipher.algorithm(),
+            key_reference: key_reference.clone(),
+            nonce_digest: sealed.nonce_digest.clone(),
+            ciphertext_digest: sealed.ciphertext_digest.clone(),
+            tag_digest: sealed.tag_digest.clone(),
+            aad_digest: sha256_label(&aad),
+            encrypted_byte_len: sealed.encrypted_byte_len,
+            schema_version: 1,
+        };
+        validate_raw_source_vault_envelope(&envelope).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        if sealed.encrypted_byte_len > self.config.max_bundle_bytes {
+            return Err(RawSourceVaultError::Denied {
+                reason: "encrypted raw-source bundle exceeds configured vault limit".to_string(),
+            });
+        }
+        fs::write(self.bundle_path(&bundle_id), &sealed.bytes).map_err(io_error)?;
         let descriptor = RawSourceRetentionBundleDescriptor {
             bundle_id: bundle_id.clone(),
             lease_id: lease.lease_id.clone(),
             workspace_id: request.workspace_id,
             purpose: request.purpose,
-            encrypted_byte_len: ciphertext.len() as u64,
-            integrity: FileFingerprint {
-                algorithm: "devil-vault-stable-sum-v1".to_string(),
-                value: stable_sum(&ciphertext),
-            },
+            encrypted_byte_len: sealed.encrypted_byte_len,
+            integrity: sealed.ciphertext_digest,
             schema_version: 1,
         };
         self.index
             .key_references
-            .insert(bundle_id.clone(), self.key_provider.key_reference());
+            .insert(bundle_id.clone(), key_reference.key_id.clone());
+        self.index.envelopes.insert(bundle_id.clone(), envelope);
+        self.index
+            .lease_expirations
+            .insert(bundle_id.clone(), lease.expires_at);
         self.index.bundles.insert(bundle_id, descriptor.clone());
         self.flush_index()?;
         Ok((lease, descriptor))
@@ -374,6 +534,20 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
         fs::read(self.bundle_path(bundle_id)).map_err(io_error)
     }
 
+    /// Read metadata-only AEAD envelope by bundle id.
+    pub fn read_vault_envelope(
+        &self,
+        bundle_id: &str,
+    ) -> Result<RawSourceVaultEnvelope, RawSourceVaultError> {
+        self.index
+            .envelopes
+            .get(bundle_id)
+            .cloned()
+            .ok_or_else(|| RawSourceVaultError::Denied {
+                reason: "raw-source vault envelope metadata is missing".to_string(),
+            })
+    }
+
     /// Decrypt bundle bytes for an authorized caller after audit validation.
     pub fn decrypt_bundle_for_authorized_read(
         &self,
@@ -384,10 +558,386 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 reason: err.message,
             }
         })?;
+        let descriptor = self.read_bundle_descriptor(&audit.bundle_id)?;
+        let envelope = self.read_vault_envelope(&audit.bundle_id)?;
+        validate_raw_source_vault_envelope(&envelope).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        if envelope.bundle_id != descriptor.bundle_id
+            || envelope.workspace_id != descriptor.workspace_id
+            || envelope.purpose != descriptor.purpose
+            || envelope.encrypted_byte_len != descriptor.encrypted_byte_len
+            || envelope.ciphertext_digest != descriptor.integrity
+        {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault envelope does not match descriptor metadata".to_string(),
+            });
+        }
+        let current_key_reference = self.key_provider.key_reference();
+        validate_raw_source_key_reference(&current_key_reference).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        if current_key_reference != envelope.key_reference {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault key reference does not match envelope".to_string(),
+            });
+        }
         let encrypted = self.read_encrypted_bundle(&audit.bundle_id)?;
-        Ok(self
-            .cipher
-            .decrypt(&self.key_provider.key_bytes(), &encrypted))
+        let encrypted_fingerprint = sha256_fingerprint(&encrypted);
+        if encrypted.len() as u64 != envelope.encrypted_byte_len
+            || encrypted_fingerprint != envelope.ciphertext_digest
+        {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault ciphertext digest mismatch".to_string(),
+            });
+        }
+        let aad = vault_aad(
+            &descriptor.bundle_id,
+            &descriptor.lease_id,
+            descriptor.workspace_id,
+            descriptor.purpose,
+            envelope.algorithm,
+            &envelope.key_reference,
+        );
+        if sha256_label(&aad) != envelope.aad_digest {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault authenticated metadata digest mismatch".to_string(),
+            });
+        }
+        let sealed = RawSourceVaultSealedPayload {
+            bytes: encrypted,
+            nonce_digest: envelope.nonce_digest,
+            ciphertext_digest: envelope.ciphertext_digest,
+            tag_digest: envelope.tag_digest,
+            encrypted_byte_len: envelope.encrypted_byte_len,
+        };
+        let key = self.key_bytes()?;
+        self.cipher.decrypt(&key, &aad, &sealed)
+    }
+
+    /// Rotate one retained bundle to a new metadata-only key reference.
+    ///
+    /// The current vault provider must still decrypt the existing envelope. Callers should reopen or
+    /// recompose the vault with a provider for the new reference before future reads.
+    pub fn rotate_bundle_key<N: RawSourceVaultKeyProvider>(
+        &mut self,
+        bundle_id: &str,
+        new_key_provider: &N,
+        event_sequence: EventSequence,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> Result<RawSourceKeyRotationRecord, RawSourceVaultError> {
+        if !self.config.enabled {
+            return Err(RawSourceVaultError::Disabled);
+        }
+        let mut descriptor = self.read_bundle_descriptor(bundle_id)?;
+        let envelope = self.read_vault_envelope(bundle_id)?;
+        validate_raw_source_vault_envelope(&envelope).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        if envelope.bundle_id != descriptor.bundle_id
+            || envelope.workspace_id != descriptor.workspace_id
+            || envelope.purpose != descriptor.purpose
+            || envelope.encrypted_byte_len != descriptor.encrypted_byte_len
+            || envelope.ciphertext_digest != descriptor.integrity
+        {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault envelope does not match descriptor metadata".to_string(),
+            });
+        }
+        let previous_key_reference = self.key_provider.key_reference();
+        validate_raw_source_key_reference(&previous_key_reference).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        if previous_key_reference != envelope.key_reference {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault key reference does not match envelope".to_string(),
+            });
+        }
+        let encrypted = self.read_encrypted_bundle(bundle_id)?;
+        let encrypted_fingerprint = sha256_fingerprint(&encrypted);
+        if encrypted.len() as u64 != envelope.encrypted_byte_len
+            || encrypted_fingerprint != envelope.ciphertext_digest
+        {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault ciphertext digest mismatch".to_string(),
+            });
+        }
+        let previous_aad = vault_aad(
+            &descriptor.bundle_id,
+            &descriptor.lease_id,
+            descriptor.workspace_id,
+            descriptor.purpose,
+            envelope.algorithm,
+            &envelope.key_reference,
+        );
+        if sha256_label(&previous_aad) != envelope.aad_digest {
+            return Err(RawSourceVaultError::Denied {
+                reason: "raw-source vault authenticated metadata digest mismatch".to_string(),
+            });
+        }
+        let sealed = RawSourceVaultSealedPayload {
+            bytes: encrypted,
+            nonce_digest: envelope.nonce_digest.clone(),
+            ciphertext_digest: envelope.ciphertext_digest.clone(),
+            tag_digest: envelope.tag_digest.clone(),
+            encrypted_byte_len: envelope.encrypted_byte_len,
+        };
+        let previous_key = self.key_bytes()?;
+        let plaintext =
+            Zeroizing::new(self.cipher.decrypt(&previous_key, &previous_aad, &sealed)?);
+
+        let new_key_reference = new_key_provider.key_reference();
+        validate_raw_source_key_reference(&new_key_reference).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        let new_key = key_bytes_from_provider(new_key_provider)?;
+        let new_aad = vault_aad(
+            &descriptor.bundle_id,
+            &descriptor.lease_id,
+            descriptor.workspace_id,
+            descriptor.purpose,
+            self.cipher.algorithm(),
+            &new_key_reference,
+        );
+        let new_sealed = self.cipher.encrypt(&new_key, &new_aad, &plaintext)?;
+        if new_sealed.encrypted_byte_len > self.config.max_bundle_bytes {
+            return Err(RawSourceVaultError::Denied {
+                reason: "rotated raw-source bundle exceeds configured vault limit".to_string(),
+            });
+        }
+        let new_envelope = RawSourceVaultEnvelope {
+            bundle_id: descriptor.bundle_id.clone(),
+            workspace_id: descriptor.workspace_id,
+            purpose: descriptor.purpose,
+            algorithm: self.cipher.algorithm(),
+            key_reference: new_key_reference.clone(),
+            nonce_digest: new_sealed.nonce_digest.clone(),
+            ciphertext_digest: new_sealed.ciphertext_digest.clone(),
+            tag_digest: new_sealed.tag_digest.clone(),
+            aad_digest: sha256_label(&new_aad),
+            encrypted_byte_len: new_sealed.encrypted_byte_len,
+            schema_version: 1,
+        };
+        validate_raw_source_vault_envelope(&new_envelope).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        descriptor.encrypted_byte_len = new_sealed.encrypted_byte_len;
+        descriptor.integrity = new_sealed.ciphertext_digest.clone();
+
+        let record = RawSourceKeyRotationRecord {
+            bundle_id: descriptor.bundle_id.clone(),
+            previous_key_reference,
+            new_key_reference,
+            event_sequence,
+            correlation_id,
+            causality_id,
+            metadata_summary: format!(
+                "rotation_complete encrypted_bytes={}",
+                new_sealed.encrypted_byte_len
+            ),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_raw_source_key_rotation_record(&record).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+
+        fs::write(self.bundle_path(bundle_id), &new_sealed.bytes).map_err(io_error)?;
+        self.index.key_references.insert(
+            bundle_id.to_string(),
+            record.new_key_reference.key_id.clone(),
+        );
+        self.index
+            .envelopes
+            .insert(bundle_id.to_string(), new_envelope);
+        self.index.bundles.insert(bundle_id.to_string(), descriptor);
+        self.flush_index()?;
+        Ok(record)
+    }
+
+    /// Produce a metadata-only recovery drill report for one retained bundle.
+    pub fn inspect_bundle_recovery(
+        &self,
+        bundle_id: &str,
+        event_sequence: EventSequence,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> Result<RawSourceVaultRecoveryReport, RawSourceVaultError> {
+        if !self.config.enabled {
+            return Err(RawSourceVaultError::Disabled);
+        }
+        let descriptor = match self.read_bundle_descriptor(bundle_id) {
+            Ok(descriptor) => descriptor,
+            Err(RawSourceVaultError::BundleMissing { .. }) => {
+                return self.recovery_report(
+                    Some(bundle_id),
+                    RawSourceVaultRecoveryState::FailedClosed,
+                    "bundle_descriptor_missing",
+                    event_sequence,
+                    correlation_id,
+                    causality_id,
+                );
+            }
+            Err(err) => return Err(err),
+        };
+        let envelope = match self.read_vault_envelope(bundle_id) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                return self.recovery_report(
+                    Some(bundle_id),
+                    RawSourceVaultRecoveryState::FailedClosed,
+                    "envelope_metadata_missing",
+                    event_sequence,
+                    correlation_id,
+                    causality_id,
+                );
+            }
+        };
+        if validate_raw_source_vault_envelope(&envelope).is_err() {
+            return self.recovery_report(
+                Some(bundle_id),
+                RawSourceVaultRecoveryState::Quarantined,
+                "envelope_metadata_invalid",
+                event_sequence,
+                correlation_id,
+                causality_id,
+            );
+        }
+        if envelope.bundle_id != descriptor.bundle_id
+            || envelope.workspace_id != descriptor.workspace_id
+            || envelope.purpose != descriptor.purpose
+            || envelope.encrypted_byte_len != descriptor.encrypted_byte_len
+            || envelope.ciphertext_digest != descriptor.integrity
+        {
+            return self.recovery_report(
+                Some(bundle_id),
+                RawSourceVaultRecoveryState::Quarantined,
+                "envelope_descriptor_mismatch",
+                event_sequence,
+                correlation_id,
+                causality_id,
+            );
+        }
+        let encrypted = match fs::read(self.bundle_path(bundle_id)) {
+            Ok(encrypted) => encrypted,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return self.recovery_report(
+                    Some(bundle_id),
+                    RawSourceVaultRecoveryState::FailedClosed,
+                    "ciphertext_missing",
+                    event_sequence,
+                    correlation_id,
+                    causality_id,
+                );
+            }
+            Err(_) => {
+                return self.recovery_report(
+                    Some(bundle_id),
+                    RawSourceVaultRecoveryState::FailedClosed,
+                    "ciphertext_unavailable",
+                    event_sequence,
+                    correlation_id,
+                    causality_id,
+                );
+            }
+        };
+        let encrypted_fingerprint = sha256_fingerprint(&encrypted);
+        if encrypted.len() as u64 != envelope.encrypted_byte_len
+            || encrypted_fingerprint != envelope.ciphertext_digest
+        {
+            return self.recovery_report(
+                Some(bundle_id),
+                RawSourceVaultRecoveryState::Quarantined,
+                "ciphertext_digest_mismatch",
+                event_sequence,
+                correlation_id,
+                causality_id,
+            );
+        }
+        let aad = vault_aad(
+            &descriptor.bundle_id,
+            &descriptor.lease_id,
+            descriptor.workspace_id,
+            descriptor.purpose,
+            envelope.algorithm,
+            &envelope.key_reference,
+        );
+        if sha256_label(&aad) != envelope.aad_digest {
+            return self.recovery_report(
+                Some(bundle_id),
+                RawSourceVaultRecoveryState::Quarantined,
+                "authenticated_metadata_digest_mismatch",
+                event_sequence,
+                correlation_id,
+                causality_id,
+            );
+        }
+        let current_key_reference = self.key_provider.key_reference();
+        if validate_raw_source_key_reference(&current_key_reference).is_err()
+            || current_key_reference != envelope.key_reference
+        {
+            return self.recovery_report(
+                Some(bundle_id),
+                RawSourceVaultRecoveryState::FailedClosed,
+                "key_reference_unavailable",
+                event_sequence,
+                correlation_id,
+                causality_id,
+            );
+        }
+        let sealed = RawSourceVaultSealedPayload {
+            bytes: encrypted,
+            nonce_digest: envelope.nonce_digest,
+            ciphertext_digest: envelope.ciphertext_digest,
+            tag_digest: envelope.tag_digest,
+            encrypted_byte_len: envelope.encrypted_byte_len,
+        };
+        let key = match self.key_bytes() {
+            Ok(key) => key,
+            Err(_) => {
+                return self.recovery_report(
+                    Some(bundle_id),
+                    RawSourceVaultRecoveryState::FailedClosed,
+                    "key_unavailable",
+                    event_sequence,
+                    correlation_id,
+                    causality_id,
+                );
+            }
+        };
+        if self.cipher.decrypt(&key, &aad, &sealed).is_err() {
+            return self.recovery_report(
+                Some(bundle_id),
+                RawSourceVaultRecoveryState::FailedClosed,
+                "authentication_unavailable",
+                event_sequence,
+                correlation_id,
+                causality_id,
+            );
+        }
+        self.recovery_report(
+            Some(bundle_id),
+            RawSourceVaultRecoveryState::Recovered,
+            "metadata_verified",
+            event_sequence,
+            correlation_id,
+            causality_id,
+        )
     }
 
     /// Delete encrypted content and keep a metadata-only tombstone.
@@ -406,9 +956,16 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 reason: "retention tombstone metadata is invalid".to_string(),
             });
         }
+        if !self.index.bundles.contains_key(&tombstone.bundle_id) {
+            return Err(RawSourceVaultError::BundleMissing {
+                bundle_id: tombstone.bundle_id,
+            });
+        }
+        fs::remove_file(self.bundle_path(&tombstone.bundle_id)).map_err(io_error)?;
         self.index.bundles.remove(&tombstone.bundle_id);
         self.index.key_references.remove(&tombstone.bundle_id);
-        let _ = fs::remove_file(self.bundle_path(&tombstone.bundle_id));
+        self.index.envelopes.remove(&tombstone.bundle_id);
+        self.index.lease_expirations.remove(&tombstone.bundle_id);
         self.index
             .tombstones
             .insert(tombstone.bundle_id.clone(), tombstone.clone());
@@ -418,10 +975,18 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
 
     /// Remove all descriptors whose lease TTL has expired and record tombstones.
     pub fn purge_expired(&mut self, now: TimestampMillis) -> Result<usize, RawSourceVaultError> {
-        if now.0 < self.policy.ttl_ms {
-            return Ok(0);
-        }
-        let bundle_ids = self.index.bundles.keys().cloned().collect::<Vec<_>>();
+        let bundle_ids = self
+            .index
+            .bundles
+            .keys()
+            .filter(|bundle_id| {
+                self.index
+                    .lease_expirations
+                    .get(*bundle_id)
+                    .is_some_and(|expires_at| expires_at.0 <= now.0)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let mut removed = 0usize;
         for bundle_id in bundle_ids {
             let tombstone = RawSourceRetentionTombstone {
@@ -475,21 +1040,168 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             })?;
         fs::write(self.root.join("index.json"), text).map_err(io_error)
     }
+
+    fn key_bytes(&self) -> Result<Zeroizing<Vec<u8>>, RawSourceVaultError> {
+        key_bytes_from_provider(&self.key_provider)
+    }
+
+    fn recovery_report(
+        &self,
+        bundle_id: Option<&str>,
+        state: RawSourceVaultRecoveryState,
+        metadata_summary: &str,
+        event_sequence: EventSequence,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> Result<RawSourceVaultRecoveryReport, RawSourceVaultError> {
+        let report = RawSourceVaultRecoveryReport {
+            recovery_id: format!(
+                "recovery:{}:{}",
+                bundle_id
+                    .map(safe_name)
+                    .unwrap_or_else(|| "vault".to_string()),
+                event_sequence.0
+            ),
+            bundle_id: bundle_id.map(ToString::to_string),
+            state,
+            event_sequence,
+            correlation_id,
+            causality_id,
+            metadata_summary: metadata_summary.to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_raw_source_vault_recovery_report(&report).map_err(|err| {
+            RawSourceVaultError::Denied {
+                reason: err.message,
+            }
+        })?;
+        Ok(report)
+    }
 }
 
-fn xor_bytes(key: &[u8], input: &[u8]) -> Vec<u8> {
-    input
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| byte ^ key[index % key.len()])
-        .collect()
+fn key_bytes_from_provider<P: RawSourceVaultKeyProvider>(
+    provider: &P,
+) -> Result<Zeroizing<Vec<u8>>, RawSourceVaultError> {
+    let key = Zeroizing::new(provider.key_bytes());
+    if key.is_empty() {
+        return Err(RawSourceVaultError::Denied {
+            reason: "raw-source vault key bytes are required".to_string(),
+        });
+    }
+    Ok(key)
 }
 
-fn stable_sum(bytes: &[u8]) -> String {
-    let sum = bytes
-        .iter()
-        .fold(0u64, |acc, byte| acc.wrapping_add(*byte as u64));
-    format!("sum:{sum}:len:{}", bytes.len())
+impl<K: RawSourceVaultKeyProvider> FileBackedRawSourceVault<K, ChaCha20Poly1305VaultCipher> {
+    /// Open a production ChaCha20-Poly1305 raw-source vault rooted at `root`.
+    pub fn open_production(
+        root: impl AsRef<Path>,
+        policy: RawSourceRetentionPolicy,
+        config: RawSourceVaultConfig,
+        key_provider: K,
+    ) -> Result<Self, RawSourceVaultError> {
+        Self::open(
+            root,
+            policy,
+            config,
+            key_provider,
+            ChaCha20Poly1305VaultCipher,
+        )
+    }
+}
+
+fn chacha20poly1305_cipher(key: &[u8]) -> Result<ChaCha20Poly1305, RawSourceVaultError> {
+    if key.len() != CHACHA20_POLY1305_KEY_LEN {
+        return Err(crypto_error(
+            "ChaCha20-Poly1305 requires a 256-bit vault key",
+        ));
+    }
+    ChaCha20Poly1305::new_from_slice(key).map_err(|_| crypto_error("invalid vault key"))
+}
+
+fn vault_aad(
+    bundle_id: &str,
+    lease_id: &str,
+    workspace_id: WorkspaceId,
+    purpose: RawSourceRetentionPurpose,
+    algorithm: RawSourceVaultAlgorithm,
+    key_reference: &RawSourceKeyReference,
+) -> Vec<u8> {
+    format!(
+        "devil.raw-source.vault.aad.v1\0bundle_id={bundle_id}\0lease_id={lease_id}\0workspace_id={}\0purpose={purpose:?}\0algorithm={algorithm:?}\0key_id={}\0key_version={}\0provider_label={}\0rotation_generation={}\0schema_version={}",
+        workspace_id.0,
+        key_reference.key_id,
+        key_reference.key_version,
+        key_reference.provider_label,
+        key_reference.rotation_generation,
+        key_reference.schema_version,
+    )
+    .into_bytes()
+}
+
+struct ParsedSealedVaultFile<'a> {
+    algorithm_id: u8,
+    nonce: &'a [u8],
+    ciphertext_and_tag: &'a [u8],
+}
+
+fn parse_sealed_vault_file(bytes: &[u8]) -> Result<ParsedSealedVaultFile<'_>, RawSourceVaultError> {
+    const HEADER_LEN: usize = 8;
+    if bytes.len() <= HEADER_LEN + CHACHA20_POLY1305_NONCE_LEN + CHACHA20_POLY1305_TAG_LEN {
+        return Err(crypto_error("sealed vault payload is truncated"));
+    }
+    if &bytes[..VAULT_FILE_MAGIC.len()] != VAULT_FILE_MAGIC {
+        return Err(crypto_error("sealed vault payload has invalid magic"));
+    }
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if version != VAULT_FILE_VERSION {
+        return Err(crypto_error("unsupported sealed vault file version"));
+    }
+    let algorithm_id = bytes[6];
+    let nonce_len = bytes[7] as usize;
+    if nonce_len != CHACHA20_POLY1305_NONCE_LEN {
+        return Err(crypto_error(
+            "sealed vault payload has invalid nonce length",
+        ));
+    }
+    let nonce_start = HEADER_LEN;
+    let nonce_end = nonce_start + nonce_len;
+    if bytes.len() <= nonce_end + CHACHA20_POLY1305_TAG_LEN {
+        return Err(crypto_error("sealed vault payload has no ciphertext"));
+    }
+    Ok(ParsedSealedVaultFile {
+        algorithm_id,
+        nonce: &bytes[nonce_start..nonce_end],
+        ciphertext_and_tag: &bytes[nonce_end..],
+    })
+}
+
+fn sha256_fingerprint(bytes: &[u8]) -> FileFingerprint {
+    FileFingerprint {
+        algorithm: "sha256".to_string(),
+        value: sha256_label(bytes),
+    }
+}
+
+fn sha256_label(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{}", lowercase_hex(&digest))
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(HEX[(byte >> 4) as usize] as char);
+        text.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    text
+}
+
+fn crypto_error(message: impl Into<String>) -> RawSourceVaultError {
+    RawSourceVaultError::Crypto {
+        message: message.into(),
+    }
 }
 
 fn safe_name(value: &str) -> String {
@@ -518,15 +1230,49 @@ mod tests {
     use super::*;
 
     #[derive(Debug, Clone)]
-    struct TestKeyProvider;
+    struct TestKeyProvider {
+        key: Vec<u8>,
+        key_version: String,
+        rotation_generation: u64,
+    }
+
+    impl TestKeyProvider {
+        fn new(key: &[u8], key_version: &str) -> Self {
+            Self::with_generation(key, key_version, 1)
+        }
+
+        fn with_generation(key: &[u8], key_version: &str, rotation_generation: u64) -> Self {
+            Self {
+                key: key.to_vec(),
+                key_version: key_version.to_string(),
+                rotation_generation,
+            }
+        }
+
+        fn wrong_key_same_reference() -> Self {
+            Self::new(b"fedcba9876543210fedcba9876543210", "v1")
+        }
+    }
+
+    impl Default for TestKeyProvider {
+        fn default() -> Self {
+            Self::new(b"0123456789abcdef0123456789abcdef", "v1")
+        }
+    }
 
     impl RawSourceVaultKeyProvider for TestKeyProvider {
-        fn key_reference(&self) -> String {
-            "key:test".to_string()
+        fn key_reference(&self) -> RawSourceKeyReference {
+            RawSourceKeyReference {
+                key_id: "key:test".to_string(),
+                key_version: self.key_version.clone(),
+                provider_label: "test-keyring".to_string(),
+                rotation_generation: self.rotation_generation,
+                schema_version: 1,
+            }
         }
 
         fn key_bytes(&self) -> Vec<u8> {
-            b"test-key".to_vec()
+            self.key.clone()
         }
     }
 
@@ -567,6 +1313,27 @@ mod tests {
             causality_id: CausalityId(uuid::Uuid::from_u128(
                 0x018f_0000_0000_7000_8000_3000_0000_0001,
             )),
+            schema_version: 1,
+        }
+    }
+
+    fn request_with_correlation(correlation_id: u64) -> RawSourceCaptureRequest {
+        RawSourceCaptureRequest {
+            correlation_id: CorrelationId(correlation_id),
+            causality_id: CausalityId(uuid::Uuid::now_v7()),
+            ..request()
+        }
+    }
+
+    fn authorized_read_audit(bundle_id: &str, sequence: u64) -> RawSourceRetentionAccessAudit {
+        RawSourceRetentionAccessAudit {
+            bundle_id: bundle_id.to_string(),
+            principal_id: PrincipalId("tester".to_string()),
+            action: "authorized_read".to_string(),
+            event_sequence: EventSequence(sequence),
+            correlation_id: CorrelationId(sequence),
+            causality_id: CausalityId(uuid::Uuid::now_v7()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         }
     }
@@ -639,14 +1406,33 @@ mod tests {
     }
 
     #[test]
+    fn retention_fixture_delete_missing_bundle_is_rejected() {
+        let mut vault = RetentionFixtureVault::new(policy(true));
+        let tombstone = RawSourceRetentionTombstone {
+            bundle_id: "bundle-missing".to_string(),
+            reason: "user_deleted".to_string(),
+            deleted_at: TimestampMillis(70_000),
+            event_sequence: EventSequence(3),
+            correlation_id: CorrelationId(3),
+            causality_id: CausalityId(uuid::Uuid::from_u128(
+                0x018f_0000_0000_7000_8000_3000_0000_0003,
+            )),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            vault.delete_bundle(tombstone),
+            Err(RetentionFixtureError::BundleMissing { .. })
+        ));
+    }
+
+    #[test]
     fn file_backed_vault_encrypts_and_does_not_store_plaintext() {
         let root = temp_vault_root("encrypted");
-        let mut vault = FileBackedRawSourceVault::open(
+        let mut vault = FileBackedRawSourceVault::open_production(
             &root,
             policy(true),
             RawSourceVaultConfig::enabled(),
-            TestKeyProvider,
-            XorVaultCipher,
+            TestKeyProvider::default(),
         )
         .expect("open vault");
         let (_lease, descriptor) = vault
@@ -662,36 +1448,163 @@ mod tests {
         let encrypted = vault
             .read_encrypted_bundle(&descriptor.bundle_id)
             .expect("encrypted bytes");
+        let envelope = vault
+            .read_vault_envelope(&descriptor.bundle_id)
+            .expect("vault envelope");
+        assert_eq!(
+            envelope.algorithm,
+            RawSourceVaultAlgorithm::ChaCha20Poly1305
+        );
+        assert_eq!(descriptor.integrity.algorithm, "sha256");
+        assert!(!descriptor.integrity.value.contains("stable-sum"));
         assert!(!String::from_utf8_lossy(&encrypted).contains("fn main"));
 
-        let audit = RawSourceRetentionAccessAudit {
-            bundle_id: descriptor.bundle_id.clone(),
-            principal_id: PrincipalId("tester".to_string()),
-            action: "authorized_read".to_string(),
-            event_sequence: EventSequence(4),
-            correlation_id: CorrelationId(4),
-            causality_id: CausalityId(uuid::Uuid::from_u128(
-                0x018f_0000_0000_7000_8000_3000_0000_0004,
-            )),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
         let decrypted = vault
-            .decrypt_bundle_for_authorized_read(audit)
+            .decrypt_bundle_for_authorized_read(authorized_read_audit(&descriptor.bundle_id, 4))
             .expect("authorized decrypt");
         assert!(String::from_utf8_lossy(&decrypted).contains("fn main"));
+        let index_text = fs::read_to_string(root.join("index.json")).expect("index text");
+        assert!(!index_text.contains("fn main"));
+        assert!(!index_text.contains("0123456789abcdef"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_uses_random_nonce_for_same_plaintext() {
+        let root = temp_vault_root("random-nonce");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let files = || {
+            vec![RawSourceVaultFile {
+                path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                bytes: b"fn main() { secret(); }".to_vec(),
+            }]
+        };
+        let first = vault
+            .capture_bundle(grant(), request_with_correlation(10), files())
+            .expect("first capture")
+            .1;
+        let second = vault
+            .capture_bundle(grant(), request_with_correlation(11), files())
+            .expect("second capture")
+            .1;
+        let first_bytes = vault
+            .read_encrypted_bundle(&first.bundle_id)
+            .expect("first ciphertext");
+        let second_bytes = vault
+            .read_encrypted_bundle(&second.bundle_id)
+            .expect("second ciphertext");
+        let first_envelope = vault
+            .read_vault_envelope(&first.bundle_id)
+            .expect("first envelope");
+        let second_envelope = vault
+            .read_vault_envelope(&second.bundle_id)
+            .expect("second envelope");
+        assert_ne!(first_bytes, second_bytes);
+        assert_ne!(first_envelope.nonce_digest, second_envelope.nonce_digest);
+        assert_ne!(first.integrity.value, second.integrity.value);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_rejects_wrong_key_and_tampered_ciphertext() {
+        let root = temp_vault_root("aead-fail-closed");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { secret(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+
+        let wrong_key_vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::wrong_key_same_reference(),
+        )
+        .expect("reopen with wrong key");
+        assert!(matches!(
+            wrong_key_vault.decrypt_bundle_for_authorized_read(authorized_read_audit(
+                &descriptor.bundle_id,
+                12,
+            )),
+            Err(RawSourceVaultError::Crypto { .. })
+        ));
+
+        let mut encrypted = fs::read(vault.bundle_path(&descriptor.bundle_id)).expect("ciphertext");
+        let last = encrypted.last_mut().expect("ciphertext byte");
+        *last ^= 0x01;
+        fs::write(vault.bundle_path(&descriptor.bundle_id), encrypted).expect("tamper ciphertext");
+        assert!(matches!(
+            vault.decrypt_bundle_for_authorized_read(authorized_read_audit(
+                &descriptor.bundle_id,
+                13
+            )),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_rejects_tampered_authenticated_metadata() {
+        let root = temp_vault_root("aad-tamper");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { secret(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        vault
+            .index
+            .envelopes
+            .get_mut(&descriptor.bundle_id)
+            .expect("envelope")
+            .aad_digest = "sha256:tampered".to_string();
+        assert!(matches!(
+            vault.decrypt_bundle_for_authorized_read(authorized_read_audit(
+                &descriptor.bundle_id,
+                14
+            )),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn file_backed_vault_rejects_out_of_scope_and_deletes_ciphertext() {
         let root = temp_vault_root("delete");
-        let mut vault = FileBackedRawSourceVault::open(
+        let mut vault = FileBackedRawSourceVault::open_production(
             &root,
             policy(true),
             RawSourceVaultConfig::enabled(),
-            TestKeyProvider,
-            XorVaultCipher,
+            TestKeyProvider::default(),
         )
         .expect("open vault");
         let out_of_scope = vec![RawSourceVaultFile {
@@ -733,15 +1646,378 @@ mod tests {
     }
 
     #[test]
+    fn file_backed_vault_rejects_duplicate_bundle_id_collision() {
+        let root = temp_vault_root("duplicate");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let files = || {
+            vec![RawSourceVaultFile {
+                path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                bytes: b"fn main() {}".to_vec(),
+            }]
+        };
+        vault
+            .capture_bundle(grant(), request(), files())
+            .expect("first capture");
+        assert!(matches!(
+            vault.capture_bundle(grant(), request(), files()),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_delete_missing_bundle_is_rejected() {
+        let root = temp_vault_root("delete-missing");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let tombstone = RawSourceRetentionTombstone {
+            bundle_id: "bundle-missing".to_string(),
+            reason: "user_deleted".to_string(),
+            deleted_at: TimestampMillis(70_000),
+            event_sequence: EventSequence(5),
+            correlation_id: CorrelationId(5),
+            causality_id: CausalityId(uuid::Uuid::from_u128(
+                0x018f_0000_0000_7000_8000_3000_0000_0005,
+            )),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            vault.delete_bundle(tombstone),
+            Err(RawSourceVaultError::BundleMissing { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_delete_fails_when_ciphertext_is_missing() {
+        let root = temp_vault_root("delete-missing-ciphertext");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() {}".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        fs::remove_file(vault.bundle_path(&descriptor.bundle_id)).expect("remove ciphertext");
+        let tombstone = RawSourceRetentionTombstone {
+            bundle_id: descriptor.bundle_id.clone(),
+            reason: "user_deleted".to_string(),
+            deleted_at: TimestampMillis(70_000),
+            event_sequence: EventSequence(6),
+            correlation_id: CorrelationId(6),
+            causality_id: CausalityId(uuid::Uuid::from_u128(
+                0x018f_0000_0000_7000_8000_3000_0000_0006,
+            )),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            vault.delete_bundle(tombstone),
+            Err(RawSourceVaultError::Io { .. })
+        ));
+        assert!(vault.read_bundle_descriptor(&descriptor.bundle_id).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn purge_expired_only_deletes_bundles_past_recorded_lease_expiry() {
+        let root = temp_vault_root("purge-expired");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() {}".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        assert_eq!(
+            vault
+                .purge_expired(TimestampMillis(59_999))
+                .expect("early purge"),
+            0
+        );
+        assert_eq!(
+            vault
+                .purge_expired(TimestampMillis(60_000))
+                .expect("expired purge"),
+            1
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_rotates_bundle_key_and_reopens_with_new_reference() {
+        let root = temp_vault_root("key-rotation");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { rotate_me(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        let previous_ciphertext = vault
+            .read_encrypted_bundle(&descriptor.bundle_id)
+            .expect("previous ciphertext");
+        let new_provider =
+            TestKeyProvider::with_generation(b"abcdef0123456789abcdef0123456789", "v2", 2);
+
+        let record = vault
+            .rotate_bundle_key(
+                &descriptor.bundle_id,
+                &new_provider,
+                EventSequence(20),
+                CorrelationId(20),
+                CausalityId(uuid::Uuid::now_v7()),
+            )
+            .expect("rotate key");
+        validate_raw_source_key_rotation_record(&record).expect("valid rotation record");
+        assert_eq!(record.previous_key_reference.key_version, "v1");
+        assert_eq!(record.new_key_reference.key_version, "v2");
+        assert_eq!(record.new_key_reference.rotation_generation, 2);
+        assert!(!format!("{record:?}").contains("rotate_me"));
+
+        let rotated_ciphertext = vault
+            .read_encrypted_bundle(&descriptor.bundle_id)
+            .expect("rotated ciphertext");
+        assert_ne!(previous_ciphertext, rotated_ciphertext);
+        let rotated_envelope = vault
+            .read_vault_envelope(&descriptor.bundle_id)
+            .expect("rotated envelope");
+        assert_eq!(rotated_envelope.key_reference.key_version, "v2");
+        assert!(matches!(
+            vault.decrypt_bundle_for_authorized_read(authorized_read_audit(
+                &descriptor.bundle_id,
+                21,
+            )),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+
+        let reopened = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            new_provider,
+        )
+        .expect("reopen with rotated key");
+        let decrypted = reopened
+            .decrypt_bundle_for_authorized_read(authorized_read_audit(&descriptor.bundle_id, 22))
+            .expect("authorized decrypt after rotation");
+        assert!(String::from_utf8_lossy(&decrypted).contains("rotate_me"));
+        let index_text = fs::read_to_string(root.join("index.json")).expect("index text");
+        assert!(!index_text.contains("rotate_me"));
+        assert!(!index_text.contains("abcdef0123456789"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_rotation_fails_closed_when_old_key_cannot_decrypt() {
+        let root = temp_vault_root("key-rotation-fail-closed");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { rotate_me(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        drop(vault);
+
+        let mut wrong_key_vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::wrong_key_same_reference(),
+        )
+        .expect("reopen with wrong key");
+        let new_provider =
+            TestKeyProvider::with_generation(b"abcdef0123456789abcdef0123456789", "v2", 2);
+        assert!(matches!(
+            wrong_key_vault.rotate_bundle_key(
+                &descriptor.bundle_id,
+                &new_provider,
+                EventSequence(23),
+                CorrelationId(23),
+                CausalityId(uuid::Uuid::now_v7()),
+            ),
+            Err(RawSourceVaultError::Crypto { .. })
+        ));
+        let envelope = wrong_key_vault
+            .read_vault_envelope(&descriptor.bundle_id)
+            .expect("envelope unchanged");
+        assert_eq!(envelope.key_reference.key_version, "v1");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn vault_recovery_report_verifies_healthy_bundle_without_plaintext() {
+        let root = temp_vault_root("recovery-healthy");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { recovery_probe(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+
+        let report = vault
+            .inspect_bundle_recovery(
+                &descriptor.bundle_id,
+                EventSequence(24),
+                CorrelationId(24),
+                CausalityId(uuid::Uuid::now_v7()),
+            )
+            .expect("inspect recovery");
+        validate_raw_source_vault_recovery_report(&report).expect("valid recovery report");
+        assert_eq!(report.state, RawSourceVaultRecoveryState::Recovered);
+        assert_eq!(report.metadata_summary, "metadata_verified");
+        assert!(!format!("{report:?}").contains("recovery_probe"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn vault_recovery_report_quarantines_corrupt_ciphertext_without_plaintext() {
+        let root = temp_vault_root("recovery-corrupt-ciphertext");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { recovery_probe(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        let mut encrypted = fs::read(vault.bundle_path(&descriptor.bundle_id)).expect("ciphertext");
+        let last = encrypted.last_mut().expect("ciphertext byte");
+        *last ^= 0x01;
+        fs::write(vault.bundle_path(&descriptor.bundle_id), encrypted).expect("tamper ciphertext");
+
+        let report = vault
+            .inspect_bundle_recovery(
+                &descriptor.bundle_id,
+                EventSequence(25),
+                CorrelationId(25),
+                CausalityId(uuid::Uuid::now_v7()),
+            )
+            .expect("inspect corrupt recovery");
+        validate_raw_source_vault_recovery_report(&report).expect("valid recovery report");
+        assert_eq!(report.state, RawSourceVaultRecoveryState::Quarantined);
+        assert_eq!(report.metadata_summary, "ciphertext_digest_mismatch");
+        assert!(!format!("{report:?}").contains("recovery_probe"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn vault_recovery_report_fails_closed_for_missing_ciphertext() {
+        let root = temp_vault_root("recovery-missing-ciphertext");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { recovery_probe(); }".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+        fs::remove_file(vault.bundle_path(&descriptor.bundle_id)).expect("remove ciphertext");
+
+        let report = vault
+            .inspect_bundle_recovery(
+                &descriptor.bundle_id,
+                EventSequence(26),
+                CorrelationId(26),
+                CausalityId(uuid::Uuid::now_v7()),
+            )
+            .expect("inspect missing recovery");
+        validate_raw_source_vault_recovery_report(&report).expect("valid recovery report");
+        assert_eq!(report.state, RawSourceVaultRecoveryState::FailedClosed);
+        assert_eq!(report.metadata_summary, "ciphertext_missing");
+        assert!(!format!("{report:?}").contains("recovery_probe"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn vault_reopen_recovers_descriptors_without_plaintext_leak() {
         let root = temp_vault_root("reopen");
         let descriptor = {
-            let mut vault = FileBackedRawSourceVault::open(
+            let mut vault = FileBackedRawSourceVault::open_production(
                 &root,
                 policy(true),
                 RawSourceVaultConfig::enabled(),
-                TestKeyProvider,
-                XorVaultCipher,
+                TestKeyProvider::default(),
             )
             .expect("open vault");
             vault
@@ -756,12 +2032,11 @@ mod tests {
                 .expect("capture")
                 .1
         };
-        let reopened = FileBackedRawSourceVault::open(
+        let reopened = FileBackedRawSourceVault::open_production(
             &root,
             policy(true),
             RawSourceVaultConfig::enabled(),
-            TestKeyProvider,
-            XorVaultCipher,
+            TestKeyProvider::default(),
         )
         .expect("reopen vault");
         let loaded = reopened

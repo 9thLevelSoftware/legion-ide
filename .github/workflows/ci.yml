@@ -7,8 +7,12 @@ on:
 
 jobs:
   validate:
-    name: Milestone-0 validation
-    runs-on: ubuntu-latest
+    name: Milestone validation (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,6 +37,9 @@ jobs:
 
       - name: Dependency policy gate
         run: cargo run -p xtask -- check-deps
+
+      - name: Phase 8 evidence gate
+        run: cargo run -p devil-cli -- evidence check --phase phase8
 
       - name: Cargo deny check
         uses: EmbarkStudios/cargo-deny-action@v2

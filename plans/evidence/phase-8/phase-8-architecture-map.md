@@ -4,7 +4,7 @@
 
 - Phase 8 acceptance: Not accepted.
 
-Runtime surface status: Deterministic metadata-only fixture slice is active; production-capable transport, terminal, telemetry, retention, and storage migration cores are implemented behind default-deny gates; production transport, native terminal, hosted export, raw-source vault, and operational GA remain deferred until final release signoff.
+Runtime surface status: Deterministic metadata-only fixture slice is active; production-capable transport, terminal, telemetry, retention, and storage migration cores are implemented behind default-deny gates; production transport, native terminal, hosted export, raw-source vault GA, and operational GA remain deferred until final release signoff.
 
 This document is Phase 8 implementation evidence. It is not final GA acceptance evidence until release signoff changes the acceptance status.
 
@@ -17,7 +17,7 @@ Phase 8 remains future-gated for production remote network transport, native loc
 - Production remote transport core is typed-envelope-only, flow-controlled, replay-aware, package-gated, and cannot mutate workspace, editor, UI, or disk state directly.
 - Standalone terminal runtime is policy-gated and platform-composed through the PTY boundary, with degraded process-backed sessions recorded as metadata-only audit.
 - Hosted telemetry has a durable local metadata spool/exporter path and remains disabled by default and denied by air-gap/non-allowlisted endpoint policy.
-- Raw-source retention has an encrypted file-backed vault path and remains disabled by default with explicit scoped consent required before capture.
+- Raw-source retention has a ChaCha20-Poly1305 AEAD file-backed vault path and remains disabled by default with explicit scoped consent required before capture.
 - Deterministic fixture crates are active for contract validation only: `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention`.
 - Normal observability, storage, remote, terminal, telemetry, plugin, AI, and collaboration metadata continue to reject raw source, raw transcripts, process output, transport payload bodies, prompts, provider payloads, and secrets by default.
 
@@ -28,7 +28,7 @@ Phase 8 remains future-gated for production remote network transport, native loc
 | Remote transport | Remote runtime owner | `remote.transport.connect`, endpoint allowlist, credential reference, schema compatibility, replay/duplicate defense, agent package manifest, and proposal-mediated mutation evidence. | Default-off production core implemented and tested. |
 | Terminal/PTTY | Platform runtime owner | `terminal.launch`, `terminal.input`, `terminal.resize`, `terminal.close`, `terminal.kill`, trusted workspace, cwd/shell/env policy, bounded output, cleanup/orphan evidence. | Default-off process-backed degraded runtime implemented and tested. |
 | Hosted telemetry | Privacy and observability owner | `telemetry.export.hosted`, explicit consent, category/endpoint allowlist, air-gap denial, durable bounded spool, classifier audit, retry/drop evidence. | Durable metadata spool/exporter implemented and tested. |
-| Raw-source retention | Security/privacy owner | `retention.raw_source.capture/read/delete/export.hosted`, scoped consent, TTL, max bytes, path scope, encrypted vault, audit, delete/revoke evidence. | Encrypted file-backed vault implemented and tested. |
+| Raw-source retention | Security/privacy owner | `retention.raw_source.capture/read/delete/export.hosted`, scoped consent, TTL, max bytes, path scope, AEAD vault, audit, delete/revoke evidence, key-provider review, and recovery drills. | AEAD file-backed vault, local key rotation, and metadata-only recovery reports implemented and tested; reviewed OS/KMS key-provider and hosted-export evidence remain deferred. |
 | Storage migrations | Storage owner | Explicit registry, dry-run, backup, checksum, recovery, quarantine, replay evidence, explicit repair flags. | Metadata registry, dry-run, backup, checksum, and recovery implemented and tested. |
 | Release operations | Release owner | Full artifact set, archived gates, platform matrix, fault/performance drills, cargo-deny review, rollback/canary/incident signoff. | Not accepted. |
 
