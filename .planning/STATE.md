@@ -1,9 +1,9 @@
 # Project State
 
 ## Current Position
-- **Phase**: 1 of 8 (review passed)
-- **Status**: Phase 1 review passed -- 1 blocker and 1 warning resolved
-- **Last Activity**: Phase 1 review (2026-05-26)
+- **Phase**: 2 of 8 (planned)
+- **Status**: Phase 2 planned -- 6 plans across 5 waves
+- **Last Activity**: Phase 2 planning (2026-05-26)
 
 ## Progress
 ```
@@ -18,6 +18,15 @@
 - Plan 01-04 (Wave 2): Dependency Policy And Xtask Renderer Gate -- complete
 - Plan 01-05 (Wave 3): Phase 1 Evidence And Readiness Gate -- complete
 
+## Phase 2 Plan
+
+- Plan 02-01 (Wave 1): Desktop Crate Scaffold And Renderer Dependency Wiring -- planned
+- Plan 02-02 (Wave 2): Projection Renderer Panels -- planned
+- Plan 02-03 (Wave 2): Desktop Intent Bridge And App Requests -- planned
+- Plan 02-04 (Wave 3): App Composition Desktop Workflow -- planned
+- Plan 02-05 (Wave 4): Renderer Timing And Platform Smoke Evidence -- planned
+- Plan 02-06 (Wave 5): Phase 2 Evidence And Acceptance Gate -- planned
+
 ## Recent Decisions
 - Use exploration design `.planning/explorations/2026-05-26-gui-ide-roadmap-design.md` as the start source.
 - Use fresh `/legion:map` dataset from `.planning/CODEBASE.md` and `.planning/codebase/`.
@@ -25,6 +34,7 @@
 - First phase is Baseline Reconciliation and Renderer Decision.
 - GUI productization must preserve projection-only UI, proposal-mediated saves, metadata-only observability/storage defaults, and policy-gated runtime surfaces.
 - Phase plan counts are estimates, not hard caps.
+- Phase 2 auto-refine critique passed after adding executable smoke evidence, split rendering/intent boundaries, first-wave dependency gates, save-rejection regression coverage, and final evidence acceptance rules.
 
 ## Next Action
-Run `/legion:plan 2` to plan Phase 2: Renderer-Backed Foundation Mode
+Run `/legion:build` to execute Phase 2: Renderer-Backed Foundation Mode
