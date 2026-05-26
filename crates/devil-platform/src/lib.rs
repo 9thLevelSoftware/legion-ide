@@ -1703,7 +1703,10 @@ impl PtyService for NativePtyService {
             }
         };
         result.id = session_id.to_string();
-        if remove && let Some(handle) = sessions.remove(session_id) {
+        if remove
+            && !result.truncated
+            && let Some(handle) = sessions.remove(session_id)
+        {
             close_removed_pty_session(handle, false);
         }
         Ok(result)

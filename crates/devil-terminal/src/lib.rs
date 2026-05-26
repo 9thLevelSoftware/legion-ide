@@ -448,7 +448,7 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
-        if read.exited {
+        if read.exited && !read.truncated {
             self.remove_session(request.session_id)?;
         }
         let redacted = redact_terminal_projection(&read.output, self.config.max_output_bytes);
@@ -750,7 +750,10 @@ fn uuid_from_value(value: u64) -> uuid::Uuid {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
     use devil_platform::{PlatformError, PtyReadResult, PtySession};
     use devil_protocol::{CapabilityId, PrincipalId, WorkspaceId};
@@ -769,6 +772,7 @@ mod tests {
         exit_on_read: bool,
         fail_close: bool,
         fail_kill: bool,
+        scripted_reads: VecDeque<PtyReadResult>,
         calls: Vec<String>,
         orphaned: Vec<String>,
     }
@@ -786,6 +790,12 @@ mod tests {
             Self::new("native-unix-pty-test", output, true)
         }
 
+        fn native_scripted_reads(reads: Vec<PtyReadResult>) -> Self {
+            let pty = Self::new("native-unix-pty-test", "", false);
+            pty.state.lock().expect("fake pty state").scripted_reads = VecDeque::from(reads);
+            pty
+        }
+
         fn new(id: impl Into<String>, output: impl Into<String>, exit_on_read: bool) -> Self {
             Self {
                 state: Arc::new(StdMutex::new(FakePtyState {
@@ -794,6 +804,7 @@ mod tests {
                     exit_on_read,
                     fail_close: false,
                     fail_kill: false,
+                    scripted_reads: VecDeque::new(),
                     calls: Vec::new(),
                     orphaned: Vec::new(),
                 })),
@@ -857,6 +868,10 @@ mod tests {
         ) -> Result<PtyReadResult, PlatformError> {
             let mut state = self.state.lock().expect("fake pty state");
             state.calls.push(format!("read:{session_id}"));
+            if let Some(mut read) = state.scripted_reads.pop_front() {
+                read.id = session_id.to_string();
+                return Ok(read);
+            }
             let output = std::mem::take(&mut state.output);
             Ok(PtyReadResult {
                 id: session_id.to_string(),
@@ -1263,6 +1278,59 @@ mod tests {
             .expect("poll output");
         assert_eq!(output.audit.state, TerminalRuntimeState::Exited);
         assert!(output.output.redacted_payload.contains("done"));
+        assert!(matches!(
+            runtime.resize(TerminalResize {
+                session_id,
+                cols: 80,
+                rows: 24,
+            }),
+            Err(TerminalRuntimeError::Backend { .. })
+        ));
+    }
+
+    #[test]
+    fn terminal_runtime_keeps_exited_native_session_until_truncated_output_is_drained() {
+        let runtime = TerminalRuntime::new(
+            TerminalRuntimeConfig::enabled(),
+            FakePty::native_scripted_reads(vec![
+                PtyReadResult {
+                    id: String::new(),
+                    output: "first".to_string(),
+                    exited: true,
+                    exit_code: Some(0),
+                    truncated: true,
+                },
+                PtyReadResult {
+                    id: String::new(),
+                    output: "tail".to_string(),
+                    exited: true,
+                    exit_code: Some(0),
+                    truncated: false,
+                },
+            ]),
+        );
+        let outcome = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        let session_id = outcome.audit.session_id;
+
+        let first = runtime
+            .poll_output(poll_request(session_id, 93))
+            .expect("first poll");
+        assert_eq!(first.audit.state, TerminalRuntimeState::Exited);
+        assert!(first.output.truncated);
+        assert!(first.output.redacted_payload.contains("first"));
+
+        let second = runtime
+            .poll_output(poll_request(session_id, 94))
+            .expect("drain poll");
+        assert_eq!(second.audit.state, TerminalRuntimeState::Exited);
+        assert!(!second.output.truncated);
+        assert!(second.output.redacted_payload.contains("tail"));
         assert!(matches!(
             runtime.resize(TerminalResize {
                 session_id,

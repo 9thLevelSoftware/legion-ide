@@ -7,7 +7,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use devil_protocol::{
     CausalityId, EventSequence, RedactionHint, RemoteAgentPackageDescriptor,
@@ -263,8 +263,13 @@ impl RustlsMtlsCarrier {
         let client_config = self.build_client_config(&attempt)?;
         let endpoint = &attempt.endpoint_policy.endpoint;
         let port = endpoint.port.unwrap_or(443);
+        let deadline = Instant::now() + Duration::from_millis(attempt.timeout_ms);
         let stream = tokio::time::timeout(
-            Duration::from_millis(attempt.timeout_ms),
+            remaining_attempt_budget(deadline).ok_or_else(|| {
+                RemoteTransportCarrierError::Network {
+                    reason: "tcp connect timed out".to_string(),
+                }
+            })?,
             TcpStream::connect((endpoint.host.as_str(), port)),
         )
         .await
@@ -282,7 +287,9 @@ impl RustlsMtlsCarrier {
         })?;
         let connector = TlsConnector::from(Arc::new(client_config));
         let tls_stream = tokio::time::timeout(
-            Duration::from_millis(attempt.timeout_ms),
+            remaining_attempt_budget(deadline).ok_or_else(|| RemoteTransportCarrierError::Tls {
+                reason: "tls handshake timed out".to_string(),
+            })?,
             connector.connect(server_name, stream),
         )
         .await
@@ -975,6 +982,14 @@ fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, RemoteTran
     })
 }
 
+fn remaining_attempt_budget(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(remaining)
+}
+
 #[cfg(test)]
 mod tests {
     use devil_protocol::{
@@ -1307,6 +1322,12 @@ mod tests {
             .block_on(carrier.connect(attempt))
             .expect_err("canceled before credential loading or network dial");
         assert!(matches!(err, RemoteTransportCarrierError::Canceled { .. }));
+    }
+
+    #[test]
+    fn rustls_mtls_carrier_uses_single_attempt_timeout_budget() {
+        let expired = Instant::now() - Duration::from_millis(1);
+        assert_eq!(remaining_attempt_budget(expired), None);
     }
 
     #[test]
