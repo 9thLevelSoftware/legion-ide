@@ -376,7 +376,7 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_input(&input).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        let (platform_session_id, sequence, correlation_id, causality_id) =
+        let (platform_session_id, sequence, _session_correlation_id, causality_id) =
             self.session_for_lifecycle(input.session_id)?;
         self.pty
             .write_pty(&platform_session_id, &input.payload)
@@ -392,7 +392,7 @@ impl<P: PtyService> TerminalRuntime<P> {
             format!(
                 "state=running action=input pty=true input_bytes={} correlation={}",
                 input.payload.len(),
-                correlation_id.0
+                input.correlation_id.0
             ),
         )
     }
@@ -496,12 +496,13 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_close_request(&request).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        let platform_session_id = self.remove_session(request.session_id)?;
+        let platform_session_id = self.platform_session_id(request.session_id)?;
         self.pty
             .close_pty(&platform_session_id)
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
+        let _ = self.remove_session(request.session_id)?;
         self.audit_record(
             request.session_id,
             TerminalRuntimeState::Exited,
@@ -521,7 +522,7 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_kill_request(&request).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        let platform_session_id = self.remove_session(request.session_id)?;
+        let platform_session_id = self.platform_session_id(request.session_id)?;
         let mode = match request.escalation {
             TerminalKillEscalation::Interrupt => PtyKillMode::Terminate,
             TerminalKillEscalation::Terminate => PtyKillMode::Terminate,
@@ -532,6 +533,7 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
+        let _ = self.remove_session(request.session_id)?;
         self.audit_record(
             request.session_id,
             TerminalRuntimeState::Exited,
@@ -755,6 +757,8 @@ mod tests {
         id: String,
         output: String,
         exit_on_read: bool,
+        fail_close: bool,
+        fail_kill: bool,
         calls: Vec<String>,
         orphaned: Vec<String>,
     }
@@ -778,6 +782,8 @@ mod tests {
                     id: id.into(),
                     output: output.into(),
                     exit_on_read,
+                    fail_close: false,
+                    fail_kill: false,
                     calls: Vec::new(),
                     orphaned: Vec::new(),
                 })),
@@ -790,6 +796,14 @@ mod tests {
 
         fn set_orphaned(&self, orphaned: Vec<String>) {
             self.state.lock().expect("fake pty state").orphaned = orphaned;
+        }
+
+        fn fail_close(&self) {
+            self.state.lock().expect("fake pty state").fail_close = true;
+        }
+
+        fn fail_kill(&self) {
+            self.state.lock().expect("fake pty state").fail_kill = true;
         }
     }
 
@@ -844,20 +858,24 @@ mod tests {
         }
 
         fn close_pty(&self, session_id: &str) -> Result<(), PlatformError> {
-            self.state
-                .lock()
-                .expect("fake pty state")
-                .calls
-                .push(format!("close:{session_id}"));
+            let mut state = self.state.lock().expect("fake pty state");
+            state.calls.push(format!("close:{session_id}"));
+            if state.fail_close {
+                return Err(PlatformError::PtyUnavailable {
+                    reason: "fake close failure".to_string(),
+                });
+            }
             Ok(())
         }
 
         fn kill_pty(&self, session_id: &str, mode: PtyKillMode) -> Result<(), PlatformError> {
-            self.state
-                .lock()
-                .expect("fake pty state")
-                .calls
-                .push(format!("kill:{session_id}:{mode:?}"));
+            let mut state = self.state.lock().expect("fake pty state");
+            state.calls.push(format!("kill:{session_id}:{mode:?}"));
+            if state.fail_kill {
+                return Err(PlatformError::PtyUnavailable {
+                    reason: "fake kill failure".to_string(),
+                });
+            }
             Ok(())
         }
 
@@ -1048,6 +1066,7 @@ mod tests {
             .expect("input");
         assert_eq!(input.state, TerminalRuntimeState::Running);
         assert!(input.metadata_summary.contains("input_bytes=4"));
+        assert!(input.metadata_summary.contains("correlation=77"));
         assert!(!input.metadata_summary.contains("dir"));
 
         let resize = runtime
@@ -1077,6 +1096,59 @@ mod tests {
         assert!(calls.contains(&"resize:native-unix-pty-test:120x40".to_string()));
         assert!(calls.contains(&"read:native-unix-pty-test".to_string()));
         assert!(calls.contains(&"close:native-unix-pty-test".to_string()));
+    }
+
+    #[test]
+    fn terminal_runtime_keeps_session_registered_when_close_or_kill_fails() {
+        let pty = FakePty::native("");
+        let runtime = TerminalRuntime::new(TerminalRuntimeConfig::enabled(), pty.clone());
+        let outcome = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        let close_session_id = outcome.audit.session_id;
+        pty.fail_close();
+        assert!(matches!(
+            runtime.close(close_request(close_session_id, 89)),
+            Err(TerminalRuntimeError::Backend { .. })
+        ));
+        runtime
+            .input(TerminalInput {
+                session_id: close_session_id,
+                correlation_id: CorrelationId(90),
+                payload: "x".to_string(),
+            })
+            .expect("session remains after close failure");
+
+        let pty = FakePty::native("");
+        let runtime = TerminalRuntime::new(TerminalRuntimeConfig::enabled(), pty.clone());
+        let outcome = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        let kill_session_id = outcome.audit.session_id;
+        pty.fail_kill();
+        assert!(matches!(
+            runtime.kill(kill_request(
+                kill_session_id,
+                91,
+                TerminalKillEscalation::Terminate,
+            )),
+            Err(TerminalRuntimeError::Backend { .. })
+        ));
+        runtime
+            .input(TerminalInput {
+                session_id: kill_session_id,
+                correlation_id: CorrelationId(92),
+                payload: "x".to_string(),
+            })
+            .expect("session remains after kill failure");
     }
 
     #[test]

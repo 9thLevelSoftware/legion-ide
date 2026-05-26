@@ -246,10 +246,9 @@ impl RustlsMtlsCarrier {
         let client_config = self.build_client_config(&attempt)?;
         let endpoint = &attempt.endpoint_policy.endpoint;
         let port = endpoint.port.unwrap_or(443);
-        let address = format!("{}:{port}", endpoint.host);
         let stream = tokio::time::timeout(
             Duration::from_millis(attempt.timeout_ms),
-            TcpStream::connect(address),
+            TcpStream::connect((endpoint.host.as_str(), port)),
         )
         .await
         .map_err(|_| RemoteTransportCarrierError::Network {
@@ -258,13 +257,14 @@ impl RustlsMtlsCarrier {
         .map_err(|err| RemoteTransportCarrierError::Network {
             reason: err.to_string(),
         })?;
-        let server_name = ServerName::try_from(endpoint.host.clone()).map_err(|err| {
+        let server_identity = tls_server_identity_name(&attempt.tls_policy.server_identity)?;
+        let server_name = ServerName::try_from(server_identity).map_err(|err| {
             RemoteTransportCarrierError::InvalidPolicy {
-                reason: format!("invalid TLS server name: {err}"),
+                reason: format!("invalid TLS policy server identity: {err}"),
             }
         })?;
         let connector = TlsConnector::from(Arc::new(client_config));
-        let _tls_stream = tokio::time::timeout(
+        let tls_stream = tokio::time::timeout(
             Duration::from_millis(attempt.timeout_ms),
             connector.connect(server_name, stream),
         )
@@ -275,6 +275,20 @@ impl RustlsMtlsCarrier {
         .map_err(|err| RemoteTransportCarrierError::Tls {
             reason: err.to_string(),
         })?;
+        let negotiated_alpn = tls_stream.get_ref().1.alpn_protocol().ok_or_else(|| {
+            RemoteTransportCarrierError::Tls {
+                reason: "tls handshake did not negotiate ALPN".to_string(),
+            }
+        })?;
+        if negotiated_alpn != attempt.selected_alpn.as_bytes() {
+            return Err(RemoteTransportCarrierError::Tls {
+                reason: format!(
+                    "negotiated ALPN `{}` did not match selected policy `{}`",
+                    String::from_utf8_lossy(negotiated_alpn),
+                    attempt.selected_alpn
+                ),
+            });
+        }
         let diagnostic = RemoteTransportCarrierDiagnostic {
             session_id: None,
             state: RemoteTransportLifecycleState::Active,
@@ -321,6 +335,21 @@ impl RemoteTransportCarrier for RustlsMtlsCarrier {
     > {
         Box::pin(self.connect_inner(attempt))
     }
+}
+
+fn tls_server_identity_name(identity: &str) -> Result<String, RemoteTransportCarrierError> {
+    let trimmed = identity.trim();
+    let name = trimmed
+        .strip_prefix("dns:")
+        .or_else(|| trimmed.strip_prefix("ip:"))
+        .unwrap_or(trimmed)
+        .trim();
+    if name.is_empty() || name.contains('/') {
+        return Err(RemoteTransportCarrierError::InvalidPolicy {
+            reason: "TLS policy server identity must be a DNS name or IP address".to_string(),
+        });
+    }
+    Ok(name.to_string())
 }
 
 /// Production transport-core configuration.
@@ -1190,6 +1219,22 @@ mod tests {
             .build_client_config(&connection_attempt())
             .expect("optional mTLS config");
         assert_eq!(config.alpn_protocols, vec![b"devil-remote/phase8".to_vec()]);
+    }
+
+    #[test]
+    fn tls_server_identity_is_policy_bound_and_normalized() {
+        assert_eq!(
+            tls_server_identity_name("dns:localhost").expect("dns identity"),
+            "localhost"
+        );
+        assert_eq!(
+            tls_server_identity_name("ip:127.0.0.1").expect("ip identity"),
+            "127.0.0.1"
+        );
+        assert!(matches!(
+            tls_server_identity_name("spiffe://example/workload"),
+            Err(RemoteTransportCarrierError::InvalidPolicy { .. })
+        ));
     }
 
     #[test]

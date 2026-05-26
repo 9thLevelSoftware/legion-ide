@@ -1094,6 +1094,12 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                     .to_string(),
             });
         }
+        if consent.endpoint_id != endpoint.endpoint_id {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export consent endpoint does not match upload endpoint"
+                    .to_string(),
+            });
+        }
         let descriptor = self.read_bundle_descriptor(bundle_id)?;
         let envelope = self.read_vault_envelope(bundle_id)?;
         if consent.workspace_id != descriptor.workspace_id || consent.purpose != descriptor.purpose
@@ -2323,6 +2329,18 @@ mod tests {
                     endpoint_label: "http://support.invalid/raw".to_string(),
                     ..hosted_endpoint()
                 },
+                &mut client,
+            ),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        assert!(matches!(
+            vault.export_encrypted_bundle_hosted(
+                &descriptor.bundle_id,
+                RawSourceHostedExportConsent {
+                    endpoint_id: "other-endpoint".to_string(),
+                    ..hosted_export_consent()
+                },
+                hosted_endpoint(),
                 &mut client,
             ),
             Err(RawSourceVaultError::Denied { .. })

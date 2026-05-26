@@ -37,6 +37,9 @@ const STABLE_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// Monotonic suffix for same-directory atomic-write temporary paths.
 static ATOMIC_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Monotonic suffix for native PTY session handles.
+static NATIVE_PTY_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 /// Errors surfaced by platform services.
 #[derive(Debug, Error)]
 pub enum PlatformError {
@@ -1048,19 +1051,26 @@ fn native_pty_sessions() -> &'static Mutex<HashMap<String, NativePtySessionHandl
     NATIVE_PTY_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn next_native_pty_session_id(prefix: &str) -> String {
+    let sequence = NATIVE_PTY_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{sequence}")
+}
+
 #[cfg(windows)]
 fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
     let handle = spawn_windows_conpty(request)?;
-    let id = format!(
-        "native-conpty-{}",
-        stable_hash_bytes(format!("{}:{:?}", request.command, request.args).as_bytes())
-    );
-    std::thread::sleep(Duration::from_millis(20));
-    let output = drain_windows_output(&handle, PTY_OUTPUT_LIMIT)?;
-    native_pty_sessions()
+    let id = next_native_pty_session_id("native-conpty");
+    let output = poll_windows_output(&handle, PTY_OUTPUT_LIMIT, Duration::from_millis(50))?;
+    let mut sessions = native_pty_sessions()
         .lock()
-        .map_err(|_| pty_registry_poisoned())?
-        .insert(id.clone(), NativePtySessionHandle::Windows(handle));
+        .map_err(|_| pty_registry_poisoned())?;
+    if sessions.contains_key(&id) {
+        close_windows_session(handle, true);
+        return Err(PlatformError::PtyUnavailable {
+            reason: format!("native PTY session id collision for `{id}`"),
+        });
+    }
+    sessions.insert(id.clone(), NativePtySessionHandle::Windows(handle));
     Ok(PtySession { id, output })
 }
 
@@ -1108,9 +1118,8 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
             command: request.command.clone(),
             message: err.to_string(),
         })?;
-    std::thread::sleep(Duration::from_millis(20));
-    let output = read_unix_available(&mut master, PTY_OUTPUT_LIMIT)?.output;
-    let id = format!("native-unix-pty-{}", child.id());
+    let output = poll_unix_output(&mut master, PTY_OUTPUT_LIMIT, Duration::from_millis(50))?;
+    let id = next_native_pty_session_id("native-unix-pty");
     native_pty_sessions()
         .lock()
         .map_err(|_| pty_registry_poisoned())?
@@ -1198,6 +1207,7 @@ fn spawn_windows_conpty(request: &PtyRequest) -> Result<WindowsPtySessionHandle,
             None,
         )
         .map_err(|err| {
+            DeleteProcThreadAttributeList(attribute_list);
             close_windows_conpty_handles(
                 Some(conpty),
                 &[input_read, input_write, output_read, output_write],
@@ -1299,6 +1309,22 @@ fn drain_windows_output(
     let take = output.len().min(max_bytes);
     let bytes = output.drain(..take).collect::<Vec<_>>();
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(windows)]
+fn poll_windows_output(
+    handle: &WindowsPtySessionHandle,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<String, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = drain_windows_output(handle, max_bytes)?;
+        if !output.is_empty() || Instant::now() >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 #[cfg(windows)]
@@ -1451,6 +1477,73 @@ fn read_unix_available(
 }
 
 #[cfg(unix)]
+fn poll_unix_output(
+    master: &mut std::fs::File,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<String, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = read_unix_available(master, max_bytes)?.output;
+        if !output.is_empty() || Instant::now() >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(unix)]
+fn write_unix_nonblocking(master: &mut std::fs::File, bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::io::Write as _;
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        match master.write(&bytes[offset..]) {
+            Ok(0) => {
+                return Err(PlatformError::PtyUnavailable {
+                    reason: format!("write Unix PTY input wrote zero bytes at offset {offset}"),
+                });
+            }
+            Ok(written) => offset += written,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => {
+                return Err(PlatformError::from_io_error(
+                    "write Unix PTY input",
+                    ".",
+                    err,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_unix_child_exit(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<bool, PlatformError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|err| PlatformError::from_io_error("wait Unix PTY child", ".", err))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(unix)]
 fn resize_unix_pty(master: &std::fs::File, cols: u16, rows: u16) -> Result<(), PlatformError> {
     use std::os::fd::AsRawFd;
     let size = nix::libc::winsize {
@@ -1495,29 +1588,37 @@ impl PtyService for NativePtyService {
         match handle {
             #[cfg(unix)]
             NativePtySessionHandle::Unix { master, .. } => {
-                master.write_all(input.as_bytes()).map_err(|err| {
-                    PlatformError::from_io_error("write Unix PTY input", ".", err)
-                })?;
-                master
-                    .flush()
-                    .map_err(|err| PlatformError::from_io_error("flush Unix PTY input", ".", err))
+                write_unix_nonblocking(master, input.as_bytes())
             }
             #[cfg(windows)]
             NativePtySessionHandle::Windows(handle) => {
                 use windows::Win32::Foundation::HANDLE;
                 use windows::Win32::Storage::FileSystem::WriteFile;
-                let mut written = 0u32;
-                unsafe {
-                    WriteFile(
-                        HANDLE(handle.input_write as *mut core::ffi::c_void),
-                        Some(input.as_bytes()),
-                        Some(&mut written),
-                        None,
-                    )
-                    .map_err(|err| PlatformError::PtyUnavailable {
-                        reason: format!("write Windows ConPTY input: {err}"),
-                    })
+                let bytes = input.as_bytes();
+                let mut offset = 0usize;
+                while offset < bytes.len() {
+                    let mut written = 0u32;
+                    unsafe {
+                        WriteFile(
+                            HANDLE(handle.input_write as *mut core::ffi::c_void),
+                            Some(&bytes[offset..]),
+                            Some(&mut written),
+                            None,
+                        )
+                        .map_err(|err| PlatformError::PtyUnavailable {
+                            reason: format!("write Windows ConPTY input at offset {offset}: {err}"),
+                        })?;
+                    }
+                    if written == 0 {
+                        return Err(PlatformError::PtyUnavailable {
+                            reason: format!(
+                                "write Windows ConPTY input wrote zero bytes at offset {offset}"
+                            ),
+                        });
+                    }
+                    offset += written as usize;
                 }
+                Ok(())
             }
         }
     }
@@ -1576,10 +1677,11 @@ impl PtyService for NativePtyService {
             #[cfg(windows)]
             NativePtySessionHandle::Windows(handle) => {
                 let (exited, exit_code) = windows_session_exited(handle)?;
-                if exited {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                let output = drain_windows_output(handle, max_bytes)?;
+                let output = if exited {
+                    poll_windows_output(handle, max_bytes, Duration::from_millis(50))?
+                } else {
+                    drain_windows_output(handle, max_bytes)?
+                };
                 (
                     PtyReadResult {
                         id: String::new(),
@@ -1623,30 +1725,49 @@ impl PtyService for NativePtyService {
         let mut sessions = native_pty_sessions()
             .lock()
             .map_err(|_| pty_registry_poisoned())?;
-        let handle = sessions
-            .remove(session_id)
-            .ok_or_else(|| pty_session_missing(session_id))?;
-        match handle {
-            #[cfg(unix)]
-            NativePtySessionHandle::Unix { mut child, .. } => {
-                let signal = match mode {
-                    PtyKillMode::Terminate => nix::sys::signal::Signal::SIGTERM,
-                    PtyKillMode::Kill | PtyKillMode::KillTree => nix::sys::signal::Signal::SIGKILL,
-                };
-                let pid = child.id() as i32;
-                let target = if mode == PtyKillMode::KillTree {
-                    nix::unistd::Pid::from_raw(-pid)
-                } else {
-                    nix::unistd::Pid::from_raw(pid)
-                };
-                let _ = nix::sys::signal::kill(target, signal);
-                let _ = child.wait();
-                Ok(())
+        #[cfg(unix)]
+        {
+            let handle = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| pty_session_missing(session_id))?;
+            match handle {
+                NativePtySessionHandle::Unix { child, .. } => {
+                    let signal = match mode {
+                        PtyKillMode::Terminate => nix::sys::signal::Signal::SIGTERM,
+                        PtyKillMode::Kill | PtyKillMode::KillTree => {
+                            nix::sys::signal::Signal::SIGKILL
+                        }
+                    };
+                    let pid = child.id() as i32;
+                    let target = if mode == PtyKillMode::KillTree {
+                        nix::unistd::Pid::from_raw(-pid)
+                    } else {
+                        nix::unistd::Pid::from_raw(pid)
+                    };
+                    let _ = nix::sys::signal::kill(target, signal);
+                    if wait_unix_child_exit(child, Duration::from_millis(500))? {
+                        let _ = sessions.remove(session_id);
+                        Ok(())
+                    } else {
+                        Err(PlatformError::PtyUnavailable {
+                            reason: format!(
+                                "Unix PTY session `{session_id}` did not exit after {signal:?}"
+                            ),
+                        })
+                    }
+                }
             }
-            #[cfg(windows)]
-            NativePtySessionHandle::Windows(handle) => {
-                close_windows_session(handle, true);
-                Ok(())
+        }
+        #[cfg(windows)]
+        {
+            let handle = sessions
+                .remove(session_id)
+                .ok_or_else(|| pty_session_missing(session_id))?;
+            match handle {
+                NativePtySessionHandle::Windows(handle) => {
+                    close_windows_session(handle, true);
+                    Ok(())
+                }
             }
         }
     }

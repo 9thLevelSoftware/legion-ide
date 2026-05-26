@@ -281,7 +281,7 @@ pub struct ReqwestTelemetryExportClient {
 impl ReqwestTelemetryExportClient {
     /// Construct a rustls-only HTTP exporter.
     pub fn new(config: ReqwestTelemetryExportConfig) -> Result<Self, TelemetrySpoolError> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        ensure_rustls_crypto_provider()?;
         let client = reqwest::blocking::Client::builder()
             .tls_backend_rustls()
             .https_only(true)
@@ -328,13 +328,12 @@ impl TelemetryExportClient for ReqwestTelemetryExportClient {
         if status.is_success() {
             let outcome = response
                 .json::<HostedTelemetryUploadOutcome>()
-                .unwrap_or_else(|_| HostedTelemetryUploadOutcome {
-                    batch_id: batch.batch_id.clone(),
-                    accepted: true,
-                    retry_after_ms: None,
-                    status: format!("http_{}", status.as_u16()),
-                    schema_version: 1,
-                });
+                .map_err(|err| TelemetrySpoolError::Http {
+                    message: format!(
+                        "parse hosted telemetry ack for HTTP {}: {err}",
+                        status.as_u16()
+                    ),
+                })?;
             if outcome.batch_id != batch.batch_id {
                 return Err(TelemetrySpoolError::InvalidMetadata {
                     reason: "hosted telemetry ack batch id did not match upload".to_string(),
@@ -355,6 +354,19 @@ impl TelemetryExportClient for ReqwestTelemetryExportClient {
                 schema_version: 1,
             })
         }
+    }
+}
+
+fn ensure_rustls_crypto_provider() -> Result<(), TelemetrySpoolError> {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(()) => Ok(()),
+        Err(_) if rustls::crypto::CryptoProvider::get_default().is_some() => Ok(()),
+        Err(_) => Err(TelemetrySpoolError::Http {
+            message: "install rustls crypto provider".to_string(),
+        }),
     }
 }
 
