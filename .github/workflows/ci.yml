@@ -48,6 +48,7 @@ jobs:
         run: cargo run -p devil-cli -- evidence check --phase phase8
 
       - name: Cargo deny check
+        if: runner.os == 'Linux'
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
