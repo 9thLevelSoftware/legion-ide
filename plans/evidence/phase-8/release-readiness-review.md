@@ -1,6 +1,6 @@
 # Phase 8 Release Readiness Review
 
-Status: implementation evidence updated for production-gated runtime adapters; final GA signoff still pending platform matrix evidence.
+Status: implementation evidence and platform matrix evidence are archived; final GA signoff still pending release-owner approval.
 
 Validated commands:
 - `cargo fmt --all --check`
@@ -22,16 +22,16 @@ Implemented release controls:
 - Cargo-deny completed with warning-level duplicate dependency findings only after reviewing the Phase 8 rustls/keyring dependency graph and allowing `ISC` plus `CDLA-Permissive-2.0` in addition to the existing AEAD license baseline.
 
 Remaining GA blockers:
-- Archive a fresh Linux, Windows, and macOS CI matrix run after this dependency/runtime rebaseline.
-- Re-run and archive the full final gate command set after the matrix evidence is available.
+- Review the archived Linux, Windows, and macOS CI matrix run for release approval.
+- Review the archived full final gate command set for release approval.
 - Record explicit release readiness signoff for security, privacy, operations, rollback, canary, incident response, and supply-chain review before flipping Phase 8 acceptance.
 
 Final signoff checklist:
-- Signoff date: pending.
-- Security signoff: Pending final matrix evidence.
-- Privacy signoff: Pending final matrix evidence.
-- Operations signoff: Pending final matrix evidence.
-- Rollback signoff: Pending final matrix evidence.
-- Canary signoff: Pending final matrix evidence.
-- Incident response signoff: Pending final matrix evidence.
-- Supply-chain signoff: Pending final matrix evidence.
+- Signoff date: pending release approval.
+- Security signoff: Pending release approval.
+- Privacy signoff: Pending release approval.
+- Operations signoff: Pending release approval.
+- Rollback signoff: Pending release approval.
+- Canary signoff: Pending release approval.
+- Incident response signoff: Pending release approval.
+- Supply-chain signoff: Pending release approval.

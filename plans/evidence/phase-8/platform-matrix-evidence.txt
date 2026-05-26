@@ -1,19 +1,28 @@
-Status: pending final GA matrix archive.
+Status: final platform matrix evidence archived; release signoff remains required before GA acceptance.
 
-Required accepted-form markers:
-- Workflow: .github/workflows/ci.yml
-- Run URL: pending
-- ubuntu-latest: pending
-- windows-latest: pending
-- macos-latest: pending
-- cargo fmt --all --check: pending
-- cargo check --workspace --all-targets: pending
-- cargo test --workspace --all-targets: pending
-- cargo clippy --workspace --all-targets -- -D warnings: pending
-- cargo deny check: pending
-- cargo run -p devil-cli -- evidence check --phase phase8: pending
-- cargo run -p xtask -- check-deps: pending
+Workflow: .github/workflows/ci.yml
+Run URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593
+Head SHA: 6e5fb6734bfae54365a98a063d48cc847988c1f1
+Completed: 2026-05-26T17:48:33Z
+
+Matrix jobs:
+- ubuntu-latest: passed
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593/job/77922469355
+- windows-latest: passed
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593/job/77922469486
+- macos-latest: passed
+  Job URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26464913593/job/77922469527
+
+Archived gate outputs from CI run 26464913593:
+- cargo fmt --all --check: passed
+- cargo check --workspace --all-targets: passed
+- cargo test --workspace --all-targets: passed
+- cargo clippy --workspace --all-targets -- -D warnings: passed
+- cargo deny check: passed
+- cargo run -p devil-cli -- evidence check --phase phase8: passed
+- cargo run -p xtask -- check-deps: passed
 
 Notes:
-- This file is intentionally not final GA evidence yet.
-- Replace each pending marker with a passed marker and the hosted CI run URL only after the Linux, Windows, and macOS matrix has run against the final Phase 8 dependency/runtime rebaseline.
+- Cargo deny ran on ubuntu-latest with the repository warning-level policy in deny.toml.
+- Windows and macOS skipped the cargo-deny action intentionally because the CI gate is Linux-owned.
+- Phase 8 requires release readiness signoff and the architecture map acceptance flip before GA approval.

@@ -4,13 +4,13 @@
 
 - Phase 8 acceptance: Not accepted.
 
-Runtime surface status: Production-gated Phase 8 runtime surfaces now include a rustls/tokio outbound TLS/mTLS carrier, native PTY platform boundary evidence, rustls-only hosted HTTP telemetry exporter, OS-keyring raw-source key-provider, KMS envelope-provider contract, and hosted encrypted raw-source export linkage. Phase 8 GA remains deferred until final Linux/Windows/macOS matrix evidence and release signoff are archived.
+Runtime surface status: Production-gated Phase 8 runtime surfaces now include a rustls/tokio outbound TLS/mTLS carrier, native PTY platform boundary evidence, rustls-only hosted HTTP telemetry exporter, OS-keyring raw-source key-provider, KMS envelope-provider contract, and hosted encrypted raw-source export linkage. Phase 8 GA remains deferred until release signoff is archived and the acceptance status is flipped.
 
 This document is Phase 8 implementation evidence. It is not final GA acceptance evidence until release signoff changes the acceptance status.
 
 ## Scope
 
-Phase 8 remains future-gated for final GA release acceptance, not for the primary implementation slices. ADR-0025 through ADR-0029 now record production implementation direction, and the current repository records protocol contracts, default-deny policy surfaces, metadata-only storage/observability paths, deterministic fixture crates, and production-gated runtime adapters. Production activation still requires archived cross-platform matrix evidence and release signoff.
+Phase 8 remains future-gated for final GA release acceptance, not for the primary implementation slices. ADR-0025 through ADR-0029 now record production implementation direction, and the current repository records protocol contracts, default-deny policy surfaces, metadata-only storage/observability paths, deterministic fixture crates, and production-gated runtime adapters. Production activation still requires release signoff and the acceptance flip.
 
 ## Boundary Summary
 
@@ -26,7 +26,7 @@ Phase 8 remains future-gated for final GA release acceptance, not for the primar
 | Area | Owner role | Activation gate | Current posture |
 | --- | --- | --- | --- |
 | Remote transport | Remote runtime owner | `remote.transport.connect`, endpoint allowlist, credential reference, schema compatibility, replay/duplicate defense, agent package manifest, and proposal-mediated mutation evidence. | Default-off production core plus rustls/tokio TLS/mTLS carrier implemented and tested. |
-| Terminal/PTTY | Platform runtime owner | `terminal.launch`, `terminal.input`, `terminal.resize`, `terminal.close`, `terminal.kill`, trusted workspace, cwd/shell/env policy, bounded output, cleanup/orphan evidence. | Native platform boundary implemented with Windows ConPTY session lifecycle and Unix PTY/process-group lifecycle path; final CI matrix remains required. |
+| Terminal/PTTY | Platform runtime owner | `terminal.launch`, `terminal.input`, `terminal.resize`, `terminal.close`, `terminal.kill`, trusted workspace, cwd/shell/env policy, bounded output, cleanup/orphan evidence. | Native platform boundary implemented with Windows ConPTY session lifecycle and Unix PTY/process-group lifecycle path; final CI matrix evidence is archived. |
 | Hosted telemetry | Privacy and observability owner | `telemetry.export.hosted`, explicit consent, category/endpoint allowlist, air-gap denial, durable bounded spool, classifier audit, retry/drop evidence. | Durable metadata spool/exporter plus rustls-only HTTP exporter implemented and tested. |
 | Raw-source retention | Security/privacy owner | `retention.raw_source.capture/read/delete/export.hosted`, scoped consent, TTL, max bytes, path scope, AEAD vault, audit, delete/revoke evidence, key-provider review, and recovery drills. | AEAD file-backed vault, OS-keyring provider, KMS envelope contract, hosted encrypted export linkage, local key rotation, and metadata-only recovery reports implemented and tested. |
 | Storage migrations | Storage owner | Explicit registry, dry-run, backup, checksum, recovery, quarantine, replay evidence, explicit repair flags. | Metadata registry, dry-run, backup, checksum, and recovery implemented and tested. |
@@ -77,5 +77,5 @@ Phase 8 remains future-gated for final GA release acceptance, not for the primar
 - [x] Protocol DTO contract tests pass for all Phase 8 contracts in this implementation slice.
 - [x] Security, privacy, storage, migration, fault-injection, and ownership tests pass for this implementation slice.
 - [x] Full workspace gates pass and outputs are archived.
-- [ ] Linux, Windows, and macOS CI matrix evidence is archived after the production runtime dependency rebaseline.
+- [x] Linux, Windows, and macOS CI matrix evidence is archived after the production runtime dependency rebaseline.
 - [ ] Release readiness signoff is updated after the final matrix run.
