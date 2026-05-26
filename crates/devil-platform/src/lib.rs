@@ -732,6 +732,8 @@ pub struct PtyReadResult {
 /// PTY kill mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtyKillMode {
+    /// Graceful interrupt signal.
+    Interrupt,
     /// Graceful termination.
     Terminate,
     /// Forceful process kill.
@@ -1328,6 +1330,38 @@ fn poll_windows_output(
 }
 
 #[cfg(windows)]
+fn write_windows_conpty_input(
+    handle: &WindowsPtySessionHandle,
+    bytes: &[u8],
+) -> Result<(), PlatformError> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::WriteFile;
+
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let mut written = 0u32;
+        unsafe {
+            WriteFile(
+                HANDLE(handle.input_write as *mut core::ffi::c_void),
+                Some(&bytes[offset..]),
+                Some(&mut written),
+                None,
+            )
+            .map_err(|err| PlatformError::PtyUnavailable {
+                reason: format!("write Windows ConPTY input at offset {offset}: {err}"),
+            })?;
+        }
+        if written == 0 {
+            return Err(PlatformError::PtyUnavailable {
+                reason: format!("write Windows ConPTY input wrote zero bytes at offset {offset}"),
+            });
+        }
+        offset += written as usize;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn windows_session_exited(
     handle: &WindowsPtySessionHandle,
 ) -> Result<(bool, Option<i32>), PlatformError> {
@@ -1592,33 +1626,7 @@ impl PtyService for NativePtyService {
             }
             #[cfg(windows)]
             NativePtySessionHandle::Windows(handle) => {
-                use windows::Win32::Foundation::HANDLE;
-                use windows::Win32::Storage::FileSystem::WriteFile;
-                let bytes = input.as_bytes();
-                let mut offset = 0usize;
-                while offset < bytes.len() {
-                    let mut written = 0u32;
-                    unsafe {
-                        WriteFile(
-                            HANDLE(handle.input_write as *mut core::ffi::c_void),
-                            Some(&bytes[offset..]),
-                            Some(&mut written),
-                            None,
-                        )
-                        .map_err(|err| PlatformError::PtyUnavailable {
-                            reason: format!("write Windows ConPTY input at offset {offset}: {err}"),
-                        })?;
-                    }
-                    if written == 0 {
-                        return Err(PlatformError::PtyUnavailable {
-                            reason: format!(
-                                "write Windows ConPTY input wrote zero bytes at offset {offset}"
-                            ),
-                        });
-                    }
-                    offset += written as usize;
-                }
-                Ok(())
+                write_windows_conpty_input(handle, input.as_bytes())
             }
         }
     }
@@ -1720,8 +1728,6 @@ impl PtyService for NativePtyService {
     }
 
     fn kill_pty(&self, session_id: &str, mode: PtyKillMode) -> Result<(), PlatformError> {
-        #[cfg(windows)]
-        let _ = mode;
         let mut sessions = native_pty_sessions()
             .lock()
             .map_err(|_| pty_registry_poisoned())?;
@@ -1733,18 +1739,22 @@ impl PtyService for NativePtyService {
             match handle {
                 NativePtySessionHandle::Unix { child, .. } => {
                     let signal = match mode {
+                        PtyKillMode::Interrupt => nix::sys::signal::Signal::SIGINT,
                         PtyKillMode::Terminate => nix::sys::signal::Signal::SIGTERM,
                         PtyKillMode::Kill | PtyKillMode::KillTree => {
                             nix::sys::signal::Signal::SIGKILL
                         }
                     };
                     let pid = child.id() as i32;
-                    let target = if mode == PtyKillMode::KillTree {
+                    let target = if matches!(mode, PtyKillMode::Interrupt | PtyKillMode::KillTree) {
                         nix::unistd::Pid::from_raw(-pid)
                     } else {
                         nix::unistd::Pid::from_raw(pid)
                     };
                     let _ = nix::sys::signal::kill(target, signal);
+                    if mode == PtyKillMode::Interrupt {
+                        return Ok(());
+                    }
                     if wait_unix_child_exit(child, Duration::from_millis(500))? {
                         let _ = sessions.remove(session_id);
                         Ok(())
@@ -1760,13 +1770,27 @@ impl PtyService for NativePtyService {
         }
         #[cfg(windows)]
         {
-            let handle = sessions
-                .remove(session_id)
-                .ok_or_else(|| pty_session_missing(session_id))?;
-            match handle {
-                NativePtySessionHandle::Windows(handle) => {
-                    close_windows_session(handle, true);
-                    Ok(())
+            match mode {
+                PtyKillMode::Interrupt => {
+                    let handle = sessions
+                        .get(session_id)
+                        .ok_or_else(|| pty_session_missing(session_id))?;
+                    match handle {
+                        NativePtySessionHandle::Windows(handle) => {
+                            write_windows_conpty_input(handle, b"\x03")
+                        }
+                    }
+                }
+                PtyKillMode::Terminate | PtyKillMode::Kill | PtyKillMode::KillTree => {
+                    let handle = sessions
+                        .remove(session_id)
+                        .ok_or_else(|| pty_session_missing(session_id))?;
+                    match handle {
+                        NativePtySessionHandle::Windows(handle) => {
+                            close_windows_session(handle, true);
+                            Ok(())
+                        }
+                    }
                 }
             }
         }

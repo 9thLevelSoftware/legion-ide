@@ -1088,6 +1088,12 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 reason: err.message,
             }
         })?;
+        let now = TimestampMillis::now();
+        if consent.issued_at.0 > now.0 || consent.expires_at.0 <= now.0 {
+            return Err(RawSourceVaultError::Denied {
+                reason: "hosted raw-source export consent is not current".to_string(),
+            });
+        }
         if !endpoint.allowlisted || !endpoint.endpoint_label.starts_with("https://") {
             return Err(RawSourceVaultError::Denied {
                 reason: "hosted raw-source export requires an allowlisted HTTPS endpoint"
@@ -1632,14 +1638,15 @@ mod tests {
     }
 
     fn hosted_export_consent() -> RawSourceHostedExportConsent {
+        let now = TimestampMillis::now().0.max(2);
         RawSourceHostedExportConsent {
             grant_id: "hosted-raw-grant".to_string(),
             principal_id: PrincipalId("tester".to_string()),
             workspace_id: WorkspaceId(1),
             endpoint_id: "support-endpoint".to_string(),
             purpose: RawSourceRetentionPurpose::SupportBundle,
-            issued_at: TimestampMillis(1),
-            expires_at: TimestampMillis(60_000),
+            issued_at: TimestampMillis(now - 1),
+            expires_at: TimestampMillis(now + 60_000),
             revoked: false,
             correlation_id: CorrelationId(1),
             schema_version: 1,
@@ -2338,6 +2345,19 @@ mod tests {
                 &descriptor.bundle_id,
                 RawSourceHostedExportConsent {
                     endpoint_id: "other-endpoint".to_string(),
+                    ..hosted_export_consent()
+                },
+                hosted_endpoint(),
+                &mut client,
+            ),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        assert!(matches!(
+            vault.export_encrypted_bundle_hosted(
+                &descriptor.bundle_id,
+                RawSourceHostedExportConsent {
+                    issued_at: TimestampMillis(1),
+                    expires_at: TimestampMillis(2),
                     ..hosted_export_consent()
                 },
                 hosted_endpoint(),

@@ -524,7 +524,7 @@ impl<P: PtyService> TerminalRuntime<P> {
         })?;
         let platform_session_id = self.platform_session_id(request.session_id)?;
         let mode = match request.escalation {
-            TerminalKillEscalation::Interrupt => PtyKillMode::Terminate,
+            TerminalKillEscalation::Interrupt => PtyKillMode::Interrupt,
             TerminalKillEscalation::Terminate => PtyKillMode::Terminate,
             TerminalKillEscalation::KillTree => PtyKillMode::KillTree,
         };
@@ -533,15 +533,25 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
-        let _ = self.remove_session(request.session_id)?;
+        let state = if request.escalation == TerminalKillEscalation::Interrupt {
+            TerminalRuntimeState::Running
+        } else {
+            let _ = self.remove_session(request.session_id)?;
+            TerminalRuntimeState::Exited
+        };
+        let state_label = if state == TerminalRuntimeState::Exited {
+            "exited"
+        } else {
+            "running"
+        };
         self.audit_record(
             request.session_id,
-            TerminalRuntimeState::Exited,
+            state,
             request.event_sequence,
             request.correlation_id,
             request.causality_id,
             format!(
-                "state=exited action=kill pty=true escalation={:?} kill_tree={}",
+                "state={state_label} action=kill pty=true escalation={:?} kill_tree={}",
                 request.escalation, request.kill_tree_authorized
             ),
         )
@@ -1149,6 +1159,40 @@ mod tests {
                 payload: "x".to_string(),
             })
             .expect("session remains after kill failure");
+    }
+
+    #[test]
+    fn terminal_runtime_interrupt_preserves_session_and_uses_interrupt_mode() {
+        let pty = FakePty::native("");
+        let runtime = TerminalRuntime::new(TerminalRuntimeConfig::enabled(), pty.clone());
+        let outcome = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        let session_id = outcome.audit.session_id;
+
+        let interrupt = runtime
+            .kill(kill_request(
+                session_id,
+                90,
+                TerminalKillEscalation::Interrupt,
+            ))
+            .expect("interrupt");
+        assert_eq!(interrupt.state, TerminalRuntimeState::Running);
+        assert!(
+            pty.calls()
+                .contains(&"kill:native-unix-pty-test:Interrupt".to_string())
+        );
+        runtime
+            .input(TerminalInput {
+                session_id,
+                correlation_id: CorrelationId(91),
+                payload: "x".to_string(),
+            })
+            .expect("interrupt keeps session available");
     }
 
     #[test]
