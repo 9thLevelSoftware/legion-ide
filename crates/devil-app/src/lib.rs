@@ -15,6 +15,9 @@ use devil_editor::{
     BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
     TextEdit, TextPosition, TextRange as EditorTextRange,
 };
+use devil_index::{
+    DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, SemanticIndex, SourceDocument,
+};
 use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
 use devil_observability::{
     SharedEventSink, agent_replay_manifest_recorded_event, collaboration_audit_recorded_event,
@@ -23,7 +26,7 @@ use devil_observability::{
     proposal_audit_recorded_event, proposal_created_event, proposal_failed_event,
     proposal_previewed_event, proposal_rejected_event, proposal_rolled_back_event,
     proposal_validated_event, remote_audit_recorded_event, save_denied_event,
-    stale_proposal_rejected_event, transaction_event,
+    stale_proposal_rejected_event, terminal_audit_recorded_event, transaction_event,
 };
 use devil_platform::{NativeFileSystem, NativeWatcherService};
 use devil_plugin::PluginRuntimeHost;
@@ -34,17 +37,23 @@ use devil_project::{
     WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
 };
 use devil_protocol::{
-    BatchProposalPayload, BufferId, CanonicalPath, CapabilityId, CapabilityNamespace, CausalityId,
-    CollaborationAuditRecord, CollaborationDocumentBinding, CollaborationDocumentEpoch,
-    CollaborationDocumentOperation, CollaborationDocumentOperationKind, CollaborationParticipant,
-    CollaborationParticipantId, CollaborationParticipantRole, CollaborationPermission,
-    CollaborationPresenceProjection, CollaborationSessionDescriptor, CollaborationSessionId,
-    CollaborationSessionState, CollaborationSharedProposalApproval,
+    BatchProposalPayload, BufferId, ByteRange, CancellationTokenId, CanonicalPath,
+    CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityId,
+    CapabilityNamespace, CapabilityRequest, CapabilityRequestContext, CapabilityResponse,
+    CausalityId, CollaborationAuditRecord, CollaborationDocumentBinding,
+    CollaborationDocumentEpoch, CollaborationDocumentOperation, CollaborationDocumentOperationKind,
+    CollaborationParticipant, CollaborationParticipantId, CollaborationParticipantRole,
+    CollaborationPermission, CollaborationPresenceProjection, CollaborationSessionDescriptor,
+    CollaborationSessionId, CollaborationSessionState, CollaborationSharedProposalApproval,
     CollaborationSharedProposalDisposition, CollaborationTransportEnvelope,
-    CollaborationTransportPayload, CorrelationId, EditorApplyTransactionRequest, EventEnvelope,
-    EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
+    CollaborationTransportPayload, CorrelationId, EditBatch, EditorApplyTransactionRequest,
+    EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
     FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
-    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode, PluginContributionProjection,
+    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode, LanguageCompletionProjection,
+    LanguageHoverProjection, LanguageId, LanguageLocationProjection,
+    LanguageOutlineSymbolProjection, LanguageProblemProjection, LanguageToolingOperationKind,
+    LanguageToolingOperationProjection, LanguageToolingProjection, LanguageToolingStatusKind,
+    LspEditProposalConversionInput, LspRequestCorrelation, PluginContributionProjection,
     PluginHostCallKind, PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest,
     PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
     ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
@@ -58,17 +67,27 @@ use devil_protocol::{
     ProtocolTextRange, RedactionHint, RemoteAgentDescriptor, RemoteAuditRecord,
     RemoteAuthorityDescriptor, RemoteTransportEnvelope, RemoteTransportPayload,
     RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
-    SaveConflictPolicy, SaveFileProposal, SaveIntent, SessionDirtyIndicator, SessionPanelState,
-    SessionTab, SessionTabGroup, StorageRepositoryPort, StorageRepositoryRequest,
-    StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, TrustDecisionContext, VersionContext, ViewportScroll, WorkspaceCloseRequest,
-    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
-    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
-    WorkspaceTrustState,
+    SaveConflictPolicy, SaveFileProposal, SaveIntent, SemanticGrammarVersion, SemanticModelVersion,
+    SemanticPrivacyScope, SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind,
+    SemanticQueryRequest, SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab,
+    SessionTabGroup, StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
+    TerminalCloseRequest, TerminalInput, TerminalKillEscalation, TerminalKillRequest,
+    TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
+    TerminalPanelStatusKind, TerminalPolicyProjection, TerminalResize, TerminalRuntimeState,
+    TerminalScrollbackProjection, TerminalSearchProjection, TerminalSessionId, TextCoordinate,
+    TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
+    TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
+    VersionContext, ViewportScroll, WorkspaceCloseRequest, WorkspaceEditProposalPayload,
+    WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
+    WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
+    WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
+    validate_terminal_close_request, validate_terminal_input, validate_terminal_kill_request,
+    validate_terminal_resize,
 };
 use devil_remote::{RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig};
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
+use devil_terminal::{TerminalFixtureConfig, TerminalFixtureRuntime};
 use devil_tracker::{TrackerLedger, TrackerRunLedgerRecord};
 use devil_ui::ui::{
     CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
@@ -150,6 +169,12 @@ pub enum AppCompositionError {
     /// Remote runtime or app gate rejected a request.
     #[error("remote request failed: {0}")]
     Remote(String),
+    /// Language tooling workflow failed.
+    #[error("language tooling request failed: {0}")]
+    LanguageTooling(String),
+    /// Terminal workflow failed.
+    #[error("terminal request failed: {0}")]
+    Terminal(String),
 }
 
 #[cfg(test)]
@@ -3280,6 +3305,1088 @@ struct ActiveSaveContext {
     trust: WorkspaceTrustState,
 }
 
+#[derive(Debug, Clone)]
+struct LanguageRequestInput {
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    metadata: ActiveFileMetadata,
+    principal: PrincipalId,
+    text: String,
+    snapshot_id: devil_protocol::SnapshotId,
+    buffer_version: devil_protocol::BufferVersion,
+    event_context: EventContext,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LanguageReadKind {
+    Hover,
+    Completion,
+    Definition,
+    References,
+    Outline,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LanguageProposalKind {
+    Formatting,
+    Rename,
+    OrganizeImports,
+    CodeAction,
+}
+
+#[derive(Debug, Clone)]
+struct LanguageToolingWorkflow {
+    projection: LanguageToolingProjection,
+    semantic_index: SemanticIndex,
+    next_operation_id: u64,
+}
+
+impl Default for LanguageToolingWorkflow {
+    fn default() -> Self {
+        Self {
+            projection: LanguageToolingProjection::empty(),
+            semantic_index: SemanticIndex::new(),
+            next_operation_id: 0,
+        }
+    }
+}
+
+impl LanguageToolingWorkflow {
+    fn projection(&self) -> LanguageToolingProjection {
+        self.projection.clone()
+    }
+
+    fn cancel_operation(&mut self, operation_id: String, event_context: EventContext) {
+        self.projection.status = LanguageToolingStatusKind::Cancelled;
+        self.projection.status_message = format!("Language operation {operation_id} cancelled");
+        self.projection.cancellation_count = self.projection.cancellation_count.saturating_add(1);
+        self.projection.generated_at = TimestampMillis::now();
+        self.push_operation(LanguageToolingOperationProjection {
+            operation_id,
+            kind: LanguageToolingOperationKind::Diagnostics,
+            status: LanguageToolingStatusKind::Cancelled,
+            request_id: None,
+            proposal_id: None,
+            message: "cancelled by app authority".to_string(),
+            correlation_id: Some(event_context.correlation_id),
+            causality_id: Some(event_context.causality_id),
+            generated_at: TimestampMillis::now(),
+            schema_version: 1,
+        });
+    }
+
+    fn run_read(
+        &mut self,
+        input: LanguageRequestInput,
+        kind: LanguageReadKind,
+        position: TextCoordinate,
+    ) -> LanguageToolingProjection {
+        let operation_kind = match kind {
+            LanguageReadKind::Hover => LanguageToolingOperationKind::Hover,
+            LanguageReadKind::Completion => LanguageToolingOperationKind::Completion,
+            LanguageReadKind::Definition => LanguageToolingOperationKind::Definition,
+            LanguageReadKind::References => LanguageToolingOperationKind::References,
+            LanguageReadKind::Outline => LanguageToolingOperationKind::Outline,
+        };
+        let operation_id = self.next_operation_id(operation_kind);
+        let same_identity = self.projection.workspace_id == Some(input.workspace_id)
+            && self.projection.buffer_id == Some(input.buffer_id)
+            && self.projection.file_id == Some(input.metadata.identity.file_id);
+        let previous_projection = if same_identity {
+            self.projection.clone()
+        } else {
+            let mut projection = LanguageToolingProjection::empty();
+            projection.operations = self.projection.operations.clone();
+            projection.cancellation_count = self.projection.cancellation_count;
+            projection.stale_result_count = if self.projection.buffer_id.is_some() {
+                self.projection.stale_result_count.saturating_add(1)
+            } else {
+                self.projection.stale_result_count
+            };
+            projection
+        };
+        let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
+        let document = SourceDocument::with_versions(
+            input.workspace_id,
+            input.metadata.identity.file_id,
+            input.metadata.identity.canonical_path.clone(),
+            language_id.clone(),
+            input.metadata.file_content_version,
+            input.metadata.workspace_generation,
+            Some(input.snapshot_id),
+            SemanticPrivacyScope::Workspace,
+            input.text,
+        );
+        let file_index = LexicalIndexer::new().index_document(
+            &document,
+            SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+            SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        );
+        let diagnostics = file_index.diagnostics.clone();
+        self.semantic_index.upsert(file_index);
+        let query_kind = match kind {
+            LanguageReadKind::Hover => SemanticQueryKind::HoverEnrichment,
+            LanguageReadKind::Completion => SemanticQueryKind::CompletionRanking,
+            LanguageReadKind::Definition => SemanticQueryKind::Definition,
+            LanguageReadKind::References => SemanticQueryKind::References,
+            LanguageReadKind::Outline => SemanticQueryKind::SymbolLookup,
+        };
+        let response = self.semantic_index.query(&SemanticQueryRequest {
+            query_id: SemanticQueryId(uuid::Uuid::now_v7()),
+            kind: query_kind,
+            scope: SemanticQueryScope {
+                workspace_id: input.workspace_id,
+                file_ids: vec![input.metadata.identity.file_id],
+                paths: vec![input.metadata.identity.canonical_path.clone()],
+                language_ids: vec![language_id],
+                privacy_scope: SemanticPrivacyScope::Workspace,
+            },
+            position: Some(position),
+            text_query_hash: None,
+            limit: 25,
+            cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
+            freshness_policy: SemanticQueryFreshnessPolicy::BestEffort,
+            correlation_id: input.event_context.correlation_id,
+            causality_id: input.event_context.causality_id,
+            schema_version: 1,
+        });
+
+        let problems = diagnostics
+            .into_iter()
+            .map(|diagnostic| LanguageProblemProjection {
+                file_id: Some(input.metadata.identity.file_id),
+                path: diagnostic
+                    .path
+                    .or_else(|| Some(input.metadata.identity.canonical_path.clone())),
+                range: diagnostic.range,
+                severity: diagnostic.severity,
+                code_label: Some(diagnostic.code),
+                message: bounded_label(diagnostic.message, 160),
+                source_label: Some("devil-index".to_string()),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+            .collect::<Vec<_>>();
+        let locations = response
+            .results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| LanguageLocationProjection {
+                location_id: result.result_id.0.clone(),
+                file_id: result.file_id,
+                path: result.path.clone(),
+                range: result.range,
+                label: bounded_label(
+                    if result.label.is_empty() {
+                        format!("result-{index}")
+                    } else {
+                        result.label.clone()
+                    },
+                    80,
+                ),
+                degraded: false,
+                schema_version: 1,
+            })
+            .collect::<Vec<_>>();
+        let completions = response
+            .results
+            .iter()
+            .take(20)
+            .map(|result| LanguageCompletionProjection {
+                completion_id: result.result_id.0.clone(),
+                label: bounded_label(result.label.clone(), 80),
+                detail_label: Some(format!("{:?}", result.kind)),
+                kind_label: format!("{:?}", result.kind),
+                score_basis_points: result.score_basis_points,
+                degraded: false,
+                schema_version: 1,
+            })
+            .collect::<Vec<_>>();
+        let outline = self
+            .semantic_index
+            .symbols()
+            .iter()
+            .filter(|symbol| symbol.file_id == input.metadata.identity.file_id)
+            .take(50)
+            .map(|symbol| LanguageOutlineSymbolProjection {
+                symbol_id: symbol.symbol_id.0.clone(),
+                label: bounded_label(
+                    symbol
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| symbol.symbol_name_hash.value.clone()),
+                    80,
+                ),
+                kind_label: bounded_label(symbol.kind.clone(), 48),
+                range: symbol.declaration_range,
+                depth: 0,
+                children_omitted: false,
+                schema_version: 1,
+            })
+            .collect::<Vec<_>>();
+
+        let hover = response
+            .results
+            .first()
+            .map(|result| LanguageHoverProjection {
+                hover_id: format!("hover:{}", operation_id),
+                file_id: result.file_id,
+                range: result.range,
+                label: bounded_label(result.label.clone(), 80),
+                summary: format!("{:?} from semantic index", result.kind),
+                degraded: false,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+
+        self.projection = LanguageToolingProjection {
+            workspace_id: Some(input.workspace_id),
+            buffer_id: Some(input.buffer_id),
+            file_id: Some(input.metadata.identity.file_id),
+            status: LanguageToolingStatusKind::Ready,
+            status_message: format!("{operation_kind:?} ready"),
+            problems,
+            hover: if matches!(kind, LanguageReadKind::Hover) {
+                hover
+            } else {
+                previous_projection.hover
+            },
+            completions: if matches!(kind, LanguageReadKind::Completion) {
+                completions
+            } else {
+                previous_projection.completions
+            },
+            definitions: if matches!(kind, LanguageReadKind::Definition) {
+                locations.clone()
+            } else {
+                previous_projection.definitions
+            },
+            references: if matches!(kind, LanguageReadKind::References) {
+                locations
+            } else {
+                previous_projection.references
+            },
+            outline: if matches!(kind, LanguageReadKind::Outline) {
+                outline
+            } else {
+                previous_projection.outline
+            },
+            operations: previous_projection.operations,
+            stale_result_count: previous_projection.stale_result_count,
+            cancellation_count: previous_projection.cancellation_count,
+            generated_at: TimestampMillis::now(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        self.push_operation(LanguageToolingOperationProjection {
+            operation_id,
+            kind: operation_kind,
+            status: LanguageToolingStatusKind::Ready,
+            request_id: Some(devil_protocol::LspRequestId(uuid::Uuid::now_v7())),
+            proposal_id: None,
+            message: "semantic projection refreshed".to_string(),
+            correlation_id: Some(input.event_context.correlation_id),
+            causality_id: Some(input.event_context.causality_id),
+            generated_at: TimestampMillis::now(),
+            schema_version: 1,
+        });
+        self.projection()
+    }
+
+    fn record_proposal(
+        &mut self,
+        input: &LanguageRequestInput,
+        kind: LanguageProposalKind,
+        proposal_id: ProposalId,
+        message: String,
+    ) -> LanguageToolingProjection {
+        let operation_kind = match kind {
+            LanguageProposalKind::Formatting => LanguageToolingOperationKind::FormattingProposal,
+            LanguageProposalKind::Rename => LanguageToolingOperationKind::RenameProposal,
+            LanguageProposalKind::OrganizeImports => {
+                LanguageToolingOperationKind::OrganizeImportsProposal
+            }
+            LanguageProposalKind::CodeAction => LanguageToolingOperationKind::CodeActionProposal,
+        };
+        self.projection.workspace_id = Some(input.workspace_id);
+        self.projection.buffer_id = Some(input.buffer_id);
+        self.projection.file_id = Some(input.metadata.identity.file_id);
+        self.projection.status = LanguageToolingStatusKind::Ready;
+        self.projection.status_message = message.clone();
+        self.projection.generated_at = TimestampMillis::now();
+        let operation_id = self.next_operation_id(operation_kind);
+        self.push_operation(LanguageToolingOperationProjection {
+            operation_id,
+            kind: operation_kind,
+            status: LanguageToolingStatusKind::Ready,
+            request_id: Some(devil_protocol::LspRequestId(uuid::Uuid::now_v7())),
+            proposal_id: Some(proposal_id),
+            message,
+            correlation_id: Some(input.event_context.correlation_id),
+            causality_id: Some(input.event_context.causality_id),
+            generated_at: TimestampMillis::now(),
+            schema_version: 1,
+        });
+        self.projection()
+    }
+
+    fn record_proposal_failure(
+        &mut self,
+        input: &LanguageRequestInput,
+        kind: LanguageProposalKind,
+        message: String,
+    ) -> LanguageToolingProjection {
+        let operation_kind = match kind {
+            LanguageProposalKind::Formatting => LanguageToolingOperationKind::FormattingProposal,
+            LanguageProposalKind::Rename => LanguageToolingOperationKind::RenameProposal,
+            LanguageProposalKind::OrganizeImports => {
+                LanguageToolingOperationKind::OrganizeImportsProposal
+            }
+            LanguageProposalKind::CodeAction => LanguageToolingOperationKind::CodeActionProposal,
+        };
+        self.projection.workspace_id = Some(input.workspace_id);
+        self.projection.buffer_id = Some(input.buffer_id);
+        self.projection.file_id = Some(input.metadata.identity.file_id);
+        self.projection.status = LanguageToolingStatusKind::Failed;
+        self.projection.status_message = message.clone();
+        self.projection.generated_at = TimestampMillis::now();
+        let operation_id = self.next_operation_id(operation_kind);
+        self.push_operation(LanguageToolingOperationProjection {
+            operation_id,
+            kind: operation_kind,
+            status: LanguageToolingStatusKind::Failed,
+            request_id: Some(devil_protocol::LspRequestId(uuid::Uuid::now_v7())),
+            proposal_id: None,
+            message,
+            correlation_id: Some(input.event_context.correlation_id),
+            causality_id: Some(input.event_context.causality_id),
+            generated_at: TimestampMillis::now(),
+            schema_version: 1,
+        });
+        self.projection()
+    }
+
+    fn next_operation_id(&mut self, kind: LanguageToolingOperationKind) -> String {
+        self.next_operation_id = self.next_operation_id.saturating_add(1).max(1);
+        format!("language:{kind:?}:{}", self.next_operation_id)
+    }
+
+    fn push_operation(&mut self, operation: LanguageToolingOperationProjection) {
+        self.projection.operations.push(operation);
+        if self.projection.operations.len() > 20 {
+            let excess = self.projection.operations.len() - 20;
+            self.projection.operations.drain(0..excess);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalWorkflow {
+    projection: TerminalPanelProjection,
+    fixture_enabled: bool,
+    fixture: TerminalFixtureRuntime,
+    security_broker: DenyByDefaultBroker,
+    last_audit: Option<devil_protocol::TerminalAuditRecord>,
+    next_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalDenial {
+    workspace_id: WorkspaceId,
+    policy: TerminalPolicyProjection,
+    reason: String,
+    event_context: EventContext,
+    session_id: Option<TerminalSessionId>,
+    action: String,
+    clear_active_session: bool,
+}
+
+impl Default for TerminalWorkflow {
+    fn default() -> Self {
+        Self {
+            projection: TerminalPanelProjection::empty(),
+            fixture_enabled: false,
+            fixture: TerminalFixtureRuntime::new(TerminalFixtureConfig::default()),
+            security_broker: DenyByDefaultBroker::new(
+                SecurityPolicy::default(),
+                CapabilityNamespace("app.terminal".to_string()),
+            ),
+            last_audit: None,
+            next_sequence: 0,
+        }
+    }
+}
+
+impl TerminalWorkflow {
+    fn projection(&self) -> TerminalPanelProjection {
+        self.projection.clone()
+    }
+
+    fn enable_fixture(&mut self) {
+        self.fixture_enabled = true;
+        self.fixture = TerminalFixtureRuntime::new(TerminalFixtureConfig::enabled());
+        let mut policy = SecurityPolicy::default();
+        policy.terminal_policy.runtime_enabled = true;
+        self.security_broker =
+            DenyByDefaultBroker::new(policy, CapabilityNamespace("app.terminal".to_string()));
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Idle,
+            message: "Terminal fixture enabled".to_string(),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+    }
+
+    fn take_last_audit(&mut self) -> Option<devil_protocol::TerminalAuditRecord> {
+        self.last_audit.take()
+    }
+
+    fn launch(
+        &mut self,
+        context: ActiveWorkspaceContext,
+        command_label: String,
+        event_context: EventContext,
+    ) -> TerminalPanelProjection {
+        let decision = self.capability_decision(
+            &context,
+            "terminal.launch",
+            Some(command_label.as_str()),
+            event_context,
+        );
+        let policy = Self::policy_projection(&context, "terminal.launch", &decision);
+        self.projection.workspace_id = Some(context.workspace_id);
+        self.projection.policy = Some(policy.clone());
+        self.projection.generated_at = TimestampMillis::now();
+
+        if !decision.granted {
+            return self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: decision
+                    .reason
+                    .unwrap_or_else(|| "terminal launch denied by policy".to_string()),
+                event_context,
+                session_id: None,
+                action: "launch".to_string(),
+                clear_active_session: true,
+            });
+        }
+        if !self.fixture_enabled {
+            return self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: "Terminal fixture runtime is disabled".to_string(),
+                event_context,
+                session_id: None,
+                action: "launch".to_string(),
+                clear_active_session: true,
+            });
+        }
+
+        let launch_policy = devil_protocol::TerminalLaunchPolicyContract {
+            principal_id: context.principal.clone(),
+            workspace_id: context.workspace_id,
+            trust_state: context.trust.clone(),
+            capability_id: CapabilityId("terminal.launch".to_string()),
+            cwd_policy: "workspace-root".to_string(),
+            output_byte_limit: 256 * 1024,
+            timeout_seconds: 30,
+            schema_version: 1,
+        };
+        let runtime_label = std::any::type_name::<
+            devil_terminal::TerminalRuntime<devil_platform::NativePtyService>,
+        >();
+        match self.fixture.launch(launch_policy) {
+            Ok(audit) => {
+                let session_id = audit.session_id;
+                let output = self.fixture.output_chunk(
+                    &audit,
+                    format!(
+                        "fixture terminal ready: command_label_bytes={}; runtime={runtime_label}",
+                        command_label.len()
+                    ),
+                    command_label.len() as u64,
+                );
+                self.projection.active_session_id = Some(session_id);
+                self.projection.runtime_state = Some(TerminalRuntimeState::Running);
+                self.projection.status = TerminalPanelStatus {
+                    kind: TerminalPanelStatusKind::Running,
+                    message: "Terminal fixture running".to_string(),
+                };
+                self.projection.last_denial = None;
+                self.projection.last_error = None;
+                self.record_audit(
+                    session_id,
+                    TerminalRuntimeState::Running,
+                    event_context,
+                    format!(
+                        "action=launch state=running decision_id={} command_label_bytes={} output_limit=262144",
+                        decision.decision_id.0,
+                        command_label.len()
+                    ),
+                );
+                if let Ok(output) = output {
+                    self.push_terminal_output(output, false);
+                }
+                self.projection()
+            }
+            Err(error) => self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: format!("Terminal launch denied: {error}"),
+                event_context,
+                session_id: None,
+                action: "launch".to_string(),
+                clear_active_session: true,
+            }),
+        }
+    }
+
+    fn input(
+        &mut self,
+        context: ActiveWorkspaceContext,
+        session_id: TerminalSessionId,
+        payload: String,
+        event_context: EventContext,
+    ) -> TerminalPanelProjection {
+        if !self.session_matches(session_id) {
+            return self.fail(
+                session_id,
+                event_context,
+                format!("terminal session {} is not active", session_id.0),
+            );
+        }
+        let decision = self.capability_decision(&context, "terminal.input", None, event_context);
+        let policy = Self::policy_projection(&context, "terminal.input", &decision);
+        self.projection.policy = Some(policy.clone());
+        if !decision.granted {
+            return self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: decision
+                    .reason
+                    .unwrap_or_else(|| "terminal input denied by policy".to_string()),
+                event_context,
+                session_id: Some(session_id),
+                action: "input".to_string(),
+                clear_active_session: false,
+            });
+        }
+        let input = TerminalInput {
+            session_id,
+            correlation_id: event_context.correlation_id,
+            payload: payload.clone(),
+        };
+        if let Err(error) = validate_terminal_input(&input) {
+            return self.fail(session_id, event_context, error.message);
+        }
+        self.push_row(
+            session_id,
+            format!("input accepted bytes={}", payload.len()),
+            payload.len() as u64,
+            false,
+        );
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Running,
+            message: "Terminal input accepted".to_string(),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            TerminalRuntimeState::Running,
+            event_context,
+            format!("action=input state=running input_bytes={}", payload.len()),
+        );
+        self.projection()
+    }
+
+    fn resize(
+        &mut self,
+        context: ActiveWorkspaceContext,
+        session_id: TerminalSessionId,
+        cols: u16,
+        rows: u16,
+        event_context: EventContext,
+    ) -> TerminalPanelProjection {
+        if !self.session_matches(session_id) {
+            return self.fail(
+                session_id,
+                event_context,
+                format!("terminal session {} is not active", session_id.0),
+            );
+        }
+        let decision = self.capability_decision(&context, "terminal.resize", None, event_context);
+        let policy = Self::policy_projection(&context, "terminal.resize", &decision);
+        self.projection.policy = Some(policy.clone());
+        if !decision.granted {
+            return self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: decision
+                    .reason
+                    .unwrap_or_else(|| "terminal resize denied by policy".to_string()),
+                event_context,
+                session_id: Some(session_id),
+                action: "resize".to_string(),
+                clear_active_session: false,
+            });
+        }
+        let resize = TerminalResize {
+            session_id,
+            cols,
+            rows,
+        };
+        if let Err(error) = validate_terminal_resize(&resize) {
+            return self.fail(session_id, event_context, error.message);
+        }
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Running,
+            message: format!("Terminal resized to {cols}x{rows}"),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            TerminalRuntimeState::Running,
+            event_context,
+            format!("action=resize state=running cols={cols} rows={rows}"),
+        );
+        self.projection()
+    }
+
+    fn poll(
+        &mut self,
+        session_id: TerminalSessionId,
+        event_context: EventContext,
+    ) -> TerminalPanelProjection {
+        if !self.session_matches(session_id) {
+            return self.fail(
+                session_id,
+                event_context,
+                format!("terminal session {} is not active", session_id.0),
+            );
+        }
+        self.push_row(session_id, "poll complete".to_string(), 13, false);
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            TerminalRuntimeState::Running,
+            event_context,
+            "action=poll state=running output_poll=bounded".to_string(),
+        );
+        self.projection()
+    }
+
+    fn search(
+        &mut self,
+        session_id: TerminalSessionId,
+        query: String,
+        event_context: EventContext,
+    ) -> TerminalPanelProjection {
+        if !self.session_matches(session_id) {
+            return self.fail(
+                session_id,
+                event_context,
+                format!("terminal session {} is not active", session_id.0),
+            );
+        }
+        let query_label = bounded_label(query, 80);
+        let query_bytes = query_label.len();
+        let match_count = self
+            .projection
+            .output_rows
+            .iter()
+            .filter(|row| row.redacted_payload.contains(&query_label))
+            .count() as u32;
+        self.projection.search = TerminalSearchProjection {
+            query_label: Some(query_label),
+            match_count,
+            active_match_index: (match_count > 0).then_some(0),
+            truncated: false,
+            schema_version: 1,
+        };
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            TerminalRuntimeState::Running,
+            event_context,
+            format!(
+                "action=search state=running query_bytes={} match_count={match_count}",
+                query_bytes
+            ),
+        );
+        self.projection()
+    }
+
+    fn close_or_kill(
+        &mut self,
+        context: ActiveWorkspaceContext,
+        session_id: TerminalSessionId,
+        killed: bool,
+        event_context: EventContext,
+    ) -> TerminalPanelProjection {
+        if !self.session_matches(session_id) {
+            return self.fail(
+                session_id,
+                event_context,
+                format!("terminal session {} is not active", session_id.0),
+            );
+        }
+        let capability = if killed {
+            "terminal.kill"
+        } else {
+            "terminal.close"
+        };
+        let decision = self.capability_decision(&context, capability, None, event_context);
+        let policy = Self::policy_projection(&context, capability, &decision);
+        self.projection.policy = Some(policy.clone());
+        if !decision.granted {
+            return self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: decision.reason.unwrap_or_else(|| {
+                    if killed {
+                        "terminal kill denied by policy".to_string()
+                    } else {
+                        "terminal close denied by policy".to_string()
+                    }
+                }),
+                event_context,
+                session_id: Some(session_id),
+                action: capability
+                    .strip_prefix("terminal.")
+                    .unwrap_or(capability)
+                    .to_string(),
+                clear_active_session: false,
+            });
+        }
+        if killed {
+            let request = TerminalKillRequest {
+                session_id,
+                principal_id: context.principal.clone(),
+                capability_id: CapabilityId("terminal.kill".to_string()),
+                escalation: TerminalKillEscalation::Terminate,
+                kill_tree_authorized: false,
+                escalation_timeout_ms: 5_000,
+                event_sequence: self.next_event_sequence(),
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                metadata_summary: "action=kill escalation=terminate".to_string(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            };
+            if let Err(error) = validate_terminal_kill_request(&request) {
+                return self.fail(session_id, event_context, error.message);
+            }
+        } else {
+            let request = TerminalCloseRequest {
+                session_id,
+                principal_id: context.principal.clone(),
+                capability_id: CapabilityId("terminal.close".to_string()),
+                event_sequence: self.next_event_sequence(),
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                metadata_summary: "action=close".to_string(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            };
+            if let Err(error) = validate_terminal_close_request(&request) {
+                return self.fail(session_id, event_context, error.message);
+            }
+        }
+        self.projection.runtime_state = Some(TerminalRuntimeState::Exited);
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Exited,
+            message: if killed {
+                "Terminal killed".to_string()
+            } else {
+                "Terminal closed".to_string()
+            },
+        };
+        self.projection.active_session_id = None;
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            TerminalRuntimeState::Exited,
+            event_context,
+            if killed {
+                "action=kill state=exited escalation=terminate".to_string()
+            } else {
+                "action=close state=exited".to_string()
+            },
+        );
+        self.projection()
+    }
+
+    fn deny(&mut self, denial: TerminalDenial) -> TerminalPanelProjection {
+        self.projection.workspace_id = Some(denial.workspace_id);
+        if denial.clear_active_session {
+            self.projection.active_session_id = None;
+        }
+        self.projection.runtime_state = Some(TerminalRuntimeState::Denied);
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Denied,
+            message: denial.reason.clone(),
+        };
+        self.projection.policy = Some(TerminalPolicyProjection {
+            granted: false,
+            reason: denial.reason.clone(),
+            ..denial.policy
+        });
+        self.projection.last_denial = Some(denial.reason.clone());
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            denial
+                .session_id
+                .unwrap_or_else(|| self.audit_session_id(denial.workspace_id)),
+            TerminalRuntimeState::Denied,
+            denial.event_context,
+            format!(
+                "action={} state=denied reason={}",
+                denial.action,
+                bounded_label(denial.reason, 96)
+            ),
+        );
+        self.projection()
+    }
+
+    fn fail(
+        &mut self,
+        session_id: TerminalSessionId,
+        event_context: EventContext,
+        reason: String,
+    ) -> TerminalPanelProjection {
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Failed,
+            message: reason.clone(),
+        };
+        self.projection.last_error = Some(reason);
+        self.projection.runtime_state = Some(TerminalRuntimeState::Failed);
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            TerminalRuntimeState::Failed,
+            event_context,
+            format!(
+                "action=terminal state=failed reason={}",
+                bounded_label(
+                    self.projection
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    96
+                )
+            ),
+        );
+        self.projection()
+    }
+
+    fn capability_decision(
+        &self,
+        context: &ActiveWorkspaceContext,
+        capability: &str,
+        command_label: Option<&str>,
+        event_context: EventContext,
+    ) -> CapabilityDecision {
+        let command_binary = command_label
+            .and_then(|label| label.split_whitespace().next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        match self.security_broker.handle(CapabilityRequest::Request {
+            principal_id: context.principal.clone(),
+            capability_id: CapabilityId(capability.to_string()),
+            workspace_trust_state: context.trust.clone(),
+            target_path: None,
+            decision_id: None,
+            context: CapabilityRequestContext {
+                command_binary,
+                ..CapabilityRequestContext::default()
+            },
+            correlation_id: event_context.correlation_id,
+        }) {
+            Ok(CapabilityResponse::Decision(decision)) => decision,
+            Ok(other) => CapabilityDecision {
+                decision_id: CapabilityDecisionId(1),
+                granted: false,
+                capability: CapabilityId(capability.to_string()),
+                reason: Some(format!(
+                    "terminal policy returned unexpected response: {other:?}"
+                )),
+            },
+            Err(error) => CapabilityDecision {
+                decision_id: CapabilityDecisionId(1),
+                granted: false,
+                capability: CapabilityId(capability.to_string()),
+                reason: Some(format!("terminal policy request failed: {error:?}")),
+            },
+        }
+    }
+
+    fn policy_projection(
+        context: &ActiveWorkspaceContext,
+        capability: &str,
+        decision: &CapabilityDecision,
+    ) -> TerminalPolicyProjection {
+        TerminalPolicyProjection {
+            capability_id: CapabilityId(capability.to_string()),
+            workspace_trust_state: context.trust.clone(),
+            granted: decision.granted,
+            decision_id: Some(decision.decision_id),
+            reason: decision
+                .reason
+                .clone()
+                .unwrap_or_else(|| "policy decision recorded".to_string()),
+            output_byte_limit: 256 * 1024,
+            timeout_seconds: 30,
+            schema_version: 1,
+        }
+    }
+
+    fn record_audit(
+        &mut self,
+        session_id: TerminalSessionId,
+        state: TerminalRuntimeState,
+        event_context: EventContext,
+        metadata_summary: String,
+    ) {
+        let event_sequence = self.next_event_sequence();
+        self.last_audit = Some(devil_protocol::TerminalAuditRecord {
+            session_id,
+            state,
+            event_sequence,
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            metadata_summary: bounded_label(metadata_summary, 160),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    }
+
+    fn next_event_sequence(&mut self) -> EventSequence {
+        self.next_sequence = self.next_sequence.saturating_add(1).max(1);
+        EventSequence(self.next_sequence)
+    }
+
+    fn audit_session_id(&self, workspace_id: WorkspaceId) -> TerminalSessionId {
+        let fallback = u64::try_from(workspace_id.0).unwrap_or(u64::MAX).max(1);
+        self.projection
+            .active_session_id
+            .unwrap_or(TerminalSessionId(fallback))
+    }
+
+    fn session_matches(&self, session_id: TerminalSessionId) -> bool {
+        self.projection.active_session_id == Some(session_id)
+    }
+
+    fn push_terminal_output(
+        &mut self,
+        output: devil_protocol::TerminalOutputChunk,
+        is_stderr: bool,
+    ) {
+        self.push_row(
+            output.session_id,
+            output.redacted_payload,
+            output.byte_count,
+            is_stderr,
+        );
+    }
+
+    fn push_row(
+        &mut self,
+        session_id: TerminalSessionId,
+        redacted_payload: String,
+        byte_count: u64,
+        is_stderr: bool,
+    ) {
+        let sequence = self.next_event_sequence();
+        self.projection
+            .output_rows
+            .push(TerminalOutputRowProjection {
+                session_id,
+                sequence,
+                redacted_payload: bounded_label(redacted_payload, 240),
+                byte_count,
+                is_stderr,
+                truncated: byte_count > 240,
+                redaction: RedactionHint::MetadataOnly,
+                schema_version: 1,
+            });
+        let mut omitted = self.projection.scrollback.omitted_row_count;
+        if self.projection.output_rows.len() > 100 {
+            let excess = self.projection.output_rows.len() - 100;
+            self.projection.output_rows.drain(0..excess);
+            omitted = omitted.saturating_add(excess as u32);
+        }
+        self.projection.scrollback = TerminalScrollbackProjection {
+            visible_row_count: self.projection.output_rows.len() as u32,
+            omitted_row_count: omitted,
+            byte_limit: 256 * 1024,
+            truncated: omitted > 0,
+            schema_version: 1,
+        };
+    }
+}
+
+fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
+    let lower = path.0.to_ascii_lowercase();
+    let language = if lower.ends_with(".rs") {
+        "rust"
+    } else if lower.ends_with(".ts") || lower.ends_with(".tsx") {
+        "typescript"
+    } else if lower.ends_with(".js") || lower.ends_with(".jsx") {
+        "javascript"
+    } else if lower.ends_with(".md") {
+        "markdown"
+    } else if lower.ends_with(".json") {
+        "json"
+    } else {
+        "text"
+    };
+    LanguageId(language.to_string())
+}
+
+fn bounded_label(value: impl Into<String>, limit: usize) -> String {
+    value.into().chars().take(limit).collect()
+}
+
+fn identifier_byte_range_at(text: &str, requested_byte: u64) -> Option<ByteRange> {
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut index = usize::try_from(requested_byte).unwrap_or(usize::MAX);
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    let bytes = text.as_bytes();
+    if index == bytes.len() && index > 0 {
+        index -= 1;
+    }
+    if index < bytes.len()
+        && !is_identifier_byte(bytes[index])
+        && index > 0
+        && is_identifier_byte(bytes[index - 1])
+    {
+        index -= 1;
+    }
+    if index >= bytes.len() || !is_identifier_byte(bytes[index]) {
+        return None;
+    }
+
+    let mut start = index;
+    while start > 0 && is_identifier_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < bytes.len() && is_identifier_byte(bytes[end]) {
+        end += 1;
+    }
+    Some(ByteRange::new(start as u64, end as u64))
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 struct Phase4ContextAssemblyService;
 
 impl Phase4ContextAssemblyService {
@@ -3597,6 +4704,113 @@ pub enum AppCommandRequest {
         /// Query id to cancel.
         query_id: String,
     },
+    /// Request hover data through app-owned language tooling.
+    RequestHover {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Request completion rows through app-owned language tooling.
+    RequestCompletion {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Request definition locations through app-owned language tooling.
+    GoToDefinition {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Request reference locations through app-owned language tooling.
+    FindReferences {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Refresh the active document outline through app-owned language tooling.
+    RefreshOutline {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request a formatting proposal preview through app-owned language tooling.
+    RequestFormattingProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request a rename proposal preview through app-owned language tooling.
+    RequestRenameProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+        /// New symbol name label.
+        new_name: String,
+    },
+    /// Request an organize-imports proposal preview through app-owned language tooling.
+    RequestOrganizeImportsProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request a code-action proposal preview through app-owned language tooling.
+    RequestCodeActionProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Code action identifier.
+        action_id: String,
+    },
+    /// Cancel an in-flight language operation.
+    CancelLanguageOperation {
+        /// Operation identifier.
+        operation_id: String,
+    },
+    /// Launch a policy-gated terminal session.
+    TerminalLaunch {
+        /// Display-safe command label or fixture command.
+        command_label: String,
+    },
+    /// Send input to an active terminal session.
+    TerminalInput {
+        /// Terminal session identifier.
+        session_id: TerminalSessionId,
+        /// Input payload.
+        payload: String,
+    },
+    /// Resize an active terminal session.
+    TerminalResize {
+        /// Terminal session identifier.
+        session_id: TerminalSessionId,
+        /// Column count.
+        cols: u16,
+        /// Row count.
+        rows: u16,
+    },
+    /// Kill an active terminal session.
+    TerminalKill {
+        /// Terminal session identifier.
+        session_id: TerminalSessionId,
+    },
+    /// Close an active terminal session.
+    TerminalClose {
+        /// Terminal session identifier.
+        session_id: TerminalSessionId,
+    },
+    /// Poll terminal output.
+    TerminalOutputPoll {
+        /// Terminal session identifier.
+        session_id: TerminalSessionId,
+    },
+    /// Search terminal output projection.
+    TerminalSearch {
+        /// Terminal session identifier.
+        session_id: TerminalSessionId,
+        /// Query label.
+        query: String,
+    },
     /// Open a workspace path through workspace authority.
     OpenPath {
         /// User-provided path text.
@@ -3839,6 +5053,23 @@ impl CommandExecutionService {
             | AppCommandRequest::SetViewportScroll { .. }
             | AppCommandRequest::RunSearch { .. }
             | AppCommandRequest::CancelSearch { .. }
+            | AppCommandRequest::RequestHover { .. }
+            | AppCommandRequest::RequestCompletion { .. }
+            | AppCommandRequest::GoToDefinition { .. }
+            | AppCommandRequest::FindReferences { .. }
+            | AppCommandRequest::RefreshOutline { .. }
+            | AppCommandRequest::RequestFormattingProposal { .. }
+            | AppCommandRequest::RequestRenameProposal { .. }
+            | AppCommandRequest::RequestOrganizeImportsProposal { .. }
+            | AppCommandRequest::RequestCodeActionProposal { .. }
+            | AppCommandRequest::CancelLanguageOperation { .. }
+            | AppCommandRequest::TerminalLaunch { .. }
+            | AppCommandRequest::TerminalInput { .. }
+            | AppCommandRequest::TerminalResize { .. }
+            | AppCommandRequest::TerminalKill { .. }
+            | AppCommandRequest::TerminalClose { .. }
+            | AppCommandRequest::TerminalOutputPoll { .. }
+            | AppCommandRequest::TerminalSearch { .. }
             | AppCommandRequest::OpenPath { .. }
             | AppCommandRequest::StartAiRun { .. }
             | AppCommandRequest::CancelAiRun { .. }
@@ -3970,6 +5201,114 @@ impl CommandDispatcher {
             }),
             CommandDispatchIntent::CancelSearch { query_id } => {
                 Ok(AppCommandRequest::CancelSearch { query_id })
+            }
+            CommandDispatchIntent::RequestHover {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestHover {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::RequestCompletion {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestCompletion {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::GoToDefinition {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::GoToDefinition {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::FindReferences {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::FindReferences {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::RefreshOutline { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RefreshOutline { buffer_id })
+            }
+            CommandDispatchIntent::RequestFormattingProposal { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestFormattingProposal { buffer_id })
+            }
+            CommandDispatchIntent::RequestRenameProposal {
+                buffer_id,
+                position,
+                new_name,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestRenameProposal {
+                    buffer_id,
+                    position,
+                    new_name,
+                })
+            }
+            CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestOrganizeImportsProposal { buffer_id })
+            }
+            CommandDispatchIntent::RequestCodeActionProposal {
+                buffer_id,
+                action_id,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestCodeActionProposal {
+                    buffer_id,
+                    action_id,
+                })
+            }
+            CommandDispatchIntent::CancelLanguageOperation { operation_id } => {
+                Ok(AppCommandRequest::CancelLanguageOperation { operation_id })
+            }
+            CommandDispatchIntent::TerminalLaunch { command_label } => {
+                Ok(AppCommandRequest::TerminalLaunch { command_label })
+            }
+            CommandDispatchIntent::TerminalInput {
+                session_id,
+                payload,
+            } => Ok(AppCommandRequest::TerminalInput {
+                session_id,
+                payload,
+            }),
+            CommandDispatchIntent::TerminalResize {
+                session_id,
+                cols,
+                rows,
+            } => Ok(AppCommandRequest::TerminalResize {
+                session_id,
+                cols,
+                rows,
+            }),
+            CommandDispatchIntent::TerminalKill { session_id } => {
+                Ok(AppCommandRequest::TerminalKill { session_id })
+            }
+            CommandDispatchIntent::TerminalClose { session_id } => {
+                Ok(AppCommandRequest::TerminalClose { session_id })
+            }
+            CommandDispatchIntent::TerminalOutputPoll { session_id } => {
+                Ok(AppCommandRequest::TerminalOutputPoll { session_id })
+            }
+            CommandDispatchIntent::TerminalSearch { session_id, query } => {
+                Ok(AppCommandRequest::TerminalSearch { session_id, query })
             }
             CommandDispatchIntent::OpenPath { path } => Ok(AppCommandRequest::OpenPath { path }),
             CommandDispatchIntent::RefreshExplorer => Ok(AppCommandRequest::RefreshExplorer),
@@ -5276,6 +6615,10 @@ pub enum AppCommandOutcome {
     ViewportScrollSet(BufferId),
     /// Search projection changed.
     SearchUpdated(SearchProjection),
+    /// Language tooling projection changed.
+    LanguageToolingUpdated(LanguageToolingProjection),
+    /// Terminal panel projection changed.
+    TerminalPanelUpdated(TerminalPanelProjection),
     /// Explorer projection was refreshed from workspace tree state.
     ExplorerRefreshed(ExplorerProjection),
     /// A workspace path was opened and bound to an editor buffer.
@@ -5762,6 +7105,8 @@ pub struct AppComposition {
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
     search_projection: SearchProjection,
+    language_tooling: LanguageToolingWorkflow,
+    terminal_workflow: TerminalWorkflow,
 }
 
 impl AppComposition {
@@ -5802,6 +7147,8 @@ impl AppComposition {
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
             search_projection: SearchProjection::idle(),
+            language_tooling: LanguageToolingWorkflow::default(),
+            terminal_workflow: TerminalWorkflow::default(),
         }
     }
 
@@ -5817,6 +7164,21 @@ impl AppComposition {
         let envelope =
             transaction_event(descriptor, true, None, self.event_sequence_generator.next());
         self.emit_event(envelope);
+    }
+
+    fn persist_latest_terminal_audit(&mut self) -> Result<(), AppCompositionError> {
+        let Some(record) = self.terminal_workflow.take_last_audit() else {
+            return Ok(());
+        };
+        self.storage
+            .handle(StorageRepositoryRequest::SaveTerminalAuditRecord(
+                record.clone(),
+            ))
+            .map_err(AppCompositionError::Protocol)?;
+        let envelope = terminal_audit_recorded_event(&record)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        self.emit_event(envelope);
+        Ok(())
     }
 
     /// Open a workspace.
@@ -5987,6 +7349,170 @@ impl AppComposition {
             AppCommandRequest::CancelSearch { query_id } => Ok(AppCommandOutcome::SearchUpdated(
                 self.cancel_search(query_id),
             )),
+            AppCommandRequest::RequestHover {
+                buffer_id,
+                position,
+            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+                self.run_language_read(buffer_id, LanguageReadKind::Hover, position)?,
+            )),
+            AppCommandRequest::RequestCompletion {
+                buffer_id,
+                position,
+            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+                self.run_language_read(buffer_id, LanguageReadKind::Completion, position)?,
+            )),
+            AppCommandRequest::GoToDefinition {
+                buffer_id,
+                position,
+            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+                self.run_language_read(buffer_id, LanguageReadKind::Definition, position)?,
+            )),
+            AppCommandRequest::FindReferences {
+                buffer_id,
+                position,
+            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+                self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
+            )),
+            AppCommandRequest::RefreshOutline { buffer_id } => Ok(
+                AppCommandOutcome::LanguageToolingUpdated(self.run_language_read(
+                    buffer_id,
+                    LanguageReadKind::Outline,
+                    TextCoordinate {
+                        line: 0,
+                        character: 0,
+                        byte_offset: Some(0),
+                        utf16_offset: Some(0),
+                    },
+                )?),
+            ),
+            AppCommandRequest::RequestFormattingProposal { buffer_id } => Ok(
+                AppCommandOutcome::LanguageToolingUpdated(self.run_language_proposal(
+                    buffer_id,
+                    LanguageProposalKind::Formatting,
+                    TextCoordinate {
+                        line: 0,
+                        character: 0,
+                        byte_offset: Some(0),
+                        utf16_offset: Some(0),
+                    },
+                    "format".to_string(),
+                )?),
+            ),
+            AppCommandRequest::RequestRenameProposal {
+                buffer_id,
+                position,
+                new_name,
+            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+                self.run_language_proposal(
+                    buffer_id,
+                    LanguageProposalKind::Rename,
+                    position,
+                    new_name,
+                )?,
+            )),
+            AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => Ok(
+                AppCommandOutcome::LanguageToolingUpdated(self.run_language_proposal(
+                    buffer_id,
+                    LanguageProposalKind::OrganizeImports,
+                    TextCoordinate {
+                        line: 0,
+                        character: 0,
+                        byte_offset: Some(0),
+                        utf16_offset: Some(0),
+                    },
+                    "organize-imports".to_string(),
+                )?),
+            ),
+            AppCommandRequest::RequestCodeActionProposal {
+                buffer_id,
+                action_id,
+            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+                self.run_language_proposal(
+                    buffer_id,
+                    LanguageProposalKind::CodeAction,
+                    TextCoordinate {
+                        line: 0,
+                        character: 0,
+                        byte_offset: Some(0),
+                        utf16_offset: Some(0),
+                    },
+                    action_id,
+                )?,
+            )),
+            AppCommandRequest::CancelLanguageOperation { operation_id } => {
+                let event_context = self.next_event_context();
+                self.language_tooling
+                    .cancel_operation(operation_id, event_context);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.language_tooling.projection(),
+                ))
+            }
+            AppCommandRequest::TerminalLaunch { command_label } => {
+                let context = self.active_documents.require_workspace_context()?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.terminal_workflow
+                        .launch(context, command_label, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
+            AppCommandRequest::TerminalInput {
+                session_id,
+                payload,
+            } => {
+                let context = self.active_documents.require_workspace_context()?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.terminal_workflow
+                        .input(context, session_id, payload, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
+            AppCommandRequest::TerminalResize {
+                session_id,
+                cols,
+                rows,
+            } => {
+                let context = self.active_documents.require_workspace_context()?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.terminal_workflow
+                        .resize(context, session_id, cols, rows, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
+            AppCommandRequest::TerminalKill { session_id } => {
+                let context = self.active_documents.require_workspace_context()?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.terminal_workflow
+                        .close_or_kill(context, session_id, true, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
+            AppCommandRequest::TerminalClose { session_id } => {
+                let context = self.active_documents.require_workspace_context()?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.terminal_workflow
+                        .close_or_kill(context, session_id, false, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
+            AppCommandRequest::TerminalOutputPoll { session_id } => {
+                let event_context = self.next_event_context();
+                let projection = self.terminal_workflow.poll(session_id, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
+            AppCommandRequest::TerminalSearch { session_id, query } => {
+                let event_context = self.next_event_context();
+                let projection = self
+                    .terminal_workflow
+                    .search(session_id, query, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
             AppCommandRequest::OpenPath { path } => {
                 Ok(AppCommandOutcome::Opened(self.open_file(path)?))
             }
@@ -7214,6 +8740,260 @@ impl AppComposition {
         self.search_projection.clone()
     }
 
+    /// Enable the deterministic terminal fixture for app integration tests.
+    pub fn enable_terminal_fixture_for_tests(&mut self) {
+        self.terminal_workflow.enable_fixture();
+    }
+
+    /// Return the current app-owned language tooling projection.
+    pub fn language_tooling_projection(&self) -> LanguageToolingProjection {
+        self.language_tooling.projection()
+    }
+
+    /// Return the current app-owned terminal panel projection.
+    pub fn terminal_panel_projection(&self) -> TerminalPanelProjection {
+        self.terminal_workflow.projection()
+    }
+
+    fn language_request_input(
+        &mut self,
+        buffer_id: BufferId,
+        event_context: EventContext,
+    ) -> Result<LanguageRequestInput, AppCompositionError> {
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let metadata = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+            .ok_or(AppCompositionError::ActiveFileMissing)?;
+        let snapshot_id = self.editor.current_snapshot(buffer_id)?.snapshot_id;
+        let buffer_version = self.editor.buffer_version(buffer_id)?;
+        let text = self.editor.text(buffer_id)?.to_string();
+        let principal = self
+            .active_documents
+            .active_principal_id
+            .clone()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+        Ok(LanguageRequestInput {
+            workspace_id: metadata.identity.workspace_id,
+            buffer_id,
+            metadata,
+            principal,
+            text,
+            snapshot_id,
+            buffer_version,
+            event_context,
+        })
+    }
+
+    fn run_language_read(
+        &mut self,
+        buffer_id: BufferId,
+        kind: LanguageReadKind,
+        position: TextCoordinate,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(self.language_tooling.run_read(input, kind, position))
+    }
+
+    fn run_language_proposal(
+        &mut self,
+        buffer_id: BufferId,
+        kind: LanguageProposalKind,
+        position: TextCoordinate,
+        label: String,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let proposal_id = self.proposal_coordinator.next_id();
+        let capability = CapabilityId("fs.write".to_string());
+        let preconditions = ProposalVersionPreconditions {
+            file_version: Some(input.metadata.file_content_version),
+            buffer_version: Some(input.buffer_version),
+            snapshot_id: Some(input.snapshot_id),
+            generation: Some(input.metadata.workspace_generation),
+            file_content_version: Some(input.metadata.file_content_version),
+            workspace_generation: Some(input.metadata.workspace_generation),
+            expected_fingerprint: Some(input.metadata.fingerprint.clone()),
+            expected_file_length: input.metadata.file_length,
+            expected_modified_at: input.metadata.modified_at,
+        };
+        let byte = position.byte_offset.unwrap_or(0);
+        let source = match kind {
+            LanguageProposalKind::Formatting => WorkspaceEditSourceKind::LspFormatting,
+            LanguageProposalKind::Rename => WorkspaceEditSourceKind::LspRename,
+            LanguageProposalKind::OrganizeImports | LanguageProposalKind::CodeAction => {
+                WorkspaceEditSourceKind::LspCodeAction
+            }
+        };
+        let title = match kind {
+            LanguageProposalKind::Formatting => "Format active buffer".to_string(),
+            LanguageProposalKind::Rename => {
+                format!("Rename symbol to {}", bounded_label(&label, 64))
+            }
+            LanguageProposalKind::OrganizeImports => "Organize imports".to_string(),
+            LanguageProposalKind::CodeAction => {
+                format!("Apply code action {}", bounded_label(&label, 64))
+            }
+        };
+        let mut diagnostics = Vec::new();
+        let (edit_range, replacement) = match kind {
+            LanguageProposalKind::Rename => {
+                let replacement = bounded_label(&label, 128);
+                if replacement.trim().is_empty() {
+                    return Ok(self.language_tooling.record_proposal_failure(
+                        &input,
+                        kind,
+                        "Rename proposal requires a non-empty replacement label".to_string(),
+                    ));
+                }
+                let Some(range) = identifier_byte_range_at(&input.text, byte) else {
+                    return Ok(self.language_tooling.record_proposal_failure(
+                        &input,
+                        kind,
+                        "Rename proposal requires an identifier at the requested position"
+                            .to_string(),
+                    ));
+                };
+                (range, replacement)
+            }
+            LanguageProposalKind::Formatting
+            | LanguageProposalKind::OrganizeImports
+            | LanguageProposalKind::CodeAction => {
+                diagnostics.push(ProtocolDiagnostic {
+                    code: "language_tooling.runtime_edit_unavailable".to_string(),
+                    message: format!(
+                        "{title} is represented as a safe no-op preview until live LSP edits are wired"
+                    ),
+                    severity: ProtocolDiagnosticSeverity::Warning,
+                    path: Some(input.metadata.identity.canonical_path.clone()),
+                    range: None,
+                });
+                (
+                    ByteRange::new(0, input.text.len() as u64),
+                    input.text.clone(),
+                )
+            }
+        };
+        let target = ProposalAffectedTarget {
+            target_id: format!("file:{}", input.metadata.identity.file_id.0),
+            kind: ProposalTargetKind::OpenBuffer,
+            workspace_id: Some(input.workspace_id),
+            file_id: Some(input.metadata.identity.file_id),
+            buffer_id: Some(buffer_id),
+            path: Some(input.metadata.identity.canonical_path.clone()),
+            terminal_session_id: None,
+            plugin_id: None,
+            remote_authority: None,
+            collaboration_session_id: None,
+            byte_ranges: vec![edit_range],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        };
+        let workspace_edit = WorkspaceEditProposalPayload {
+            workspace_id: input.workspace_id,
+            edit_id: uuid::Uuid::now_v7(),
+            title: title.clone(),
+            source,
+            target_coverage: ProposalTargetCoverage {
+                coverage_kind: ProposalTargetCoverageKind::Complete,
+                targets: vec![target],
+                omitted_target_count: 0,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            },
+            file_edits: vec![WorkspaceTextEdit {
+                file: input.metadata.identity.clone(),
+                buffer_id: Some(buffer_id),
+                edits: EditBatch {
+                    edits: vec![ProtocolWorkspaceTextEdit {
+                        range: ProtocolEditTextRange::byte(edit_range.start, edit_range.end),
+                        replacement,
+                    }],
+                },
+                preconditions: preconditions.clone(),
+            }],
+            file_operations: Vec::new(),
+            required_capability: capability.clone(),
+            diagnostics: diagnostics.clone(),
+            schema_version: 1,
+        };
+        let request = LspRequestCorrelation {
+            request_id: devil_protocol::LspRequestId(uuid::Uuid::now_v7()),
+            server_id: devil_protocol::LanguageServerId(1),
+            workspace_id: input.workspace_id,
+            file_id: Some(input.metadata.identity.file_id),
+            snapshot_id: Some(input.snapshot_id),
+            buffer_version: Some(input.buffer_version),
+            correlation_id: input.event_context.correlation_id,
+            causality_id: input.event_context.causality_id,
+            cancellation_token: Some(CancellationTokenId(uuid::Uuid::now_v7())),
+            privacy_scope: SemanticPrivacyScope::Workspace,
+            issued_at: TimestampMillis::now(),
+            schema_version: 1,
+        };
+        let proposal = devil_protocol::convert_lsp_edit_to_workspace_proposal(
+            LspEditProposalConversionInput {
+                proposal_id,
+                principal: input.principal.clone(),
+                capability,
+                request,
+                workspace_edit,
+                preconditions,
+                lifecycle_state: ProposalLifecycleState::Created,
+                privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                preview: PreviewSummary {
+                    summary: title.clone(),
+                    details: vec![
+                        "language_tooling.proposal_preview".to_string(),
+                        format!("buffer_version={}", input.buffer_version.0),
+                        format!("snapshot_id={}", input.snapshot_id.0),
+                    ],
+                },
+                expires_at: None,
+                created_at: TimestampMillis::now(),
+                diagnostics,
+                schema_version: 1,
+            },
+        )
+        .map_err(|error| AppCompositionError::LanguageTooling(format!("{error:?}")))?;
+        self.proposal_coordinator
+            .register_lifecycle_context(proposal.proposal_id, input.event_context);
+        let created = self.proposal_coordinator.created_response(&proposal);
+        if !matches!(created, ProposalResponse::Created(_)) {
+            return Ok(self.language_tooling.record_proposal_failure(
+                &input,
+                kind,
+                format!("{} proposal creation failed: {created:?}", title),
+            ));
+        }
+        let validated = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Validate(proposal.clone()));
+        if !matches!(validated, Ok(ProposalResponse::Validated(_))) {
+            return Ok(self.language_tooling.record_proposal_failure(
+                &input,
+                kind,
+                format!("{} proposal validation failed: {validated:?}", title),
+            ));
+        }
+        let previewed = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Preview(proposal.clone()));
+        if !matches!(previewed, Ok(ProposalResponse::Previewed { .. })) {
+            return Ok(self.language_tooling.record_proposal_failure(
+                &input,
+                kind,
+                format!("{} proposal preview failed: {previewed:?}", title),
+            ));
+        }
+        Ok(self.language_tooling.record_proposal(
+            &input,
+            kind,
+            proposal.proposal_id,
+            format!("{} proposal preview created", title),
+        ))
+    }
+
     fn run_active_file_search(
         &self,
         query_id: &str,
@@ -7501,6 +9281,8 @@ impl AppComposition {
                 &self.editor,
             ),
             search_projection: self.search_projection.clone(),
+            language_tooling_projection: self.language_tooling.projection(),
+            terminal_panel_projection: self.terminal_workflow.projection(),
         })
     }
 

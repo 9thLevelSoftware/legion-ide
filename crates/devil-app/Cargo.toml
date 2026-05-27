@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 devil-editor = { workspace = true }
+devil-index = { workspace = true }
 devil-collaboration = { workspace = true }
 devil-remote = { workspace = true }
 devil-platform = { workspace = true }
@@ -16,6 +17,7 @@ devil-protocol = { workspace = true }
 devil-observability = { workspace = true }
 devil-security = { workspace = true }
 devil-storage = { workspace = true }
+devil-terminal = { workspace = true }
 devil-ui = { workspace = true }
 devil-agent = { workspace = true }
 devil-ai = { workspace = true }

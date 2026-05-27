@@ -12995,6 +12995,425 @@ pub struct ProposalLedgerProjection {
 }
 
 // -----------------------------------------------------------------------------
+// Language and terminal IDE loop projections
+// -----------------------------------------------------------------------------
+
+/// High-level status for the language tooling panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LanguageToolingStatusKind {
+    /// No language tooling request has run.
+    Idle,
+    /// Language tooling data is ready for the active buffer.
+    Ready,
+    /// A language tooling request is running.
+    Running,
+    /// The latest result is stale for the current buffer identity.
+    Stale,
+    /// The latest request was cancelled.
+    Cancelled,
+    /// Language tooling is unavailable for the current buffer.
+    Unavailable,
+    /// Language tooling failed before producing projection data.
+    Failed,
+}
+
+/// Operation kind represented in the language tooling projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LanguageToolingOperationKind {
+    /// Diagnostics refresh.
+    Diagnostics,
+    /// Hover lookup.
+    Hover,
+    /// Completion lookup.
+    Completion,
+    /// Definition lookup.
+    Definition,
+    /// References lookup.
+    References,
+    /// Outline refresh.
+    Outline,
+    /// Formatting proposal conversion.
+    FormattingProposal,
+    /// Rename proposal conversion.
+    RenameProposal,
+    /// Organize imports proposal conversion.
+    OrganizeImportsProposal,
+    /// Code action proposal conversion.
+    CodeActionProposal,
+}
+
+/// One language tooling operation row with request/proposal correlation metadata only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageToolingOperationProjection {
+    /// Stable operation identifier.
+    pub operation_id: String,
+    /// Operation kind.
+    pub kind: LanguageToolingOperationKind,
+    /// Current operation status.
+    pub status: LanguageToolingStatusKind,
+    /// LSP request identifier when the operation crossed an LSP boundary.
+    pub request_id: Option<LspRequestId>,
+    /// Proposal identifier when an edit-producing operation created a proposal preview.
+    pub proposal_id: Option<ProposalId>,
+    /// Bounded metadata-only status message.
+    pub message: String,
+    /// Cross-domain correlation id when issued by app authority.
+    pub correlation_id: Option<CorrelationId>,
+    /// Cross-domain causality id when issued by app authority.
+    pub causality_id: Option<CausalityId>,
+    /// Projection row generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Operation row schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only language problem row for diagnostics and parser/index feedback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageProblemProjection {
+    /// File containing the problem when known.
+    pub file_id: Option<FileId>,
+    /// Canonical path for display when disclosure is allowed.
+    pub path: Option<CanonicalPath>,
+    /// Problem range when disclosure is allowed.
+    pub range: Option<ProtocolTextRange>,
+    /// Diagnostic severity.
+    pub severity: ProtocolDiagnosticSeverity,
+    /// Optional metadata-only code or code hash.
+    pub code_label: Option<String>,
+    /// Bounded display message.
+    pub message: String,
+    /// Optional source label, such as an LSP server or lexical indexer.
+    pub source_label: Option<String>,
+    /// Redaction hints for the row.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Problem row schema version.
+    pub schema_version: u16,
+}
+
+/// Bounded hover projection for the active symbol or cursor position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageHoverProjection {
+    /// Metadata-only hover identifier.
+    pub hover_id: String,
+    /// File containing the hover target.
+    pub file_id: Option<FileId>,
+    /// Range associated with the hover result when known.
+    pub range: Option<ProtocolTextRange>,
+    /// Bounded display label for the hovered symbol.
+    pub label: String,
+    /// Bounded documentation or type summary.
+    pub summary: String,
+    /// Whether the hover was produced from degraded semantic data.
+    pub degraded: bool,
+    /// Redaction hints for the row.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Hover row schema version.
+    pub schema_version: u16,
+}
+
+/// Bounded completion row for projection-only UI surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageCompletionProjection {
+    /// Metadata-only completion identifier.
+    pub completion_id: String,
+    /// Display label.
+    pub label: String,
+    /// Optional detail label.
+    pub detail_label: Option<String>,
+    /// Completion kind label.
+    pub kind_label: String,
+    /// Rank in basis points.
+    pub score_basis_points: u16,
+    /// Whether this completion was produced from degraded semantic data.
+    pub degraded: bool,
+    /// Completion row schema version.
+    pub schema_version: u16,
+}
+
+/// Location row used for definition and reference projections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageLocationProjection {
+    /// Metadata-only location identifier.
+    pub location_id: String,
+    /// File containing the target location.
+    pub file_id: Option<FileId>,
+    /// Canonical path for display when disclosure is allowed.
+    pub path: Option<CanonicalPath>,
+    /// Target range when disclosure is allowed.
+    pub range: Option<ProtocolTextRange>,
+    /// Display label for the symbol or target.
+    pub label: String,
+    /// Whether this location was produced from degraded semantic data.
+    pub degraded: bool,
+    /// Location row schema version.
+    pub schema_version: u16,
+}
+
+/// Outline row for the active document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageOutlineSymbolProjection {
+    /// Metadata-only outline row identifier.
+    pub symbol_id: String,
+    /// Display label.
+    pub label: String,
+    /// Symbol kind label.
+    pub kind_label: String,
+    /// Range associated with the symbol when known.
+    pub range: Option<ProtocolTextRange>,
+    /// Outline depth.
+    pub depth: u16,
+    /// Whether child rows were omitted by projection bounds.
+    pub children_omitted: bool,
+    /// Outline row schema version.
+    pub schema_version: u16,
+}
+
+/// Projection-only language tooling panel state for the active editor buffer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageToolingProjection {
+    /// Workspace represented by the projection, when one is open.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Active editor buffer represented by the projection, when one is open.
+    pub buffer_id: Option<BufferId>,
+    /// Active file represented by the projection, when one is open.
+    pub file_id: Option<FileId>,
+    /// High-level projection status.
+    pub status: LanguageToolingStatusKind,
+    /// Bounded metadata-only status message.
+    pub status_message: String,
+    /// Diagnostic/problem rows.
+    pub problems: Vec<LanguageProblemProjection>,
+    /// Current hover result.
+    pub hover: Option<LanguageHoverProjection>,
+    /// Current completion rows.
+    pub completions: Vec<LanguageCompletionProjection>,
+    /// Current definition locations.
+    pub definitions: Vec<LanguageLocationProjection>,
+    /// Current reference locations.
+    pub references: Vec<LanguageLocationProjection>,
+    /// Current outline rows.
+    pub outline: Vec<LanguageOutlineSymbolProjection>,
+    /// Recent operation status rows.
+    pub operations: Vec<LanguageToolingOperationProjection>,
+    /// Count of stale results discarded before projection.
+    pub stale_result_count: u32,
+    /// Count of cancellation acknowledgements projected.
+    pub cancellation_count: u32,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for the whole projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl LanguageToolingProjection {
+    /// Construct an empty language tooling projection.
+    pub fn empty() -> Self {
+        Self {
+            workspace_id: None,
+            buffer_id: None,
+            file_id: None,
+            status: LanguageToolingStatusKind::Idle,
+            status_message: "Language tooling idle".to_string(),
+            problems: Vec::new(),
+            hover: None,
+            completions: Vec::new(),
+            definitions: Vec::new(),
+            references: Vec::new(),
+            outline: Vec::new(),
+            operations: Vec::new(),
+            stale_result_count: 0,
+            cancellation_count: 0,
+            generated_at: TimestampMillis(0),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for LanguageToolingProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// High-level terminal panel status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalPanelStatusKind {
+    /// Terminal workflow is disabled.
+    Disabled,
+    /// Terminal workflow was denied by policy.
+    Denied,
+    /// No terminal session is active.
+    Idle,
+    /// Terminal launch is in progress.
+    Starting,
+    /// Terminal session is running.
+    Running,
+    /// Terminal session exited.
+    Exited,
+    /// Terminal workflow failed.
+    Failed,
+    /// Terminal output is degraded or bounded.
+    Degraded,
+}
+
+/// Terminal panel status row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalPanelStatus {
+    /// Status kind.
+    pub kind: TerminalPanelStatusKind,
+    /// Bounded metadata-only status message.
+    pub message: String,
+}
+
+/// Metadata-only policy state for a terminal workflow request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalPolicyProjection {
+    /// Capability required by terminal launch or lifecycle actions.
+    pub capability_id: CapabilityId,
+    /// Workspace trust posture observed by app authority.
+    pub workspace_trust_state: WorkspaceTrustState,
+    /// Whether policy granted the latest request.
+    pub granted: bool,
+    /// Capability decision identifier when known.
+    pub decision_id: Option<CapabilityDecisionId>,
+    /// Bounded metadata-only reason.
+    pub reason: String,
+    /// Output byte limit selected by policy.
+    pub output_byte_limit: u64,
+    /// Timeout selected by policy.
+    pub timeout_seconds: u64,
+    /// Policy projection schema version.
+    pub schema_version: u16,
+}
+
+/// Bounded redacted terminal output row for projection-only UI surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOutputRowProjection {
+    /// Terminal session identifier.
+    pub session_id: TerminalSessionId,
+    /// Output sequence.
+    pub sequence: EventSequence,
+    /// Bounded redacted payload.
+    pub redacted_payload: String,
+    /// Byte count before redaction or truncation.
+    pub byte_count: u64,
+    /// Whether the row came from stderr.
+    pub is_stderr: bool,
+    /// Whether output was truncated.
+    pub truncated: bool,
+    /// Redaction applied to this row.
+    pub redaction: RedactionHint,
+    /// Output row schema version.
+    pub schema_version: u16,
+}
+
+/// Scrollback bounds projected for terminal output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalScrollbackProjection {
+    /// Number of visible output rows.
+    pub visible_row_count: u32,
+    /// Number of rows omitted by retention bounds.
+    pub omitted_row_count: u32,
+    /// Byte ceiling for projected output.
+    pub byte_limit: u64,
+    /// Whether scrollback was truncated.
+    pub truncated: bool,
+    /// Scrollback projection schema version.
+    pub schema_version: u16,
+}
+
+/// Search summary for projected terminal output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSearchProjection {
+    /// Bounded display label for the search query.
+    pub query_label: Option<String>,
+    /// Number of matches in projected rows.
+    pub match_count: u32,
+    /// Active match index when one is selected.
+    pub active_match_index: Option<u32>,
+    /// Whether search results were truncated by projection bounds.
+    pub truncated: bool,
+    /// Search projection schema version.
+    pub schema_version: u16,
+}
+
+/// Projection-only terminal panel state for app-owned terminal workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalPanelProjection {
+    /// Workspace represented by the terminal panel, when one is open.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Active terminal session identifier, when one exists.
+    pub active_session_id: Option<TerminalSessionId>,
+    /// Runtime state reported by the terminal boundary, when one exists.
+    pub runtime_state: Option<TerminalRuntimeState>,
+    /// High-level panel status.
+    pub status: TerminalPanelStatus,
+    /// Latest terminal policy projection.
+    pub policy: Option<TerminalPolicyProjection>,
+    /// Bounded output rows.
+    pub output_rows: Vec<TerminalOutputRowProjection>,
+    /// Scrollback bound summary.
+    pub scrollback: TerminalScrollbackProjection,
+    /// Current terminal search summary.
+    pub search: TerminalSearchProjection,
+    /// Bounded metadata-only error message.
+    pub last_error: Option<String>,
+    /// Bounded metadata-only denial reason.
+    pub last_denial: Option<String>,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for the whole projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl TerminalPanelProjection {
+    /// Construct an empty terminal panel projection.
+    pub fn empty() -> Self {
+        Self {
+            workspace_id: None,
+            active_session_id: None,
+            runtime_state: None,
+            status: TerminalPanelStatus {
+                kind: TerminalPanelStatusKind::Disabled,
+                message: "Terminal workflow disabled".to_string(),
+            },
+            policy: None,
+            output_rows: Vec::new(),
+            scrollback: TerminalScrollbackProjection {
+                visible_row_count: 0,
+                omitted_row_count: 0,
+                byte_limit: 0,
+                truncated: false,
+                schema_version: 1,
+            },
+            search: TerminalSearchProjection {
+                query_label: None,
+                match_count: 0,
+                active_match_index: None,
+                truncated: false,
+                schema_version: 1,
+            },
+            last_error: None,
+            last_denial: None,
+            generated_at: TimestampMillis(0),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for TerminalPanelProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+// -----------------------------------------------------------------------------
 // LSP contracts
 // -----------------------------------------------------------------------------
 

@@ -193,6 +193,10 @@ pub enum DesktopWorkflowOutcome {
     ViewportScrollSet(BufferId),
     /// Search projection changed through app authority.
     SearchUpdated,
+    /// Language tooling projection changed through app authority.
+    LanguageToolingUpdated,
+    /// Terminal panel projection changed through app authority.
+    TerminalPanelUpdated,
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -537,6 +541,20 @@ impl DesktopRuntime {
                     format!("Search: {}", projection.status.message),
                 );
                 DesktopWorkflowOutcome::SearchUpdated
+            }
+            AppCommandOutcome::LanguageToolingUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Language: {}", projection.status_message),
+                );
+                DesktopWorkflowOutcome::LanguageToolingUpdated
+            }
+            AppCommandOutcome::TerminalPanelUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Terminal: {}", projection.status.message),
+                );
+                DesktopWorkflowOutcome::TerminalPanelUpdated
             }
             AppCommandOutcome::ExplorerRefreshed(_) => {
                 self.set_status(StatusSeverity::Info, "Explorer refreshed");

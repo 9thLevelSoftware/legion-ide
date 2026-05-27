@@ -89,6 +89,7 @@ Renderer crates are adapter-only. They must not appear in `devil-ui`, app/editor
   - `devil-ai-providers`
   - `devil-collaboration`
   - `devil-editor`
+  - `devil-index`
   - `devil-memory`
   - `devil-observability`
   - `devil-platform`
@@ -98,8 +99,11 @@ Renderer crates are adapter-only. They must not appear in `devil-ui`, app/editor
   - `devil-remote`
   - `devil-security`
   - `devil-storage`
+  - `devil-terminal`
   - `devil-tracker`
   - `devil-ui`
+
+GUI Phase 4 activates `devil-app` composition edges to `devil-index` and `devil-terminal` only for the language-and-terminal IDE loop. Language features must consume semantic/index and LSP DTOs through proposal-mediated edit previews before mutation. Terminal features must remain policy-gated, projection-only at the UI boundary, metadata-redacted, and fail closed by default; native terminal execution stays controlled by the terminal crate and its security/runtime gates. This GUI Phase 4 policy does not authorize `devil-ui` ownership of editor sessions/text, direct workspace mutation from language tooling, or new dependencies from `devil-index`/`devil-terminal` back into app, UI, editor, project, or desktop internals.
 
 - `devil-ai` may depend on:
   - `devil-protocol`

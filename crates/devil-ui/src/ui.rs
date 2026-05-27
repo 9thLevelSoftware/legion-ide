@@ -5,11 +5,12 @@ use devil_protocol::{
     CollaborationParticipantId, CollaborationPresenceProjection, CollaborationSessionId,
     ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
     ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
-    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
-    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
-    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
-    ProposalRollbackReason, ProtocolTextRange, RedactionHint, TextCoordinate, TimestampMillis,
-    ViewportScroll, WorkspaceId,
+    LanguageToolingProjection, PermissionBudgetProjection, PluginContributionProjection, PluginId,
+    PrivacyInspectorProjection, ProposalApprovalChecklistProjection, ProposalCancellationReason,
+    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
+    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
+    TerminalPanelProjection, TerminalSessionId, TextCoordinate, TimestampMillis, ViewportScroll,
+    WorkspaceId,
 };
 use thiserror::Error;
 
@@ -485,6 +486,113 @@ pub enum CommandDispatchIntent {
         /// Query id to cancel.
         query_id: String,
     },
+    /// Request hover data through app-owned language tooling.
+    RequestHover {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
+    /// Request completion rows through app-owned language tooling.
+    RequestCompletion {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
+    /// Request definition locations through app-owned language tooling.
+    GoToDefinition {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
+    /// Request reference locations through app-owned language tooling.
+    FindReferences {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
+    /// Refresh the active document outline through app-owned language tooling.
+    RefreshOutline {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request a formatting proposal preview through app authority.
+    RequestFormattingProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request a rename proposal preview through app authority.
+    RequestRenameProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+        /// New symbol name label.
+        new_name: String,
+    },
+    /// Request an organize-imports proposal preview through app authority.
+    RequestOrganizeImportsProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request a code-action proposal preview through app authority.
+    RequestCodeActionProposal {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Code-action identifier selected from projection data.
+        action_id: String,
+    },
+    /// Cancel an in-flight language operation through app authority.
+    CancelLanguageOperation {
+        /// Operation identifier selected from projection data.
+        operation_id: String,
+    },
+    /// Launch a policy-gated terminal session through app authority.
+    TerminalLaunch {
+        /// Display-safe command label or fixture command.
+        command_label: String,
+    },
+    /// Send input to an active terminal session through app authority.
+    TerminalInput {
+        /// Terminal session identifier selected from projection data.
+        session_id: TerminalSessionId,
+        /// Input payload.
+        payload: String,
+    },
+    /// Resize an active terminal session through app authority.
+    TerminalResize {
+        /// Terminal session identifier selected from projection data.
+        session_id: TerminalSessionId,
+        /// Column count.
+        cols: u16,
+        /// Row count.
+        rows: u16,
+    },
+    /// Kill an active terminal session through app authority.
+    TerminalKill {
+        /// Terminal session identifier selected from projection data.
+        session_id: TerminalSessionId,
+    },
+    /// Close an active terminal session through app authority.
+    TerminalClose {
+        /// Terminal session identifier selected from projection data.
+        session_id: TerminalSessionId,
+    },
+    /// Poll terminal output through app authority.
+    TerminalOutputPoll {
+        /// Terminal session identifier selected from projection data.
+        session_id: TerminalSessionId,
+    },
+    /// Search projected terminal output through app authority.
+    TerminalSearch {
+        /// Terminal session identifier selected from projection data.
+        session_id: TerminalSessionId,
+        /// Bounded query label.
+        query: String,
+    },
     /// Open a file by path through workspace authority.
     OpenPath {
         /// User-provided path text.
@@ -621,6 +729,10 @@ pub struct ShellProjectionSnapshot {
     pub daily_editing_projection: DailyEditingProjection,
     /// Search projection supplied by the application layer.
     pub search_projection: SearchProjection,
+    /// Language tooling projection supplied by the application layer.
+    pub language_tooling_projection: LanguageToolingProjection,
+    /// Terminal panel projection supplied by the application layer.
+    pub terminal_panel_projection: TerminalPanelProjection,
 }
 
 /// Command parsing errors surfaced by projection-only shell input handling.
@@ -632,6 +744,9 @@ pub enum ShellCommandError {
     /// A command supplied a range with start after end.
     #[error("command range start must be <= end")]
     InvalidRange,
+    /// A terminal command requires an active terminal session projection.
+    #[error("active terminal session projection is missing")]
+    ActiveTerminalSessionMissing,
 }
 
 /// Projection-only IDE shell state.
@@ -669,6 +784,10 @@ pub struct Shell {
     pub daily_editing_projection: DailyEditingProjection,
     /// Static search projection.
     pub search_projection: SearchProjection,
+    /// Static language tooling projection.
+    pub language_tooling_projection: LanguageToolingProjection,
+    /// Static terminal panel projection.
+    pub terminal_panel_projection: TerminalPanelProjection,
     /// Command dispatch intents emitted by input parsing.
     pub command_dispatch_intents: Vec<CommandDispatchIntent>,
 }
@@ -693,6 +812,8 @@ impl Shell {
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
             daily_editing_projection: snapshot.daily_editing_projection,
             search_projection: snapshot.search_projection,
+            language_tooling_projection: snapshot.language_tooling_projection,
+            terminal_panel_projection: snapshot.terminal_panel_projection,
             command_dispatch_intents: Vec::new(),
         }
     }
@@ -719,6 +840,8 @@ impl Shell {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         })
     }
 
@@ -741,6 +864,8 @@ impl Shell {
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
             daily_editing_projection: self.daily_editing_projection.clone(),
             search_projection: self.search_projection.clone(),
+            language_tooling_projection: self.language_tooling_projection.clone(),
+            terminal_panel_projection: self.terminal_panel_projection.clone(),
         }
     }
 
@@ -762,6 +887,8 @@ impl Shell {
         self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
         self.daily_editing_projection = snapshot.daily_editing_projection;
         self.search_projection = snapshot.search_projection;
+        self.language_tooling_projection = snapshot.language_tooling_projection;
+        self.terminal_panel_projection = snapshot.terminal_panel_projection;
     }
 
     /// Drain queued command-dispatch intents.
@@ -1052,8 +1179,57 @@ impl Shell {
                 );
             }
         }
+        if self.language_tooling_projection.buffer_id.is_some()
+            || !self.language_tooling_projection.operations.is_empty()
+            || !self.language_tooling_projection.problems.is_empty()
+        {
+            let language = &self.language_tooling_projection;
+            println!(
+                "Language tooling {:?} | problems={} completions={} definitions={} references={} outline={} stale={} cancelled={}",
+                language.status,
+                language.problems.len(),
+                language.completions.len(),
+                language.definitions.len(),
+                language.references.len(),
+                language.outline.len(),
+                language.stale_result_count,
+                language.cancellation_count
+            );
+            if let Some(hover) = &language.hover {
+                println!("- hover {} {}", hover.label, hover.summary);
+            }
+            for operation in &language.operations {
+                println!(
+                    "- operation {} {:?} {:?} proposal={:?}",
+                    operation.operation_id,
+                    operation.kind,
+                    operation.status,
+                    operation.proposal_id.map(|proposal| proposal.0)
+                );
+            }
+        }
+        if self.terminal_panel_projection.active_session_id.is_some()
+            || !self.terminal_panel_projection.output_rows.is_empty()
+            || self.terminal_panel_projection.last_denial.is_some()
+        {
+            let terminal = &self.terminal_panel_projection;
+            println!(
+                "Terminal {:?} | session={:?} rows={} omitted={} matches={}",
+                terminal.status.kind,
+                terminal.active_session_id.map(|session| session.0),
+                terminal.output_rows.len(),
+                terminal.scrollback.omitted_row_count,
+                terminal.search.match_count
+            );
+            if let Some(denial) = &terminal.last_denial {
+                println!("- denial {}", denial);
+            }
+            for row in &terminal.output_rows {
+                println!("- [{}] {}", row.sequence.0, row.redacted_payload);
+            }
+        }
         println!(
-            "Commands: :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :close id | :plugin id command | :ai-start label | :u | :redo | :q"
+            "Commands: :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :u | :redo | :q"
         );
     }
 
@@ -1115,6 +1291,165 @@ impl Shell {
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::CancelSearch {
                     query_id: query_id.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":hover") {
+            let buffer_id = self.active_buffer_id()?;
+            let position = self.command_position(payload.trim());
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestHover {
+                    buffer_id,
+                    position,
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":completion") {
+            let buffer_id = self.active_buffer_id()?;
+            let position = self.command_position(payload.trim());
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestCompletion {
+                    buffer_id,
+                    position,
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":definition") {
+            let buffer_id = self.active_buffer_id()?;
+            let position = self.command_position(payload.trim());
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::GoToDefinition {
+                    buffer_id,
+                    position,
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":references") {
+            let buffer_id = self.active_buffer_id()?;
+            let position = self.command_position(payload.trim());
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::FindReferences {
+                    buffer_id,
+                    position,
+                },
+            )));
+        }
+        if trimmed == ":outline" {
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::RefreshOutline { buffer_id }),
+            ));
+        }
+        if trimmed == ":format" {
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestFormattingProposal { buffer_id },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":rename ") {
+            let buffer_id = self.active_buffer_id()?;
+            let mut split = payload.splitn(2, ',');
+            let first = split.next().unwrap_or_default().trim();
+            let (position, new_name) = if let Some(name) = split.next() {
+                (
+                    first
+                        .parse::<usize>()
+                        .map(|offset| self.parse_pos(offset))
+                        .unwrap_or_else(|_| self.parse_pos(0)),
+                    name.trim(),
+                )
+            } else {
+                (self.parse_pos(0), first)
+            };
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestRenameProposal {
+                    buffer_id,
+                    position,
+                    new_name: new_name.to_string(),
+                },
+            )));
+        }
+        if trimmed == ":organize-imports" {
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id },
+            )));
+        }
+        if let Some(action_id) = trimmed.strip_prefix(":code-action ") {
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestCodeActionProposal {
+                    buffer_id,
+                    action_id: action_id.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(operation_id) = trimmed.strip_prefix(":language-cancel ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::CancelLanguageOperation {
+                    operation_id: operation_id.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(command_label) = trimmed.strip_prefix(":term-launch ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::TerminalLaunch {
+                    command_label: command_label.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":term-input ") {
+            let session_id = self.active_terminal_session_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::TerminalInput {
+                    session_id,
+                    payload: payload.to_string(),
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":term-resize ") {
+            let session_id = self.active_terminal_session_id()?;
+            let mut split = payload.split_whitespace();
+            let cols = split
+                .next()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(80);
+            let rows = split
+                .next()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(24);
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::TerminalResize {
+                    session_id,
+                    cols,
+                    rows,
+                },
+            )));
+        }
+        if trimmed == ":term-kill" {
+            let session_id = self.active_terminal_session_id()?;
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::TerminalKill { session_id }),
+            ));
+        }
+        if trimmed == ":term-close" {
+            let session_id = self.active_terminal_session_id()?;
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::TerminalClose { session_id }),
+            ));
+        }
+        if trimmed == ":term-poll" {
+            let session_id = self.active_terminal_session_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::TerminalOutputPoll { session_id },
+            )));
+        }
+        if let Some(query) = trimmed.strip_prefix(":term-search ") {
+            let session_id = self.active_terminal_session_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::TerminalSearch {
+                    session_id,
+                    query: query.trim().to_string(),
                 },
             )));
         }
@@ -1308,9 +1643,25 @@ impl Shell {
             .ok_or(ShellCommandError::ActiveBufferMissing)
     }
 
+    fn active_terminal_session_id(&self) -> Result<TerminalSessionId, ShellCommandError> {
+        self.terminal_panel_projection
+            .active_session_id
+            .ok_or(ShellCommandError::ActiveTerminalSessionMissing)
+    }
+
     fn push_intent(&mut self, intent: CommandDispatchIntent) -> CommandDispatchIntent {
         self.command_dispatch_intents.push(intent.clone());
         intent
+    }
+
+    fn command_position(&self, payload: &str) -> TextCoordinate {
+        if payload.is_empty() {
+            return self.parse_pos(0);
+        }
+        payload
+            .parse::<usize>()
+            .map(|offset| self.parse_pos(offset))
+            .unwrap_or_else(|_| self.parse_pos(0))
     }
 
     fn parse_pos(&self, byte_offset: usize) -> TextCoordinate {
@@ -1790,6 +2141,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let intent = shell
@@ -1835,6 +2188,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1882,6 +2237,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1937,6 +2294,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let before = shell.projection_snapshot();
@@ -2014,6 +2373,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -2099,6 +2460,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -2171,6 +2534,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -2307,6 +2672,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -2391,6 +2758,8 @@ mod tests {
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();

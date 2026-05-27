@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use devil_protocol::{BufferId, FileId, ProtocolTextRange, TextCoordinate, ViewportScroll};
+use devil_protocol::{
+    BufferId, FileId, ProtocolTextRange, TerminalSessionId, TextCoordinate, ViewportScroll,
+};
 use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
 use thiserror::Error;
 
@@ -137,6 +139,77 @@ pub enum DesktopAction {
         /// Query id to cancel.
         query_id: String,
     },
+    /// Request language hover for the active buffer.
+    RequestHover {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Request language completions for the active buffer.
+    RequestCompletion {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Request definition locations for the active buffer.
+    GoToDefinition {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Request reference locations for the active buffer.
+    FindReferences {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Refresh the active buffer outline.
+    RefreshOutline,
+    /// Request a formatting proposal preview.
+    RequestFormattingProposal,
+    /// Request a rename proposal preview.
+    RequestRenameProposal {
+        /// Projected cursor position.
+        position: TextCoordinate,
+        /// New symbol name.
+        new_name: String,
+    },
+    /// Request an organize-imports proposal preview.
+    RequestOrganizeImportsProposal,
+    /// Request a code-action proposal preview.
+    RequestCodeActionProposal {
+        /// Code-action identifier.
+        action_id: String,
+    },
+    /// Cancel a language operation.
+    CancelLanguageOperation {
+        /// Operation identifier.
+        operation_id: String,
+    },
+    /// Launch a terminal session through app authority.
+    TerminalLaunch {
+        /// Command label.
+        command_label: String,
+    },
+    /// Send input to the active terminal session.
+    TerminalInput {
+        /// Input payload.
+        payload: String,
+    },
+    /// Resize the active terminal session.
+    TerminalResize {
+        /// Column count.
+        cols: u16,
+        /// Row count.
+        rows: u16,
+    },
+    /// Kill the active terminal session.
+    TerminalKill,
+    /// Close the active terminal session.
+    TerminalClose,
+    /// Poll output for the active terminal session.
+    TerminalOutputPoll,
+    /// Search terminal output.
+    TerminalSearch {
+        /// Query label.
+        query: String,
+    },
 }
 
 /// App-owned request that is not a direct UI command intent.
@@ -212,6 +285,9 @@ pub enum DesktopBridgeError {
         /// Unsupported action label.
         action: &'static str,
     },
+    /// A terminal action requires an active terminal session projection.
+    #[error("active terminal session is required for this desktop action")]
+    MissingActiveTerminalSession,
 }
 
 /// Adapter-local command bridge.
@@ -347,6 +423,103 @@ impl DesktopCommandBridge {
             DesktopAction::CancelSearch { query_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelSearch { query_id })
             }
+            DesktopAction::RequestHover { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| CommandDispatchIntent::RequestHover {
+                    buffer_id,
+                    position,
+                })
+            }
+            DesktopAction::RequestCompletion { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::RequestCompletion {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::GoToDefinition { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::GoToDefinition {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::FindReferences { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::FindReferences {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::RefreshOutline => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::RefreshOutline { buffer_id }
+            }),
+            DesktopAction::RequestFormattingProposal => self
+                .with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::RequestFormattingProposal { buffer_id }
+                }),
+            DesktopAction::RequestRenameProposal { position, new_name } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::RequestRenameProposal {
+                        buffer_id,
+                        position,
+                        new_name,
+                    }
+                })
+            }
+            DesktopAction::RequestOrganizeImportsProposal => self
+                .with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id }
+                }),
+            DesktopAction::RequestCodeActionProposal { action_id } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::RequestCodeActionProposal {
+                        buffer_id,
+                        action_id,
+                    }
+                })
+            }
+            DesktopAction::CancelLanguageOperation { operation_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelLanguageOperation {
+                    operation_id,
+                })
+            }
+            DesktopAction::TerminalLaunch { command_label } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::TerminalLaunch { command_label })
+            }
+            DesktopAction::TerminalInput { payload } => {
+                self.with_active_terminal(snapshot, |session_id| {
+                    CommandDispatchIntent::TerminalInput {
+                        session_id,
+                        payload,
+                    }
+                })
+            }
+            DesktopAction::TerminalResize { cols, rows } => {
+                self.with_active_terminal(snapshot, |session_id| {
+                    CommandDispatchIntent::TerminalResize {
+                        session_id,
+                        cols,
+                        rows,
+                    }
+                })
+            }
+            DesktopAction::TerminalKill => self.with_active_terminal(snapshot, |session_id| {
+                CommandDispatchIntent::TerminalKill { session_id }
+            }),
+            DesktopAction::TerminalClose => self.with_active_terminal(snapshot, |session_id| {
+                CommandDispatchIntent::TerminalClose { session_id }
+            }),
+            DesktopAction::TerminalOutputPoll => self
+                .with_active_terminal(snapshot, |session_id| {
+                    CommandDispatchIntent::TerminalOutputPoll { session_id }
+                }),
+            DesktopAction::TerminalSearch { query } => self
+                .with_active_terminal(snapshot, |session_id| {
+                    CommandDispatchIntent::TerminalSearch { session_id, query }
+                }),
         }
     }
 
@@ -358,6 +531,17 @@ impl DesktopCommandBridge {
         match snapshot.active_buffer_projection.buffer_id {
             Some(buffer_id) => DesktopBridgeOutput::Intent(build(buffer_id)),
             None => DesktopBridgeOutput::Error(DesktopBridgeError::MissingActiveBuffer),
+        }
+    }
+
+    fn with_active_terminal(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        build: impl FnOnce(TerminalSessionId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        match snapshot.terminal_panel_projection.active_session_id {
+            Some(session_id) => DesktopBridgeOutput::Intent(build(session_id)),
+            None => DesktopBridgeOutput::Error(DesktopBridgeError::MissingActiveTerminalSession),
         }
     }
 

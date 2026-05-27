@@ -43,6 +43,10 @@ pub struct DesktopProjectionViewModel {
     pub trust_rows: Vec<String>,
     /// Assisted-AI and delegated-task summary rows.
     pub assistant_rows: Vec<String>,
+    /// Language tooling summary rows.
+    pub language_rows: Vec<String>,
+    /// Terminal panel summary rows.
+    pub terminal_rows: Vec<String>,
     /// Plugin contribution summary rows.
     pub plugin_rows: Vec<String>,
     /// Collaboration presence rows.
@@ -95,6 +99,8 @@ impl DesktopProjectionViewModel {
             proposal_rows: proposal_rows(snapshot),
             trust_rows: trust_rows(snapshot),
             assistant_rows: assistant_rows(snapshot),
+            language_rows: language_rows(snapshot),
+            terminal_rows: terminal_rows(snapshot),
             plugin_rows: plugin_rows(snapshot),
             collaboration_rows: collaboration_rows(snapshot),
             empty_or_degraded_flags: flags,
@@ -188,6 +194,22 @@ impl ProjectionView {
                 ui.separator();
                 ui.checkbox(&mut self.show_auxiliary, "Auxiliary");
                 if self.show_auxiliary {
+                    ui.heading("Language");
+                    if model.language_rows.is_empty() {
+                        ui.label("No language tooling activity");
+                    }
+                    for row in &model.language_rows {
+                        ui.label(row);
+                    }
+                    ui.separator();
+                    ui.heading("Terminal");
+                    if model.terminal_rows.is_empty() {
+                        ui.label("No terminal activity");
+                    }
+                    for row in &model.terminal_rows {
+                        ui.label(row);
+                    }
+                    ui.separator();
                     for row in &model.assistant_rows {
                         ui.label(row);
                     }
@@ -747,6 +769,76 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             delegated.plan_count, delegated.blocked_plan_count, delegated.runtime_activation
         ));
     }
+    rows
+}
+
+fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let language = &snapshot.language_tooling_projection;
+    let mut rows = Vec::new();
+    if language.buffer_id.is_some()
+        || !language.operations.is_empty()
+        || !language.problems.is_empty()
+        || !language.outline.is_empty()
+    {
+        rows.push(format!(
+            "language: {:?} problems={} completions={} definitions={} references={} outline={} stale={} cancelled={}",
+            language.status,
+            language.problems.len(),
+            language.completions.len(),
+            language.definitions.len(),
+            language.references.len(),
+            language.outline.len(),
+            language.stale_result_count,
+            language.cancellation_count
+        ));
+    }
+    if let Some(hover) = &language.hover {
+        rows.push(format!("hover: {} {}", hover.label, hover.summary));
+    }
+    rows.extend(language.operations.iter().map(|operation| {
+        format!(
+            "language op {} {:?} {:?} proposal={:?}",
+            operation.operation_id,
+            operation.kind,
+            operation.status,
+            operation.proposal_id.map(|proposal| proposal.0)
+        )
+    }));
+    rows
+}
+
+fn terminal_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let terminal = &snapshot.terminal_panel_projection;
+    let mut rows = Vec::new();
+    if terminal.active_session_id.is_some()
+        || terminal.last_denial.is_some()
+        || terminal.last_error.is_some()
+        || !terminal.output_rows.is_empty()
+    {
+        rows.push(format!(
+            "terminal: {:?} session={:?} rows={} omitted={} matches={}",
+            terminal.status.kind,
+            terminal.active_session_id.map(|session| session.0),
+            terminal.output_rows.len(),
+            terminal.scrollback.omitted_row_count,
+            terminal.search.match_count
+        ));
+    }
+    if let Some(policy) = &terminal.policy {
+        rows.push(format!(
+            "terminal policy: capability={} trust={:?} granted={} reason={}",
+            policy.capability_id.0, policy.workspace_trust_state, policy.granted, policy.reason
+        ));
+    }
+    if let Some(denial) = &terminal.last_denial {
+        rows.push(format!("terminal denial: {denial}"));
+    }
+    rows.extend(terminal.output_rows.iter().take(5).map(|row| {
+        format!(
+            "terminal output {}: {}",
+            row.sequence.0, row.redacted_payload
+        )
+    }));
     rows
 }
 

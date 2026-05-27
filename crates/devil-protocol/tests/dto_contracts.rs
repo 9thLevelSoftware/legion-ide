@@ -7681,3 +7681,162 @@ fn dto_contracts_phase4_runtime_surfaces_are_protocol_mediated() {
     assert!(!memory_manifest.contains("devil-platform"));
     assert!(!memory_manifest.contains("devil-observability"));
 }
+
+#[test]
+fn language_terminal_projection_roundtrips_language_surface() {
+    let projection = LanguageToolingProjection {
+        workspace_id: Some(WorkspaceId(11)),
+        buffer_id: Some(BufferId(22)),
+        file_id: Some(FileId(33)),
+        status: LanguageToolingStatusKind::Ready,
+        status_message: "Semantic index ready".to_string(),
+        problems: vec![LanguageProblemProjection {
+            file_id: Some(FileId(33)),
+            path: Some(CanonicalPath("C:/repo/src/main.rs".to_string())),
+            range: Some(protocol_range()),
+            severity: ProtocolDiagnosticSeverity::Warning,
+            code_label: Some("index.lexical.todo".to_string()),
+            message: "TODO marker".to_string(),
+            source_label: Some("lexical-index".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        hover: Some(LanguageHoverProjection {
+            hover_id: "hover-1".to_string(),
+            file_id: Some(FileId(33)),
+            range: Some(protocol_range()),
+            label: "main".to_string(),
+            summary: "function symbol".to_string(),
+            degraded: false,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }),
+        completions: vec![LanguageCompletionProjection {
+            completion_id: "completion-1".to_string(),
+            label: "main".to_string(),
+            detail_label: Some("symbol".to_string()),
+            kind_label: "function".to_string(),
+            score_basis_points: 9000,
+            degraded: false,
+            schema_version: 1,
+        }],
+        definitions: vec![LanguageLocationProjection {
+            location_id: "definition-1".to_string(),
+            file_id: Some(FileId(33)),
+            path: Some(CanonicalPath("C:/repo/src/main.rs".to_string())),
+            range: Some(protocol_range()),
+            label: "main".to_string(),
+            degraded: false,
+            schema_version: 1,
+        }],
+        references: Vec::new(),
+        outline: vec![LanguageOutlineSymbolProjection {
+            symbol_id: "outline-1".to_string(),
+            label: "main".to_string(),
+            kind_label: "function".to_string(),
+            range: Some(protocol_range()),
+            depth: 0,
+            children_omitted: false,
+            schema_version: 1,
+        }],
+        operations: vec![LanguageToolingOperationProjection {
+            operation_id: "operation-1".to_string(),
+            kind: LanguageToolingOperationKind::FormattingProposal,
+            status: LanguageToolingStatusKind::Ready,
+            request_id: Some(LspRequestId(
+                Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+            )),
+            proposal_id: Some(ProposalId(700)),
+            message: "proposal preview created".to_string(),
+            correlation_id: Some(CorrelationId(901)),
+            causality_id: Some(causality_id()),
+            generated_at: TimestampMillis(1700),
+            schema_version: 1,
+        }],
+        stale_result_count: 1,
+        cancellation_count: 0,
+        generated_at: TimestampMillis(1800),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    let encoded = serde_json::to_value(&projection).expect("language projection serializes");
+    assert!(encoded.get("raw_source_text").is_none());
+    assert!(encoded.get("raw_lsp_payload").is_none());
+    let decoded: LanguageToolingProjection =
+        serde_json::from_value(encoded).expect("language projection roundtrips");
+    assert_eq!(decoded, projection);
+}
+
+#[test]
+fn language_terminal_projection_roundtrips_terminal_surface() {
+    let projection = TerminalPanelProjection {
+        workspace_id: Some(WorkspaceId(11)),
+        active_session_id: Some(TerminalSessionId(44)),
+        runtime_state: Some(TerminalRuntimeState::Running),
+        status: TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Running,
+            message: "terminal running".to_string(),
+        },
+        policy: Some(TerminalPolicyProjection {
+            capability_id: CapabilityId("terminal.launch".to_string()),
+            workspace_trust_state: WorkspaceTrustState::Trusted,
+            granted: true,
+            decision_id: Some(CapabilityDecisionId(9)),
+            reason: "trusted fixture".to_string(),
+            output_byte_limit: 4096,
+            timeout_seconds: 30,
+            schema_version: 1,
+        }),
+        output_rows: vec![TerminalOutputRowProjection {
+            session_id: TerminalSessionId(44),
+            sequence: EventSequence(1),
+            redacted_payload: "fixture ready".to_string(),
+            byte_count: 13,
+            is_stderr: false,
+            truncated: false,
+            redaction: RedactionHint::MetadataOnly,
+            schema_version: 1,
+        }],
+        scrollback: TerminalScrollbackProjection {
+            visible_row_count: 1,
+            omitted_row_count: 0,
+            byte_limit: 4096,
+            truncated: false,
+            schema_version: 1,
+        },
+        search: TerminalSearchProjection {
+            query_label: Some("ready".to_string()),
+            match_count: 1,
+            active_match_index: Some(0),
+            truncated: false,
+            schema_version: 1,
+        },
+        last_error: None,
+        last_denial: None,
+        generated_at: TimestampMillis(1800),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    let encoded = serde_json::to_value(&projection).expect("terminal projection serializes");
+    assert!(encoded.get("raw_command").is_none());
+    assert!(encoded.get("raw_env").is_none());
+    let decoded: TerminalPanelProjection =
+        serde_json::from_value(encoded).expect("terminal projection roundtrips");
+    assert_eq!(decoded, projection);
+}
+
+#[test]
+fn language_terminal_projection_default_surfaces_are_inert() {
+    let language = LanguageToolingProjection::empty();
+    assert_eq!(language.status, LanguageToolingStatusKind::Idle);
+    assert!(language.buffer_id.is_none());
+    assert!(language.operations.is_empty());
+
+    let terminal = TerminalPanelProjection::empty();
+    assert_eq!(terminal.status.kind, TerminalPanelStatusKind::Disabled);
+    assert!(terminal.active_session_id.is_none());
+    assert!(terminal.output_rows.is_empty());
+    assert_eq!(terminal.redaction_hints, vec![RedactionHint::MetadataOnly]);
+}

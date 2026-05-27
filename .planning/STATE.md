@@ -1,13 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: 3 of 8 (complete)
-- **Status**: Phase 3 complete -- all plans executed and Daily Editing MVP accepted
-- **Last Activity**: Plan 03-06 acceptance gate rerun (2026-05-27)
+- **Phase**: 4 of 8 (complete)
+- **Status**: Phase 4 complete -- language and terminal IDE loop accepted
+- **Last Activity**: Phase 4 review remediation and acceptance gate (2026-05-27)
 
 ## Progress
 ```
-[########............] 40% - 17/42 plans complete
+[###########.........] 55% - 23/42 plans complete
 ```
 
 ## Phase 1 Results
@@ -36,6 +36,15 @@
 - Plan 03-05 (Wave 5): Session Restore And Large-File Guardrails -- complete
 - Plan 03-06 (Wave 6): Phase 3 Evidence And Acceptance Gate -- complete
 
+## Phase 4 Plan
+
+- Plan 04-01 (Wave 1): Governance And Projection Contract Rebaseline -- complete
+- Plan 04-02 (Wave 2): App Language Tooling Composition And Proposal Routing -- complete
+- Plan 04-03 (Wave 3): Policy-Gated Terminal App Workflow -- complete
+- Plan 04-04 (Wave 4): Desktop Language And Terminal Panels -- complete
+- Plan 04-05 (Wave 5): Cross-Boundary Safety And Failure Tests -- complete
+- Plan 04-06 (Wave 6): Phase 4 Evidence And Acceptance Gate -- complete
+
 ## Recent Decisions
 - Use exploration design `.planning/explorations/2026-05-26-gui-ide-roadmap-design.md` as the start source.
 - Use fresh `/legion:map` dataset from `.planning/CODEBASE.md` and `.planning/codebase/`.
@@ -53,6 +62,11 @@
 - Desktop session persistence uses metadata-only `WorkspaceSessionRecord` JSON through `serde_json`; no `devil-storage` dependency was added.
 - Phase 3 large-file evidence proves bounded degraded desktop rendering/search but does not promote the ignored 100MB performance workload.
 - Phase 3 is accepted with all final gates green after the broad `cargo test --workspace --all-targets` gate passed on rerun with restored disk space.
+- Phase 4 planning treats the legacy Phase 4 agentic AI evidence path as a governance collision that must be handled in Plan 04-01 before app dependency edges to `devil-index` and `devil-terminal` are added.
+- Phase 4 uses six sequential waves because dependency policy, protocol/UI projection contracts, app composition, terminal security, desktop routing, and final evidence share high-risk ownership boundaries.
+- Phase 4 language edit actions must become proposal previews before mutation; terminal workflows must remain policy-gated, bounded, metadata-audited, and unable to mutate editor buffers or disk directly.
+- Phase 4 is accepted with GUI Phase 4 dependency policy rebaseline, language/terminal projection DTOs, app-owned language proposal routing, default-deny terminal workflow, desktop panel routing, and full final gates passing.
+- Phase 4 review found and fixed proposal lifecycle ordering, safe language edit payloads, stale projection retention, terminal lifecycle policy/validator/audit enforcement, and exact test target drift before passing final gates.
 
 ## Next Action
-Run `/legion:plan 4 --auto-refine` for Phase 4: Language and Terminal IDE Loop
+Run `/legion:plan 5 --auto-refine` to plan Phase 5: Control, Trust, and Assisted AI Surfaces
