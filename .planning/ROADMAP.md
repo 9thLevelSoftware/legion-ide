@@ -3,7 +3,7 @@
 ## Phases
 
 - [x] Phase 1: Baseline Reconciliation and Renderer Decision
-- [ ] Phase 2: Renderer-Backed Foundation Mode
+- [x] Phase 2: Renderer-Backed Foundation Mode
 - [ ] Phase 3: Daily Editing MVP
 - [ ] Phase 4: Language and Terminal IDE Loop
 - [ ] Phase 5: Control, Trust, and Assisted AI Surfaces
@@ -149,7 +149,7 @@
 | Phase | Plans | Completed | Status |
 |-------|-------|-----------|--------|
 | 1 | 5 | 5 | Complete |
-| 2 | 6 | 5 | In Progress |
+| 2 | 6 | 6 | Complete |
 | 3 | 6 | 0 | Not started |
 | 4 | 6 | 0 | Not started |
 | 5 | 5 | 0 | Not started |
