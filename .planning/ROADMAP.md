@@ -6,7 +6,7 @@
 - [x] Phase 2: Renderer-Backed Foundation Mode
 - [x] Phase 3: Daily Editing MVP
 - [x] Phase 4: Language and Terminal IDE Loop
-- [ ] Phase 5: Control, Trust, and Assisted AI Surfaces
+- [x] Phase 5: Control, Trust, and Assisted AI Surfaces
 - [ ] Phase 6: Packaging, Platform Integration, and Accessibility
 - [ ] Phase 7: Fully Functional Local IDE Beta
 - [ ] Phase 8: Advanced Platform GUI GA
@@ -28,7 +28,7 @@
 - `devil-ui` remains projection-only and no GUI dependency is introduced without policy coverage.
 - Verification includes `cargo run -p xtask -- check-deps`, `cargo fmt --all --check`, `cargo check --workspace --all-targets`, and targeted app/UI tests.
 
-**Plans**: 5
+**Plans**: 7
 
 ### Phase 2: Renderer-Backed Foundation Mode
 **Goal**: Open a real desktop window that renders current shell projections and routes commands through existing app authority.
@@ -80,6 +80,8 @@
 **Plans**: 6
 
 ### Phase 5: Control, Trust, and Assisted AI Surfaces
+Phase 5 status: Complete.
+
 **Goal**: Make the control-first differentiator visible and usable in the GUI.
 
 **Requirements**: R-010, R-011, R-013
@@ -93,7 +95,7 @@
 - Users can see what context was used, what was redacted or denied, and what risk labels apply.
 - Approval, rejection, cancellation, stale, conflict, failed, applied, and rolled-back states are visible.
 
-**Plans**: 5
+**Plans**: 7
 
 ### Phase 6: Packaging, Platform Integration, and Accessibility
 **Goal**: Turn the GUI into an installable Windows desktop application with credible platform behavior.
@@ -152,13 +154,13 @@
 | 2 | 6 | 6 | Complete |
 | 3 | 6 | 6 | Complete |
 | 4 | 6 | 6 | Complete |
-| 5 | 5 | 0 | Not started |
+| 5 | 7 | 7 | Complete |
 | 6 | 5 | 0 | Not started |
 | 7 | 4 | 0 | Not started |
 | 8 | 5 | 0 | Not started |
 
 ## Planning Notes
 
-- Total estimated plans: 42.
+- Total estimated plans: 46.
 - Estimates are not caps. A phase may produce as many tasks as needed to satisfy the phase goal and verification contract.
 - `/legion:plan` should use `.planning/CODEBASE.md`, `.planning/codebase/index.jsonl`, and `.planning/codebase/symbols.json` before decomposing each phase.

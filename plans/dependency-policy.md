@@ -152,6 +152,8 @@ Phase 4 activates `devil-agent`, `devil-tracker`, and `devil-memory` only for me
 
 Phase 5 activates `devil-plugin` only as an isolated WASM plugin runtime boundary using protocol DTOs, manifest/capability validation, quota metadata, plugin-scoped storage, and metadata-only observability. It must not depend on app/UI/editor/project internals and must not gain direct filesystem, process, network, terminal, AI, tracker, memory, collaboration, remote, settings, or buffer mutation authority. Plugin mutation outputs must remain proposal-mediated.
 
+Compatibility note: the plugin entry above is historical runtime evidence for the previously accepted Phase 5 plugin boundary. GUI Phase 5 is the active productization phase for control, trust, and assisted-AI surfaces. It authorizes only app-owned proposal, trust, permission, privacy, budget, and assisted-AI composition surfaced through protocol DTOs and projection snapshots. `devil-ui` and `devil-desktop` must remain projection and intent layers only; they must not own proposal lifecycle state, provider routing, editor text, workspace mutation, storage authority, raw-source retention, hosted-provider activation, or autonomous apply behavior.
+
 - `devil-cli` may depend on:
   - `devil-index`
   - `devil-protocol`

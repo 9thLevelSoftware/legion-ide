@@ -4830,6 +4830,158 @@ fn assisted_ai_ledger(proposal_id: ProposalId) -> ProposalLedgerProjection {
 }
 
 #[test]
+fn control_trust_projection_contracts_roundtrip_redaction_and_required_fields() {
+    let proposal = proposal_for_lsp();
+    let manifest = context_manifest_from_proposal(
+        &proposal,
+        "manifest:control-trust",
+        Some(WorkspaceTrustState::Trusted),
+        ProposalPrivacyLabel::WorkspaceMetadata,
+        ProposalRiskLabel::Medium,
+        TimestampMillis(1800),
+        1,
+    );
+    let manifest_projection = ContextManifestProjection {
+        manifest,
+        selected_item_id: Some("proposal:target:0".to_string()),
+        generated_at: TimestampMillis(1800),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let privacy = privacy_inspector_from_context_manifest_projection(
+        &manifest_projection,
+        "privacy:control-trust",
+        TimestampMillis(1801),
+        1,
+    );
+    let budget = PermissionBudgetContract {
+        budget_id: "budget:control-trust".to_string(),
+        action_class: PermissionBudgetActionClass::ApplyApprovedProposal,
+        capability: Some(CapabilityId("fs.write".to_string())),
+        state: PermissionBudgetState::Allowed,
+        privacy_scope: SemanticPrivacyScope::MetadataOnly,
+        usage: PermissionBudgetUsageSummary {
+            unit_label: "proposals".to_string(),
+            used: 0,
+            ceiling: Some(3),
+            remaining: Some(3),
+            attempted: 0,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        reset_policy_label: PermissionBudgetResetPolicyLabel::ManualApproval,
+        consent_requirement_label: PermissionBudgetConsentRequirementLabel::NotRequired,
+        risk_label: ProposalRiskLabel::Medium,
+        reasons: vec!["approval.metadata_only".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let action = PermissionBudgetActionSummary {
+        action_id: "action:control-trust:apply".to_string(),
+        action_class: PermissionBudgetActionClass::ApplyApprovedProposal,
+        capability: Some(CapabilityId("fs.write".to_string())),
+        workspace_id: Some(WorkspaceId(11)),
+        proposal_id: Some(proposal.proposal_id),
+        target_id: Some("target-buffer-main".to_string()),
+        privacy_scope: SemanticPrivacyScope::MetadataOnly,
+        egress: ContextManifestEgressStatus::LocalOnly,
+        estimated_units: 1,
+        ranges: vec![ByteRange::new(10, 14)],
+        counts: vec![ContextManifestItemCount {
+            label: "targets".to_string(),
+            count: 1,
+        }],
+        hashes: vec![fingerprint("control-trust-target")],
+        labels: vec!["apply.approved_proposal".to_string()],
+        risk_label: ProposalRiskLabel::Medium,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let evaluation = evaluate_permission_budget(&budget, action, "eval:control-trust", 1);
+    let budgets = permission_budget_projection_from_contracts(
+        "budgets:control-trust",
+        vec![budget],
+        vec![evaluation],
+        TimestampMillis(1802),
+        1,
+    );
+    let rollback = checkpoint_rollback_projection_from_proposal(
+        "checkpoint-rollback:control-trust",
+        &proposal,
+        ProposalLifecycleState::Previewed,
+        None,
+        CheckpointRollbackAuditStatus::Available,
+        Some(causality_id()),
+        TimestampMillis(1803),
+        1,
+    );
+    let checklist = approval_checklist_from_trust_projections(
+        "approval-checklist:control-trust",
+        &proposal,
+        ProposalLifecycleState::Previewed,
+        None,
+        Some(&manifest_projection),
+        Some(&privacy),
+        Some(&budgets),
+        Some(&rollback),
+        true,
+        Some(causality_id()),
+        TimestampMillis(1804),
+        1,
+    );
+
+    let provider = assisted_ai_provider(AssistedAiProviderClass::LocalLoopback);
+    let boundary = assisted_ai_boundary();
+    let decision = assisted_ai_evaluate_route_decision(
+        &provider,
+        &boundary,
+        AssistedAiOperationClass::ProposeEdit,
+        1,
+    );
+    let request = assisted_ai_request_with_decision(provider.clone(), boundary, decision);
+    let output = assisted_ai_output(ProposalId(701));
+    let ledger = assisted_ai_ledger(ProposalId(701));
+    let assisted = assisted_ai_projection_from_metadata(
+        "assisted-ai:control-trust",
+        vec![provider],
+        vec![request],
+        vec![output],
+        Some(&ledger),
+        Some(&manifest_projection),
+        Some(&privacy),
+        Some(&budgets),
+        Some(&checklist),
+        Some(&rollback),
+        TimestampMillis(1805),
+        1,
+    );
+
+    let bundle = serde_json::to_value(json!({
+        "ledger": ledger,
+        "manifest": manifest_projection,
+        "privacy": privacy,
+        "budgets": budgets,
+        "checklist": checklist,
+        "rollback": rollback,
+        "assisted": assisted,
+    }))
+    .expect("serialize control trust bundle");
+    let serialized = serde_json::to_string(&bundle).expect("stringify control trust bundle");
+    assert!(serialized.contains("MetadataOnly"));
+    assert!(serialized.contains("PreviewReady"));
+    assert!(serialized.contains("proposal.apply.not_encoded"));
+    assert!(!serialized.contains("fn main"));
+    assert!(!serialized.contains("raw prompt"));
+    assert!(!serialized.contains("secret"));
+    assert!(!serialized.contains("provider_payload"));
+    assert!(!serialized.contains("terminal output"));
+    assert!(!serialized.contains("workspace_actor"));
+
+    let mut missing = bundle["assisted"].clone();
+    remove_required_field::<AssistedAiProjection>(&mut missing, "schema_version");
+}
+
+#[test]
 fn dto_contracts_assisted_ai_provider_capability_and_request_are_metadata_only() {
     let provider = assisted_ai_provider(AssistedAiProviderClass::LocalLoopback);
     let boundary = assisted_ai_boundary();

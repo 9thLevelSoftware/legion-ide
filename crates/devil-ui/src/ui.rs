@@ -651,6 +651,16 @@ pub enum CommandDispatchIntent {
         /// Display-safe instruction label.
         instruction_label: String,
     },
+    /// Start a metadata-only assisted-AI explain run through app-owned composition.
+    StartAiExplain {
+        /// Display-safe instruction label.
+        instruction_label: String,
+    },
+    /// Start a proposal-only assisted-AI edit run through app-owned composition.
+    StartAiProposal {
+        /// Display-safe instruction label.
+        instruction_label: String,
+    },
     /// Cancel a Phase 4 AI run through app-owned composition.
     CancelAiRun {
         /// Agent run identifier selected from projection data or user input.
@@ -1229,7 +1239,7 @@ impl Shell {
             }
         }
         println!(
-            "Commands: :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :u | :redo | :q"
+            "Commands: :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :ai-explain label | :ai-propose label | :u | :redo | :q"
         );
     }
 
@@ -1463,6 +1473,30 @@ impl Shell {
                     instruction_label.to_string()
                 },
             })));
+        }
+        if let Some(label) = trimmed.strip_prefix(":ai-explain") {
+            let instruction_label = label.trim();
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::StartAiExplain {
+                    instruction_label: if instruction_label.is_empty() {
+                        "phase5.local_explain".to_string()
+                    } else {
+                        instruction_label.to_string()
+                    },
+                },
+            )));
+        }
+        if let Some(label) = trimmed.strip_prefix(":ai-propose") {
+            let instruction_label = label.trim();
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::StartAiProposal {
+                    instruction_label: if instruction_label.is_empty() {
+                        "phase5.local_proposal".to_string()
+                    } else {
+                        instruction_label.to_string()
+                    },
+                },
+            )));
         }
         if let Some(run_id) = trimmed.strip_prefix(":ai-cancel ") {
             return Ok(Some(self.push_intent(CommandDispatchIntent::CancelAiRun {
@@ -2312,6 +2346,152 @@ mod tests {
         );
         assert_eq!(shell.projection_snapshot(), before);
         assert_eq!(shell.command_dispatch_intents.len(), 1);
+    }
+
+    #[test]
+    fn control_trust_command_intents_remain_projection_only() {
+        let mut shell = Shell::new(ShellProjectionSnapshot {
+            layout_projection: ShellLayoutProjection::plain("control-trust"),
+            explorer_projection: ExplorerProjection {
+                nodes: Vec::new(),
+                selection: None,
+            },
+            active_buffer_projection: ActiveBufferProjection {
+                workspace_id: Some(WorkspaceId(1)),
+                buffer_id: Some(BufferId(2)),
+                file_id: Some(FileId(9)),
+                file_path: Some(CanonicalPath("a.md".to_string())),
+                viewport: None,
+                degraded: false,
+                small_buffer_preview: Some("first".to_string()),
+                dirty: true,
+            },
+            status_messages: Vec::new(),
+            proposal_ledger_projection: test_proposal_ledger_projection(),
+            context_manifest_projection: empty_context_manifest_projection(),
+            privacy_inspector_projection: empty_privacy_inspector_projection(),
+            permission_budget_projection: empty_permission_budget_projection(),
+            approval_checklist_projection: empty_approval_checklist_projection(),
+            checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
+            assisted_ai_projection: empty_assisted_ai_projection(),
+            delegated_task_projection: empty_delegated_task_projection(),
+            plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
+        });
+        let before = shell.projection_snapshot();
+
+        let commands = vec![
+            (
+                ":proposal-preview 42",
+                CommandDispatchIntent::PreviewProposal {
+                    proposal_id: ProposalId(42),
+                },
+            ),
+            (
+                ":proposal-approve 42",
+                CommandDispatchIntent::ApproveProposal {
+                    proposal_id: ProposalId(42),
+                },
+            ),
+            (
+                ":proposal-reject 42",
+                CommandDispatchIntent::RejectProposal {
+                    proposal_id: ProposalId(42),
+                    reason: ProposalRejectionReason::UserRejected,
+                },
+            ),
+            (
+                ":proposal-apply 42",
+                CommandDispatchIntent::ApplyProposal {
+                    proposal_id: ProposalId(42),
+                },
+            ),
+            (
+                ":proposal-rollback 42",
+                CommandDispatchIntent::RollbackProposal {
+                    proposal_id: ProposalId(42),
+                    reason: ProposalRollbackReason::UserRequested,
+                },
+            ),
+            (
+                ":proposal-cancel 42",
+                CommandDispatchIntent::CancelProposal {
+                    proposal_id: ProposalId(42),
+                    reason: ProposalCancellationReason::UserCancelled,
+                },
+            ),
+            (
+                ":proposal-details 42",
+                CommandDispatchIntent::OpenProposalDetails {
+                    proposal_id: ProposalId(42),
+                },
+            ),
+            (
+                ":ai-start summarize context",
+                CommandDispatchIntent::StartAiRun {
+                    instruction_label: "summarize context".to_string(),
+                },
+            ),
+            (
+                ":ai-explain summarize context",
+                CommandDispatchIntent::StartAiExplain {
+                    instruction_label: "summarize context".to_string(),
+                },
+            ),
+            (
+                ":ai-propose add guard",
+                CommandDispatchIntent::StartAiProposal {
+                    instruction_label: "add guard".to_string(),
+                },
+            ),
+            (
+                ":ai-cancel run-1",
+                CommandDispatchIntent::CancelAiRun {
+                    run_id: AgentRunId("run-1".to_string()),
+                },
+            ),
+            (
+                ":ai-replay run-1",
+                CommandDispatchIntent::ReplayAiRun {
+                    run_id: AgentRunId("run-1".to_string()),
+                },
+            ),
+            (
+                ":ai-inspect run-1",
+                CommandDispatchIntent::InspectAiRun {
+                    run_id: AgentRunId("run-1".to_string()),
+                },
+            ),
+        ];
+
+        let command_count = commands.len();
+        for (command, expected) in commands {
+            let intent = shell
+                .handle_command(command)
+                .expect("control trust command should parse")
+                .expect("intent should be emitted");
+            assert_eq!(intent, expected);
+            assert_eq!(shell.projection_snapshot(), before);
+        }
+
+        assert!(shell.command_dispatch_intents.len() >= command_count);
+    }
+
+    #[test]
+    fn assisted_ai_command_intents_remain_projection_only() {
+        control_trust_command_intents_remain_projection_only();
+    }
+
+    #[test]
+    fn control_trust_shell_carries_static_projection_contracts_without_ownership() {
+        shell_renders_context_manifest_from_static_snapshot_without_ownership();
+        shell_renders_privacy_and_budget_summaries_from_static_snapshot_without_ownership();
+        shell_renders_approval_and_rollback_summaries_from_static_snapshot_without_ownership();
+        shell_renders_assisted_ai_projection_from_static_snapshot_without_ownership();
     }
 
     #[test]

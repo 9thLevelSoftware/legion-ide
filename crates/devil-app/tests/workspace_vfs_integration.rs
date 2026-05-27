@@ -4566,10 +4566,11 @@ fn workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_o
     let outcome = app
         .start_ai_run("phase4.integration")
         .expect("phase4 AI run starts");
+    let proposal_id = outcome.proposal_id.expect("proposal id");
 
     assert!(matches!(
         outcome.proposal_created,
-        ProposalResponse::Created(_)
+        Some(ProposalResponse::Created(_))
     ));
     assert_eq!(
         outcome.route_response.invocation_state,
@@ -4596,8 +4597,12 @@ fn workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_o
         .shell_projection_snapshot("phase4")
         .expect("shell projection");
     assert_eq!(
-        shell.context_manifest_projection.manifest.manifest_id,
-        outcome.context_manifest_projection.manifest.manifest_id
+        shell.proposal_ledger_projection.selected_proposal_id,
+        Some(proposal_id)
+    );
+    assert_eq!(
+        shell.context_manifest_projection.manifest.proposal_id,
+        Some(proposal_id)
     );
     assert_eq!(
         shell.assisted_ai_projection.provider_invocation,
@@ -4608,14 +4613,65 @@ fn workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_o
     let replay = app
         .replay_ai_run(outcome.run_id.clone())
         .expect("replay manifest roundtrip");
-    assert_eq!(replay.proposal_ids, vec![outcome.proposal_id]);
+    assert_eq!(replay.proposal_ids, vec![proposal_id]);
     let inspect = app
         .inspect_ai_run(outcome.run_id.clone())
         .expect("inspect AI run");
     assert_eq!(inspect.run_id, outcome.run_id);
     assert_eq!(
+        inspect.context_manifest_projection.manifest.manifest_id,
+        outcome.context_manifest_projection.manifest.manifest_id
+    );
+    assert_eq!(
         inspect.context_manifest_projection.manifest.items.len(),
         outcome.context_manifest_projection.manifest.items.len()
+    );
+    assert_eq!(
+        inspect.assisted_ai_projection.projection_id,
+        format!("phase4:assisted:{}", outcome.run_id.0)
+    );
+
+    let second_outcome = app
+        .start_ai_run("phase4.integration.second")
+        .expect("second phase4 AI run starts");
+    assert_ne!(second_outcome.run_id, outcome.run_id);
+    assert_ne!(
+        second_outcome
+            .context_manifest_projection
+            .manifest
+            .manifest_id,
+        outcome.context_manifest_projection.manifest.manifest_id
+    );
+
+    let first_after_second = app
+        .inspect_ai_run(outcome.run_id.clone())
+        .expect("first AI run remains inspectable after second run");
+    assert_eq!(first_after_second.run_id, outcome.run_id);
+    assert_eq!(
+        first_after_second
+            .context_manifest_projection
+            .manifest
+            .manifest_id,
+        outcome.context_manifest_projection.manifest.manifest_id
+    );
+    assert_eq!(
+        first_after_second.assisted_ai_projection.projection_id,
+        format!("phase4:assisted:{}", outcome.run_id.0)
+    );
+
+    let second_inspect = app
+        .inspect_ai_run(second_outcome.run_id.clone())
+        .expect("second AI run inspectable");
+    assert_eq!(second_inspect.run_id, second_outcome.run_id);
+    assert_eq!(
+        second_inspect
+            .context_manifest_projection
+            .manifest
+            .manifest_id,
+        second_outcome
+            .context_manifest_projection
+            .manifest
+            .manifest_id
     );
 
     assert_eq!(

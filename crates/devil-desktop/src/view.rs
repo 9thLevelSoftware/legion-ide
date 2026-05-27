@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use devil_protocol::{FileId, ViewportProjectionMode};
+use devil_protocol::{
+    AgentRunId, FileId, ProposalCancellationReason, ProposalRejectionReason,
+    ProposalRollbackReason, ViewportProjectionMode,
+};
 use devil_ui::{ShellProjectionSnapshot, StatusSeverity};
 
 use crate::{bridge::DesktopAction, search::DesktopSearchViewModel};
@@ -180,6 +183,7 @@ impl ProjectionView {
                     for row in &model.proposal_rows {
                         ui.label(row);
                     }
+                    render_proposal_controls(ui, snapshot, &mut actions);
 
                     ui.separator();
                     ui.heading("Trust");
@@ -213,6 +217,7 @@ impl ProjectionView {
                     for row in &model.assistant_rows {
                         ui.label(row);
                     }
+                    render_assistant_controls(ui, snapshot, &mut actions);
                     for row in &model.plugin_rows {
                         ui.label(row);
                     }
@@ -335,6 +340,85 @@ fn render_close_dirty_prompt_controls(
             });
         }
     });
+}
+
+fn render_proposal_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    for row in &snapshot.proposal_ledger_projection.rows {
+        let proposal_id = row.proposal_id;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Proposal {}", proposal_id.0));
+            if ui.button("Details").clicked() {
+                actions.push(DesktopAction::OpenProposalDetails { proposal_id });
+            }
+            if ui.button("Preview").clicked() {
+                actions.push(DesktopAction::PreviewProposal { proposal_id });
+            }
+            if ui.button("Approve").clicked() {
+                actions.push(DesktopAction::ApproveProposal { proposal_id });
+            }
+            if ui.button("Apply").clicked() {
+                actions.push(DesktopAction::ApplyProposal { proposal_id });
+            }
+            if ui.button("Reject").clicked() {
+                actions.push(DesktopAction::RejectProposal {
+                    proposal_id,
+                    reason: ProposalRejectionReason::UserRejected,
+                });
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(DesktopAction::CancelProposal {
+                    proposal_id,
+                    reason: ProposalCancellationReason::UserCancelled,
+                });
+            }
+            if ui.button("Rollback").clicked() {
+                actions.push(DesktopAction::RollbackProposal {
+                    proposal_id,
+                    reason: ProposalRollbackReason::UserRequested,
+                });
+            }
+        });
+    }
+}
+
+fn render_assistant_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if ui.button("Explain").clicked() {
+        actions.push(DesktopAction::StartAiExplain {
+            instruction_label: "desktop explain".to_string(),
+        });
+    }
+    if ui.button("Propose").clicked() {
+        actions.push(DesktopAction::StartAiProposal {
+            instruction_label: "desktop propose".to_string(),
+        });
+    }
+
+    if let Some(run_id) = projected_assisted_run_id(snapshot) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Run {}", run_id.0));
+            if ui.button("Inspect").clicked() {
+                actions.push(DesktopAction::InspectAiRun {
+                    run_id: run_id.clone(),
+                });
+            }
+            if ui.button("Replay").clicked() {
+                actions.push(DesktopAction::ReplayAiRun {
+                    run_id: run_id.clone(),
+                });
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(DesktopAction::CancelAiRun { run_id });
+            }
+        });
+    }
 }
 
 fn render_explorer_controls(
@@ -671,21 +755,100 @@ fn save_rejection_status_marker(message: &str) -> Option<&'static str> {
 }
 
 fn proposal_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    snapshot
-        .proposal_ledger_projection
-        .rows
-        .iter()
-        .map(|row| {
+    let ledger = &snapshot.proposal_ledger_projection;
+    let mut rows = Vec::new();
+    if let Some(selected) = ledger.selected_proposal_id {
+        rows.push(format!("selected proposal: {}", selected.0));
+    }
+
+    for row in ledger.rows.iter().take(12) {
+        rows.push(format!(
+            "proposal {}: {} [{} {:?} {:?}] payload={:?} rollback={:?}",
+            row.proposal_id.0,
+            row.title,
+            row.lifecycle.label,
+            row.risk_label,
+            row.privacy_label,
+            row.payload_kind,
+            row.rollback
+        ));
+        rows.push(format!(
+            "proposal {} diff: {:?} targets={} hunks={} +{} -{} omitted={} hash={}",
+            row.proposal_id.0,
+            row.diff_summary.kind,
+            row.diff_summary.target_count,
+            row.diff_summary.hunk_count,
+            row.diff_summary.inserted_line_count,
+            row.diff_summary.deleted_line_count,
+            row.diff_summary.omitted_hunk_count,
+            row.diff_summary
+                .diff_hash
+                .as_ref()
+                .map(|hash| hash.value.as_str())
+                .unwrap_or("<none>")
+        ));
+        rows.push(format!(
+            "proposal {} targets: {:?} shown={} omitted={} redaction={}",
+            row.proposal_id.0,
+            row.target_coverage.coverage_kind,
+            row.target_coverage.targets.len(),
+            row.target_coverage.omitted_target_count,
+            redaction_label(&row.target_coverage.redaction_hints)
+        ));
+        rows.extend(row.target_coverage.targets.iter().take(4).map(|target| {
             format!(
-                "proposal {}: {} [{} {:?} {:?}]",
+                "proposal {} target {}: {:?} file={:?} buffer={:?} path={} ranges={} redaction={}",
                 row.proposal_id.0,
-                row.title,
-                row.lifecycle.label,
-                row.risk_label,
-                row.privacy_label
+                target.target_id,
+                target.kind,
+                target.file_id.map(|file| file.0),
+                target.buffer_id.map(|buffer| buffer.0),
+                target
+                    .path
+                    .as_ref()
+                    .map(|path| path.0.as_str())
+                    .unwrap_or("<redacted>"),
+                target.byte_ranges.len(),
+                redaction_label(&target.redaction_hints)
             )
-        })
-        .collect()
+        }));
+        rows.push(format!(
+            "proposal {} context: {} categories={} items={} omitted={} redaction={}",
+            row.proposal_id.0,
+            row.context_manifest.manifest_id,
+            row.context_manifest.category_count,
+            row.context_manifest.total_item_count,
+            row.context_manifest.omitted_item_count,
+            redaction_label(&row.context_manifest.redaction_hints)
+        ));
+        if !row.preview_warnings.is_empty() {
+            rows.push(format!(
+                "proposal {} warnings: {}",
+                row.proposal_id.0,
+                row.preview_warnings.len()
+            ));
+        }
+        rows.extend(row.preview_warnings.iter().take(4).map(|warning| {
+            format!(
+                "proposal {} warning {} {:?}: {}",
+                row.proposal_id.0, warning.code, warning.kind, warning.message
+            )
+        }));
+        if !row.diagnostics.is_empty() {
+            rows.push(format!(
+                "proposal {} diagnostics: {}",
+                row.proposal_id.0,
+                row.diagnostics.len()
+            ));
+        }
+    }
+    if ledger.omitted_row_count > 0 {
+        rows.push(format!(
+            "proposal ledger omitted rows: {}",
+            ledger.omitted_row_count
+        ));
+    }
+    rows
 }
 
 fn trust_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
@@ -700,34 +863,182 @@ fn trust_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             manifest.egress
         ));
     }
+    rows.extend(manifest.items.iter().take(10).map(|item| {
+        format!(
+            "context item {}: {:?} {:?} risk={:?} privacy={:?} egress={:?} file={:?} buffer={:?} path={} counts={} ranges={} labels={}",
+            item.item_id,
+            item.kind,
+            item.inclusion,
+            item.risk_label,
+            item.privacy_label,
+            item.egress,
+            item.file_id.map(|file| file.0),
+            item.buffer_id.map(|buffer| buffer.0),
+            item.path
+                .as_ref()
+                .map(|path| path.0.as_str())
+                .unwrap_or("<redacted>"),
+            item.counts.len(),
+            item.ranges.len(),
+            bounded_join(&item.labels)
+        )
+    }));
+    rows.extend(manifest.permissions.iter().take(10).map(|permission| {
+        format!(
+            "context permission {:?}: capability={} granted={} scope={:?} egress={:?} risk={:?}",
+            permission.kind,
+            permission.capability.0,
+            permission.granted,
+            permission.privacy_scope,
+            permission.egress,
+            permission.risk_label
+        )
+    }));
 
     let privacy = &snapshot.privacy_inspector_projection;
     if !privacy.records.is_empty() || privacy.refusal.is_some() {
         rows.push(format!(
-            "privacy: {} records, {} denied, {} redacted, {} external",
+            "privacy: {} records, {} denied, {} redacted, {} external, {} high-risk",
             privacy.records.len(),
             privacy.denied_record_count,
             privacy.redacted_record_count,
-            privacy.external_egress_record_count
+            privacy.external_egress_record_count,
+            privacy.high_risk_record_count
+        ));
+    }
+    rows.extend(privacy.records.iter().take(10).map(|record| {
+        format!(
+            "privacy record {}: {:?} {:?} risk={:?} privacy={:?} egress={:?} permission={} reasons={}",
+            record.exposure_id,
+            record.source_kind,
+            record.redaction_state,
+            record.risk_label,
+            record.privacy_label,
+            record.egress,
+            record
+                .permission_label
+                .as_ref()
+                .map(|capability| capability.0.as_str())
+                .unwrap_or("<none>"),
+            bounded_join(&record.reasons)
+        )
+    }));
+    if let Some(refusal) = &privacy.refusal {
+        rows.push(format!(
+            "privacy refusal {}: {} scope={:?} capability={} risk={:?} reasons={}",
+            refusal.reason_code,
+            refusal.label,
+            refusal.privacy_scope,
+            refusal
+                .capability
+                .as_ref()
+                .map(|capability| capability.0.as_str())
+                .unwrap_or("<none>"),
+            refusal.risk_label,
+            bounded_join(&refusal.reasons)
         ));
     }
 
     let budget = &snapshot.permission_budget_projection;
     if !budget.budgets.is_empty() || !budget.evaluations.is_empty() {
         rows.push(format!(
-            "permission budget: {} budgets, {} evaluations, {} refused",
+            "permission budget: {} budgets, {} evaluations, {} denied, {} depleted, {} refused",
             budget.budgets.len(),
             budget.evaluations.len(),
+            budget.denied_budget_count,
+            budget.depleted_budget_count,
             budget.refused_evaluation_count
         ));
     }
+    rows.extend(budget.budgets.iter().take(10).map(|contract| {
+        format!(
+            "permission budget {}: {:?} state={:?} scope={:?} consent={:?} used={}/{} risk={:?} reasons={}",
+            contract.budget_id,
+            contract.action_class,
+            contract.state,
+            contract.privacy_scope,
+            contract.consent_requirement_label,
+            contract.usage.used,
+            contract
+                .usage
+                .ceiling
+                .map(|ceiling| ceiling.to_string())
+                .unwrap_or_else(|| "uncapped".to_string()),
+            contract.risk_label,
+            bounded_join(&contract.reasons)
+        )
+    }));
+    rows.extend(budget.evaluations.iter().take(10).map(|evaluation| {
+        format!(
+            "permission evaluation {}: budget={} disposition={:?} allowed={} action={:?} estimated={} reasons={}",
+            evaluation.evaluation_id,
+            evaluation.budget_id,
+            evaluation.disposition,
+            evaluation.allowed,
+            evaluation.action.action_class,
+            evaluation.action.estimated_units,
+            bounded_join(&evaluation.reasons)
+        )
+    }));
+    rows.extend(
+        budget
+            .evaluations
+            .iter()
+            .filter_map(|evaluation| {
+                evaluation
+                    .refusal
+                    .as_ref()
+                    .map(|refusal| (evaluation, refusal))
+            })
+            .take(6)
+            .map(|(evaluation, refusal)| {
+                format!(
+                    "permission refusal {}: {} reason={} risk={:?}",
+                    evaluation.evaluation_id,
+                    refusal.label,
+                    refusal.reason_code,
+                    refusal.risk_label
+                )
+            }),
+    );
 
     let checklist = &snapshot.approval_checklist_projection;
     if !checklist.gates.is_empty() || !checklist.blockers.is_empty() {
         rows.push(format!(
-            "approval checklist: {} gates, ready={}",
+            "approval checklist: proposal {} lifecycle={:?} gates={} blockers={} ready={} denials={}",
+            checklist.proposal_id.0,
+            checklist.lifecycle_state,
             checklist.gates.len(),
-            checklist.ready_for_approval
+            checklist.blockers.len(),
+            checklist.ready_for_approval,
+            checklist.explicit_denial_reasons.len()
+        ));
+    }
+    rows.extend(checklist.gates.iter().take(12).map(|gate| {
+        format!(
+            "approval gate {:?}: {:?} risk={:?} privacy={:?} labels={} reasons={}",
+            gate.gate,
+            gate.status,
+            gate.risk_label,
+            gate.privacy_label,
+            bounded_join(&gate.labels),
+            gate.reasons.len()
+        )
+    }));
+    rows.extend(checklist.blockers.iter().take(10).map(|blocker| {
+        format!(
+            "approval blocker {:?}: {} {} risk={:?} privacy={:?}",
+            blocker.gate,
+            blocker.reason_code,
+            blocker.label,
+            blocker.risk_label,
+            blocker.privacy_label
+        )
+    }));
+    if !checklist.explicit_denial_reasons.is_empty() {
+        rows.push(format!(
+            "approval explicit denials: {}",
+            bounded_join(&checklist.explicit_denial_reasons)
         ));
     }
 
@@ -742,6 +1053,61 @@ fn trust_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             rollback.rollback.availability
         ));
     }
+    if !rollback.targets.is_empty() {
+        rows.push(format!(
+            "checkpoint: id={} available={} targets={} audit={:?} limitations={}",
+            rollback.checkpoint.checkpoint_id,
+            rollback.checkpoint.available,
+            rollback.checkpoint.target_count,
+            rollback.checkpoint.audit_status,
+            rollback.checkpoint.limitations.len()
+        ));
+        rows.push(format!(
+            "rollback: availability={:?} steps={} reversible={} irreversible={} audit={:?} limitations={}",
+            rollback.rollback.availability,
+            rollback.rollback.rollback_step_count,
+            rollback.rollback.reversible_target_count,
+            rollback.rollback.irreversible_target_count,
+            rollback.rollback.audit_status,
+            rollback.rollback.limitations.len()
+        ));
+    }
+    rows.extend(rollback.targets.iter().take(10).map(|target| {
+        format!(
+            "rollback target {}: {:?} file={:?} buffer={:?} labels={}",
+            target.target_id,
+            target.kind,
+            target.file_id.map(|file| file.0),
+            target.buffer_id.map(|buffer| buffer.0),
+            bounded_join(&target.labels)
+        )
+    }));
+    rows.extend(
+        rollback
+            .checkpoint
+            .limitations
+            .iter()
+            .take(6)
+            .map(|limitation| {
+                format!(
+                    "checkpoint limitation {}: {} risk={:?}",
+                    limitation.reason_code, limitation.label, limitation.risk_label
+                )
+            }),
+    );
+    rows.extend(
+        rollback
+            .rollback
+            .limitations
+            .iter()
+            .take(6)
+            .map(|limitation| {
+                format!(
+                    "rollback limitation {}: {} risk={:?}",
+                    limitation.reason_code, limitation.label, limitation.risk_label
+                )
+            }),
+    );
 
     rows
 }
@@ -758,6 +1124,114 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             assisted.preview_ready_count
         ));
     }
+    rows.extend(assisted.providers.iter().take(8).map(|provider| {
+        format!(
+            "assisted provider {}: {} class={:?} availability={:?} ops={} cost={} risk_budget={} privacy={} risk={:?}",
+            provider.provider_id,
+            provider.provider_label,
+            provider.provider_class,
+            provider.availability,
+            provider.supported_operation_count,
+            provider.cost_budget_label,
+            provider.risk_budget_label,
+            provider.privacy_retention_label,
+            provider.risk_label
+        )
+    }));
+    rows.extend(
+        assisted
+            .providers
+            .iter()
+            .filter_map(|provider| provider.refusal.as_ref().map(|refusal| (provider, refusal)))
+            .take(6)
+            .map(|(provider, refusal)| {
+                format!(
+                    "assisted provider refusal {}: {} {} risk={:?}",
+                    provider.provider_id, refusal.reason_code, refusal.label, refusal.risk_label
+                )
+            }),
+    );
+    rows.extend(assisted.routes.iter().take(8).map(|route| {
+        format!(
+            "assisted route {}: provider={} op={:?} disposition={:?} invocation={:?} refused_evals={} risk={:?} privacy={:?} reasons={}",
+            route.request_id,
+            route.provider_id,
+            route.operation_class,
+            route.disposition,
+            route.provider_invocation,
+            route.refused_permission_budget_evaluation_count,
+            route.risk_label,
+            route.privacy_label,
+            bounded_join(&route.reasons)
+        )
+    }));
+    rows.extend(
+        assisted
+            .routes
+            .iter()
+            .filter_map(|route| route.refusal.as_ref().map(|refusal| (route, refusal)))
+            .take(6)
+            .map(|(route, refusal)| {
+                format!(
+                    "assisted route refusal {}: {} {} risk={:?}",
+                    route.request_id, refusal.reason_code, refusal.label, refusal.risk_label
+                )
+            }),
+    );
+    rows.extend(assisted.requests.iter().take(8).map(|request| {
+        format!(
+            "assisted request {}: op={:?} payload={:?} targets={} omitted={} capability={} route={:?} refs={}/{}/{} approval={} checkpoint={} labels={}",
+            request.request_id,
+            request.operation_class,
+            request.proposal_payload_kind,
+            request.proposal_target_count,
+            request.omitted_target_count,
+            request.required_capability.0,
+            request.route_decision.disposition,
+            request.context_manifest.reference_id,
+            request.privacy_inspector.reference_id,
+            request.permission_budget_projection.reference_id,
+            request.approval_checklist.reference_id,
+            request
+                .checkpoint_rollback
+                .as_ref()
+                .map(|reference| reference.reference_id.as_str())
+                .unwrap_or("<none>"),
+            bounded_join(&request.labels)
+        )
+    }));
+    rows.extend(assisted.proposal_previews.iter().take(8).map(|preview| {
+        format!(
+            "assisted preview {}: proposal={} readiness={:?} preview_ready={} approval_ready={} apply_ready={} ledger={} diff={:?} targets={} risk={:?} privacy={:?}",
+            preview.preview_id,
+            preview.proposal_id.0,
+            preview.readiness,
+            preview.ready_for_preview,
+            preview.ready_for_approval,
+            preview.ready_for_apply,
+            preview.ledger_row_present,
+            preview.diff_summary.kind,
+            preview.target_coverage.targets.len(),
+            preview.risk_label,
+            preview.privacy_label
+        )
+    }));
+    rows.extend(assisted.refusals.iter().take(8).map(|refusal| {
+        format!(
+            "assisted refusal {}: {} provider={} op={:?} capability={} risk={:?} reasons={}",
+            refusal.reason_code,
+            refusal.label,
+            refusal.provider_id.as_deref().unwrap_or("<none>"),
+            refusal.operation_class,
+            refusal
+                .capability
+                .as_ref()
+                .map(|capability| capability.0.as_str())
+                .unwrap_or("<none>"),
+            refusal.risk_label,
+            bounded_join(&refusal.reasons)
+        )
+    }));
 
     let delegated = &snapshot.delegated_task_projection;
     if delegated.plan_count > 0
@@ -770,6 +1244,38 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         ));
     }
     rows
+}
+
+fn redaction_label(redaction_hints: &[devil_protocol::RedactionHint]) -> String {
+    if redaction_hints.is_empty() {
+        "none".to_string()
+    } else {
+        redaction_hints
+            .iter()
+            .take(4)
+            .map(|hint| format!("{hint:?}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn bounded_join(values: &[String]) -> String {
+    if values.is_empty() {
+        "<none>".to_string()
+    } else {
+        values
+            .iter()
+            .take(4)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn projected_assisted_run_id(snapshot: &ShellProjectionSnapshot) -> Option<AgentRunId> {
+    let projection_id = snapshot.assisted_ai_projection.projection_id.as_str();
+    let run_index = projection_id.find("phase4-run-")?;
+    Some(AgentRunId(projection_id[run_index..].to_string()))
 }
 
 fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

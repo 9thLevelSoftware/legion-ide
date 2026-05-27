@@ -8,13 +8,14 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use devil_app::{
-    AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveAllItemOutcome,
+    AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveAllItemOutcome,
     AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus, AppSaveOutcome,
     AppSessionRestoreOutcome,
 };
 use devil_protocol::{
-    BufferId, CanonicalPath, PrincipalId, ProtocolTextRange, SessionPanelState, TextCoordinate,
-    ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
+    AgentRunId, BufferId, CanonicalPath, PrincipalId, ProposalId, ProposalLifecycleState,
+    ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange, SessionPanelState,
+    TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
     CommandDispatchIntent, SearchScopeProjection, Shell, ShellProjectionSnapshot,
@@ -197,6 +198,26 @@ pub enum DesktopWorkflowOutcome {
     LanguageToolingUpdated,
     /// Terminal panel projection changed through app authority.
     TerminalPanelUpdated,
+    /// Proposal lifecycle state changed through app authority.
+    ProposalLifecycleUpdated {
+        /// Proposal whose lifecycle changed.
+        proposal_id: ProposalId,
+        /// Resulting lifecycle state.
+        lifecycle_state: ProposalLifecycleState,
+        /// User-visible status summary.
+        status: String,
+    },
+    /// Proposal detail projection selection changed through app authority.
+    ProposalDetailsOpened(ProposalId),
+    /// Assisted-AI metadata changed through app authority.
+    AssistedAiUpdated {
+        /// Assisted-AI run represented by the app outcome.
+        run_id: AgentRunId,
+        /// Proposal created by the run, when the run was proposal-producing.
+        proposal_id: Option<ProposalId>,
+        /// User-visible status summary.
+        status: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -556,6 +577,28 @@ impl DesktopRuntime {
                 );
                 DesktopWorkflowOutcome::TerminalPanelUpdated
             }
+            AppCommandOutcome::ProposalLifecycleUpdated(response) => {
+                let transition = proposal_response_transition(&response);
+                let kind = proposal_response_kind(&response);
+                let severity = proposal_response_status_severity(&response);
+                let status = format!(
+                    "Proposal {} {kind} ({:?})",
+                    transition.proposal_id.0, transition.lifecycle_state
+                );
+                self.set_status(severity, status.clone());
+                DesktopWorkflowOutcome::ProposalLifecycleUpdated {
+                    proposal_id: transition.proposal_id,
+                    lifecycle_state: transition.lifecycle_state,
+                    status,
+                }
+            }
+            AppCommandOutcome::ProposalDetailsOpened(proposal_id) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Proposal details opened {}", proposal_id.0),
+                );
+                DesktopWorkflowOutcome::ProposalDetailsOpened(proposal_id)
+            }
             AppCommandOutcome::ExplorerRefreshed(_) => {
                 self.set_status(StatusSeverity::Info, "Explorer refreshed");
                 DesktopWorkflowOutcome::ExplorerRefreshed
@@ -564,11 +607,49 @@ impl DesktopRuntime {
                 self.set_status(StatusSeverity::Info, "Opened");
                 DesktopWorkflowOutcome::Opened
             }
-            AppCommandOutcome::AiRunStarted(_)
-            | AppCommandOutcome::AiRunCancelled(_)
-            | AppCommandOutcome::AiRunReplayed(_)
-            | AppCommandOutcome::AiRunInspected(_)
-            | AppCommandOutcome::PluginCommandInvoked(_)
+            AppCommandOutcome::AiRunStarted(outcome) => self.map_ai_run_started(&outcome),
+            AppCommandOutcome::AiRunCancelled(run_id) => {
+                let status = format!("Assisted AI run cancelled {}", run_id.0);
+                self.set_status(StatusSeverity::Warning, status.clone());
+                DesktopWorkflowOutcome::AssistedAiUpdated {
+                    run_id,
+                    proposal_id: None,
+                    status,
+                }
+            }
+            AppCommandOutcome::AiRunReplayed(manifest) => {
+                let status = format!(
+                    "Assisted AI run replayed {} transitions={} proposals={}",
+                    manifest.run_id.0,
+                    manifest.transitions.len(),
+                    manifest.proposal_ids.len()
+                );
+                self.set_status(StatusSeverity::Info, status.clone());
+                DesktopWorkflowOutcome::AssistedAiUpdated {
+                    run_id: manifest.run_id.clone(),
+                    proposal_id: manifest.proposal_ids.first().copied(),
+                    status,
+                }
+            }
+            AppCommandOutcome::AiRunInspected(snapshot) => {
+                let status = format!(
+                    "Assisted AI run inspected {} requests={} refusals={}",
+                    snapshot.run_id.0,
+                    snapshot.assisted_ai_projection.request_count,
+                    snapshot.assisted_ai_projection.refusal_count
+                );
+                self.set_status(StatusSeverity::Info, status.clone());
+                DesktopWorkflowOutcome::AssistedAiUpdated {
+                    run_id: snapshot.run_id.clone(),
+                    proposal_id: snapshot
+                        .assisted_ai_projection
+                        .proposal_previews
+                        .first()
+                        .map(|preview| preview.proposal_id),
+                    status,
+                }
+            }
+            AppCommandOutcome::PluginCommandInvoked(_)
             | AppCommandOutcome::CollaborationSessionJoined(_)
             | AppCommandOutcome::CollaborationSessionLeft(_)
             | AppCommandOutcome::CollaborationPresencePublished(_)
@@ -576,6 +657,40 @@ impl DesktopRuntime {
                 self.set_status(StatusSeverity::Info, "Command handled");
                 DesktopWorkflowOutcome::Noop
             }
+        }
+    }
+
+    fn map_ai_run_started(&mut self, outcome: &AppAiRunOutcome) -> DesktopWorkflowOutcome {
+        let (severity, status) = if let Some(refusal) = &outcome.refusal {
+            (
+                StatusSeverity::Warning,
+                format!(
+                    "Assisted AI run refused {}: {} {}",
+                    outcome.run_id.0, refusal.reason_code, refusal.label
+                ),
+            )
+        } else if let Some(proposal_id) = outcome.proposal_id {
+            (
+                StatusSeverity::Info,
+                format!(
+                    "Assisted AI proposal run {} created proposal {}",
+                    outcome.run_id.0, proposal_id.0
+                ),
+            )
+        } else {
+            (
+                StatusSeverity::Info,
+                format!(
+                    "Assisted AI explain run {} completed metadata-only",
+                    outcome.run_id.0
+                ),
+            )
+        };
+        self.set_status(severity, status.clone());
+        DesktopWorkflowOutcome::AssistedAiUpdated {
+            run_id: outcome.run_id.clone(),
+            proposal_id: outcome.proposal_id,
+            status,
         }
     }
 
@@ -947,6 +1062,57 @@ fn status_message(severity: StatusSeverity, message: impl Into<String>) -> Statu
     StatusMessageProjection {
         severity,
         message: message.into(),
+    }
+}
+
+fn proposal_response_transition(response: &ProposalResponse) -> &ProposalLifecycleTransition {
+    match response {
+        ProposalResponse::Created(transition)
+        | ProposalResponse::Validated(transition)
+        | ProposalResponse::Approved(transition)
+        | ProposalResponse::Applied(transition) => transition,
+        ProposalResponse::Previewed { transition, .. }
+        | ProposalResponse::Rejected { transition, .. }
+        | ProposalResponse::Denied { transition, .. }
+        | ProposalResponse::Failed { transition, .. }
+        | ProposalResponse::RolledBack { transition, .. }
+        | ProposalResponse::Stale { transition, .. }
+        | ProposalResponse::Conflict { transition, .. }
+        | ProposalResponse::Cancelled { transition, .. } => transition,
+    }
+}
+
+fn proposal_response_kind(response: &ProposalResponse) -> &'static str {
+    match response {
+        ProposalResponse::Created(_) => "created",
+        ProposalResponse::Validated(_) => "validated",
+        ProposalResponse::Previewed { .. } => "previewed",
+        ProposalResponse::Approved(_) => "approved",
+        ProposalResponse::Rejected { .. } => "rejected",
+        ProposalResponse::Applied(_) => "applied",
+        ProposalResponse::Denied { .. } => "denied",
+        ProposalResponse::Failed { .. } => "failed",
+        ProposalResponse::RolledBack { .. } => "rolled back",
+        ProposalResponse::Stale { .. } => "stale",
+        ProposalResponse::Conflict { .. } => "conflict",
+        ProposalResponse::Cancelled { .. } => "cancelled",
+    }
+}
+
+fn proposal_response_status_severity(response: &ProposalResponse) -> StatusSeverity {
+    match response {
+        ProposalResponse::Failed { .. } => StatusSeverity::Error,
+        ProposalResponse::Rejected { .. }
+        | ProposalResponse::Denied { .. }
+        | ProposalResponse::Stale { .. }
+        | ProposalResponse::Conflict { .. }
+        | ProposalResponse::Cancelled { .. } => StatusSeverity::Warning,
+        ProposalResponse::Created(_)
+        | ProposalResponse::Validated(_)
+        | ProposalResponse::Previewed { .. }
+        | ProposalResponse::Approved(_)
+        | ProposalResponse::Applied(_)
+        | ProposalResponse::RolledBack { .. } => StatusSeverity::Info,
     }
 }
 

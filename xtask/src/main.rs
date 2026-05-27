@@ -14,6 +14,8 @@ const DEFAULT_UI_MANIFEST_PATH: &str = "crates/devil-ui/Cargo.toml";
 const DEFAULT_PHASE3_EVIDENCE_PATH: &str = "plans/evidence/phase-3/predictive-semantic-fabric.md";
 const DEFAULT_PHASE4_EVIDENCE_PATH: &str = "plans/evidence/phase-4/agentic-ai-architecture-map.md";
 const DEFAULT_PHASE5_EVIDENCE_PATH: &str = "plans/evidence/phase-5/plugin-architecture-map.md";
+const DEFAULT_GUI_PHASE5_EVIDENCE_PATH: &str =
+    "plans/evidence/gui-productization/phase-5-control-trust-assisted-ai.md";
 const DEFAULT_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/phase-6/collaboration-architecture-map.md";
 const DEFAULT_PHASE7_EVIDENCE_PATH: &str = "plans/evidence/phase-7/remote-architecture-map.md";
@@ -139,6 +141,22 @@ const PHASE5_REQUIRED_ARTIFACTS: &[&str] = &[
     "cargo-check-workspace-all-targets.txt",
     "cargo-test-workspace-all-targets.txt",
     "cargo-clippy-workspace-all-targets.txt",
+];
+const GUI_PHASE5_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plans/evidence/gui-productization/phase-5-control-trust-safety.md",
+    ".planning/phases/05-control-trust-and-assisted-ai-surfaces/05-01-RESULT.md",
+    ".planning/phases/05-control-trust-and-assisted-ai-surfaces/05-02-RESULT.md",
+    ".planning/phases/05-control-trust-and-assisted-ai-surfaces/05-03-RESULT.md",
+    ".planning/phases/05-control-trust-and-assisted-ai-surfaces/05-04-RESULT.md",
+    ".planning/phases/05-control-trust-and-assisted-ai-surfaces/05-05-RESULT.md",
+    ".planning/phases/05-control-trust-and-assisted-ai-surfaces/05-06-RESULT.md",
+];
+const GUI_PHASE5_REQUIRED_COMMAND_MARKERS: &[&str] = &[
+    "cargo run -p xtask -- check-deps",
+    "cargo fmt --all --check",
+    "cargo check --workspace --all-targets",
+    "cargo test --workspace --all-targets",
+    "cargo clippy --workspace --all-targets -- -D warnings",
 ];
 const PHASE6_REQUIRED_ARTIFACTS: &[&str] = &[
     "collaboration-architecture-map.md",
@@ -336,6 +354,18 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
         phase5_evidence_dir.join(artifact).is_file()
     });
 
+    let gui_phase5_evidence_path = workspace_root.join(DEFAULT_GUI_PHASE5_EVIDENCE_PATH);
+    let gui_phase5_evidence = fs::read_to_string(&gui_phase5_evidence_path).map_err(|err| {
+        format!(
+            "unable to read GUI Phase 5 evidence at `{}`: {err}",
+            gui_phase5_evidence_path.display()
+        )
+    })?;
+    let gui_phase5_violations =
+        validate_gui_phase5_acceptance_governance(&gui_phase5_evidence, |artifact| {
+            workspace_root.join(artifact).is_file()
+        });
+
     let phase6_evidence_path = workspace_root.join(DEFAULT_PHASE6_EVIDENCE_PATH);
     let phase6_evidence = fs::read_to_string(&phase6_evidence_path).map_err(|err| {
         format!(
@@ -386,6 +416,7 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     all.extend(phase3_violations);
     all.extend(phase4_violations);
     all.extend(phase5_violations);
+    all.extend(gui_phase5_violations);
     all.extend(phase6_violations);
     all.extend(phase7_violations);
     all.extend(phase8_violations);
@@ -886,6 +917,88 @@ where
         if !artifact_exists(artifact) {
             issues.push(format!(
                 "`{DEFAULT_PHASE5_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing from `plans/evidence/phase-5`"
+            ));
+        }
+    }
+
+    issues
+}
+
+fn validate_gui_phase5_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    let Some(status_section) = markdown_section(evidence, PHASE5_STATUS_HEADING) else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` must include `{PHASE5_STATUS_HEADING}` with explicit GUI Phase 5 acceptance status"
+        ));
+        return issues;
+    };
+
+    let phase5_not_accepted = status_section.contains(PHASE5_NOT_ACCEPTED_MARKER);
+    let phase5_accepted = status_section.contains(PHASE5_ACCEPTED_MARKER);
+    match (phase5_not_accepted, phase5_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` must not declare both `{PHASE5_NOT_ACCEPTED_MARKER}` and `{PHASE5_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` must declare either `{PHASE5_NOT_ACCEPTED_MARKER}` or `{PHASE5_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    if phase5_accepted {
+        issues.extend(validate_gui_phase5_completion_evidence(
+            evidence,
+            &artifact_exists,
+        ));
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_gui_phase5_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    if let Some(checklist) = markdown_section(evidence, PHASE5_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` claims acceptance but `{PHASE5_FINAL_CHECKLIST_HEADING}` is missing"
+        ));
+    }
+
+    for artifact in GUI_PHASE5_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is not listed"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing"
+            ));
+        }
+    }
+
+    for command in GUI_PHASE5_REQUIRED_COMMAND_MARKERS {
+        if !evidence.contains(command) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
             ));
         }
     }
@@ -1600,6 +1713,37 @@ mod tests {
         )
     }
 
+    fn accepted_gui_phase5_evidence(checklist_checked: bool) -> String {
+        let artifacts = GUI_PHASE5_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let commands = GUI_PHASE5_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`\n"))
+            .collect::<String>();
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# GUI Phase 5 evidence
+
+## Acceptance Status
+
+- {PHASE5_ACCEPTED_MARKER}
+
+## Required Artifacts
+
+{artifacts}
+## Required Commands
+
+{commands}
+## Final Validation Checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
     fn accepted_phase6_evidence(scaffold_disclaimer: bool, checklist_checked: bool) -> String {
         let artifacts = PHASE6_REQUIRED_ARTIFACTS
             .iter()
@@ -2011,6 +2155,47 @@ Final gate outputs archived from current commands.
                 "Phase 5 evidence must list required artifact `{artifact}`"
             );
         }
+    }
+
+    #[test]
+    fn gui_phase5_not_accepted_status_allows_scaffold_without_artifacts() {
+        let evidence = format!(
+            r#"# GUI Phase 5 control and trust evidence
+
+## Acceptance Status
+
+- {PHASE5_NOT_ACCEPTED_MARKER}
+
+## Final Validation Checklist
+
+- [ ] pending
+"#
+        );
+
+        let issues = validate_gui_phase5_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase5_acceptance_claim_requires_artifacts_commands_and_checked_checklist() {
+        let evidence = accepted_gui_phase5_evidence(false);
+        let issues = validate_gui_phase5_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "required artifact `plans/evidence/gui-productization/phase-5-control-trust-safety.md` is missing"
+        )));
+    }
+
+    #[test]
+    fn gui_phase5_acceptance_claim_passes_with_checked_checklist_artifacts_and_commands() {
+        let evidence = accepted_gui_phase5_evidence(true);
+        let issues = validate_gui_phase5_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
     }
 
     #[test]

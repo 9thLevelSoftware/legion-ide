@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use devil_protocol::{
-    BufferId, FileId, ProtocolTextRange, TerminalSessionId, TextCoordinate, ViewportScroll,
+    AgentRunId, BufferId, FileId, ProposalCancellationReason, ProposalId, ProposalRejectionReason,
+    ProposalRollbackReason, ProtocolTextRange, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
 use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
 use thiserror::Error;
@@ -66,6 +67,72 @@ pub enum DesktopAction {
     SelectExplorerFile {
         /// Projected workspace file identifier.
         file_id: FileId,
+    },
+    /// Request a proposal preview through app authority.
+    PreviewProposal {
+        /// Projected proposal identifier.
+        proposal_id: ProposalId,
+    },
+    /// Approve a projected proposal through app authority.
+    ApproveProposal {
+        /// Projected proposal identifier.
+        proposal_id: ProposalId,
+    },
+    /// Reject a projected proposal through app authority.
+    RejectProposal {
+        /// Projected proposal identifier.
+        proposal_id: ProposalId,
+        /// Display-safe rejection reason.
+        reason: ProposalRejectionReason,
+    },
+    /// Apply a projected proposal through app authority.
+    ApplyProposal {
+        /// Projected proposal identifier.
+        proposal_id: ProposalId,
+    },
+    /// Roll back a projected proposal through app authority.
+    RollbackProposal {
+        /// Projected proposal identifier.
+        proposal_id: ProposalId,
+        /// Display-safe rollback reason.
+        reason: ProposalRollbackReason,
+    },
+    /// Cancel a projected proposal through app authority.
+    CancelProposal {
+        /// Projected proposal identifier.
+        proposal_id: ProposalId,
+        /// Display-safe cancellation reason.
+        reason: ProposalCancellationReason,
+    },
+    /// Open projected proposal details without taking proposal ownership.
+    OpenProposalDetails {
+        /// Projected proposal identifier.
+        proposal_id: ProposalId,
+    },
+    /// Start a metadata-only assisted-AI explain run through app authority.
+    StartAiExplain {
+        /// Display-safe instruction label.
+        instruction_label: String,
+    },
+    /// Start a proposal-only assisted-AI edit run through app authority.
+    StartAiProposal {
+        /// Display-safe instruction label.
+        instruction_label: String,
+    },
+    /// Cancel a projected assisted-AI run through app authority.
+    CancelAiRun {
+        /// Projected or user-visible run identifier.
+        run_id: AgentRunId,
+    },
+    /// Replay a projected assisted-AI run from app-owned metadata.
+    ReplayAiRun {
+        /// Projected or user-visible run identifier.
+        run_id: AgentRunId,
+    },
+    /// Inspect projected assisted-AI run metadata.
+    InspectAiRun {
+        /// Projected or user-visible run identifier.
+        run_id: AgentRunId,
     },
     /// Insert text at a projected coordinate.
     InsertText {
@@ -270,12 +337,27 @@ pub enum DesktopBridgeError {
         /// Unknown explorer file.
         file_id: FileId,
     },
+    /// Target proposal was not present in the proposal ledger projection.
+    #[error("unknown proposal: {proposal_id:?}")]
+    UnknownProposal {
+        /// Unknown proposal id.
+        proposal_id: ProposalId,
+    },
+    /// Assisted-AI run id was empty or not present in current projections.
+    #[error("unknown assisted-ai run: {run_id:?}")]
+    UnknownAiRun {
+        /// Unknown run id.
+        run_id: AgentRunId,
+    },
     /// Target buffer does not own the active dirty-close prompt.
     #[error("dirty-close prompt is not active for buffer {buffer_id:?}")]
     DirtyClosePromptMissing {
         /// Target buffer without an active prompt.
         buffer_id: BufferId,
     },
+    /// Assisted-AI start action was missing a display-safe instruction label.
+    #[error("assisted-ai instruction label is empty")]
+    InvalidInstructionLabel,
     /// Path text was empty after trimming.
     #[error("path input is empty")]
     InvalidPathInput,
@@ -367,6 +449,88 @@ impl DesktopCommandBridge {
                 } else {
                     DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile { file_id })
                 }
+            }
+            DesktopAction::PreviewProposal { proposal_id } => {
+                self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+                    CommandDispatchIntent::PreviewProposal { proposal_id }
+                })
+            }
+            DesktopAction::ApproveProposal { proposal_id } => {
+                self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+                    CommandDispatchIntent::ApproveProposal { proposal_id }
+                })
+            }
+            DesktopAction::RejectProposal {
+                proposal_id,
+                reason,
+            } => self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+                CommandDispatchIntent::RejectProposal {
+                    proposal_id,
+                    reason,
+                }
+            }),
+            DesktopAction::ApplyProposal { proposal_id } => {
+                self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+                    CommandDispatchIntent::ApplyProposal { proposal_id }
+                })
+            }
+            DesktopAction::RollbackProposal {
+                proposal_id,
+                reason,
+            } => self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+                CommandDispatchIntent::RollbackProposal {
+                    proposal_id,
+                    reason,
+                }
+            }),
+            DesktopAction::CancelProposal {
+                proposal_id,
+                reason,
+            } => self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+                CommandDispatchIntent::CancelProposal {
+                    proposal_id,
+                    reason,
+                }
+            }),
+            DesktopAction::OpenProposalDetails { proposal_id } => {
+                self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+                    CommandDispatchIntent::OpenProposalDetails { proposal_id }
+                })
+            }
+            DesktopAction::StartAiExplain { instruction_label } => {
+                match normalized_instruction(instruction_label) {
+                    Some(instruction_label) => {
+                        DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiExplain {
+                            instruction_label,
+                        })
+                    }
+                    None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidInstructionLabel),
+                }
+            }
+            DesktopAction::StartAiProposal { instruction_label } => {
+                match normalized_instruction(instruction_label) {
+                    Some(instruction_label) => {
+                        DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
+                            instruction_label,
+                        })
+                    }
+                    None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidInstructionLabel),
+                }
+            }
+            DesktopAction::CancelAiRun { run_id } => {
+                self.with_known_ai_run(snapshot, run_id, |run_id| {
+                    CommandDispatchIntent::CancelAiRun { run_id }
+                })
+            }
+            DesktopAction::ReplayAiRun { run_id } => {
+                self.with_known_ai_run(snapshot, run_id, |run_id| {
+                    CommandDispatchIntent::ReplayAiRun { run_id }
+                })
+            }
+            DesktopAction::InspectAiRun { run_id } => {
+                self.with_known_ai_run(snapshot, run_id, |run_id| {
+                    CommandDispatchIntent::InspectAiRun { run_id }
+                })
             }
             DesktopAction::InsertText { text, at }
             | DesktopAction::ClipboardPaste { text, at }
@@ -594,6 +758,32 @@ impl DesktopCommandBridge {
             DesktopBridgeOutput::Error(DesktopBridgeError::DirtyClosePromptMissing { buffer_id })
         }
     }
+
+    fn with_known_proposal(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        proposal_id: ProposalId,
+        build: impl FnOnce(ProposalId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if proposal_is_known(snapshot, proposal_id) {
+            DesktopBridgeOutput::Intent(build(proposal_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownProposal { proposal_id })
+        }
+    }
+
+    fn with_known_ai_run(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        run_id: AgentRunId,
+        build: impl FnOnce(AgentRunId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if assisted_ai_projection_references_run(snapshot, &run_id) {
+            DesktopBridgeOutput::Intent(build(run_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownAiRun { run_id })
+        }
+    }
 }
 
 fn normalized_path(path: String) -> Option<String> {
@@ -602,6 +792,15 @@ fn normalized_path(path: String) -> Option<String> {
         None
     } else {
         Some(path.to_string())
+    }
+}
+
+fn normalized_instruction(label: String) -> Option<String> {
+    let label = label.trim();
+    if label.is_empty() {
+        None
+    } else {
+        Some(label.to_string())
     }
 }
 
@@ -620,4 +819,30 @@ fn explorer_contains_file(snapshot: &ShellProjectionSnapshot, file_id: FileId) -
         .nodes
         .iter()
         .any(|node| node.file_id == file_id)
+}
+
+fn proposal_is_known(snapshot: &ShellProjectionSnapshot, proposal_id: ProposalId) -> bool {
+    snapshot
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .any(|row| row.proposal_id == proposal_id)
+}
+
+fn assisted_ai_projection_references_run(
+    snapshot: &ShellProjectionSnapshot,
+    run_id: &AgentRunId,
+) -> bool {
+    let needle = run_id.0.trim();
+    if needle.is_empty() {
+        return false;
+    }
+
+    projected_assisted_run_id(snapshot).is_some_and(|projected| projected == needle)
+}
+
+fn projected_assisted_run_id(snapshot: &ShellProjectionSnapshot) -> Option<&str> {
+    let projection_id = snapshot.assisted_ai_projection.projection_id.as_str();
+    let run_index = projection_id.rfind("phase4-run-")?;
+    Some(&projection_id[run_index..])
 }
