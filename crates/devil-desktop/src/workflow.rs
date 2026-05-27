@@ -13,9 +13,10 @@ use devil_app::{
     AppSessionRestoreOutcome,
 };
 use devil_protocol::{
-    AgentRunId, BufferId, CanonicalPath, PrincipalId, ProposalId, ProposalLifecycleState,
-    ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange, SessionPanelState,
-    TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
+    AgentRunId, BufferId, CanonicalPath, PluginDenialReason, PluginHostCallResponse, PluginId,
+    PluginManifest, PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalResponse, ProtocolTextRange, SessionPanelState, TextCoordinate, ViewportScroll,
+    WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
     CommandDispatchIntent, SearchScopeProjection, Shell, ShellProjectionSnapshot,
@@ -276,6 +277,17 @@ pub enum DesktopWorkflowOutcome {
         /// User-visible status summary.
         status: String,
     },
+    /// Plugin command invocation changed through app-owned plugin authority.
+    PluginCommand {
+        /// Plugin selected from projection data.
+        plugin_id: PluginId,
+        /// Command selected from projection data.
+        command_id: String,
+        /// Normalized desktop command status.
+        status: DesktopPluginCommandStatus,
+        /// User-visible status summary.
+        message: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -288,6 +300,19 @@ pub enum DesktopWorkflowOutcome {
     QuitRequested,
     /// Bridge or app command failed without implying success.
     Error(String),
+}
+
+/// Desktop-facing status for a projected plugin command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopPluginCommandStatus {
+    /// Plugin runtime accepted the metadata-only command.
+    Invoked,
+    /// Plugin command created a proposal through app authority.
+    ProposalCreated,
+    /// Plugin runtime denied the command.
+    Denied,
+    /// Plugin runtime was absent or unavailable for a projected command.
+    NoRuntime,
 }
 
 /// Renderer-backed desktop runtime.
@@ -432,6 +457,17 @@ impl DesktopRuntime {
         &self.last_outcome
     }
 
+    /// Load a plugin manifest through app-owned plugin authority and refresh projections.
+    pub fn load_plugin_manifest(&mut self, manifest: PluginManifest) -> Result<PluginId> {
+        let plugin_id = self.app.load_plugin_manifest(manifest)?;
+        self.set_status(
+            StatusSeverity::Info,
+            format!("Plugin {} loaded", plugin_id.0),
+        );
+        self.refresh_projection()?;
+        Ok(plugin_id)
+    }
+
     /// Returns whether an explorer path is expanded by adapter-local state.
     pub fn explorer_path_expanded(&self, path: &str) -> bool {
         self.explorer_expansion.contains(path)
@@ -514,10 +550,24 @@ impl DesktopRuntime {
     }
 
     fn dispatch_intent(&mut self, intent: CommandDispatchIntent) -> Result<DesktopWorkflowOutcome> {
+        let plugin_context = plugin_intent_context(&intent);
         match self.app.dispatch_ui_intent(intent) {
-            Ok(outcome) => Ok(self.map_app_outcome(outcome)),
+            Ok(outcome) => Ok(self.map_app_outcome(outcome, plugin_context)),
             Err(error) => {
                 let message = error.to_string();
+                if let Some((plugin_id, command_id)) = plugin_context {
+                    let status = format!(
+                        "Plugin command unavailable {} {}: {message}",
+                        plugin_id.0, command_id
+                    );
+                    self.set_status(StatusSeverity::Warning, status.clone());
+                    return Ok(DesktopWorkflowOutcome::PluginCommand {
+                        plugin_id,
+                        command_id,
+                        status: DesktopPluginCommandStatus::NoRuntime,
+                        message: status,
+                    });
+                }
                 self.set_status(StatusSeverity::Error, message.clone());
                 Ok(DesktopWorkflowOutcome::Error(message))
             }
@@ -584,7 +634,11 @@ impl DesktopRuntime {
         DesktopWorkflowOutcome::Error(message)
     }
 
-    fn map_app_outcome(&mut self, outcome: AppCommandOutcome) -> DesktopWorkflowOutcome {
+    fn map_app_outcome(
+        &mut self,
+        outcome: AppCommandOutcome,
+        plugin_context: Option<(PluginId, String)>,
+    ) -> DesktopWorkflowOutcome {
         match outcome {
             AppCommandOutcome::Noop => {
                 self.set_status(StatusSeverity::Info, "No action");
@@ -746,14 +800,68 @@ impl DesktopRuntime {
                     status,
                 }
             }
-            AppCommandOutcome::PluginCommandInvoked(_)
-            | AppCommandOutcome::CollaborationSessionJoined(_)
+            AppCommandOutcome::PluginCommandInvoked(response) => {
+                let Some((plugin_id, command_id)) = plugin_context else {
+                    self.set_status(StatusSeverity::Info, "Plugin command handled");
+                    return DesktopWorkflowOutcome::Noop;
+                };
+                self.map_plugin_command_response(plugin_id, command_id, response.as_ref())
+            }
+            AppCommandOutcome::CollaborationSessionJoined(_)
             | AppCommandOutcome::CollaborationSessionLeft(_)
             | AppCommandOutcome::CollaborationPresencePublished(_)
             | AppCommandOutcome::CollaborationOperationApplied(_) => {
                 self.set_status(StatusSeverity::Info, "Command handled");
                 DesktopWorkflowOutcome::Noop
             }
+        }
+    }
+
+    fn map_plugin_command_response(
+        &mut self,
+        plugin_id: PluginId,
+        command_id: String,
+        response: &PluginHostCallResponse,
+    ) -> DesktopWorkflowOutcome {
+        let (severity, status, message) = match response {
+            PluginHostCallResponse::Accepted { metadata_label } => (
+                StatusSeverity::Info,
+                DesktopPluginCommandStatus::Invoked,
+                format!(
+                    "Plugin command invoked {} {}: {metadata_label}",
+                    plugin_id.0, command_id
+                ),
+            ),
+            PluginHostCallResponse::ProposalCreated(proposal) => (
+                StatusSeverity::Info,
+                DesktopPluginCommandStatus::ProposalCreated,
+                format!(
+                    "Plugin command created proposal {} {}: proposal {}",
+                    plugin_id.0, command_id, proposal.proposal.proposal_id.0
+                ),
+            ),
+            PluginHostCallResponse::Denied { reason, message } => {
+                let status = if *reason == PluginDenialReason::UnsupportedHostCall {
+                    DesktopPluginCommandStatus::NoRuntime
+                } else {
+                    DesktopPluginCommandStatus::Denied
+                };
+                (
+                    StatusSeverity::Warning,
+                    status,
+                    format!(
+                        "Plugin command denied {} {}: {:?} {message}",
+                        plugin_id.0, command_id, reason
+                    ),
+                )
+            }
+        };
+        self.set_status(severity, message.clone());
+        DesktopWorkflowOutcome::PluginCommand {
+            plugin_id,
+            command_id,
+            status,
+            message,
         }
     }
 
@@ -953,6 +1061,17 @@ fn save_all_item_status_message(item: &AppSaveAllItemOutcome) -> StatusMessagePr
                 ),
             )
         }
+    }
+}
+
+fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, String)> {
+    match intent {
+        CommandDispatchIntent::InvokePluginCommand {
+            plugin_id,
+            command_id,
+            ..
+        } => Some((*plugin_id, command_id.clone())),
+        _ => None,
     }
 }
 
@@ -1474,11 +1593,64 @@ fn ordered_range(first: TextCoordinate, second: TextCoordinate) -> ProtocolTextR
 
 #[cfg(test)]
 mod tests {
-    use devil_protocol::{BufferId, CanonicalPath, FileId};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use devil_protocol::{
+        BufferId, CanonicalPath, CapabilityId, FileId, PluginCommandDescriptor, PluginContribution,
+        PluginContributionProjection,
+    };
     use devil_ui::ui::{CloseDirtyPromptProjection, DailyEditingProjection};
     use devil_ui::{ActiveBufferProjection, Shell};
 
     use super::*;
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempWorkspace {
+        root: PathBuf,
+    }
+
+    impl TempWorkspace {
+        fn new() -> Self {
+            let temp_root = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos();
+            let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let root = temp_root.join(format!(
+                "devil_desktop_workflow_plugin_management_{}_{}_{}",
+                std::process::id(),
+                nanos,
+                id
+            ));
+            fs::create_dir(&root).expect("temp workspace should be created");
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for TempWorkspace {
+        fn drop(&mut self) {
+            let temp_root = std::env::temp_dir();
+            let file_name = self.root.file_name().and_then(|name| name.to_str());
+            if self.root.starts_with(&temp_root)
+                && file_name.is_some_and(|name| {
+                    name.starts_with("devil_desktop_workflow_plugin_management_")
+                })
+            {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
 
     fn snapshot_with_active_buffer() -> ShellProjectionSnapshot {
         let mut snapshot = Shell::empty("Keyboard").projection_snapshot();
@@ -1487,6 +1659,18 @@ mod tests {
             ..ActiveBufferProjection::empty()
         };
         snapshot
+    }
+
+    fn plugin_management_projection(plugin_id: PluginId) -> PluginContributionProjection {
+        PluginContributionProjection {
+            plugin_id,
+            contributions: vec![PluginContribution::Command(PluginCommandDescriptor {
+                command_id: "phase8.run".to_string(),
+                title: "Phase 8 Run".to_string(),
+                required_capability: CapabilityId("plugin.command".to_string()),
+            })],
+            status_label: "loaded".to_string(),
+        }
     }
 
     #[test]
@@ -1549,5 +1733,39 @@ mod tests {
             editor_text_input_actions(&events, &snapshot, !close_dirty_prompt_active(&snapshot))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn plugin_management_workflow_reports_no_runtime_for_stale_projection() {
+        let workspace = TempWorkspace::new();
+        let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+            workspace.path().to_path_buf(),
+            None,
+        ))
+        .expect("runtime should open temp workspace");
+        let mut snapshot = runtime.projection_snapshot();
+        snapshot
+            .plugin_contribution_projections
+            .push(plugin_management_projection(PluginId(77)));
+        runtime.shell.replace_projection_snapshot(snapshot);
+
+        let outcome = runtime
+            .handle_action(DesktopAction::InvokePluginCommand {
+                plugin_id: PluginId(77),
+                command_id: "phase8.run".to_string(),
+            })
+            .expect("no-runtime plugin denial should become a workflow outcome");
+
+        assert!(matches!(
+            outcome,
+            DesktopWorkflowOutcome::PluginCommand {
+                plugin_id: PluginId(77),
+                ref command_id,
+                status: DesktopPluginCommandStatus::NoRuntime,
+                ref message,
+            } if command_id == "phase8.run"
+                && message.contains("Plugin command denied")
+                && message.contains("UnsupportedHostCall")
+        ));
     }
 }

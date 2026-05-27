@@ -3,8 +3,9 @@
 use std::collections::{BTreeSet, HashSet};
 
 use devil_protocol::{
-    AgentRunId, FileId, ProposalCancellationReason, ProposalRejectionReason,
-    ProposalRollbackReason, ViewportProjectionMode,
+    AgentRunId, FileId, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
+    ProposalCancellationReason, ProposalRejectionReason, ProposalRollbackReason,
+    ViewportProjectionMode,
 };
 use devil_ui::{ShellProjectionSnapshot, StatusSeverity};
 
@@ -228,9 +229,13 @@ impl ProjectionView {
                         ui.label(row);
                     }
                     render_assistant_controls(ui, snapshot, &mut actions);
+                    ui.separator();
+                    ui.heading("Plugin Management");
                     for row in &model.plugin_rows {
                         ui.label(row);
                     }
+                    render_plugin_management_controls(ui, snapshot, &mut actions);
+                    ui.separator();
                     for row in &model.collaboration_rows {
                         ui.label(row);
                     }
@@ -428,6 +433,29 @@ fn render_assistant_controls(
                 actions.push(DesktopAction::CancelAiRun { run_id });
             }
         });
+    }
+}
+
+fn render_plugin_management_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if snapshot.plugin_contribution_projections.is_empty() {
+        ui.label("No plugin contributions");
+        return;
+    }
+
+    for projection in &snapshot.plugin_contribution_projections {
+        for command in plugin_command_descriptors(projection) {
+            let label = format!("{} ({})", command.title, command.command_id);
+            if ui.button(label).clicked() {
+                actions.push(DesktopAction::InvokePluginCommand {
+                    plugin_id: projection.plugin_id,
+                    command_id: command.command_id.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -1363,16 +1391,49 @@ fn operational_health_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 }
 
 fn plugin_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    snapshot
-        .plugin_contribution_projections
-        .iter()
-        .map(|projection| {
+    let mut rows = Vec::new();
+    for projection in &snapshot.plugin_contribution_projections {
+        let commands = plugin_command_descriptors(projection);
+        let other_contribution_count = projection
+            .contributions
+            .len()
+            .saturating_sub(commands.len());
+        rows.push(format!(
+            "plugin management plugin {}: status={} contributions={} commands={} other={} sandbox=metadata-only audit=app-owned",
+            projection.plugin_id.0,
+            projection.status_label,
+            projection.contributions.len(),
+            commands.len(),
+            other_contribution_count
+        ));
+        if commands.is_empty() {
+            rows.push(format!(
+                "plugin management plugin {}: no projected commands",
+                projection.plugin_id.0
+            ));
+        }
+        rows.extend(commands.into_iter().map(|command| {
             format!(
-                "plugin {}: {} contributions, {}",
+                "plugin management plugin {} command {}: {} capability={} audit=dispatch-intent-only",
                 projection.plugin_id.0,
-                projection.contributions.len(),
-                projection.status_label
+                command.command_id,
+                command.title,
+                command.required_capability.0
             )
+        }));
+    }
+    rows
+}
+
+fn plugin_command_descriptors(
+    projection: &PluginContributionProjection,
+) -> Vec<&PluginCommandDescriptor> {
+    projection
+        .contributions
+        .iter()
+        .filter_map(|contribution| match contribution {
+            PluginContribution::Command(command) => Some(command),
+            _ => None,
         })
         .collect()
 }

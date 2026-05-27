@@ -6,6 +6,7 @@ use devil_protocol::{
     AgentRunId, BufferId, FileId, ProposalCancellationReason, ProposalId, ProposalRejectionReason,
     ProposalRollbackReason, ProtocolTextRange, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
+use devil_protocol::{PluginContribution, PluginId};
 use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
 use thiserror::Error;
 
@@ -133,6 +134,13 @@ pub enum DesktopAction {
     InspectAiRun {
         /// Projected or user-visible run identifier.
         run_id: AgentRunId,
+    },
+    /// Invoke a projected plugin command through app-owned plugin authority.
+    InvokePluginCommand {
+        /// Plugin identifier selected from projection data.
+        plugin_id: PluginId,
+        /// Command identifier selected from projection data.
+        command_id: String,
     },
     /// Insert text at a projected coordinate.
     InsertText {
@@ -349,6 +357,26 @@ pub enum DesktopBridgeError {
         /// Unknown run id.
         run_id: AgentRunId,
     },
+    /// Plugin id was not present in current contribution projections.
+    #[error("unknown plugin: {plugin_id:?}")]
+    UnknownPlugin {
+        /// Unknown plugin id.
+        plugin_id: PluginId,
+    },
+    /// Plugin command id was empty after normalization.
+    #[error("plugin command id is empty for plugin {plugin_id:?}")]
+    InvalidPluginCommand {
+        /// Plugin id for the invalid command request.
+        plugin_id: PluginId,
+    },
+    /// Command id was not present in the selected plugin projection.
+    #[error("unknown plugin command: plugin {plugin_id:?} command {command_id}")]
+    UnknownPluginCommand {
+        /// Plugin id that was present.
+        plugin_id: PluginId,
+        /// Unknown command id.
+        command_id: String,
+    },
     /// Target buffer does not own the active dirty-close prompt.
     #[error("dirty-close prompt is not active for buffer {buffer_id:?}")]
     DirtyClosePromptMissing {
@@ -532,6 +560,10 @@ impl DesktopCommandBridge {
                     CommandDispatchIntent::InspectAiRun { run_id }
                 })
             }
+            DesktopAction::InvokePluginCommand {
+                plugin_id,
+                command_id,
+            } => self.with_known_plugin_command(snapshot, plugin_id, command_id),
             DesktopAction::InsertText { text, at }
             | DesktopAction::ClipboardPaste { text, at }
             | DesktopAction::ImeCommit { text, at } => {
@@ -784,6 +816,52 @@ impl DesktopCommandBridge {
             DesktopBridgeOutput::Error(DesktopBridgeError::UnknownAiRun { run_id })
         }
     }
+
+    fn with_known_plugin_command(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        plugin_id: PluginId,
+        command_id: String,
+    ) -> DesktopBridgeOutput {
+        let Some(command_id) = normalized_plugin_command(command_id) else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidPluginCommand {
+                plugin_id,
+            });
+        };
+        let Some(projection) = snapshot
+            .plugin_contribution_projections
+            .iter()
+            .find(|projection| projection.plugin_id == plugin_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownPlugin { plugin_id });
+        };
+        let Some(command) = projection
+            .contributions
+            .iter()
+            .filter_map(|contribution| match contribution {
+                PluginContribution::Command(command) => Some(command),
+                _ => None,
+            })
+            .find(|command| command.command_id == command_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownPluginCommand {
+                plugin_id,
+                command_id,
+            });
+        };
+
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::InvokePluginCommand {
+            plugin_id,
+            command_id: command.command_id.clone(),
+            metadata_label: plugin_command_metadata_label(
+                plugin_id,
+                &command.command_id,
+                &command.title,
+                &command.required_capability.0,
+                &projection.status_label,
+            ),
+        })
+    }
 }
 
 fn normalized_path(path: String) -> Option<String> {
@@ -802,6 +880,28 @@ fn normalized_instruction(label: String) -> Option<String> {
     } else {
         Some(label.to_string())
     }
+}
+
+fn normalized_plugin_command(command_id: String) -> Option<String> {
+    let command_id = command_id.trim();
+    if command_id.is_empty() {
+        None
+    } else {
+        Some(command_id.to_string())
+    }
+}
+
+fn plugin_command_metadata_label(
+    plugin_id: PluginId,
+    command_id: &str,
+    title: &str,
+    capability: &str,
+    status_label: &str,
+) -> String {
+    format!(
+        "plugin {} command {command_id}: {title} (status={status_label} capability={capability})",
+        plugin_id.0
+    )
 }
 
 fn tab_is_known(snapshot: &ShellProjectionSnapshot, buffer_id: BufferId) -> bool {
