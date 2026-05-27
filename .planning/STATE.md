@@ -2,8 +2,8 @@
 
 ## Current Position
 - **Phase**: 2 of 8 (planned)
-- **Status**: Phase 2 complete -- renderer-backed foundation accepted
-- **Last Activity**: Plan 02-06 execution (2026-05-26)
+- **Status**: Phase 2 complete -- review passed
+- **Last Activity**: Phase 2 review passed (2026-05-26)
 
 ## Progress
 ```
@@ -35,6 +35,7 @@
 - GUI productization must preserve projection-only UI, proposal-mediated saves, metadata-only observability/storage defaults, and policy-gated runtime surfaces.
 - Phase plan counts are estimates, not hard caps.
 - Phase 2 auto-refine critique passed after adding executable smoke evidence, split rendering/intent boundaries, first-wave dependency gates, save-rejection regression coverage, and final evidence acceptance rules.
+- Phase 2 review found and fixed a prompt/editor text-routing blocker before passing final gates.
 
 ## Next Action
 Run `/legion:plan 3 --auto-refine` for Phase 3: Daily Editing MVP
