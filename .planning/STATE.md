@@ -1,9 +1,9 @@
 # Project State
 
 ## Current Position
-- **Phase**: 2 of 8 (planned)
-- **Status**: Phase 2 complete -- review passed
-- **Last Activity**: Phase 2 review passed (2026-05-26)
+- **Phase**: 3 of 8 (planned)
+- **Status**: Phase 3 planned -- 6 plans across 6 waves
+- **Last Activity**: Phase 3 planning (2026-05-27)
 
 ## Progress
 ```
@@ -27,6 +27,15 @@
 - Plan 02-05 (Wave 4): Renderer Timing And Platform Smoke Evidence -- complete
 - Plan 02-06 (Wave 5): Phase 2 Evidence And Acceptance Gate -- complete
 
+## Phase 3 Plan
+
+- Plan 03-01 (Wave 1): Daily Editing App State And Projection Contracts -- planned
+- Plan 03-02 (Wave 2): Desktop Tabs Explorer And Viewport Controls -- planned
+- Plan 03-03 (Wave 3): Bounded File And Workspace Search -- planned
+- Plan 03-04 (Wave 4): Save-All Conflict And Dirty-Close Hardening -- planned
+- Plan 03-05 (Wave 5): Session Restore And Large-File Guardrails -- planned
+- Plan 03-06 (Wave 6): Phase 3 Evidence And Acceptance Gate -- planned
+
 ## Recent Decisions
 - Use exploration design `.planning/explorations/2026-05-26-gui-ide-roadmap-design.md` as the start source.
 - Use fresh `/legion:map` dataset from `.planning/CODEBASE.md` and `.planning/codebase/`.
@@ -36,6 +45,9 @@
 - Phase plan counts are estimates, not hard caps.
 - Phase 2 auto-refine critique passed after adding executable smoke evidence, split rendering/intent boundaries, first-wave dependency gates, save-rejection regression coverage, and final evidence acceptance rules.
 - Phase 2 review found and fixed a prompt/editor text-routing blocker before passing final gates.
+- Phase 3 plan uses six sequential waves because app/UI/desktop daily-editing work shares high-risk files and should not be parallelized across those files.
+- Phase 3 codebase-map context is stale relative to current Phase 2 source; build agents must read live source before editing.
+- Phase 3 search is intentionally bounded lexical search through app/workspace authority, not semantic/LSP/provider activation.
 
 ## Next Action
-Run `/legion:plan 3 --auto-refine` for Phase 3: Daily Editing MVP
+Run `/legion:build` to execute Phase 3: Daily Editing MVP
