@@ -17,6 +17,7 @@ use crate::{
         DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput,
         DesktopCommandBridge,
     },
+    smoke::{self, RendererSmokeConfig},
     view::ProjectionView,
 };
 
@@ -31,8 +32,8 @@ pub struct DesktopLaunchConfig {
     pub initial_file: Option<String>,
     /// Principal used for app-owned workspace trust/open requests.
     pub principal: PrincipalId,
-    /// Reserved Plan 02-05 smoke-mode switch.
-    pub smoke: bool,
+    /// Optional timed smoke-mode configuration.
+    pub smoke: Option<RendererSmokeConfig>,
 }
 
 impl DesktopLaunchConfig {
@@ -42,7 +43,7 @@ impl DesktopLaunchConfig {
             workspace_root,
             initial_file,
             principal: PrincipalId("desktop".to_string()),
-            smoke: false,
+            smoke: None,
         }
     }
 
@@ -53,28 +54,72 @@ impl DesktopLaunchConfig {
 
     /// Parse launch config from an argument iterator.
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        let mut smoke = false;
+        let mut smoke_enabled = false;
+        let mut workspace_root = None;
+        let mut initial_file = None;
+        let mut duration_ms = 1500;
+        let mut evidence_path =
+            PathBuf::from("plans/evidence/gui-productization/phase-2-renderer-smoke.md");
         let mut positionals = Vec::new();
-        for arg in args {
-            if arg == "--smoke" {
-                smoke = true;
-            } else {
-                positionals.push(arg);
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            let arg_text = arg.to_string_lossy();
+            match arg_text.as_ref() {
+                "--smoke" => smoke_enabled = true,
+                "--workspace" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--workspace requires a path"))?;
+                    workspace_root = Some(PathBuf::from(value));
+                }
+                "--file" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--file requires a path"))?;
+                    initial_file = Some(value.to_string_lossy().into_owned());
+                }
+                "--duration-ms" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--duration-ms requires a number"))?;
+                    duration_ms = value.to_string_lossy().parse::<u64>()?;
+                }
+                "--evidence" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--evidence requires a path"))?;
+                    evidence_path = PathBuf::from(value);
+                }
+                other if other.starts_with("--") => {
+                    return Err(anyhow!("unsupported desktop argument: {other}"));
+                }
+                _ => positionals.push(arg),
             }
         }
 
-        let workspace_root = match positionals.first() {
-            Some(path) => PathBuf::from(path),
+        let workspace_root = match workspace_root.or_else(|| positionals.first().map(PathBuf::from))
+        {
+            Some(path) => path,
             None => std::env::current_dir()?,
         };
         if workspace_root.as_os_str().is_empty() {
             return Err(anyhow!("workspace root cannot be empty"));
         }
 
-        let initial_file = positionals
-            .get(1)
-            .map(|path| path.to_string_lossy().into_owned())
+        let initial_file = initial_file
+            .or_else(|| {
+                positionals
+                    .get(1)
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
             .filter(|path| !path.trim().is_empty());
+
+        let smoke = if smoke_enabled {
+            Some(RendererSmokeConfig::new(duration_ms, evidence_path)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             workspace_root,
@@ -306,7 +351,11 @@ impl DesktopRuntime {
 /// Run the desktop adapter from process arguments.
 pub fn run_from_env() -> Result<()> {
     let config = DesktopLaunchConfig::from_env_args()?;
-    run_native(config)
+    if let Some(smoke_config) = config.smoke.clone() {
+        smoke::run_smoke(config, smoke_config)
+    } else {
+        run_native(config)
+    }
 }
 
 fn run_native(config: DesktopLaunchConfig) -> Result<()> {
