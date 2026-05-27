@@ -67,6 +67,84 @@ const PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
     "xtask-check-deps.txt",
 ];
 
+const GUI_PHASE6_EVIDENCE_PATH: &str =
+    "plans/evidence/gui-productization/phase-6-packaging-platform-accessibility.md";
+const GUI_PHASE7_EVIDENCE_PATH: &str =
+    "plans/evidence/gui-productization/phase-7-local-ide-beta.md";
+const GUI_PHASE6_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plans/evidence/gui-productization/phase-6-package-runbook.md",
+    "plans/evidence/gui-productization/phase-6-packaging-smoke.md",
+    "plans/evidence/gui-productization/phase-6-platform-accessibility-smoke.md",
+    "plans/evidence/gui-productization/phase-6-session-diagnostics-safety.md",
+    "plans/evidence/gui-productization/phase-6-workflow-smoke.md",
+    "plans/evidence/gui-productization/phase-6-performance-reliability.md",
+    "plans/evidence/gui-productization/phase-6-ci-parity-plan.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-01-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-02-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-03-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-04-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-05-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-06-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-07-RESULT.md",
+];
+const GUI_PHASE6_REQUIRED_COMMAND_MARKERS: &[&str] = &[
+    "cargo run -p xtask -- check-deps",
+    "cargo fmt --all --check",
+    "cargo check --workspace --all-targets",
+    "cargo test --workspace --all-targets",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo deny check",
+    "cargo test -p devil-desktop --test packaging -- --nocapture",
+    "cargo test -p devil-desktop --test platform_integration -- --nocapture",
+    "cargo test -p devil-desktop --test platform_smoke -- --nocapture",
+    "cargo test -p devil-desktop --test session_restore -- --nocapture",
+    "cargo test -p devil-desktop --test diagnostics_export -- --nocapture",
+    "cargo test -p devil-cli gui_phase6 -- --nocapture",
+    "scripts/package-windows.ps1 -DryRun",
+    "scripts/gui-smoke.ps1 -DryRun",
+    "scripts/gui-smoke.sh --dry-run",
+    "cargo run -p devil-cli -- evidence check --phase gui-phase6",
+];
+const GUI_PHASE7_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plans/evidence/gui-productization/phase-7-local-workflow-smoke.md",
+    "plans/evidence/gui-productization/phase-7-operational-health-diagnostics.md",
+    "plans/evidence/gui-productization/phase-7-launch-runbook.md",
+    "plans/evidence/gui-productization/phase-7-known-limitations.md",
+    "plans/evidence/gui-productization/phase-7-release-readiness.md",
+    "plans/evidence/gui-productization/phase-7-manual-beta-evidence.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-01-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-02-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-03-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-04-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-05-RESULT.md",
+    "scripts/gui-smoke.ps1",
+    "scripts/gui-smoke.sh",
+    ".github/workflows/ci.yml",
+];
+const GUI_PHASE7_REQUIRED_COMMAND_MARKERS: &[&str] = &[
+    "cargo run -p xtask -- check-deps",
+    "cargo fmt --all --check",
+    "cargo check --workspace --all-targets",
+    "cargo test --workspace --all-targets",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo deny check",
+    "cargo test -p devil-desktop --test beta_workflow -- --nocapture",
+    "cargo test -p devil-desktop --test operational_health -- --nocapture",
+    "cargo test -p devil-desktop --test diagnostics_export -- --nocapture",
+    "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun",
+    "bash scripts/gui-smoke.sh --beta --dry-run",
+    "cargo run -p devil-cli -- evidence check --phase gui-phase7",
+];
+const GUI_PHASE7_REQUIRED_LIMITATION_MARKERS: &[&str] = &[
+    "Remote production GUI: unsupported",
+    "Collaboration GUI: unsupported",
+    "Plugin management GUI: unsupported",
+    "Hosted provider activation: unsupported",
+    "Signed installer: unsupported",
+    "Cross-platform parity: unsupported",
+    "Autonomous apply: unsupported",
+];
+
 const PHASE8_ACCEPTED_REQUIRED_MARKERS: &[&str] = &[
     "Runtime surface status: Production GA runtime surfaces are active behind accepted policy gates.",
     "Platform matrix: Linux, Windows, and macOS validated.",
@@ -202,6 +280,10 @@ enum EvidencePhase {
     Phase0,
     /// Phase 3 scaffold or acceptance evidence.
     Phase3,
+    /// GUI Phase 6 packaging/platform/accessibility productization evidence.
+    GuiPhase6,
+    /// GUI Phase 7 local IDE beta productization evidence.
+    GuiPhase7,
     /// Phase 8 production GA scaffold or acceptance evidence.
     Phase8,
 }
@@ -422,6 +504,8 @@ fn run_evidence_check(workspace: PathBuf, phase: EvidencePhase) -> Result<()> {
     match phase {
         EvidencePhase::Phase0 => check_phase0_evidence(&workspace, &mut issues),
         EvidencePhase::Phase3 => check_phase3_evidence(&workspace, &mut issues),
+        EvidencePhase::GuiPhase6 => check_gui_phase6_evidence(&workspace, &mut issues),
+        EvidencePhase::GuiPhase7 => check_gui_phase7_evidence(&workspace, &mut issues),
         EvidencePhase::Phase8 => check_phase8_evidence(&workspace, &mut issues),
     }
     finish_issue_report("Evidence check", &workspace, issues)
@@ -526,6 +610,8 @@ fn run_setup_status(workspace: PathBuf) -> Result<()> {
     println!("cargo run -p devil-cli -- doctor");
     println!("cargo run -p devil-cli -- evidence check --phase phase0");
     println!("cargo run -p devil-cli -- evidence check --phase phase3");
+    println!("cargo run -p devil-cli -- evidence check --phase gui-phase6");
+    println!("cargo run -p devil-cli -- evidence check --phase gui-phase7");
     println!("cargo run -p devil-cli -- evidence check --phase phase8");
     println!("pwsh ./scripts/run-phase-gates.ps1");
     finish_issue_report("Setup status", &workspace, issues)
@@ -590,6 +676,114 @@ fn check_phase3_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) 
             &phase3,
             "LSP supervision acceptance: Not accepted.",
             "LSP supervision remains gated until evidence is complete",
+            issues,
+        );
+    }
+}
+
+fn check_gui_phase6_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) {
+    let Some(evidence) = read_optional(workspace, GUI_PHASE6_EVIDENCE_PATH, issues) else {
+        return;
+    };
+
+    require_text(
+        &evidence,
+        "GUI Phase 6",
+        "GUI Phase 6 evidence names productization scope",
+        issues,
+    );
+    if evidence.contains("Phase 6 acceptance: Accepted.") {
+        if evidence.contains("- [ ]") {
+            issues.push(
+                "GUI Phase 6 is marked accepted but checklist still has unchecked items"
+                    .to_string(),
+            );
+        }
+        if evidence.contains("This document is GUI Phase 6 scaffold evidence") {
+            issues.push(
+                "GUI Phase 6 is marked accepted but still declares scaffold evidence".to_string(),
+            );
+        }
+        for artifact in GUI_PHASE6_REQUIRED_ARTIFACTS {
+            require_text(
+                &evidence,
+                artifact,
+                &format!("GUI Phase 6 required artifact `{artifact}` is listed"),
+                issues,
+            );
+            require_file(workspace, artifact, issues);
+        }
+        for command in GUI_PHASE6_REQUIRED_COMMAND_MARKERS {
+            require_text(
+                &evidence,
+                command,
+                &format!("GUI Phase 6 required command `{command}` is listed"),
+                issues,
+            );
+        }
+    } else {
+        require_text(
+            &evidence,
+            "Phase 6 acceptance: Not accepted.",
+            "GUI Phase 6 remains gated until evidence is complete",
+            issues,
+        );
+    }
+}
+
+fn check_gui_phase7_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) {
+    let Some(evidence) = read_optional(workspace, GUI_PHASE7_EVIDENCE_PATH, issues) else {
+        return;
+    };
+
+    require_text(
+        &evidence,
+        "GUI Phase 7",
+        "GUI Phase 7 evidence names local beta productization scope",
+        issues,
+    );
+    if evidence.contains("Phase 7 acceptance: Accepted.") {
+        if evidence.contains("- [ ]") {
+            issues.push(
+                "GUI Phase 7 is marked accepted but checklist still has unchecked items"
+                    .to_string(),
+            );
+        }
+        if evidence.contains("This document is GUI Phase 7 scaffold evidence") {
+            issues.push(
+                "GUI Phase 7 is marked accepted but still declares scaffold evidence".to_string(),
+            );
+        }
+        for artifact in GUI_PHASE7_REQUIRED_ARTIFACTS {
+            require_text(
+                &evidence,
+                artifact,
+                &format!("GUI Phase 7 required artifact `{artifact}` is listed"),
+                issues,
+            );
+            require_file(workspace, artifact, issues);
+        }
+        for command in GUI_PHASE7_REQUIRED_COMMAND_MARKERS {
+            require_text(
+                &evidence,
+                command,
+                &format!("GUI Phase 7 required command `{command}` is listed"),
+                issues,
+            );
+        }
+        for marker in GUI_PHASE7_REQUIRED_LIMITATION_MARKERS {
+            require_text(
+                &evidence,
+                marker,
+                &format!("GUI Phase 7 required limitation marker `{marker}` is listed"),
+                issues,
+            );
+        }
+    } else {
+        require_text(
+            &evidence,
+            "Phase 7 acceptance: Not accepted.",
+            "GUI Phase 7 remains gated until evidence is complete",
             issues,
         );
     }
@@ -873,4 +1067,262 @@ fn ci_contains_gate(ci: &str, command: &str) -> bool {
 
     command == "cargo deny check"
         && (ci.contains("cargo-deny-action") || ci.contains("EmbarkStudios/cargo-deny-action"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        GUI_PHASE6_EVIDENCE_PATH, GUI_PHASE6_REQUIRED_ARTIFACTS,
+        GUI_PHASE6_REQUIRED_COMMAND_MARKERS, GUI_PHASE7_EVIDENCE_PATH,
+        GUI_PHASE7_REQUIRED_ARTIFACTS, GUI_PHASE7_REQUIRED_COMMAND_MARKERS,
+        GUI_PHASE7_REQUIRED_LIMITATION_MARKERS, check_gui_phase6_evidence,
+        check_gui_phase7_evidence,
+    };
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempWorkspace {
+        root: PathBuf,
+    }
+
+    impl TempWorkspace {
+        fn new(prefix: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos();
+            let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let root = std::env::temp_dir().join(format!(
+                "{prefix}_{}_{}_{}",
+                std::process::id(),
+                nanos,
+                id
+            ));
+            fs::create_dir(&root).expect("temp workspace should be created");
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+
+        fn write(&self, relative: &str, contents: &str) {
+            let path = self.root.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("parent directory should be created");
+            }
+            fs::write(path, contents).expect("test file should be written");
+        }
+    }
+
+    impl Drop for TempWorkspace {
+        fn drop(&mut self) {
+            if self.root.starts_with(std::env::temp_dir()) {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    fn accepted_gui_phase6_evidence(checklist_checked: bool) -> String {
+        let checklist = if checklist_checked { "x" } else { " " };
+        let artifacts = GUI_PHASE6_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let commands = GUI_PHASE6_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`\n"))
+            .collect::<String>();
+
+        format!(
+            r#"# GUI Phase 6 evidence
+
+## Acceptance Status
+
+- Phase 6 acceptance: Accepted.
+
+## Required Artifacts
+
+{artifacts}
+## Required Commands
+
+{commands}
+## Final Validation Checklist
+
+- [{checklist}] Required validation is complete.
+"#
+        )
+    }
+
+    fn accepted_gui_phase7_evidence(checklist_checked: bool) -> String {
+        let checklist = if checklist_checked { "x" } else { " " };
+        let artifacts = GUI_PHASE7_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let commands = GUI_PHASE7_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`\n"))
+            .collect::<String>();
+        let limitations = GUI_PHASE7_REQUIRED_LIMITATION_MARKERS
+            .iter()
+            .map(|marker| format!("- {marker}\n"))
+            .collect::<String>();
+
+        format!(
+            r#"# GUI Phase 7 local IDE beta evidence
+
+## Acceptance Status
+
+- Phase 7 acceptance: Accepted.
+
+## Required Artifacts
+
+{artifacts}
+## Required Commands
+
+{commands}
+## Known Limitations Required For Acceptance
+
+{limitations}
+## Final Validation Checklist
+
+- [{checklist}] Required validation is complete.
+"#
+        )
+    }
+
+    #[test]
+    fn gui_phase6_not_accepted_scaffold_passes_without_artifacts() {
+        let workspace = TempWorkspace::new("devil_cli_gui_phase6_not_accepted");
+        workspace.write(
+            GUI_PHASE6_EVIDENCE_PATH,
+            r#"# GUI Phase 6 evidence
+
+## Acceptance Status
+
+- Phase 6 acceptance: Not accepted.
+"#,
+        );
+        let mut issues = Vec::new();
+
+        check_gui_phase6_evidence(workspace.path(), &mut issues);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase6_acceptance_requires_artifacts_commands_and_checked_checklist() {
+        let workspace = TempWorkspace::new("devil_cli_gui_phase6_incomplete");
+        workspace.write(
+            GUI_PHASE6_EVIDENCE_PATH,
+            &accepted_gui_phase6_evidence(false),
+        );
+        let mut issues = Vec::new();
+
+        check_gui_phase6_evidence(workspace.path(), &mut issues);
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains("GUI Phase 6 is marked accepted but checklist still has unchecked items")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains(
+                "required file `plans/evidence/gui-productization/phase-6-package-runbook.md` is missing",
+            )
+        }));
+    }
+
+    #[test]
+    fn gui_phase6_acceptance_passes_with_artifacts_commands_and_checked_checklist() {
+        let workspace = TempWorkspace::new("devil_cli_gui_phase6_complete");
+        workspace.write(
+            GUI_PHASE6_EVIDENCE_PATH,
+            &accepted_gui_phase6_evidence(true),
+        );
+        for artifact in GUI_PHASE6_REQUIRED_ARTIFACTS {
+            workspace.write(artifact, "artifact present\n");
+        }
+        let mut issues = Vec::new();
+
+        check_gui_phase6_evidence(workspace.path(), &mut issues);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase7_not_accepted_scaffold_passes_without_artifacts() {
+        let workspace = TempWorkspace::new("devil_cli_gui_phase7_not_accepted");
+        workspace.write(
+            GUI_PHASE7_EVIDENCE_PATH,
+            r#"# GUI Phase 7 local IDE beta evidence
+
+## Acceptance Status
+
+- Phase 7 acceptance: Not accepted.
+"#,
+        );
+        let mut issues = Vec::new();
+
+        check_gui_phase7_evidence(workspace.path(), &mut issues);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase7_acceptance_requires_artifacts_commands_limits_and_checked_checklist() {
+        let workspace = TempWorkspace::new("devil_cli_gui_phase7_incomplete");
+        let evidence = accepted_gui_phase7_evidence(false)
+            .replace(
+                "- `cargo run -p devil-cli -- evidence check --phase gui-phase7`\n",
+                "",
+            )
+            .replace("- Autonomous apply: unsupported\n", "");
+        workspace.write(GUI_PHASE7_EVIDENCE_PATH, &evidence);
+        let mut issues = Vec::new();
+
+        check_gui_phase7_evidence(workspace.path(), &mut issues);
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains("GUI Phase 7 is marked accepted but checklist still has unchecked items")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains(
+                "required file `plans/evidence/gui-productization/phase-7-local-workflow-smoke.md` is missing",
+            )
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains(
+                "missing marker for GUI Phase 7 required command `cargo run -p devil-cli -- evidence check --phase gui-phase7` is listed",
+            )
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains(
+                "missing marker for GUI Phase 7 required limitation marker `Autonomous apply: unsupported` is listed",
+            )
+        }));
+    }
+
+    #[test]
+    fn gui_phase7_acceptance_passes_with_artifacts_commands_limits_and_checked_checklist() {
+        let workspace = TempWorkspace::new("devil_cli_gui_phase7_complete");
+        workspace.write(
+            GUI_PHASE7_EVIDENCE_PATH,
+            &accepted_gui_phase7_evidence(true),
+        );
+        for artifact in GUI_PHASE7_REQUIRED_ARTIFACTS {
+            workspace.write(artifact, "artifact present\n");
+        }
+        let mut issues = Vec::new();
+
+        check_gui_phase7_evidence(workspace.path(), &mut issues);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
 }

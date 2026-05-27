@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -84,19 +85,7 @@ impl DesktopSessionStore {
                 source,
             })?;
         reject_raw_source_markers(&json)?;
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).map_err(|source| DesktopSessionError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        fs::write(path, json).map_err(|source| DesktopSessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+        save_crash_safe(path, &json)
     }
 }
 
@@ -122,4 +111,129 @@ fn reject_raw_source_markers(json: &str) -> Result<(), DesktopSessionError> {
         return Err(DesktopSessionError::RawSourceMarker((*marker).to_string()));
     }
     Ok(())
+}
+
+fn save_crash_safe(path: &Path, json: &str) -> Result<(), DesktopSessionError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|source| DesktopSessionError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let temp_path = temporary_session_path(path, "tmp");
+    let _ = fs::remove_file(&temp_path);
+
+    write_and_verify_temp(path, &temp_path, json)?;
+    publish_temp_session(path, &temp_path)
+}
+
+fn write_and_verify_temp(
+    final_path: &Path,
+    temp_path: &Path,
+    json: &str,
+) -> Result<(), DesktopSessionError> {
+    {
+        let mut temp = fs::File::create(temp_path).map_err(|source| DesktopSessionError::Io {
+            path: temp_path.to_path_buf(),
+            source,
+        })?;
+        temp.write_all(json.as_bytes())
+            .and_then(|()| temp.sync_all())
+            .map_err(|source| DesktopSessionError::Io {
+                path: temp_path.to_path_buf(),
+                source,
+            })?;
+    }
+
+    let written = fs::read_to_string(temp_path).map_err(|source| DesktopSessionError::Io {
+        path: temp_path.to_path_buf(),
+        source,
+    })?;
+    reject_raw_source_markers(&written)?;
+    let record = serde_json::from_str::<WorkspaceSessionRecord>(&written).map_err(|source| {
+        DesktopSessionError::Json {
+            path: final_path.to_path_buf(),
+            source,
+        }
+    })?;
+    validate_record(&record)?;
+    Ok(())
+}
+
+fn publish_temp_session(final_path: &Path, temp_path: &Path) -> Result<(), DesktopSessionError> {
+    replace_session_file(temp_path, final_path).map_err(|source| DesktopSessionError::Io {
+        path: final_path.to_path_buf(),
+        source,
+    })?;
+    sync_parent_dir(final_path).map_err(|source| DesktopSessionError::Io {
+        path: final_path.to_path_buf(),
+        source,
+    })
+}
+
+fn temporary_session_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("session.json");
+    path.with_file_name(format!(".{file_name}.{}.{}", std::process::id(), suffix))
+}
+
+#[cfg(windows)]
+fn replace_session_file(temp_path: &Path, final_path: &Path) -> io::Result<()> {
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let existing = wide_path(temp_path);
+    let new = wide_path(final_path);
+    let ok = unsafe {
+        MoveFileExW(
+            existing.as_ptr(),
+            new.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(not(windows))]
+fn replace_session_file(temp_path: &Path, final_path: &Path) -> io::Result<()> {
+    fs::rename(temp_path, final_path)
+}
+
+#[cfg(windows)]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    fs::File::open(parent)?.sync_all()
 }

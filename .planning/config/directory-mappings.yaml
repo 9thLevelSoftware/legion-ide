@@ -1,8 +1,11 @@
-generated: "2026-05-26T17:48:31.3852290-04:00"
+generated: "2026-05-27T12:57:55.9718684-04:00"
 source: "CODEBASE.md"
 version: "1.0"
 map_schema_version: "2.0"
 scope: "project-root"
+analyzed_commit: "beb896492685fadbb4d1669250f0a5f5a145f613"
+source_fingerprint: "d659f105ff658b23cd599dfe39bd98ec6aedb99082fc2840467a462783e2b584"
+source_fingerprint_kind: "sha256:path-size-mtime"
 
 mappings:
   source:
@@ -12,7 +15,7 @@ mappings:
     priority: 10
     pattern: "**/*.rs"
     description: "Rust source files for workspace crates and xtask"
-    lastKnownFileCount: 27
+    lastKnownFileCount: 36
   tests:
     paths:
       - "crates/*/tests"
@@ -21,7 +24,7 @@ mappings:
     priority: 10
     pattern: "**/*.rs"
     description: "Integration tests plus inline cfg(test) modules"
-    lastKnownFileCount: 9
+    lastKnownFileCount: 60
   app:
     paths:
       - "crates/devil-app/src"
@@ -29,6 +32,20 @@ mappings:
     pattern: "crates/devil-app/src/*.rs"
     description: "Application composition root and CLI proof"
     lastKnownFileCount: 2
+  desktop:
+    paths:
+      - "crates/devil-desktop/src"
+    priority: 10
+    pattern: "crates/devil-desktop/src/*.rs"
+    description: "Renderer-backed desktop adapter, view, bridge, workflow, session, search, smoke, and metrics"
+    lastKnownFileCount: 9
+  desktop_tests:
+    paths:
+      - "crates/devil-desktop/tests"
+    priority: 10
+    pattern: "crates/devil-desktop/tests/*.rs"
+    description: "Desktop adapter integration tests"
+    lastKnownFileCount: 11
   ui:
     paths:
       - "crates/devil-ui/src"
@@ -42,7 +59,7 @@ mappings:
       - "crates/devil-protocol/tests"
     priority: 10
     pattern: "crates/devil-protocol/**/*.rs"
-    description: "Shared DTO, validation, port, and contract tests"
+    description: "Shared DTO, validation, port, projection, and contract tests"
     lastKnownFileCount: 2
   workspace:
     paths:
@@ -67,7 +84,7 @@ mappings:
       - "crates/devil-security/tests"
     priority: 10
     pattern: "crates/devil-security/**/*.rs"
-    description: "Trust, path, command, provider, and capability policy"
+    description: "Trust, path, command, provider, terminal, and capability policy"
     lastKnownFileCount: 2
   storage_observability:
     paths:
@@ -94,7 +111,7 @@ mappings:
       - "crates/devil-retention/src"
     priority: 8
     pattern: "crates/devil-*/src/*.rs"
-    description: "Gated or bounded feature runtimes and future product surfaces"
+    description: "Activated or gated feature runtimes and future product surfaces"
     lastKnownFileCount: 13
   planning_docs:
     paths:
@@ -103,7 +120,7 @@ mappings:
     priority: 8
     pattern: "**/*.md"
     description: "ADRs, phase evidence, generated Legion artifacts, and roadmap state"
-    lastKnownFileCount: 78
+    lastKnownFileCount: 175
   governance:
     paths:
       - "xtask"
@@ -113,7 +130,7 @@ mappings:
     priority: 10
     pattern: "{xtask/**,plans/dependency-policy.md,deny.toml,AGENTS.md}"
     description: "Repository gates, dependency policy, and local agent constraints"
-    lastKnownFileCount: 4
+    lastKnownFileCount: 5
   scripts:
     paths:
       - "scripts"
@@ -121,6 +138,13 @@ mappings:
     pattern: "scripts/**"
     description: "Utility scripts"
     lastKnownFileCount: 2
+  stray_root_source:
+    paths:
+      - "test.rs"
+    priority: 1
+    pattern: "test.rs"
+    description: "Standalone root Rust snippet that is not a workspace member"
+    lastKnownFileCount: 1
 
 packages:
   devil-app:
@@ -129,6 +153,13 @@ packages:
       priority: 10
     tests:
       paths: ["crates/devil-app/tests"]
+      priority: 10
+  devil-desktop:
+    source:
+      paths: ["crates/devil-desktop/src"]
+      priority: 10
+    tests:
+      paths: ["crates/devil-desktop/tests"]
       priority: 10
   devil-ui:
     source:
@@ -161,6 +192,7 @@ rules:
   exceptions:
     - "Generated Legion artifacts may be written under .planning"
     - "Inline Rust tests may live beside source under cfg(test)"
+    - "Renderer dependencies are isolated to devil-desktop by policy"
 
 autoUpdate:
   enabled: true

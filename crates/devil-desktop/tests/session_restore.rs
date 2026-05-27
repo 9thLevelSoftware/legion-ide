@@ -223,6 +223,34 @@ fn session_restore_store_rejects_raw_source_markers() {
     assert!(matches!(error, DesktopSessionError::RawSourceMarker(_)));
 }
 
+#[test]
+fn session_store_save_publishes_validated_temp_and_cleans_intermediates() {
+    let workspace = TempWorkspace::new("devil_desktop_session_restore_atomic");
+    let session_state = workspace.path().join("session.json");
+    let mut first = minimal_record(workspace.path());
+    first.session_id = "workspace-session:first".to_string();
+    let mut second = minimal_record(workspace.path());
+    second.session_id = "workspace-session:second".to_string();
+
+    DesktopSessionStore::save(&session_state, &first).expect("first session save");
+    DesktopSessionStore::save(&session_state, &second).expect("second session save");
+
+    let saved = fs::read_to_string(&session_state).expect("session json should exist");
+    assert!(saved.contains("workspace-session:second"));
+    assert!(!saved.contains("workspace-session:first"));
+
+    let leftovers = fs::read_dir(workspace.path())
+        .expect("workspace directory should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp") || name.contains(".bak"))
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "session temp/backup files should be cleaned: {leftovers:?}"
+    );
+}
+
 fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
     WorkspaceSessionRecord {
         session_id: "workspace-session:test".to_string(),

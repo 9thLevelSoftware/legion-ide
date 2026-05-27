@@ -16,6 +16,10 @@ const DEFAULT_PHASE4_EVIDENCE_PATH: &str = "plans/evidence/phase-4/agentic-ai-ar
 const DEFAULT_PHASE5_EVIDENCE_PATH: &str = "plans/evidence/phase-5/plugin-architecture-map.md";
 const DEFAULT_GUI_PHASE5_EVIDENCE_PATH: &str =
     "plans/evidence/gui-productization/phase-5-control-trust-assisted-ai.md";
+const DEFAULT_GUI_PHASE6_EVIDENCE_PATH: &str =
+    "plans/evidence/gui-productization/phase-6-packaging-platform-accessibility.md";
+const DEFAULT_GUI_PHASE7_EVIDENCE_PATH: &str =
+    "plans/evidence/gui-productization/phase-7-local-ide-beta.md";
 const DEFAULT_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/phase-6/collaboration-architecture-map.md";
 const DEFAULT_PHASE7_EVIDENCE_PATH: &str = "plans/evidence/phase-7/remote-architecture-map.md";
@@ -157,6 +161,79 @@ const GUI_PHASE5_REQUIRED_COMMAND_MARKERS: &[&str] = &[
     "cargo check --workspace --all-targets",
     "cargo test --workspace --all-targets",
     "cargo clippy --workspace --all-targets -- -D warnings",
+];
+const GUI_PHASE6_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plans/evidence/gui-productization/phase-6-package-runbook.md",
+    "plans/evidence/gui-productization/phase-6-packaging-smoke.md",
+    "plans/evidence/gui-productization/phase-6-platform-accessibility-smoke.md",
+    "plans/evidence/gui-productization/phase-6-session-diagnostics-safety.md",
+    "plans/evidence/gui-productization/phase-6-workflow-smoke.md",
+    "plans/evidence/gui-productization/phase-6-performance-reliability.md",
+    "plans/evidence/gui-productization/phase-6-ci-parity-plan.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-01-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-02-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-03-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-04-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-05-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-06-RESULT.md",
+    ".planning/phases/06-packaging-platform-integration-and-accessibility/06-07-RESULT.md",
+];
+const GUI_PHASE6_REQUIRED_COMMAND_MARKERS: &[&str] = &[
+    "cargo run -p xtask -- check-deps",
+    "cargo fmt --all --check",
+    "cargo check --workspace --all-targets",
+    "cargo test --workspace --all-targets",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo deny check",
+    "cargo test -p devil-desktop --test packaging -- --nocapture",
+    "cargo test -p devil-desktop --test platform_integration -- --nocapture",
+    "cargo test -p devil-desktop --test platform_smoke -- --nocapture",
+    "cargo test -p devil-desktop --test session_restore -- --nocapture",
+    "cargo test -p devil-desktop --test diagnostics_export -- --nocapture",
+    "cargo test -p devil-cli gui_phase6 -- --nocapture",
+    "scripts/package-windows.ps1 -DryRun",
+    "scripts/gui-smoke.ps1 -DryRun",
+    "scripts/gui-smoke.sh --dry-run",
+    "cargo run -p devil-cli -- evidence check --phase gui-phase6",
+];
+const GUI_PHASE7_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plans/evidence/gui-productization/phase-7-local-workflow-smoke.md",
+    "plans/evidence/gui-productization/phase-7-operational-health-diagnostics.md",
+    "plans/evidence/gui-productization/phase-7-launch-runbook.md",
+    "plans/evidence/gui-productization/phase-7-known-limitations.md",
+    "plans/evidence/gui-productization/phase-7-release-readiness.md",
+    "plans/evidence/gui-productization/phase-7-manual-beta-evidence.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-01-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-02-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-03-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-04-RESULT.md",
+    ".planning/phases/07-fully-functional-local-ide-beta/07-05-RESULT.md",
+    "scripts/gui-smoke.ps1",
+    "scripts/gui-smoke.sh",
+    ".github/workflows/ci.yml",
+];
+const GUI_PHASE7_REQUIRED_COMMAND_MARKERS: &[&str] = &[
+    "cargo run -p xtask -- check-deps",
+    "cargo fmt --all --check",
+    "cargo check --workspace --all-targets",
+    "cargo test --workspace --all-targets",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo deny check",
+    "cargo test -p devil-desktop --test beta_workflow -- --nocapture",
+    "cargo test -p devil-desktop --test operational_health -- --nocapture",
+    "cargo test -p devil-desktop --test diagnostics_export -- --nocapture",
+    "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun",
+    "bash scripts/gui-smoke.sh --beta --dry-run",
+    "cargo run -p devil-cli -- evidence check --phase gui-phase7",
+];
+const GUI_PHASE7_REQUIRED_LIMITATION_MARKERS: &[&str] = &[
+    "Remote production GUI: unsupported",
+    "Collaboration GUI: unsupported",
+    "Plugin management GUI: unsupported",
+    "Hosted provider activation: unsupported",
+    "Signed installer: unsupported",
+    "Cross-platform parity: unsupported",
+    "Autonomous apply: unsupported",
 ];
 const PHASE6_REQUIRED_ARTIFACTS: &[&str] = &[
     "collaboration-architecture-map.md",
@@ -366,6 +443,30 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
             workspace_root.join(artifact).is_file()
         });
 
+    let gui_phase6_evidence_path = workspace_root.join(DEFAULT_GUI_PHASE6_EVIDENCE_PATH);
+    let gui_phase6_evidence = fs::read_to_string(&gui_phase6_evidence_path).map_err(|err| {
+        format!(
+            "unable to read GUI Phase 6 evidence at `{}`: {err}",
+            gui_phase6_evidence_path.display()
+        )
+    })?;
+    let gui_phase6_violations =
+        validate_gui_phase6_acceptance_governance(&gui_phase6_evidence, |artifact| {
+            workspace_root.join(artifact).is_file()
+        });
+
+    let gui_phase7_evidence_path = workspace_root.join(DEFAULT_GUI_PHASE7_EVIDENCE_PATH);
+    let gui_phase7_evidence = fs::read_to_string(&gui_phase7_evidence_path).map_err(|err| {
+        format!(
+            "unable to read GUI Phase 7 evidence at `{}`: {err}",
+            gui_phase7_evidence_path.display()
+        )
+    })?;
+    let gui_phase7_violations =
+        validate_gui_phase7_acceptance_governance(&gui_phase7_evidence, |artifact| {
+            workspace_root.join(artifact).is_file()
+        });
+
     let phase6_evidence_path = workspace_root.join(DEFAULT_PHASE6_EVIDENCE_PATH);
     let phase6_evidence = fs::read_to_string(&phase6_evidence_path).map_err(|err| {
         format!(
@@ -417,6 +518,8 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     all.extend(phase4_violations);
     all.extend(phase5_violations);
     all.extend(gui_phase5_violations);
+    all.extend(gui_phase6_violations);
+    all.extend(gui_phase7_violations);
     all.extend(phase6_violations);
     all.extend(phase7_violations);
     all.extend(phase8_violations);
@@ -999,6 +1102,184 @@ where
         if !evidence.contains(command) {
             issues.push(format!(
                 "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
+            ));
+        }
+    }
+
+    issues
+}
+
+fn validate_gui_phase6_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    let Some(status_section) = markdown_section(evidence, PHASE6_STATUS_HEADING) else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` must include `{PHASE6_STATUS_HEADING}` with explicit GUI Phase 6 acceptance status"
+        ));
+        return issues;
+    };
+
+    let phase6_not_accepted = status_section.contains(PHASE6_NOT_ACCEPTED_MARKER);
+    let phase6_accepted = status_section.contains(PHASE6_ACCEPTED_MARKER);
+    match (phase6_not_accepted, phase6_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` must not declare both `{PHASE6_NOT_ACCEPTED_MARKER}` and `{PHASE6_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` must declare either `{PHASE6_NOT_ACCEPTED_MARKER}` or `{PHASE6_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    if phase6_accepted {
+        issues.extend(validate_gui_phase6_completion_evidence(
+            evidence,
+            &artifact_exists,
+        ));
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_gui_phase6_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    if let Some(checklist) = markdown_section(evidence, PHASE6_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` claims acceptance but `{PHASE6_FINAL_CHECKLIST_HEADING}` is missing"
+        ));
+    }
+
+    for artifact in GUI_PHASE6_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is not listed"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing"
+            ));
+        }
+    }
+
+    for command in GUI_PHASE6_REQUIRED_COMMAND_MARKERS {
+        if !evidence.contains(command) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
+            ));
+        }
+    }
+
+    issues
+}
+
+fn validate_gui_phase7_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    let Some(status_section) = markdown_section(evidence, PHASE7_STATUS_HEADING) else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` must include `{PHASE7_STATUS_HEADING}` with explicit GUI Phase 7 acceptance status"
+        ));
+        return issues;
+    };
+
+    let phase7_not_accepted = status_section.contains(PHASE7_NOT_ACCEPTED_MARKER);
+    let phase7_accepted = status_section.contains(PHASE7_ACCEPTED_MARKER);
+    match (phase7_not_accepted, phase7_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` must not declare both `{PHASE7_NOT_ACCEPTED_MARKER}` and `{PHASE7_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` must declare either `{PHASE7_NOT_ACCEPTED_MARKER}` or `{PHASE7_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    if phase7_accepted {
+        issues.extend(validate_gui_phase7_completion_evidence(
+            evidence,
+            &artifact_exists,
+        ));
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_gui_phase7_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    if evidence.contains("This document is GUI Phase 7 scaffold evidence") {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance while still saying it is scaffold evidence"
+        ));
+    }
+
+    if let Some(checklist) = markdown_section(evidence, PHASE7_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance but `{PHASE7_FINAL_CHECKLIST_HEADING}` is missing"
+        ));
+    }
+
+    for artifact in GUI_PHASE7_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is not listed"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing"
+            ));
+        }
+    }
+
+    for command in GUI_PHASE7_REQUIRED_COMMAND_MARKERS {
+        if !evidence.contains(command) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
+            ));
+        }
+    }
+
+    for marker in GUI_PHASE7_REQUIRED_LIMITATION_MARKERS {
+        if !evidence.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance but required limitation marker `{marker}` is not listed"
             ));
         }
     }
@@ -1744,6 +2025,75 @@ mod tests {
         )
     }
 
+    fn accepted_gui_phase6_evidence(checklist_checked: bool) -> String {
+        let artifacts = GUI_PHASE6_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let commands = GUI_PHASE6_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`\n"))
+            .collect::<String>();
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# GUI Phase 6 evidence
+
+## Acceptance Status
+
+- {PHASE6_ACCEPTED_MARKER}
+
+## Required Artifacts
+
+{artifacts}
+## Required Commands
+
+{commands}
+## Final Validation Checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
+    fn accepted_gui_phase7_evidence(checklist_checked: bool) -> String {
+        let artifacts = GUI_PHASE7_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let commands = GUI_PHASE7_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`\n"))
+            .collect::<String>();
+        let limitations = GUI_PHASE7_REQUIRED_LIMITATION_MARKERS
+            .iter()
+            .map(|marker| format!("- {marker}\n"))
+            .collect::<String>();
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# GUI Phase 7 local IDE beta evidence
+
+## Acceptance Status
+
+- {PHASE7_ACCEPTED_MARKER}
+
+## Required Artifacts
+
+{artifacts}
+## Required Commands
+
+{commands}
+## Known Limitations Required For Acceptance
+
+{limitations}
+## Final Validation Checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
     fn accepted_phase6_evidence(scaffold_disclaimer: bool, checklist_checked: bool) -> String {
         let artifacts = PHASE6_REQUIRED_ARTIFACTS
             .iter()
@@ -2194,6 +2544,128 @@ Final gate outputs archived from current commands.
     fn gui_phase5_acceptance_claim_passes_with_checked_checklist_artifacts_and_commands() {
         let evidence = accepted_gui_phase5_evidence(true);
         let issues = validate_gui_phase5_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase6_not_accepted_status_allows_scaffold_without_artifacts() {
+        let evidence = format!(
+            r#"# GUI Phase 6 packaging platform accessibility evidence
+
+## Acceptance Status
+
+- {PHASE6_NOT_ACCEPTED_MARKER}
+
+## Final Validation Checklist
+
+- [ ] pending
+"#
+        );
+
+        let issues = validate_gui_phase6_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase6_acceptance_claim_requires_artifacts_commands_and_checked_checklist() {
+        let evidence = accepted_gui_phase6_evidence(false).replace(
+            "- `cargo run -p devil-cli -- evidence check --phase gui-phase6`\n",
+            "",
+        );
+        let issues = validate_gui_phase6_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "required artifact `plans/evidence/gui-productization/phase-6-package-runbook.md` is missing"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "required command `cargo run -p devil-cli -- evidence check --phase gui-phase6` is not listed"
+        )));
+    }
+
+    #[test]
+    fn gui_phase6_acceptance_claim_passes_with_checked_checklist_artifacts_and_commands() {
+        let evidence = accepted_gui_phase6_evidence(true);
+        let issues = validate_gui_phase6_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase7_not_accepted_status_allows_scaffold_without_artifacts() {
+        let evidence = format!(
+            r#"# GUI Phase 7 local IDE beta evidence
+
+## Acceptance Status
+
+- {PHASE7_NOT_ACCEPTED_MARKER}
+
+## Final Validation Checklist
+
+- [ ] pending
+"#
+        );
+
+        let issues = validate_gui_phase7_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase7_acceptance_status_rejects_conflicting_markers() {
+        let evidence = format!(
+            r#"# GUI Phase 7 local IDE beta evidence
+
+## Acceptance Status
+
+- {PHASE7_NOT_ACCEPTED_MARKER}
+- {PHASE7_ACCEPTED_MARKER}
+"#
+        );
+
+        let issues = validate_gui_phase7_acceptance_governance(&evidence, |_| true);
+
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("must not declare both"))
+        );
+    }
+
+    #[test]
+    fn gui_phase7_acceptance_claim_requires_artifacts_commands_limits_and_checked_checklist() {
+        let evidence = accepted_gui_phase7_evidence(false)
+            .replace(
+                "- `cargo run -p devil-cli -- evidence check --phase gui-phase7`\n",
+                "",
+            )
+            .replace("- Autonomous apply: unsupported\n", "");
+        let issues = validate_gui_phase7_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "required artifact `plans/evidence/gui-productization/phase-7-local-workflow-smoke.md` is missing"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "required command `cargo run -p devil-cli -- evidence check --phase gui-phase7` is not listed"
+        )));
+        assert!(issues.iter().any(|issue| {
+            issue.contains(
+                "required limitation marker `Autonomous apply: unsupported` is not listed",
+            )
+        }));
+    }
+
+    #[test]
+    fn gui_phase7_acceptance_claim_passes_with_checked_checklist_artifacts_commands_and_limits() {
+        let evidence = accepted_gui_phase7_evidence(true);
+        let issues = validate_gui_phase7_acceptance_governance(&evidence, |_| true);
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
     }

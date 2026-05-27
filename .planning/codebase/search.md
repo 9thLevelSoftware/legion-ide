@@ -1,6 +1,10 @@
-# Legion Codebase Search Protocol
+# Codebase Map Search Protocol
 
-Required artifacts:
+Generated: 2026-05-27T12:57:55.9718684-04:00
+Analyzed commit: beb896492685fadbb4d1669250f0a5f5a145f613
+Schema: 2.0
+
+## Required Artifacts
 
 - `.planning/CODEBASE.md`
 - `.planning/codebase/index.jsonl`
@@ -10,52 +14,46 @@ Required artifacts:
 
 ## Query Planning
 
-For a query, extract:
+For a `/legion:map --query "..."` request, split the query into:
 
-- Terms: important nouns, verbs, feature names, and technology names.
-- Path hints: explicit files or directories.
-- Symbol hints: structs, enums, traits, functions, crates, or commands.
-- Domain hints: UI, editor, workspace, save, security, storage, index, AI, terminal, remote, planning, governance.
+- terms: important nouns, verbs, feature names, and technology names
+- path_hints: explicit file or directory names
+- symbol_hints: structs, enums, traits, functions, commands, or crate names
+- domain_hints: likely areas such as renderer, app, protocol, save, language, terminal, trust, AI, plugin, collaboration, remote, storage, security, or governance
 
 ## Retrieval Order
 
 1. Search explicit path hints in `index.jsonl` and `symbols.json`.
 2. Search symbol hints in `symbols.json`.
 3. Search terms and aliases in `index.jsonl`.
-4. Search section headings and risk entries in `CODEBASE.md`.
+4. Search `.planning/CODEBASE.md` section headings for broad architecture context.
 5. Read the original source files for the top matches before planning, reviewing, or editing.
 
 ## Ranking
 
-Rank matches by exact path/symbol match first, then keyword/alias overlap, domain relevance, risk level, and high fan-in relevance.
-
-Return at most 5 primary chunks unless the caller explicitly requests broader coverage.
+Rank matches by exact path/symbol hit, keyword overlap, same domain, risk level, fan-in relevance, and current source recency. Return at most five primary chunks and five read-next paths unless the caller requests broader coverage.
 
 ## Safety Rules
 
-- Treat map chunks as navigation metadata, not source of truth for code edits.
-- If source files conflict with the map, source files win and `/legion:map --refresh` should be run.
-- Do not load the whole index into implementation prompts when a targeted query is enough.
-- Do not cite stale map data as current without checking metadata freshness.
+- Chunk summaries are not source of truth for code edits.
+- Current source wins if it conflicts with this map.
+- Do not cite stale map data as current without checking metadata and source fingerprint.
+- Do not load the whole index when a targeted query is enough.
 
 ## Example
 
-Query:
+Query: `trust assisted ai proposal preview`
 
-```text
-/legion:map --query "GUI renderer projection boundary"
-```
-
-Example result format:
+Expected high-value matches:
 
 | Rank | Chunk | Path | Lines | Kind | Why it matched |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `map:ui-projection:001` | `crates/devil-ui/src/ui.rs` | 1-180 | module | exact UI/projection boundary match |
-| 2 | `map:app-projection:001` | `crates/devil-app/src/lib.rs` | 3899-3968 | module | app builds projection snapshots consumed by UI |
-| 3 | `map:renderer-adr:001` | `plans/adrs/ADR-0002-ui-editor-rendering.md` | 1-220 | doc | renderer decision context |
+| 1 | `map:protocol-trust-ai:001` | `crates/devil-protocol/src/lib.rs` | 5112-6660 | module | Exact trust, assisted AI, permission, approval, checkpoint, proposal preview terms |
+| 2 | `map:app-composition:001` | `crates/devil-app/src/lib.rs` | 7090-7630 | module | App composition owns projection and workflow wiring |
+| 3 | `map:desktop-view:001` | `crates/devil-desktop/src/view.rs` | 1-330 | component | Desktop view displays trust and assistant rows |
 
 Read next:
 
-- `crates/devil-ui/src/ui.rs` lines 1-460
-- `crates/devil-app/src/lib.rs` lines 3899-4145
-- `plans/adrs/ADR-0002-ui-editor-rendering.md`
+- `crates/devil-protocol/src/lib.rs` around trust/assisted-AI projection DTOs
+- `crates/devil-app/src/lib.rs` around projection helpers and app workflow methods
+- `crates/devil-desktop/src/view.rs` around trust and assistant rendering rows

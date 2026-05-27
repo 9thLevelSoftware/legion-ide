@@ -23,9 +23,15 @@ use devil_ui::{
 };
 
 use crate::{
+    beta::{self, BetaWorkflowConfig},
     bridge::{
         DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput,
         DesktopCommandBridge,
+    },
+    diagnostics::DesktopDiagnosticsExport,
+    health::DesktopOperationalHealthSnapshot,
+    platform::{
+        NativePlatformObservation, build_platform_adapter_checks, build_platform_smoke_snapshot,
     },
     session::DesktopSessionStore,
     smoke::{self, RendererSmokeConfig},
@@ -45,8 +51,12 @@ pub struct DesktopLaunchConfig {
     pub principal: PrincipalId,
     /// Optional timed smoke-mode configuration.
     pub smoke: Option<RendererSmokeConfig>,
+    /// Optional non-native-window GUI Phase 7 beta smoke configuration.
+    pub beta: Option<BetaWorkflowConfig>,
     /// Optional metadata-only session JSON path.
     pub session_state: Option<PathBuf>,
+    /// Optional metadata-only diagnostics markdown path.
+    pub diagnostics_export: Option<PathBuf>,
 }
 
 impl DesktopLaunchConfig {
@@ -57,13 +67,21 @@ impl DesktopLaunchConfig {
             initial_file,
             principal: PrincipalId("desktop".to_string()),
             smoke: None,
+            beta: None,
             session_state: None,
+            diagnostics_export: None,
         }
     }
 
     /// Attach a metadata-only session state path.
     pub fn with_session_state(mut self, path: PathBuf) -> Self {
         self.session_state = Some(path);
+        self
+    }
+
+    /// Attach a metadata-only diagnostics export path.
+    pub fn with_diagnostics_export(mut self, path: PathBuf) -> Self {
+        self.diagnostics_export = Some(path);
         self
     }
 
@@ -75,12 +93,15 @@ impl DesktopLaunchConfig {
     /// Parse launch config from an argument iterator.
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut smoke_enabled = false;
+        let mut beta_enabled = false;
         let mut workspace_root = None;
+        let mut beta_workspace_root = None;
         let mut initial_file = None;
         let mut duration_ms = 1500;
         let mut evidence_path =
             PathBuf::from("plans/evidence/gui-productization/phase-2-renderer-smoke.md");
         let mut session_state = None;
+        let mut diagnostics_export = None;
         let mut positionals = Vec::new();
         let mut args = args.into_iter();
 
@@ -88,11 +109,18 @@ impl DesktopLaunchConfig {
             let arg_text = arg.to_string_lossy();
             match arg_text.as_ref() {
                 "--smoke" => smoke_enabled = true,
+                "--beta-smoke" => beta_enabled = true,
                 "--workspace" => {
                     let value = args
                         .next()
                         .ok_or_else(|| anyhow!("--workspace requires a path"))?;
                     workspace_root = Some(PathBuf::from(value));
+                }
+                "--beta-workspace" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--beta-workspace requires a path"))?;
+                    beta_workspace_root = Some(PathBuf::from(value));
                 }
                 "--file" => {
                     let value = args
@@ -118,6 +146,12 @@ impl DesktopLaunchConfig {
                         .ok_or_else(|| anyhow!("--session-state requires a path"))?;
                     session_state = Some(PathBuf::from(value));
                 }
+                "--diagnostics-export" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--diagnostics-export requires a path"))?;
+                    diagnostics_export = Some(PathBuf::from(value));
+                }
                 other if other.starts_with("--") => {
                     return Err(anyhow!("unsupported desktop argument: {other}"));
                 }
@@ -133,6 +167,9 @@ impl DesktopLaunchConfig {
         if workspace_root.as_os_str().is_empty() {
             return Err(anyhow!("workspace root cannot be empty"));
         }
+        if smoke_enabled && beta_enabled {
+            return Err(anyhow!("--smoke and --beta-smoke cannot be combined"));
+        }
 
         let initial_file = initial_file
             .or_else(|| {
@@ -143,7 +180,26 @@ impl DesktopLaunchConfig {
             .filter(|path| !path.trim().is_empty());
 
         let smoke = if smoke_enabled {
-            Some(RendererSmokeConfig::new(duration_ms, evidence_path)?)
+            Some(RendererSmokeConfig::new(
+                duration_ms,
+                evidence_path.clone(),
+            )?)
+        } else {
+            None
+        };
+        let beta = if beta_enabled {
+            Some(BetaWorkflowConfig::new(
+                workspace_root.clone(),
+                beta_workspace_root
+                    .unwrap_or_else(|| PathBuf::from(beta::DEFAULT_BETA_WORKSPACE_PATH)),
+                evidence_path,
+                session_state
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(beta::DEFAULT_BETA_SESSION_STATE_PATH)),
+                diagnostics_export
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(beta::DEFAULT_BETA_DIAGNOSTICS_EXPORT_PATH)),
+            )?)
         } else {
             None
         };
@@ -153,7 +209,9 @@ impl DesktopLaunchConfig {
             initial_file,
             principal: PrincipalId("desktop".to_string()),
             smoke,
+            beta,
             session_state,
+            diagnostics_export,
         })
     }
 }
@@ -238,6 +296,7 @@ pub struct DesktopRuntime {
     shell: Shell,
     bridge: DesktopCommandBridge,
     view: ProjectionView,
+    workspace_root: PathBuf,
     principal: PrincipalId,
     open_path_prompt: bool,
     open_path_text: String,
@@ -247,6 +306,7 @@ pub struct DesktopRuntime {
     explorer_expansion: BTreeSet<String>,
     panel_state: SessionPanelState,
     session_state_path: Option<PathBuf>,
+    diagnostics_export_path: Option<PathBuf>,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
     last_status_details: Vec<StatusMessageProjection>,
@@ -306,11 +366,12 @@ impl DesktopRuntime {
             .status_messages
             .extend(status_details.iter().cloned());
 
-        Ok(Self {
+        let mut runtime = Self {
             app,
             shell: Shell::new(snapshot),
             bridge: DesktopCommandBridge::new(),
             view: ProjectionView::new(),
+            workspace_root: config.workspace_root.clone(),
             principal: config.principal,
             open_path_prompt: false,
             open_path_text: String::new(),
@@ -320,11 +381,14 @@ impl DesktopRuntime {
             explorer_expansion,
             panel_state,
             session_state_path: config.session_state,
+            diagnostics_export_path: config.diagnostics_export,
             quit_requested: false,
             last_status: Some(status),
             last_status_details: status_details,
             last_outcome: DesktopWorkflowOutcome::Noop,
-        })
+        };
+        runtime.persist_diagnostics_if_configured();
+        Ok(runtime)
     }
 
     /// Handle a desktop action through bridge and app-owned authority.
@@ -349,6 +413,7 @@ impl DesktopRuntime {
         self.persist_session_if_configured();
         self.refresh_projection()?;
         self.last_outcome = outcome.clone();
+        self.persist_diagnostics_if_configured();
         Ok(outcome)
     }
 
@@ -403,6 +468,38 @@ impl DesktopRuntime {
         let record = self.capture_session_record()?;
         DesktopSessionStore::save(path, &record)?;
         Ok(())
+    }
+
+    /// Build metadata-only diagnostics from the current projection.
+    pub fn diagnostics_export(&self) -> DesktopDiagnosticsExport {
+        let snapshot = self.projection_snapshot();
+        let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+        let dirty_tab_count = tabs.iter().filter(|tab| tab.dirty).count();
+        let platform = build_platform_smoke_snapshot(
+            &snapshot,
+            build_platform_adapter_checks(&snapshot),
+            NativePlatformObservation::default(),
+        );
+        let last_outcome = format!("{:?}", self.last_outcome);
+        let health = DesktopOperationalHealthSnapshot::from_runtime(
+            &snapshot,
+            self.workspace_root.display().to_string(),
+            &self.last_outcome,
+            self.session_state_path.is_some(),
+            self.diagnostics_export_path.is_some(),
+        );
+
+        DesktopDiagnosticsExport {
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            workspace: self.workspace_root.display().to_string(),
+            open_tab_count: tabs.len(),
+            dirty_tab_count,
+            status_message_count: snapshot.status_messages.len(),
+            session_state_configured: self.session_state_path.is_some(),
+            last_outcome,
+            health,
+            platform,
+        }
     }
 
     fn projection_view_state(&self) -> DesktopProjectionViewState {
@@ -755,6 +852,18 @@ impl DesktopRuntime {
             );
         }
     }
+
+    fn persist_diagnostics_if_configured(&mut self) {
+        let Some(path) = &self.diagnostics_export_path else {
+            return;
+        };
+        if let Err(error) = self.diagnostics_export().write_to_path(path) {
+            self.set_status(
+                StatusSeverity::Warning,
+                format!("Diagnostics export failed: {error}"),
+            );
+        }
+    }
 }
 
 fn default_panel_state() -> SessionPanelState {
@@ -850,7 +959,9 @@ fn save_all_item_status_message(item: &AppSaveAllItemOutcome) -> StatusMessagePr
 /// Run the desktop adapter from process arguments.
 pub fn run_from_env() -> Result<()> {
     let config = DesktopLaunchConfig::from_env_args()?;
-    if let Some(smoke_config) = config.smoke.clone() {
+    if let Some(beta_config) = config.beta.clone() {
+        beta::run_beta_workflow(beta_config).map(|_| ())
+    } else if let Some(smoke_config) = config.smoke.clone() {
         smoke::run_smoke(config, smoke_config)
     } else {
         run_native(config)
@@ -858,7 +969,7 @@ pub fn run_from_env() -> Result<()> {
 }
 
 fn run_native(config: DesktopLaunchConfig) -> Result<()> {
-    let native_options = eframe::NativeOptions::default();
+    let native_options = desktop_native_options(WINDOW_TITLE);
     eframe::run_native(
         WINDOW_TITLE,
         native_options,
@@ -869,6 +980,17 @@ fn run_native(config: DesktopLaunchConfig) -> Result<()> {
         }),
     )
     .map_err(|error| anyhow!(error.to_string()))
+}
+
+/// Build the native desktop options shared by normal and smoke launches.
+#[must_use]
+pub fn desktop_native_options(title: &str) -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size([960.0, 720.0]),
+        ..Default::default()
+    }
 }
 
 struct DesktopEframeApp {

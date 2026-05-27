@@ -8,7 +8,9 @@ use devil_protocol::{
 };
 use devil_ui::{ShellProjectionSnapshot, StatusSeverity};
 
-use crate::{bridge::DesktopAction, search::DesktopSearchViewModel};
+use crate::{
+    bridge::DesktopAction, health::DesktopOperationalHealthSnapshot, search::DesktopSearchViewModel,
+};
 
 /// Adapter-local view state layered over app-owned projections.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -50,6 +52,8 @@ pub struct DesktopProjectionViewModel {
     pub language_rows: Vec<String>,
     /// Terminal panel summary rows.
     pub terminal_rows: Vec<String>,
+    /// Operational health summary rows.
+    pub operational_health_rows: Vec<String>,
     /// Plugin contribution summary rows.
     pub plugin_rows: Vec<String>,
     /// Collaboration presence rows.
@@ -104,6 +108,7 @@ impl DesktopProjectionViewModel {
             assistant_rows: assistant_rows(snapshot),
             language_rows: language_rows(snapshot),
             terminal_rows: terminal_rows(snapshot),
+            operational_health_rows: operational_health_rows(snapshot),
             plugin_rows: plugin_rows(snapshot),
             collaboration_rows: collaboration_rows(snapshot),
             empty_or_degraded_flags: flags,
@@ -211,6 +216,11 @@ impl ProjectionView {
                         ui.label("No terminal activity");
                     }
                     for row in &model.terminal_rows {
+                        ui.label(row);
+                    }
+                    ui.separator();
+                    ui.heading("Operational health");
+                    for row in &model.operational_health_rows {
                         ui.label(row);
                     }
                     ui.separator();
@@ -1346,6 +1356,10 @@ fn terminal_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         )
     }));
     rows
+}
+
+fn operational_health_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    DesktopOperationalHealthSnapshot::from_projection(snapshot).rows()
 }
 
 fn plugin_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

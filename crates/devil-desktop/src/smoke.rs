@@ -8,18 +8,22 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use devil_protocol::TextCoordinate;
 use devil_ui::ShellProjectionSnapshot;
 
 use crate::{
-    bridge::{DesktopAction, DesktopBridgeOutput, DesktopCommandBridge},
     metrics::{FrameTimingRecorder, FrameTimingSummary},
+    platform::{
+        DesktopPlatformAdapterChecks, DesktopPlatformSmokeSnapshot, NativePlatformObservation,
+        build_platform_adapter_checks, build_platform_smoke_snapshot,
+    },
     view::ProjectionView,
-    workflow::{DesktopLaunchConfig, DesktopRuntime},
+    workflow::{DesktopLaunchConfig, DesktopRuntime, desktop_native_options},
 };
 
-const ADAPTER_PATH_PASSED: &str = "adapter-path passed";
 const NOT_OBSERVED: &str = "not observed";
+
+/// Display label for the non-native-window GUI Phase 7 beta smoke harness.
+pub const GUI_PHASE7_BETA_SMOKE_LABEL: &str = "GUI Phase 7 beta smoke";
 
 /// Smoke-mode launch configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,16 +85,28 @@ pub struct RendererSmokeReport {
     pub timing: FrameTimingSummary,
     /// Focus smoke status.
     pub focus_smoke: String,
+    /// Menu smoke status.
+    pub menu_smoke: String,
+    /// Keyboard shortcut smoke status.
+    pub shortcut_smoke: String,
     /// Clipboard smoke status.
     pub clipboard_smoke: String,
     /// IME smoke status.
     pub ime_smoke: String,
+    /// Theme smoke status.
+    pub theme_smoke: String,
     /// High-DPI smoke status.
     pub high_dpi_smoke: String,
+    /// Focus traversal smoke status.
+    pub focus_traversal_smoke: String,
     /// File-dialog smoke status.
     pub file_dialog_smoke: String,
     /// Accessibility smoke status.
     pub accessibility_smoke: String,
+    /// Metadata-only accessibility projection status.
+    pub accessibility_tree_smoke: String,
+    /// Count of metadata-only accessibility projection nodes.
+    pub accessibility_projection_node_count: usize,
     /// Large-file degraded projection status.
     pub large_file_degraded_status: String,
     /// Bounded degraded search status.
@@ -117,11 +133,17 @@ impl RendererSmokeReport {
             duration_ms: smoke.duration_ms,
             timing: FrameTimingSummary::default(),
             focus_smoke: NOT_OBSERVED.to_string(),
+            menu_smoke: NOT_OBSERVED.to_string(),
+            shortcut_smoke: NOT_OBSERVED.to_string(),
             clipboard_smoke: NOT_OBSERVED.to_string(),
             ime_smoke: NOT_OBSERVED.to_string(),
+            theme_smoke: NOT_OBSERVED.to_string(),
             high_dpi_smoke: NOT_OBSERVED.to_string(),
+            focus_traversal_smoke: NOT_OBSERVED.to_string(),
             file_dialog_smoke: NOT_OBSERVED.to_string(),
             accessibility_smoke: NOT_OBSERVED.to_string(),
+            accessibility_tree_smoke: NOT_OBSERVED.to_string(),
+            accessibility_projection_node_count: 0,
             large_file_degraded_status: NOT_OBSERVED.to_string(),
             bounded_search_status: NOT_OBSERVED.to_string(),
             full_text_projection_status: NOT_OBSERVED.to_string(),
@@ -142,7 +164,7 @@ impl RendererSmokeReport {
         };
         format!(
             concat!(
-                "# Phase 2 Renderer Smoke Evidence\n\n",
+                "# Renderer Smoke Evidence\n\n",
                 "## Status\n\n",
                 "status: {status}\n",
                 "workspace: {workspace}\n",
@@ -159,11 +181,17 @@ impl RendererSmokeReport {
                 "frame_variance_ms2: {variance:.3}\n\n",
                 "## Platform Smoke\n\n",
                 "focus_smoke: {focus}\n",
+                "menu_smoke: {menu}\n",
+                "shortcut_smoke: {shortcut}\n",
                 "clipboard_smoke: {clipboard}\n",
                 "ime_smoke: {ime}\n",
+                "theme_smoke: {theme}\n",
                 "high_dpi_smoke: {high_dpi}\n",
+                "focus_traversal_smoke: {focus_traversal}\n",
                 "file_dialog_smoke: {file_dialog}\n",
-                "accessibility_smoke: {accessibility}\n\n",
+                "accessibility_smoke: {accessibility}\n",
+                "accessibility_tree_smoke: {accessibility_tree}\n",
+                "accessibility_projection_node_count: {accessibility_node_count}\n\n",
                 "## Large File Guardrails\n\n",
                 "large_file_degraded_status: {large_file_degraded_status}\n",
                 "bounded_search_status: {bounded_search_status}\n",
@@ -186,11 +214,17 @@ impl RendererSmokeReport {
             average_frame = self.timing.average_frame_ms,
             variance = self.timing.frame_variance_ms2,
             focus = self.focus_smoke,
+            menu = self.menu_smoke,
+            shortcut = self.shortcut_smoke,
             clipboard = self.clipboard_smoke,
             ime = self.ime_smoke,
+            theme = self.theme_smoke,
             high_dpi = self.high_dpi_smoke,
+            focus_traversal = self.focus_traversal_smoke,
             file_dialog = self.file_dialog_smoke,
             accessibility = self.accessibility_smoke,
+            accessibility_tree = self.accessibility_tree_smoke,
+            accessibility_node_count = self.accessibility_projection_node_count,
             large_file_degraded_status = self.large_file_degraded_status,
             bounded_search_status = self.bounded_search_status,
             full_text_projection_status = self.full_text_projection_status,
@@ -238,12 +272,7 @@ fn run_smoke_window(
     let duration = Duration::from_millis(smoke.duration_ms);
     let report_config = config.clone();
 
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Devil IDE Smoke")
-            .with_inner_size([960.0, 720.0]),
-        ..Default::default()
-    };
+    let native_options = desktop_native_options("Devil IDE Smoke");
 
     eframe::run_native(
         "Devil IDE Smoke",
@@ -252,8 +281,14 @@ fn run_smoke_window(
             let runtime = DesktopRuntime::open(config)
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
             if let Ok(mut observations) = observations_for_app.lock() {
-                observations
-                    .apply_adapter_checks(adapter_platform_checks(&runtime.projection_snapshot()));
+                let snapshot = runtime.projection_snapshot();
+                let adapter_checks = adapter_platform_checks(&snapshot);
+                observations.apply_adapter_checks(adapter_checks);
+                observations.apply_platform_snapshot(build_platform_smoke_snapshot(
+                    &snapshot,
+                    adapter_checks,
+                    NativePlatformObservation::default(),
+                ));
             }
             Ok(Box::new(RendererSmokeApp::new(
                 runtime,
@@ -273,6 +308,7 @@ fn run_smoke_window(
         .lock()
         .map_err(|_| anyhow!("smoke observations lock was poisoned"))?
         .clone();
+    let platform_snapshot = observations.platform_snapshot.clone().unwrap_or_default();
 
     let mut errors = Vec::new();
     if observations.frame_count == 0 {
@@ -292,11 +328,17 @@ fn run_smoke_window(
         duration_ms: smoke.duration_ms,
         timing,
         focus_smoke: observations.focus_status(),
-        clipboard_smoke: adapter_status(observations.clipboard_adapter_path),
-        ime_smoke: adapter_status(observations.ime_adapter_path),
+        menu_smoke: platform_snapshot.menu_smoke,
+        shortcut_smoke: platform_snapshot.shortcut_smoke,
+        clipboard_smoke: platform_snapshot.clipboard_smoke,
+        ime_smoke: platform_snapshot.ime_smoke,
+        theme_smoke: platform_snapshot.theme_smoke,
         high_dpi_smoke: observations.high_dpi_status(),
-        file_dialog_smoke: adapter_status(observations.file_dialog_adapter_path),
+        focus_traversal_smoke: platform_snapshot.focus_traversal_smoke,
+        file_dialog_smoke: platform_snapshot.file_dialog_smoke,
         accessibility_smoke: NOT_OBSERVED.to_string(),
+        accessibility_tree_smoke: platform_snapshot.accessibility_tree_smoke,
+        accessibility_projection_node_count: platform_snapshot.accessibility_projection_node_count,
         large_file_degraded_status: observations.large_file_degraded_status(),
         bounded_search_status: observations.bounded_search_status(),
         full_text_projection_status: observations.full_text_projection_status(),
@@ -314,15 +356,13 @@ fn smoke_command(config: &DesktopLaunchConfig, smoke: &RendererSmokeConfig) -> S
     }
     parts.push(format!("--duration-ms {}", smoke.duration_ms));
     parts.push(format!("--evidence {}", smoke.evidence_path.display()));
-    parts.join(" ")
-}
-
-fn adapter_status(passed: bool) -> String {
-    if passed {
-        ADAPTER_PATH_PASSED.to_string()
-    } else {
-        "failed".to_string()
+    if let Some(path) = &config.session_state {
+        parts.push(format!("--session-state {}", path.display()));
     }
+    if let Some(path) = &config.diagnostics_export {
+        parts.push(format!("--diagnostics-export {}", path.display()));
+    }
+    parts.join(" ")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -330,19 +370,39 @@ struct SmokeObservations {
     frame_count: u64,
     focused: Option<bool>,
     pixels_per_point: Option<f32>,
-    clipboard_adapter_path: bool,
-    ime_adapter_path: bool,
-    file_dialog_adapter_path: bool,
+    clipboard_adapter_path: Option<bool>,
+    ime_adapter_path: Option<bool>,
+    file_dialog_adapter_path: Option<bool>,
+    platform_snapshot: Option<DesktopPlatformSmokeSnapshot>,
     large_file_degraded_observed: bool,
     degraded_small_preview_absent: bool,
     bounded_search_observed: bool,
 }
 
 impl SmokeObservations {
-    fn apply_adapter_checks(&mut self, checks: AdapterPlatformChecks) {
+    fn apply_adapter_checks(&mut self, checks: DesktopPlatformAdapterChecks) {
         self.clipboard_adapter_path = checks.clipboard_adapter_path;
         self.ime_adapter_path = checks.ime_adapter_path;
         self.file_dialog_adapter_path = checks.file_dialog_adapter_path;
+    }
+
+    fn apply_platform_snapshot(&mut self, snapshot: DesktopPlatformSmokeSnapshot) {
+        self.platform_snapshot = Some(snapshot);
+    }
+
+    fn adapter_checks(&self) -> DesktopPlatformAdapterChecks {
+        DesktopPlatformAdapterChecks {
+            clipboard_adapter_path: self.clipboard_adapter_path,
+            ime_adapter_path: self.ime_adapter_path,
+            file_dialog_adapter_path: self.file_dialog_adapter_path,
+        }
+    }
+
+    fn native_observation(&self) -> NativePlatformObservation {
+        NativePlatformObservation {
+            focused: self.focused,
+            pixels_per_point: self.pixels_per_point,
+        }
     }
 
     fn apply_projection_checks(&mut self, snapshot: &ShellProjectionSnapshot) {
@@ -464,6 +524,13 @@ impl eframe::App for RendererSmokeApp {
         let snapshot = self.runtime.projection_snapshot();
         if let Ok(mut observations) = self.observations.lock() {
             observations.apply_projection_checks(&snapshot);
+            let adapter_checks = observations.adapter_checks();
+            let native = observations.native_observation();
+            observations.apply_platform_snapshot(build_platform_smoke_snapshot(
+                &snapshot,
+                adapter_checks,
+                native,
+            ));
         }
         let _ = self.view.render(ui, &snapshot);
 
@@ -475,57 +542,6 @@ impl eframe::App for RendererSmokeApp {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct AdapterPlatformChecks {
-    clipboard_adapter_path: bool,
-    ime_adapter_path: bool,
-    file_dialog_adapter_path: bool,
-}
-
-fn adapter_platform_checks(snapshot: &ShellProjectionSnapshot) -> AdapterPlatformChecks {
-    let bridge = DesktopCommandBridge::new();
-    let at = projected_cursor(snapshot);
-    AdapterPlatformChecks {
-        clipboard_adapter_path: matches!(
-            bridge.translate(
-                DesktopAction::ClipboardPaste {
-                    text: "clipboard-smoke".to_string(),
-                    at,
-                },
-                snapshot,
-            ),
-            DesktopBridgeOutput::Intent(_)
-        ),
-        ime_adapter_path: matches!(
-            bridge.translate(
-                DesktopAction::ImeCommit {
-                    text: "ime-smoke".to_string(),
-                    at,
-                },
-                snapshot,
-            ),
-            DesktopBridgeOutput::Intent(_)
-        ),
-        file_dialog_adapter_path: matches!(
-            bridge.translate(
-                DesktopAction::OpenPathDialogSelected("Cargo.toml".to_string()),
-                snapshot,
-            ),
-            DesktopBridgeOutput::Intent(_)
-        ),
-    }
-}
-
-fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {
-    snapshot
-        .active_buffer_projection
-        .viewport
-        .as_ref()
-        .map(|viewport| viewport.cursor)
-        .unwrap_or(TextCoordinate {
-            line: 0,
-            character: 0,
-            byte_offset: Some(0),
-            utf16_offset: Some(0),
-        })
+fn adapter_platform_checks(snapshot: &ShellProjectionSnapshot) -> DesktopPlatformAdapterChecks {
+    build_platform_adapter_checks(snapshot)
 }
