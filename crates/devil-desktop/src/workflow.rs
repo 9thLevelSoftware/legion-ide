@@ -1,10 +1,12 @@
 //! Desktop runtime workflow boundary.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{collections::BTreeSet, ffi::OsString, path::PathBuf};
 
 use anyhow::{Result, anyhow};
-use devil_app::{AppCommandOutcome, AppComposition, AppSaveOutcome};
-use devil_protocol::{PrincipalId, TextCoordinate, WorkspaceTrustState};
+use devil_app::{AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveOutcome};
+use devil_protocol::{
+    BufferId, PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, WorkspaceTrustState,
+};
 use devil_ui::{
     CommandDispatchIntent, Shell, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
 };
@@ -15,7 +17,7 @@ use crate::{
         DesktopCommandBridge,
     },
     smoke::{self, RendererSmokeConfig},
-    view::ProjectionView,
+    view::{DesktopProjectionViewState, ProjectionView},
 };
 
 const WINDOW_TITLE: &str = "Devil IDE";
@@ -138,10 +140,31 @@ pub enum DesktopWorkflowOutcome {
     Edited,
     /// Save completed through app/workspace authority.
     Saved,
+    /// Save-all completed through app/workspace authority.
+    SaveAll {
+        /// Count of buffers saved successfully.
+        saved_count: usize,
+        /// Count of rejected saves that kept buffers dirty.
+        rejected_count: usize,
+    },
     /// Save was rejected without marking editor text clean.
     SaveRejected(String),
+    /// Active tab changed through app authority.
+    TabSwitched(BufferId),
+    /// Clean tab closed through app authority.
+    TabClosed(BufferId),
+    /// Dirty tab close produced an app-owned prompt.
+    CloseDirtyPrompt(BufferId),
+    /// Cursor update completed through editor authority.
+    CursorSet(BufferId),
+    /// Selection update completed through editor authority.
+    SelectionSet(BufferId),
+    /// Viewport scroll update completed through app authority.
+    ViewportScrollSet(BufferId),
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
+    /// Adapter-local explorer expansion changed.
+    ExplorerPathToggled(String),
     /// Open-path prompt should be shown by the adapter.
     OpenPathPromptRequested,
     /// Workspace root was opened through app authority.
@@ -161,6 +184,7 @@ pub struct DesktopRuntime {
     principal: PrincipalId,
     open_path_prompt: bool,
     open_path_text: String,
+    explorer_expansion: BTreeSet<String>,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
     last_outcome: DesktopWorkflowOutcome,
@@ -194,6 +218,7 @@ impl DesktopRuntime {
             principal: config.principal,
             open_path_prompt: false,
             open_path_text: String::new(),
+            explorer_expansion: BTreeSet::new(),
             quit_requested: false,
             last_status: Some(status_message(
                 StatusSeverity::Info,
@@ -242,6 +267,22 @@ impl DesktopRuntime {
         &self.last_outcome
     }
 
+    /// Returns whether an explorer path is expanded by adapter-local state.
+    pub fn explorer_path_expanded(&self, path: &str) -> bool {
+        self.explorer_expansion.contains(path)
+    }
+
+    fn projection_view_state(&self) -> DesktopProjectionViewState {
+        DesktopProjectionViewState {
+            expanded_explorer_paths: self.explorer_expansion.clone(),
+            selected_explorer_file: None,
+        }
+    }
+
+    fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
+        !self.open_path_prompt && !close_dirty_prompt_active(snapshot)
+    }
+
     fn dispatch_intent(&mut self, intent: CommandDispatchIntent) -> Result<DesktopWorkflowOutcome> {
         match self.app.dispatch_ui_intent(intent) {
             Ok(outcome) => Ok(self.map_app_outcome(outcome)),
@@ -259,6 +300,13 @@ impl DesktopRuntime {
                 self.open_path_prompt = true;
                 self.set_status(StatusSeverity::Info, "Open path requested");
                 Ok(DesktopWorkflowOutcome::OpenPathPromptRequested)
+            }
+            DesktopAppRequest::ToggleExplorerPath { path } => {
+                if !self.explorer_expansion.remove(&path) {
+                    self.explorer_expansion.insert(path.clone());
+                }
+                self.set_status(StatusSeverity::Info, format!("Explorer toggled {path}"));
+                Ok(DesktopWorkflowOutcome::ExplorerPathToggled(path))
             }
             DesktopAppRequest::OpenWorkspace { root } => match self.app.open_workspace(
                 &root,
@@ -307,6 +355,57 @@ impl DesktopRuntime {
                 let message = format!("Save rejected: {response:?}");
                 self.set_status(StatusSeverity::Warning, message.clone());
                 DesktopWorkflowOutcome::SaveRejected(message)
+            }
+            AppCommandOutcome::SaveAll(outcome) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!(
+                        "Save all completed: {} saved, {} rejected",
+                        outcome.saved_count, outcome.rejected_count
+                    ),
+                );
+                DesktopWorkflowOutcome::SaveAll {
+                    saved_count: outcome.saved_count,
+                    rejected_count: outcome.rejected_count,
+                }
+            }
+            AppCommandOutcome::TabSwitched(buffer_id) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Tab switched {}", buffer_id.0),
+                );
+                DesktopWorkflowOutcome::TabSwitched(buffer_id)
+            }
+            AppCommandOutcome::TabClose(AppCloseTabOutcome::Closed { buffer_id }) => {
+                self.set_status(StatusSeverity::Info, format!("Tab closed {}", buffer_id.0));
+                DesktopWorkflowOutcome::TabClosed(buffer_id)
+            }
+            AppCommandOutcome::TabClose(AppCloseTabOutcome::CloseDirtyPrompt {
+                buffer_id, ..
+            }) => {
+                self.set_status(
+                    StatusSeverity::Warning,
+                    format!("Close dirty prompt {}", buffer_id.0),
+                );
+                DesktopWorkflowOutcome::CloseDirtyPrompt(buffer_id)
+            }
+            AppCommandOutcome::CursorSet(buffer_id) => {
+                self.set_status(StatusSeverity::Info, format!("Cursor set {}", buffer_id.0));
+                DesktopWorkflowOutcome::CursorSet(buffer_id)
+            }
+            AppCommandOutcome::SelectionSet(buffer_id) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Selection set {}", buffer_id.0),
+                );
+                DesktopWorkflowOutcome::SelectionSet(buffer_id)
+            }
+            AppCommandOutcome::ViewportScrollSet(buffer_id) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Viewport scroll set {}", buffer_id.0),
+                );
+                DesktopWorkflowOutcome::ViewportScrollSet(buffer_id)
             }
             AppCommandOutcome::ExplorerRefreshed(_) => {
                 self.set_status(StatusSeverity::Info, "Explorer refreshed");
@@ -381,17 +480,36 @@ impl DesktopEframeApp {
     fn handle_keyboard(&mut self, ui: &egui::Ui) {
         let mut actions = Vec::new();
         let snapshot = self.runtime.projection_snapshot();
-        let editor_input_enabled = !self.runtime.open_path_prompt;
+        let editor_input_enabled = self.runtime.editor_input_enabled(&snapshot);
         ui.input(|input| {
             let command = input.modifiers.command;
             if command && input.key_pressed(egui::Key::S) {
-                actions.push(DesktopAction::SaveActive);
+                if input.modifiers.shift {
+                    actions.push(DesktopAction::SaveAll);
+                } else {
+                    actions.push(DesktopAction::SaveActive);
+                }
             }
             if command && input.key_pressed(egui::Key::Q) {
                 actions.push(DesktopAction::Quit);
             }
+            if command && input.key_pressed(egui::Key::W) {
+                if let Some(buffer_id) = active_buffer_for_input(&snapshot) {
+                    actions.push(DesktopAction::CloseTab { buffer_id });
+                }
+            }
+            if command && input.key_pressed(egui::Key::Tab) {
+                if let Some(buffer_id) =
+                    adjacent_tab_id(&snapshot, if input.modifiers.shift { -1 } else { 1 })
+                {
+                    actions.push(DesktopAction::SwitchTab { buffer_id });
+                }
+            }
             if command && input.key_pressed(egui::Key::O) {
                 actions.push(DesktopAction::ShowOpenPathPrompt);
+            }
+            if input.key_pressed(egui::Key::F5) {
+                actions.push(DesktopAction::RefreshExplorer);
             }
             if command && input.key_pressed(egui::Key::Z) {
                 if input.modifiers.shift {
@@ -403,6 +521,11 @@ impl DesktopEframeApp {
 
             actions.extend(editor_text_input_actions(
                 &input.events,
+                &snapshot,
+                editor_input_enabled,
+            ));
+            actions.extend(editor_keyboard_control_actions(
+                input,
                 &snapshot,
                 editor_input_enabled,
             ));
@@ -451,7 +574,14 @@ impl eframe::App for DesktopEframeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_keyboard(ui);
         let snapshot = self.runtime.projection_snapshot();
-        let output = self.runtime.view.render(ui, &snapshot);
+        let view_state = self.runtime.projection_view_state();
+        let output = self
+            .runtime
+            .view
+            .render_with_state(ui, &snapshot, &view_state);
+        for action in output.actions {
+            let _ = self.runtime.handle_action(action);
+        }
         if output.needs_repaint {
             ui.ctx().request_repaint();
         }
@@ -469,6 +599,38 @@ fn status_message(severity: StatusSeverity, message: impl Into<String>) -> Statu
     }
 }
 
+fn close_dirty_prompt_active(snapshot: &ShellProjectionSnapshot) -> bool {
+    snapshot
+        .daily_editing_projection
+        .close_dirty_prompt
+        .is_some()
+}
+
+fn active_buffer_for_input(snapshot: &ShellProjectionSnapshot) -> Option<BufferId> {
+    snapshot
+        .daily_editing_projection
+        .tabs
+        .active_buffer_id
+        .or(snapshot.active_buffer_projection.buffer_id)
+}
+
+fn adjacent_tab_id(snapshot: &ShellProjectionSnapshot, direction: isize) -> Option<BufferId> {
+    let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+    if tabs.is_empty() {
+        return active_buffer_for_input(snapshot);
+    }
+
+    let active = active_buffer_for_input(snapshot)?;
+    let active_index = tabs
+        .iter()
+        .position(|tab| tab.buffer_id == active)
+        .or_else(|| tabs.iter().position(|tab| tab.active))
+        .unwrap_or(0);
+    let len = tabs.len() as isize;
+    let next = (active_index as isize + direction).rem_euclid(len) as usize;
+    Some(tabs[next].buffer_id)
+}
+
 fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {
     snapshot
         .active_buffer_projection
@@ -480,6 +642,28 @@ fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {
             character: 0,
             byte_offset: Some(0),
             utf16_offset: Some(0),
+        })
+}
+
+fn projected_scroll(snapshot: &ShellProjectionSnapshot) -> ViewportScroll {
+    let active = active_buffer_for_input(snapshot);
+    if let Some(state) = snapshot
+        .daily_editing_projection
+        .viewport_states
+        .iter()
+        .find(|state| Some(state.buffer_id) == active)
+    {
+        return state.scroll;
+    }
+
+    snapshot
+        .active_buffer_projection
+        .viewport
+        .as_ref()
+        .map(|viewport| viewport.scroll)
+        .unwrap_or(ViewportScroll {
+            top_line: 0,
+            left_column: 0,
         })
 }
 
@@ -514,9 +698,145 @@ fn editor_text_input_actions(
     actions
 }
 
+fn editor_keyboard_control_actions(
+    input: &egui::InputState,
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+) -> Vec<DesktopAction> {
+    if !editor_input_enabled || input.modifiers.command {
+        return Vec::new();
+    }
+
+    let Some(buffer_id) = active_buffer_for_input(snapshot) else {
+        return Vec::new();
+    };
+
+    let mut actions = Vec::new();
+    if input.key_pressed(egui::Key::ArrowLeft) {
+        actions.push(cursor_or_selection_action(
+            buffer_id,
+            projected_cursor(snapshot),
+            0,
+            -1,
+            input.modifiers.shift,
+        ));
+    }
+    if input.key_pressed(egui::Key::ArrowRight) {
+        actions.push(cursor_or_selection_action(
+            buffer_id,
+            projected_cursor(snapshot),
+            0,
+            1,
+            input.modifiers.shift,
+        ));
+    }
+    if input.key_pressed(egui::Key::ArrowUp) {
+        actions.push(cursor_or_selection_action(
+            buffer_id,
+            projected_cursor(snapshot),
+            -1,
+            0,
+            input.modifiers.shift,
+        ));
+    }
+    if input.key_pressed(egui::Key::ArrowDown) {
+        actions.push(cursor_or_selection_action(
+            buffer_id,
+            projected_cursor(snapshot),
+            1,
+            0,
+            input.modifiers.shift,
+        ));
+    }
+    if input.key_pressed(egui::Key::PageUp) {
+        let scroll = projected_scroll(snapshot);
+        actions.push(DesktopAction::SetViewportScroll {
+            buffer_id: Some(buffer_id),
+            scroll: ViewportScroll {
+                top_line: scroll.top_line.saturating_sub(25),
+                left_column: scroll.left_column,
+            },
+        });
+    }
+    if input.key_pressed(egui::Key::PageDown) {
+        let scroll = projected_scroll(snapshot);
+        actions.push(DesktopAction::SetViewportScroll {
+            buffer_id: Some(buffer_id),
+            scroll: ViewportScroll {
+                top_line: scroll.top_line.saturating_add(25),
+                left_column: scroll.left_column,
+            },
+        });
+    }
+
+    actions
+}
+
+fn cursor_or_selection_action(
+    buffer_id: BufferId,
+    cursor: TextCoordinate,
+    line_delta: i32,
+    character_delta: i32,
+    selecting: bool,
+) -> DesktopAction {
+    let target = moved_coordinate(cursor, line_delta, character_delta);
+    if selecting {
+        DesktopAction::SetSelection {
+            buffer_id: Some(buffer_id),
+            range: ordered_range(cursor, target),
+        }
+    } else {
+        DesktopAction::SetCursor {
+            buffer_id: Some(buffer_id),
+            cursor: target,
+        }
+    }
+}
+
+fn moved_coordinate(
+    coordinate: TextCoordinate,
+    line_delta: i32,
+    character_delta: i32,
+) -> TextCoordinate {
+    let line = if line_delta.is_negative() {
+        coordinate.line.saturating_sub(line_delta.unsigned_abs())
+    } else {
+        coordinate.line.saturating_add(line_delta as u32)
+    };
+    let character = if character_delta.is_negative() {
+        coordinate
+            .character
+            .saturating_sub(character_delta.unsigned_abs())
+    } else {
+        coordinate.character.saturating_add(character_delta as u32)
+    };
+
+    TextCoordinate {
+        line,
+        character,
+        byte_offset: None,
+        utf16_offset: Some(character as u64),
+    }
+}
+
+fn ordered_range(first: TextCoordinate, second: TextCoordinate) -> ProtocolTextRange {
+    if (first.line, first.character) <= (second.line, second.character) {
+        ProtocolTextRange {
+            start: first,
+            end: second,
+        }
+    } else {
+        ProtocolTextRange {
+            start: second,
+            end: first,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use devil_protocol::BufferId;
+    use devil_protocol::{BufferId, CanonicalPath, FileId};
+    use devil_ui::ui::{CloseDirtyPromptProjection, DailyEditingProjection};
     use devil_ui::{ActiveBufferProjection, Shell};
 
     use super::*;
@@ -567,6 +887,28 @@ mod tests {
                     at,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn close_dirty_prompt_disables_editor_text_input() {
+        let mut snapshot = snapshot_with_active_buffer();
+        snapshot.daily_editing_projection = DailyEditingProjection {
+            close_dirty_prompt: Some(CloseDirtyPromptProjection {
+                buffer_id: BufferId(1),
+                file_id: Some(FileId(2)),
+                file_path: Some(CanonicalPath("dirty.txt".to_string())),
+                title: "dirty.txt".to_string(),
+                message: "Save changes before closing dirty.txt?".to_string(),
+            }),
+            ..DailyEditingProjection::empty()
+        };
+        let events = vec![egui::Event::Text("x".to_string())];
+
+        assert!(close_dirty_prompt_active(&snapshot));
+        assert!(
+            editor_text_input_actions(&events, &snapshot, !close_dirty_prompt_active(&snapshot))
+                .is_empty()
         );
     }
 }

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use devil_protocol::{BufferId, ProtocolTextRange, TextCoordinate};
+use devil_protocol::{BufferId, FileId, ProtocolTextRange, TextCoordinate, ViewportScroll};
 use devil_ui::{CommandDispatchIntent, ShellProjectionSnapshot};
 use thiserror::Error;
 
@@ -13,6 +13,18 @@ pub enum DesktopAction {
     Quit,
     /// Save the active buffer through app authority.
     SaveActive,
+    /// Save every open tab through app authority.
+    SaveAll,
+    /// Switch to a projected tab.
+    SwitchTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request close for a projected tab.
+    CloseTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
     /// Open a user-entered path through workspace authority.
     OpenPathText(String),
     /// Open a path selected by a native file dialog.
@@ -28,6 +40,16 @@ pub enum DesktopAction {
     },
     /// Refresh the explorer projection through app authority.
     RefreshExplorer,
+    /// Toggle adapter-local explorer expansion for a canonical path.
+    ToggleExplorerPath {
+        /// Canonical path represented by the explorer row.
+        path: String,
+    },
+    /// Select/reveal an explorer file through app authority.
+    SelectExplorerFile {
+        /// Projected workspace file identifier.
+        file_id: FileId,
+    },
     /// Insert text at a projected coordinate.
     InsertText {
         /// Text to insert.
@@ -65,6 +87,27 @@ pub enum DesktopAction {
     Undo,
     /// Redo the active buffer.
     Redo,
+    /// Set the primary cursor for a buffer or the active buffer.
+    SetCursor {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+        /// Cursor coordinate in projection space.
+        cursor: TextCoordinate,
+    },
+    /// Set the primary selection for a buffer or the active buffer.
+    SetSelection {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+        /// Selection range in projection space.
+        range: ProtocolTextRange,
+    },
+    /// Set viewport scroll for a buffer or the active buffer.
+    SetViewportScroll {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+        /// Projected viewport scroll state.
+        scroll: ViewportScroll,
+    },
 }
 
 /// App-owned request that is not a direct UI command intent.
@@ -77,6 +120,11 @@ pub enum DesktopAppRequest {
     },
     /// Ask workflow code to display an open-path prompt.
     ShowOpenPathPrompt,
+    /// Toggle adapter-local explorer expansion.
+    ToggleExplorerPath {
+        /// Canonical path represented by the explorer row.
+        path: String,
+    },
 }
 
 /// Result of translating a desktop action.
@@ -98,6 +146,18 @@ pub enum DesktopBridgeError {
     /// The current projection has no active buffer id.
     #[error("active buffer is required for this desktop action")]
     MissingActiveBuffer,
+    /// Target buffer was not present in the projected tab list.
+    #[error("unknown tab buffer: {buffer_id:?}")]
+    UnknownTab {
+        /// Unknown tab buffer.
+        buffer_id: BufferId,
+    },
+    /// Target file was not present in the projected explorer tree.
+    #[error("unknown explorer file: {file_id:?}")]
+    UnknownExplorerFile {
+        /// Unknown explorer file.
+        file_id: FileId,
+    },
     /// Path text was empty after trimming.
     #[error("path input is empty")]
     InvalidPathInput,
@@ -130,6 +190,17 @@ impl DesktopCommandBridge {
             DesktopAction::SaveActive => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::Save { buffer_id }
             }),
+            DesktopAction::SaveAll => DesktopBridgeOutput::Intent(CommandDispatchIntent::SaveAll),
+            DesktopAction::SwitchTab { buffer_id } => {
+                self.with_known_tab(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::SwitchTab { buffer_id }
+                })
+            }
+            DesktopAction::CloseTab { buffer_id } => {
+                self.with_known_tab(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::CloseTab { buffer_id }
+                })
+            }
             DesktopAction::OpenPathText(path) | DesktopAction::OpenPathDialogSelected(path) => {
                 match normalized_path(path) {
                     Some(path) => {
@@ -147,6 +218,19 @@ impl DesktopCommandBridge {
             }
             DesktopAction::RefreshExplorer => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshExplorer)
+            }
+            DesktopAction::ToggleExplorerPath { path } => match normalized_path(path) {
+                Some(path) => {
+                    DesktopBridgeOutput::AppRequest(DesktopAppRequest::ToggleExplorerPath { path })
+                }
+                None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidPathInput),
+            },
+            DesktopAction::SelectExplorerFile { file_id } => {
+                if explorer_contains_file(snapshot, file_id) {
+                    DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id })
+                } else {
+                    DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile { file_id })
+                }
             }
             DesktopAction::InsertText { text, at }
             | DesktopAction::ClipboardPaste { text, at }
@@ -176,6 +260,21 @@ impl DesktopCommandBridge {
             DesktopAction::Redo => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::Redo { buffer_id }
             }),
+            DesktopAction::SetCursor { buffer_id, cursor } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::SetCursor { buffer_id, cursor }
+                })
+            }
+            DesktopAction::SetSelection { buffer_id, range } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::SetSelection { buffer_id, range }
+                })
+            }
+            DesktopAction::SetViewportScroll { buffer_id, scroll } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::SetViewportScroll { buffer_id, scroll }
+                })
+            }
         }
     }
 
@@ -189,6 +288,35 @@ impl DesktopCommandBridge {
             None => DesktopBridgeOutput::Error(DesktopBridgeError::MissingActiveBuffer),
         }
     }
+
+    fn with_resolved_buffer(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        requested: Option<BufferId>,
+        build: impl FnOnce(BufferId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        let Some(buffer_id) = requested
+            .or(snapshot.daily_editing_projection.tabs.active_buffer_id)
+            .or(snapshot.active_buffer_projection.buffer_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::MissingActiveBuffer);
+        };
+
+        self.with_known_tab(snapshot, buffer_id, build)
+    }
+
+    fn with_known_tab(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        buffer_id: BufferId,
+        build: impl FnOnce(BufferId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if tab_is_known(snapshot, buffer_id) {
+            DesktopBridgeOutput::Intent(build(buffer_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownTab { buffer_id })
+        }
+    }
 }
 
 fn normalized_path(path: String) -> Option<String> {
@@ -198,4 +326,21 @@ fn normalized_path(path: String) -> Option<String> {
     } else {
         Some(path.to_string())
     }
+}
+
+fn tab_is_known(snapshot: &ShellProjectionSnapshot, buffer_id: BufferId) -> bool {
+    let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+    if tabs.is_empty() {
+        return snapshot.active_buffer_projection.buffer_id == Some(buffer_id);
+    }
+
+    tabs.iter().any(|tab| tab.buffer_id == buffer_id)
+}
+
+fn explorer_contains_file(snapshot: &ShellProjectionSnapshot, file_id: FileId) -> bool {
+    snapshot
+        .explorer_projection
+        .nodes
+        .iter()
+        .any(|node| node.file_id == file_id)
 }

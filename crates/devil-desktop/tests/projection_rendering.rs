@@ -1,4 +1,6 @@
-use devil_desktop::view::DesktopProjectionViewModel;
+use std::collections::BTreeSet;
+
+use devil_desktop::view::{DesktopProjectionViewModel, DesktopProjectionViewState};
 use devil_protocol::{
     BufferId, BufferVersion, ByteRange, CanonicalPath, CapabilityId, CollaborationParticipantId,
     CollaborationPresenceProjection, CollaborationSessionId, ContextManifestEgressStatus,
@@ -12,6 +14,10 @@ use devil_protocol::{
     TextCoordinate, TimestampMillis, Utf16Position, Utf16Range, ViewportDimensions,
     ViewportLineSlice, ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
     ViewportScroll, WorkspaceId,
+};
+use devil_ui::ui::{
+    CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
+    EditorViewportStateProjection,
 };
 use devil_ui::{
     ActiveBufferProjection, ExplorerNodeProjection, ExplorerProjection,
@@ -132,12 +138,20 @@ fn context_item() -> ContextManifestItem {
 fn populated_snapshot() -> devil_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Foundation Mode").projection_snapshot();
     snapshot.explorer_projection = ExplorerProjection {
-        nodes: vec![ExplorerNodeProjection {
-            file_id: FileId(2),
-            canonical_path: CanonicalPath("Cargo.toml".to_string()),
-            name: "Cargo.toml".to_string(),
-            children: Vec::new(),
-        }],
+        nodes: vec![
+            ExplorerNodeProjection {
+                file_id: FileId(2),
+                canonical_path: CanonicalPath("Cargo.toml".to_string()),
+                name: "Cargo.toml".to_string(),
+                children: vec![FileId(8)],
+            },
+            ExplorerNodeProjection {
+                file_id: FileId(8),
+                canonical_path: CanonicalPath("src/lib.rs".to_string()),
+                name: "lib.rs".to_string(),
+                children: Vec::new(),
+            },
+        ],
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
     };
     snapshot.active_buffer_projection = ActiveBufferProjection {
@@ -149,6 +163,50 @@ fn populated_snapshot() -> devil_ui::ShellProjectionSnapshot {
         degraded: false,
         small_buffer_preview: Some("[workspace]\nmembers = []".to_string()),
         dirty: true,
+    };
+    snapshot.daily_editing_projection = DailyEditingProjection {
+        tabs: EditorTabsProjection {
+            tabs: vec![
+                EditorTabProjection {
+                    buffer_id: BufferId(3),
+                    file_id: Some(FileId(2)),
+                    file_path: Some(CanonicalPath("Cargo.toml".to_string())),
+                    title: "Cargo.toml".to_string(),
+                    active: true,
+                    dirty: true,
+                    pinned: false,
+                    preview: false,
+                },
+                EditorTabProjection {
+                    buffer_id: BufferId(9),
+                    file_id: Some(FileId(8)),
+                    file_path: Some(CanonicalPath("src/lib.rs".to_string())),
+                    title: "lib.rs".to_string(),
+                    active: false,
+                    dirty: false,
+                    pinned: true,
+                    preview: false,
+                },
+            ],
+            active_buffer_id: Some(BufferId(3)),
+        },
+        close_dirty_prompt: Some(CloseDirtyPromptProjection {
+            buffer_id: BufferId(3),
+            file_id: Some(FileId(2)),
+            file_path: Some(CanonicalPath("Cargo.toml".to_string())),
+            title: "Cargo.toml".to_string(),
+            message: "Save changes before closing Cargo.toml?".to_string(),
+        }),
+        viewport_states: vec![EditorViewportStateProjection {
+            buffer_id: BufferId(3),
+            scroll: ViewportScroll {
+                top_line: 2,
+                left_column: 4,
+            },
+            cursor: Some(coord(1, 3, 12)),
+            selections: vec![range(0, 1)],
+        }],
+        session_record: None,
     };
     snapshot.status_messages = vec![StatusMessageProjection {
         severity: StatusSeverity::Info,
@@ -247,6 +305,12 @@ fn projection_rendering_populates_required_phase2_surfaces() {
     assert_eq!(model.layout_title, "Foundation Mode");
     assert!(
         model
+            .tab_rows
+            .iter()
+            .any(|row| row.contains("Cargo.toml +"))
+    );
+    assert!(
+        model
             .explorer_rows
             .iter()
             .any(|row| row.contains("Cargo.toml"))
@@ -256,6 +320,24 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             .active_buffer_lines
             .iter()
             .any(|row| row.contains("[workspace]"))
+    );
+    assert!(
+        model
+            .editor_status_rows
+            .iter()
+            .any(|row| row.contains("dirty small-buffer"))
+    );
+    assert!(
+        model
+            .viewport_metadata_rows
+            .iter()
+            .any(|row| row.contains("scroll=2:4"))
+    );
+    assert!(
+        model
+            .close_prompt_rows
+            .iter()
+            .any(|row| row.contains("close_dirty"))
     );
     assert!(
         model
@@ -308,6 +390,12 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             .any(|row| row == "<no active buffer>")
     );
     assert!(empty_model.proposal_rows.is_empty());
+    assert!(empty_model.tab_rows.contains(&"<no open tabs>".to_string()));
+    assert!(
+        empty_model
+            .editor_status_rows
+            .contains(&"editor: no active buffer".to_string())
+    );
     assert!(empty_model.trust_rows.is_empty());
     assert!(empty_model.assistant_rows.is_empty());
     assert!(empty_model.plugin_rows.is_empty());
@@ -324,6 +412,52 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
         degraded_model
             .empty_or_degraded_flags
             .contains(&"degraded".to_string())
+    );
+    assert!(
+        degraded_model
+            .editor_status_rows
+            .iter()
+            .any(|row| row.contains("DegradedLargeFile"))
+    );
+}
+
+#[test]
+fn projection_rendering_marks_expanded_and_collapsed_explorer_rows() {
+    let snapshot = populated_snapshot();
+    let collapsed = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert!(
+        collapsed
+            .explorer_state_rows
+            .iter()
+            .any(|row| row.contains("> Cargo.toml"))
+    );
+    assert!(
+        !collapsed
+            .explorer_state_rows
+            .iter()
+            .any(|row| row.contains("lib.rs"))
+    );
+
+    let mut expanded = BTreeSet::new();
+    expanded.insert("Cargo.toml".to_string());
+    let model = DesktopProjectionViewModel::from_snapshot_with_state(
+        &snapshot,
+        &DesktopProjectionViewState {
+            expanded_explorer_paths: expanded,
+            selected_explorer_file: Some(FileId(8)),
+        },
+    );
+    assert!(
+        model
+            .explorer_state_rows
+            .iter()
+            .any(|row| row.contains("v Cargo.toml"))
+    );
+    assert!(
+        model
+            .explorer_state_rows
+            .iter()
+            .any(|row| row.contains("* -   lib.rs"))
     );
 }
 
