@@ -211,6 +211,7 @@ impl ProjectionView {
             for row in &model.close_prompt_rows {
                 ui.label(row);
             }
+            render_close_dirty_prompt_controls(ui, snapshot, &mut actions);
             egui::ScrollArea::both().show(ui, |ui| {
                 for row in &model.active_buffer_lines {
                     ui.monospace(row);
@@ -290,6 +291,28 @@ fn render_tab_controls(
             });
         }
     }
+}
+
+fn render_close_dirty_prompt_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let Some(prompt) = &snapshot.daily_editing_projection.close_dirty_prompt else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        if ui.button("Save").clicked() {
+            actions.push(DesktopAction::SaveDirtyClose {
+                buffer_id: prompt.buffer_id,
+            });
+        }
+        if ui.button("Cancel").clicked() {
+            actions.push(DesktopAction::CancelDirtyClose {
+                buffer_id: prompt.buffer_id,
+            });
+        }
+    });
 }
 
 fn render_explorer_controls(
@@ -483,13 +506,13 @@ fn active_buffer_lines(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         return vec!["<no active buffer>".to_string()];
     }
 
-    if !active.degraded {
-        if let Some(text) = active.small_buffer_text() {
-            if text.is_empty() {
-                return vec!["<empty buffer>".to_string()];
-            }
-            return text.lines().map(ToString::to_string).collect();
+    if !active.degraded
+        && let Some(text) = active.small_buffer_text()
+    {
+        if text.is_empty() {
+            return vec!["<empty buffer>".to_string()];
         }
+        return text.lines().map(ToString::to_string).collect();
     }
 
     if let Some(viewport) = &active.viewport {
@@ -599,9 +622,30 @@ fn status_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
                 StatusSeverity::Warning => "warning",
                 StatusSeverity::Error => "error",
             };
-            format!("{severity}: {}", status.message)
+            match save_rejection_status_marker(&status.message) {
+                Some(marker) => format!("{severity} {marker}: {}", status.message),
+                None => format!("{severity}: {}", status.message),
+            }
         })
         .collect()
+}
+
+fn save_rejection_status_marker(message: &str) -> Option<&'static str> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("save") {
+        return None;
+    }
+    if lower.contains("conflict") {
+        Some("save_conflict")
+    } else if lower.contains("stale") {
+        Some("save_stale")
+    } else if lower.contains("denied") {
+        Some("save_denied")
+    } else if lower.contains("reject") {
+        Some("save_rejected")
+    } else {
+        None
+    }
 }
 
 fn proposal_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

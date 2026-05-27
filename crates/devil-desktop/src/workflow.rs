@@ -3,7 +3,10 @@
 use std::{collections::BTreeSet, ffi::OsString, path::PathBuf};
 
 use anyhow::{Result, anyhow};
-use devil_app::{AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveOutcome};
+use devil_app::{
+    AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveAllItemOutcome,
+    AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus, AppSaveOutcome,
+};
 use devil_protocol::{
     BufferId, PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, WorkspaceTrustState,
 };
@@ -156,6 +159,8 @@ pub enum DesktopWorkflowOutcome {
     TabClosed(BufferId),
     /// Dirty tab close produced an app-owned prompt.
     CloseDirtyPrompt(BufferId),
+    /// Dirty-close prompt was cancelled without closing or discarding text.
+    DirtyCloseCancelled(BufferId),
     /// Cursor update completed through editor authority.
     CursorSet(BufferId),
     /// Selection update completed through editor authority.
@@ -193,6 +198,7 @@ pub struct DesktopRuntime {
     explorer_expansion: BTreeSet<String>,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
+    last_status_details: Vec<StatusMessageProjection>,
     last_outcome: DesktopWorkflowOutcome,
 }
 
@@ -233,6 +239,7 @@ impl DesktopRuntime {
                 StatusSeverity::Info,
                 "Desktop adapter ready",
             )),
+            last_status_details: Vec::new(),
             last_outcome: DesktopWorkflowOutcome::Noop,
         })
     }
@@ -323,6 +330,22 @@ impl DesktopRuntime {
                 self.set_status(StatusSeverity::Info, format!("Explorer toggled {path}"));
                 Ok(DesktopWorkflowOutcome::ExplorerPathToggled(path))
             }
+            DesktopAppRequest::CancelDirtyClose { buffer_id } => {
+                match self.app.cancel_dirty_close(buffer_id) {
+                    Ok(()) => {
+                        self.set_status(
+                            StatusSeverity::Info,
+                            format!("Close cancelled {}", buffer_id.0),
+                        );
+                        Ok(DesktopWorkflowOutcome::DirtyCloseCancelled(buffer_id))
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
             DesktopAppRequest::OpenWorkspace { root } => match self.app.open_workspace(
                 &root,
                 WorkspaceTrustState::Trusted,
@@ -372,13 +395,7 @@ impl DesktopRuntime {
                 DesktopWorkflowOutcome::SaveRejected(message)
             }
             AppCommandOutcome::SaveAll(outcome) => {
-                self.set_status(
-                    StatusSeverity::Info,
-                    format!(
-                        "Save all completed: {} saved, {} rejected",
-                        outcome.saved_count, outcome.rejected_count
-                    ),
-                );
+                self.set_save_all_status(&outcome);
                 DesktopWorkflowOutcome::SaveAll {
                     saved_count: outcome.saved_count,
                     rejected_count: outcome.rejected_count,
@@ -457,12 +474,89 @@ impl DesktopRuntime {
         if let Some(status) = &self.last_status {
             snapshot.status_messages.push(status.clone());
         }
+        snapshot
+            .status_messages
+            .extend(self.last_status_details.iter().cloned());
         self.shell.replace_projection_snapshot(snapshot);
         Ok(())
     }
 
     fn set_status(&mut self, severity: StatusSeverity, message: impl Into<String>) {
         self.last_status = Some(status_message(severity, message));
+        self.last_status_details.clear();
+    }
+
+    fn set_status_with_details(
+        &mut self,
+        severity: StatusSeverity,
+        message: impl Into<String>,
+        details: Vec<StatusMessageProjection>,
+    ) {
+        self.last_status = Some(status_message(severity, message));
+        self.last_status_details = details;
+    }
+
+    fn set_save_all_status(&mut self, outcome: &AppSaveAllOutcome) {
+        let severity = match outcome.status {
+            AppSaveAllStatus::Noop | AppSaveAllStatus::Saved => StatusSeverity::Info,
+            AppSaveAllStatus::Partial | AppSaveAllStatus::Rejected => StatusSeverity::Warning,
+        };
+        let status_label = match outcome.status {
+            AppSaveAllStatus::Noop => "no-op",
+            AppSaveAllStatus::Saved => "saved",
+            AppSaveAllStatus::Partial => "partial",
+            AppSaveAllStatus::Rejected => "rejected",
+        };
+        let details = outcome
+            .results
+            .iter()
+            .map(save_all_item_status_message)
+            .collect();
+        self.set_status_with_details(
+            severity,
+            format!(
+                "Save all {status_label}: {} saved, {} rejected",
+                outcome.saved_count, outcome.rejected_count
+            ),
+            details,
+        );
+    }
+}
+
+fn save_all_item_status_message(item: &AppSaveAllItemOutcome) -> StatusMessageProjection {
+    let path = item
+        .file_path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .unwrap_or("<unknown>");
+    match item.status {
+        AppSaveAllItemStatus::Saved => status_message(
+            StatusSeverity::Info,
+            format!(
+                "Save all item saved: buffer {} path={path} dirty={}",
+                item.buffer_id.0, item.final_dirty
+            ),
+        ),
+        AppSaveAllItemStatus::Rejected | AppSaveAllItemStatus::MetadataMissing => {
+            let kind = item
+                .rejection_metadata
+                .as_ref()
+                .map(|metadata| metadata.response_kind.as_str())
+                .unwrap_or("Rejected");
+            let diagnostics = item
+                .rejection_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.diagnostic_messages.first())
+                .map(String::as_str)
+                .unwrap_or("no diagnostic message");
+            status_message(
+                StatusSeverity::Warning,
+                format!(
+                    "Save all item rejected: buffer {} path={path} response={kind} dirty={} diagnostic={diagnostics}",
+                    item.buffer_id.0, item.final_dirty
+                ),
+            )
+        }
     }
 }
 
@@ -515,17 +609,18 @@ impl DesktopEframeApp {
             if command && input.key_pressed(egui::Key::Q) {
                 actions.push(DesktopAction::Quit);
             }
-            if command && input.key_pressed(egui::Key::W) {
-                if let Some(buffer_id) = active_buffer_for_input(&snapshot) {
-                    actions.push(DesktopAction::CloseTab { buffer_id });
-                }
+            if command
+                && input.key_pressed(egui::Key::W)
+                && let Some(buffer_id) = active_buffer_for_input(&snapshot)
+            {
+                actions.push(DesktopAction::CloseTab { buffer_id });
             }
-            if command && input.key_pressed(egui::Key::Tab) {
-                if let Some(buffer_id) =
+            if command
+                && input.key_pressed(egui::Key::Tab)
+                && let Some(buffer_id) =
                     adjacent_tab_id(&snapshot, if input.modifiers.shift { -1 } else { 1 })
-                {
-                    actions.push(DesktopAction::SwitchTab { buffer_id });
-                }
+            {
+                actions.push(DesktopAction::SwitchTab { buffer_id });
             }
             if command && input.key_pressed(egui::Key::O) {
                 actions.push(DesktopAction::ShowOpenPathPrompt);

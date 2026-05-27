@@ -118,6 +118,9 @@ pub enum AppCompositionError {
     /// UI command targeted a buffer that is not open in the app tab set.
     #[error("buffer {0:?} is not open")]
     BufferNotOpen(BufferId),
+    /// Dirty-close cancellation targeted a buffer with no active dirty-close prompt.
+    #[error("dirty-close prompt is not active for buffer {0:?}")]
+    DirtyClosePromptMissing(BufferId),
     /// UI proposal intent targeted a proposal other than the app-owned proposal being routed.
     #[error("proposal intent targeted {target:?}, but routed proposal is {active:?}")]
     ProposalIntentMismatch {
@@ -147,6 +150,36 @@ pub enum AppCompositionError {
     /// Remote runtime or app gate rejected a request.
     #[error("remote request failed: {0}")]
     Remote(String),
+}
+
+#[cfg(test)]
+mod daily_editing_save_all_internal_tests {
+    use super::*;
+
+    #[test]
+    fn daily_editing_save_all_missing_metadata_records_buffer_error() {
+        let mut app = AppComposition::new();
+        let orphaned_buffer = BufferId(9001);
+        app.active_documents.open_tabs.push(orphaned_buffer);
+
+        let outcome = app.save_all().expect("save-all records metadata error");
+        assert_eq!(outcome.status, AppSaveAllStatus::Rejected);
+        assert_eq!(outcome.saved_count, 0);
+        assert_eq!(outcome.rejected_count, 1);
+        assert_eq!(outcome.results.len(), 1);
+
+        let item = &outcome.results[0];
+        assert_eq!(item.buffer_id, orphaned_buffer);
+        assert_eq!(item.status, AppSaveAllItemStatus::MetadataMissing);
+        assert!(item.outcome.is_none());
+        assert!(item.final_dirty);
+        let metadata = item
+            .rejection_metadata
+            .as_ref()
+            .expect("metadata failure summary");
+        assert_eq!(metadata.response_kind, "MetadataMissing");
+        assert_eq!(metadata.diagnostic_codes, vec!["save_all.metadata_missing"]);
+    }
 }
 
 /// Typed save result returned by application save routing.
@@ -3004,10 +3037,31 @@ impl ActiveDocumentController {
             modified_at: applied.modified_at,
             file_length: applied.file_length,
         };
+        let workspace_generation = metadata.workspace_generation;
         if self.active_buffer_id == Some(buffer_id) {
             self.activate_metadata(buffer_id, &metadata);
         }
         self.buffer_file_metadata.insert(buffer_id, metadata);
+        self.refresh_workspace_generation(workspace_generation);
+    }
+
+    fn refresh_workspace_generation(&mut self, workspace_generation: WorkspaceGeneration) {
+        for metadata in self.buffer_file_metadata.values_mut() {
+            metadata.workspace_generation = workspace_generation;
+        }
+        if let Some(metadata) = self.active_file_metadata.as_mut() {
+            metadata.workspace_generation = workspace_generation;
+        }
+    }
+
+    fn clear_dirty_prompt_for(&mut self, buffer_id: BufferId) {
+        if self
+            .close_dirty_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.buffer_id == buffer_id)
+        {
+            self.close_dirty_prompt = None;
+        }
     }
 
     fn activate_metadata(&mut self, buffer_id: BufferId, metadata: &ActiveFileMetadata) {
@@ -3111,6 +3165,20 @@ impl ActiveDocumentController {
             title,
         });
         Ok(())
+    }
+
+    fn cancel_dirty_close(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
+        self.require_open_buffer(buffer_id)?;
+        if self
+            .close_dirty_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.buffer_id == buffer_id)
+        {
+            self.close_dirty_prompt = None;
+            Ok(())
+        } else {
+            Err(AppCompositionError::DirtyClosePromptMissing(buffer_id))
+        }
     }
 
     fn save_context_for_buffer(
@@ -4192,11 +4260,9 @@ impl ProjectionBuilder {
             .iter()
             .filter_map(|buffer_id| {
                 let metadata = active.metadata_for_buffer(*buffer_id)?;
-                let dirty = editor.is_dirty(*buffer_id).unwrap_or_else(|_| {
-                    editor
-                        .buffer_metadata(*buffer_id)
-                        .map_or(false, |m| m.dirty)
-                });
+                let dirty = editor
+                    .is_dirty(*buffer_id)
+                    .unwrap_or_else(|_| editor.buffer_metadata(*buffer_id).is_ok_and(|m| m.dirty));
                 Some(EditorTabProjection {
                     buffer_id: *buffer_id,
                     file_id: Some(metadata.identity.file_id),
@@ -5241,19 +5307,109 @@ pub struct AppSaveAllItemOutcome {
     pub buffer_id: BufferId,
     /// File associated with the buffer, when known.
     pub file_id: Option<FileId>,
-    /// Save outcome for this buffer.
-    pub outcome: AppSaveOutcome,
+    /// Canonical file path associated with the buffer, when known.
+    pub file_path: Option<CanonicalPath>,
+    /// Explicit save-all item status.
+    pub status: AppSaveAllItemStatus,
+    /// Save outcome for this buffer when a proposal-mediated save was attempted.
+    pub outcome: Option<AppSaveOutcome>,
+    /// Proposal or metadata failure summary for rejected items.
+    pub rejection_metadata: Option<AppSaveAllRejectionMetadata>,
+    /// Dirty state after this save-all item completed.
+    pub final_dirty: bool,
+}
+
+/// Explicit per-buffer save-all item status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppSaveAllItemStatus {
+    /// Buffer was saved through the proposal-mediated save workflow.
+    Saved,
+    /// Save was rejected and dirty text was preserved.
+    Rejected,
+    /// Buffer lacked the metadata required for a safe proposal-mediated save.
+    MetadataMissing,
+}
+
+/// Proposal response summary attached to a save-all rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppSaveAllRejectionMetadata {
+    /// Proposal response or app metadata failure kind.
+    pub response_kind: String,
+    /// Proposal id from the response transition, when one exists.
+    pub proposal_id: Option<ProposalId>,
+    /// Diagnostic codes carried by the response.
+    pub diagnostic_codes: Vec<String>,
+    /// Diagnostic messages carried by the response or synthesized by app metadata validation.
+    pub diagnostic_messages: Vec<String>,
 }
 
 /// Aggregate save-all result.
 #[derive(Debug, Clone)]
 pub struct AppSaveAllOutcome {
+    /// Aggregate save-all status.
+    pub status: AppSaveAllStatus,
     /// Per-buffer results in tab order.
     pub results: Vec<AppSaveAllItemOutcome>,
     /// Number of successfully saved buffers.
     pub saved_count: usize,
     /// Number of rejected saves that preserved dirty buffers.
     pub rejected_count: usize,
+}
+
+/// Aggregate save-all status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppSaveAllStatus {
+    /// No open buffers were available to save.
+    Noop,
+    /// Every attempted buffer saved successfully.
+    Saved,
+    /// Some buffers saved and some were rejected.
+    Partial,
+    /// No buffers saved successfully and at least one buffer was rejected.
+    Rejected,
+}
+
+fn save_all_missing_metadata(buffer_id: BufferId) -> AppSaveAllRejectionMetadata {
+    AppSaveAllRejectionMetadata {
+        response_kind: "MetadataMissing".to_string(),
+        proposal_id: None,
+        diagnostic_codes: vec!["save_all.metadata_missing".to_string()],
+        diagnostic_messages: vec![format!(
+            "buffer {} is open without the metadata required for a safe save",
+            buffer_id.0
+        )],
+    }
+}
+
+fn save_all_rejection_metadata(response: &ProposalResponse) -> AppSaveAllRejectionMetadata {
+    let (response_kind, transition) = match response {
+        ProposalResponse::Created(transition) => ("Created", transition),
+        ProposalResponse::Validated(transition) => ("Validated", transition),
+        ProposalResponse::Previewed { transition, .. } => ("Previewed", transition),
+        ProposalResponse::Approved(transition) => ("Approved", transition),
+        ProposalResponse::Rejected { transition, .. } => ("Rejected", transition),
+        ProposalResponse::Applied(transition) => ("Applied", transition),
+        ProposalResponse::Denied { transition, .. } => ("Denied", transition),
+        ProposalResponse::Failed { transition, .. } => ("Failed", transition),
+        ProposalResponse::RolledBack { transition, .. } => ("RolledBack", transition),
+        ProposalResponse::Stale { transition, .. } => ("Stale", transition),
+        ProposalResponse::Conflict { transition, .. } => ("Conflict", transition),
+        ProposalResponse::Cancelled { transition, .. } => ("Cancelled", transition),
+    };
+    AppSaveAllRejectionMetadata {
+        response_kind: response_kind.to_string(),
+        proposal_id: Some(transition.proposal_id),
+        diagnostic_codes: transition
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.clone())
+            .collect(),
+        diagnostic_messages: transition
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect(),
+    }
 }
 
 /// App-owned tab-close outcome.
@@ -6829,6 +6985,8 @@ impl AppComposition {
                     .acknowledge_save_outcome(output.save.request_id, SaveAcknowledgement::Saved);
                 self.active_documents
                     .bind_saved_buffer(output.save.buffer_id, output.applied);
+                self.active_documents
+                    .clear_dirty_prompt_for(output.save.buffer_id);
                 Ok(AppSaveOutcome::Saved(output.save))
             }
             Err(failure) => {
@@ -6850,18 +7008,47 @@ impl AppComposition {
         let mut saved_count = 0;
         let mut rejected_count = 0;
         for buffer_id in buffers {
-            if self
-                .active_documents
-                .require_open_buffer(buffer_id)
-                .is_err()
-            {
-                continue;
-            }
-            let file_id = self
+            let Some(metadata) = self
                 .active_documents
                 .metadata_for_buffer(buffer_id)
-                .map(|metadata| metadata.identity.file_id);
+                .cloned()
+            else {
+                rejected_count += 1;
+                results.push(AppSaveAllItemOutcome {
+                    buffer_id,
+                    file_id: None,
+                    file_path: None,
+                    status: AppSaveAllItemStatus::MetadataMissing,
+                    outcome: None,
+                    rejection_metadata: Some(save_all_missing_metadata(buffer_id)),
+                    final_dirty: self.editor.is_dirty(buffer_id).unwrap_or(true),
+                });
+                continue;
+            };
+            if !self.active_documents.open_tabs.contains(&buffer_id) {
+                rejected_count += 1;
+                results.push(AppSaveAllItemOutcome {
+                    buffer_id,
+                    file_id: Some(metadata.identity.file_id),
+                    file_path: Some(metadata.identity.canonical_path),
+                    status: AppSaveAllItemStatus::MetadataMissing,
+                    outcome: None,
+                    rejection_metadata: Some(save_all_missing_metadata(buffer_id)),
+                    final_dirty: self.editor.is_dirty(buffer_id).unwrap_or(true),
+                });
+                continue;
+            }
+            let file_id = Some(metadata.identity.file_id);
+            let file_path = Some(metadata.identity.canonical_path);
             let outcome = self.save_buffer(buffer_id)?;
+            let status = match &outcome {
+                AppSaveOutcome::Saved(_) => AppSaveAllItemStatus::Saved,
+                AppSaveOutcome::Rejected(_) => AppSaveAllItemStatus::Rejected,
+            };
+            let rejection_metadata = match &outcome {
+                AppSaveOutcome::Saved(_) => None,
+                AppSaveOutcome::Rejected(response) => Some(save_all_rejection_metadata(response)),
+            };
             match &outcome {
                 AppSaveOutcome::Saved(_) => saved_count += 1,
                 AppSaveOutcome::Rejected(_) => rejected_count += 1,
@@ -6869,15 +7056,32 @@ impl AppComposition {
             results.push(AppSaveAllItemOutcome {
                 buffer_id,
                 file_id,
-                outcome,
+                file_path,
+                status,
+                outcome: Some(outcome),
+                rejection_metadata,
+                final_dirty: self.editor.is_dirty(buffer_id)?,
             });
         }
 
+        let status = match (saved_count, rejected_count, results.is_empty()) {
+            (_, _, true) => AppSaveAllStatus::Noop,
+            (_, 0, false) => AppSaveAllStatus::Saved,
+            (0, _, false) => AppSaveAllStatus::Rejected,
+            _ => AppSaveAllStatus::Partial,
+        };
+
         Ok(AppSaveAllOutcome {
+            status,
             results,
             saved_count,
             rejected_count,
         })
+    }
+
+    /// Cancel the active dirty-close prompt without changing buffer text or tab state.
+    pub fn cancel_dirty_close(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
+        self.active_documents.cancel_dirty_close(buffer_id)
     }
 
     /// Switch the active tab to an already-open buffer.

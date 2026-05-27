@@ -25,6 +25,16 @@ pub enum DesktopAction {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Save the buffer currently represented by a dirty-close prompt.
+    SaveDirtyClose {
+        /// Prompt buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Cancel the active dirty-close prompt without closing or discarding text.
+    CancelDirtyClose {
+        /// Prompt buffer identifier.
+        buffer_id: BufferId,
+    },
     /// Open a user-entered path through workspace authority.
     OpenPathText(String),
     /// Open a path selected by a native file dialog.
@@ -149,6 +159,11 @@ pub enum DesktopAppRequest {
         /// Canonical path represented by the explorer row.
         path: String,
     },
+    /// Cancel an app-owned dirty-close prompt.
+    CancelDirtyClose {
+        /// Prompt buffer identifier.
+        buffer_id: BufferId,
+    },
 }
 
 /// Result of translating a desktop action.
@@ -181,6 +196,12 @@ pub enum DesktopBridgeError {
     UnknownExplorerFile {
         /// Unknown explorer file.
         file_id: FileId,
+    },
+    /// Target buffer does not own the active dirty-close prompt.
+    #[error("dirty-close prompt is not active for buffer {buffer_id:?}")]
+    DirtyClosePromptMissing {
+        /// Target buffer without an active prompt.
+        buffer_id: BufferId,
     },
     /// Path text was empty after trimming.
     #[error("path input is empty")]
@@ -223,6 +244,18 @@ impl DesktopCommandBridge {
             DesktopAction::CloseTab { buffer_id } => {
                 self.with_known_tab(snapshot, buffer_id, |buffer_id| {
                     CommandDispatchIntent::CloseTab { buffer_id }
+                })
+            }
+            DesktopAction::SaveDirtyClose { buffer_id } => {
+                self.with_dirty_close_prompt(snapshot, buffer_id, |buffer_id| {
+                    DesktopBridgeOutput::Intent(CommandDispatchIntent::Save { buffer_id })
+                })
+            }
+            DesktopAction::CancelDirtyClose { buffer_id } => {
+                self.with_dirty_close_prompt(snapshot, buffer_id, |buffer_id| {
+                    DesktopBridgeOutput::AppRequest(DesktopAppRequest::CancelDirtyClose {
+                        buffer_id,
+                    })
                 })
             }
             DesktopAction::OpenPathText(path) | DesktopAction::OpenPathDialogSelected(path) => {
@@ -354,6 +387,27 @@ impl DesktopCommandBridge {
             DesktopBridgeOutput::Intent(build(buffer_id))
         } else {
             DesktopBridgeOutput::Error(DesktopBridgeError::UnknownTab { buffer_id })
+        }
+    }
+
+    fn with_dirty_close_prompt(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        buffer_id: BufferId,
+        build: impl FnOnce(BufferId) -> DesktopBridgeOutput,
+    ) -> DesktopBridgeOutput {
+        if !tab_is_known(snapshot, buffer_id) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownTab { buffer_id });
+        }
+        if snapshot
+            .daily_editing_projection
+            .close_dirty_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.buffer_id == buffer_id)
+        {
+            build(buffer_id)
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::DirtyClosePromptMissing { buffer_id })
         }
     }
 }

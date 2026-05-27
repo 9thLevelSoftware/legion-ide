@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use devil_app::{AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveOutcome};
+use devil_app::{
+    AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveAllItemStatus, AppSaveAllStatus,
+    AppSaveOutcome,
+};
 use devil_editor::{TextEdit, TextPosition};
 use devil_protocol::{
     PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, WorkspaceTrustState,
@@ -137,10 +140,11 @@ fn daily_editing_contracts_save_all_preserves_rejected_dirty_buffers() {
     assert_eq!(outcome.saved_count, 1);
     assert_eq!(outcome.rejected_count, 1);
     assert!(outcome.results.iter().any(|item| {
-        item.buffer_id == clean_buffer && matches!(item.outcome, AppSaveOutcome::Saved(_))
+        item.buffer_id == clean_buffer && matches!(item.outcome, Some(AppSaveOutcome::Saved(_)))
     }));
     assert!(outcome.results.iter().any(|item| {
-        item.buffer_id == conflicted_buffer && matches!(item.outcome, AppSaveOutcome::Rejected(_))
+        item.buffer_id == conflicted_buffer
+            && matches!(item.outcome, Some(AppSaveOutcome::Rejected(_)))
     }));
     assert_eq!(
         std::fs::read_to_string(&clean).expect("read clean"),
@@ -155,6 +159,137 @@ fn daily_editing_contracts_save_all_preserves_rejected_dirty_buffers() {
             .is_dirty(conflicted_buffer)
             .expect("dirty preserved")
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_save_all_saves_all_dirty_buffers_in_tab_order() {
+    let root = create_root();
+    let first = root.join("ordered-first.txt");
+    let second = root.join("ordered-second.txt");
+    std::fs::write(&first, "first").expect("seed first");
+    std::fs::write(&second, "second").expect("seed second");
+
+    let mut app = trusted_app(&root);
+    app.open_file(first.to_string_lossy()).expect("open first");
+    let first_buffer = app.active_buffer_id().expect("first buffer");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 5), "!"))
+        .expect("edit first");
+    app.open_file(second.to_string_lossy())
+        .expect("open second");
+    let second_buffer = app.active_buffer_id().expect("second buffer");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 6), "!"))
+        .expect("edit second");
+
+    let outcome = app.save_all().expect("save all");
+    assert_eq!(outcome.status, AppSaveAllStatus::Saved);
+    assert_eq!(outcome.saved_count, 2);
+    assert_eq!(outcome.rejected_count, 0);
+    assert_eq!(
+        outcome
+            .results
+            .iter()
+            .map(|item| item.buffer_id)
+            .collect::<Vec<_>>(),
+        vec![first_buffer, second_buffer]
+    );
+    for item in &outcome.results {
+        assert_eq!(item.status, AppSaveAllItemStatus::Saved);
+        assert!(matches!(item.outcome, Some(AppSaveOutcome::Saved(_))));
+        assert!(item.rejection_metadata.is_none());
+        assert!(!item.final_dirty);
+        assert!(item.file_id.is_some());
+        assert!(item.file_path.is_some());
+    }
+    assert_eq!(
+        std::fs::read_to_string(&first).expect("read first"),
+        "first!"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&second).expect("read second"),
+        "second!"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_save_all_reports_mixed_conflict_metadata_and_dirty_state() {
+    let root = create_root();
+    let clean = root.join("mixed-clean.txt");
+    let conflicted = root.join("mixed-conflicted.txt");
+    std::fs::write(&clean, "clean").expect("seed clean");
+    std::fs::write(&conflicted, "conflicted").expect("seed conflicted");
+
+    let mut app = trusted_app(&root);
+    app.open_file(clean.to_string_lossy()).expect("open clean");
+    let clean_buffer = app.active_buffer_id().expect("clean buffer");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 5), "!"))
+        .expect("edit clean");
+    app.open_file(conflicted.to_string_lossy())
+        .expect("open conflicted");
+    let conflicted_buffer = app.active_buffer_id().expect("conflicted buffer");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 10), "!"))
+        .expect("edit conflicted");
+    std::fs::write(&conflicted, "external").expect("external overwrite");
+
+    let outcome = app.save_all().expect("save all");
+    assert_eq!(outcome.status, AppSaveAllStatus::Partial);
+    assert_eq!(outcome.saved_count, 1);
+    assert_eq!(outcome.rejected_count, 1);
+
+    let clean_item = outcome
+        .results
+        .iter()
+        .find(|item| item.buffer_id == clean_buffer)
+        .expect("clean save item");
+    assert_eq!(clean_item.status, AppSaveAllItemStatus::Saved);
+    assert!(!clean_item.final_dirty);
+
+    let rejected_item = outcome
+        .results
+        .iter()
+        .find(|item| item.buffer_id == conflicted_buffer)
+        .expect("rejected save item");
+    assert_eq!(rejected_item.status, AppSaveAllItemStatus::Rejected);
+    assert!(matches!(
+        rejected_item.outcome,
+        Some(AppSaveOutcome::Rejected(_))
+    ));
+    assert!(rejected_item.final_dirty);
+    let metadata = rejected_item
+        .rejection_metadata
+        .as_ref()
+        .expect("rejection metadata");
+    assert!(matches!(
+        metadata.response_kind.as_str(),
+        "Conflict" | "Stale" | "Denied" | "Rejected" | "Failed"
+    ));
+    assert!(metadata.proposal_id.is_some());
+
+    assert_eq!(
+        app.editor().text(conflicted_buffer).expect("dirty text"),
+        "conflicted!"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&conflicted).expect("external content"),
+        "external"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_save_all_no_open_buffers_returns_noop_outcome() {
+    let root = create_root();
+    let mut app = trusted_app(&root);
+
+    let outcome = app.save_all().expect("save all no-op");
+    assert_eq!(outcome.status, AppSaveAllStatus::Noop);
+    assert!(outcome.results.is_empty());
+    assert_eq!(outcome.saved_count, 0);
+    assert_eq!(outcome.rejected_count, 0);
 
     let _ = std::fs::remove_dir_all(&root);
 }

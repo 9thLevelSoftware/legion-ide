@@ -7,6 +7,7 @@ use std::{
 
 use devil_desktop::{
     bridge::DesktopAction,
+    view::DesktopProjectionViewModel,
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use devil_protocol::{ProtocolTextRange, TextCoordinate};
@@ -141,6 +142,13 @@ fn desktop_workflow_external_overwrite_save_rejects_and_preserves_dirty_projecti
     assert_eq!(
         rejected.active_buffer_projection.small_buffer_text(),
         Some("seed!")
+    );
+    let model = DesktopProjectionViewModel::from_snapshot(&rejected);
+    assert!(
+        model
+            .status_rows
+            .iter()
+            .any(|row| { row.contains("save_") && row.contains("Save rejected") })
     );
 }
 

@@ -245,18 +245,13 @@ impl Default for DailyEditingProjection {
 }
 
 /// Search scope selected by projection-only UI controls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchScopeProjection {
     /// Search only the active editor buffer.
+    #[default]
     ActiveFile,
     /// Search workspace files through app/workspace authority.
     Workspace,
-}
-
-impl Default for SearchScopeProjection {
-    fn default() -> Self {
-        Self::ActiveFile
-    }
 }
 
 /// High-level search status for display.
