@@ -20,6 +20,8 @@ const DEFAULT_GUI_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/gui-productization/phase-6-packaging-platform-accessibility.md";
 const DEFAULT_GUI_PHASE7_EVIDENCE_PATH: &str =
     "plans/evidence/gui-productization/phase-7-local-ide-beta.md";
+const DEFAULT_GUI_PHASE8_EVIDENCE_PATH: &str =
+    "plans/evidence/gui-productization/phase-8-advanced-platform-gui-ga.md";
 const DEFAULT_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/phase-6/collaboration-architecture-map.md";
 const DEFAULT_PHASE7_EVIDENCE_PATH: &str = "plans/evidence/phase-7/remote-architecture-map.md";
@@ -234,6 +236,59 @@ const GUI_PHASE7_REQUIRED_LIMITATION_MARKERS: &[&str] = &[
     "Signed installer: unsupported",
     "Cross-platform parity: unsupported",
     "Autonomous apply: unsupported",
+];
+const GUI_PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plans/evidence/gui-productization/phase-8-plugin-management.md",
+    "plans/evidence/gui-productization/phase-8-collaboration-gui.md",
+    "plans/evidence/gui-productization/phase-8-remote-workspace-gui.md",
+    "plans/evidence/gui-productization/phase-8-delegated-task-command-center.md",
+    "plans/evidence/gui-productization/phase-8-ga-release-runbook.md",
+    "plans/evidence/gui-productization/phase-8-update-rollback-incident.md",
+    "plans/evidence/gui-productization/phase-8-platform-parity.md",
+    "plans/evidence/gui-productization/phase-8-final-gates.md",
+    ".planning/phases/08-advanced-platform-gui-ga/08-01-RESULT.md",
+    ".planning/phases/08-advanced-platform-gui-ga/08-02-RESULT.md",
+    ".planning/phases/08-advanced-platform-gui-ga/08-03-RESULT.md",
+    ".planning/phases/08-advanced-platform-gui-ga/08-04-RESULT.md",
+    ".planning/phases/08-advanced-platform-gui-ga/08-05-RESULT.md",
+    ".planning/phases/08-advanced-platform-gui-ga/08-06-RESULT.md",
+    ".planning/phases/08-advanced-platform-gui-ga/08-07-RESULT.md",
+    "scripts/gui-smoke.ps1",
+    "scripts/gui-smoke.sh",
+    ".github/workflows/ci.yml",
+];
+const GUI_PHASE8_REQUIRED_COMMAND_MARKERS: &[&str] = &[
+    "cargo run -p xtask -- check-deps",
+    "cargo fmt --all --check",
+    "cargo check --workspace --all-targets",
+    "cargo test --workspace --all-targets",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo deny check",
+    "cargo test -p devil-desktop plugin_management collaboration_gui remote_workspace_gui delegated_task_command_center -- --nocapture",
+    "cargo run -p devil-cli -- evidence check --phase gui-phase8",
+    "cargo run -p devil-cli -- evidence check --phase phase8",
+    "powershell -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Help",
+    "bash scripts/gui-smoke.sh --help",
+];
+const GUI_PHASE8_REQUIRED_SURFACE_MARKERS: &[&str] = &[
+    "Plugin management GUI: supported",
+    "Collaboration GUI: supported",
+    "Remote workspace GUI: supported",
+    "Delegated task command center: approval-gated",
+    "Autonomous apply: unsupported",
+];
+const GUI_PHASE8_REQUIRED_PLATFORM_MARKERS: &[&str] = &[
+    "Platform parity: Windows",
+    "Platform parity: macOS",
+    "Platform parity: Linux",
+    "Update rollback: documented",
+    "Incident response: documented",
+];
+const GUI_PHASE8_STALE_UNSUPPORTED_MARKERS: &[&str] = &[
+    "Remote production GUI: unsupported",
+    "Collaboration GUI: unsupported",
+    "Plugin management GUI: unsupported",
+    "Cross-platform parity: unsupported",
 ];
 const PHASE6_REQUIRED_ARTIFACTS: &[&str] = &[
     "collaboration-architecture-map.md",
@@ -467,6 +522,18 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
             workspace_root.join(artifact).is_file()
         });
 
+    let gui_phase8_evidence_path = workspace_root.join(DEFAULT_GUI_PHASE8_EVIDENCE_PATH);
+    let gui_phase8_evidence = fs::read_to_string(&gui_phase8_evidence_path).map_err(|err| {
+        format!(
+            "unable to read GUI Phase 8 evidence at `{}`: {err}",
+            gui_phase8_evidence_path.display()
+        )
+    })?;
+    let gui_phase8_violations =
+        validate_gui_phase8_acceptance_governance(&gui_phase8_evidence, |artifact| {
+            workspace_root.join(artifact).is_file()
+        });
+
     let phase6_evidence_path = workspace_root.join(DEFAULT_PHASE6_EVIDENCE_PATH);
     let phase6_evidence = fs::read_to_string(&phase6_evidence_path).map_err(|err| {
         format!(
@@ -520,6 +587,7 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     all.extend(gui_phase5_violations);
     all.extend(gui_phase6_violations);
     all.extend(gui_phase7_violations);
+    all.extend(gui_phase8_violations);
     all.extend(phase6_violations);
     all.extend(phase7_violations);
     all.extend(phase8_violations);
@@ -1280,6 +1348,118 @@ where
         if !evidence.contains(marker) {
             issues.push(format!(
                 "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance but required limitation marker `{marker}` is not listed"
+            ));
+        }
+    }
+
+    issues
+}
+
+fn validate_gui_phase8_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    let Some(status_section) = markdown_section(evidence, PHASE8_STATUS_HEADING) else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` must include `{PHASE8_STATUS_HEADING}` with explicit GUI Phase 8 acceptance status"
+        ));
+        return issues;
+    };
+
+    let phase8_not_accepted = status_section.contains(PHASE8_NOT_ACCEPTED_MARKER);
+    let phase8_accepted = status_section.contains(PHASE8_ACCEPTED_MARKER);
+    match (phase8_not_accepted, phase8_accepted) {
+        (true, false) | (false, true) => {}
+        (true, true) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` must not declare both `{PHASE8_NOT_ACCEPTED_MARKER}` and `{PHASE8_ACCEPTED_MARKER}`"
+        )),
+        (false, false) => issues.push(format!(
+            "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` must declare either `{PHASE8_NOT_ACCEPTED_MARKER}` or `{PHASE8_ACCEPTED_MARKER}`"
+        )),
+    }
+
+    if phase8_accepted {
+        issues.extend(validate_gui_phase8_completion_evidence(
+            evidence,
+            &artifact_exists,
+        ));
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_gui_phase8_completion_evidence<F>(evidence: &str, artifact_exists: &F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    if evidence.contains("This document is GUI Phase 8 scaffold evidence") {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance while still saying it is scaffold evidence"
+        ));
+    }
+
+    if let Some(checklist) = markdown_section(evidence, PHASE8_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance but `{PHASE8_FINAL_CHECKLIST_HEADING}` is missing"
+        ));
+    }
+
+    for artifact in GUI_PHASE8_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is not listed"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance but required artifact `{artifact}` is missing"
+            ));
+        }
+    }
+
+    for command in GUI_PHASE8_REQUIRED_COMMAND_MARKERS {
+        if !evidence.contains(command) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
+            ));
+        }
+    }
+
+    for marker in GUI_PHASE8_REQUIRED_SURFACE_MARKERS {
+        if !evidence.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance but required supported surface marker `{marker}` is not listed"
+            ));
+        }
+    }
+
+    for marker in GUI_PHASE8_REQUIRED_PLATFORM_MARKERS {
+        if !evidence.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance but required platform marker `{marker}` is not listed"
+            ));
+        }
+    }
+
+    for marker in GUI_PHASE8_STALE_UNSUPPORTED_MARKERS {
+        if evidence.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance while still containing stale unsupported marker `{marker}`"
             ));
         }
     }
@@ -2094,6 +2274,51 @@ mod tests {
         )
     }
 
+    fn accepted_gui_phase8_evidence(checklist_checked: bool) -> String {
+        let artifacts = GUI_PHASE8_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let commands = GUI_PHASE8_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`\n"))
+            .collect::<String>();
+        let surfaces = GUI_PHASE8_REQUIRED_SURFACE_MARKERS
+            .iter()
+            .map(|marker| format!("- {marker}\n"))
+            .collect::<String>();
+        let platforms = GUI_PHASE8_REQUIRED_PLATFORM_MARKERS
+            .iter()
+            .map(|marker| format!("- {marker}\n"))
+            .collect::<String>();
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# GUI Phase 8 advanced platform GUI GA evidence
+
+## Acceptance Status
+
+- {PHASE8_ACCEPTED_MARKER}
+
+## Required Artifacts
+
+{artifacts}
+## Required Commands
+
+{commands}
+## Supported Advanced GUI Surface Markers
+
+{surfaces}
+## Platform Parity Markers
+
+{platforms}
+## Final Validation Checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
     fn accepted_phase6_evidence(scaffold_disclaimer: bool, checklist_checked: bool) -> String {
         let artifacts = PHASE6_REQUIRED_ARTIFACTS
             .iter()
@@ -2666,6 +2891,97 @@ Final gate outputs archived from current commands.
     fn gui_phase7_acceptance_claim_passes_with_checked_checklist_artifacts_commands_and_limits() {
         let evidence = accepted_gui_phase7_evidence(true);
         let issues = validate_gui_phase7_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase8_not_accepted_status_allows_scaffold_without_artifacts() {
+        let evidence = format!(
+            r#"# GUI Phase 8 advanced platform GUI GA evidence
+
+## Acceptance Status
+
+- {PHASE8_NOT_ACCEPTED_MARKER}
+
+## Final Validation Checklist
+
+- [ ] pending
+"#
+        );
+
+        let issues = validate_gui_phase8_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn gui_phase8_acceptance_status_rejects_conflicting_markers() {
+        let evidence = format!(
+            r#"# GUI Phase 8 advanced platform GUI GA evidence
+
+## Acceptance Status
+
+- {PHASE8_NOT_ACCEPTED_MARKER}
+- {PHASE8_ACCEPTED_MARKER}
+"#
+        );
+
+        let issues = validate_gui_phase8_acceptance_governance(&evidence, |_| true);
+
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("must not declare both"))
+        );
+    }
+
+    #[test]
+    fn gui_phase8_acceptance_claim_requires_artifacts_commands_markers_and_checked_checklist() {
+        let evidence = accepted_gui_phase8_evidence(false)
+            .replace(
+                "- `cargo run -p devil-cli -- evidence check --phase gui-phase8`\n",
+                "",
+            )
+            .replace("- Plugin management GUI: supported\n", "")
+            .replace("- Platform parity: macOS\n", "");
+        let issues = validate_gui_phase8_acceptance_governance(&evidence, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "required artifact `plans/evidence/gui-productization/phase-8-plugin-management.md` is missing"
+        )));
+        assert!(issues.iter().any(|issue| issue.contains(
+            "required command `cargo run -p devil-cli -- evidence check --phase gui-phase8` is not listed"
+        )));
+        assert!(issues.iter().any(|issue| {
+            issue.contains(
+                "required supported surface marker `Plugin management GUI: supported` is not listed",
+            )
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required platform marker `Platform parity: macOS` is not listed")
+        }));
+    }
+
+    #[test]
+    fn gui_phase8_acceptance_claim_rejects_phase7_unsupported_labels() {
+        let mut evidence = accepted_gui_phase8_evidence(true);
+        evidence.push_str("\nPlugin management GUI: unsupported\n");
+
+        let issues = validate_gui_phase8_acceptance_governance(&evidence, |_| true);
+
+        assert!(issues.iter().any(|issue| {
+            issue.contains("stale unsupported marker `Plugin management GUI: unsupported`")
+        }));
+    }
+
+    #[test]
+    fn gui_phase8_acceptance_claim_passes_with_checked_checklist_artifacts_commands_and_markers() {
+        let evidence = accepted_gui_phase8_evidence(true);
+        let issues = validate_gui_phase8_acceptance_governance(&evidence, |_| true);
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
     }
