@@ -7,8 +7,8 @@
 - [x] Phase 3: Daily Editing MVP
 - [x] Phase 4: Language and Terminal IDE Loop
 - [x] Phase 5: Control, Trust, and Assisted AI Surfaces
-- [ ] Phase 6: Packaging, Platform Integration, and Accessibility
-- [ ] Phase 7: Fully Functional Local IDE Beta
+- [x] Phase 6: Packaging, Platform Integration, and Accessibility
+- [x] Phase 7: Fully Functional Local IDE Beta
 - [ ] Phase 8: Advanced Platform GUI GA
 
 ## Phase Details
@@ -98,6 +98,8 @@ Phase 5 status: Complete.
 **Plans**: 7
 
 ### Phase 6: Packaging, Platform Integration, and Accessibility
+Phase 6 status: Complete; review passed on 2026-05-27.
+
 **Goal**: Turn the GUI into an installable Windows desktop application with credible platform behavior.
 
 **Requirements**: R-012, R-013
@@ -111,9 +113,11 @@ Phase 5 status: Complete.
 - Smoke-test scripts cover install, launch, open workspace, edit/save, terminal, LSP, proposal review, and quit.
 - macOS/Linux parity plan and initial CI smoke coverage are documented.
 
-**Plans**: 5
+**Plans**: 7
 
 ### Phase 7: Fully Functional Local IDE Beta
+Phase 7 status: Complete; accepted and review passed on 2026-05-27.
+
 **Goal**: Reach a beta that can be used as a local IDE for normal development.
 
 **Requirements**: R-014
@@ -127,9 +131,11 @@ Phase 5 status: Complete.
 - Critical workflows have automated smoke coverage and manual evidence.
 - The beta does not claim unsupported remote/collaboration/plugin/autonomy behavior.
 
-**Plans**: 4
+**Plans**: 5
 
 ### Phase 8: Advanced Platform GUI GA
+Phase 8 status: Planned on 2026-05-27; implementation not started.
+
 **Goal**: Expose accepted advanced runtime surfaces through production-grade GUI workflows.
 
 **Requirements**: R-015
@@ -144,7 +150,7 @@ Phase 5 status: Complete.
 - Cross-platform release, update, rollback, and incident response procedures are documented and evidenced.
 - Windows, macOS, and Linux platform parity evidence exists before GA claims.
 
-**Plans**: 5
+**Plans**: 7
 
 ## Progress
 
@@ -155,12 +161,12 @@ Phase 5 status: Complete.
 | 3 | 6 | 6 | Complete |
 | 4 | 6 | 6 | Complete |
 | 5 | 7 | 7 | Complete |
-| 6 | 5 | 0 | Not started |
-| 7 | 4 | 0 | Not started |
-| 8 | 5 | 0 | Not started |
+| 6 | 7 | 7 | Complete |
+| 7 | 5 | 5 | Complete |
+| 8 | 7 | 0 | Planned |
 
 ## Planning Notes
 
-- Total estimated plans: 46.
+- Total planned plans: 51.
 - Estimates are not caps. A phase may produce as many tasks as needed to satisfy the phase goal and verification contract.
 - `/legion:plan` should use `.planning/CODEBASE.md`, `.planning/codebase/index.jsonl`, and `.planning/codebase/symbols.json` before decomposing each phase.
