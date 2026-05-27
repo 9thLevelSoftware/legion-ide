@@ -6,6 +6,8 @@ pub mod ui;
 
 pub use ui::{
     ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
-    ExplorerSelectionProjection, Layout, RenderMode, Shell, ShellCommandError,
-    ShellLayoutProjection, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+    ExplorerSelectionProjection, Layout, RenderMode, SearchProjection, SearchResultProjection,
+    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, Shell,
+    ShellCommandError, ShellLayoutProjection, ShellProjectionSnapshot, StatusMessageProjection,
+    StatusSeverity,
 };

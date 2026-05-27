@@ -8,7 +8,8 @@ use devil_protocol::{
     BufferId, PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, WorkspaceTrustState,
 };
 use devil_ui::{
-    CommandDispatchIntent, Shell, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+    CommandDispatchIntent, SearchScopeProjection, Shell, ShellProjectionSnapshot,
+    StatusMessageProjection, StatusSeverity,
 };
 
 use crate::{
@@ -161,6 +162,8 @@ pub enum DesktopWorkflowOutcome {
     SelectionSet(BufferId),
     /// Viewport scroll update completed through app authority.
     ViewportScrollSet(BufferId),
+    /// Search projection changed through app authority.
+    SearchUpdated,
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -184,6 +187,9 @@ pub struct DesktopRuntime {
     principal: PrincipalId,
     open_path_prompt: bool,
     open_path_text: String,
+    search_prompt: bool,
+    search_query_text: String,
+    search_scope: SearchScopeProjection,
     explorer_expansion: BTreeSet<String>,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
@@ -218,6 +224,9 @@ impl DesktopRuntime {
             principal: config.principal,
             open_path_prompt: false,
             open_path_text: String::new(),
+            search_prompt: false,
+            search_query_text: String::new(),
+            search_scope: SearchScopeProjection::ActiveFile,
             explorer_expansion: BTreeSet::new(),
             quit_requested: false,
             last_status: Some(status_message(
@@ -280,7 +289,7 @@ impl DesktopRuntime {
     }
 
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
-        !self.open_path_prompt && !close_dirty_prompt_active(snapshot)
+        !self.open_path_prompt && !self.search_prompt && !close_dirty_prompt_active(snapshot)
     }
 
     fn dispatch_intent(&mut self, intent: CommandDispatchIntent) -> Result<DesktopWorkflowOutcome> {
@@ -300,6 +309,12 @@ impl DesktopRuntime {
                 self.open_path_prompt = true;
                 self.set_status(StatusSeverity::Info, "Open path requested");
                 Ok(DesktopWorkflowOutcome::OpenPathPromptRequested)
+            }
+            DesktopAppRequest::ShowSearchPrompt { scope } => {
+                self.search_prompt = true;
+                self.search_scope = scope;
+                self.set_status(StatusSeverity::Info, "Search requested");
+                Ok(DesktopWorkflowOutcome::Noop)
             }
             DesktopAppRequest::ToggleExplorerPath { path } => {
                 if !self.explorer_expansion.remove(&path) {
@@ -407,6 +422,13 @@ impl DesktopRuntime {
                 );
                 DesktopWorkflowOutcome::ViewportScrollSet(buffer_id)
             }
+            AppCommandOutcome::SearchUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Search: {}", projection.status.message),
+                );
+                DesktopWorkflowOutcome::SearchUpdated
+            }
             AppCommandOutcome::ExplorerRefreshed(_) => {
                 self.set_status(StatusSeverity::Info, "Explorer refreshed");
                 DesktopWorkflowOutcome::ExplorerRefreshed
@@ -508,6 +530,15 @@ impl DesktopEframeApp {
             if command && input.key_pressed(egui::Key::O) {
                 actions.push(DesktopAction::ShowOpenPathPrompt);
             }
+            if command && input.key_pressed(egui::Key::F) {
+                actions.push(DesktopAction::ShowSearchPrompt {
+                    scope: if input.modifiers.shift {
+                        SearchScopeProjection::Workspace
+                    } else {
+                        SearchScopeProjection::ActiveFile
+                    },
+                });
+            }
             if input.key_pressed(egui::Key::F5) {
                 actions.push(DesktopAction::RefreshExplorer);
             }
@@ -568,6 +599,58 @@ impl DesktopEframeApp {
             self.runtime.open_path_prompt = false;
         }
     }
+
+    fn show_search_prompt(&mut self, ctx: &egui::Context) {
+        if !self.runtime.search_prompt {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("Search").open(&mut open).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.radio_value(
+                    &mut self.runtime.search_scope,
+                    SearchScopeProjection::ActiveFile,
+                    "File",
+                );
+                ui.radio_value(
+                    &mut self.runtime.search_scope,
+                    SearchScopeProjection::Workspace,
+                    "Workspace",
+                );
+            });
+            ui.text_edit_singleline(&mut self.runtime.search_query_text);
+            ui.horizontal(|ui| {
+                if ui.button("Search").clicked() {
+                    let query = self.runtime.search_query_text.clone();
+                    self.runtime.search_prompt = false;
+                    let _ = self.runtime.handle_action(DesktopAction::RunSearch {
+                        scope: self.runtime.search_scope,
+                        query,
+                        limit: 0,
+                    });
+                }
+                if ui.button("Cancel").clicked() {
+                    self.runtime.search_prompt = false;
+                    if let Some(query_id) = self
+                        .runtime
+                        .projection_snapshot()
+                        .search_projection
+                        .query_id
+                        .clone()
+                    {
+                        let _ = self
+                            .runtime
+                            .handle_action(DesktopAction::CancelSearch { query_id });
+                    }
+                }
+            });
+        });
+
+        if !open {
+            self.runtime.search_prompt = false;
+        }
+    }
 }
 
 impl eframe::App for DesktopEframeApp {
@@ -586,6 +669,7 @@ impl eframe::App for DesktopEframeApp {
             ui.ctx().request_repaint();
         }
         self.show_open_path_prompt(ui.ctx());
+        self.show_search_prompt(ui.ctx());
         if self.runtime.quit_requested() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }

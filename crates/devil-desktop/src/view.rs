@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashSet};
 use devil_protocol::{FileId, ViewportProjectionMode};
 use devil_ui::{ShellProjectionSnapshot, StatusSeverity};
 
-use crate::bridge::DesktopAction;
+use crate::{bridge::DesktopAction, search::DesktopSearchViewModel};
 
 /// Adapter-local view state layered over app-owned projections.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -216,6 +216,8 @@ impl ProjectionView {
                     ui.monospace(row);
                 }
             });
+            ui.separator();
+            render_search_projection(ui, snapshot);
         });
 
         ProjectionViewOutput {
@@ -223,6 +225,25 @@ impl ProjectionView {
             displayed_title: model.layout_title,
             actions,
         }
+    }
+}
+
+fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
+    let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
+    ui.heading("Search");
+    ui.label(search.header);
+    for row in &search.status_rows {
+        ui.label(row);
+    }
+    if search.result_rows.is_empty() {
+        ui.label("<no search results>");
+    } else {
+        for row in &search.result_rows {
+            ui.monospace(row);
+        }
+    }
+    for row in &search.diagnostic_rows {
+        ui.label(row);
     }
 }
 

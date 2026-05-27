@@ -12,8 +12,8 @@ use devil_ai::ProviderRouter;
 use devil_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_stub_registry};
 use devil_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use devil_editor::{
-    Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection, TextEdit,
-    TextPosition, TextRange as EditorTextRange,
+    BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
+    TextEdit, TextPosition, TextRange as EditorTextRange,
 };
 use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
 use devil_observability::{
@@ -44,7 +44,7 @@ use devil_protocol::{
     CollaborationTransportPayload, CorrelationId, EditorApplyTransactionRequest, EventEnvelope,
     EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
     FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
-    FileFingerprint, FileId, FileIdentity, FileTreeNode, PluginContributionProjection,
+    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode, PluginContributionProjection,
     PluginHostCallKind, PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest,
     PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
     ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
@@ -54,15 +54,16 @@ use devil_protocol::{
     ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
     ProposalResponse, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
-    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, RedactionHint,
-    RemoteAgentDescriptor, RemoteAuditRecord, RemoteAuthorityDescriptor, RemoteTransportEnvelope,
-    RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor,
-    RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal, SaveIntent,
-    SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup, StorageRepositoryPort,
-    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor,
-    TimestampMillis, TransactionSource, TrustDecisionContext, VersionContext, ViewportScroll,
-    WorkspaceCloseRequest, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened,
-    WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
+    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
+    ProtocolTextRange, RedactionHint, RemoteAgentDescriptor, RemoteAuditRecord,
+    RemoteAuthorityDescriptor, RemoteTransportEnvelope, RemoteTransportPayload,
+    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
+    SaveConflictPolicy, SaveFileProposal, SaveIntent, SessionDirtyIndicator, SessionPanelState,
+    SessionTab, SessionTabGroup, StorageRepositoryPort, StorageRepositoryRequest,
+    StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
+    TransactionSource, TrustDecisionContext, VersionContext, ViewportScroll, WorkspaceCloseRequest,
+    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
+    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
     WorkspaceTrustState,
 };
 use devil_remote::{RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig};
@@ -71,13 +72,19 @@ use devil_storage::InMemoryStorageRepositoryPort;
 use devil_tracker::{TrackerLedger, TrackerRunLedgerRecord};
 use devil_ui::ui::{
     CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
-    EditorViewportStateProjection, WorkspaceSessionRecordProjection,
+    EditorViewportStateProjection, SearchProjection, SearchResultProjection, SearchScopeProjection,
+    SearchStatusKindProjection, SearchStatusProjection, WorkspaceSessionRecordProjection,
 };
 use devil_ui::{
     ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
     ExplorerSelectionProjection, ShellLayoutProjection, ShellProjectionSnapshot,
 };
 use thiserror::Error;
+
+const SEARCH_DEFAULT_RESULT_LIMIT: usize = 50;
+const SEARCH_MAX_RESULT_LIMIT: usize = 100;
+const SEARCH_SNIPPET_LIMIT_BYTES: usize = 160;
+const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
 
 /// App-level composition errors.
 #[derive(Debug, Error)]
@@ -3506,6 +3513,22 @@ pub enum AppCommandRequest {
         /// Scroll offsets.
         scroll: ViewportScroll,
     },
+    /// Run bounded lexical search through app authority.
+    RunSearch {
+        /// App-generated query id.
+        query_id: String,
+        /// Search scope.
+        scope: SearchScopeProjection,
+        /// User query.
+        query: String,
+        /// Requested result limit; zero means app default.
+        limit: usize,
+    },
+    /// Cancel the projected search by query id.
+    CancelSearch {
+        /// Query id to cancel.
+        query_id: String,
+    },
     /// Open a workspace path through workspace authority.
     OpenPath {
         /// User-provided path text.
@@ -3746,6 +3769,8 @@ impl CommandExecutionService {
             | AppCommandRequest::SetCursor { .. }
             | AppCommandRequest::SetSelection { .. }
             | AppCommandRequest::SetViewportScroll { .. }
+            | AppCommandRequest::RunSearch { .. }
+            | AppCommandRequest::CancelSearch { .. }
             | AppCommandRequest::OpenPath { .. }
             | AppCommandRequest::StartAiRun { .. }
             | AppCommandRequest::CancelAiRun { .. }
@@ -3864,6 +3889,19 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::SetViewportScroll { buffer_id, scroll } => {
                 Ok(AppCommandRequest::SetViewportScroll { buffer_id, scroll })
+            }
+            CommandDispatchIntent::RunSearch {
+                scope,
+                query,
+                limit,
+            } => Ok(AppCommandRequest::RunSearch {
+                query_id: format!("search:{}", correlation_id.0),
+                scope,
+                query,
+                limit,
+            }),
+            CommandDispatchIntent::CancelSearch { query_id } => {
+                Ok(AppCommandRequest::CancelSearch { query_id })
             }
             CommandDispatchIntent::OpenPath { path } => Ok(AppCommandRequest::OpenPath { path }),
             CommandDispatchIntent::RefreshExplorer => Ok(AppCommandRequest::RefreshExplorer),
@@ -5170,6 +5208,8 @@ pub enum AppCommandOutcome {
     SelectionSet(BufferId),
     /// Viewport scroll update completed.
     ViewportScrollSet(BufferId),
+    /// Search projection changed.
+    SearchUpdated(SearchProjection),
     /// Explorer projection was refreshed from workspace tree state.
     ExplorerRefreshed(ExplorerProjection),
     /// A workspace path was opened and bound to an editor buffer.
@@ -5298,6 +5338,203 @@ struct Phase4ProjectionState {
     replay_manifests: HashMap<devil_protocol::AgentRunId, devil_protocol::AgentReplayManifest>,
 }
 
+#[derive(Debug, Default)]
+struct SearchBuildResult {
+    results: Vec<SearchResultProjection>,
+    omitted_result_count: usize,
+    omitted_file_count: usize,
+    diagnostics: Vec<String>,
+    degraded_limited: bool,
+}
+
+struct SearchTextInput<'a> {
+    query_id: &'a str,
+    query: &'a str,
+    scope: SearchScopeProjection,
+    workspace_id: Option<WorkspaceId>,
+    buffer_id: Option<BufferId>,
+    file_id: Option<FileId>,
+    file_path: Option<CanonicalPath>,
+    text: &'a str,
+    limit: usize,
+    result: &'a mut SearchBuildResult,
+}
+
+struct SearchLineInput<'a> {
+    query_id: &'a str,
+    query: &'a str,
+    scope: SearchScopeProjection,
+    workspace_id: Option<WorkspaceId>,
+    buffer_id: Option<BufferId>,
+    file_id: Option<FileId>,
+    file_path: Option<CanonicalPath>,
+    line_number: u32,
+    line_text: &'a str,
+    absolute_line_start: u64,
+    limit: usize,
+    result: &'a mut SearchBuildResult,
+}
+
+fn normalize_search_limit(limit: usize) -> usize {
+    if limit == 0 {
+        SEARCH_DEFAULT_RESULT_LIMIT
+    } else {
+        limit.min(SEARCH_MAX_RESULT_LIMIT)
+    }
+}
+
+fn search_status_for_result(
+    scope: SearchScopeProjection,
+    result: &SearchBuildResult,
+) -> SearchStatusProjection {
+    if result.degraded_limited {
+        return SearchStatusProjection {
+            kind: SearchStatusKindProjection::DegradedLimited,
+            message: if result.results.is_empty() {
+                "Search was limited to degraded viewport content; no visible matches".to_string()
+            } else {
+                format!(
+                    "Search was limited to degraded viewport content; {} visible matches",
+                    result.results.len()
+                )
+            },
+        };
+    }
+
+    if result.results.is_empty() {
+        SearchStatusProjection {
+            kind: SearchStatusKindProjection::NoResults,
+            message: "No search results".to_string(),
+        }
+    } else {
+        let scope_label = match scope {
+            SearchScopeProjection::ActiveFile => "active file",
+            SearchScopeProjection::Workspace => "workspace",
+        };
+        SearchStatusProjection {
+            kind: SearchStatusKindProjection::Completed,
+            message: format!("Found {} results in {scope_label}", result.results.len()),
+        }
+    }
+}
+
+fn build_search_projection(
+    query_id: Option<String>,
+    scope: SearchScopeProjection,
+    query_label: String,
+    result_limit: usize,
+    status: SearchStatusProjection,
+    result: SearchBuildResult,
+) -> SearchProjection {
+    SearchProjection {
+        query_id,
+        scope,
+        query_label,
+        status,
+        results: result.results,
+        result_limit,
+        omitted_result_count: result.omitted_result_count,
+        omitted_file_count: result.omitted_file_count,
+        diagnostics: result.diagnostics,
+        generated_at: TimestampMillis::now(),
+        schema_version: 1,
+    }
+}
+
+fn workspace_node_is_regular_file(node: &FileTreeNode) -> bool {
+    node.metadata
+        .as_ref()
+        .is_some_and(|metadata| matches!(metadata.kind, FileKind::File))
+}
+
+fn collect_search_results_for_text(input: SearchTextInput<'_>) {
+    let mut absolute_line_start = 0_u64;
+    for (line_number, line) in input.text.split_inclusive('\n').enumerate() {
+        let line_text = line.trim_end_matches(&['\r', '\n'][..]);
+        collect_search_results_for_line(SearchLineInput {
+            query_id: input.query_id,
+            query: input.query,
+            scope: input.scope,
+            workspace_id: input.workspace_id,
+            buffer_id: input.buffer_id,
+            file_id: input.file_id,
+            file_path: input.file_path.clone(),
+            line_number: line_number as u32,
+            line_text,
+            absolute_line_start,
+            limit: input.limit,
+            result: input.result,
+        });
+        absolute_line_start = absolute_line_start.saturating_add(line.len() as u64);
+    }
+}
+
+fn collect_search_results_for_line(input: SearchLineInput<'_>) {
+    if input.query.is_empty() {
+        return;
+    }
+
+    let mut cursor = 0;
+    while let Some(relative) = input.line_text[cursor..].find(input.query) {
+        let byte_start = cursor + relative;
+        let byte_end = byte_start + input.query.len();
+        let character_start = input.line_text[..byte_start].chars().count() as u32;
+        let character_end = input.line_text[..byte_end].chars().count() as u32;
+        let (snippet, snippet_truncated) = bounded_search_snippet(input.line_text);
+        let row = SearchResultProjection {
+            query_id: input.query_id.to_string(),
+            scope: input.scope,
+            workspace_id: input.workspace_id,
+            buffer_id: input.buffer_id,
+            file_id: input.file_id,
+            file_path: input.file_path.clone(),
+            line_number: input.line_number,
+            range: ProtocolTextRange {
+                start: TextCoordinate {
+                    line: input.line_number,
+                    character: character_start,
+                    byte_offset: Some(input.absolute_line_start + byte_start as u64),
+                    utf16_offset: Some(character_start as u64),
+                },
+                end: TextCoordinate {
+                    line: input.line_number,
+                    character: character_end,
+                    byte_offset: Some(input.absolute_line_start + byte_end as u64),
+                    utf16_offset: Some(character_end as u64),
+                },
+            },
+            snippet,
+            snippet_truncated,
+        };
+        push_bounded_search_result(input.result, input.limit, row);
+        cursor = byte_end;
+    }
+}
+
+fn push_bounded_search_result(
+    result: &mut SearchBuildResult,
+    limit: usize,
+    row: SearchResultProjection,
+) {
+    if result.results.len() < limit {
+        result.results.push(row);
+    } else {
+        result.omitted_result_count = result.omitted_result_count.saturating_add(1);
+    }
+}
+
+fn bounded_search_snippet(line: &str) -> (String, bool) {
+    if line.len() <= SEARCH_SNIPPET_LIMIT_BYTES {
+        return (line.to_string(), false);
+    }
+
+    let mut end = SEARCH_SNIPPET_LIMIT_BYTES;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}...", &line[..end]), true)
+}
+
 #[derive(Debug, Clone)]
 struct SharedProposalGate {
     required_approvers: HashSet<CollaborationParticipantId>,
@@ -5368,6 +5605,7 @@ pub struct AppComposition {
     plugin_contribution_projections: Vec<PluginContributionProjection>,
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
+    search_projection: SearchProjection,
 }
 
 impl AppComposition {
@@ -5407,6 +5645,7 @@ impl AppComposition {
             plugin_contribution_projections: Vec::new(),
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
+            search_projection: SearchProjection::idle(),
         }
     }
 
@@ -5581,6 +5820,17 @@ impl AppComposition {
                 self.set_viewport_scroll(buffer_id, scroll)?;
                 Ok(AppCommandOutcome::ViewportScrollSet(buffer_id))
             }
+            AppCommandRequest::RunSearch {
+                query_id,
+                scope,
+                query,
+                limit,
+            } => Ok(AppCommandOutcome::SearchUpdated(
+                self.run_search(query_id, scope, query, limit)?,
+            )),
+            AppCommandRequest::CancelSearch { query_id } => Ok(AppCommandOutcome::SearchUpdated(
+                self.cancel_search(query_id),
+            )),
             AppCommandRequest::OpenPath { path } => {
                 Ok(AppCommandOutcome::Opened(self.open_file(path)?))
             }
@@ -6702,6 +6952,216 @@ impl AppComposition {
         self.active_documents.set_viewport_scroll(buffer_id, scroll)
     }
 
+    /// Run bounded lexical search through app-owned editor/workspace authority.
+    pub fn run_search(
+        &mut self,
+        query_id: String,
+        scope: SearchScopeProjection,
+        query: String,
+        limit: usize,
+    ) -> Result<SearchProjection, AppCompositionError> {
+        let result_limit = normalize_search_limit(limit);
+        let query_label = query.trim().to_string();
+        if query_label.is_empty() {
+            self.search_projection = build_search_projection(
+                Some(query_id),
+                scope,
+                query_label,
+                result_limit,
+                SearchStatusProjection {
+                    kind: SearchStatusKindProjection::ValidationError,
+                    message: "Search query is empty".to_string(),
+                },
+                SearchBuildResult::default(),
+            );
+            return Ok(self.search_projection.clone());
+        }
+
+        let result = match scope {
+            SearchScopeProjection::ActiveFile => {
+                self.run_active_file_search(&query_id, &query_label, result_limit)?
+            }
+            SearchScopeProjection::Workspace => {
+                self.run_workspace_search(&query_id, &query_label, result_limit)?
+            }
+        };
+
+        let status = search_status_for_result(scope, &result);
+        self.search_projection = build_search_projection(
+            Some(query_id),
+            scope,
+            query_label,
+            result_limit,
+            status,
+            result,
+        );
+        Ok(self.search_projection.clone())
+    }
+
+    /// Cancel the projected search by query id.
+    pub fn cancel_search(&mut self, query_id: String) -> SearchProjection {
+        if self.search_projection.query_id.as_deref() == Some(query_id.as_str()) {
+            self.search_projection.status = SearchStatusProjection {
+                kind: SearchStatusKindProjection::Cancelled,
+                message: "Search cancelled".to_string(),
+            };
+            self.search_projection.generated_at = TimestampMillis::now();
+        }
+        self.search_projection.clone()
+    }
+
+    fn run_active_file_search(
+        &self,
+        query_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<SearchBuildResult, AppCompositionError> {
+        let buffer_id = self.active_documents.require_active_buffer()?;
+        let metadata = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+            .ok_or(AppCompositionError::ActiveFileMissing)?;
+
+        if matches!(self.editor.buffer_mode(buffer_id)?, BufferMode::Degraded) {
+            return self
+                .run_degraded_active_file_search(query_id, query, limit, buffer_id, metadata);
+        }
+
+        let text = self.editor.text(buffer_id)?;
+        let mut result = SearchBuildResult::default();
+        collect_search_results_for_text(SearchTextInput {
+            query_id,
+            query,
+            scope: SearchScopeProjection::ActiveFile,
+            workspace_id: Some(metadata.identity.workspace_id),
+            buffer_id: Some(buffer_id),
+            file_id: Some(metadata.identity.file_id),
+            file_path: Some(metadata.identity.canonical_path),
+            text,
+            limit,
+            result: &mut result,
+        });
+        Ok(result)
+    }
+
+    fn run_degraded_active_file_search(
+        &self,
+        query_id: &str,
+        query: &str,
+        limit: usize,
+        buffer_id: BufferId,
+        metadata: ActiveFileMetadata,
+    ) -> Result<SearchBuildResult, AppCompositionError> {
+        let scroll = self.active_documents.viewport_scroll_for(buffer_id);
+        let viewport = self
+            .editor
+            .viewport_projection(devil_protocol::EditorViewportRequest {
+                buffer_id,
+                scroll,
+                dimensions: devil_protocol::ViewportDimensions {
+                    width_px: 800,
+                    height_px: 384,
+                },
+            })?;
+        let mut result = SearchBuildResult {
+            degraded_limited: true,
+            diagnostics: vec![
+                "Active-file search is limited to the visible viewport in degraded mode"
+                    .to_string(),
+            ],
+            ..SearchBuildResult::default()
+        };
+
+        for slice in &viewport.line_slices {
+            collect_search_results_for_line(SearchLineInput {
+                query_id,
+                query,
+                scope: SearchScopeProjection::ActiveFile,
+                workspace_id: Some(metadata.identity.workspace_id),
+                buffer_id: Some(buffer_id),
+                file_id: Some(metadata.identity.file_id),
+                file_path: Some(metadata.identity.canonical_path.clone()),
+                line_number: slice.line_number,
+                line_text: &slice.visible_text,
+                absolute_line_start: slice.byte_range.start,
+                limit,
+                result: &mut result,
+            });
+        }
+
+        Ok(result)
+    }
+
+    fn run_workspace_search(
+        &self,
+        query_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<SearchBuildResult, AppCompositionError> {
+        let workspace_id = self.active_documents.require_workspace_id()?;
+        let tree = self.workspace.tree_snapshot()?;
+        let mut result = SearchBuildResult::default();
+
+        for node in tree {
+            if !workspace_node_is_regular_file(&node) {
+                continue;
+            }
+            let Some(size_bytes) = node
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.size_bytes)
+            else {
+                result.omitted_file_count += 1;
+                result.diagnostics.push(format!(
+                    "Skipped {} because file size metadata is unavailable",
+                    node.identity.canonical_path.0
+                ));
+                continue;
+            };
+            if size_bytes > WORKSPACE_SEARCH_MAX_FILE_BYTES {
+                result.omitted_file_count += 1;
+                result.diagnostics.push(format!(
+                    "Skipped {} because {} bytes exceeds the workspace search bound",
+                    node.identity.canonical_path.0, size_bytes
+                ));
+                continue;
+            }
+
+            let text = match self
+                .workspace
+                .read_file_text(workspace_id, &node.identity.canonical_path.0)
+            {
+                Ok(text) => text,
+                Err(error) => {
+                    result.omitted_file_count += 1;
+                    result.diagnostics.push(format!(
+                        "Skipped {}: {error}",
+                        node.identity.canonical_path.0
+                    ));
+                    continue;
+                }
+            };
+
+            collect_search_results_for_text(SearchTextInput {
+                query_id,
+                query,
+                scope: SearchScopeProjection::Workspace,
+                workspace_id: Some(workspace_id),
+                buffer_id: self
+                    .editor
+                    .buffer_for_file(workspace_id, node.identity.file_id),
+                file_id: Some(node.identity.file_id),
+                file_path: Some(node.identity.canonical_path),
+                text: &text,
+                limit,
+                result: &mut result,
+            });
+        }
+
+        Ok(result)
+    }
+
     /// Capture a metadata-only workspace session record.
     pub fn capture_workspace_session_record(
         &self,
@@ -6836,6 +7296,7 @@ impl AppComposition {
                 &self.active_documents,
                 &self.editor,
             ),
+            search_projection: self.search_projection.clone(),
         })
     }
 

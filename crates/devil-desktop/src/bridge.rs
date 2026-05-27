@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use devil_protocol::{BufferId, FileId, ProtocolTextRange, TextCoordinate, ViewportScroll};
-use devil_ui::{CommandDispatchIntent, ShellProjectionSnapshot};
+use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
 use thiserror::Error;
 
 /// Adapter-local renderer action before app routing.
@@ -33,6 +33,11 @@ pub enum DesktopAction {
     OpenPathDialogCancelled,
     /// Ask the workflow layer to show an open-path prompt.
     ShowOpenPathPrompt,
+    /// Ask the workflow layer to show a search prompt.
+    ShowSearchPrompt {
+        /// Search scope to preselect.
+        scope: SearchScopeProjection,
+    },
     /// Ask the workflow layer to open a workspace root.
     OpenWorkspace {
         /// Workspace root selected by the adapter.
@@ -108,6 +113,20 @@ pub enum DesktopAction {
         /// Projected viewport scroll state.
         scroll: ViewportScroll,
     },
+    /// Run bounded lexical search through app authority.
+    RunSearch {
+        /// Search scope.
+        scope: SearchScopeProjection,
+        /// User-provided query text.
+        query: String,
+        /// Requested result limit; zero means app default.
+        limit: usize,
+    },
+    /// Cancel projected search by query id.
+    CancelSearch {
+        /// Query id to cancel.
+        query_id: String,
+    },
 }
 
 /// App-owned request that is not a direct UI command intent.
@@ -120,6 +139,11 @@ pub enum DesktopAppRequest {
     },
     /// Ask workflow code to display an open-path prompt.
     ShowOpenPathPrompt,
+    /// Ask workflow code to display a search prompt.
+    ShowSearchPrompt {
+        /// Search scope to preselect.
+        scope: SearchScopeProjection,
+    },
     /// Toggle adapter-local explorer expansion.
     ToggleExplorerPath {
         /// Canonical path represented by the explorer row.
@@ -213,6 +237,9 @@ impl DesktopCommandBridge {
             DesktopAction::ShowOpenPathPrompt => {
                 DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowOpenPathPrompt)
             }
+            DesktopAction::ShowSearchPrompt { scope } => {
+                DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowSearchPrompt { scope })
+            }
             DesktopAction::OpenWorkspace { root } => {
                 DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenWorkspace { root })
             }
@@ -274,6 +301,18 @@ impl DesktopCommandBridge {
                 self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
                     CommandDispatchIntent::SetViewportScroll { buffer_id, scroll }
                 })
+            }
+            DesktopAction::RunSearch {
+                scope,
+                query,
+                limit,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::RunSearch {
+                scope,
+                query,
+                limit,
+            }),
+            DesktopAction::CancelSearch { query_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelSearch { query_id })
             }
         }
     }

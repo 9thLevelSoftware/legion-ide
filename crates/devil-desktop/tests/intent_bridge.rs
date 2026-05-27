@@ -9,7 +9,7 @@ use devil_protocol::{
 use devil_ui::ui::{DailyEditingProjection, EditorTabProjection, EditorTabsProjection};
 use devil_ui::{
     ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
-    Shell,
+    SearchScopeProjection, Shell,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -246,6 +246,38 @@ fn intent_bridge_routes_explorer_actions_and_adapter_local_toggle() {
             &snapshot,
         ),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id: FileId(3) })
+    );
+}
+
+#[test]
+fn intent_bridge_routes_search_actions() {
+    assert_eq!(
+        translate(DesktopAction::ShowSearchPrompt {
+            scope: SearchScopeProjection::Workspace,
+        }),
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowSearchPrompt {
+            scope: SearchScopeProjection::Workspace,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::RunSearch {
+            scope: SearchScopeProjection::ActiveFile,
+            query: "needle".to_string(),
+            limit: 7,
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::RunSearch {
+            scope: SearchScopeProjection::ActiveFile,
+            query: "needle".to_string(),
+            limit: 7,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::CancelSearch {
+            query_id: "search:1".to_string(),
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelSearch {
+            query_id: "search:1".to_string(),
+        })
     );
 }
 

@@ -244,6 +244,138 @@ impl Default for DailyEditingProjection {
     }
 }
 
+/// Search scope selected by projection-only UI controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScopeProjection {
+    /// Search only the active editor buffer.
+    ActiveFile,
+    /// Search workspace files through app/workspace authority.
+    Workspace,
+}
+
+impl Default for SearchScopeProjection {
+    fn default() -> Self {
+        Self::ActiveFile
+    }
+}
+
+/// High-level search status for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchStatusKindProjection {
+    /// No search has run.
+    Idle,
+    /// Search is in progress.
+    Running,
+    /// Search completed with one or more results.
+    Completed,
+    /// Search completed without results.
+    NoResults,
+    /// Search was cancelled by query id.
+    Cancelled,
+    /// Search could not run because user input was invalid.
+    ValidationError,
+    /// Search ran in a bounded degraded mode.
+    DegradedLimited,
+    /// Search failed without panicking.
+    Error,
+}
+
+/// Display-safe search status message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchStatusProjection {
+    /// Status kind for stable view logic.
+    pub kind: SearchStatusKindProjection,
+    /// User-visible status message.
+    pub message: String,
+}
+
+impl SearchStatusProjection {
+    /// Construct an idle status.
+    pub fn idle() -> Self {
+        Self {
+            kind: SearchStatusKindProjection::Idle,
+            message: "Search idle".to_string(),
+        }
+    }
+}
+
+/// One bounded lexical search result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResultProjection {
+    /// Search query id that produced this row.
+    pub query_id: String,
+    /// Search scope that produced this row.
+    pub scope: SearchScopeProjection,
+    /// Workspace containing the result when known.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Buffer containing the result when it is open.
+    pub buffer_id: Option<BufferId>,
+    /// Workspace file containing the result when known.
+    pub file_id: Option<FileId>,
+    /// Canonical path containing the result when known.
+    pub file_path: Option<CanonicalPath>,
+    /// Zero-based result line number.
+    pub line_number: u32,
+    /// Bounded result range in projection coordinates.
+    pub range: ProtocolTextRange,
+    /// Bounded snippet around the match.
+    pub snippet: String,
+    /// Whether the snippet was truncated.
+    pub snippet_truncated: bool,
+}
+
+/// Projection-only bounded search surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjection {
+    /// Current query id when a search has run.
+    pub query_id: Option<String>,
+    /// Current search scope.
+    pub scope: SearchScopeProjection,
+    /// Display-safe query label.
+    pub query_label: String,
+    /// Current status.
+    pub status: SearchStatusProjection,
+    /// Bounded result rows.
+    pub results: Vec<SearchResultProjection>,
+    /// Applied result limit.
+    pub result_limit: usize,
+    /// Count of result rows omitted by result limit.
+    pub omitted_result_count: usize,
+    /// Count of files skipped or omitted by bounds/errors.
+    pub omitted_file_count: usize,
+    /// Display-safe diagnostics for skipped/limited search.
+    pub diagnostics: Vec<String>,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl SearchProjection {
+    /// Construct an idle search projection.
+    pub fn idle() -> Self {
+        Self {
+            query_id: None,
+            scope: SearchScopeProjection::ActiveFile,
+            query_label: String::new(),
+            status: SearchStatusProjection::idle(),
+            results: Vec::new(),
+            result_limit: 0,
+            omitted_result_count: 0,
+            omitted_file_count: 0,
+            diagnostics: Vec::new(),
+            generated_at: TimestampMillis(0),
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for SearchProjection {
+    fn default() -> Self {
+        Self::idle()
+    }
+}
+
 /// UI status severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusSeverity {
@@ -343,6 +475,20 @@ pub enum CommandDispatchIntent {
         buffer_id: BufferId,
         /// Scroll offsets.
         scroll: ViewportScroll,
+    },
+    /// Run bounded lexical search through app authority.
+    RunSearch {
+        /// Search scope.
+        scope: SearchScopeProjection,
+        /// User-provided query.
+        query: String,
+        /// Requested result limit; zero means app default.
+        limit: usize,
+    },
+    /// Cancel the currently projected search by query id.
+    CancelSearch {
+        /// Query id to cancel.
+        query_id: String,
     },
     /// Open a file by path through workspace authority.
     OpenPath {
@@ -478,6 +624,8 @@ pub struct ShellProjectionSnapshot {
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Daily-editing projection supplied by the application layer.
     pub daily_editing_projection: DailyEditingProjection,
+    /// Search projection supplied by the application layer.
+    pub search_projection: SearchProjection,
 }
 
 /// Command parsing errors surfaced by projection-only shell input handling.
@@ -524,6 +672,8 @@ pub struct Shell {
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Static daily-editing projection.
     pub daily_editing_projection: DailyEditingProjection,
+    /// Static search projection.
+    pub search_projection: SearchProjection,
     /// Command dispatch intents emitted by input parsing.
     pub command_dispatch_intents: Vec<CommandDispatchIntent>,
 }
@@ -547,6 +697,7 @@ impl Shell {
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
             daily_editing_projection: snapshot.daily_editing_projection,
+            search_projection: snapshot.search_projection,
             command_dispatch_intents: Vec::new(),
         }
     }
@@ -572,6 +723,7 @@ impl Shell {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         })
     }
 
@@ -593,6 +745,7 @@ impl Shell {
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
             daily_editing_projection: self.daily_editing_projection.clone(),
+            search_projection: self.search_projection.clone(),
         }
     }
 
@@ -613,6 +766,7 @@ impl Shell {
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
         self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
         self.daily_editing_projection = snapshot.daily_editing_projection;
+        self.search_projection = snapshot.search_projection;
     }
 
     /// Drain queued command-dispatch intents.
@@ -947,6 +1101,27 @@ impl Shell {
             return Ok(Some(
                 self.push_intent(CommandDispatchIntent::CloseTab { buffer_id }),
             ));
+        }
+        if let Some(query) = trimmed.strip_prefix(":search ") {
+            return Ok(Some(self.push_intent(CommandDispatchIntent::RunSearch {
+                scope: SearchScopeProjection::ActiveFile,
+                query: query.trim().to_string(),
+                limit: 0,
+            })));
+        }
+        if let Some(query) = trimmed.strip_prefix(":search-workspace ") {
+            return Ok(Some(self.push_intent(CommandDispatchIntent::RunSearch {
+                scope: SearchScopeProjection::Workspace,
+                query: query.trim().to_string(),
+                limit: 0,
+            })));
+        }
+        if let Some(query_id) = trimmed.strip_prefix(":search-cancel ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::CancelSearch {
+                    query_id: query_id.trim().to_string(),
+                },
+            )));
         }
 
         if let Some(label) = trimmed.strip_prefix(":ai-start") {
@@ -1619,6 +1794,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let intent = shell
@@ -1663,6 +1839,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1709,6 +1886,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1763,6 +1941,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let before = shell.projection_snapshot();
@@ -1839,6 +2018,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1923,6 +2103,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1994,6 +2175,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -2129,6 +2311,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -2212,6 +2395,7 @@ mod tests {
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
         });
 
         let snapshot = shell.projection_snapshot();
