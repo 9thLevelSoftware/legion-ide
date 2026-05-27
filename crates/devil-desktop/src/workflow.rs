@@ -1,14 +1,20 @@
 //! Desktop runtime workflow boundary.
 
-use std::{collections::BTreeSet, ffi::OsString, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, anyhow};
 use devil_app::{
     AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveAllItemOutcome,
     AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus, AppSaveOutcome,
+    AppSessionRestoreOutcome,
 };
 use devil_protocol::{
-    BufferId, PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, WorkspaceTrustState,
+    BufferId, CanonicalPath, PrincipalId, ProtocolTextRange, SessionPanelState, TextCoordinate,
+    ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
     CommandDispatchIntent, SearchScopeProjection, Shell, ShellProjectionSnapshot,
@@ -20,6 +26,7 @@ use crate::{
         DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput,
         DesktopCommandBridge,
     },
+    session::DesktopSessionStore,
     smoke::{self, RendererSmokeConfig},
     view::{DesktopProjectionViewState, ProjectionView},
 };
@@ -37,6 +44,8 @@ pub struct DesktopLaunchConfig {
     pub principal: PrincipalId,
     /// Optional timed smoke-mode configuration.
     pub smoke: Option<RendererSmokeConfig>,
+    /// Optional metadata-only session JSON path.
+    pub session_state: Option<PathBuf>,
 }
 
 impl DesktopLaunchConfig {
@@ -47,7 +56,14 @@ impl DesktopLaunchConfig {
             initial_file,
             principal: PrincipalId("desktop".to_string()),
             smoke: None,
+            session_state: None,
         }
+    }
+
+    /// Attach a metadata-only session state path.
+    pub fn with_session_state(mut self, path: PathBuf) -> Self {
+        self.session_state = Some(path);
+        self
     }
 
     /// Parse launch config from process arguments.
@@ -63,6 +79,7 @@ impl DesktopLaunchConfig {
         let mut duration_ms = 1500;
         let mut evidence_path =
             PathBuf::from("plans/evidence/gui-productization/phase-2-renderer-smoke.md");
+        let mut session_state = None;
         let mut positionals = Vec::new();
         let mut args = args.into_iter();
 
@@ -93,6 +110,12 @@ impl DesktopLaunchConfig {
                         .next()
                         .ok_or_else(|| anyhow!("--evidence requires a path"))?;
                     evidence_path = PathBuf::from(value);
+                }
+                "--session-state" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--session-state requires a path"))?;
+                    session_state = Some(PathBuf::from(value));
                 }
                 other if other.starts_with("--") => {
                     return Err(anyhow!("unsupported desktop argument: {other}"));
@@ -129,6 +152,7 @@ impl DesktopLaunchConfig {
             initial_file,
             principal: PrincipalId("desktop".to_string()),
             smoke,
+            session_state,
         })
     }
 }
@@ -196,6 +220,8 @@ pub struct DesktopRuntime {
     search_query_text: String,
     search_scope: SearchScopeProjection,
     explorer_expansion: BTreeSet<String>,
+    panel_state: SessionPanelState,
+    session_state_path: Option<PathBuf>,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
     last_status_details: Vec<StatusMessageProjection>,
@@ -205,6 +231,10 @@ pub struct DesktopRuntime {
 impl DesktopRuntime {
     /// Open the configured workspace and optional initial file.
     pub fn open(config: DesktopLaunchConfig) -> Result<Self> {
+        let session_record = match &config.session_state {
+            Some(path) => DesktopSessionStore::load(path)?,
+            None => None,
+        };
         let mut app = AppComposition::new();
         app.open_workspace(
             &config.workspace_root,
@@ -212,15 +242,44 @@ impl DesktopRuntime {
             config.principal.clone(),
         )?;
 
+        let mut explorer_expansion = BTreeSet::new();
+        let mut panel_state = default_panel_state();
+        let mut status = status_message(StatusSeverity::Info, "Desktop adapter ready");
+        let mut status_details = Vec::new();
+
+        if let Some(record) = &session_record {
+            if session_workspace_matches(&config.workspace_root, record) {
+                let restore = app.restore_workspace_session_record(record)?;
+                explorer_expansion = record
+                    .explorer_expansion
+                    .iter()
+                    .map(|path| path.0.clone())
+                    .collect();
+                panel_state = record.panel_state.clone();
+                let (restore_status, restore_details) = restore_status_messages(&restore);
+                status = restore_status;
+                status_details = restore_details;
+            } else {
+                status = status_message(
+                    StatusSeverity::Warning,
+                    "Session restore skipped: workspace mismatch",
+                );
+                status_details.push(status_message(
+                    StatusSeverity::Warning,
+                    "Session last_workspace_path did not match launch workspace",
+                ));
+            }
+        }
+
         if let Some(initial_file) = &config.initial_file {
             app.open_file(initial_file)?;
         }
 
         let mut snapshot = app.shell_projection_snapshot(WINDOW_TITLE)?;
-        snapshot.status_messages.push(status_message(
-            StatusSeverity::Info,
-            "Desktop adapter ready",
-        ));
+        snapshot.status_messages.push(status.clone());
+        snapshot
+            .status_messages
+            .extend(status_details.iter().cloned());
 
         Ok(Self {
             app,
@@ -233,13 +292,12 @@ impl DesktopRuntime {
             search_prompt: false,
             search_query_text: String::new(),
             search_scope: SearchScopeProjection::ActiveFile,
-            explorer_expansion: BTreeSet::new(),
+            explorer_expansion,
+            panel_state,
+            session_state_path: config.session_state,
             quit_requested: false,
-            last_status: Some(status_message(
-                StatusSeverity::Info,
-                "Desktop adapter ready",
-            )),
-            last_status_details: Vec::new(),
+            last_status: Some(status),
+            last_status_details: status_details,
             last_outcome: DesktopWorkflowOutcome::Noop,
         })
     }
@@ -263,6 +321,7 @@ impl DesktopRuntime {
             DesktopBridgeOutput::Error(error) => self.handle_bridge_error(error),
         };
 
+        self.persist_session_if_configured();
         self.refresh_projection()?;
         self.last_outcome = outcome.clone();
         Ok(outcome)
@@ -286,6 +345,39 @@ impl DesktopRuntime {
     /// Returns whether an explorer path is expanded by adapter-local state.
     pub fn explorer_path_expanded(&self, path: &str) -> bool {
         self.explorer_expansion.contains(path)
+    }
+
+    /// Return the adapter-local restored panel state.
+    pub fn panel_state(&self) -> &SessionPanelState {
+        &self.panel_state
+    }
+
+    /// Replace adapter-local panel state for future session captures.
+    pub fn set_panel_state(&mut self, panel_state: SessionPanelState) {
+        self.panel_state = panel_state;
+    }
+
+    /// Capture a metadata-only session record with adapter-local desktop state applied.
+    pub fn capture_session_record(&self) -> Result<WorkspaceSessionRecord> {
+        let mut record = self.app.capture_workspace_session_record()?;
+        record.explorer_expansion = self
+            .explorer_expansion
+            .iter()
+            .cloned()
+            .map(CanonicalPath)
+            .collect();
+        record.panel_state = self.panel_state.clone();
+        Ok(record)
+    }
+
+    /// Save the current session to the configured session path.
+    pub fn save_session_state(&self) -> Result<()> {
+        let Some(path) = &self.session_state_path else {
+            return Ok(());
+        };
+        let record = self.capture_session_record()?;
+        DesktopSessionStore::save(path, &record)?;
+        Ok(())
     }
 
     fn projection_view_state(&self) -> DesktopProjectionViewState {
@@ -520,6 +612,68 @@ impl DesktopRuntime {
             ),
             details,
         );
+    }
+
+    fn persist_session_if_configured(&mut self) {
+        if let Err(error) = self.save_session_state() {
+            self.set_status(
+                StatusSeverity::Warning,
+                format!("Session save failed: {error}"),
+            );
+        }
+    }
+}
+
+fn default_panel_state() -> SessionPanelState {
+    SessionPanelState {
+        bottom_visible: false,
+        side_visible: true,
+        active_panel: None,
+        bottom_height_px: None,
+        side_width_px: None,
+    }
+}
+
+fn restore_status_messages(
+    restore: &AppSessionRestoreOutcome,
+) -> (StatusMessageProjection, Vec<StatusMessageProjection>) {
+    let severity = if restore.skipped_tabs.is_empty() {
+        StatusSeverity::Info
+    } else {
+        StatusSeverity::Warning
+    };
+    let status = status_message(
+        severity,
+        format!(
+            "Session restored: {} tabs, {} skipped",
+            restore.restored_file_ids.len(),
+            restore.skipped_tabs.len()
+        ),
+    );
+    let details = restore
+        .skipped_tabs
+        .iter()
+        .map(|tab| {
+            status_message(
+                StatusSeverity::Warning,
+                format!("Session skipped tab {}: {}", tab.tab_id, tab.reason),
+            )
+        })
+        .collect();
+    (status, details)
+}
+
+fn session_workspace_matches(workspace_root: &Path, record: &WorkspaceSessionRecord) -> bool {
+    let Some(session_root) = &record.last_workspace_path else {
+        return true;
+    };
+    paths_equivalent(workspace_root, Path::new(&session_root.0))
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
     }
 }
 

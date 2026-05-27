@@ -12,4 +12,5 @@ devil-protocol = { workspace = true }
 devil-ui = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }

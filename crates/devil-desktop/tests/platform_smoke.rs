@@ -94,6 +94,9 @@ fn platform_smoke_report_markdown_contains_required_fields() {
         high_dpi_smoke: "not observed".to_string(),
         file_dialog_smoke: "adapter-path passed".to_string(),
         accessibility_smoke: "not observed".to_string(),
+        large_file_degraded_status: "not observed".to_string(),
+        bounded_search_status: "not observed".to_string(),
+        full_text_projection_status: "not observed".to_string(),
         errors: Vec::new(),
     };
     let markdown = report.to_markdown();
@@ -108,6 +111,9 @@ fn platform_smoke_report_markdown_contains_required_fields() {
         "high_dpi_smoke",
         "file_dialog_smoke",
         "accessibility_smoke",
+        "large_file_degraded_status",
+        "bounded_search_status",
+        "full_text_projection_status",
     ] {
         assert!(markdown.contains(field), "missing {field}");
     }

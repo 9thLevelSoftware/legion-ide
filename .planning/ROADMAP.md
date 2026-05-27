@@ -150,7 +150,7 @@
 |-------|-------|-----------|--------|
 | 1 | 5 | 5 | Complete |
 | 2 | 6 | 6 | Complete |
-| 3 | 6 | 4 | In Progress |
+| 3 | 6 | 5 | In Progress |
 | 4 | 6 | 0 | Not started |
 | 5 | 5 | 0 | Not started |
 | 6 | 5 | 0 | Not started |

@@ -9,6 +9,7 @@
 pub mod bridge;
 pub mod metrics;
 pub mod search;
+pub mod session;
 pub mod smoke;
 pub mod view;
 pub mod workflow;

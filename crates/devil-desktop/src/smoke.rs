@@ -91,6 +91,12 @@ pub struct RendererSmokeReport {
     pub file_dialog_smoke: String,
     /// Accessibility smoke status.
     pub accessibility_smoke: String,
+    /// Large-file degraded projection status.
+    pub large_file_degraded_status: String,
+    /// Bounded degraded search status.
+    pub bounded_search_status: String,
+    /// Full-text projection avoidance status.
+    pub full_text_projection_status: String,
     /// Errors or blockers observed during the smoke run.
     pub errors: Vec<String>,
 }
@@ -116,6 +122,9 @@ impl RendererSmokeReport {
             high_dpi_smoke: NOT_OBSERVED.to_string(),
             file_dialog_smoke: NOT_OBSERVED.to_string(),
             accessibility_smoke: NOT_OBSERVED.to_string(),
+            large_file_degraded_status: NOT_OBSERVED.to_string(),
+            bounded_search_status: NOT_OBSERVED.to_string(),
+            full_text_projection_status: NOT_OBSERVED.to_string(),
             errors: vec![error.into()],
         }
     }
@@ -155,6 +164,10 @@ impl RendererSmokeReport {
                 "high_dpi_smoke: {high_dpi}\n",
                 "file_dialog_smoke: {file_dialog}\n",
                 "accessibility_smoke: {accessibility}\n\n",
+                "## Large File Guardrails\n\n",
+                "large_file_degraded_status: {large_file_degraded_status}\n",
+                "bounded_search_status: {bounded_search_status}\n",
+                "full_text_projection_status: {full_text_projection_status}\n\n",
                 "## Errors\n\n",
                 "{errors}\n\n",
                 "## Residual Risk\n\n",
@@ -178,6 +191,9 @@ impl RendererSmokeReport {
             high_dpi = self.high_dpi_smoke,
             file_dialog = self.file_dialog_smoke,
             accessibility = self.accessibility_smoke,
+            large_file_degraded_status = self.large_file_degraded_status,
+            bounded_search_status = self.bounded_search_status,
+            full_text_projection_status = self.full_text_projection_status,
             errors = errors,
         )
     }
@@ -281,6 +297,9 @@ fn run_smoke_window(
         high_dpi_smoke: observations.high_dpi_status(),
         file_dialog_smoke: adapter_status(observations.file_dialog_adapter_path),
         accessibility_smoke: NOT_OBSERVED.to_string(),
+        large_file_degraded_status: observations.large_file_degraded_status(),
+        bounded_search_status: observations.bounded_search_status(),
+        full_text_projection_status: observations.full_text_projection_status(),
         errors,
     })
 }
@@ -314,6 +333,9 @@ struct SmokeObservations {
     clipboard_adapter_path: bool,
     ime_adapter_path: bool,
     file_dialog_adapter_path: bool,
+    large_file_degraded_observed: bool,
+    degraded_small_preview_absent: bool,
+    bounded_search_observed: bool,
 }
 
 impl SmokeObservations {
@@ -321,6 +343,25 @@ impl SmokeObservations {
         self.clipboard_adapter_path = checks.clipboard_adapter_path;
         self.ime_adapter_path = checks.ime_adapter_path;
         self.file_dialog_adapter_path = checks.file_dialog_adapter_path;
+    }
+
+    fn apply_projection_checks(&mut self, snapshot: &ShellProjectionSnapshot) {
+        if snapshot.active_buffer_projection.degraded {
+            self.large_file_degraded_observed = true;
+            self.degraded_small_preview_absent = snapshot
+                .active_buffer_projection
+                .small_buffer_preview
+                .is_none();
+        }
+        if snapshot
+            .search_projection
+            .status
+            .message
+            .to_ascii_lowercase()
+            .contains("degraded")
+        {
+            self.bounded_search_observed = true;
+        }
     }
 
     fn focus_status(&self) -> String {
@@ -335,6 +376,30 @@ impl SmokeObservations {
         match self.pixels_per_point {
             Some(scale) if scale > 1.0 => format!("os-observed scale {scale:.3}"),
             Some(_) | None => NOT_OBSERVED.to_string(),
+        }
+    }
+
+    fn large_file_degraded_status(&self) -> String {
+        if self.large_file_degraded_observed {
+            "projection observed degraded large-file mode".to_string()
+        } else {
+            NOT_OBSERVED.to_string()
+        }
+    }
+
+    fn bounded_search_status(&self) -> String {
+        if self.bounded_search_observed {
+            "search observed degraded bounded viewport mode".to_string()
+        } else {
+            NOT_OBSERVED.to_string()
+        }
+    }
+
+    fn full_text_projection_status(&self) -> String {
+        if self.degraded_small_preview_absent {
+            "degraded projection omitted full small-buffer preview".to_string()
+        } else {
+            NOT_OBSERVED.to_string()
         }
     }
 }
@@ -397,6 +462,9 @@ impl eframe::App for RendererSmokeApp {
         }
 
         let snapshot = self.runtime.projection_snapshot();
+        if let Ok(mut observations) = self.observations.lock() {
+            observations.apply_projection_checks(&snapshot);
+        }
         let _ = self.view.render(ui, &snapshot);
 
         if now.saturating_duration_since(self.started_at) >= self.duration {
