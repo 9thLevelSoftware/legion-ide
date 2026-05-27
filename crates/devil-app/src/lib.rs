@@ -12,8 +12,8 @@ use devil_ai::ProviderRouter;
 use devil_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_stub_registry};
 use devil_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use devil_editor::{
-    EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, TextEdit, TextPosition,
-    TextRange as EditorTextRange,
+    Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection, TextEdit,
+    TextPosition, TextRange as EditorTextRange,
 };
 use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
 use devil_observability::{
@@ -58,16 +58,21 @@ use devil_protocol::{
     RemoteAgentDescriptor, RemoteAuditRecord, RemoteAuthorityDescriptor, RemoteTransportEnvelope,
     RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor,
     RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal, SaveIntent,
-    StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate,
-    TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
-    VersionContext, WorkspaceCloseRequest, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
-    WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
+    SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup, StorageRepositoryPort,
+    StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextTransactionDescriptor,
+    TimestampMillis, TransactionSource, TrustDecisionContext, VersionContext, ViewportScroll,
+    WorkspaceCloseRequest, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened,
+    WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
     WorkspaceTrustState,
 };
 use devil_remote::{RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig};
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
 use devil_tracker::{TrackerLedger, TrackerRunLedgerRecord};
+use devil_ui::ui::{
+    CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
+    EditorViewportStateProjection, WorkspaceSessionRecordProjection,
+};
 use devil_ui::{
     ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
     ExplorerSelectionProjection, ShellLayoutProjection, ShellProjectionSnapshot,
@@ -103,6 +108,9 @@ pub enum AppCompositionError {
         /// Active buffer id.
         active: Option<BufferId>,
     },
+    /// UI command targeted a buffer that is not open in the app tab set.
+    #[error("buffer {0:?} is not open")]
+    BufferNotOpen(BufferId),
     /// UI proposal intent targeted a proposal other than the app-owned proposal being routed.
     #[error("proposal intent targeted {target:?}, but routed proposal is {active:?}")]
     ProposalIntentMismatch {
@@ -160,6 +168,14 @@ struct ActiveFileMetadata {
     workspace_generation: WorkspaceGeneration,
     modified_at: Option<TimestampMillis>,
     file_length: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct CloseDirtyPromptState {
+    buffer_id: BufferId,
+    file_id: Option<FileId>,
+    path: Option<CanonicalPath>,
+    title: String,
 }
 
 /// Non-zero observability identifiers assigned to one app-routed workflow.
@@ -2891,11 +2907,14 @@ struct ActiveDocumentController {
     workspace_root_path: Option<String>,
     active_principal_id: Option<PrincipalId>,
     active_workspace_trust: Option<WorkspaceTrustState>,
+    open_tabs: Vec<BufferId>,
     active_file_id: Option<FileId>,
     active_file_path: Option<String>,
     active_buffer_id: Option<BufferId>,
     active_file_metadata: Option<ActiveFileMetadata>,
     buffer_file_metadata: HashMap<BufferId, ActiveFileMetadata>,
+    viewport_scrolls: HashMap<BufferId, ViewportScroll>,
+    close_dirty_prompt: Option<CloseDirtyPromptState>,
 }
 
 impl ActiveDocumentController {
@@ -2905,11 +2924,14 @@ impl ActiveDocumentController {
             workspace_root_path: None,
             active_principal_id: None,
             active_workspace_trust: None,
+            open_tabs: Vec::new(),
             active_file_id: None,
             active_file_path: None,
             active_buffer_id: None,
             active_file_metadata: None,
             buffer_file_metadata: HashMap::new(),
+            viewport_scrolls: HashMap::new(),
+            close_dirty_prompt: None,
         }
     }
 
@@ -2934,11 +2956,14 @@ impl ActiveDocumentController {
     }
 
     fn clear_active_file(&mut self) {
+        self.open_tabs.clear();
         self.active_file_id = None;
         self.active_file_path = None;
         self.active_buffer_id = None;
         self.active_file_metadata = None;
         self.buffer_file_metadata.clear();
+        self.viewport_scrolls.clear();
+        self.close_dirty_prompt = None;
     }
 
     fn bind_opened_file(&mut self, opened: &OpenedFileText, buffer_id: BufferId) {
@@ -2951,28 +2976,12 @@ impl ActiveDocumentController {
             modified_at: opened.modified_at,
             file_length: opened.file_length,
         };
-        self.active_file_id = Some(identity.file_id);
-        self.active_file_path = Some(identity.canonical_path.0.clone());
-        self.active_buffer_id = Some(buffer_id);
-        self.active_file_metadata = Some(metadata.clone());
-        self.buffer_file_metadata.insert(buffer_id, metadata);
-    }
-
-    fn bind_saved_file(&mut self, applied: devil_project::WorkspaceSaveApplied) {
-        let metadata = ActiveFileMetadata {
-            identity: applied.identity.clone(),
-            fingerprint: applied.fingerprint,
-            file_content_version: applied.file_content_version,
-            workspace_generation: applied.workspace_generation,
-            modified_at: applied.modified_at,
-            file_length: applied.file_length,
-        };
-        self.active_file_id = Some(applied.identity.file_id);
-        self.active_file_path = Some(applied.identity.canonical_path.0.clone());
-        self.active_file_metadata = Some(metadata.clone());
-        if let Some(buffer_id) = self.active_buffer_id {
-            self.buffer_file_metadata.insert(buffer_id, metadata);
+        self.activate_metadata(buffer_id, &metadata);
+        if !self.open_tabs.contains(&buffer_id) {
+            self.open_tabs.push(buffer_id);
         }
+        self.buffer_file_metadata.insert(buffer_id, metadata);
+        self.close_dirty_prompt = None;
     }
 
     fn bind_saved_buffer(
@@ -2989,11 +2998,16 @@ impl ActiveDocumentController {
             file_length: applied.file_length,
         };
         if self.active_buffer_id == Some(buffer_id) {
-            self.active_file_id = Some(applied.identity.file_id);
-            self.active_file_path = Some(applied.identity.canonical_path.0.clone());
-            self.active_file_metadata = Some(metadata.clone());
+            self.activate_metadata(buffer_id, &metadata);
         }
         self.buffer_file_metadata.insert(buffer_id, metadata);
+    }
+
+    fn activate_metadata(&mut self, buffer_id: BufferId, metadata: &ActiveFileMetadata) {
+        self.active_file_id = Some(metadata.identity.file_id);
+        self.active_file_path = Some(metadata.identity.canonical_path.0.clone());
+        self.active_buffer_id = Some(buffer_id);
+        self.active_file_metadata = Some(metadata.clone());
     }
 
     fn metadata_for_buffer(&self, buffer_id: BufferId) -> Option<&ActiveFileMetadata> {
@@ -3003,6 +3017,114 @@ impl ActiveDocumentController {
             } else {
                 None
             }
+        })
+    }
+
+    fn require_open_buffer(&self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
+        if self.open_tabs.contains(&buffer_id) && self.metadata_for_buffer(buffer_id).is_some() {
+            Ok(())
+        } else {
+            Err(AppCompositionError::BufferNotOpen(buffer_id))
+        }
+    }
+
+    fn switch_to_buffer(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
+        let metadata = self
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+            .ok_or(AppCompositionError::BufferNotOpen(buffer_id))?;
+        if !self.open_tabs.contains(&buffer_id) {
+            return Err(AppCompositionError::BufferNotOpen(buffer_id));
+        }
+        self.activate_metadata(buffer_id, &metadata);
+        self.close_dirty_prompt = None;
+        Ok(())
+    }
+
+    fn remove_open_tab(&mut self, buffer_id: BufferId) {
+        self.open_tabs.retain(|candidate| *candidate != buffer_id);
+        self.buffer_file_metadata.remove(&buffer_id);
+        self.viewport_scrolls.remove(&buffer_id);
+        if self
+            .close_dirty_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.buffer_id == buffer_id)
+        {
+            self.close_dirty_prompt = None;
+        }
+        if self.active_buffer_id == Some(buffer_id) {
+            self.active_buffer_id = None;
+            self.active_file_id = None;
+            self.active_file_path = None;
+            self.active_file_metadata = None;
+        }
+    }
+
+    fn activate_first_available_tab(&mut self) {
+        if self.active_buffer_id.is_some() {
+            return;
+        }
+        if let Some(buffer_id) = self.open_tabs.first().copied()
+            && let Some(metadata) = self.metadata_for_buffer(buffer_id).cloned()
+        {
+            self.activate_metadata(buffer_id, &metadata);
+        }
+    }
+
+    fn set_viewport_scroll(
+        &mut self,
+        buffer_id: BufferId,
+        scroll: ViewportScroll,
+    ) -> Result<(), AppCompositionError> {
+        self.require_open_buffer(buffer_id)?;
+        self.viewport_scrolls.insert(buffer_id, scroll);
+        Ok(())
+    }
+
+    fn viewport_scroll_for(&self, buffer_id: BufferId) -> ViewportScroll {
+        self.viewport_scrolls
+            .get(&buffer_id)
+            .copied()
+            .unwrap_or(ViewportScroll {
+                top_line: 0,
+                left_column: 0,
+            })
+    }
+
+    fn prompt_dirty_close(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
+        let metadata = self
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+            .ok_or(AppCompositionError::BufferNotOpen(buffer_id))?;
+        let title = tab_title(&metadata.identity.canonical_path);
+        self.close_dirty_prompt = Some(CloseDirtyPromptState {
+            buffer_id,
+            file_id: Some(metadata.identity.file_id),
+            path: Some(metadata.identity.canonical_path),
+            title,
+        });
+        Ok(())
+    }
+
+    fn save_context_for_buffer(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<ActiveSaveContext, AppCompositionError> {
+        Ok(ActiveSaveContext {
+            workspace_id: self.require_workspace_id()?,
+            buffer_id,
+            metadata: self
+                .metadata_for_buffer(buffer_id)
+                .cloned()
+                .ok_or(AppCompositionError::BufferNotOpen(buffer_id))?,
+            principal: self
+                .active_principal_id
+                .clone()
+                .ok_or(AppCompositionError::WorkspaceNotOpen)?,
+            trust: self
+                .active_workspace_trust
+                .clone()
+                .ok_or(AppCompositionError::WorkspaceNotOpen)?,
         })
     }
 
@@ -3351,6 +3473,39 @@ pub enum AppCommandRequest {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Switch active tab.
+    SwitchTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request closing a tab.
+    CloseTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Save every open buffer through app-owned save workflows.
+    SaveAll,
+    /// Set the primary cursor for a buffer.
+    SetCursor {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor coordinate from UI projection space.
+        cursor: TextCoordinate,
+    },
+    /// Set the primary selection for a buffer.
+    SetSelection {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Selection range from UI projection space.
+        range: devil_protocol::ProtocolTextRange,
+    },
+    /// Update viewport scroll state for a buffer.
+    SetViewportScroll {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Scroll offsets.
+        scroll: ViewportScroll,
+    },
     /// Open a workspace path through workspace authority.
     OpenPath {
         /// User-provided path text.
@@ -3585,6 +3740,12 @@ impl CommandExecutionService {
                 )))
             }
             AppCommandRequest::Save { .. }
+            | AppCommandRequest::SwitchTab { .. }
+            | AppCommandRequest::CloseTab { .. }
+            | AppCommandRequest::SaveAll
+            | AppCommandRequest::SetCursor { .. }
+            | AppCommandRequest::SetSelection { .. }
+            | AppCommandRequest::SetViewportScroll { .. }
             | AppCommandRequest::OpenPath { .. }
             | AppCommandRequest::StartAiRun { .. }
             | AppCommandRequest::CancelAiRun { .. }
@@ -3687,6 +3848,22 @@ impl CommandDispatcher {
             CommandDispatchIntent::Save { buffer_id } => {
                 Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
                 Ok(AppCommandRequest::Save { buffer_id })
+            }
+            CommandDispatchIntent::SwitchTab { buffer_id } => {
+                Ok(AppCommandRequest::SwitchTab { buffer_id })
+            }
+            CommandDispatchIntent::CloseTab { buffer_id } => {
+                Ok(AppCommandRequest::CloseTab { buffer_id })
+            }
+            CommandDispatchIntent::SaveAll => Ok(AppCommandRequest::SaveAll),
+            CommandDispatchIntent::SetCursor { buffer_id, cursor } => {
+                Ok(AppCommandRequest::SetCursor { buffer_id, cursor })
+            }
+            CommandDispatchIntent::SetSelection { buffer_id, range } => {
+                Ok(AppCommandRequest::SetSelection { buffer_id, range })
+            }
+            CommandDispatchIntent::SetViewportScroll { buffer_id, scroll } => {
+                Ok(AppCommandRequest::SetViewportScroll { buffer_id, scroll })
             }
             CommandDispatchIntent::OpenPath { path } => Ok(AppCommandRequest::OpenPath { path }),
             CommandDispatchIntent::RefreshExplorer => Ok(AppCommandRequest::RefreshExplorer),
@@ -3906,13 +4083,9 @@ impl ProjectionBuilder {
             return Ok(ActiveBufferProjection::empty());
         };
 
-        // Construct default viewport request
         let request = devil_protocol::EditorViewportRequest {
             buffer_id,
-            scroll: devil_protocol::ViewportScroll {
-                top_line: 0,
-                left_column: 0,
-            },
+            scroll: active.viewport_scroll_for(buffer_id),
             dimensions: devil_protocol::ViewportDimensions {
                 width_px: layout.layout.width as u32 * 8, // Approximate
                 height_px: layout.layout.height as u32 * 16,
@@ -3971,6 +4144,176 @@ impl ProjectionBuilder {
             selection: active_file_id.map(|file_id| ExplorerSelectionProjection { file_id }),
         }
     }
+
+    fn daily_editing_projection(
+        active: &ActiveDocumentController,
+        editor: &EditorEngine,
+    ) -> DailyEditingProjection {
+        let tabs = active
+            .open_tabs
+            .iter()
+            .filter_map(|buffer_id| {
+                let metadata = active.metadata_for_buffer(*buffer_id)?;
+                let dirty = editor.is_dirty(*buffer_id).unwrap_or_else(|_| {
+                    editor
+                        .buffer_metadata(*buffer_id)
+                        .map_or(false, |m| m.dirty)
+                });
+                Some(EditorTabProjection {
+                    buffer_id: *buffer_id,
+                    file_id: Some(metadata.identity.file_id),
+                    file_path: Some(metadata.identity.canonical_path.clone()),
+                    title: tab_title(&metadata.identity.canonical_path),
+                    active: active.active_buffer_id == Some(*buffer_id),
+                    dirty,
+                    pinned: false,
+                    preview: false,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let viewport_states = active
+            .open_tabs
+            .iter()
+            .map(|buffer_id| {
+                let scroll = active.viewport_scroll_for(*buffer_id);
+                let viewport = editor
+                    .viewport_projection(devil_protocol::EditorViewportRequest {
+                        buffer_id: *buffer_id,
+                        scroll,
+                        dimensions: devil_protocol::ViewportDimensions {
+                            width_px: 800,
+                            height_px: 384,
+                        },
+                    })
+                    .ok();
+                EditorViewportStateProjection {
+                    buffer_id: *buffer_id,
+                    scroll,
+                    cursor: viewport.as_ref().map(|projection| projection.cursor),
+                    selections: viewport
+                        .as_ref()
+                        .map(|projection| projection.selections.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        DailyEditingProjection {
+            tabs: EditorTabsProjection {
+                tabs,
+                active_buffer_id: active.active_buffer_id,
+            },
+            close_dirty_prompt: active.close_dirty_prompt.as_ref().map(|prompt| {
+                CloseDirtyPromptProjection {
+                    buffer_id: prompt.buffer_id,
+                    file_id: prompt.file_id,
+                    file_path: prompt.path.clone(),
+                    title: prompt.title.clone(),
+                    message: format!("Save changes to {} before closing?", prompt.title),
+                }
+            }),
+            viewport_states,
+            session_record: capture_workspace_session_record(active, editor)
+                .ok()
+                .map(|record| WorkspaceSessionRecordProjection {
+                    session_id: record.session_id,
+                    last_workspace: record.last_workspace,
+                    open_tab_count: record.open_tabs.len(),
+                    active_buffer: record.active_buffer,
+                    saved_at: record.saved_at,
+                    schema_version: record.schema_version,
+                }),
+        }
+    }
+}
+
+fn tab_title(path: &CanonicalPath) -> String {
+    Path::new(&path.0)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path.0.as_str())
+        .to_string()
+}
+
+fn tab_id_for_buffer(buffer_id: BufferId) -> String {
+    format!("buffer:{}", buffer_id.0)
+}
+
+fn capture_workspace_session_record(
+    active: &ActiveDocumentController,
+    editor: &EditorEngine,
+) -> Result<WorkspaceSessionRecord, AppCompositionError> {
+    let open_tabs = active
+        .open_tabs
+        .iter()
+        .filter_map(|buffer_id| {
+            let metadata = active.metadata_for_buffer(*buffer_id)?;
+            let dirty = editor.is_dirty(*buffer_id).unwrap_or(false);
+            Some(SessionTab {
+                tab_id: tab_id_for_buffer(*buffer_id),
+                buffer_id: Some(*buffer_id),
+                file_id: Some(metadata.identity.file_id),
+                path: Some(metadata.identity.canonical_path.clone()),
+                title: tab_title(&metadata.identity.canonical_path),
+                pinned: false,
+                preview: false,
+                dirty,
+            })
+        })
+        .collect::<Vec<_>>();
+    let tab_ids = open_tabs
+        .iter()
+        .map(|tab| tab.tab_id.clone())
+        .collect::<Vec<_>>();
+    let active_tab = active.active_buffer_id.map(tab_id_for_buffer);
+    let dirty_indicators = active
+        .open_tabs
+        .iter()
+        .filter_map(|buffer_id| {
+            let metadata = active.metadata_for_buffer(*buffer_id)?;
+            let editor_metadata = editor.buffer_metadata(*buffer_id).ok()?;
+            Some(SessionDirtyIndicator {
+                buffer_id: *buffer_id,
+                file_id: Some(metadata.identity.file_id),
+                dirty: editor_metadata.dirty,
+                buffer_version: editor_metadata.buffer_version,
+            })
+        })
+        .collect();
+
+    Ok(WorkspaceSessionRecord {
+        session_id: active
+            .workspace_id()
+            .map(|workspace_id| format!("workspace-session:{}", workspace_id.0))
+            .unwrap_or_else(|| "workspace-session:empty".to_string()),
+        last_workspace: active.workspace_id(),
+        last_workspace_path: active
+            .workspace_root_path
+            .as_ref()
+            .map(|path| CanonicalPath(path.clone())),
+        open_tabs,
+        active_tab: active_tab.clone(),
+        active_buffer: active.active_buffer_id,
+        tab_groups: vec![SessionTabGroup {
+            group_id: "main".to_string(),
+            tab_ids,
+            active_tab_id: active_tab,
+        }],
+        layout_splits: Vec::new(),
+        explorer_expansion: Vec::new(),
+        panel_state: SessionPanelState {
+            bottom_visible: false,
+            side_visible: true,
+            active_panel: None,
+            bottom_height_px: None,
+            side_width_px: None,
+        },
+        dirty_indicators,
+        saved_at: TimestampMillis::now(),
+        schema_version: 1,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -4815,6 +5158,18 @@ pub enum AppCommandOutcome {
     Edited(TextTransactionDescriptor),
     /// Buffer save completed through workspace authority.
     Save(AppSaveOutcome),
+    /// All open buffers were saved or rejected through app authority.
+    SaveAll(AppSaveAllOutcome),
+    /// Active tab changed.
+    TabSwitched(BufferId),
+    /// Tab close request completed or produced a dirty prompt.
+    TabClose(AppCloseTabOutcome),
+    /// Cursor update completed.
+    CursorSet(BufferId),
+    /// Selection update completed.
+    SelectionSet(BufferId),
+    /// Viewport scroll update completed.
+    ViewportScrollSet(BufferId),
     /// Explorer projection was refreshed from workspace tree state.
     ExplorerRefreshed(ExplorerProjection),
     /// A workspace path was opened and bound to an editor buffer.
@@ -4837,6 +5192,65 @@ pub enum AppCommandOutcome {
     CollaborationPresencePublished(CollaborationSessionId),
     /// Collaboration transport operation was accepted and applied through editor authority.
     CollaborationOperationApplied(TextTransactionDescriptor),
+}
+
+/// Per-buffer save-all result.
+#[derive(Debug, Clone)]
+pub struct AppSaveAllItemOutcome {
+    /// Buffer that was saved or rejected.
+    pub buffer_id: BufferId,
+    /// File associated with the buffer, when known.
+    pub file_id: Option<FileId>,
+    /// Save outcome for this buffer.
+    pub outcome: AppSaveOutcome,
+}
+
+/// Aggregate save-all result.
+#[derive(Debug, Clone)]
+pub struct AppSaveAllOutcome {
+    /// Per-buffer results in tab order.
+    pub results: Vec<AppSaveAllItemOutcome>,
+    /// Number of successfully saved buffers.
+    pub saved_count: usize,
+    /// Number of rejected saves that preserved dirty buffers.
+    pub rejected_count: usize,
+}
+
+/// App-owned tab-close outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppCloseTabOutcome {
+    /// Clean tab was closed.
+    Closed {
+        /// Closed buffer.
+        buffer_id: BufferId,
+    },
+    /// Dirty tab was kept open and projected as a prompt.
+    CloseDirtyPrompt {
+        /// Dirty buffer.
+        buffer_id: BufferId,
+        /// File associated with the dirty buffer.
+        file_id: Option<FileId>,
+        /// Display path associated with the dirty buffer.
+        path: Option<CanonicalPath>,
+    },
+}
+
+/// One tab skipped during metadata-only session restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppSessionRestoreSkippedTab {
+    /// Persisted session tab id.
+    pub tab_id: String,
+    /// Human-readable skip reason.
+    pub reason: String,
+}
+
+/// Metadata-only session restore result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppSessionRestoreOutcome {
+    /// Restored workspace file ids.
+    pub restored_file_ids: Vec<FileId>,
+    /// Tabs skipped because their metadata could not be opened.
+    pub skipped_tabs: Vec<AppSessionRestoreSkippedTab>,
 }
 
 /// App-owned result for a Phase 4 AI run.
@@ -5073,12 +5487,24 @@ impl AppComposition {
     fn bind_opened_file(&mut self, opened: OpenedFileText) -> Result<FileId, AppCompositionError> {
         let identity = opened.identity.clone();
 
-        let buffer_id = self.editor.open_buffer(
-            identity.workspace_id,
-            identity.file_id,
-            identity.canonical_path.0.clone(),
-            opened.text.clone(),
-        )?;
+        let buffer_id = self
+            .editor
+            .buffer_for_file(identity.workspace_id, identity.file_id)
+            .or_else(|| {
+                self.editor
+                    .buffer_for_path(identity.workspace_id, &identity.canonical_path.0)
+            })
+            .map_or_else(
+                || {
+                    self.editor.open_buffer(
+                        identity.workspace_id,
+                        identity.file_id,
+                        identity.canonical_path.0.clone(),
+                        opened.text.clone(),
+                    )
+                },
+                Ok,
+            )?;
 
         self.active_documents.bind_opened_file(&opened, buffer_id);
         Ok(identity.file_id)
@@ -5134,6 +5560,26 @@ impl AppComposition {
             AppCommandRequest::Save { buffer_id } => {
                 self.active_documents.ensure_active_buffer(buffer_id)?;
                 Ok(AppCommandOutcome::Save(self.save_active_buffer()?))
+            }
+            AppCommandRequest::SwitchTab { buffer_id } => {
+                self.switch_tab(buffer_id)?;
+                Ok(AppCommandOutcome::TabSwitched(buffer_id))
+            }
+            AppCommandRequest::CloseTab { buffer_id } => {
+                Ok(AppCommandOutcome::TabClose(self.close_tab(buffer_id)?))
+            }
+            AppCommandRequest::SaveAll => Ok(AppCommandOutcome::SaveAll(self.save_all()?)),
+            AppCommandRequest::SetCursor { buffer_id, cursor } => {
+                self.set_buffer_cursor(buffer_id, cursor)?;
+                Ok(AppCommandOutcome::CursorSet(buffer_id))
+            }
+            AppCommandRequest::SetSelection { buffer_id, range } => {
+                self.set_buffer_selection(buffer_id, range)?;
+                Ok(AppCommandOutcome::SelectionSet(buffer_id))
+            }
+            AppCommandRequest::SetViewportScroll { buffer_id, scroll } => {
+                self.set_viewport_scroll(buffer_id, scroll)?;
+                Ok(AppCommandOutcome::ViewportScrollSet(buffer_id))
             }
             AppCommandRequest::OpenPath { path } => {
                 Ok(AppCommandOutcome::Opened(self.open_file(path)?))
@@ -6113,7 +6559,12 @@ impl AppComposition {
 
     /// Save currently active buffer through editor save request and workspace write authority.
     pub fn save_active_buffer(&mut self) -> Result<AppSaveOutcome, AppCompositionError> {
-        let context = self.active_documents.require_active_save_context()?;
+        let buffer_id = self.active_documents.require_active_buffer()?;
+        self.save_buffer(buffer_id)
+    }
+
+    fn save_buffer(&mut self, buffer_id: BufferId) -> Result<AppSaveOutcome, AppCompositionError> {
+        let context = self.active_documents.save_context_for_buffer(buffer_id)?;
         let event_context = self.next_event_context();
         match SaveWorkflowService::save_active_buffer(
             &mut self.editor,
@@ -6126,7 +6577,8 @@ impl AppComposition {
             Ok(output) => {
                 self.editor
                     .acknowledge_save_outcome(output.save.request_id, SaveAcknowledgement::Saved);
-                self.active_documents.bind_saved_file(output.applied);
+                self.active_documents
+                    .bind_saved_buffer(output.save.buffer_id, output.applied);
                 Ok(AppSaveOutcome::Saved(output.save))
             }
             Err(failure) => {
@@ -6139,6 +6591,171 @@ impl AppComposition {
                 Ok(AppSaveOutcome::Rejected(Box::new(failure.response)))
             }
         }
+    }
+
+    /// Save all open tabs sequentially through the existing proposal-mediated save workflow.
+    pub fn save_all(&mut self) -> Result<AppSaveAllOutcome, AppCompositionError> {
+        let buffers = self.active_documents.open_tabs.clone();
+        let mut results = Vec::new();
+        let mut saved_count = 0;
+        let mut rejected_count = 0;
+        for buffer_id in buffers {
+            if self
+                .active_documents
+                .require_open_buffer(buffer_id)
+                .is_err()
+            {
+                continue;
+            }
+            let file_id = self
+                .active_documents
+                .metadata_for_buffer(buffer_id)
+                .map(|metadata| metadata.identity.file_id);
+            let outcome = self.save_buffer(buffer_id)?;
+            match &outcome {
+                AppSaveOutcome::Saved(_) => saved_count += 1,
+                AppSaveOutcome::Rejected(_) => rejected_count += 1,
+            }
+            results.push(AppSaveAllItemOutcome {
+                buffer_id,
+                file_id,
+                outcome,
+            });
+        }
+
+        Ok(AppSaveAllOutcome {
+            results,
+            saved_count,
+            rejected_count,
+        })
+    }
+
+    /// Switch the active tab to an already-open buffer.
+    pub fn switch_tab(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
+        self.active_documents.switch_to_buffer(buffer_id)
+    }
+
+    /// Close a tab when clean; dirty tabs produce a prompt projection and remain open.
+    pub fn close_tab(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Result<AppCloseTabOutcome, AppCompositionError> {
+        self.active_documents.require_open_buffer(buffer_id)?;
+        if self.editor.is_dirty(buffer_id)? {
+            self.active_documents.prompt_dirty_close(buffer_id)?;
+            let prompt = self
+                .active_documents
+                .close_dirty_prompt
+                .as_ref()
+                .ok_or(AppCompositionError::BufferNotOpen(buffer_id))?;
+            return Ok(AppCloseTabOutcome::CloseDirtyPrompt {
+                buffer_id,
+                file_id: prompt.file_id,
+                path: prompt.path.clone(),
+            });
+        }
+
+        self.editor.close_buffer(buffer_id)?;
+        self.active_documents.remove_open_tab(buffer_id);
+        self.active_documents.activate_first_available_tab();
+        Ok(AppCloseTabOutcome::Closed { buffer_id })
+    }
+
+    /// Set the active cursor for an open buffer through editor authority.
+    pub fn set_buffer_cursor(
+        &mut self,
+        buffer_id: BufferId,
+        cursor: TextCoordinate,
+    ) -> Result<(), AppCompositionError> {
+        self.active_documents.require_open_buffer(buffer_id)?;
+        self.editor.set_cursors(
+            buffer_id,
+            vec![Cursor {
+                position: CommandDispatcher::editor_position(cursor),
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Set the active selection for an open buffer through editor authority.
+    pub fn set_buffer_selection(
+        &mut self,
+        buffer_id: BufferId,
+        range: devil_protocol::ProtocolTextRange,
+    ) -> Result<(), AppCompositionError> {
+        self.active_documents.require_open_buffer(buffer_id)?;
+        self.editor.set_selections(
+            buffer_id,
+            vec![Selection {
+                range: CommandDispatcher::editor_range(range),
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Store viewport scroll for an open buffer.
+    pub fn set_viewport_scroll(
+        &mut self,
+        buffer_id: BufferId,
+        scroll: ViewportScroll,
+    ) -> Result<(), AppCompositionError> {
+        self.active_documents.set_viewport_scroll(buffer_id, scroll)
+    }
+
+    /// Capture a metadata-only workspace session record.
+    pub fn capture_workspace_session_record(
+        &self,
+    ) -> Result<WorkspaceSessionRecord, AppCompositionError> {
+        capture_workspace_session_record(&self.active_documents, &self.editor)
+    }
+
+    /// Restore open tabs from a metadata-only session record.
+    pub fn restore_workspace_session_record(
+        &mut self,
+        record: &WorkspaceSessionRecord,
+    ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
+        let mut restored_file_ids = Vec::new();
+        let mut skipped_tabs = Vec::new();
+        for tab in &record.open_tabs {
+            let Some(path) = tab.path.as_ref() else {
+                skipped_tabs.push(AppSessionRestoreSkippedTab {
+                    tab_id: tab.tab_id.clone(),
+                    reason: "missing path".to_string(),
+                });
+                continue;
+            };
+            if !Path::new(&path.0).exists() {
+                skipped_tabs.push(AppSessionRestoreSkippedTab {
+                    tab_id: tab.tab_id.clone(),
+                    reason: "path missing".to_string(),
+                });
+                continue;
+            }
+            match self.open_file(&path.0) {
+                Ok(file_id) => restored_file_ids.push(file_id),
+                Err(error) => skipped_tabs.push(AppSessionRestoreSkippedTab {
+                    tab_id: tab.tab_id.clone(),
+                    reason: error.to_string(),
+                }),
+            }
+        }
+
+        if let Some(active_tab) = &record.active_tab
+            && let Some(tab) = record
+                .open_tabs
+                .iter()
+                .find(|candidate| &candidate.tab_id == active_tab)
+            && let Some(path) = &tab.path
+            && let Some(workspace_id) = self.active_documents.workspace_id()
+            && let Some(buffer_id) = self.editor.buffer_for_path(workspace_id, &path.0)
+        {
+            let _ = self.switch_tab(buffer_id);
+        }
+
+        Ok(AppSessionRestoreOutcome {
+            restored_file_ids,
+            skipped_tabs,
+        })
     }
 
     /// Build active-buffer projection from editor-engine state.
@@ -6215,6 +6832,10 @@ impl AppComposition {
             },
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
+            daily_editing_projection: ProjectionBuilder::daily_editing_projection(
+                &self.active_documents,
+                &self.editor,
+            ),
         })
     }
 

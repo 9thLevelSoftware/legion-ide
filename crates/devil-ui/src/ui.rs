@@ -9,7 +9,7 @@ use devil_protocol::{
     ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
     ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
     ProposalRollbackReason, ProtocolTextRange, RedactionHint, TextCoordinate, TimestampMillis,
-    WorkspaceId,
+    ViewportScroll, WorkspaceId,
 };
 use thiserror::Error;
 
@@ -138,6 +138,112 @@ impl Default for ActiveBufferProjection {
     }
 }
 
+/// Metadata-only tab row projected from application-owned editor state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorTabProjection {
+    /// Backing editor buffer identifier.
+    pub buffer_id: BufferId,
+    /// Backing workspace file identifier when the tab is file-backed.
+    pub file_id: Option<FileId>,
+    /// Canonical path for display and restore metadata.
+    pub file_path: Option<CanonicalPath>,
+    /// Display title.
+    pub title: String,
+    /// Whether this tab is currently active.
+    pub active: bool,
+    /// Whether the backing buffer has unsaved changes.
+    pub dirty: bool,
+    /// Whether this tab is pinned.
+    pub pinned: bool,
+    /// Whether this tab is a preview tab.
+    pub preview: bool,
+}
+
+/// Projection-only tab list for daily editing surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EditorTabsProjection {
+    /// Open tabs in display order.
+    pub tabs: Vec<EditorTabProjection>,
+    /// Active buffer identifier when a tab is selected.
+    pub active_buffer_id: Option<BufferId>,
+}
+
+/// Metadata-only close prompt for a dirty buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloseDirtyPromptProjection {
+    /// Dirty buffer that requested close.
+    pub buffer_id: BufferId,
+    /// File identifier when the dirty buffer is file-backed.
+    pub file_id: Option<FileId>,
+    /// Canonical path for display.
+    pub file_path: Option<CanonicalPath>,
+    /// Display title.
+    pub title: String,
+    /// User-visible prompt message.
+    pub message: String,
+}
+
+/// Per-buffer viewport input state preserved by app authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorViewportStateProjection {
+    /// Buffer represented by this viewport state.
+    pub buffer_id: BufferId,
+    /// Last known viewport scroll.
+    pub scroll: ViewportScroll,
+    /// Last projected primary cursor, if available.
+    pub cursor: Option<TextCoordinate>,
+    /// Last projected selections, if available.
+    pub selections: Vec<ProtocolTextRange>,
+}
+
+/// Metadata-only session summary derived from a workspace session record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSessionRecordProjection {
+    /// Session identifier.
+    pub session_id: String,
+    /// Last workspace identifier.
+    pub last_workspace: Option<WorkspaceId>,
+    /// Number of open tabs represented by the record.
+    pub open_tab_count: usize,
+    /// Active buffer identifier.
+    pub active_buffer: Option<BufferId>,
+    /// Last saved timestamp.
+    pub saved_at: TimestampMillis,
+    /// Session schema version.
+    pub schema_version: u16,
+}
+
+/// Daily-editing projection composed from app/editor metadata only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyEditingProjection {
+    /// Open editor tabs.
+    pub tabs: EditorTabsProjection,
+    /// Prompt state for attempted dirty close.
+    pub close_dirty_prompt: Option<CloseDirtyPromptProjection>,
+    /// Per-buffer viewport state.
+    pub viewport_states: Vec<EditorViewportStateProjection>,
+    /// Metadata-only session summary for restore surfaces.
+    pub session_record: Option<WorkspaceSessionRecordProjection>,
+}
+
+impl DailyEditingProjection {
+    /// Construct an empty daily-editing projection.
+    pub fn empty() -> Self {
+        Self {
+            tabs: EditorTabsProjection::default(),
+            close_dirty_prompt: None,
+            viewport_states: Vec::new(),
+            session_record: None,
+        }
+    }
+}
+
+impl Default for DailyEditingProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 /// UI status severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusSeverity {
@@ -204,6 +310,39 @@ pub enum CommandDispatchIntent {
     Save {
         /// Target buffer identifier.
         buffer_id: BufferId,
+    },
+    /// Switch the active editor tab through app authority.
+    SwitchTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Request close for a tab through app authority.
+    CloseTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Save all open buffers through app-owned save workflows.
+    SaveAll,
+    /// Set primary cursor through editor authority.
+    SetCursor {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor coordinate from projection space.
+        cursor: TextCoordinate,
+    },
+    /// Set selection through editor authority.
+    SetSelection {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Selection range from projection space.
+        range: ProtocolTextRange,
+    },
+    /// Set viewport scroll through app-owned viewport state.
+    SetViewportScroll {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Scroll offsets.
+        scroll: ViewportScroll,
     },
     /// Open a file by path through workspace authority.
     OpenPath {
@@ -337,6 +476,8 @@ pub struct ShellProjectionSnapshot {
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Collaboration presence projections supplied by the application layer.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
+    /// Daily-editing projection supplied by the application layer.
+    pub daily_editing_projection: DailyEditingProjection,
 }
 
 /// Command parsing errors surfaced by projection-only shell input handling.
@@ -381,6 +522,8 @@ pub struct Shell {
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Static collaboration presence projections.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
+    /// Static daily-editing projection.
+    pub daily_editing_projection: DailyEditingProjection,
     /// Command dispatch intents emitted by input parsing.
     pub command_dispatch_intents: Vec<CommandDispatchIntent>,
 }
@@ -403,6 +546,7 @@ impl Shell {
             delegated_task_projection: snapshot.delegated_task_projection,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
+            daily_editing_projection: snapshot.daily_editing_projection,
             command_dispatch_intents: Vec::new(),
         }
     }
@@ -427,6 +571,7 @@ impl Shell {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         })
     }
 
@@ -447,6 +592,7 @@ impl Shell {
             delegated_task_projection: self.delegated_task_projection.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
+            daily_editing_projection: self.daily_editing_projection.clone(),
         }
     }
 
@@ -466,6 +612,7 @@ impl Shell {
         self.delegated_task_projection = snapshot.delegated_task_projection;
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
         self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
+        self.daily_editing_projection = snapshot.daily_editing_projection;
     }
 
     /// Drain queued command-dispatch intents.
@@ -490,6 +637,26 @@ impl Shell {
 
         if self.active_buffer_projection.degraded {
             println!("<Degraded Mode: Large File>");
+        }
+        if !self.daily_editing_projection.tabs.tabs.is_empty() {
+            let rows = self
+                .daily_editing_projection
+                .tabs
+                .tabs
+                .iter()
+                .map(|tab| {
+                    format!(
+                        "{}{}{}",
+                        if tab.active { "*" } else { "" },
+                        tab.title,
+                        if tab.dirty { " +" } else { "" }
+                    )
+                })
+                .collect::<Vec<_>>();
+            println!("Tabs: {}", rows.join(" | "));
+        }
+        if let Some(prompt) = &self.daily_editing_projection.close_dirty_prompt {
+            println!("Close dirty: {}", prompt.message);
         }
 
         if let Some(text) = self.active_buffer_projection.small_buffer_text() {
@@ -737,7 +904,7 @@ impl Shell {
             }
         }
         println!(
-            "Commands: :i text | :d start,end | :r start,end,text | :w | :plugin id command | :ai-start label | :u | :redo | :q"
+            "Commands: :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :close id | :plugin id command | :ai-start label | :u | :redo | :q"
         );
     }
 
@@ -766,6 +933,19 @@ impl Shell {
             let buffer_id = self.active_buffer_id()?;
             return Ok(Some(
                 self.push_intent(CommandDispatchIntent::Save { buffer_id }),
+            ));
+        }
+        if trimmed == ":wa" {
+            return Ok(Some(self.push_intent(CommandDispatchIntent::SaveAll)));
+        }
+        if let Some(buffer_id) = parse_buffer_id(trimmed.strip_prefix(":tab ")) {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::SwitchTab { buffer_id }),
+            ));
+        }
+        if let Some(buffer_id) = parse_buffer_id(trimmed.strip_prefix(":close ")) {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::CloseTab { buffer_id }),
             ));
         }
 
@@ -1000,6 +1180,13 @@ fn protocol_text_coordinate(line: u32, character: u32, byte_offset: Option<u64>)
         byte_offset,
         utf16_offset: None,
     }
+}
+
+fn parse_buffer_id(input: Option<&str>) -> Option<BufferId> {
+    input
+        .and_then(|value| value.trim().parse::<u128>().ok())
+        .filter(|value| *value != 0)
+        .map(BufferId)
 }
 
 fn empty_proposal_ledger_projection() -> ProposalLedgerProjection {
@@ -1431,6 +1618,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let intent = shell
@@ -1474,6 +1662,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1519,6 +1708,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1572,6 +1762,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let before = shell.projection_snapshot();
@@ -1647,6 +1838,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1730,6 +1922,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1800,6 +1993,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -1934,6 +2128,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
@@ -2016,6 +2211,7 @@ mod tests {
             delegated_task_projection: delegated.clone(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            daily_editing_projection: DailyEditingProjection::empty(),
         });
 
         let snapshot = shell.projection_snapshot();
