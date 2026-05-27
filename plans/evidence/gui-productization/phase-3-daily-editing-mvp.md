@@ -8,7 +8,7 @@ Decision date: 2026-05-27
 
 Phase 3 is accepted for the Daily Editing MVP scope. The accepted scope is local daily editing in the renderer-backed desktop adapter: tabs, explorer controls, cursor/selection/scrolling, undo/redo routing, save all, dirty-close prompts, bounded active-file/workspace search, metadata-only session restore, visible conflict preservation, and large-file degraded guardrails.
 
-This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control and AI surfaces, or Phase 6 packaging/accessibility proof. The broad workspace test command was run and failed in this local environment from MSVC PDB write failures and low disk space; it is recorded as a residual verification risk and is not marked passed.
+This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control and AI surfaces, or Phase 6 packaging/accessibility proof. The broad workspace test command initially failed in the low-disk local environment, then passed after disk space was restored.
 
 ## Artifact Inventory
 
@@ -82,7 +82,7 @@ This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control a
 | `cargo check --workspace --all-targets` | Passed | Workspace all-target check completed for `devil-ui`, `devil-app`, and `devil-desktop`. |
 | `cargo test -p devil-app daily_editing -- --nocapture` | Passed | App daily-editing filters passed: save-all unit coverage, 7 `daily_editing_contracts` tests, and 6 `daily_editing_search` tests. |
 | `cargo test -p devil-desktop --all-targets` | Passed | Desktop tests passed, including workflow, daily-editing controls, intent bridge, large-file guardrails, platform smoke, projection rendering, save-all conflict, search workflow, and session restore. |
-| `cargo test --workspace --all-targets` | Failed - environment | Run failed during MSVC linker/PDB writes with `LNK1318 Unexpected PDB error` and `LNK1201 error writing to program database`; `-j 1` retry failed similarly. Fresh temporary target retry also failed with `There is not enough space on the disk. (os error 112)` and `rustc-LLVM ERROR: IO failure on output stream: no space on device`. A follow-up filesystem check showed only about 630 MB free on `C:`/Temp. No Rust assertion failure was observed before the linker/disk failures. |
+| `cargo test --workspace --all-targets` | Passed on rerun | After freeing disk space, the workspace all-target test passed. The performance suite reported 7 passed and 3 ignored, including the intentionally ignored 100MB degraded-mode workload. |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Passed | Finished warning-clean for `devil-ui`, `devil-app`, and `devil-desktop`. |
 | `rg -q "Phase 3 daily editing MVP: Accepted" plans/evidence/gui-productization/phase-3-daily-editing-mvp.md` | Passed | Acceptance marker present in this evidence artifact. |
 
@@ -98,7 +98,6 @@ This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control a
 
 ## Residual Risks
 
-- `cargo test --workspace --all-targets` did not pass in this local environment. The observed failures were MSVC PDB write errors and low disk space, not a Phase 3 test assertion; this should be rerun on a machine or CI worker with adequate free disk and stable PDB writes.
 - Accessibility proof remains limited. Phase 2 recorded accessibility smoke as not observed, and Phase 3 did not add Phase 6 accessibility-tree evidence.
 - The ignored 100MB performance workload remains a known degraded/streaming-mode gap. Phase 3 proves bounded degraded behavior, not final large-file performance.
 - `cargo deny check` was not part of Plan 03-06 frontmatter and was not rerun here; dependency policy was covered by `xtask check-deps`.
@@ -108,4 +107,4 @@ This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control a
 - Preserve the Phase 3 daily editing boundary: desktop renders and routes, app/editor/workspace retain authority.
 - Keep edit-producing language actions proposal-mediated.
 - Do not route terminal or LSP output directly into editor buffers or disk writes.
-- Re-run the broad workspace test gate after freeing disk or on CI before treating the local environment as fully green.
+- Preserve Phase 3's bounded large-file assumptions until the ignored 100MB degraded-mode workload is promoted by a later phase.

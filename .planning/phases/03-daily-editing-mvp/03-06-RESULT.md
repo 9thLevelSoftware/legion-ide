@@ -1,6 +1,6 @@
 # Plan 03-06 Result: Phase 3 Evidence And Acceptance Gate
 
-Status: Complete with environment warning
+Status: Complete
 
 ## Files Changed
 
@@ -15,7 +15,7 @@ Status: Complete with environment warning
 - Gathered prior Phase 3 result artifacts and source boundary checks.
 - Wrote the final Phase 3 Daily Editing MVP acceptance evidence.
 - Updated the wave checklist with per-plan status, verification summaries, boundary proof, and the map freshness warning.
-- Recorded the broad workspace all-target test failure as an environment/PDB/disk blocker instead of marking it passed.
+- Re-ran the broad workspace all-target test after disk space was restored and recorded the passing result.
 - Updated roadmap/state for Phase 3 acceptance and Phase 4 planning handoff.
 
 ## Verification
@@ -27,7 +27,7 @@ Status: Complete with environment warning
 | `cargo check --workspace --all-targets` | Passed |
 | `cargo test -p devil-app daily_editing -- --nocapture` | Passed; app daily-editing filters passed |
 | `cargo test -p devil-desktop --all-targets` | Passed; desktop all-target tests passed |
-| `cargo test --workspace --all-targets` | Failed from local environment; MSVC `LNK1318`/`LNK1201` PDB write errors, `-j 1` retry also failed, and fresh temporary target retry reported `os error 112`/no space on device |
+| `cargo test --workspace --all-targets` | Passed on rerun after disk space was restored |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
 | `rg -q "Phase 3 daily editing MVP: Accepted" plans/evidence/gui-productization/phase-3-daily-editing-mvp.md` | Passed |
 | `rg -q "03-05" .planning/phases/03-daily-editing-mvp/WAVE-CHECKLIST.md` | Passed |
@@ -45,10 +45,10 @@ Status: Complete with environment warning
 
 ## Decisions
 
-- Accepted Phase 3 because every roadmap success criterion is met by targeted command and source evidence.
-- Did not mark `cargo test --workspace --all-targets` passed. The failure is retained as residual environmental verification risk because the observed failure is linker/PDB/disk related, not a Phase 3 source assertion.
-- Phase 4 should start from `/legion:plan 4 --auto-refine` after rerunning broad workspace tests on a healthy disk/CI environment when possible.
+- Accepted Phase 3 because every roadmap success criterion is met by targeted command, broad workspace test, and source evidence.
+- The prior `cargo test --workspace --all-targets` environment failure is superseded by the successful rerun after freeing disk space.
+- Phase 4 should start from `/legion:plan 4 --auto-refine`.
 
 ## Issues
 
-- Broad workspace test gate is not green locally due to MSVC PDB write failures and low disk space.
+- None.

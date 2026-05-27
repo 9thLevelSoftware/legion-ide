@@ -3,7 +3,7 @@
 ## Current Position
 - **Phase**: 3 of 8 (complete)
 - **Status**: Phase 3 complete -- all plans executed and Daily Editing MVP accepted
-- **Last Activity**: Plan 03-06 execution and Phase 3 acceptance gate (2026-05-27)
+- **Last Activity**: Plan 03-06 acceptance gate rerun (2026-05-27)
 
 ## Progress
 ```
@@ -52,7 +52,7 @@
 - Dirty-close prompt exposes app-owned save/cancel behavior only; discard remains unavailable until a verified app contract exists.
 - Desktop session persistence uses metadata-only `WorkspaceSessionRecord` JSON through `serde_json`; no `devil-storage` dependency was added.
 - Phase 3 large-file evidence proves bounded degraded desktop rendering/search but does not promote the ignored 100MB performance workload.
-- Phase 3 is accepted with a recorded local environment warning: `cargo test --workspace --all-targets` failed from MSVC PDB write errors and low disk space, while targeted Phase 3 gates and workspace check/clippy passed.
+- Phase 3 is accepted with all final gates green after the broad `cargo test --workspace --all-targets` gate passed on rerun with restored disk space.
 
 ## Next Action
 Run `/legion:plan 4 --auto-refine` for Phase 4: Language and Terminal IDE Loop

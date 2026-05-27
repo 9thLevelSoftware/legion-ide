@@ -12,7 +12,7 @@ Status: Complete
 | 03-03 | 3 | lsp-index-engineer + testing-qa-verification-specialist | Complete | `.planning/phases/03-daily-editing-mvp/03-03-RESULT.md` | Bounded active-file and workspace search | `cargo test -p devil-app daily_editing_search -- --nocapture` passed; `cargo test -p devil-desktop search_workflow -- --nocapture` passed; workspace check passed | None |
 | 03-04 | 4 | engineering-senior-developer + testing-qa-verification-specialist | Complete | `.planning/phases/03-daily-editing-mvp/03-04-RESULT.md` | Save-all conflict and dirty-close hardening | `cargo test -p devil-desktop save_all_conflict -- --nocapture` passed; external-overwrite regression passed; app/desktop clippy passed | None |
 | 03-05 | 5 | engineering-senior-developer + testing-performance-benchmarker | Complete | `.planning/phases/03-daily-editing-mvp/03-05-RESULT.md` | `plans/evidence/gui-productization/phase-3-session-and-large-file.md` | `session_restore`, `large_file_guardrails`, `platform_smoke`, `intent_bridge`, desktop check, and desktop clippy passed | None |
-| 03-06 | 6 | testing-qa-verification-specialist + product-technical-writer | Complete with environment warning | `.planning/phases/03-daily-editing-mvp/03-06-RESULT.md` | `plans/evidence/gui-productization/phase-3-daily-editing-mvp.md` | Final targeted gates passed; broad workspace test was run and failed from local MSVC PDB/disk environment, not a Phase 3 source assertion failure | Broad `cargo test --workspace --all-targets` not green in this local environment |
+| 03-06 | 6 | testing-qa-verification-specialist + product-technical-writer | Complete | `.planning/phases/03-daily-editing-mvp/03-06-RESULT.md` | `plans/evidence/gui-productization/phase-3-daily-editing-mvp.md` | Final targeted gates passed; broad workspace test passed on rerun after disk space was restored | None |
 
 ## Boundary Checks
 
@@ -32,4 +32,4 @@ The map freshness warning from `.planning/phases/03-daily-editing-mvp/03-CONTEXT
 
 - Final targeted app and desktop daily-editing tests passed.
 - `cargo run -p xtask -- check-deps`, `cargo fmt --all --check`, `cargo check --workspace --all-targets`, and `cargo clippy --workspace --all-targets -- -D warnings` passed in Plan 03-06.
-- `cargo test --workspace --all-targets` was run and failed at local MSVC linker/PDB writes; a fresh temporary target retry also reported disk exhaustion. This command is recorded as failed, not passed.
+- `cargo test --workspace --all-targets` initially failed at local MSVC linker/PDB writes while disk space was low, then passed after disk space was restored.
