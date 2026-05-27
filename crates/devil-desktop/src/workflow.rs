@@ -380,6 +380,8 @@ impl DesktopEframeApp {
 
     fn handle_keyboard(&mut self, ui: &egui::Ui) {
         let mut actions = Vec::new();
+        let snapshot = self.runtime.projection_snapshot();
+        let editor_input_enabled = !self.runtime.open_path_prompt;
         ui.input(|input| {
             let command = input.modifiers.command;
             if command && input.key_pressed(egui::Key::S) {
@@ -399,17 +401,11 @@ impl DesktopEframeApp {
                 }
             }
 
-            let at = projected_cursor(&self.runtime.projection_snapshot());
-            for event in &input.events {
-                if let egui::Event::Text(text) = event
-                    && !text.is_empty()
-                {
-                    actions.push(DesktopAction::InsertText {
-                        text: text.clone(),
-                        at,
-                    });
-                }
-            }
+            actions.extend(editor_text_input_actions(
+                &input.events,
+                &snapshot,
+                editor_input_enabled,
+            ));
         });
 
         for action in actions {
@@ -485,4 +481,92 @@ fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {
             byte_offset: Some(0),
             utf16_offset: Some(0),
         })
+}
+
+fn editor_text_input_actions(
+    events: &[egui::Event],
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+) -> Vec<DesktopAction> {
+    if !editor_input_enabled {
+        return Vec::new();
+    }
+
+    let at = projected_cursor(snapshot);
+    let mut actions = Vec::new();
+    for event in events {
+        match event {
+            egui::Event::Text(text) if !text.is_empty() => {
+                actions.push(DesktopAction::InsertText {
+                    text: text.clone(),
+                    at,
+                });
+            }
+            egui::Event::Paste(text) if !text.is_empty() => {
+                actions.push(DesktopAction::ClipboardPaste {
+                    text: text.clone(),
+                    at,
+                });
+            }
+            _ => {}
+        }
+    }
+    actions
+}
+
+#[cfg(test)]
+mod tests {
+    use devil_protocol::BufferId;
+    use devil_ui::{ActiveBufferProjection, Shell};
+
+    use super::*;
+
+    fn snapshot_with_active_buffer() -> ShellProjectionSnapshot {
+        let mut snapshot = Shell::empty("Keyboard").projection_snapshot();
+        snapshot.active_buffer_projection = ActiveBufferProjection {
+            buffer_id: Some(BufferId(1)),
+            ..ActiveBufferProjection::empty()
+        };
+        snapshot
+    }
+
+    #[test]
+    fn prompt_active_text_input_does_not_route_to_editor() {
+        let events = vec![
+            egui::Event::Text("Cargo.toml".to_string()),
+            egui::Event::Paste("pasted/path.rs".to_string()),
+        ];
+
+        assert!(
+            editor_text_input_actions(&events, &snapshot_with_active_buffer(), false).is_empty()
+        );
+    }
+
+    #[test]
+    fn editor_text_input_routes_text_and_clipboard_paste() {
+        let events = vec![
+            egui::Event::Text("x".to_string()),
+            egui::Event::Paste("clip".to_string()),
+        ];
+        let at = TextCoordinate {
+            line: 0,
+            character: 0,
+            byte_offset: Some(0),
+            utf16_offset: Some(0),
+        };
+
+        assert_eq!(
+            editor_text_input_actions(&events, &snapshot_with_active_buffer(), true),
+            vec![
+                DesktopAction::InsertText {
+                    text: "x".to_string(),
+                    at,
+                },
+                DesktopAction::ClipboardPaste {
+                    text: "clip".to_string(),
+                    at,
+                },
+            ]
+        );
+    }
 }
