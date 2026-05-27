@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use devil_desktop::bridge::{
-    DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput,
-    DesktopCommandBridge,
+    DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput, DesktopCommandBridge,
 };
 use devil_protocol::{BufferId, ProtocolTextRange, TextCoordinate};
 use devil_ui::{ActiveBufferProjection, CommandDispatchIntent, Shell};

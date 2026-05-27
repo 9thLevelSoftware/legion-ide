@@ -8,14 +8,14 @@ use devil_protocol::{
     ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
     ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
     ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SemanticPrivacyScope,
-    SnapshotId, TextCoordinate, TimestampMillis, Utf16Position, Utf16Range, ViewportDimensions,
+    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId,
+    TextCoordinate, TimestampMillis, Utf16Position, Utf16Range, ViewportDimensions,
     ViewportLineSlice, ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
     ViewportScroll, WorkspaceId,
 };
 use devil_ui::{
-    ActiveBufferProjection, ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
-    Shell, StatusMessageProjection, StatusSeverity,
+    ActiveBufferProjection, ExplorerNodeProjection, ExplorerProjection,
+    ExplorerSelectionProjection, Shell, StatusMessageProjection, StatusSeverity,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -245,22 +245,68 @@ fn projection_rendering_populates_required_phase2_surfaces() {
     let model = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
 
     assert_eq!(model.layout_title, "Foundation Mode");
-    assert!(model.explorer_rows.iter().any(|row| row.contains("Cargo.toml")));
-    assert!(model.active_buffer_lines.iter().any(|row| row.contains("[workspace]")));
-    assert!(model.status_rows.iter().any(|row| row.contains("Desktop adapter ready")));
-    assert!(model.proposal_rows.iter().any(|row| row.contains("Save Cargo manifest")));
-    assert!(model.trust_rows.iter().any(|row| row.contains("context manifest")));
-    assert!(model.assistant_rows.iter().any(|row| row.contains("assisted ai")));
+    assert!(
+        model
+            .explorer_rows
+            .iter()
+            .any(|row| row.contains("Cargo.toml"))
+    );
+    assert!(
+        model
+            .active_buffer_lines
+            .iter()
+            .any(|row| row.contains("[workspace]"))
+    );
+    assert!(
+        model
+            .status_rows
+            .iter()
+            .any(|row| row.contains("Desktop adapter ready"))
+    );
+    assert!(
+        model
+            .proposal_rows
+            .iter()
+            .any(|row| row.contains("Save Cargo manifest"))
+    );
+    assert!(
+        model
+            .trust_rows
+            .iter()
+            .any(|row| row.contains("context manifest"))
+    );
+    assert!(
+        model
+            .assistant_rows
+            .iter()
+            .any(|row| row.contains("assisted ai"))
+    );
     assert!(model.plugin_rows.iter().any(|row| row.contains("plugin 4")));
-    assert!(model.collaboration_rows.iter().any(|row| row.contains("participant 6")));
+    assert!(
+        model
+            .collaboration_rows
+            .iter()
+            .any(|row| row.contains("participant 6"))
+    );
     assert!(model.empty_or_degraded_flags.contains(&"dirty".to_string()));
 }
 
 #[test]
 fn projection_rendering_handles_empty_and_degraded_snapshots() {
-    let empty_model = DesktopProjectionViewModel::from_snapshot(&Shell::empty("Empty").projection_snapshot());
-    assert!(empty_model.explorer_rows.iter().any(|row| row == "<empty explorer>"));
-    assert!(empty_model.active_buffer_lines.iter().any(|row| row == "<no active buffer>"));
+    let empty_model =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Empty").projection_snapshot());
+    assert!(
+        empty_model
+            .explorer_rows
+            .iter()
+            .any(|row| row == "<empty explorer>")
+    );
+    assert!(
+        empty_model
+            .active_buffer_lines
+            .iter()
+            .any(|row| row == "<no active buffer>")
+    );
     assert!(empty_model.proposal_rows.is_empty());
     assert!(empty_model.trust_rows.is_empty());
     assert!(empty_model.assistant_rows.is_empty());
@@ -283,11 +329,8 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
 
 #[test]
 fn projection_rendering_tests_preserve_app_boundary() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/view.rs"
-    ))
-    .expect("renderer source should be readable");
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/view.rs"))
+        .expect("renderer source should be readable");
 
     assert!(!source.contains("devil_app"));
     assert!(!source.contains("AppComposition"));

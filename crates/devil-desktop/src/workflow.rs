@@ -1,9 +1,6 @@
 //! Desktop runtime workflow boundary.
 
-use std::{
-    ffi::OsString,
-    path::PathBuf,
-};
+use std::{ffi::OsString, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 use devil_app::{AppCommandOutcome, AppComposition, AppSaveOutcome};
@@ -469,10 +466,7 @@ impl eframe::App for DesktopEframeApp {
     }
 }
 
-fn status_message(
-    severity: StatusSeverity,
-    message: impl Into<String>,
-) -> StatusMessageProjection {
+fn status_message(severity: StatusSeverity, message: impl Into<String>) -> StatusMessageProjection {
     StatusMessageProjection {
         severity,
         message: message.into(),

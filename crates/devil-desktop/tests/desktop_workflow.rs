@@ -186,7 +186,10 @@ fn desktop_workflow_replace_and_delete_route_through_app_authority() {
         DesktopWorkflowOutcome::Edited
     );
     assert_eq!(
-        runtime.projection_snapshot().active_buffer_projection.small_buffer_text(),
+        runtime
+            .projection_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
         Some("aXYe")
     );
 }

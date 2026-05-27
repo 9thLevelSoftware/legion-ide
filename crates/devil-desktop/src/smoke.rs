@@ -236,9 +236,8 @@ fn run_smoke_window(
             let runtime = DesktopRuntime::open(config)
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
             if let Ok(mut observations) = observations_for_app.lock() {
-                observations.apply_adapter_checks(adapter_platform_checks(
-                    &runtime.projection_snapshot(),
-                ));
+                observations
+                    .apply_adapter_checks(adapter_platform_checks(&runtime.projection_snapshot()));
             }
             Ok(Box::new(RendererSmokeApp::new(
                 runtime,

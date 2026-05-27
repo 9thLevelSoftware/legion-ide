@@ -253,7 +253,11 @@ fn proposal_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         .map(|row| {
             format!(
                 "proposal {}: {} [{} {:?} {:?}]",
-                row.proposal_id.0, row.title, row.lifecycle.label, row.risk_label, row.privacy_label
+                row.proposal_id.0,
+                row.title,
+                row.lifecycle.label,
+                row.risk_label,
+                row.privacy_label
             )
         })
         .collect()
