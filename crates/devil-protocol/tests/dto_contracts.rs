@@ -5902,6 +5902,363 @@ fn dto_contracts_delegated_task_plan_and_projection_are_metadata_only() {
 }
 
 #[test]
+fn dto_contracts_post_ga_work_surface_projections_are_metadata_only() {
+    let generated_at = TimestampMillis(2600);
+    let command_projection = CommandRegistryProjection {
+        projection_id: "command-registry:post-ga".to_string(),
+        commands: vec![CommandDescriptor {
+            command_id: "delegated.allocate_sandbox".to_string(),
+            title: "Allocate Delegated Sandbox".to_string(),
+            scope: "agents".to_string(),
+            enabled: false,
+            disabled_reason: Some("policy gate required".to_string()),
+            shortcut: None,
+            risk_label: CommandRiskLabel::Privileged,
+            required_permission: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+            target: Some("isolated-worktree".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        selected_command_id: None,
+        omitted_command_count: 0,
+        generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let artifact_projection = ArtifactLedgerProjection {
+        projection_id: "artifact-ledger:post-ga".to_string(),
+        rows: vec![ArtifactLedgerRow {
+            artifact_id: "artifact:directive:1".to_string(),
+            kind: ArtifactKind::Directive,
+            title: "Directive".to_string(),
+            state_label: "Planned".to_string(),
+            linked_proposal_id: Some(ProposalId(801)),
+            linked_session_id: Some("session:1".to_string()),
+            raw_payload_retained: false,
+            risk_label: ProposalRiskLabel::Medium,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        omitted_row_count: 0,
+        generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let verification_projection = VerificationRunProjection {
+        projection_id: "verification-runs:post-ga".to_string(),
+        rows: vec![VerificationRunRow {
+            run_id: "verification:1".to_string(),
+            label: "cargo test".to_string(),
+            state: VerificationRunState::Planned,
+            command_class_label: "test".to_string(),
+            command_body_redacted: true,
+            exit_code: None,
+            target_labels: vec!["workspace".to_string()],
+            evidence_artifact_id: None,
+            started_at: None,
+            completed_at: None,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        omitted_row_count: 0,
+        generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let graph_projection = SystemGraphProjection {
+        projection_id: "system-graph:post-ga".to_string(),
+        nodes: vec![SystemGraphNode {
+            node_id: "system:workspace".to_string(),
+            kind_label: "workspace".to_string(),
+            display_label: "Active workspace".to_string(),
+            target_count: 1,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        edges: vec![SystemGraphEdge {
+            from_node_id: "system:workspace".to_string(),
+            to_node_id: "system:proposal-ledger".to_string(),
+            relation_label: "contains".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        omitted_node_count: 0,
+        omitted_edge_count: 0,
+        generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    let value = json!({
+        "command": command_projection.clone(),
+        "artifact": artifact_projection.clone(),
+        "verification": verification_projection.clone(),
+        "graph": graph_projection.clone(),
+    });
+    let serialized = serde_json::to_string(&value).expect("serialize post-GA surfaces");
+    assert!(serialized.contains("delegated.allocate_sandbox"));
+    assert!(serialized.contains("artifact-ledger:post-ga"));
+    assert!(serialized.contains("command_body_redacted"));
+    assert!(serialized.contains("system-graph:post-ga"));
+    assert!(!serialized.contains("raw prompt"));
+    assert!(!serialized.contains("source_body"));
+    assert!(!serialized.contains("provider_payload"));
+    assert!(!serialized.contains("terminal output"));
+    assert!(!serialized.contains("replacement"));
+
+    let mut command_value =
+        serde_json::to_value(&command_projection).expect("serialize command registry");
+    let roundtrip: CommandRegistryProjection =
+        serde_json::from_value(command_value.clone()).expect("roundtrip command registry");
+    assert_eq!(
+        roundtrip.commands[0].risk_label,
+        CommandRiskLabel::Privileged
+    );
+    remove_required_field::<CommandRegistryProjection>(&mut command_value, "schema_version");
+}
+
+#[test]
+fn dto_contracts_post_ga_artifacts_default_to_metadata_only_retention() {
+    let directive = DirectiveArtifact {
+        artifact_id: "artifact:directive:1".to_string(),
+        directive_id: "directive:1".to_string(),
+        goal_hash: fingerprint("goal-hash"),
+        scope_labels: vec!["workspace".to_string()],
+        workspace_id: Some(WorkspaceId(1)),
+        product_mode: ProductMode::Delegates,
+        policy_profile_id: "policy:local-metadata-only".to_string(),
+        retention_policy_label: "metadata-only".to_string(),
+        raw_payload_retained: false,
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        created_at: TimestampMillis(2601),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let spec = SpecArtifact {
+        artifact_id: "artifact:spec:1".to_string(),
+        directive_id: directive.directive_id.clone(),
+        requirement_hashes: vec![fingerprint("requirement")],
+        design_note_hashes: vec![fingerprint("design")],
+        acceptance_criteria_hashes: vec![fingerprint("acceptance")],
+        constraint_labels: vec!["proposal-only".to_string()],
+        retention_policy_label: "metadata-only".to_string(),
+        raw_payload_retained: false,
+        generated_at: TimestampMillis(2602),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let task_graph = TaskGraphArtifact {
+        artifact_id: "artifact:task-graph:1".to_string(),
+        directive_id: directive.directive_id.clone(),
+        nodes: vec![TaskNode {
+            task_id: "task:1".to_string(),
+            depends_on: Vec::new(),
+            target_labels: vec!["src/lib.rs".to_string()],
+            verification_requirements: vec!["cargo test".to_string()],
+            state: DelegatedTaskStepState::Planned,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        edge_count: 0,
+        blocked_task_count: 0,
+        retention_policy_label: "metadata-only".to_string(),
+        raw_payload_retained: false,
+        generated_at: TimestampMillis(2603),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let session = ExecutionSessionArtifact {
+        artifact_id: "artifact:session:1".to_string(),
+        session_id: "session:1".to_string(),
+        directive_id: directive.directive_id.clone(),
+        plan_id: Some(DelegatedTaskPlanId("plan:1".to_string())),
+        workspace_id: Some(WorkspaceId(1)),
+        worktree_label: "isolated-worktree".to_string(),
+        sandbox_label: "local-sandbox".to_string(),
+        tool_grants: vec![CapabilityId("tool.test".to_string())],
+        lifecycle_state: DelegatedTaskRuntimeActivationState::SandboxAllocated,
+        runtime_activation_labels: vec!["sandbox.allocated".to_string()],
+        retention_policy_label: "metadata-only".to_string(),
+        raw_payload_retained: false,
+        generated_at: TimestampMillis(2604),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let evidence = EvidenceArtifact {
+        artifact_id: "artifact:evidence:1".to_string(),
+        session_id: Some(session.session_id.clone()),
+        command_label: Some("cargo test".to_string()),
+        run_state: VerificationRunState::Passed,
+        summary_hash: fingerprint("test-summary"),
+        passed: true,
+        failure_labels: Vec::new(),
+        screenshot_hashes: Vec::new(),
+        log_hashes: vec![fingerprint("log-summary")],
+        retention_policy_label: "metadata-only".to_string(),
+        raw_payload_retained: false,
+        generated_at: TimestampMillis(2605),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let approval = ApprovalArtifact {
+        artifact_id: "artifact:approval:1".to_string(),
+        directive_id: directive.directive_id.clone(),
+        proposal_ids: vec![ProposalId(801)],
+        reviewer_decision_labels: vec!["approved".to_string()],
+        denied_gate_labels: Vec::new(),
+        rollback_available: true,
+        audit_record_hashes: vec![fingerprint("audit")],
+        generated_at: TimestampMillis(2606),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    let value = json!({
+        "directive": directive.clone(),
+        "spec": spec.clone(),
+        "task_graph": task_graph.clone(),
+        "session": session.clone(),
+        "evidence": evidence.clone(),
+        "approval": approval.clone(),
+    });
+    let serialized = serde_json::to_string(&value).expect("serialize post-GA artifacts");
+    assert!(serialized.contains("metadata-only"));
+    assert!(serialized.contains("SandboxAllocated"));
+    assert!(serialized.contains("\"raw_payload_retained\":false"));
+    assert!(!serialized.contains("raw prompt"));
+    assert!(!serialized.contains("source_body"));
+    assert!(!serialized.contains("provider_payload"));
+    assert!(!serialized.contains("terminal output"));
+
+    let mut directive_value =
+        serde_json::to_value(&directive).expect("serialize directive artifact");
+    let roundtrip: DirectiveArtifact =
+        serde_json::from_value(directive_value.clone()).expect("roundtrip directive");
+    assert_eq!(roundtrip.product_mode, ProductMode::Delegates);
+    remove_required_field::<DirectiveArtifact>(&mut directive_value, "schema_version");
+}
+
+#[test]
+fn dto_contracts_runtime_activation_variants_and_security_stop_gates_are_explicit() {
+    let value = serde_json::to_value(DelegatedTaskRuntimeActivationState::Executing)
+        .expect("serialize runtime state");
+    assert_eq!(value, json!("Executing"));
+    assert!(DelegatedTaskRuntimeActivationState::Executing.is_encoded());
+    assert!(DelegatedTaskRuntimeActivationState::Executing.requires_isolation());
+    assert!(DelegatedTaskRuntimeActivationState::Verifying.is_active());
+    assert!(!DelegatedTaskRuntimeActivationState::NotEncoded.is_encoded());
+
+    let contract = DelegatedTaskSecurityContract {
+        contract_id: "security:delegated:1".to_string(),
+        workspace_id: Some(WorkspaceId(1)),
+        workspace_scope_labels: vec!["workspace".to_string()],
+        protected_path_patterns: vec![".git".to_string()],
+        allowed_command_classes: vec![
+            DelegatedRuntimeCommandClass::ReadOnly,
+            DelegatedRuntimeCommandClass::Test,
+        ],
+        denied_command_classes: vec![
+            DelegatedRuntimeCommandClass::Network,
+            DelegatedRuntimeCommandClass::DirectMutation,
+        ],
+        egress_allowlist: vec!["localhost".to_string()],
+        tool_grants: vec![CapabilityId("tool.test".to_string())],
+        budget_labels: vec!["budget:small".to_string()],
+        approval_gate_labels: vec!["human-review".to_string()],
+        sandbox_required: true,
+        worktree_isolation_required: true,
+        audit_before_success_required: true,
+        proposal_only_mutation_required: true,
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let blocked = evaluate_delegated_task_runtime_readiness(DelegatedTaskRuntimeReadinessInput {
+        security_contract: contract.clone(),
+        requested_command_classes: vec![
+            DelegatedRuntimeCommandClass::Network,
+            DelegatedRuntimeCommandClass::DirectMutation,
+        ],
+        target_path_labels: vec![".git/config".to_string()],
+        requested_egress_labels: vec!["example.com".to_string()],
+        sandbox_allocated: false,
+        main_workspace_dirty_conflict: true,
+        proposal_preconditions_stale: true,
+        verification_evidence_count: 0,
+        audit_persisted_before_success: false,
+        runtime_activation: DelegatedTaskRuntimeActivationState::Verifying,
+        schema_version: 1,
+    });
+
+    assert!(!blocked.allowed);
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::NoSandboxAvailable)
+    );
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::ProtectedFileTarget)
+    );
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::UnapprovedEgress)
+    );
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::DeniedCommandClass)
+    );
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::DirectMutationAttempt)
+    );
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::StaleProposalPreconditions)
+    );
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::DirtyMainWorkspaceConflict)
+    );
+    assert!(
+        blocked
+            .stop_gates
+            .contains(&DelegatedRuntimeStopGate::MissingVerificationEvidence)
+    );
+
+    let allowed = evaluate_delegated_task_runtime_readiness(DelegatedTaskRuntimeReadinessInput {
+        security_contract: contract,
+        requested_command_classes: vec![DelegatedRuntimeCommandClass::Test],
+        target_path_labels: vec!["src/lib.rs".to_string()],
+        requested_egress_labels: vec!["localhost".to_string()],
+        sandbox_allocated: true,
+        main_workspace_dirty_conflict: false,
+        proposal_preconditions_stale: false,
+        verification_evidence_count: 1,
+        audit_persisted_before_success: true,
+        runtime_activation: DelegatedTaskRuntimeActivationState::Executing,
+        schema_version: 1,
+    });
+    assert!(allowed.allowed);
+    assert!(allowed.stop_gates.is_empty());
+}
+
+#[test]
 fn dto_contracts_delegated_task_blockers_and_refusals_are_visible_without_runtime() {
     let blocked = delegated_task_plan_from_boundary_input(DelegatedTaskPlanningBoundaryInput {
         privacy_denied: true,

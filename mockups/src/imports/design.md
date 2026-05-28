@@ -8,13 +8,13 @@ _A starting style guide for a fast, native-feeling, AI-native development enviro
 
 **Product name:** Legion IDE  
 **Category:** AI-native software development environment  
-**Core concept:** A desktop IDE that lets developers fluidly move from manual coding to autonomous multi-agent software execution.
+**Core concept:** A desktop IDE that lets developers choose one of three explicit product modes: full manual coding, delegated model work, or full Legion Workflows.
 
 Legion IDE should not look or feel like a VS Code fork, a generic Electron app, or a chat sidebar bolted onto a code editor. It should feel native, fast, elegant, operational, and deeply purpose-built for commanding AI software teams.
 
 ### Core Promise
 
-> From code editor to autonomous engineering fleet.
+> From manual IDE to delegated work to complete Legion Workflows.
 
 ### Product Personality
 
@@ -50,23 +50,21 @@ Legion IDE should not feel:
 
 Even in autonomous modes, the product should respect the developer’s mental model. Code, diffs, tests, approvals, and project context remain visible and inspectable.
 
-### 2.2 Autonomy Is a Spectrum
+### 2.2 Product Modes Are Explicit
 
-The UI is organized around a five-level autonomy model. Each level changes the interface, the AI affordances, and the developer’s role.
+The UI is organized around three product modes. The internal runtime can still have detailed lifecycle states, but users should choose between these modes rather than manage a five-step product mode switch.
 
-| Level | Name | Developer Role | AI Role |
+| Mode | Name | Developer Role | Model Role |
 |---:|---|---|---|
-| 1 | Manual | Writes code directly | Quiet, optional |
-| 2 | Assisted | Writes code with inline help | Suggests and explains |
-| 3 | Co-Pilot | Collaborates on edits | Proposes multi-file changes |
-| 4 | Delegated | Reviews scoped tasks | Executes assigned tasks |
-| 5 | Autonomous Fleet | Directs and supervises | Plans, executes, tests, reviews |
+| 1 | Manual | Writes code directly | Disabled; no model calls |
+| 2 | Delegates | Scopes and reviews delegated work | Plans, proposes, and may coordinate bounded subagents |
+| 3 | Legion Workflows | Gives a directive and signs off | Runs a full model team through implementation, testing, evidence, and review |
 
 ### 2.3 Human Control Is Always Visible
 
-Higher autonomy should feel powerful, not reckless. The UI must clearly show:
+Higher-agency modes should feel powerful, not reckless. The UI must clearly show:
 
-- Current autonomy level
+- Current product mode
 - Active agents
 - Current directive
 - Files being changed
@@ -108,7 +106,7 @@ Use these references as directional inspiration, not as templates:
 - Technical
 - Quietly futuristic
 - High contrast where needed
-- Subtle glow only for AI/autonomy states
+- Subtle glow only for AI/product-mode states
 
 ---
 
@@ -156,10 +154,10 @@ Use accents sparingly. They should communicate system state, not decorate the UI
 
 | Token | Hex | Usage |
 |---|---:|---|
-| `--accent-cyan` | `#39D7FF` | Assisted AI, execution, active links |
+| `--accent-cyan` | `#39D7FF` | Delegates AI, execution, active links |
 | `--accent-blue` | `#4B8CFF` | Writing, code actions |
-| `--accent-violet` | `#8B5CFF` | Autonomy, review, fleet activity |
-| `--accent-purple` | `#B16CFF` | Level 5 emphasis, premium glow |
+| `--accent-violet` | `#8B5CFF` | Autonomy, review, workflow activity |
+| `--accent-purple` | `#B16CFF` | Legion Workflows emphasis, premium glow |
 | `--accent-amber` | `#FFCC66` | Planning, waiting, attention |
 | `--accent-green` | `#4ADE80` | Passed, complete, healthy |
 | `--accent-red` | `#FF5C7A` | Failed, error, destructive |
@@ -180,12 +178,12 @@ Use accents sparingly. They should communicate system state, not decorate the UI
 
 ### 4.6 Gradients and Glow
 
-Use glow only around autonomy controls, active fleet states, and important AI indicators.
+Use glow only around product-mode controls, active workflow states, and important AI indicators.
 
 ```css
 --glow-cyan: 0 0 24px rgba(57, 215, 255, 0.22);
 --glow-violet: 0 0 28px rgba(139, 92, 255, 0.26);
---glow-fleet: 0 0 32px rgba(177, 108, 255, 0.30), 0 0 18px rgba(57, 215, 255, 0.16);
+--glow-workflow: 0 0 32px rgba(177, 108, 255, 0.30), 0 0 18px rgba(57, 215, 255, 0.16);
 ```
 
 Avoid heavy shadows. Prefer subtle background elevation and low-opacity borders.
@@ -278,11 +276,11 @@ Required elements:
 - Workspace name
 - Git branch
 - Legion Engine status
-- Centered Autonomy Scale
+- Centered Product Mode Switch
 - Command palette shortcut
 - Build/test status
 - Resource indicators
-- Run Directive / Pause Fleet button
+- Run Directive / Pause Workflow button
 - User or workspace avatar
 
 Style:
@@ -295,21 +293,21 @@ Style:
 
 ### 7.2 Left Sidebar
 
-The left sidebar balances project navigation and AI fleet management.
+The left sidebar balances project navigation and AI workflow management.
 
-At low autonomy levels:
+At low product modes:
 
 - File explorer dominates
-- Active Fleet is collapsed or minimized
+- Active Workflow is collapsed or minimized
 
-At high autonomy levels:
+At high product modes:
 
-- Active Fleet dominates
+- Active Workflow dominates
 - File explorer becomes secondary or collapsible
 
 ### 7.3 Main Canvas
 
-The main canvas changes by autonomy level.
+The main canvas changes by product mode.
 
 | Level | Main Canvas Focus |
 |---:|---|
@@ -344,13 +342,13 @@ The bottom panel contains operational output:
 - Workflow logs
 - Build output
 
-At Level 5, the Agent Comm Stream becomes especially important.
+At Legion Workflows, the Agent Comm Stream becomes especially important.
 
 ---
 
-## 8. Autonomy Scale
+## 8. Product Mode Switch
 
-The Autonomy Scale is the defining UI component of Legion IDE.
+The Product Mode Switch is the defining UI component of Legion IDE.
 
 ### 8.1 Component Requirements
 
@@ -358,17 +356,17 @@ The Autonomy Scale is the defining UI component of Legion IDE.
 - Segmented control combined with slider behavior
 - Five labeled levels
 - Active state must be instantly legible
-- Higher autonomy states should feel more energetic
+- Higher-agency modes states should feel more energetic
 - Levels 4 and 5 should communicate increased capability and increased responsibility
 
 ### 8.2 Labels
 
 ```text
 1 Manual
-2 Assisted
-3 Co-Pilot
+2 Delegates
+3 Delegate
 4 Delegated
-5 Fleet
+5 Legion Workflows
 ```
 
 ### 8.3 Microcopy
@@ -376,10 +374,10 @@ The Autonomy Scale is the defining UI component of Legion IDE.
 | Level | Label | Microcopy |
 |---:|---|---|
 | 1 | Manual | You write. AI stays quiet. |
-| 2 | Assisted | AI helps inline. |
-| 3 | Co-Pilot | AI pairs with you. |
+| 2 | Delegates | AI helps inline. |
+| 3 | Delegate | AI pairs with you. |
 | 4 | Delegated | Agents handle scoped tasks. |
-| 5 | Fleet | The fleet executes directives. |
+| 5 | Legion Workflows | The workflow executes directives. |
 
 ### 8.4 Visual States
 
@@ -393,20 +391,20 @@ The Autonomy Scale is the defining UI component of Legion IDE.
 
 ### 8.5 Safety Interaction
 
-Switching into Level 4 or Level 5 should show a confirmation flow unless the user has disabled confirmations.
+Switching into Delegates Mode or Legion Workflows should show a confirmation flow unless the user has disabled confirmations.
 
-Level 4 confirmation:
+Delegates Mode confirmation:
 
 ```text
 Enter Delegated Mode?
 Agents can work on scoped tasks and prepare diffs for your review.
 ```
 
-Level 5 confirmation:
+Legion Workflows confirmation:
 
 ```text
-Activate Autonomous Fleet?
-The fleet will break down directives, modify files, run tests, and prepare changes for review.
+Activate Legion Workflows?
+The workflow will break down directives, modify files, run tests, and prepare changes for review.
 ```
 
 Include clear permission toggles:
@@ -422,7 +420,7 @@ Include clear permission toggles:
 
 ## 9. Autonomy-Level UI Behavior
 
-### 9.1 Level 1 — Manual
+### 9.1 Manual Mode — Manual
 
 Human writes code directly. AI is quiet.
 
@@ -445,7 +443,7 @@ Do not:
 - Show agent boards
 - Over-emphasize AI
 
-### 9.2 Level 2 — Assisted
+### 9.2 Delegates Mode — Delegates
 
 AI provides inline completions, fixes, and explanations.
 
@@ -464,7 +462,7 @@ Example actions:
 - Generate test
 - Refactor selection
 
-### 9.3 Level 3 — Co-Pilot
+### 9.3 Delegates Mode — Delegate
 
 AI actively pairs with the developer.
 
@@ -483,13 +481,13 @@ Example UI elements:
 - Request revision
 - Human feedback input
 
-### 9.4 Level 4 — Delegated
+### 9.4 Delegates Mode — Delegated
 
 Developer delegates scoped tasks to agents.
 
 UI emphasis:
 
-- Active Fleet sidebar
+- Active Workflow sidebar
 - Diff review area
 - Delegated task board
 - Human approval queue
@@ -502,15 +500,15 @@ Key states:
 - Testing
 - Done
 
-### 9.5 Level 5 — Autonomous Fleet
+### 9.5 Legion Workflows — Legion Workflows
 
-Developer gives a master directive and supervises a multi-agent fleet.
+Developer gives a master directive and supervises a multi-agent workflow.
 
 UI emphasis:
 
 - Autonomous Kanban board
 - Master Directive bar
-- Active Fleet
+- Active Workflow
 - Directive Console
 - Agent Comm Stream
 - Risk Monitor
@@ -530,7 +528,7 @@ Used for high-value actions.
 Examples:
 
 - Run Directive
-- Activate Fleet
+- Activate Legion Workflows
 - Review & Merge
 - Approve Changes
 
@@ -569,7 +567,7 @@ Used for destructive or stop actions.
 Examples:
 
 - Reject Changes
-- Stop Fleet
+- Stop Legion Workflows
 - Remove Agent
 
 Use red text or red border. Avoid large filled red buttons unless urgent.
@@ -600,11 +598,11 @@ Examples:
 
 ```text
 Manual Mode
-Assisted Coding Active
+Delegates Coding Active
 Pair Programming Active
 Delegated Tasks Active
-Autonomous Fleet Active
-Fleet Paused
+Legion Workflows Active
+Legion Workflow Paused
 Intervention Needed
 Awaiting Human Review
 Directive Completed
@@ -621,7 +619,7 @@ Style:
 
 ## 10.4 Agent Rows
 
-Agent rows appear in the Active Fleet sidebar and task details.
+Agent rows appear in the Active Workflow sidebar and task details.
 
 Each row should include:
 
@@ -642,7 +640,7 @@ GPT-5.5   Backend Agent   Writing   checkout.ts   68%
 
 ## 10.5 Kanban Cards
 
-Kanban cards are central to Level 4 and Level 5.
+Kanban cards are central to Delegates Mode and Legion Workflows.
 
 Each task card should include:
 
@@ -838,12 +836,12 @@ Use ease-out or spring-like motion. Avoid bouncy consumer-app animation.
 
 ### 12.3 Mode Transitions
 
-When switching autonomy levels:
+When switching product modes:
 
 - Panels should resize smoothly
 - Sidebars should expand/collapse gracefully
 - New areas should fade and slide in subtly
-- The Autonomy Scale active segment should animate first
+- The Product Mode Switch active segment should animate first
 - No jarring full-screen reflows
 
 ### 12.4 Live Agent Activity
@@ -876,8 +874,8 @@ Required shortcuts:
 ⌘Enter            Run directive / submit action
 Esc               Dismiss popover/modal
 Tab               Accept inline suggestion
-⌘⇧A               Open Autonomy Scale
-⌘⇧F               Focus fleet / agent panel
+⌘⇧A               Open Product Mode Switch
+⌘⇧F               Focus workflow / agent panel
 ⌘⇧R               Review pending changes
 ```
 
@@ -912,7 +910,7 @@ Avoid exaggerated AI hype.
 Use:
 
 - Directive
-- Fleet
+- Legion Workflows
 - Agent
 - Task
 - Diff
@@ -936,8 +934,8 @@ Avoid overusing:
 
 ```text
 Run Directive
-Pause Fleet
-Resume Fleet
+Pause Workflow
+Resume Legion Workflows
 Review Decisions
 Approve Changes
 Request Revision
@@ -981,24 +979,24 @@ Prepare this app for production deployment with environment validation and healt
 
 ## 15. Empty, Error, and Success States
 
-### 15.1 Empty Level 5 State
+### 15.1 Empty Legion Workflows State
 
 Title:
 
 ```text
-Command the fleet
+Command the workflow
 ```
 
 Subtitle:
 
 ```text
-Give Legion a directive. The agent fleet will break it down, plan the work, execute changes, test, and prepare everything for review.
+Give Legion a directive. The agent workflow will break it down, plan the work, execute changes, test, and prepare everything for review.
 ```
 
 Idle stream message:
 
 ```text
-Fleet standing by.
+Legion Workflows standing by.
 ```
 
 ### 15.2 Error State
@@ -1008,7 +1006,7 @@ Tone: serious but controlled.
 Status chip:
 
 ```text
-Fleet Active — Intervention Needed
+Legion Workflow Active — Intervention Needed
 ```
 
 Actions:
@@ -1016,7 +1014,7 @@ Actions:
 - Review Failures
 - Approve Patch
 - Review Diff
-- Stop Fleet
+- Stop Legion Workflows
 
 Show:
 
@@ -1076,7 +1074,7 @@ Legion IDE is a desktop app, but it should adapt gracefully to smaller laptop wi
 
 - Left sidebar collapses to icon rail
 - Directive Console becomes slide-over
-- Autonomy Scale remains visible
+- Product Mode Switch remains visible
 - Main editor/board remains primary
 - Agent Comm Stream collapses to ticker
 
@@ -1163,7 +1161,7 @@ Legion IDE is a desktop app, but it should adapt gracefully to smaller laptop wi
   --shadow-panel: 0 16px 60px rgba(0, 0, 0, 0.36);
   --glow-cyan: 0 0 24px rgba(57, 215, 255, 0.22);
   --glow-violet: 0 0 28px rgba(139, 92, 255, 0.26);
-  --glow-fleet: 0 0 32px rgba(177, 108, 255, 0.30), 0 0 18px rgba(57, 215, 255, 0.16);
+  --glow-workflow: 0 0 32px rgba(177, 108, 255, 0.30), 0 0 18px rgba(57, 215, 255, 0.16);
 
   --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
@@ -1179,13 +1177,13 @@ Build the product around these reusable components:
 ```text
 AppShell
 TopCommandBar
-AutonomyScale
+ProductModeSwitch
 WorkspaceStatus
 ResourceMonitor
 LeftSidebar
 FileExplorer
-ActiveFleet
-FleetTeamGroup
+ActiveLegion Workflows
+WorkflowTeamGroup
 AgentRow
 MainCanvas
 CodeEditor
@@ -1223,12 +1221,12 @@ ProgressBar
 For an initial prototype, design these first:
 
 1. Core app shell
-2. Autonomy Scale
-3. Level 1 Manual editor
-4. Level 3 Co-Pilot diff review
-5. Level 5 Autonomous Fleet board
+2. Product Mode Switch
+3. Manual Mode Manual editor
+4. Delegates Mode Delegate diff review
+5. Legion Workflows Legion Workflows board
 6. Directive Console
-7. Active Fleet sidebar
+7. Active Workflow sidebar
 8. Agent Comm Stream
 9. Permission confirmation modal
 10. Completed directive summary
@@ -1240,9 +1238,9 @@ For an initial prototype, design these first:
 Before accepting a design, check:
 
 - Does it avoid looking like VS Code?
-- Is the Autonomy Scale clearly the central product control?
-- Can the user immediately tell what autonomy level they are in?
-- Does Level 5 feel like managing an autonomous engineering fleet?
+- Is the Product Mode Switch clearly the central product control?
+- Can the user immediately tell what product mode they are in?
+- Does Legion Workflows feel like managing an autonomous engineering workflow?
 - Are code, diffs, tests, and approvals visible?
 - Does the UI communicate safety and control?
 - Are agent actions auditable without exposing raw hidden reasoning?
@@ -1254,4 +1252,4 @@ Before accepting a design, check:
 
 ## 21. One-Sentence Design North Star
 
-> Legion IDE should feel like the first truly native AI development environment: a fast code editor when you want control, a collaborative co-pilot when you want help, and an autonomous engineering command center when you want the fleet to execute.
+> Legion IDE should feel like the first truly native AI development environment: a fast code editor when you want control, a collaborative co-pilot when you want help, and an autonomous engineering command center when you want the workflow to execute.

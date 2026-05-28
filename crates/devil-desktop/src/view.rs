@@ -3,9 +3,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use devil_protocol::{
-    DelegatedTaskRuntimeActivationState, FileId, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, ProposalId, ProposalRejectionReason, ProposalRiskLabel,
-    ViewportProjectionMode,
+    FileId, PluginCommandDescriptor, PluginContribution, PluginContributionProjection, ProposalId,
+    ProposalRejectionReason, ProposalRiskLabel, ViewportProjectionMode,
 };
 use devil_ui::{ShellProjectionSnapshot, StatusSeverity};
 
@@ -30,8 +29,8 @@ pub struct DesktopProjectionViewModel {
     pub layout_title: String,
     /// Top command-bar rows.
     pub top_bar_rows: Vec<String>,
-    /// Read-only autonomy scale rows.
-    pub autonomy_rows: Vec<String>,
+    /// Read-only product-mode rows.
+    pub product_mode_rows: Vec<String>,
     /// Left sidebar summary rows.
     pub left_sidebar_rows: Vec<String>,
     /// Main code-canvas summary rows.
@@ -111,11 +110,11 @@ impl DesktopProjectionViewModel {
             flags.push("no_active_buffer".to_string());
         }
 
-        let autonomy_rows = autonomy_rows(snapshot);
+        let product_mode_rows = product_mode_rows(snapshot);
         Self {
             layout_title: snapshot.layout_projection.layout.title.clone(),
             top_bar_rows: top_bar_rows(snapshot, &flags),
-            autonomy_rows,
+            product_mode_rows,
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
             right_console_rows: right_console_rows(snapshot),
@@ -202,10 +201,10 @@ impl ProjectionView {
                 render_status_bar(ui, &model);
             });
 
-        let bottom_height = match projected_autonomy_level(snapshot) {
-            DesktopAutonomyLevel::Manual => 150.0,
-            DesktopAutonomyLevel::Fleet => 240.0,
-            _ => 200.0,
+        let bottom_height = match projected_product_mode(snapshot) {
+            DesktopProductMode::Manual => 150.0,
+            DesktopProductMode::LegionWorkflows => 240.0,
+            DesktopProductMode::Delegates => 200.0,
         };
         egui::Panel::bottom("devil_desktop_bottom_console")
             .default_size(bottom_height)
@@ -216,12 +215,9 @@ impl ProjectionView {
                 render_bottom_console(ui, &model);
             });
 
-        let right_width = match projected_autonomy_level(snapshot) {
-            DesktopAutonomyLevel::Manual => 260.0,
-            DesktopAutonomyLevel::Assisted => 340.0,
-            DesktopAutonomyLevel::Copilot
-            | DesktopAutonomyLevel::Delegated
-            | DesktopAutonomyLevel::Fleet => 380.0,
+        let right_width = match projected_product_mode(snapshot) {
+            DesktopProductMode::Manual => 260.0,
+            DesktopProductMode::Delegates | DesktopProductMode::LegionWorkflows => 380.0,
         };
         egui::Panel::right("devil_desktop_trust")
             .default_size(right_width)
@@ -259,7 +255,7 @@ fn render_top_command_bar(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    let level = projected_autonomy_level(snapshot);
+    let level = projected_product_mode(snapshot);
     ui.set_height(52.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
@@ -270,7 +266,7 @@ fn render_top_command_bar(
         render_branch_pill(ui, snapshot);
         render_engine_status(ui, snapshot, level);
         ui.add_space(12.0);
-        render_autonomy_scale(ui, model);
+        render_product_mode_switch(ui, model);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             avatar(ui, "MK", theme::TEXT_SECONDARY);
@@ -284,13 +280,12 @@ fn render_top_command_bar(
             }
             if primary_button(ui, level_primary_action(level), level_color(level)).clicked() {
                 actions.push(match level {
-                    DesktopAutonomyLevel::Manual | DesktopAutonomyLevel::Assisted => {
-                        DesktopAction::StartAiExplain {
-                            instruction_label: "desktop explain".to_string(),
-                        }
-                    }
-                    _ => DesktopAction::StartAiProposal {
-                        instruction_label: "desktop directive".to_string(),
+                    DesktopProductMode::Manual => DesktopAction::SaveAll,
+                    DesktopProductMode::Delegates => DesktopAction::StartAiProposal {
+                        instruction_label: "desktop delegated task".to_string(),
+                    },
+                    DesktopProductMode::LegionWorkflows => DesktopAction::StartAiProposal {
+                        instruction_label: "desktop legion workflow".to_string(),
                     },
                 });
             }
@@ -302,21 +297,19 @@ fn render_top_command_bar(
     });
 }
 
-fn render_autonomy_scale(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+fn render_product_mode_switch(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
     let active = model
-        .autonomy_rows
+        .product_mode_rows
         .first()
         .map(|row| row.as_str())
-        .unwrap_or("autonomy scale: active=L1 Manual read-only projection");
+        .unwrap_or("product mode: active=Manual read-only projection");
     theme::card_frame_tinted(theme::BG_INPUT, theme::BORDER_DEFAULT).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(theme::eyebrow("AUTONOMY LEVEL"));
+            ui.label(theme::eyebrow("PRODUCT MODE"));
             for (level, label, color) in [
-                ("L1", "Manual", theme::TEXT_MUTED),
-                ("L2", "Assisted", theme::ACCENT_CYAN),
-                ("L3", "Co-Pilot", theme::ACCENT_BLUE),
-                ("L4", "Delegated", theme::ACCENT_VIOLET),
-                ("L5", "Fleet", theme::ACCENT_PURPLE),
+                ("M", "Manual", theme::TEXT_MUTED),
+                ("D", "Delegates", theme::ACCENT_VIOLET),
+                ("W", "Legion Workflows", theme::ACCENT_PURPLE),
             ] {
                 level_pill(ui, level, label, color, active.contains(level));
             }
@@ -331,21 +324,26 @@ fn render_left_sidebar(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    let level = projected_autonomy_level(snapshot);
+    let level = projected_product_mode(snapshot);
     sidebar_header(ui, "PROJECT", workspace_label(snapshot));
-    if level == DesktopAutonomyLevel::Fleet {
+    if level == DesktopProductMode::LegionWorkflows {
         render_context_packs(ui);
     } else {
         render_project_tree_panel(ui, snapshot, state, level, actions);
     }
 
     match level {
-        DesktopAutonomyLevel::Manual => render_collapsed_ai_rail(ui),
-        DesktopAutonomyLevel::Assisted => render_assistance_toggles(ui),
-        DesktopAutonomyLevel::Copilot => render_session_context(ui, snapshot),
-        DesktopAutonomyLevel::Delegated | DesktopAutonomyLevel::Fleet => {
-            render_agent_roster(ui, snapshot, model, level)
+        DesktopProductMode::Manual => render_collapsed_ai_rail(ui),
+        DesktopProductMode::Delegates => {
+            if delegated_activity_projected(snapshot) {
+                render_agent_roster(ui, snapshot, model, level)
+            } else if snapshot.assisted_ai_projection.preview_ready_count > 0 {
+                render_session_context(ui, snapshot)
+            } else {
+                render_assistance_toggles(ui)
+            }
         }
+        DesktopProductMode::LegionWorkflows => render_agent_roster(ui, snapshot, model, level),
     }
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -359,13 +357,18 @@ fn render_code_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    match projected_autonomy_level(snapshot) {
-        DesktopAutonomyLevel::Manual | DesktopAutonomyLevel::Assisted => {
-            render_editor_canvas(ui, snapshot, model, actions)
+    match projected_product_mode(snapshot) {
+        DesktopProductMode::Manual => render_editor_canvas(ui, snapshot, model, actions),
+        DesktopProductMode::Delegates => {
+            if delegated_activity_projected(snapshot) {
+                render_delegated_canvas(ui, snapshot, model, actions)
+            } else if snapshot.assisted_ai_projection.preview_ready_count > 0 {
+                render_copilot_canvas(ui, snapshot, model, actions)
+            } else {
+                render_editor_canvas(ui, snapshot, model, actions)
+            }
         }
-        DesktopAutonomyLevel::Copilot => render_copilot_canvas(ui, snapshot, model, actions),
-        DesktopAutonomyLevel::Delegated => render_delegated_canvas(ui, snapshot, model, actions),
-        DesktopAutonomyLevel::Fleet => render_fleet_canvas(ui, snapshot, model, actions),
+        DesktopProductMode::LegionWorkflows => render_fleet_canvas(ui, snapshot, model, actions),
     }
 }
 
@@ -377,16 +380,18 @@ fn render_right_console(
     _show_auxiliary: &mut bool,
     actions: &mut Vec<DesktopAction>,
 ) {
-    match projected_autonomy_level(snapshot) {
-        DesktopAutonomyLevel::Manual => {
-            render_manual_context_inspector(ui, snapshot, model, actions)
+    match projected_product_mode(snapshot) {
+        DesktopProductMode::Manual => render_manual_context_inspector(ui, snapshot, model, actions),
+        DesktopProductMode::Delegates => {
+            if delegated_activity_projected(snapshot) {
+                render_delegation_console(ui, snapshot, model, show_trust, actions)
+            } else if snapshot.assisted_ai_projection.preview_ready_count > 0 {
+                render_pair_session_panel(ui, snapshot, model, actions)
+            } else {
+                render_assisted_inspector(ui, snapshot, model, actions)
+            }
         }
-        DesktopAutonomyLevel::Assisted => render_assisted_inspector(ui, snapshot, model, actions),
-        DesktopAutonomyLevel::Copilot => render_pair_session_panel(ui, snapshot, model, actions),
-        DesktopAutonomyLevel::Delegated => {
-            render_delegation_console(ui, snapshot, model, show_trust, actions)
-        }
-        DesktopAutonomyLevel::Fleet => render_fleet_console(ui, snapshot, model, actions),
+        DesktopProductMode::LegionWorkflows => render_fleet_console(ui, snapshot, model, actions),
     }
 }
 
@@ -417,7 +422,7 @@ fn render_status_bar(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
             ui.label(theme::code_muted(trim_middle(row, 56)));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(theme::accent("Autonomy", theme::ACCENT_VIOLET));
+            ui.label(theme::accent("Product Mode", theme::ACCENT_VIOLET));
             ui.label(theme::code_muted("UTF-8"));
             ui.label(theme::code_muted("LF"));
         });
@@ -465,14 +470,12 @@ fn render_branch_pill(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
 fn render_engine_status(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
-    level: DesktopAutonomyLevel,
+    level: DesktopProductMode,
 ) {
     let label = match level {
-        DesktopAutonomyLevel::Manual => "Engine idle",
-        DesktopAutonomyLevel::Assisted => "Context indexed",
-        DesktopAutonomyLevel::Copilot => "Pair session active",
-        DesktopAutonomyLevel::Delegated => "Delegated tasks active",
-        DesktopAutonomyLevel::Fleet => "Fleet online",
+        DesktopProductMode::Manual => "Engine idle",
+        DesktopProductMode::Delegates => "Delegates active",
+        DesktopProductMode::LegionWorkflows => "Legion workflow online",
     };
     ui.horizontal(|ui| {
         status_dot(ui, level_color(level));
@@ -486,7 +489,7 @@ fn render_engine_status(
 fn render_resource_strip(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
-    level: DesktopAutonomyLevel,
+    level: DesktopProductMode,
 ) {
     theme::ghost_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -512,7 +515,7 @@ fn render_project_tree_panel(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     state: &DesktopProjectionViewState,
-    level: DesktopAutonomyLevel,
+    level: DesktopProductMode,
     actions: &mut Vec<DesktopAction>,
 ) {
     ui.horizontal(|ui| {
@@ -525,7 +528,7 @@ fn render_project_tree_panel(
     });
     egui::ScrollArea::vertical()
         .id_salt("devil_desktop_explorer_scroll")
-        .max_height(if level == DesktopAutonomyLevel::Manual {
+        .max_height(if level == DesktopProductMode::Manual {
             520.0
         } else {
             240.0
@@ -559,9 +562,9 @@ fn render_collapsed_ai_rail(ui: &mut egui::Ui) {
     ui.add_space(8.0);
     theme::small_card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(theme::eyebrow("ACTIVE FLEET"));
+            ui.label(theme::eyebrow("MANUAL MODE"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::muted("AI idle"));
+                ui.label(theme::muted("AI disabled"));
             });
         });
     });
@@ -609,10 +612,10 @@ fn render_agent_roster(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
-    level: DesktopAutonomyLevel,
+    level: DesktopProductMode,
 ) {
     ui.add_space(8.0);
-    section_label(ui, "Active Fleet", Some(level_color(level)));
+    section_label(ui, "Active Delegates", Some(level_color(level)));
     let mut rendered = 0usize;
     for provider in snapshot.assisted_ai_projection.providers.iter().take(4) {
         agent_card(
@@ -667,7 +670,7 @@ fn render_editor_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    let level = projected_autonomy_level(snapshot);
+    let level = projected_product_mode(snapshot);
     render_tab_strip(ui, snapshot, actions);
     render_breadcrumb_bar(ui, snapshot, level);
     theme::code_frame().show(ui, |ui| {
@@ -678,10 +681,10 @@ fn render_editor_canvas(
                 render_code_lines(ui, model);
             });
     });
-    if level == DesktopAutonomyLevel::Assisted {
+    if level == DesktopProductMode::Delegates && !delegated_activity_projected(snapshot) {
         render_assisted_suggestion_panel(ui);
     }
-    if level == DesktopAutonomyLevel::Manual {
+    if level == DesktopProductMode::Manual {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             theme::ghost_frame().show(ui, |ui| {
                 ui.label(theme::muted("Tab to accept completion"));
@@ -744,7 +747,7 @@ fn render_tab_strip(
 fn render_breadcrumb_bar(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
-    level: DesktopAutonomyLevel,
+    level: DesktopProductMode,
 ) {
     theme::pane_frame(theme::BG_CODE).show(ui, |ui| {
         ui.set_height(28.0);
@@ -755,7 +758,7 @@ fn render_breadcrumb_bar(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(theme::muted("TS - LF - UTF-8"));
                 ui.label(theme::accent("checks ready", theme::ACCENT_GREEN));
-                if level != DesktopAutonomyLevel::Manual {
+                if level != DesktopProductMode::Manual {
                     ui.label(theme::accent("AI suggestions", level_color(level)));
                 }
             });
@@ -830,7 +833,7 @@ fn render_copilot_plan_strip(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapsh
     theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
         ui.set_height(40.0);
         ui.horizontal(|ui| {
-            section_label(ui, "Co-Pilot Plan", Some(theme::ACCENT_BLUE));
+            section_label(ui, "Delegate Plan", Some(theme::ACCENT_BLUE));
             for (index, label) in [
                 "Inspect current file",
                 "Draft proposal",
@@ -930,13 +933,7 @@ fn render_delegated_canvas(
         );
     });
     ui.separator();
-    render_task_board(
-        ui,
-        snapshot,
-        model,
-        DesktopAutonomyLevel::Delegated,
-        actions,
-    );
+    render_task_board(ui, snapshot, model, DesktopProductMode::Delegates, actions);
 }
 
 fn render_fleet_canvas(
@@ -948,7 +945,7 @@ fn render_fleet_canvas(
     theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
         ui.set_height(84.0);
         ui.horizontal(|ui| {
-            avatar(ui, "L5", theme::ACCENT_PURPLE);
+            avatar(ui, "LW", theme::ACCENT_PURPLE);
             ui.vertical(|ui| {
                 ui.label(theme::accent("MASTER DIRECTIVE", theme::ACCENT_PURPLE));
                 ui.label(theme::title(current_objective(snapshot)));
@@ -959,13 +956,13 @@ fn render_fleet_canvas(
                 {
                     actions.push(DesktopAction::PreviewProposal { proposal_id });
                 }
-                let _ = soft_button(ui, "Pause Fleet");
+                let _ = soft_button(ui, "Pause Workflow");
                 let _ = soft_button(ui, "Add Constraint");
             });
         });
         ui.horizontal(|ui| {
             ui.label(theme::muted(format!(
-                "{} agents active",
+                "{} delegates active",
                 projected_agent_count(snapshot)
             )));
             ui.separator();
@@ -977,14 +974,20 @@ fn render_fleet_canvas(
             ui.label(theme::accent("confidence 87%", theme::ACCENT_GREEN));
         });
     });
-    render_task_board(ui, snapshot, model, DesktopAutonomyLevel::Fleet, actions);
+    render_task_board(
+        ui,
+        snapshot,
+        model,
+        DesktopProductMode::LegionWorkflows,
+        actions,
+    );
 }
 
 fn render_task_board(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
-    level: DesktopAutonomyLevel,
+    level: DesktopProductMode,
     actions: &mut Vec<DesktopAction>,
 ) {
     let board_height = ui.available_height();
@@ -1017,7 +1020,7 @@ fn render_task_board(
                 );
                 task_column(
                     ui,
-                    if level == DesktopAutonomyLevel::Fleet {
+                    if level == DesktopProductMode::LegionWorkflows {
                         "TESTING / REVIEW"
                     } else {
                         "TESTING"
@@ -1085,7 +1088,7 @@ fn render_manual_context_inspector(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Context", DesktopAutonomyLevel::Manual);
+    inspector_header(ui, "Context", DesktopProductMode::Manual);
     section_label(ui, "Current File", None);
     ui.label(theme::code(current_path(snapshot)));
     ui.label(theme::muted(format!(
@@ -1102,10 +1105,8 @@ fn render_manual_context_inspector(
     section_label(ui, "Git Changes", None);
     render_compact_rows(ui, &model.proposal_rows, "No projected changes", 5);
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-        if soft_button(ui, "Ask AI").clicked() {
-            actions.push(DesktopAction::StartAiExplain {
-                instruction_label: "desktop ask ai".to_string(),
-            });
+        if soft_button(ui, "Save All").clicked() {
+            actions.push(DesktopAction::SaveAll);
         }
     });
 }
@@ -1116,7 +1117,7 @@ fn render_assisted_inspector(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Assistant", DesktopAutonomyLevel::Assisted);
+    inspector_header(ui, "Delegates", DesktopProductMode::Delegates);
     section_label(ui, "Current Selection", Some(theme::ACCENT_CYAN));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::code(current_path(snapshot)));
@@ -1150,18 +1151,18 @@ fn render_pair_session_panel(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Pair Session", DesktopAutonomyLevel::Copilot);
+    inspector_header(ui, "Delegate Session", DesktopProductMode::Delegates);
     section_label(ui, "Current Objective", Some(theme::ACCENT_BLUE));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
         ui.label(theme::code_muted(current_path(snapshot)));
     });
     section_label(ui, "AI Plan", None);
-    render_compact_rows(ui, &model.assistant_rows, "No co-pilot plan projected", 6);
+    render_compact_rows(ui, &model.assistant_rows, "No delegate plan projected", 6);
     section_label(ui, "Human Feedback", None);
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::muted(
-            "Guide the co-pilot, revise the plan, or ask for alternatives...",
+            "Guide the delegate, revise the plan, or ask for alternatives...",
         ));
         if primary_button(ui, "Send", theme::ACCENT_BLUE).clicked() {
             actions.push(DesktopAction::StartAiExplain {
@@ -1178,7 +1179,7 @@ fn render_delegation_console(
     show_trust: &mut bool,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Delegation Console", DesktopAutonomyLevel::Delegated);
+    inspector_header(ui, "Delegation Console", DesktopProductMode::Delegates);
     section_label(ui, "Delegate Task", Some(theme::ACCENT_VIOLET));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::muted("Delegate a scoped task to projected agents"));
@@ -1202,7 +1203,11 @@ fn render_fleet_console(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Fleet Control Panel", DesktopAutonomyLevel::Fleet);
+    inspector_header(
+        ui,
+        "Legion Workflow Control",
+        DesktopProductMode::LegionWorkflows,
+    );
     section_label(ui, "Current Directive", Some(theme::ACCENT_PURPLE));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
@@ -1324,16 +1329,11 @@ fn sidebar_header(ui: &mut egui::Ui, title: &str, detail: String) {
     ui.separator();
 }
 
-fn inspector_header(ui: &mut egui::Ui, title: &str, level: DesktopAutonomyLevel) {
+fn inspector_header(ui: &mut egui::Ui, title: &str, level: DesktopProductMode) {
     ui.horizontal(|ui| {
         ui.label(theme::heading(title));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            pill(
-                ui,
-                &format!("L{}", level.number()),
-                level_color(level),
-                true,
-            );
+            pill(ui, level.label(), level_color(level), true);
         });
     });
     ui.separator();
@@ -1593,34 +1593,28 @@ fn projected_agent_count(snapshot: &ShellProjectionSnapshot) -> usize {
         + snapshot.delegated_task_projection.step_summaries.len()
 }
 
-fn resource_load(snapshot: &ShellProjectionSnapshot, level: DesktopAutonomyLevel) -> usize {
+fn resource_load(snapshot: &ShellProjectionSnapshot, level: DesktopProductMode) -> usize {
     let base = match level {
-        DesktopAutonomyLevel::Manual => 12,
-        DesktopAutonomyLevel::Assisted => 24,
-        DesktopAutonomyLevel::Copilot => 34,
-        DesktopAutonomyLevel::Delegated => 56,
-        DesktopAutonomyLevel::Fleet => 82,
+        DesktopProductMode::Manual => 12,
+        DesktopProductMode::Delegates => 42,
+        DesktopProductMode::LegionWorkflows => 82,
     };
     (base + snapshot.terminal_panel_projection.output_rows.len()).min(99)
 }
 
-fn level_primary_action(level: DesktopAutonomyLevel) -> &'static str {
+fn level_primary_action(level: DesktopProductMode) -> &'static str {
     match level {
-        DesktopAutonomyLevel::Manual => "Ask AI",
-        DesktopAutonomyLevel::Assisted => "Run Assist",
-        DesktopAutonomyLevel::Copilot => "Apply Plan",
-        DesktopAutonomyLevel::Delegated => "Run Directive",
-        DesktopAutonomyLevel::Fleet => "Pause Fleet",
+        DesktopProductMode::Manual => "Save All",
+        DesktopProductMode::Delegates => "Delegate",
+        DesktopProductMode::LegionWorkflows => "Run Workflow",
     }
 }
 
-fn level_color(level: DesktopAutonomyLevel) -> egui::Color32 {
+fn level_color(level: DesktopProductMode) -> egui::Color32 {
     match level {
-        DesktopAutonomyLevel::Manual => theme::TEXT_MUTED,
-        DesktopAutonomyLevel::Assisted => theme::ACCENT_CYAN,
-        DesktopAutonomyLevel::Copilot => theme::ACCENT_BLUE,
-        DesktopAutonomyLevel::Delegated => theme::ACCENT_VIOLET,
-        DesktopAutonomyLevel::Fleet => theme::ACCENT_PURPLE,
+        DesktopProductMode::Manual => theme::TEXT_MUTED,
+        DesktopProductMode::Delegates => theme::ACCENT_VIOLET,
+        DesktopProductMode::LegionWorkflows => theme::ACCENT_PURPLE,
     }
 }
 
@@ -1668,95 +1662,82 @@ pub struct ProjectionViewOutput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DesktopAutonomyLevel {
+enum DesktopProductMode {
     Manual,
-    Assisted,
-    Copilot,
-    Delegated,
-    Fleet,
+    Delegates,
+    LegionWorkflows,
 }
 
-impl DesktopAutonomyLevel {
-    fn number(self) -> u8 {
-        match self {
-            Self::Manual => 1,
-            Self::Assisted => 2,
-            Self::Copilot => 3,
-            Self::Delegated => 4,
-            Self::Fleet => 5,
-        }
-    }
-
+impl DesktopProductMode {
     fn label(self) -> &'static str {
         match self {
             Self::Manual => "Manual",
-            Self::Assisted => "Assisted",
-            Self::Copilot => "Co-Pilot",
-            Self::Delegated => "Delegated",
-            Self::Fleet => "Fleet",
+            Self::Delegates => "Delegates",
+            Self::LegionWorkflows => "Legion Workflows",
         }
     }
 }
 
-fn projected_autonomy_level(snapshot: &ShellProjectionSnapshot) -> DesktopAutonomyLevel {
+fn projected_product_mode(snapshot: &ShellProjectionSnapshot) -> DesktopProductMode {
     let delegated = &snapshot.delegated_task_projection;
-    if delegated.runtime_activation != DelegatedTaskRuntimeActivationState::NotEncoded
-        && delegated.plan_count > 0
-    {
-        return DesktopAutonomyLevel::Fleet;
+    if delegated.runtime_activation.is_encoded() && delegated.plan_count > 1 {
+        return DesktopProductMode::LegionWorkflows;
     }
     if delegated.plan_count > 0
         || !delegated.plan_rows.is_empty()
         || !delegated.required_approvals.is_empty()
         || !delegated.proposal_preview_links.is_empty()
     {
-        return DesktopAutonomyLevel::Delegated;
+        return DesktopProductMode::Delegates;
     }
 
     let assisted = &snapshot.assisted_ai_projection;
     if assisted.request_count > 0
         || assisted.preview_ready_count > 0
         || !assisted.proposal_previews.is_empty()
+        || assisted.provider_count > 0
+        || !assisted.providers.is_empty()
     {
-        return DesktopAutonomyLevel::Copilot;
-    }
-    if assisted.provider_count > 0 || !assisted.providers.is_empty() {
-        return DesktopAutonomyLevel::Assisted;
+        return DesktopProductMode::Delegates;
     }
 
-    DesktopAutonomyLevel::Manual
+    DesktopProductMode::Manual
 }
 
-fn autonomy_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    let level = projected_autonomy_level(snapshot);
+fn product_mode_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let level = projected_product_mode(snapshot);
     let delegated = &snapshot.delegated_task_projection;
     let mut rows = vec![
         format!(
-            "autonomy scale: active=L{} {} read-only projection",
-            level.number(),
+            "product mode: active={} read-only projection",
             level.label()
         ),
-        "autonomy scale levels: L1 Manual | L2 Assisted | L3 Co-Pilot | L4 Delegated | L5 Fleet"
-            .to_string(),
+        "product modes: Manual | Delegates | Legion Workflows".to_string(),
     ];
 
-    if level == DesktopAutonomyLevel::Delegated {
+    if level == DesktopProductMode::Delegates {
         rows.push(
-            "autonomy safety: delegated work is approval-gated; autonomous apply unsupported"
+            "product-mode safety: delegated work is approval-gated; direct workspace apply unsupported"
                 .to_string(),
         );
-    } else if level == DesktopAutonomyLevel::Fleet {
+    } else if level == DesktopProductMode::LegionWorkflows {
         rows.push(format!(
-            "autonomy safety: fleet display from runtime={:?}; autonomous apply remains proposal-mediated",
+            "product-mode safety: Legion Workflow display from runtime={:?}; apply remains proposal-mediated",
             delegated.runtime_activation
         ));
     } else {
-        rows.push("autonomy safety: mode switching is not implemented in the renderer".to_string());
+        rows.push("product-mode safety: Manual Mode has no AI dispatch path".to_string());
     }
     rows.push(
-        "autonomy control: display-only; no provider, terminal, or apply authority".to_string(),
+        "product-mode control: display-only; no provider, terminal, or apply authority".to_string(),
     );
     rows
+}
+
+fn delegated_activity_projected(snapshot: &ShellProjectionSnapshot) -> bool {
+    snapshot.delegated_task_projection.plan_count > 0
+        || !snapshot.delegated_task_projection.plan_rows.is_empty()
+        || !snapshot.delegated_task_projection.step_summaries.is_empty()
 }
 
 fn top_bar_rows(snapshot: &ShellProjectionSnapshot, flags: &[String]) -> Vec<String> {
@@ -1780,7 +1761,14 @@ fn top_bar_rows(snapshot: &ShellProjectionSnapshot, flags: &[String]) -> Vec<Str
             snapshot.layout_projection.layout.title, workspace, buffer, status
         ),
         format!(
-            "command affordance: search={} save_all={} proposal_controls={}",
+            "command affordance: registry={} enabled={} search={} save_all={} proposal_controls={}",
+            snapshot.command_registry_projection.commands.len(),
+            snapshot
+                .command_registry_projection
+                .commands
+                .iter()
+                .filter(|command| command.enabled)
+                .count(),
             snapshot.search_projection.results.len(),
             snapshot.daily_editing_projection.tabs.tabs.len(),
             snapshot.proposal_ledger_projection.rows.len()
@@ -1852,8 +1840,9 @@ fn main_canvas_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 fn right_console_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     vec![
         format!(
-            "directive console: proposals={} trust_items={} approval_gates={} proposal-mediated",
+            "directive console: proposals={} artifacts={} trust_items={} approval_gates={} proposal-mediated",
             snapshot.proposal_ledger_projection.rows.len(),
+            snapshot.artifact_ledger_projection.rows.len(),
             snapshot.context_manifest_projection.manifest.items.len(),
             snapshot.approval_checklist_projection.gates.len()
         ),
@@ -1891,9 +1880,11 @@ fn bottom_console_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             health_rows.len()
         ),
         format!(
-            "agent stream: assisted_requests={} delegated_steps={} shared_reviews={} remote_reviews={}",
+            "agent stream: assisted_requests={} delegated_steps={} verification_runs={} graph_nodes={} shared_reviews={} remote_reviews={}",
             snapshot.assisted_ai_projection.request_count,
             snapshot.delegated_task_projection.step_summaries.len(),
+            snapshot.verification_run_projection.rows.len(),
+            snapshot.system_graph_projection.nodes.len(),
             snapshot
                 .collaboration_gui_projection
                 .shared_proposal_rows

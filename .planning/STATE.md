@@ -1,13 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: 8 of 8 (planned)
-- **Status**: Phase 8 executing - Plan 08-06 complete; final acceptance blocked on macOS/Linux parity proof
-- **Last Activity**: Plan 08-06 execution (2026-05-27)
+- **Phase**: Post-GA autonomy-native foundation after Phase 8
+- **Status**: Phase 8 accepted; Phase 9-11 metadata-first autonomy foundation complete; Phase 12 delegated runtime planned
+- **Last Activity**: Phase 8 Wave 7 evidence closure and post-GA command/artifact/runtime contract implementation (2026-05-28)
 
 ## Progress
 ```
-[###################.] 94% - 48/51 plans complete
+[####################] 100% - 51/51 GUI GA plans complete
 ```
 
 ## Phase 1 Results
@@ -80,8 +80,16 @@
 - Plan 08-03 (Wave 3): Collaboration Presence And Shared Proposal GUI Workflow -- complete
 - Plan 08-04 (Wave 4): Remote Workspace Manager And Remote Status GUI Workflow -- complete
 - Plan 08-05 (Wave 5): Delegated Task Command Center -- complete
-- Plan 08-06 (Wave 6): GA Release Update Rollback Incident Evidence -- complete; final acceptance blocked on macOS/Linux parity proof
-- Plan 08-07 (Wave 7): Phase 8 GUI Evidence Capture And Acceptance Gate -- planned
+- Plan 08-06 (Wave 6): GA Release Update Rollback Incident Evidence -- complete
+- Plan 08-07 (Wave 7): Phase 8 GUI Evidence Capture And Acceptance Gate -- complete
+
+## Post-GA Autonomy-Native Foundation
+
+- Phase 9: Command And Work Surfaces Foundation -- complete for metadata-first projections.
+- Phase 10: Metadata-First Artifact Model -- complete for public protocol DTOs.
+- Phase 11: Safe Runtime Activation Contracts -- complete for runtime states, security contracts, and readiness stop gates.
+- Phase 12: Delegated Task Runtime -- planned; no direct main-workspace mutation authority is enabled.
+- Phase 13: Legion Workflow Orchestration -- planned; no multi-session runtime merge/apply authority is enabled.
 
 ## Recent Decisions
 - Use exploration design `.planning/explorations/2026-05-26-gui-ide-roadmap-design.md` as the start source.
@@ -129,8 +137,10 @@
 - Phase 8 planning treats accepted legacy `plans/evidence/phase-8/` runtime substrate evidence as distinct from GUI productization GA evidence under `plans/evidence/gui-productization/`.
 - Phase 8 uses seven sequential waves because governance, plugin GUI, collaboration GUI, remote GUI, delegated task GUI, GA operations evidence, and final acceptance have separate authority boundaries and evidence gates.
 - Phase 8 implementation must keep plugin, collaboration, remote, delegated task, proposal, terminal, storage, provider, and security authority out of `devil-ui` and `devil-desktop`.
-- Phase 8 operations evidence is complete with smoke scripts, CI `gui-phase8` wiring, release/update/rollback/incident runbooks, and advanced-surface smoke evidence.
-- Phase 8 final acceptance is blocked until macOS and Linux platform parity proof is archived and the final acceptance gates pass.
+- Phase 8 operations evidence is complete with smoke scripts, CI `gui-phase8` wiring, release/update/rollback/incident runbooks, advanced-surface smoke evidence, and cross-platform parity proof from GitHub Actions run `26590800830`.
+- Phase 8 is accepted with final gates passing on 2026-05-28.
+- Post-GA autonomy-native work added command registry, artifact ledger, verification run, and system graph projections while preserving projection-only UI and renderer boundaries.
+- Post-GA artifact/runtime contracts are metadata-first and fail-closed; Delegates and Legion Workflows execution remain gated until runtime/sandbox/worktree implementation evidence exists.
 
 ## Next Action
-Resolve macOS/Linux platform parity proof, then continue `/legion:build 8` with Wave 7: Phase 8 GUI Evidence Capture And Acceptance Gate.
+Plan Phase 12 delegated runtime activation with isolated worktree/sandbox orchestration, proposal-only generated edits, verification evidence, and audit-before-success gates.

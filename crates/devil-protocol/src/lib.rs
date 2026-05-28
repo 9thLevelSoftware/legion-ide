@@ -6927,11 +6927,54 @@ pub enum DelegatedTaskStepState {
     ProposalPreviewLinked,
 }
 
-/// Delegated-task runtime activation state; P7.1 only allows `NotEncoded`.
+/// Delegated-task runtime activation state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DelegatedTaskRuntimeActivationState {
     /// No agent runtime, provider call, tool execution, terminal command, network request, or mutation is encoded.
     NotEncoded,
+    /// Runtime work is planned but no sandbox or worktree has been allocated.
+    Planned,
+    /// A sandbox or isolated worktree has been allocated.
+    SandboxAllocated,
+    /// Granted tools are executing in the isolated runtime boundary.
+    Executing,
+    /// Runtime work has stopped mutations and is running verification.
+    Verifying,
+    /// Runtime work has emitted proposal/evidence artifacts and waits for human approval.
+    WaitingForApproval,
+    /// Runtime work is blocked by a policy, scope, dependency, or environment gate.
+    Blocked,
+    /// Runtime work completed and persisted audit metadata before success was reported.
+    Completed,
+    /// Runtime work was cancelled before completion.
+    Cancelled,
+    /// Runtime work failed and emitted failure evidence.
+    Failed,
+}
+
+impl DelegatedTaskRuntimeActivationState {
+    /// Returns true when this state encodes a runtime lifecycle beyond metadata-only planning.
+    pub fn is_encoded(self) -> bool {
+        self != Self::NotEncoded
+    }
+
+    /// Returns true when this state requires sandbox or isolated-worktree metadata.
+    pub fn requires_isolation(self) -> bool {
+        matches!(
+            self,
+            Self::SandboxAllocated
+                | Self::Executing
+                | Self::Verifying
+                | Self::WaitingForApproval
+                | Self::Completed
+                | Self::Failed
+        )
+    }
+
+    /// Returns true when this state represents active runtime work.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Executing | Self::Verifying)
+    }
 }
 
 /// Projection readiness for delegated-task plan summaries.
@@ -7460,6 +7503,753 @@ pub struct DelegatedTaskProjection {
     pub redaction_hints: Vec<RedactionHint>,
     /// Projection schema version.
     pub schema_version: u16,
+}
+
+// -----------------------------------------------------------------------------
+// Post-GA autonomy-native work-surface projections
+// -----------------------------------------------------------------------------
+
+/// User-facing product mode represented by durable artifacts and projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProductMode {
+    /// Full manual IDE workflows with AI disabled.
+    Manual,
+    /// User delegates work to an LLM, which may coordinate bounded subagents.
+    Delegates,
+    /// Legion runs a full workflow through planning, execution, verification, and sign-off.
+    LegionWorkflows,
+}
+
+/// Risk label for command-registry entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CommandRiskLabel {
+    /// Deterministic read-only or local editor navigation command.
+    Safe,
+    /// Command creates or changes proposal metadata and needs review.
+    Review,
+    /// Command uses privileged tools, runtime resources, or scoped permissions.
+    Privileged,
+    /// Command could affect persisted workspace state and requires explicit gates.
+    Destructive,
+}
+
+/// Metadata-only command descriptor projected into command surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandDescriptor {
+    /// Stable command identifier.
+    pub command_id: String,
+    /// Display-safe command title.
+    pub title: String,
+    /// Display-safe command scope label.
+    pub scope: String,
+    /// Whether the command can be dispatched from the current projection.
+    pub enabled: bool,
+    /// Display-safe disabled reason when the command is unavailable.
+    pub disabled_reason: Option<String>,
+    /// Optional projected shortcut label.
+    pub shortcut: Option<String>,
+    /// Command risk label.
+    pub risk_label: CommandRiskLabel,
+    /// Required capability or permission for dispatch.
+    pub required_permission: Option<CapabilityId>,
+    /// Display-safe command target label.
+    pub target: Option<String>,
+    /// Redaction hints for this descriptor.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only command registry projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandRegistryProjection {
+    /// Stable projection identifier.
+    pub projection_id: String,
+    /// Projected command descriptors.
+    pub commands: Vec<CommandDescriptor>,
+    /// Optional selected command id.
+    pub selected_command_id: Option<String>,
+    /// Number of commands omitted by a bounded projection.
+    pub omitted_command_count: u32,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints that apply to the projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl CommandRegistryProjection {
+    /// Creates an empty command registry projection.
+    pub fn empty(
+        projection_id: impl Into<String>,
+        generated_at: TimestampMillis,
+        schema_version: u16,
+    ) -> Self {
+        Self {
+            projection_id: projection_id.into(),
+            commands: Vec::new(),
+            selected_command_id: None,
+            omitted_command_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version,
+        }
+    }
+}
+
+/// Durable artifact kind represented in the artifact ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ArtifactKind {
+    /// User directive artifact.
+    Directive,
+    /// Structured specification artifact.
+    Spec,
+    /// Task graph artifact.
+    TaskGraph,
+    /// Isolated execution session artifact.
+    ExecutionSession,
+    /// Verification evidence artifact.
+    Evidence,
+    /// Human approval artifact.
+    Approval,
+}
+
+/// Metadata-only artifact ledger row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactLedgerRow {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Artifact kind.
+    pub kind: ArtifactKind,
+    /// Display-safe artifact title.
+    pub title: String,
+    /// Display-safe state label.
+    pub state_label: String,
+    /// Linked proposal identifier, if any.
+    pub linked_proposal_id: Option<ProposalId>,
+    /// Linked runtime session identifier, if any.
+    pub linked_session_id: Option<String>,
+    /// Whether raw payload retention is enabled for this artifact.
+    pub raw_payload_retained: bool,
+    /// Artifact risk label.
+    pub risk_label: ProposalRiskLabel,
+    /// Artifact privacy label.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Redaction hints for this ledger row.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Row schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only artifact ledger projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactLedgerProjection {
+    /// Stable projection identifier.
+    pub projection_id: String,
+    /// Projected artifact rows.
+    pub rows: Vec<ArtifactLedgerRow>,
+    /// Number of rows omitted by a bounded projection.
+    pub omitted_row_count: u32,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints that apply to the projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl ArtifactLedgerProjection {
+    /// Creates an empty artifact ledger projection.
+    pub fn empty(
+        projection_id: impl Into<String>,
+        generated_at: TimestampMillis,
+        schema_version: u16,
+    ) -> Self {
+        Self {
+            projection_id: projection_id.into(),
+            rows: Vec::new(),
+            omitted_row_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version,
+        }
+    }
+}
+
+/// Verification run lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VerificationRunState {
+    /// Verification is planned but has not started.
+    Planned,
+    /// Verification is currently running.
+    Running,
+    /// Verification passed.
+    Passed,
+    /// Verification failed.
+    Failed,
+    /// Verification is blocked by missing policy, environment, or approval.
+    Blocked,
+    /// Verification was cancelled.
+    Cancelled,
+}
+
+/// Metadata-only verification run row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationRunRow {
+    /// Stable run identifier.
+    pub run_id: String,
+    /// Display-safe run label.
+    pub label: String,
+    /// Run lifecycle state.
+    pub state: VerificationRunState,
+    /// Display-safe command class label; raw command text is not stored here.
+    pub command_class_label: String,
+    /// Whether raw command text was intentionally redacted.
+    pub command_body_redacted: bool,
+    /// Process exit code when available.
+    pub exit_code: Option<i32>,
+    /// Display-safe target labels covered by the run.
+    pub target_labels: Vec<String>,
+    /// Linked evidence artifact identifier, if any.
+    pub evidence_artifact_id: Option<String>,
+    /// Run start timestamp.
+    pub started_at: Option<TimestampMillis>,
+    /// Run completion timestamp.
+    pub completed_at: Option<TimestampMillis>,
+    /// Run risk label.
+    pub risk_label: ProposalRiskLabel,
+    /// Run privacy label.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Redaction hints for this row.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Row schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only verification run projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationRunProjection {
+    /// Stable projection identifier.
+    pub projection_id: String,
+    /// Projected verification run rows.
+    pub rows: Vec<VerificationRunRow>,
+    /// Number of rows omitted by a bounded projection.
+    pub omitted_row_count: u32,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints that apply to the projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl VerificationRunProjection {
+    /// Creates an empty verification run projection.
+    pub fn empty(
+        projection_id: impl Into<String>,
+        generated_at: TimestampMillis,
+        schema_version: u16,
+    ) -> Self {
+        Self {
+            projection_id: projection_id.into(),
+            rows: Vec::new(),
+            omitted_row_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version,
+        }
+    }
+}
+
+/// Metadata-only system graph node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemGraphNode {
+    /// Stable node identifier.
+    pub node_id: String,
+    /// Display-safe node kind label.
+    pub kind_label: String,
+    /// Display-safe node label.
+    pub display_label: String,
+    /// Number of targets represented by this node.
+    pub target_count: u32,
+    /// Node risk label.
+    pub risk_label: ProposalRiskLabel,
+    /// Node privacy label.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Redaction hints for this node.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Node schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only system graph edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemGraphEdge {
+    /// Source node identifier.
+    pub from_node_id: String,
+    /// Destination node identifier.
+    pub to_node_id: String,
+    /// Display-safe relation label.
+    pub relation_label: String,
+    /// Redaction hints for this edge.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Edge schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only system graph projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemGraphProjection {
+    /// Stable projection identifier.
+    pub projection_id: String,
+    /// Projected graph nodes.
+    pub nodes: Vec<SystemGraphNode>,
+    /// Projected graph edges.
+    pub edges: Vec<SystemGraphEdge>,
+    /// Number of nodes omitted by a bounded projection.
+    pub omitted_node_count: u32,
+    /// Number of edges omitted by a bounded projection.
+    pub omitted_edge_count: u32,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints that apply to the projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl SystemGraphProjection {
+    /// Creates an empty system graph projection.
+    pub fn empty(
+        projection_id: impl Into<String>,
+        generated_at: TimestampMillis,
+        schema_version: u16,
+    ) -> Self {
+        Self {
+            projection_id: projection_id.into(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            omitted_node_count: 0,
+            omitted_edge_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version,
+        }
+    }
+}
+
+/// Metadata-first directive artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveArtifact {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Stable directive identifier.
+    pub directive_id: String,
+    /// Hash of the user goal; raw directive text is retained only by explicit policy.
+    pub goal_hash: FileFingerprint,
+    /// Display-safe scope labels.
+    pub scope_labels: Vec<String>,
+    /// Optional workspace identifier.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Product mode requested for the directive.
+    pub product_mode: ProductMode,
+    /// Policy profile selected for the directive.
+    pub policy_profile_id: String,
+    /// Retention policy label for raw source, prompts, terminal bodies, and provider payloads.
+    pub retention_policy_label: String,
+    /// Whether raw payload retention is enabled.
+    pub raw_payload_retained: bool,
+    /// Correlation identifier for audit continuity.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier for audit continuity.
+    pub causality_id: CausalityId,
+    /// Artifact creation timestamp.
+    pub created_at: TimestampMillis,
+    /// Redaction hints for this artifact.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Artifact schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-first specification artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecArtifact {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Linked directive identifier.
+    pub directive_id: String,
+    /// Requirement hashes; raw requirement text is retained only by explicit policy.
+    pub requirement_hashes: Vec<FileFingerprint>,
+    /// Design-note hashes; raw design text is retained only by explicit policy.
+    pub design_note_hashes: Vec<FileFingerprint>,
+    /// Acceptance-criteria hashes; raw criteria text is retained only by explicit policy.
+    pub acceptance_criteria_hashes: Vec<FileFingerprint>,
+    /// Display-safe constraint labels.
+    pub constraint_labels: Vec<String>,
+    /// Retention policy label.
+    pub retention_policy_label: String,
+    /// Whether raw payload retention is enabled.
+    pub raw_payload_retained: bool,
+    /// Artifact generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for this artifact.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Artifact schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-first task node artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskNode {
+    /// Stable task identifier.
+    pub task_id: String,
+    /// Predecessor task identifiers.
+    pub depends_on: Vec<String>,
+    /// Display-safe target labels.
+    pub target_labels: Vec<String>,
+    /// Display-safe verification requirement labels.
+    pub verification_requirements: Vec<String>,
+    /// Task state.
+    pub state: DelegatedTaskStepState,
+    /// Task risk label.
+    pub risk_label: ProposalRiskLabel,
+    /// Task privacy label.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Redaction hints for this task node.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Task-node schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-first task graph artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskGraphArtifact {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Linked directive identifier.
+    pub directive_id: String,
+    /// Task nodes.
+    pub nodes: Vec<TaskNode>,
+    /// Number of dependency edges.
+    pub edge_count: u32,
+    /// Number of blocked task nodes.
+    pub blocked_task_count: u32,
+    /// Retention policy label.
+    pub retention_policy_label: String,
+    /// Whether raw payload retention is enabled.
+    pub raw_payload_retained: bool,
+    /// Artifact generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for this artifact.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Artifact schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-first execution session artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionSessionArtifact {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Stable execution session identifier.
+    pub session_id: String,
+    /// Linked directive identifier.
+    pub directive_id: String,
+    /// Linked delegated-task plan identifier.
+    pub plan_id: Option<DelegatedTaskPlanId>,
+    /// Optional workspace identifier.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Display-safe isolated worktree label.
+    pub worktree_label: String,
+    /// Display-safe sandbox label.
+    pub sandbox_label: String,
+    /// Granted tool capabilities.
+    pub tool_grants: Vec<CapabilityId>,
+    /// Runtime lifecycle state.
+    pub lifecycle_state: DelegatedTaskRuntimeActivationState,
+    /// Display-safe runtime activation labels.
+    pub runtime_activation_labels: Vec<String>,
+    /// Retention policy label.
+    pub retention_policy_label: String,
+    /// Whether raw payload retention is enabled.
+    pub raw_payload_retained: bool,
+    /// Artifact generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for this artifact.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Artifact schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-first evidence artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceArtifact {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Linked execution session identifier.
+    pub session_id: Option<String>,
+    /// Display-safe command label.
+    pub command_label: Option<String>,
+    /// Verification state represented by this evidence.
+    pub run_state: VerificationRunState,
+    /// Hash of the evidence summary; raw output is retained only by explicit policy.
+    pub summary_hash: FileFingerprint,
+    /// Whether the evidence indicates success.
+    pub passed: bool,
+    /// Display-safe failure labels.
+    pub failure_labels: Vec<String>,
+    /// Screenshot hashes, when screenshots are retained separately.
+    pub screenshot_hashes: Vec<FileFingerprint>,
+    /// Log-summary hashes, when logs are retained separately.
+    pub log_hashes: Vec<FileFingerprint>,
+    /// Retention policy label.
+    pub retention_policy_label: String,
+    /// Whether raw payload retention is enabled.
+    pub raw_payload_retained: bool,
+    /// Artifact generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for this artifact.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Artifact schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-first approval artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalArtifact {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Linked directive identifier.
+    pub directive_id: String,
+    /// Proposal identifiers covered by this approval artifact.
+    pub proposal_ids: Vec<ProposalId>,
+    /// Display-safe reviewer decision labels.
+    pub reviewer_decision_labels: Vec<String>,
+    /// Display-safe denied gate labels.
+    pub denied_gate_labels: Vec<String>,
+    /// Whether rollback metadata is available.
+    pub rollback_available: bool,
+    /// Audit-record hashes represented by this artifact.
+    pub audit_record_hashes: Vec<FileFingerprint>,
+    /// Artifact generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for this artifact.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Artifact schema version.
+    pub schema_version: u16,
+}
+
+/// Runtime command class used by delegated-task security contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DelegatedRuntimeCommandClass {
+    /// Metadata-only read.
+    ReadOnly,
+    /// Build command.
+    Build,
+    /// Test command.
+    Test,
+    /// Lint or formatting check command.
+    Lint,
+    /// Security or dependency audit command.
+    SecurityAudit,
+    /// Network egress command.
+    Network,
+    /// Filesystem write command in an isolated runtime boundary.
+    FilesystemWrite,
+    /// Process launch command.
+    ProcessLaunch,
+    /// Direct editor or main-workspace mutation command.
+    DirectMutation,
+}
+
+/// Stop gate that prevents delegated runtime work from proceeding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DelegatedRuntimeStopGate {
+    /// No sandbox or isolated worktree is available.
+    NoSandboxAvailable,
+    /// Correlation or causality metadata is invalid.
+    InvalidCorrelationCausality,
+    /// A target matches a protected path.
+    ProtectedFileTarget,
+    /// Requested network egress is not approved.
+    UnapprovedEgress,
+    /// Requested command class is denied or not allowed.
+    DeniedCommandClass,
+    /// Proposal preconditions are stale.
+    StaleProposalPreconditions,
+    /// Main workspace is dirty and conflicts with runtime merge/apply.
+    DirtyMainWorkspaceConflict,
+    /// Required verification evidence is missing.
+    MissingVerificationEvidence,
+    /// Runtime attempted direct mutation instead of proposal output.
+    DirectMutationAttempt,
+    /// Audit metadata is missing before success reporting.
+    MissingAuditBeforeSuccess,
+}
+
+/// Delegated-task runtime security contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskSecurityContract {
+    /// Stable security contract identifier.
+    pub contract_id: String,
+    /// Optional workspace identifier.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Display-safe workspace scope labels.
+    pub workspace_scope_labels: Vec<String>,
+    /// Protected path labels or patterns.
+    pub protected_path_patterns: Vec<String>,
+    /// Command classes explicitly allowed.
+    pub allowed_command_classes: Vec<DelegatedRuntimeCommandClass>,
+    /// Command classes explicitly denied.
+    pub denied_command_classes: Vec<DelegatedRuntimeCommandClass>,
+    /// Display-safe egress allowlist labels.
+    pub egress_allowlist: Vec<String>,
+    /// Granted tool capabilities.
+    pub tool_grants: Vec<CapabilityId>,
+    /// Display-safe budget labels.
+    pub budget_labels: Vec<String>,
+    /// Display-safe approval gate labels.
+    pub approval_gate_labels: Vec<String>,
+    /// Whether sandbox allocation is required.
+    pub sandbox_required: bool,
+    /// Whether isolated worktree allocation is required.
+    pub worktree_isolation_required: bool,
+    /// Whether audit metadata must be persisted before success is reported.
+    pub audit_before_success_required: bool,
+    /// Whether generated edits must be proposal-only.
+    pub proposal_only_mutation_required: bool,
+    /// Correlation identifier for audit continuity.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier for audit continuity.
+    pub causality_id: CausalityId,
+    /// Redaction hints for this contract.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Contract schema version.
+    pub schema_version: u16,
+}
+
+/// Runtime readiness input for delegated-task security evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskRuntimeReadinessInput {
+    /// Security contract to evaluate.
+    pub security_contract: DelegatedTaskSecurityContract,
+    /// Requested command classes.
+    pub requested_command_classes: Vec<DelegatedRuntimeCommandClass>,
+    /// Display-safe target path labels.
+    pub target_path_labels: Vec<String>,
+    /// Requested egress target labels.
+    pub requested_egress_labels: Vec<String>,
+    /// Whether sandbox or worktree isolation has been allocated.
+    pub sandbox_allocated: bool,
+    /// Whether the main workspace is dirty in a conflicting way.
+    pub main_workspace_dirty_conflict: bool,
+    /// Whether proposal preconditions are stale.
+    pub proposal_preconditions_stale: bool,
+    /// Number of verification evidence artifacts available.
+    pub verification_evidence_count: u32,
+    /// Whether success audit metadata is already persisted.
+    pub audit_persisted_before_success: bool,
+    /// Runtime lifecycle state being evaluated.
+    pub runtime_activation: DelegatedTaskRuntimeActivationState,
+    /// Input schema version.
+    pub schema_version: u16,
+}
+
+/// Runtime readiness decision for delegated-task security evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskRuntimeReadiness {
+    /// Whether runtime work may proceed.
+    pub allowed: bool,
+    /// Stop gates that blocked progress.
+    pub stop_gates: Vec<DelegatedRuntimeStopGate>,
+    /// Runtime lifecycle state represented by this decision.
+    pub runtime_activation: DelegatedTaskRuntimeActivationState,
+    /// Display-safe decision labels.
+    pub labels: Vec<String>,
+    /// Redaction hints for this decision.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Decision schema version.
+    pub schema_version: u16,
+}
+
+/// Evaluates delegated-task runtime readiness using fail-closed security gates.
+pub fn evaluate_delegated_task_runtime_readiness(
+    input: DelegatedTaskRuntimeReadinessInput,
+) -> DelegatedTaskRuntimeReadiness {
+    let contract = &input.security_contract;
+    let mut stop_gates = Vec::new();
+
+    if contract.correlation_id.0 == 0 || contract.causality_id.0 == Uuid::nil() {
+        stop_gates.push(DelegatedRuntimeStopGate::InvalidCorrelationCausality);
+    }
+    if (contract.sandbox_required || contract.worktree_isolation_required)
+        && !input.sandbox_allocated
+    {
+        stop_gates.push(DelegatedRuntimeStopGate::NoSandboxAvailable);
+    }
+    if input.target_path_labels.iter().any(|target| {
+        contract
+            .protected_path_patterns
+            .iter()
+            .any(|protected| !protected.is_empty() && target.contains(protected))
+    }) {
+        stop_gates.push(DelegatedRuntimeStopGate::ProtectedFileTarget);
+    }
+    if input.requested_egress_labels.iter().any(|egress| {
+        !contract
+            .egress_allowlist
+            .iter()
+            .any(|allowed| allowed == egress)
+    }) {
+        stop_gates.push(DelegatedRuntimeStopGate::UnapprovedEgress);
+    }
+    if input.requested_command_classes.iter().any(|command| {
+        contract.denied_command_classes.contains(command)
+            || !contract.allowed_command_classes.contains(command)
+    }) {
+        stop_gates.push(DelegatedRuntimeStopGate::DeniedCommandClass);
+    }
+    if input
+        .requested_command_classes
+        .contains(&DelegatedRuntimeCommandClass::DirectMutation)
+        && contract.proposal_only_mutation_required
+    {
+        stop_gates.push(DelegatedRuntimeStopGate::DirectMutationAttempt);
+    }
+    if input.proposal_preconditions_stale {
+        stop_gates.push(DelegatedRuntimeStopGate::StaleProposalPreconditions);
+    }
+    if input.main_workspace_dirty_conflict {
+        stop_gates.push(DelegatedRuntimeStopGate::DirtyMainWorkspaceConflict);
+    }
+    if input.runtime_activation == DelegatedTaskRuntimeActivationState::Verifying
+        && input.verification_evidence_count == 0
+    {
+        stop_gates.push(DelegatedRuntimeStopGate::MissingVerificationEvidence);
+    }
+    if input.runtime_activation == DelegatedTaskRuntimeActivationState::Completed
+        && contract.audit_before_success_required
+        && !input.audit_persisted_before_success
+    {
+        stop_gates.push(DelegatedRuntimeStopGate::MissingAuditBeforeSuccess);
+    }
+
+    stop_gates.sort_by_key(|gate| format!("{gate:?}"));
+    stop_gates.dedup();
+    let allowed = stop_gates.is_empty();
+    DelegatedTaskRuntimeReadiness {
+        allowed,
+        stop_gates,
+        runtime_activation: input.runtime_activation,
+        labels: if allowed {
+            vec!["delegated_runtime.allowed".to_string()]
+        } else {
+            vec!["delegated_runtime.blocked".to_string()]
+        },
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: input.schema_version,
+    }
 }
 
 // -----------------------------------------------------------------------------

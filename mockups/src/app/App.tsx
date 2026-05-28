@@ -53,7 +53,7 @@ export default function App() {
       >
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#4ADE80" }} /> connected · {manual ? "local tools" : "fleet-mesh"}
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#4ADE80" }} /> connected · {manual ? "local tools" : "model runtime"}
           </span>
           <span className="font-mono">feature/stripe-subscriptions</span>
           <span className="font-mono">↑2 ↓0</span>
@@ -64,7 +64,9 @@ export default function App() {
           <span>Ln 15, Col 22</span>
           <span>UTF-8</span>
           <span>LF</span>
-          <span style={{ color: manual ? "#A8C3FF" : "#C8B5FF" }}>{manual ? "Manual · AI Disabled" : `Autonomy · L${level}`}</span>
+          <span style={{ color: manual ? "#A8C3FF" : "#C8B5FF" }}>
+            {manual ? "Manual · AI Disabled" : level === 2 ? "Delegates" : "Legion Workflows"}
+          </span>
         </div>
       </div>
     </div>

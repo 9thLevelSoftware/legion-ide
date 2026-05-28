@@ -185,10 +185,10 @@ function FileRow({
 
 export function LeftSidebar({ level = 3 }: { level?: number }) {
   const manual = level === 1;
-  const assisted = level === 2;
-  const copilot = level === 3;
-  const delegated = level === 4;
-  const fleet = level === 5;
+  const assisted = false;
+  const copilot = false;
+  const delegated = level === 2;
+  const fleet = level === 3;
 
   const fleetTeams = [
     {
@@ -232,7 +232,7 @@ export function LeftSidebar({ level = 3 }: { level?: number }) {
       ])
     : copilot
     ? ([
-        { name: "GPT-5.5", model: "turbo", role: "Co-Pilot", status: "writing" as Status, task: "Pairing on auth/middleware.ts", progress: 62 },
+        { name: "GPT-5.5", model: "turbo", role: "Delegate", status: "writing" as Status, task: "Pairing on auth/middleware.ts", progress: 62 },
         { name: "Claude", model: "opus-4.7", role: "Architect", status: "reviewing" as Status, task: "Architecture review", progress: 45 },
         { name: "Local", model: "qwen3-32b", role: "Search", status: "testing" as Status, task: "Fast symbol search", progress: 90 },
       ])
@@ -400,7 +400,7 @@ export function LeftSidebar({ level = 3 }: { level?: number }) {
         </div>
       )}
 
-      {/* Deterministic local tooling in Manual; fleet UI starts at higher autonomy. */}
+      {/* Deterministic local tooling in Manual; workflow UI starts in Legion Workflows. */}
       {manual ? (
         <ManualToolchainPanel />
       ) : fleet ? (
@@ -410,7 +410,7 @@ export function LeftSidebar({ level = 3 }: { level?: number }) {
         >
           <div className="px-2 flex items-center justify-between mb-2">
             <span className="text-[10px] uppercase tracking-[0.16em] text-[#B16CFF]">
-              Active Fleet
+              Active Delegates
             </span>
             <span className="text-[10px] text-white/40">9 active</span>
           </div>
@@ -479,7 +479,7 @@ export function LeftSidebar({ level = 3 }: { level?: number }) {
       >
         <div className="px-2 flex items-center justify-between mb-2">
           <span className="text-[10px] uppercase tracking-[0.16em] text-white/35">
-            {assisted ? "Assistants" : "Active Fleet"}
+            {assisted ? "Assistants" : "Active Delegates"}
           </span>
           <span className="text-[10px] text-white/40">{agents.length} {assisted ? "loaded" : "active"}</span>
         </div>

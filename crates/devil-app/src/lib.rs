@@ -6562,6 +6562,34 @@ fn trust_reference(
     }
 }
 
+struct AppCommandDescriptorInput<'a> {
+    command_id: &'a str,
+    title: &'a str,
+    scope: &'a str,
+    enabled: bool,
+    disabled_reason: Option<String>,
+    shortcut: Option<&'a str>,
+    risk_label: devil_protocol::CommandRiskLabel,
+    required_permission: Option<CapabilityId>,
+    target: Option<String>,
+}
+
+fn command_descriptor(input: AppCommandDescriptorInput<'_>) -> devil_protocol::CommandDescriptor {
+    devil_protocol::CommandDescriptor {
+        command_id: input.command_id.to_string(),
+        title: input.title.to_string(),
+        scope: input.scope.to_string(),
+        enabled: input.enabled,
+        disabled_reason: input.disabled_reason,
+        shortcut: input.shortcut.map(str::to_string),
+        risk_label: input.risk_label,
+        required_permission: input.required_permission,
+        target: input.target,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
 fn phase4_provider_capability(
     provider_class: devil_protocol::AssistedAiProviderClass,
     refusal: Option<devil_protocol::AssistedAiRefusalMetadata>,
@@ -8468,6 +8496,285 @@ impl AppComposition {
         )
     }
 
+    fn command_registry_projection(
+        &self,
+        proposal_ledger_projection: &ProposalLedgerProjection,
+        delegated_task_projection: &DelegatedTaskProjection,
+        generated_at: TimestampMillis,
+    ) -> devil_protocol::CommandRegistryProjection {
+        let active_buffer = self.active_documents.active_buffer_id;
+        let selected_proposal = proposal_ledger_projection.selected_proposal_id;
+        let delegated_plans_available = delegated_task_projection.plan_count > 0;
+        devil_protocol::CommandRegistryProjection {
+            projection_id: "command-registry:app-shell".to_string(),
+            commands: vec![
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "file.save",
+                    title: "Save Active Buffer",
+                    scope: "editor",
+                    enabled: active_buffer.is_some(),
+                    disabled_reason: active_buffer
+                        .is_none()
+                        .then(|| "no active buffer".to_string()),
+                    shortcut: Some(":w"),
+                    risk_label: devil_protocol::CommandRiskLabel::Review,
+                    required_permission: Some(CapabilityId("workspace.save".to_string())),
+                    target: active_buffer.map(|buffer| format!("buffer:{}", buffer.0)),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "proposal.preview",
+                    title: "Preview Proposal",
+                    scope: "review",
+                    enabled: selected_proposal.is_some(),
+                    disabled_reason: selected_proposal
+                        .is_none()
+                        .then(|| "no selected proposal".to_string()),
+                    shortcut: None,
+                    risk_label: devil_protocol::CommandRiskLabel::Safe,
+                    required_permission: Some(CapabilityId("proposal.preview".to_string())),
+                    target: selected_proposal.map(|proposal| format!("proposal:{}", proposal.0)),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "proposal.approve",
+                    title: "Approve Proposal",
+                    scope: "review",
+                    enabled: selected_proposal.is_some(),
+                    disabled_reason: selected_proposal
+                        .is_none()
+                        .then(|| "no selected proposal".to_string()),
+                    shortcut: None,
+                    risk_label: devil_protocol::CommandRiskLabel::Review,
+                    required_permission: Some(CapabilityId("proposal.approve".to_string())),
+                    target: selected_proposal.map(|proposal| format!("proposal:{}", proposal.0)),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "proposal.apply.approved",
+                    title: "Apply Approved Proposal",
+                    scope: "review",
+                    enabled: false,
+                    disabled_reason: Some(
+                        "requires explicit approved proposal dispatch".to_string(),
+                    ),
+                    shortcut: None,
+                    risk_label: devil_protocol::CommandRiskLabel::Destructive,
+                    required_permission: Some(CapabilityId("proposal.apply".to_string())),
+                    target: selected_proposal.map(|proposal| format!("proposal:{}", proposal.0)),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "delegated.inspect_plan",
+                    title: "Inspect Delegated Plan",
+                    scope: "agents",
+                    enabled: delegated_plans_available,
+                    disabled_reason: (!delegated_plans_available)
+                        .then(|| "no delegated plan projected".to_string()),
+                    shortcut: None,
+                    risk_label: devil_protocol::CommandRiskLabel::Safe,
+                    required_permission: Some(CapabilityId("delegated.plan.inspect".to_string())),
+                    target: delegated_plans_available.then(|| "delegated-task".to_string()),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "delegated.allocate_sandbox",
+                    title: "Allocate Delegated Sandbox",
+                    scope: "agents",
+                    enabled: false,
+                    disabled_reason: Some(
+                        "post-GA runtime activation requires policy and approval gates".to_string(),
+                    ),
+                    shortcut: None,
+                    risk_label: devil_protocol::CommandRiskLabel::Privileged,
+                    required_permission: Some(CapabilityId(
+                        "delegated.runtime.allocate".to_string(),
+                    )),
+                    target: delegated_plans_available.then(|| "isolated-worktree".to_string()),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "verification.run_required",
+                    title: "Run Required Verification",
+                    scope: "verification",
+                    enabled: false,
+                    disabled_reason: Some(
+                        "verification runs are projected until runtime gate is accepted"
+                            .to_string(),
+                    ),
+                    shortcut: None,
+                    risk_label: devil_protocol::CommandRiskLabel::Privileged,
+                    required_permission: Some(CapabilityId("verification.run".to_string())),
+                    target: Some("workspace-gates".to_string()),
+                }),
+            ],
+            selected_command_id: None,
+            omitted_command_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn artifact_ledger_projection(
+        &self,
+        proposal_ledger_projection: &ProposalLedgerProjection,
+        delegated_task_projection: &DelegatedTaskProjection,
+        generated_at: TimestampMillis,
+    ) -> devil_protocol::ArtifactLedgerProjection {
+        let mut rows = delegated_task_projection
+            .plan_rows
+            .iter()
+            .map(|plan| devil_protocol::ArtifactLedgerRow {
+                artifact_id: format!("artifact:directive:{}", plan.plan_id.0),
+                kind: devil_protocol::ArtifactKind::Directive,
+                title: "Delegated directive".to_string(),
+                state_label: format!("{:?}", plan.plan_state),
+                linked_proposal_id: None,
+                linked_session_id: None,
+                raw_payload_retained: false,
+                risk_label: plan.risk_label,
+                privacy_label: plan.privacy_label,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+            .collect::<Vec<_>>();
+        rows.extend(proposal_ledger_projection.rows.iter().map(|proposal| {
+            devil_protocol::ArtifactLedgerRow {
+                artifact_id: format!("artifact:approval:{}", proposal.proposal_id.0),
+                kind: devil_protocol::ArtifactKind::Approval,
+                title: proposal.title.clone(),
+                state_label: proposal.lifecycle.label.clone(),
+                linked_proposal_id: Some(proposal.proposal_id),
+                linked_session_id: None,
+                raw_payload_retained: false,
+                risk_label: proposal.risk_label,
+                privacy_label: proposal.privacy_label,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }
+        }));
+        devil_protocol::ArtifactLedgerProjection {
+            projection_id: "artifact-ledger:app-shell".to_string(),
+            rows,
+            omitted_row_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn verification_run_projection(
+        &self,
+        delegated_task_projection: &DelegatedTaskProjection,
+        generated_at: TimestampMillis,
+    ) -> devil_protocol::VerificationRunProjection {
+        let rows = delegated_task_projection
+            .plan_rows
+            .iter()
+            .map(|plan| devil_protocol::VerificationRunRow {
+                run_id: format!("verification:{}", plan.plan_id.0),
+                label: "Required delegated-task verification".to_string(),
+                state: if plan.readiness
+                    == devil_protocol::DelegatedTaskPlanReadinessStatus::Refused
+                    || plan.readiness == devil_protocol::DelegatedTaskPlanReadinessStatus::Blocked
+                {
+                    devil_protocol::VerificationRunState::Blocked
+                } else {
+                    devil_protocol::VerificationRunState::Planned
+                },
+                command_class_label: "workspace-gates".to_string(),
+                command_body_redacted: true,
+                exit_code: None,
+                target_labels: plan.labels.clone(),
+                evidence_artifact_id: None,
+                started_at: None,
+                completed_at: None,
+                risk_label: plan.risk_label,
+                privacy_label: plan.privacy_label,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+            .collect::<Vec<_>>();
+        devil_protocol::VerificationRunProjection {
+            projection_id: "verification-runs:app-shell".to_string(),
+            rows,
+            omitted_row_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn system_graph_projection(
+        &self,
+        proposal_ledger_projection: &ProposalLedgerProjection,
+        delegated_task_projection: &DelegatedTaskProjection,
+        generated_at: TimestampMillis,
+    ) -> devil_protocol::SystemGraphProjection {
+        let mut nodes = vec![devil_protocol::SystemGraphNode {
+            node_id: "system:workspace".to_string(),
+            kind_label: "workspace".to_string(),
+            display_label: "Active workspace".to_string(),
+            target_count: self.active_documents.workspace_id().map_or(0, |_| 1),
+            risk_label: devil_protocol::ProposalRiskLabel::Low,
+            privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }];
+        if self.active_documents.active_file_id.is_some() {
+            nodes.push(devil_protocol::SystemGraphNode {
+                node_id: "system:active-file".to_string(),
+                kind_label: "file".to_string(),
+                display_label: "Active file".to_string(),
+                target_count: 1,
+                risk_label: devil_protocol::ProposalRiskLabel::Low,
+                privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        }
+        if !proposal_ledger_projection.rows.is_empty() {
+            nodes.push(devil_protocol::SystemGraphNode {
+                node_id: "system:proposal-ledger".to_string(),
+                kind_label: "proposal-ledger".to_string(),
+                display_label: "Proposal ledger".to_string(),
+                target_count: proposal_ledger_projection.rows.len() as u32,
+                risk_label: devil_protocol::ProposalRiskLabel::Medium,
+                privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        }
+        if delegated_task_projection.plan_count > 0 {
+            nodes.push(devil_protocol::SystemGraphNode {
+                node_id: "system:delegated-task-manager".to_string(),
+                kind_label: "delegated-task-manager".to_string(),
+                display_label: "Delegated task manager".to_string(),
+                target_count: delegated_task_projection.plan_count,
+                risk_label: devil_protocol::ProposalRiskLabel::Medium,
+                privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        }
+        let edges = nodes
+            .iter()
+            .filter(|node| node.node_id != "system:workspace")
+            .map(|node| devil_protocol::SystemGraphEdge {
+                from_node_id: "system:workspace".to_string(),
+                to_node_id: node.node_id.clone(),
+                relation_label: "contains".to_string(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+            .collect::<Vec<_>>();
+        devil_protocol::SystemGraphProjection {
+            projection_id: "system-graph:app-shell".to_string(),
+            nodes,
+            edges,
+            omitted_node_count: 0,
+            omitted_edge_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
     /// Seed an ephemeral deterministic remote fixture file for Phase 7 validation.
     pub fn seed_remote_fixture_file(
         &mut self,
@@ -10093,6 +10400,24 @@ impl AppComposition {
             .proposal_coordinator
             .proposal_ledger_projection(generated_at);
         let remote_gui_projection = self.remote.gui_projection(&proposal_ledger_projection);
+        let delegated_task_projection = self.delegated_task_projection(generated_at);
+        let command_registry_projection = self.command_registry_projection(
+            &proposal_ledger_projection,
+            &delegated_task_projection,
+            generated_at,
+        );
+        let artifact_ledger_projection = self.artifact_ledger_projection(
+            &proposal_ledger_projection,
+            &delegated_task_projection,
+            generated_at,
+        );
+        let verification_run_projection =
+            self.verification_run_projection(&delegated_task_projection, generated_at);
+        let system_graph_projection = self.system_graph_projection(
+            &proposal_ledger_projection,
+            &delegated_task_projection,
+            generated_at,
+        );
         let selected_proposal_trust =
             self.selected_proposal_trust_projections(&proposal_ledger_projection, generated_at);
         Ok(ShellProjectionSnapshot {
@@ -10100,7 +10425,11 @@ impl AppComposition {
             layout_projection,
             explorer_projection: self.explorer_projection()?,
             status_messages: Vec::new(),
+            command_registry_projection,
             proposal_ledger_projection,
+            artifact_ledger_projection,
+            verification_run_projection,
+            system_graph_projection,
             context_manifest_projection: selected_proposal_trust
                 .as_ref()
                 .map(|projections| projections.context_manifest_projection.clone())
@@ -10151,7 +10480,7 @@ impl AppComposition {
                 .assisted_ai_projection
                 .clone()
                 .unwrap_or_else(empty_assisted_ai_projection),
-            delegated_task_projection: self.delegated_task_projection(generated_at),
+            delegated_task_projection,
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),

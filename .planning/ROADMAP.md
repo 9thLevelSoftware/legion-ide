@@ -9,7 +9,12 @@
 - [x] Phase 5: Control, Trust, and Assisted AI Surfaces
 - [x] Phase 6: Packaging, Platform Integration, and Accessibility
 - [x] Phase 7: Fully Functional Local IDE Beta
-- [ ] Phase 8: Advanced Platform GUI GA
+- [x] Phase 8: Advanced Platform GUI GA
+- [x] Phase 9: Command And Work Surfaces Foundation
+- [x] Phase 10: Metadata-First Artifact Model
+- [x] Phase 11: Safe Runtime Activation Contracts
+- [ ] Phase 12: Delegated Task Runtime
+- [ ] Phase 13: Legion Workflow Orchestration
 
 ## Phase Details
 
@@ -134,7 +139,7 @@ Phase 7 status: Complete; accepted and review passed on 2026-05-27.
 **Plans**: 5
 
 ### Phase 8: Advanced Platform GUI GA
-Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-06 complete; final acceptance blocked on macOS/Linux platform parity proof.
+Phase 8 status: Complete; accepted on 2026-05-28 after current Windows, macOS, and Linux parity proof plus final gates.
 
 **Goal**: Expose accepted advanced runtime surfaces through production-grade GUI workflows.
 
@@ -152,6 +157,47 @@ Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-06 complete; f
 
 **Plans**: 7
 
+### Phase 9: Command And Work Surfaces Foundation
+Phase 9 status: Complete for the metadata-first foundation slice.
+
+**Goal**: Promote command and work surfaces into app-owned, projection-only contracts.
+
+**Success Criteria**:
+- Command registry, artifact ledger, verification run, and system graph projections exist as public protocol contracts.
+- `devil-app` builds app-owned projection data.
+- `devil-ui` carries the projections without gaining authority.
+- `devil-desktop` renders summary rows derived from `ShellProjectionSnapshot`.
+
+### Phase 10: Metadata-First Artifact Model
+Phase 10 status: Complete for protocol DTO contracts.
+
+**Goal**: Make delegated work inspectable through durable metadata-first artifacts.
+
+**Success Criteria**:
+- Directive, spec, task graph, execution session, evidence, and approval artifact DTOs exist.
+- Raw payload retention remains explicit; metadata-only remains the default.
+- DTO round-trip tests cover the new artifacts.
+
+### Phase 11: Safe Runtime Activation Contracts
+Phase 11 status: Complete for protocol and policy contracts.
+
+**Goal**: Encode runtime lifecycle states and fail-closed delegated-task stop gates before runtime authority exists.
+
+**Success Criteria**:
+- `DelegatedTaskRuntimeActivationState` includes planned, sandbox, execution, verification, approval, blocked, completed, cancelled, and failed states.
+- Runtime security contracts cover scope, protected paths, command classes, egress, tool grants, budget labels, approval gates, isolation, and audit-before-success.
+- Runtime readiness tests prove protected paths, egress, denied commands, direct mutation, stale preconditions, dirty workspace conflict, and missing evidence block progress.
+
+### Phase 12: Delegated Task Runtime
+Phase 12 status: Planned.
+
+**Goal**: Activate `devil-agent` as an isolated orchestrator that emits proposals and evidence, never direct main-workspace mutation.
+
+### Phase 13: Legion Workflow Orchestration
+Phase 13 status: Planned.
+
+**Goal**: Coordinate a full Legion Workflow team across local or provider-backed models, with conflict/dependency tracking, verification, sign-off, and approval-gated merge.
+
 ## Progress
 
 | Phase | Plans | Completed | Status |
@@ -163,10 +209,16 @@ Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-06 complete; f
 | 5 | 7 | 7 | Complete |
 | 6 | 7 | 7 | Complete |
 | 7 | 5 | 5 | Complete |
-| 8 | 7 | 6 | In Progress |
+| 8 | 7 | 7 | Complete |
+| 9 | 1 | 1 | Complete |
+| 10 | 1 | 1 | Complete |
+| 11 | 1 | 1 | Complete |
+| 12 | TBD | 0 | Planned |
+| 13 | TBD | 0 | Planned |
 
 ## Planning Notes
 
-- Total planned plans: 51.
+- Total GUI GA plans completed through Phase 8: 51.
+- Post-GA Phase 9-11 foundation slices are complete; Phase 12-13 execution/fleet work remains planned and must not bypass proposal-mediated authority.
 - Estimates are not caps. A phase may produce as many tasks as needed to satisfy the phase goal and verification contract.
 - `/legion:plan` should use `.planning/CODEBASE.md`, `.planning/codebase/index.jsonl`, and `.planning/codebase/symbols.json` before decomposing each phase.

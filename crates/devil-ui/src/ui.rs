@@ -1,17 +1,17 @@
 //! Projection-only UI primitives for the native shell.
 
 use devil_protocol::{
-    AgentRunId, AssistedAiProjection, BufferId, CanonicalPath, CheckpointRollbackProjection,
-    CollaborationGuiProjection, CollaborationParticipantId, CollaborationPresenceProjection,
-    CollaborationSessionId, ContextManifestEgressStatus, ContextManifestProjection,
-    ContextManifestPurpose, ContextManifestRecord, DelegatedTaskProjection,
-    DelegatedTaskRuntimeActivationState, FileId, LanguageToolingProjection,
-    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
-    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
-    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
-    ProposalRollbackReason, ProtocolTextRange, RedactionHint, RemoteGuiProjection,
-    TerminalPanelProjection, TerminalSessionId, TextCoordinate, TimestampMillis, ViewportScroll,
-    WorkspaceId,
+    AgentRunId, ArtifactLedgerProjection, AssistedAiProjection, BufferId, CanonicalPath,
+    CheckpointRollbackProjection, CollaborationGuiProjection, CollaborationParticipantId,
+    CollaborationPresenceProjection, CollaborationSessionId, CommandRegistryProjection,
+    ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
+    ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
+    LanguageToolingProjection, PermissionBudgetProjection, PluginContributionProjection, PluginId,
+    PrivacyInspectorProjection, ProposalApprovalChecklistProjection, ProposalCancellationReason,
+    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
+    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
+    RemoteGuiProjection, SystemGraphProjection, TerminalPanelProjection, TerminalSessionId,
+    TextCoordinate, TimestampMillis, VerificationRunProjection, ViewportScroll, WorkspaceId,
 };
 use thiserror::Error;
 
@@ -716,8 +716,16 @@ pub struct ShellProjectionSnapshot {
     pub active_buffer_projection: ActiveBufferProjection,
     /// Status message projections.
     pub status_messages: Vec<StatusMessageProjection>,
+    /// Command registry projection supplied by the application layer.
+    pub command_registry_projection: CommandRegistryProjection,
     /// Proposal ledger projection supplied by the application layer.
     pub proposal_ledger_projection: ProposalLedgerProjection,
+    /// Artifact ledger projection supplied by the application layer.
+    pub artifact_ledger_projection: ArtifactLedgerProjection,
+    /// Verification-run projection supplied by the application layer.
+    pub verification_run_projection: VerificationRunProjection,
+    /// System graph summary projection supplied by the application layer.
+    pub system_graph_projection: SystemGraphProjection,
     /// Trust-layer context manifest projection supplied by the application layer.
     pub context_manifest_projection: ContextManifestProjection,
     /// Trust-layer privacy inspector projection supplied by the application layer.
@@ -775,8 +783,16 @@ pub struct Shell {
     pub active_buffer_projection: ActiveBufferProjection,
     /// Projected status messages.
     pub status_messages: Vec<StatusMessageProjection>,
+    /// Static command registry projection.
+    pub command_registry_projection: CommandRegistryProjection,
     /// Static proposal ledger projection.
     pub proposal_ledger_projection: ProposalLedgerProjection,
+    /// Static artifact ledger projection.
+    pub artifact_ledger_projection: ArtifactLedgerProjection,
+    /// Static verification-run projection.
+    pub verification_run_projection: VerificationRunProjection,
+    /// Static system graph projection.
+    pub system_graph_projection: SystemGraphProjection,
     /// Static trust-layer context manifest projection.
     pub context_manifest_projection: ContextManifestProjection,
     /// Static trust-layer privacy inspector projection.
@@ -819,7 +835,11 @@ impl Shell {
             explorer_projection: snapshot.explorer_projection,
             active_buffer_projection: snapshot.active_buffer_projection,
             status_messages: snapshot.status_messages,
+            command_registry_projection: snapshot.command_registry_projection,
             proposal_ledger_projection: snapshot.proposal_ledger_projection,
+            artifact_ledger_projection: snapshot.artifact_ledger_projection,
+            verification_run_projection: snapshot.verification_run_projection,
+            system_graph_projection: snapshot.system_graph_projection,
             context_manifest_projection: snapshot.context_manifest_projection,
             privacy_inspector_projection: snapshot.privacy_inspector_projection,
             permission_budget_projection: snapshot.permission_budget_projection,
@@ -849,7 +869,11 @@ impl Shell {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: empty_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -875,7 +899,11 @@ impl Shell {
             explorer_projection: self.explorer_projection.clone(),
             active_buffer_projection: self.active_buffer_projection.clone(),
             status_messages: self.status_messages.clone(),
+            command_registry_projection: self.command_registry_projection.clone(),
             proposal_ledger_projection: self.proposal_ledger_projection.clone(),
+            artifact_ledger_projection: self.artifact_ledger_projection.clone(),
+            verification_run_projection: self.verification_run_projection.clone(),
+            system_graph_projection: self.system_graph_projection.clone(),
             context_manifest_projection: self.context_manifest_projection.clone(),
             privacy_inspector_projection: self.privacy_inspector_projection.clone(),
             permission_budget_projection: self.permission_budget_projection.clone(),
@@ -900,7 +928,11 @@ impl Shell {
         self.explorer_projection = snapshot.explorer_projection;
         self.active_buffer_projection = snapshot.active_buffer_projection;
         self.status_messages = snapshot.status_messages;
+        self.command_registry_projection = snapshot.command_registry_projection;
         self.proposal_ledger_projection = snapshot.proposal_ledger_projection;
+        self.artifact_ledger_projection = snapshot.artifact_ledger_projection;
+        self.verification_run_projection = snapshot.verification_run_projection;
+        self.system_graph_projection = snapshot.system_graph_projection;
         self.context_manifest_projection = snapshot.context_manifest_projection;
         self.privacy_inspector_projection = snapshot.privacy_inspector_projection;
         self.permission_budget_projection = snapshot.permission_budget_projection;
@@ -983,6 +1015,31 @@ impl Shell {
             .map(|path| path.0.as_str())
             .unwrap_or("<no active file>");
         println!("Path: {}", path);
+        if !self.command_registry_projection.commands.is_empty() {
+            let registry = &self.command_registry_projection;
+            let enabled_count = registry
+                .commands
+                .iter()
+                .filter(|command| command.enabled)
+                .count();
+            println!(
+                "Command registry {} | commands={} enabled={} omitted={}",
+                registry.projection_id,
+                registry.commands.len(),
+                enabled_count,
+                registry.omitted_command_count
+            );
+            for command in &registry.commands {
+                println!(
+                    "- command {} scope={} enabled={} risk={:?} target={:?}",
+                    command.command_id,
+                    command.scope,
+                    command.enabled,
+                    command.risk_label,
+                    command.target
+                );
+            }
+        }
         if !self.proposal_ledger_projection.rows.is_empty() {
             println!("Proposals:");
             for row in &self.proposal_ledger_projection.rows {
@@ -999,6 +1056,58 @@ impl Shell {
                     row.diff_summary.full_source_redacted
                 );
             }
+        }
+        if !self.artifact_ledger_projection.rows.is_empty() {
+            let ledger = &self.artifact_ledger_projection;
+            println!(
+                "Artifact ledger {} | artifacts={} omitted={}",
+                ledger.projection_id,
+                ledger.rows.len(),
+                ledger.omitted_row_count
+            );
+            for row in &ledger.rows {
+                println!(
+                    "- artifact {} kind={:?} state={} raw_retained={} risk={:?} privacy={:?}",
+                    row.artifact_id,
+                    row.kind,
+                    row.state_label,
+                    row.raw_payload_retained,
+                    row.risk_label,
+                    row.privacy_label
+                );
+            }
+        }
+        if !self.verification_run_projection.rows.is_empty() {
+            let verification = &self.verification_run_projection;
+            println!(
+                "Verification runs {} | runs={} omitted={}",
+                verification.projection_id,
+                verification.rows.len(),
+                verification.omitted_row_count
+            );
+            for row in &verification.rows {
+                println!(
+                    "- verification {} state={:?} class={} command_redacted={} evidence={:?}",
+                    row.run_id,
+                    row.state,
+                    row.command_class_label,
+                    row.command_body_redacted,
+                    row.evidence_artifact_id
+                );
+            }
+        }
+        if !self.system_graph_projection.nodes.is_empty()
+            || !self.system_graph_projection.edges.is_empty()
+        {
+            let graph = &self.system_graph_projection;
+            println!(
+                "System graph {} | nodes={} edges={} omitted_nodes={} omitted_edges={}",
+                graph.projection_id,
+                graph.nodes.len(),
+                graph.edges.len(),
+                graph.omitted_node_count,
+                graph.omitted_edge_count
+            );
         }
         if !self.context_manifest_projection.manifest.items.is_empty() {
             let manifest = &self.context_manifest_projection.manifest;
@@ -1772,6 +1881,22 @@ fn empty_proposal_ledger_projection() -> ProposalLedgerProjection {
     }
 }
 
+fn empty_command_registry_projection() -> CommandRegistryProjection {
+    CommandRegistryProjection::empty("command-registry:empty", TimestampMillis(0), 1)
+}
+
+fn empty_artifact_ledger_projection() -> ArtifactLedgerProjection {
+    ArtifactLedgerProjection::empty("artifact-ledger:empty", TimestampMillis(0), 1)
+}
+
+fn empty_verification_run_projection() -> VerificationRunProjection {
+    VerificationRunProjection::empty("verification-runs:empty", TimestampMillis(0), 1)
+}
+
+fn empty_system_graph_projection() -> SystemGraphProjection {
+    SystemGraphProjection::empty("system-graph:empty", TimestampMillis(0), 1)
+}
+
 fn empty_context_manifest_projection() -> ContextManifestProjection {
     ContextManifestProjection {
         manifest: ContextManifestRecord {
@@ -2180,7 +2305,11 @@ mod tests {
                 dirty: false,
             },
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2229,7 +2358,11 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: ledger.clone(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2261,6 +2394,114 @@ mod tests {
     }
 
     #[test]
+    fn shell_carries_post_ga_work_surface_projections_without_ownership() {
+        let mut snapshot = Shell::empty("work-surfaces").projection_snapshot();
+        snapshot.command_registry_projection = devil_protocol::CommandRegistryProjection {
+            projection_id: "command-registry:test".to_string(),
+            commands: vec![devil_protocol::CommandDescriptor {
+                command_id: "delegated.inspect_plan".to_string(),
+                title: "Inspect Delegated Plan".to_string(),
+                scope: "agents".to_string(),
+                enabled: true,
+                disabled_reason: None,
+                shortcut: None,
+                risk_label: devil_protocol::CommandRiskLabel::Safe,
+                required_permission: Some(CapabilityId("delegated.plan.inspect".to_string())),
+                target: Some("plan:1".to_string()),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            selected_command_id: None,
+            omitted_command_count: 0,
+            generated_at: TimestampMillis(1),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        snapshot.artifact_ledger_projection = devil_protocol::ArtifactLedgerProjection {
+            projection_id: "artifact-ledger:test".to_string(),
+            rows: vec![devil_protocol::ArtifactLedgerRow {
+                artifact_id: "artifact:directive:1".to_string(),
+                kind: devil_protocol::ArtifactKind::Directive,
+                title: "Directive".to_string(),
+                state_label: "Planned".to_string(),
+                linked_proposal_id: None,
+                linked_session_id: None,
+                raw_payload_retained: false,
+                risk_label: ProposalRiskLabel::Medium,
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            omitted_row_count: 0,
+            generated_at: TimestampMillis(1),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        snapshot.verification_run_projection = devil_protocol::VerificationRunProjection {
+            projection_id: "verification-runs:test".to_string(),
+            rows: vec![devil_protocol::VerificationRunRow {
+                run_id: "verification:1".to_string(),
+                label: "cargo test".to_string(),
+                state: devil_protocol::VerificationRunState::Planned,
+                command_class_label: "test".to_string(),
+                command_body_redacted: true,
+                exit_code: None,
+                target_labels: vec!["workspace".to_string()],
+                evidence_artifact_id: None,
+                started_at: None,
+                completed_at: None,
+                risk_label: ProposalRiskLabel::Low,
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            omitted_row_count: 0,
+            generated_at: TimestampMillis(1),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        snapshot.system_graph_projection = devil_protocol::SystemGraphProjection {
+            projection_id: "system-graph:test".to_string(),
+            nodes: vec![devil_protocol::SystemGraphNode {
+                node_id: "system:workspace".to_string(),
+                kind_label: "workspace".to_string(),
+                display_label: "Active workspace".to_string(),
+                target_count: 1,
+                risk_label: ProposalRiskLabel::Low,
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            edges: Vec::new(),
+            omitted_node_count: 0,
+            omitted_edge_count: 0,
+            generated_at: TimestampMillis(1),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+
+        let shell = Shell::new(snapshot.clone());
+        let roundtrip = shell.projection_snapshot();
+        assert_eq!(
+            roundtrip.command_registry_projection,
+            snapshot.command_registry_projection
+        );
+        assert_eq!(
+            roundtrip.artifact_ledger_projection,
+            snapshot.artifact_ledger_projection
+        );
+        assert_eq!(
+            roundtrip.verification_run_projection,
+            snapshot.verification_run_projection
+        );
+        assert_eq!(
+            roundtrip.system_graph_projection,
+            snapshot.system_graph_projection
+        );
+        assert!(shell.command_dispatch_intents.is_empty());
+    }
+
+    #[test]
     fn shell_snapshot_large_file_projection_carries_only_viewport_slices() {
         let large_source_len = 6 * 1024 * 1024;
         let shell = Shell::new(ShellProjectionSnapshot {
@@ -2280,7 +2521,11 @@ mod tests {
                 dirty: false,
             },
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2339,7 +2584,11 @@ mod tests {
                 dirty: false,
             },
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2392,7 +2641,11 @@ mod tests {
                 dirty: true,
             },
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2568,7 +2821,11 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: manifest.clone(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2657,7 +2914,11 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: privacy.clone(),
             permission_budget_projection: budgets.clone(),
@@ -2733,7 +2994,11 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2873,7 +3138,11 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),
@@ -2961,7 +3230,11 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
             context_manifest_projection: empty_context_manifest_projection(),
             privacy_inspector_projection: empty_privacy_inspector_projection(),
             permission_budget_projection: empty_permission_budget_projection(),

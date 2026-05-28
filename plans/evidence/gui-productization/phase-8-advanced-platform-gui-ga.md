@@ -2,9 +2,9 @@
 
 ## Acceptance Status
 
-- Phase 8 acceptance: Not accepted.
+- Phase 8 acceptance: Accepted.
 
-This document is GUI Phase 8 scaffold evidence for the advanced GUI GA productization track. It is separate from the accepted legacy Phase 8 runtime substrate evidence under `plans/evidence/phase-8/`.
+This document is GUI Phase 8 acceptance evidence for the advanced GUI GA productization track. It is separate from the accepted legacy Phase 8 runtime substrate evidence under `plans/evidence/phase-8/`.
 
 ## Scope
 
@@ -41,7 +41,10 @@ The GUI track must preserve app/protocol/runtime authority boundaries. `devil-ui
 - `cargo test --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo deny check`
-- `cargo test -p devil-desktop plugin_management collaboration_gui remote_workspace_gui delegated_task_command_center -- --nocapture`
+- `cargo test -p devil-desktop --test plugin_management -- --nocapture`
+- `cargo test -p devil-desktop --test collaboration_gui -- --nocapture`
+- `cargo test -p devil-desktop --test remote_workspace_gui -- --nocapture`
+- `cargo test -p devil-desktop --test delegated_task_command_center -- --nocapture`
 - `cargo run -p devil-cli -- evidence check --phase gui-phase8`
 - `cargo run -p devil-cli -- evidence check --phase phase8`
 - `powershell -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Help`
@@ -49,29 +52,31 @@ The GUI track must preserve app/protocol/runtime authority boundaries. `devil-ui
 
 ## Supported Advanced GUI Surface Markers
 
-- Plugin management GUI: not accepted yet
-- Collaboration GUI: not accepted yet
-- Remote workspace GUI: not accepted yet
-- Delegated task command center: not accepted yet
+- Plugin management GUI: supported
+- Collaboration GUI: supported
+- Remote workspace GUI: supported
+- Delegated task command center: approval-gated
 - Autonomous apply: unsupported
 
 ## Platform Parity Markers
 
-- Platform parity: not accepted yet
-- Update rollback: not accepted yet
-- Incident response: not accepted yet
+- Platform parity: Windows
+- Platform parity: macOS
+- Platform parity: Linux
+- Update rollback: documented
+- Incident response: documented
 
 ## Final Validation Checklist
 
-- [ ] Plugin management GUI evidence is complete.
-- [ ] Collaboration GUI evidence is complete.
-- [ ] Remote workspace GUI evidence is complete.
-- [ ] Delegated task command-center evidence is complete and approval-gated.
-- [ ] GA release, update, rollback, incident, smoke, CI, and platform parity evidence is complete.
-- [ ] GUI Phase 8 final gates passed and required command outputs are archived.
-- [ ] Phase 8 accepted status is recorded only after all required artifacts and commands pass.
+- [x] Plugin management GUI evidence is complete.
+- [x] Collaboration GUI evidence is complete.
+- [x] Remote workspace GUI evidence is complete.
+- [x] Delegated task command-center evidence is complete and approval-gated.
+- [x] GA release, update, rollback, incident, smoke, CI, and platform parity evidence is complete.
+- [x] GUI Phase 8 final gates passed and required command outputs are archived.
+- [x] Phase 8 accepted status is recorded only after all required artifacts and commands pass.
 
 ## Residual Risks
 
-- GUI Phase 8 is not accepted until every required artifact, command marker, supported advanced-surface marker, platform parity marker, and result file is present and verified.
 - The accepted legacy runtime substrate evidence under `plans/evidence/phase-8/` remains valid but is not a substitute for GUI productization GA evidence.
+- Phase 8 does not enable autonomous apply. Delegated-task runtime activation beyond metadata-only planning is a post-GA track and remains proposal-mediated, isolated, and approval-gated.

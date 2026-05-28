@@ -91,13 +91,10 @@ const CODE_ASSISTED: Line[] = [
 
 export function CodeCanvas({ level = 3 }: { level?: number }) {
   const manual = level === 1;
-  const assisted = level === 2;
-  const copilot = level === 3;
-  if (copilot) return <CopilotCanvas />;
-  if (level === 4) return <DelegatedCanvas />;
-  if (level === 5) return <FleetCanvas />;
-  const TABS = manual ? TABS_MANUAL : assisted ? TABS_ASSISTED : TABS_AI;
-  const CODE = manual ? CODE_MANUAL : assisted ? CODE_ASSISTED : CODE_AI;
+  if (level === 2) return <DelegatedCanvas />;
+  if (level === 3) return <FleetCanvas />;
+  const TABS = manual ? TABS_MANUAL : TABS_AI;
+  const CODE = manual ? CODE_MANUAL : CODE_AI;
   const activeTab = TABS.find((t) => t.active)!;
 
   return (
@@ -287,14 +284,14 @@ export function CodeCanvas({ level = 3 }: { level?: number }) {
             </div>
           )}
 
-          {/* Co-Pilot suggestion (hidden in Manual & Assisted) */}
+          {/* Delegate suggestion (hidden in Manual) */}
           {!manual && !assisted && (
             <div
               className="absolute top-[148px] right-6 w-[260px] p-2.5 rounded-lg border"
               style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.08)" }}
             >
               <div className="flex items-center gap-1.5 text-[10.5px]" style={{ color: "#C8B5FF" }}>
-                <Sparkles className="w-3 h-3" /> Orion · Co-Pilot
+                <Sparkles className="w-3 h-3" /> Orion · Delegate
               </div>
               <div className="mt-1.5 text-[11.5px] text-white/80 leading-snug">
                 Parallelize task dispatch with bounded concurrency (8).
@@ -328,7 +325,7 @@ export function CodeCanvas({ level = 3 }: { level?: number }) {
   );
 }
 
-/* ---------- Level 3 · Co-Pilot canvas ---------- */
+/* ---------- Delegate proposal canvas ---------- */
 
 const PLAN_STEPS = [
   { n: 1, label: "Inspect existing auth middleware", state: "done" },
@@ -401,14 +398,14 @@ const DIFF_FILES = [
 function CopilotCanvas() {
   return (
     <div className="flex-1 min-w-0 h-full flex flex-col" style={{ background: "#0B0B10" }}>
-      {/* Co-Pilot Plan strip */}
+      {/* Delegate plan strip */}
       <div
         className="shrink-0 border-b px-3 py-2 flex items-center gap-2"
         style={{ background: "#111118", borderColor: "rgba(255,255,255,0.05)" }}
       >
         <div className="flex items-center gap-1.5 pr-3 border-r" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
           <Sparkles className="w-3.5 h-3.5" style={{ color: "#8B5CFF" }} />
-          <span className="text-[10.5px] uppercase tracking-[0.16em] text-white/45">Co-Pilot Plan</span>
+          <span className="text-[10.5px] uppercase tracking-[0.16em] text-white/45">Delegate Plan</span>
         </div>
         <div className="flex items-center gap-1 flex-1 min-w-0">
           {PLAN_STEPS.map((s, i) => {

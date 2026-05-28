@@ -803,10 +803,8 @@ function PairSessionPanel({ level }: { level: number }) {
 
 export function RightInspector({ level }: { level: number }) {
   if (level === 1) return <ManualContextInspector level={level} />;
-  if (level === 2) return <AssistedPanel level={level} />;
-  if (level === 3) return <PairSessionPanel level={level} />;
-  if (level === 4) return <DelegationConsole level={level} />;
-  if (level === 5) return <FleetConsole level={level} />;
+  if (level === 2) return <DelegationConsole level={level} />;
+  if (level === 3) return <FleetConsole level={level} />;
   return (
     <div
       className="w-[380px] shrink-0 h-full flex flex-col border-l"
@@ -1002,7 +1000,7 @@ function FleetConsole({ level }: { level: number }) {
       >
         <div className="flex items-center gap-2">
           <Wand2 className="w-3.5 h-3.5" style={{ color: "#B16CFF" }} />
-          <span className="text-[12px] text-white/90 font-medium tracking-tight">Fleet Control Panel</span>
+          <span className="text-[12px] text-white/90 font-medium tracking-tight">Legion Workflow Control</span>
         </div>
         <span
           className="px-1.5 py-[2px] rounded text-[10px] font-mono"

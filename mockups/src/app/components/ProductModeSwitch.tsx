@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Keyboard, Sparkles, Users, Layers, Network } from "lucide-react";
+import { Keyboard, Layers, Network } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 const LEVELS = [
@@ -15,39 +15,19 @@ const LEVELS = [
   },
   {
     n: 2,
-    label: "Assisted",
-    icon: Sparkles,
-    microcopy: "AI assists inline.",
-    color: "#9EE9FF",
-    bg: "rgba(57,215,255,0.10)",
-    border: "rgba(57,215,255,0.45)",
-    glow: "rgba(57,215,255, 0.2)",
-  },
-  {
-    n: 3,
-    label: "Co-Pilot",
-    icon: Users,
-    microcopy: "AI pairs with you.",
-    color: "#A8C3FF",
-    bg: "rgba(75,140,255,0.10)",
-    border: "rgba(75,140,255,0.45)",
-    glow: "rgba(75,140,255, 0.4)",
-  },
-  {
-    n: 4,
-    label: "Delegated",
+    label: "Delegates",
     icon: Layers,
-    microcopy: "Delegate scoped tasks.",
+    microcopy: "Delegate scoped work to a model and its bounded subagents.",
     color: "#C8B5FF",
     bg: "rgba(139,92,255,0.10)",
     border: "rgba(139,92,255,0.45)",
     glow: "rgba(139,92,255, 0.5)",
   },
   {
-    n: 5,
-    label: "Fleet",
+    n: 3,
+    label: "Legion Workflows",
     icon: Network,
-    microcopy: "Fleet executes directives.",
+    microcopy: "Run the prompt through a full model team, verification, and sign-off.",
     color: "#D9B8FF",
     bg: "rgba(177,108,255,0.12)",
     border: "rgba(177,108,255,0.5)",
@@ -55,7 +35,7 @@ const LEVELS = [
   },
 ];
 
-export function AutonomyScale({
+export function ProductModeSwitch({
   level,
   onLevel,
 }: {
@@ -67,7 +47,7 @@ export function AutonomyScale({
 
   const handleLevelClick = (n: number) => {
     if (n === level) return;
-    if (n >= 4 && n > level) {
+    if (n >= 2 && n > level) {
       setPendingLevel(n);
     } else {
       onLevel(n);
@@ -122,7 +102,7 @@ export function AutonomyScale({
                     style={{
                       background: l.bg,
                       border: `1px solid ${l.border}`,
-                      boxShadow: l.n === 5 ? `0 0 12px ${l.glow}` : `0 0 8px ${l.glow}`,
+                      boxShadow: l.n === 3 ? `0 0 12px ${l.glow}` : `0 0 8px ${l.glow}`,
                     }}
                     transition={{ type: "spring", stiffness: 400, damping: 30 }}
                   />
@@ -136,7 +116,7 @@ export function AutonomyScale({
                   className="relative z-10 font-mono text-[9px] opacity-70"
                   style={{ color: isActive ? l.color : "inherit" }}
                 >
-                  L{l.n}
+                  {l.n === 1 ? "M" : l.n === 2 ? "D" : "W"}
                 </span>
               </button>
             </div>
@@ -180,14 +160,14 @@ export function AutonomyScale({
             }}
           >
             <div className="text-[12px] font-medium text-white">
-              {pendingLevel === 4
+              {pendingLevel === 2
                 ? "Delegate scoped work?"
-                : "Activate Autonomous Fleet?"}
+                : "Run Legion Workflow?"}
             </div>
             <div className="text-[11px] text-white/60 leading-relaxed">
-              {pendingLevel === 4
+              {pendingLevel === 2
                 ? "AI agents will execute tasks and request your approval."
-                : "The fleet will autonomously plan and execute across your codebase."}
+                : "A full model team will plan, execute, test, and wait for sign-off."}
             </div>
             <div className="flex items-center gap-2 mt-1">
               <button
@@ -201,11 +181,11 @@ export function AutonomyScale({
                 className="flex-1 px-2 py-1.5 rounded-md text-[11px] font-medium text-white transition-colors"
                 style={{
                   background:
-                    pendingLevel === 4
+                    pendingLevel === 2
                       ? "rgba(139,92,255,0.5)"
                       : "rgba(177,108,255,0.5)",
                   border: `1px solid ${
-                    pendingLevel === 4
+                    pendingLevel === 2
                       ? "rgba(139,92,255,0.8)"
                       : "rgba(177,108,255,0.8)"
                   }`,

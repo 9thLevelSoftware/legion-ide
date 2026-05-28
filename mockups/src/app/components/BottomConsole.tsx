@@ -134,10 +134,10 @@ const COMM = [
 
 export function BottomConsole({ level = 3 }: { level?: number }) {
   const manual = level === 1;
-  const assisted = level === 2;
-  const copilot = level === 3;
-  const delegated = level === 4;
-  const fleet = level === 5;
+  const assisted = false;
+  const copilot = false;
+  const delegated = level === 2;
+  const fleet = level === 3;
   if (fleet) return <FleetBottomConsole level={level} />;
   const TABS = manual ? TABS_MANUAL : assisted ? TABS_ASSISTED : copilot ? TABS_COPILOT : delegated ? TABS_DELEGATED : TABS_FULL;
   const [tab, setTab] = useState(manual ? "terminal" : assisted ? "ai" : copilot ? "reasoning" : delegated ? "agentlogs" : "comm");
@@ -475,7 +475,7 @@ export function BottomConsole({ level = 3 }: { level?: number }) {
             <span className="shrink-0 px-1 rounded text-[10px] font-semibold tracking-wide" style={{ background: "rgba(255,255,255,0.04)", color: "#B6B7C3" }}>
               IDLE
             </span>
-            <span className="text-white/55">Fleet standing by</span>
+            <span className="text-white/55">Legion workflow standing by</span>
             <span className="w-1.5 h-3 animate-pulse" style={{ background: "#39D7FF" }} />
           </div>
         )}
@@ -565,7 +565,7 @@ function FleetBottomConsole({ level }: { level: number }) {
           ))}
           <div className="flex gap-3 items-center pt-1 text-white/45">
             <span className="text-white/30">12:06:58</span>
-            <span className="text-white/55">Fleet actively communicating</span>
+            <span className="text-white/55">Legion workflow actively communicating</span>
             <span className="w-1.5 h-3 animate-pulse" style={{ background: "#B16CFF" }} />
           </div>
         </div>

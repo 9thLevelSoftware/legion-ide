@@ -2,18 +2,21 @@ use std::collections::BTreeSet;
 
 use devil_desktop::view::{DesktopProjectionViewModel, DesktopProjectionViewState};
 use devil_protocol::{
-    BufferId, BufferVersion, ByteRange, CanonicalPath, CapabilityId, CollaborationParticipantId,
-    CollaborationPresenceProjection, CollaborationSessionId, ContextManifestEgressStatus,
-    ContextManifestInclusionState, ContextManifestItem, ContextManifestItemCount,
-    ContextManifestItemKind, FileFingerprint, FileId, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, PluginId, PrincipalId, ProposalContextManifestSummary,
-    ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
-    ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
-    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId,
-    TextCoordinate, TimestampMillis, Utf16Position, Utf16Range, ViewportDimensions,
-    ViewportLineSlice, ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
-    ViewportScroll, WorkspaceId,
+    ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow, BufferId, BufferVersion, ByteRange,
+    CanonicalPath, CapabilityId, CollaborationParticipantId, CollaborationPresenceProjection,
+    CollaborationSessionId, CommandDescriptor, CommandRegistryProjection, CommandRiskLabel,
+    ContextManifestEgressStatus, ContextManifestInclusionState, ContextManifestItem,
+    ContextManifestItemCount, ContextManifestItemKind, FileFingerprint, FileId,
+    PluginCommandDescriptor, PluginContribution, PluginContributionProjection, PluginId,
+    PrincipalId, ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind,
+    ProposalId, ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
+    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
+    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
+    ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId, SystemGraphEdge,
+    SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis, Utf16Position,
+    Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
+    ViewportDimensions, ViewportLineSlice, ViewportLineTruncationState, ViewportProjection,
+    ViewportProjectionMode, ViewportScroll, WorkspaceId,
 };
 use devil_ui::ui::{
     CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
@@ -212,7 +215,96 @@ fn populated_snapshot() -> devil_ui::ShellProjectionSnapshot {
         severity: StatusSeverity::Info,
         message: "Desktop adapter ready".to_string(),
     }];
+    snapshot.command_registry_projection = CommandRegistryProjection {
+        projection_id: "command-registry:test".to_string(),
+        commands: vec![CommandDescriptor {
+            command_id: "delegated.allocate_sandbox".to_string(),
+            title: "Allocate Delegated Sandbox".to_string(),
+            scope: "agents".to_string(),
+            enabled: false,
+            disabled_reason: Some("policy gate required".to_string()),
+            shortcut: None,
+            risk_label: CommandRiskLabel::Privileged,
+            required_permission: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+            target: Some("isolated-worktree".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        selected_command_id: None,
+        omitted_command_count: 0,
+        generated_at: TimestampMillis(4),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
     snapshot.proposal_ledger_projection = populated_proposal_ledger();
+    snapshot.artifact_ledger_projection = ArtifactLedgerProjection {
+        projection_id: "artifact-ledger:test".to_string(),
+        rows: vec![ArtifactLedgerRow {
+            artifact_id: "artifact:approval:7".to_string(),
+            kind: ArtifactKind::Approval,
+            title: "Proposal approval".to_string(),
+            state_label: "Created".to_string(),
+            linked_proposal_id: Some(ProposalId(7)),
+            linked_session_id: None,
+            raw_payload_retained: false,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        omitted_row_count: 0,
+        generated_at: TimestampMillis(4),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    snapshot.verification_run_projection = VerificationRunProjection {
+        projection_id: "verification-runs:test".to_string(),
+        rows: vec![VerificationRunRow {
+            run_id: "verification:test".to_string(),
+            label: "cargo test".to_string(),
+            state: VerificationRunState::Planned,
+            command_class_label: "test".to_string(),
+            command_body_redacted: true,
+            exit_code: None,
+            target_labels: vec!["workspace".to_string()],
+            evidence_artifact_id: None,
+            started_at: None,
+            completed_at: None,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        omitted_row_count: 0,
+        generated_at: TimestampMillis(4),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    snapshot.system_graph_projection = SystemGraphProjection {
+        projection_id: "system-graph:test".to_string(),
+        nodes: vec![SystemGraphNode {
+            node_id: "system:workspace".to_string(),
+            kind_label: "workspace".to_string(),
+            display_label: "Active workspace".to_string(),
+            target_count: 1,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        edges: vec![SystemGraphEdge {
+            from_node_id: "system:workspace".to_string(),
+            to_node_id: "system:proposal-ledger".to_string(),
+            relation_label: "contains".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        omitted_node_count: 0,
+        omitted_edge_count: 0,
+        generated_at: TimestampMillis(4),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
     snapshot
         .context_manifest_projection
         .manifest
@@ -311,6 +403,12 @@ fn projection_rendering_populates_required_phase2_surfaces() {
     );
     assert!(
         model
+            .top_bar_rows
+            .iter()
+            .any(|row| row.contains("registry=1"))
+    );
+    assert!(
+        model
             .left_sidebar_rows
             .iter()
             .any(|row| row.contains("project sidebar"))
@@ -325,7 +423,7 @@ fn projection_rendering_populates_required_phase2_surfaces() {
         model
             .right_console_rows
             .iter()
-            .any(|row| row.contains("directive console"))
+            .any(|row| row.contains("directive console") && row.contains("artifacts=1"))
     );
     assert!(
         model
@@ -410,20 +508,20 @@ fn projection_rendering_populates_required_phase2_surfaces() {
 }
 
 #[test]
-fn projection_rendering_models_read_only_autonomy_shell() {
+fn projection_rendering_models_read_only_product_mode_shell() {
     let populated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
     assert!(
         populated
-            .autonomy_rows
+            .product_mode_rows
             .iter()
-            .any(|row| row.contains("active=L4 Delegated read-only projection"))
+            .any(|row| row.contains("active=Delegates read-only projection"))
     );
-    assert!(populated.autonomy_rows.iter().any(|row| {
-        row.contains("approval-gated") && row.contains("autonomous apply unsupported")
+    assert!(populated.product_mode_rows.iter().any(|row| {
+        row.contains("approval-gated") && row.contains("direct workspace apply unsupported")
     }));
     assert!(
         populated
-            .autonomy_rows
+            .product_mode_rows
             .iter()
             .any(|row| row.contains("no provider, terminal, or apply authority"))
     );
@@ -432,15 +530,15 @@ fn projection_rendering_models_read_only_autonomy_shell() {
         DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
     assert!(
         empty
-            .autonomy_rows
+            .product_mode_rows
             .iter()
-            .any(|row| row.contains("active=L1 Manual read-only projection"))
+            .any(|row| row.contains("active=Manual read-only projection"))
     );
     assert!(
         empty
-            .autonomy_rows
+            .product_mode_rows
             .iter()
-            .any(|row| row.contains("mode switching is not implemented"))
+            .any(|row| row.contains("Manual Mode has no AI dispatch path"))
     );
 }
 
@@ -453,6 +551,12 @@ fn projection_rendering_keeps_advanced_surfaces_metadata_and_projection_derived(
             .right_console_rows
             .iter()
             .any(|row| row.contains("proposal-mediated"))
+    );
+    assert!(
+        model
+            .bottom_console_rows
+            .iter()
+            .any(|row| row.contains("verification_runs=1") && row.contains("graph_nodes=1"))
     );
     assert!(
         model

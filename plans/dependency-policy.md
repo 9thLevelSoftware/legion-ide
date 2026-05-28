@@ -389,6 +389,31 @@ Phase 8 production capability names are reserved for security-broker decisions b
   - `DelegatedTaskPlanRow`
   - `DelegatedTaskStepSummary`
   - `DelegatedTaskProjection`
+  - `ProductMode`
+  - `CommandRiskLabel`
+  - `CommandDescriptor`
+  - `CommandRegistryProjection`
+  - `ArtifactKind`
+  - `ArtifactLedgerRow`
+  - `ArtifactLedgerProjection`
+  - `VerificationRunState`
+  - `VerificationRunRow`
+  - `VerificationRunProjection`
+  - `SystemGraphNode`
+  - `SystemGraphEdge`
+  - `SystemGraphProjection`
+  - `DirectiveArtifact`
+  - `SpecArtifact`
+  - `TaskNode`
+  - `TaskGraphArtifact`
+  - `ExecutionSessionArtifact`
+  - `EvidenceArtifact`
+  - `ApprovalArtifact`
+  - `DelegatedRuntimeCommandClass`
+  - `DelegatedRuntimeStopGate`
+  - `DelegatedTaskSecurityContract`
+  - `DelegatedTaskRuntimeReadinessInput`
+  - `DelegatedTaskRuntimeReadiness`
   - `FutureSurfaceGateId`
   - `FutureSurfaceClass`
   - `FutureSurfaceOperationClass`

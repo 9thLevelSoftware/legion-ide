@@ -2,10 +2,10 @@
 
 ## Status
 
-- Platform parity: Windows - evidenced locally on 2026-05-27.
-- Platform parity: macOS - BLOCKED; no current macOS runner output is archived in this local execution.
-- Platform parity: Linux - BLOCKED; no current Linux runner output is archived in this local execution.
-- GA platform parity acceptance: BLOCKED until Windows, macOS, and Linux evidence is present from current CI or equivalent platform runs.
+- Platform parity: Windows - evidenced locally on 2026-05-27 and by GitHub Actions run `26590800830` on 2026-05-28.
+- Platform parity: macOS - evidenced by GitHub Actions run `26590800830` on 2026-05-28.
+- Platform parity: Linux - evidenced by GitHub Actions run `26590800830` on 2026-05-28.
+- GA platform parity acceptance: Accepted from current CI matrix proof plus local Windows dry-run evidence.
 
 ## Windows Evidence
 
@@ -22,32 +22,48 @@ The Windows evidence proves the PowerShell smoke wrapper exposes GUI phase-8 hel
 
 Platform parity: macOS
 
-Status: BLOCKED.
+Status: accepted.
 
-Required proof is a current `macos-latest` CI or equivalent platform run showing:
+Current proof:
 
-- `sh scripts/gui-smoke.sh --phase-8 --dry-run`
-- `cargo run -p devil-cli -- evidence check --phase gui-phase8`
-- repository gates required by `AGENTS.md`
+- GitHub Actions run: `26590800830`
+- Run URL: `https://github.com/9thLevelSoftware/devil-ide/actions/runs/26590800830`
+- Job: `Milestone validation (macos-latest)`
+- Job conclusion: `success`
+- Created: `2026-05-28T17:24:44Z`
+- Completed: `2026-05-28T17:27:51Z`
+- Successful steps included format check, clippy, tests, workspace check, dependency policy gate, `GUI Phase 8 smoke dry run (Unix)`, `GUI Phase 8 evidence gate`, and `Phase 8 evidence gate`.
 
 ## Linux Evidence
 
 Platform parity: Linux
 
-Status: BLOCKED.
+Status: accepted.
 
-Required proof is a current `ubuntu-latest` CI or equivalent platform run showing:
+Current proof:
 
-- `sh scripts/gui-smoke.sh --phase-8 --dry-run`
-- `cargo run -p devil-cli -- evidence check --phase gui-phase8`
-- repository gates required by `AGENTS.md`
+- GitHub Actions run: `26590800830`
+- Run URL: `https://github.com/9thLevelSoftware/devil-ide/actions/runs/26590800830`
+- Job: `Milestone validation (ubuntu-latest)`
+- Job conclusion: `success`
+- Created: `2026-05-28T17:24:44Z`
+- Completed: `2026-05-28T17:28:45Z`
+- Successful steps included format check, clippy, tests, workspace check, dependency policy gate, `GUI Phase 8 smoke dry run (Unix)`, `GUI Phase 8 evidence gate`, `Phase 8 evidence gate`, and `Cargo deny check`.
 
 ## Cross-Platform Decision
 
-Do not mark GUI Phase 8 accepted from this local Windows run alone. The shell help and dry-run checks passed locally through `bash`, but that is not Linux or macOS OS parity proof.
+GUI Phase 8 platform parity is accepted from current matrix evidence. Windows has local dry-run evidence plus `windows-latest` CI proof; macOS and Linux have current CI proof from run `26590800830`.
+
+Windows CI details:
+
+- GitHub Actions run: `26590800830`
+- Job: `Milestone validation (windows-latest)`
+- Job conclusion: `success`
+- Completed: `2026-05-28T17:31:58Z`
+- Successful steps included format check, clippy, tests, workspace check, dependency policy gate, `GUI Phase 8 smoke dry run (Windows)`, `GUI Phase 8 evidence gate`, and `Phase 8 evidence gate`.
 
 ## Evidence Handling Rules
 
 - Archive command labels, exit status, platform, run id, and artifact checksums.
 - Do not archive raw source, dirty buffers, terminal output bodies, transport frames, prompts, provider payloads, secrets, private keys, or signing credentials.
-- Keep failed or missing platform proof as `BLOCKED` until replaced by current passing evidence.
+- Keep failed or missing future platform proof as `BLOCKED` until replaced by current passing evidence.

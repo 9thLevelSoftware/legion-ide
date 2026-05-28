@@ -1,4 +1,4 @@
-import { AutonomyScale } from "./AutonomyScale";
+import { ProductModeSwitch } from "./ProductModeSwitch";
 import {
   Search,
   GitBranch,
@@ -30,10 +30,8 @@ function ResourceChip({ icon: Icon, value, sub, color = "#B6B7C3" }: any) {
 
 const LEVEL_STATUS: Record<number, { label: string; engine: string; engineColor: string; pulse: boolean }> = {
   1: { label: "Manual", engine: "AI Disabled · Local Tools Only", engineColor: "#4B8CFF", pulse: false },
-  2: { label: "Assisted Coding Active", engine: "Context indexed", engineColor: "#39D7FF", pulse: true },
-  3: { label: "Pair Programming Active", engine: "Primary Co-Pilot: GPT-5.5", engineColor: "#4B8CFF", pulse: true },
-  4: { label: "Delegated Tasks Active", engine: "4 agents · 3 approvals pending", engineColor: "#8B5CFF", pulse: true },
-  5: { label: "Autonomous Fleet Active", engine: "Legion Engine Online", engineColor: "#B16CFF", pulse: true },
+  2: { label: "Delegates Active", engine: "4 delegates · 3 approvals pending", engineColor: "#8B5CFF", pulse: true },
+  3: { label: "Legion Workflow Active", engine: "Legion Engine Online", engineColor: "#B16CFF", pulse: true },
 };
 
 export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number) => void }) {
@@ -93,12 +91,12 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
         </div>
       </div>
 
-      {/* Center: Autonomy Scale */}
+      {/* Center: Product Mode */}
       <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center z-50">
         <span className="text-[9.5px] uppercase tracking-[0.18em] text-white/30 mb-1 font-medium">
-          Autonomy Level
+          Product Mode
         </span>
-        <AutonomyScale level={level} onLevel={onLevel} />
+        <ProductModeSwitch level={level} onLevel={onLevel} />
       </div>
 
       {/* Right */}
@@ -130,7 +128,7 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
               <span className="w-px h-3 bg-white/[0.07]" />
               <ResourceChip icon={FlaskConical} value="412" sub="tests" color="#4ADE80" />
             </>
-          ) : level === 5 ? (
+          ) : level === 3 ? (
             <>
               <ResourceChip icon={Cpu} value="82%" color="#39D7FF" />
               <span className="w-px h-3 bg-white/[0.07]" />
@@ -154,7 +152,7 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
         </div>
 
         {/* Primary/Secondary Buttons */}
-        {level === 5 ? (
+        {level === 3 ? (
           <>
             <button className="h-7 px-2.5 flex items-center gap-1.5 rounded-md bg-white/[0.03] border border-white/[0.07] text-[11px] text-white/70 hover:text-white/90 hover:bg-white/[0.06]">
               Review Decisions
@@ -166,7 +164,7 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
               }}
             >
               <span className="w-2 h-2 bg-[#FF5C7A] rounded-sm" />
-              Pause Fleet
+              Pause Workflow
             </button>
           </>
         ) : (
@@ -180,7 +178,7 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
             }}
           >
             <Play className="w-3 h-3 fill-current" />
-            {level === 1 ? "Run Task" : "Run Directive"}
+            {level === 1 ? "Run Task" : "Delegate"}
           </button>
         )}
 
