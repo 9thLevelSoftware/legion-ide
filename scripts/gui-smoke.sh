@@ -1,10 +1,30 @@
 #!/usr/bin/env sh
-# GUI Phase 6 desktop smoke wrapper.
+# GUI desktop smoke wrapper.
 
 set -eu
 
+show_help() {
+    cat <<'EOF'
+GUI smoke wrapper
+
+Usage:
+  sh scripts/gui-smoke.sh [--dry-run] [--beta|--phase-8] [--workspace PATH] [--file PATH]
+
+Modes:
+  default    GUI Phase 6 desktop smoke evidence
+  --beta     GUI Phase 7 local beta smoke evidence
+  --phase-8  GUI phase-8 advanced surface smoke evidence
+
+Phase 8 defaults:
+  Evidence: plans/evidence/gui-productization/phase-8-advanced-surface-smoke.md
+  Session state: target/gui-phase8-session.json
+  Diagnostics export: target/gui-phase8-diagnostics.md
+EOF
+}
+
 dry_run=false
 beta=false
+phase8=false
 workspace='.'
 beta_workspace='target/gui-phase7-beta-workspace'
 file=''
@@ -15,6 +35,10 @@ diagnostics_export='target/gui-phase6-diagnostics.md'
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
         --dry-run)
             dry_run=true
             shift
@@ -24,6 +48,13 @@ while [ "$#" -gt 0 ]; do
             evidence='plans/evidence/gui-productization/phase-7-local-workflow-smoke.md'
             session_state='target/gui-phase7-session.json'
             diagnostics_export='target/gui-phase7-diagnostics.md'
+            shift
+            ;;
+        --phase-8|--phase8)
+            phase8=true
+            evidence='plans/evidence/gui-productization/phase-8-advanced-surface-smoke.md'
+            session_state='target/gui-phase8-session.json'
+            diagnostics_export='target/gui-phase8-diagnostics.md'
             shift
             ;;
         --workspace)
@@ -61,6 +92,11 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$beta" = true ] && [ "$phase8" = true ]; then
+    printf '%s\n' 'choose either --beta or --phase-8, not both' >&2
+    exit 2
+fi
+
 if [ "$beta" = true ]; then
     set -- run -p devil-desktop -- \
         --workspace "$workspace" \
@@ -86,6 +122,8 @@ fi
 if [ "$beta" = true ]; then
     printf '%s\n' 'GUI Phase 7 beta smoke plan'
     printf 'Beta workspace: %s\n' "$beta_workspace"
+elif [ "$phase8" = true ]; then
+    printf '%s\n' 'GUI Phase 8 advanced surface smoke plan'
 else
     printf '%s\n' 'GUI Phase 6 smoke plan'
 fi

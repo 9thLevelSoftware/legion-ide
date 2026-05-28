@@ -70,6 +70,17 @@ jobs:
       - name: GUI Phase 7 evidence gate
         run: cargo run -p devil-cli -- evidence check --phase gui-phase7
 
+      - name: GUI Phase 8 smoke dry run (Windows)
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Phase8 -DryRun
+
+      - name: GUI Phase 8 smoke dry run (Unix)
+        if: runner.os != 'Windows'
+        run: sh scripts/gui-smoke.sh --phase-8 --dry-run
+
+      - name: GUI Phase 8 evidence gate
+        run: cargo run -p devil-cli -- evidence check --phase gui-phase8
+
       - name: Phase 8 evidence gate
         run: cargo run -p devil-cli -- evidence check --phase phase8
 

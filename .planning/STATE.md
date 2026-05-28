@@ -2,12 +2,12 @@
 
 ## Current Position
 - **Phase**: 8 of 8 (planned)
-- **Status**: Phase 8 executing - Plan 08-05 complete
-- **Last Activity**: Plan 08-05 execution (2026-05-27)
+- **Status**: Phase 8 executing - Plan 08-06 complete; final acceptance blocked on macOS/Linux parity proof
+- **Last Activity**: Plan 08-06 execution (2026-05-27)
 
 ## Progress
 ```
-[##################..] 92% - 47/51 plans complete
+[###################.] 94% - 48/51 plans complete
 ```
 
 ## Phase 1 Results
@@ -80,7 +80,7 @@
 - Plan 08-03 (Wave 3): Collaboration Presence And Shared Proposal GUI Workflow -- complete
 - Plan 08-04 (Wave 4): Remote Workspace Manager And Remote Status GUI Workflow -- complete
 - Plan 08-05 (Wave 5): Delegated Task Command Center -- complete
-- Plan 08-06 (Wave 6): GA Release Update Rollback Incident Evidence -- planned
+- Plan 08-06 (Wave 6): GA Release Update Rollback Incident Evidence -- complete; final acceptance blocked on macOS/Linux parity proof
 - Plan 08-07 (Wave 7): Phase 8 GUI Evidence Capture And Acceptance Gate -- planned
 
 ## Recent Decisions
@@ -129,7 +129,8 @@
 - Phase 8 planning treats accepted legacy `plans/evidence/phase-8/` runtime substrate evidence as distinct from GUI productization GA evidence under `plans/evidence/gui-productization/`.
 - Phase 8 uses seven sequential waves because governance, plugin GUI, collaboration GUI, remote GUI, delegated task GUI, GA operations evidence, and final acceptance have separate authority boundaries and evidence gates.
 - Phase 8 implementation must keep plugin, collaboration, remote, delegated task, proposal, terminal, storage, provider, and security authority out of `devil-ui` and `devil-desktop`.
-- Phase 8 final acceptance is blocked until plugin management, collaboration, remote workspace, delegated task command-center, release/update/rollback/incident, smoke, CI, and Windows/macOS/Linux platform parity evidence are complete.
+- Phase 8 operations evidence is complete with smoke scripts, CI `gui-phase8` wiring, release/update/rollback/incident runbooks, and advanced-surface smoke evidence.
+- Phase 8 final acceptance is blocked until macOS and Linux platform parity proof is archived and the final acceptance gates pass.
 
 ## Next Action
-Continue `/legion:build 8` with Wave 4: Remote Workspace Manager And Remote Status GUI Workflow.
+Resolve macOS/Linux platform parity proof, then continue `/legion:build 8` with Wave 7: Phase 8 GUI Evidence Capture And Acceptance Gate.

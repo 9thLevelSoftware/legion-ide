@@ -134,7 +134,7 @@ Phase 7 status: Complete; accepted and review passed on 2026-05-27.
 **Plans**: 5
 
 ### Phase 8: Advanced Platform GUI GA
-Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-05 complete.
+Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-06 complete; final acceptance blocked on macOS/Linux platform parity proof.
 
 **Goal**: Expose accepted advanced runtime surfaces through production-grade GUI workflows.
 
@@ -163,7 +163,7 @@ Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-05 complete.
 | 5 | 7 | 7 | Complete |
 | 6 | 7 | 7 | Complete |
 | 7 | 5 | 5 | Complete |
-| 8 | 7 | 3 | In Progress |
+| 8 | 7 | 6 | In Progress |
 
 ## Planning Notes
 
