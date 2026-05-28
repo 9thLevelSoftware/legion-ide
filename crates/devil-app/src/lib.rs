@@ -58,20 +58,22 @@ use devil_protocol::{
     PluginHostCallKind, PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest,
     PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
     ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
-    ProposalFailureReason, ProposalId, ProposalLifecycleAction, ProposalLifecycleCommand,
-    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalLifecycleTransition,
-    ProposalPartialFailureDisposition, ProposalPartialFailureRecord, ProposalPayload, ProposalPort,
-    ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
-    ProposalResponse, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
-    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
-    ProtocolTextRange, RedactionHint, RemoteAgentDescriptor, RemoteAuditRecord,
-    RemoteAuthorityDescriptor, RemoteTransportEnvelope, RemoteTransportPayload,
-    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
-    SaveConflictPolicy, SaveFileProposal, SaveIntent, SemanticGrammarVersion, SemanticModelVersion,
-    SemanticPrivacyScope, SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind,
-    SemanticQueryRequest, SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab,
-    SessionTabGroup, StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
+    ProposalFailureReason, ProposalId, ProposalLedgerProjection, ProposalLifecycleAction,
+    ProposalLifecycleCommand, ProposalLifecycleCommandReason, ProposalLifecycleState,
+    ProposalLifecycleTransition, ProposalPartialFailureDisposition, ProposalPartialFailureRecord,
+    ProposalPayload, ProposalPort, ProposalPreviewWarning, ProposalPreviewWarningKind,
+    ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackReason,
+    ProposalStaleReason, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
+    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
+    ProtocolResult, ProtocolTextRange, RedactionHint, RemoteAgentDescriptor, RemoteAuditRecord,
+    RemoteAuthorityDescriptor, RemoteCapabilityKind, RemoteGuiProjection,
+    RemoteProposalReviewGuiRow, RemoteTransportEnvelope, RemoteTransportPayload,
+    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionGuiRow,
+    RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal, SaveIntent,
+    SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
+    SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
+    SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup,
+    StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
     TerminalCloseRequest, TerminalInput, TerminalKillEscalation, TerminalKillRequest,
     TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
     TerminalPanelStatusKind, TerminalPolicyProjection, TerminalResize, TerminalRuntimeState,
@@ -7352,6 +7354,183 @@ impl RemoteComposition {
     fn session_descriptors(&self) -> Vec<RemoteWorkspaceSessionDescriptor> {
         self.runtime.session_descriptors()
     }
+
+    fn gui_projection(&self, proposal_ledger: &ProposalLedgerProjection) -> RemoteGuiProjection {
+        let mut descriptors = self.session_descriptors();
+        descriptors.sort_by_key(|descriptor| descriptor.session_id.0);
+        let proposal_review_rows = remote_proposal_review_rows(&descriptors, proposal_ledger);
+        let mut session_rows = descriptors
+            .iter()
+            .map(|descriptor| {
+                let proposal_review_count = proposal_review_rows
+                    .iter()
+                    .filter(|row| row.session_id == descriptor.session_id)
+                    .count();
+                remote_workspace_session_gui_row(descriptor, proposal_review_count)
+            })
+            .collect::<Vec<_>>();
+        session_rows.sort_by_key(|row| row.session_id.0);
+
+        let connected_session_count = session_rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.state,
+                    RemoteWorkspaceLifecycleState::Active | RemoteWorkspaceLifecycleState::Degraded
+                )
+            })
+            .count();
+        let reconnecting_session_count = session_rows.iter().filter(|row| row.reconnecting).count();
+        let offline_session_count = session_rows.iter().filter(|row| row.offline).count();
+        let status_label = if !self.runtime_sessions_enabled {
+            "remote workspace runtime disabled by policy".to_string()
+        } else if session_rows.is_empty() {
+            "remote workspace runtime enabled with no active sessions".to_string()
+        } else if offline_session_count > 0 {
+            format!("remote workspace offline sessions: {offline_session_count}")
+        } else if reconnecting_session_count > 0 {
+            format!("remote workspace reconnecting sessions: {reconnecting_session_count}")
+        } else {
+            format!("remote workspace sessions connected: {connected_session_count}")
+        };
+
+        RemoteGuiProjection {
+            runtime_enabled: self.runtime_sessions_enabled,
+            session_rows,
+            proposal_review_rows,
+            connected_session_count,
+            reconnecting_session_count,
+            offline_session_count,
+            status_label,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
+fn remote_workspace_session_gui_row(
+    descriptor: &RemoteWorkspaceSessionDescriptor,
+    proposal_review_count: usize,
+) -> RemoteWorkspaceSessionGuiRow {
+    let reconnecting = descriptor.state == RemoteWorkspaceLifecycleState::Reconnecting;
+    let offline = matches!(
+        descriptor.state,
+        RemoteWorkspaceLifecycleState::Offline
+            | RemoteWorkspaceLifecycleState::Closing
+            | RemoteWorkspaceLifecycleState::Closed
+            | RemoteWorkspaceLifecycleState::Denied
+    );
+    let status_label = if reconnecting {
+        "reconnecting".to_string()
+    } else if offline {
+        format!("offline: {:?}", descriptor.state)
+    } else if descriptor.state == RemoteWorkspaceLifecycleState::Degraded {
+        "degraded".to_string()
+    } else if descriptor.state == RemoteWorkspaceLifecycleState::Active {
+        "connected".to_string()
+    } else {
+        format!("{:?}", descriptor.state)
+    };
+
+    RemoteWorkspaceSessionGuiRow {
+        session_id: descriptor.session_id,
+        authority_label: descriptor.authority.authority_label.clone(),
+        agent_version: descriptor.agent.agent_version.clone(),
+        state: descriptor.state,
+        filesystem_descriptor_status: remote_filesystem_descriptor_status(
+            &descriptor.granted_capabilities,
+        ),
+        terminal_descriptor_status: remote_terminal_descriptor_status(
+            &descriptor.granted_capabilities,
+        ),
+        lsp_descriptor_status: remote_lsp_descriptor_status(&descriptor.granted_capabilities),
+        reconnect_supported: descriptor
+            .granted_capabilities
+            .contains(&RemoteCapabilityKind::OfflineResume),
+        reconnecting,
+        offline,
+        proposal_review_count,
+        status_label,
+    }
+}
+
+fn remote_filesystem_descriptor_status(capabilities: &[RemoteCapabilityKind]) -> String {
+    let read = capabilities.contains(&RemoteCapabilityKind::FilesystemRead);
+    let write = capabilities.contains(&RemoteCapabilityKind::FilesystemWrite);
+    match (read, write) {
+        (true, true) => "read/write proposal-mediated".to_string(),
+        (true, false) => "read-only".to_string(),
+        (false, true) => "write proposal-mediated".to_string(),
+        (false, false) => "unavailable".to_string(),
+    }
+}
+
+fn remote_terminal_descriptor_status(capabilities: &[RemoteCapabilityKind]) -> String {
+    if capabilities.contains(&RemoteCapabilityKind::TerminalAccess)
+        || capabilities.contains(&RemoteCapabilityKind::PtyInput)
+        || capabilities.contains(&RemoteCapabilityKind::ProcessLaunch)
+    {
+        "terminal descriptor available".to_string()
+    } else {
+        "unavailable".to_string()
+    }
+}
+
+fn remote_lsp_descriptor_status(capabilities: &[RemoteCapabilityKind]) -> String {
+    if capabilities.contains(&RemoteCapabilityKind::LspLaunch)
+        || capabilities.contains(&RemoteCapabilityKind::SemanticQuery)
+    {
+        "lsp descriptor available".to_string()
+    } else {
+        "unavailable".to_string()
+    }
+}
+
+fn remote_proposal_review_rows(
+    descriptors: &[RemoteWorkspaceSessionDescriptor],
+    proposal_ledger: &ProposalLedgerProjection,
+) -> Vec<RemoteProposalReviewGuiRow> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+
+    for proposal in &proposal_ledger.rows {
+        for target in &proposal.target_coverage.targets {
+            if target.kind != ProposalTargetKind::RemoteWorkspace
+                && target.remote_authority.is_none()
+            {
+                continue;
+            }
+
+            let descriptor = match target.remote_authority.as_deref() {
+                Some(authority_label) => descriptors
+                    .iter()
+                    .find(|descriptor| descriptor.authority.authority_label == authority_label),
+                None if descriptors.len() == 1 => descriptors.first(),
+                None => None,
+            };
+            let Some(descriptor) = descriptor else {
+                continue;
+            };
+            if !seen.insert((descriptor.session_id, proposal.proposal_id)) {
+                continue;
+            }
+            rows.push(RemoteProposalReviewGuiRow {
+                session_id: descriptor.session_id,
+                proposal_id: proposal.proposal_id,
+                remote_authority_label: descriptor.authority.authority_label.clone(),
+                payload_kind: proposal.payload_kind,
+                lifecycle_state: proposal.lifecycle.state,
+                status_label: format!(
+                    "remote proposal {:?} via app proposal lifecycle",
+                    proposal.lifecycle.state
+                ),
+                proposal_mediated: true,
+            });
+        }
+    }
+
+    rows.sort_by_key(|row| (row.session_id.0, row.proposal_id.0));
+    rows
 }
 
 fn remote_error(error: impl ToString) -> AppCompositionError {
@@ -9893,6 +10072,7 @@ impl AppComposition {
         let proposal_ledger_projection = self
             .proposal_coordinator
             .proposal_ledger_projection(generated_at);
+        let remote_gui_projection = self.remote.gui_projection(&proposal_ledger_projection);
         let selected_proposal_trust =
             self.selected_proposal_trust_projections(&proposal_ledger_projection, generated_at);
         Ok(ShellProjectionSnapshot {
@@ -9972,6 +10152,7 @@ impl AppComposition {
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),
+            remote_gui_projection,
             daily_editing_projection: ProjectionBuilder::daily_editing_projection(
                 &self.active_documents,
                 &self.editor,

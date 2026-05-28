@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use devil_protocol::{
     AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, FileId,
     ProposalCancellationReason, ProposalId, ProposalRejectionReason, ProposalRollbackReason,
-    ProtocolTextRange, TerminalSessionId, TextCoordinate, ViewportScroll,
+    ProtocolTextRange, RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
 use devil_protocol::{PluginContribution, PluginId};
 use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
@@ -165,6 +165,20 @@ pub enum DesktopAction {
         /// Session identifier selected from projected collaboration GUI data.
         session_id: CollaborationSessionId,
         /// Shared proposal identifier selected from projected collaboration GUI data.
+        proposal_id: ProposalId,
+    },
+    /// Connect or reconnect a remote workspace through app-owned remote authority.
+    ConnectRemoteWorkspace {
+        /// Session identifier selected from user input or projected remote GUI data.
+        session_id: RemoteWorkspaceSessionId,
+        /// Display-safe remote authority label or stable hash.
+        authority_label: String,
+    },
+    /// Open remote proposal review through proposal details.
+    OpenRemoteProposalReview {
+        /// Session identifier selected from projected remote GUI data.
+        session_id: RemoteWorkspaceSessionId,
+        /// Remote proposal identifier selected from projected remote GUI data.
         proposal_id: ProposalId,
     },
     /// Insert text at a projected coordinate.
@@ -337,6 +351,13 @@ pub enum DesktopAppRequest {
         /// Prompt buffer identifier.
         buffer_id: BufferId,
     },
+    /// Connect or reconnect a remote workspace through app composition.
+    ConnectRemoteWorkspace {
+        /// Remote workspace session id.
+        session_id: RemoteWorkspaceSessionId,
+        /// Display-safe remote authority label or stable hash.
+        authority_label: String,
+    },
 }
 
 /// Result of translating a desktop action.
@@ -424,6 +445,29 @@ pub enum DesktopBridgeError {
     UnknownSharedCollaborationProposal {
         /// Collaboration session id.
         session_id: CollaborationSessionId,
+        /// Proposal id.
+        proposal_id: ProposalId,
+    },
+    /// Remote workspace session id was zero.
+    #[error("remote workspace session id must be non-zero")]
+    InvalidRemoteWorkspaceSession,
+    /// Remote authority label was empty after normalization.
+    #[error("remote authority label is empty")]
+    InvalidRemoteAuthority,
+    /// Remote runtime is not enabled in the current app projection.
+    #[error("remote workspace runtime is disabled by policy")]
+    RemoteRuntimeUnavailable,
+    /// Remote workspace session was not present in current projections.
+    #[error("unknown remote workspace session: {session_id:?}")]
+    UnknownRemoteWorkspaceSession {
+        /// Unknown remote workspace session.
+        session_id: RemoteWorkspaceSessionId,
+    },
+    /// Remote proposal row was not present in current projections.
+    #[error("unknown remote proposal: session {session_id:?} proposal {proposal_id:?}")]
+    UnknownRemoteProposal {
+        /// Remote workspace session id.
+        session_id: RemoteWorkspaceSessionId,
         /// Proposal id.
         proposal_id: ProposalId,
     },
@@ -640,6 +684,14 @@ impl DesktopCommandBridge {
                 session_id,
                 proposal_id,
             } => self.with_known_shared_collaboration_proposal(snapshot, session_id, proposal_id),
+            DesktopAction::ConnectRemoteWorkspace {
+                session_id,
+                authority_label,
+            } => self.with_remote_connect(snapshot, session_id, authority_label),
+            DesktopAction::OpenRemoteProposalReview {
+                session_id,
+                proposal_id,
+            } => self.with_known_remote_proposal(snapshot, session_id, proposal_id),
             DesktopAction::InsertText { text, at }
             | DesktopAction::ClipboardPaste { text, at }
             | DesktopAction::ImeCommit { text, at } => {
@@ -992,6 +1044,52 @@ impl DesktopCommandBridge {
             CommandDispatchIntent::OpenProposalDetails { proposal_id }
         })
     }
+
+    fn with_remote_connect(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: RemoteWorkspaceSessionId,
+        authority_label: String,
+    ) -> DesktopBridgeOutput {
+        if session_id.0 == 0 {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidRemoteWorkspaceSession);
+        }
+        let Some(authority_label) = normalized_remote_authority(authority_label) else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidRemoteAuthority);
+        };
+        if !snapshot.remote_gui_projection.runtime_enabled {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::RemoteRuntimeUnavailable);
+        }
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ConnectRemoteWorkspace {
+            session_id,
+            authority_label,
+        })
+    }
+
+    fn with_known_remote_proposal(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: RemoteWorkspaceSessionId,
+        proposal_id: ProposalId,
+    ) -> DesktopBridgeOutput {
+        if session_id.0 == 0 {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidRemoteWorkspaceSession);
+        }
+        if !remote_session_is_known(snapshot, session_id) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownRemoteWorkspaceSession {
+                session_id,
+            });
+        }
+        if !remote_proposal_is_known(snapshot, session_id, proposal_id) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownRemoteProposal {
+                session_id,
+                proposal_id,
+            });
+        }
+        self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+            CommandDispatchIntent::OpenProposalDetails { proposal_id }
+        })
+    }
 }
 
 fn normalized_path(path: String) -> Option<String> {
@@ -1018,6 +1116,15 @@ fn normalized_plugin_command(command_id: String) -> Option<String> {
         None
     } else {
         Some(command_id.to_string())
+    }
+}
+
+fn normalized_remote_authority(authority_label: String) -> Option<String> {
+    let authority_label = authority_label.trim();
+    if authority_label.is_empty() {
+        None
+    } else {
+        Some(authority_label.to_string())
     }
 }
 
@@ -1094,6 +1201,29 @@ fn shared_collaboration_proposal_is_known(
     snapshot
         .collaboration_gui_projection
         .shared_proposal_rows
+        .iter()
+        .any(|row| row.session_id == session_id && row.proposal_id == proposal_id)
+}
+
+fn remote_session_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: RemoteWorkspaceSessionId,
+) -> bool {
+    snapshot
+        .remote_gui_projection
+        .session_rows
+        .iter()
+        .any(|row| row.session_id == session_id)
+}
+
+fn remote_proposal_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: RemoteWorkspaceSessionId,
+    proposal_id: ProposalId,
+) -> bool {
+    snapshot
+        .remote_gui_projection
+        .proposal_review_rows
         .iter()
         .any(|row| row.session_id == session_id && row.proposal_id == proposal_id)
 }

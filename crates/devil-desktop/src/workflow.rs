@@ -16,7 +16,8 @@ use devil_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, PluginDenialReason,
     PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
     ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
-    SessionPanelState, TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
+    RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
+    WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
     CommandDispatchIntent, SearchScopeProjection, Shell, ShellProjectionSnapshot,
@@ -297,6 +298,15 @@ pub enum DesktopWorkflowOutcome {
         /// User-visible status summary.
         message: String,
     },
+    /// Remote workspace workflow state changed through app-owned remote authority.
+    RemoteUpdated {
+        /// Remote workspace session represented by the outcome.
+        session_id: RemoteWorkspaceSessionId,
+        /// Normalized desktop remote status.
+        status: DesktopRemoteStatus,
+        /// User-visible status summary.
+        message: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -335,6 +345,13 @@ pub enum DesktopCollaborationStatus {
     PresencePublished,
     /// Collaboration operation was accepted by app/editor authority.
     OperationApplied,
+}
+
+/// Desktop-facing status for remote workspace GUI workflows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopRemoteStatus {
+    /// Remote workspace session connected or reconnected through app authority.
+    Connected,
 }
 
 /// Renderer-backed desktop runtime.
@@ -500,6 +517,16 @@ impl DesktopRuntime {
         self.refresh_projection()
     }
 
+    /// Enable app-owned remote workspace runtime for explicit test or launch harnesses.
+    pub fn enable_remote_development_runtime(&mut self) -> Result<()> {
+        self.app.enable_remote_development_runtime();
+        self.set_status(
+            StatusSeverity::Info,
+            "Remote workspace runtime enabled by app policy",
+        );
+        self.refresh_projection()
+    }
+
     /// Returns whether an explorer path is expanded by adapter-local state.
     pub fn explorer_path_expanded(&self, path: &str) -> bool {
         self.explorer_expansion.contains(path)
@@ -650,6 +677,31 @@ impl DesktopRuntime {
                 Ok(_) => {
                     self.set_status(StatusSeverity::Info, format!("Opened {}", root.display()));
                     Ok(DesktopWorkflowOutcome::WorkspaceOpened)
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.set_status(StatusSeverity::Error, message.clone());
+                    Ok(DesktopWorkflowOutcome::Error(message))
+                }
+            },
+            DesktopAppRequest::ConnectRemoteWorkspace {
+                session_id,
+                authority_label,
+            } => match self
+                .app
+                .connect_remote_workspace_session(session_id, authority_label.clone())
+            {
+                Ok(_) => {
+                    let message = format!(
+                        "Remote workspace connected {} authority={authority_label}",
+                        session_id.0
+                    );
+                    self.set_status(StatusSeverity::Info, message.clone());
+                    Ok(DesktopWorkflowOutcome::RemoteUpdated {
+                        session_id,
+                        status: DesktopRemoteStatus::Connected,
+                        message,
+                    })
                 }
                 Err(error) => {
                     let message = error.to_string();

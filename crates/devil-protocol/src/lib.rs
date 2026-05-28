@@ -1995,6 +1995,94 @@ impl RemoteWorkspaceSessionDescriptor {
     }
 }
 
+/// Metadata-only remote workspace GUI projection for session/status/review surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteGuiProjection {
+    /// Whether app policy currently enables remote runtime sessions.
+    pub runtime_enabled: bool,
+    /// Remote workspace session summary rows.
+    pub session_rows: Vec<RemoteWorkspaceSessionGuiRow>,
+    /// Remote proposal review summary rows.
+    pub proposal_review_rows: Vec<RemoteProposalReviewGuiRow>,
+    /// Total connected or degraded sessions.
+    pub connected_session_count: usize,
+    /// Total sessions currently reconnecting.
+    pub reconnecting_session_count: usize,
+    /// Total sessions closed, denied, or offline.
+    pub offline_session_count: usize,
+    /// Metadata-only status label.
+    pub status_label: String,
+    /// Redaction hints for displayed remote metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl RemoteGuiProjection {
+    /// Empty projection for the default disabled policy state.
+    pub fn disabled() -> Self {
+        Self {
+            runtime_enabled: false,
+            session_rows: Vec::new(),
+            proposal_review_rows: Vec::new(),
+            connected_session_count: 0,
+            reconnecting_session_count: 0,
+            offline_session_count: 0,
+            status_label: "remote workspace runtime disabled by policy".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
+/// Metadata-only row for one remote workspace session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteWorkspaceSessionGuiRow {
+    /// Session identifier.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Redacted authority label or stable hash.
+    pub authority_label: String,
+    /// Remote agent version or build label.
+    pub agent_version: String,
+    /// Session lifecycle state.
+    pub state: RemoteWorkspaceLifecycleState,
+    /// Filesystem descriptor status derived from granted capabilities.
+    pub filesystem_descriptor_status: String,
+    /// Terminal descriptor status derived from granted capabilities.
+    pub terminal_descriptor_status: String,
+    /// LSP descriptor status derived from granted capabilities.
+    pub lsp_descriptor_status: String,
+    /// Whether offline resume is projected as supported.
+    pub reconnect_supported: bool,
+    /// Whether the session is currently reconnecting.
+    pub reconnecting: bool,
+    /// Whether the session is closed, denied, or offline for GUI work.
+    pub offline: bool,
+    /// Number of proposal-mediated remote review rows for this session.
+    pub proposal_review_count: usize,
+    /// Metadata-only session status label.
+    pub status_label: String,
+}
+
+/// Metadata-only row for a remote workspace proposal review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteProposalReviewGuiRow {
+    /// Session identifier associated with the remote authority.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Proposal identifier reviewed through app-owned proposal lifecycle actions.
+    pub proposal_id: ProposalId,
+    /// Redacted authority label or stable hash.
+    pub remote_authority_label: String,
+    /// Proposal payload kind summarized for display.
+    pub payload_kind: ProposalPayloadKind,
+    /// Proposal lifecycle state summarized for display.
+    pub lifecycle_state: ProposalLifecycleState,
+    /// Metadata-only review status label.
+    pub status_label: String,
+    /// True when remote mutation must pass through proposal lifecycle authority.
+    pub proposal_mediated: bool,
+}
+
 /// Remote transport envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteTransportEnvelope {

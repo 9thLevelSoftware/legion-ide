@@ -60,6 +60,8 @@ pub struct DesktopProjectionViewModel {
     pub plugin_rows: Vec<String>,
     /// Collaboration presence rows.
     pub collaboration_rows: Vec<String>,
+    /// Remote workspace manager rows.
+    pub remote_rows: Vec<String>,
     /// Empty, dirty, or degraded display flags.
     pub empty_or_degraded_flags: Vec<String>,
 }
@@ -113,6 +115,7 @@ impl DesktopProjectionViewModel {
             operational_health_rows: operational_health_rows(snapshot),
             plugin_rows: plugin_rows(snapshot),
             collaboration_rows: collaboration_rows(snapshot),
+            remote_rows: remote_rows(snapshot),
             empty_or_degraded_flags: flags,
         }
     }
@@ -241,6 +244,12 @@ impl ProjectionView {
                         ui.label(row);
                     }
                     render_collaboration_controls(ui, snapshot, &mut actions);
+                    ui.separator();
+                    ui.heading("Remote Workspace");
+                    for row in &model.remote_rows {
+                        ui.label(row);
+                    }
+                    render_remote_workspace_controls(ui, snapshot, &mut actions);
                 }
             });
 
@@ -493,6 +502,38 @@ fn render_collaboration_controls(
             .clicked()
         {
             actions.push(DesktopAction::OpenSharedProposalReview {
+                session_id: review.session_id,
+                proposal_id: review.proposal_id,
+            });
+        }
+    }
+}
+
+fn render_remote_workspace_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let projection = &snapshot.remote_gui_projection;
+    for session in &projection.session_rows {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Remote session {}", session.session_id.0));
+            if session.reconnecting || session.offline {
+                if ui.button("Reconnect").clicked() {
+                    actions.push(DesktopAction::ConnectRemoteWorkspace {
+                        session_id: session.session_id,
+                        authority_label: session.authority_label.clone(),
+                    });
+                }
+            }
+        });
+    }
+    for review in &projection.proposal_review_rows {
+        if ui
+            .button(format!("Review remote proposal {}", review.proposal_id.0))
+            .clicked()
+        {
+            actions.push(DesktopAction::OpenRemoteProposalReview {
                 session_id: review.session_id,
                 proposal_id: review.proposal_id,
             });
@@ -1538,6 +1579,51 @@ fn collaboration_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
                 )
             }),
     );
+    rows
+}
+
+fn remote_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let mut rows = Vec::new();
+    let projection = &snapshot.remote_gui_projection;
+    rows.push(format!(
+        "remote workspace: status={} runtime_enabled={} sessions={} connected={} reconnecting={} offline={} proposal_reviews={} redaction=metadata-only",
+        projection.status_label,
+        projection.runtime_enabled,
+        projection.session_rows.len(),
+        projection.connected_session_count,
+        projection.reconnecting_session_count,
+        projection.offline_session_count,
+        projection.proposal_review_rows.len()
+    ));
+    rows.extend(projection.session_rows.iter().map(|session| {
+        format!(
+            "remote workspace session {} authority={} agent={} state={:?} filesystem={} terminal={} lsp={} reconnect_supported={} reconnecting={} offline={} proposal_reviews={} status={}",
+            session.session_id.0,
+            session.authority_label,
+            session.agent_version,
+            session.state,
+            session.filesystem_descriptor_status,
+            session.terminal_descriptor_status,
+            session.lsp_descriptor_status,
+            session.reconnect_supported,
+            session.reconnecting,
+            session.offline,
+            session.proposal_review_count,
+            session.status_label
+        )
+    }));
+    rows.extend(projection.proposal_review_rows.iter().map(|review| {
+        format!(
+            "remote proposal session {} proposal {} authority={} payload={:?} lifecycle={:?} status={} proposal-mediated={}",
+            review.session_id.0,
+            review.proposal_id.0,
+            review.remote_authority_label,
+            review.payload_kind,
+            review.lifecycle_state,
+            review.status_label,
+            review.proposal_mediated
+        )
+    }));
     rows
 }
 
