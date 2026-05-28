@@ -16,5 +16,6 @@ pub mod platform;
 pub mod search;
 pub mod session;
 pub mod smoke;
+mod theme;
 pub mod view;
 pub mod workflow;

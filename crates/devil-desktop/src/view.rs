@@ -3,15 +3,16 @@
 use std::collections::{BTreeSet, HashSet};
 
 use devil_protocol::{
-    AgentRunId, CollaborationParticipantId, CollaborationSessionId, FileId,
-    PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    ProposalCancellationReason, ProposalRejectionReason, ProposalRollbackReason,
-    ViewportProjectionMode,
+    AgentRunId, CollaborationParticipantId, CollaborationSessionId,
+    DelegatedTaskRuntimeActivationState, FileId, PluginCommandDescriptor, PluginContribution,
+    PluginContributionProjection, ProposalCancellationReason, ProposalRejectionReason,
+    ProposalRollbackReason, ViewportProjectionMode,
 };
 use devil_ui::{ShellProjectionSnapshot, StatusSeverity};
 
 use crate::{
-    bridge::DesktopAction, health::DesktopOperationalHealthSnapshot, search::DesktopSearchViewModel,
+    bridge::DesktopAction, health::DesktopOperationalHealthSnapshot,
+    search::DesktopSearchViewModel, theme,
 };
 
 /// Adapter-local view state layered over app-owned projections.
@@ -28,6 +29,20 @@ pub struct DesktopProjectionViewState {
 pub struct DesktopProjectionViewModel {
     /// Window or shell title.
     pub layout_title: String,
+    /// Top command-bar rows.
+    pub top_bar_rows: Vec<String>,
+    /// Read-only autonomy scale rows.
+    pub autonomy_rows: Vec<String>,
+    /// Left sidebar summary rows.
+    pub left_sidebar_rows: Vec<String>,
+    /// Main code-canvas summary rows.
+    pub main_canvas_rows: Vec<String>,
+    /// Right directive and trust console summary rows.
+    pub right_console_rows: Vec<String>,
+    /// Bottom operational console rows.
+    pub bottom_console_rows: Vec<String>,
+    /// Compact status-bar rows.
+    pub status_bar_rows: Vec<String>,
     /// Tab-strip display rows.
     pub tab_rows: Vec<String>,
     /// Explorer display rows.
@@ -97,8 +112,16 @@ impl DesktopProjectionViewModel {
             flags.push("no_active_buffer".to_string());
         }
 
+        let autonomy_rows = autonomy_rows(snapshot);
         Self {
             layout_title: snapshot.layout_projection.layout.title.clone(),
+            top_bar_rows: top_bar_rows(snapshot, &flags),
+            autonomy_rows,
+            left_sidebar_rows: left_sidebar_rows(snapshot),
+            main_canvas_rows: main_canvas_rows(snapshot),
+            right_console_rows: right_console_rows(snapshot),
+            bottom_console_rows: bottom_console_rows(snapshot),
+            status_bar_rows: status_bar_rows(snapshot, &flags),
             tab_rows: tab_rows(snapshot),
             explorer_rows: explorer_rows(snapshot, state),
             explorer_state_rows: explorer_rows(snapshot, state),
@@ -153,126 +176,63 @@ impl ProjectionView {
         snapshot: &ShellProjectionSnapshot,
         state: &DesktopProjectionViewState,
     ) -> ProjectionViewOutput {
+        theme::install(ui.ctx());
         let model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
         let mut actions = Vec::new();
 
-        egui::Panel::top("devil_desktop_top").show_inside(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.heading(&model.layout_title);
-                ui.horizontal_wrapped(|ui| {
-                    for flag in &model.empty_or_degraded_flags {
-                        ui.label(flag);
-                    }
-                });
-                ui.horizontal_wrapped(|ui| render_tab_controls(ui, snapshot, &mut actions));
+        egui::Panel::top("devil_desktop_top")
+            .exact_size(76.0)
+            .frame(theme::panel_frame(theme::BG_BASE))
+            .show_inside(ui, |ui| {
+                render_top_command_bar(ui, snapshot, &model, &mut actions);
             });
-        });
 
         egui::Panel::left("devil_desktop_explorer")
+            .default_size(286.0)
+            .min_size(220.0)
             .resizable(true)
+            .frame(theme::panel_frame(theme::BG_BASE))
             .show_inside(ui, |ui| {
-                ui.heading("Explorer");
-                render_explorer_controls(ui, snapshot, state, &mut actions);
+                render_left_sidebar(ui, snapshot, state, &model, &mut actions);
             });
 
-        egui::Panel::bottom("devil_desktop_status").show_inside(ui, |ui| {
-            for row in &model.status_rows {
-                ui.label(row);
-            }
-        });
+        egui::Panel::bottom("devil_desktop_status")
+            .exact_size(28.0)
+            .frame(theme::panel_frame(theme::BG_CODE))
+            .show_inside(ui, |ui| {
+                render_status_bar(ui, &model);
+            });
+
+        egui::Panel::bottom("devil_desktop_bottom_console")
+            .default_size(208.0)
+            .min_size(112.0)
+            .resizable(true)
+            .frame(theme::panel_frame(theme::BG_CODE))
+            .show_inside(ui, |ui| {
+                render_bottom_console(ui, &model);
+            });
 
         egui::Panel::right("devil_desktop_trust")
+            .default_size(392.0)
+            .min_size(300.0)
             .resizable(true)
+            .frame(theme::panel_frame(theme::BG_BASE))
             .show_inside(ui, |ui| {
-                ui.checkbox(&mut self.show_trust, "Trust");
-                if self.show_trust {
-                    ui.heading("Proposals");
-                    if model.proposal_rows.is_empty() {
-                        ui.label("No proposals");
-                    }
-                    for row in &model.proposal_rows {
-                        ui.label(row);
-                    }
-                    render_proposal_controls(ui, snapshot, &mut actions);
-
-                    ui.separator();
-                    ui.heading("Trust");
-                    if model.trust_rows.is_empty() {
-                        ui.label("No trust warnings");
-                    }
-                    for row in &model.trust_rows {
-                        ui.label(row);
-                    }
-                }
-
-                ui.separator();
-                ui.checkbox(&mut self.show_auxiliary, "Auxiliary");
-                if self.show_auxiliary {
-                    ui.heading("Language");
-                    if model.language_rows.is_empty() {
-                        ui.label("No language tooling activity");
-                    }
-                    for row in &model.language_rows {
-                        ui.label(row);
-                    }
-                    ui.separator();
-                    ui.heading("Terminal");
-                    if model.terminal_rows.is_empty() {
-                        ui.label("No terminal activity");
-                    }
-                    for row in &model.terminal_rows {
-                        ui.label(row);
-                    }
-                    ui.separator();
-                    ui.heading("Operational health");
-                    for row in &model.operational_health_rows {
-                        ui.label(row);
-                    }
-                    ui.separator();
-                    for row in &model.assistant_rows {
-                        ui.label(row);
-                    }
-                    render_assistant_controls(ui, snapshot, &mut actions);
-                    ui.separator();
-                    ui.heading("Plugin Management");
-                    for row in &model.plugin_rows {
-                        ui.label(row);
-                    }
-                    render_plugin_management_controls(ui, snapshot, &mut actions);
-                    ui.separator();
-                    for row in &model.collaboration_rows {
-                        ui.label(row);
-                    }
-                    render_collaboration_controls(ui, snapshot, &mut actions);
-                    ui.separator();
-                    ui.heading("Remote Workspace");
-                    for row in &model.remote_rows {
-                        ui.label(row);
-                    }
-                    render_remote_workspace_controls(ui, snapshot, &mut actions);
-                }
+                render_right_console(
+                    ui,
+                    snapshot,
+                    &model,
+                    &mut self.show_trust,
+                    &mut self.show_auxiliary,
+                    &mut actions,
+                );
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.heading("Active Buffer");
-            for row in &model.editor_status_rows {
-                ui.label(row);
-            }
-            for row in &model.viewport_metadata_rows {
-                ui.label(row);
-            }
-            for row in &model.close_prompt_rows {
-                ui.label(row);
-            }
-            render_close_dirty_prompt_controls(ui, snapshot, &mut actions);
-            egui::ScrollArea::both().show(ui, |ui| {
-                for row in &model.active_buffer_lines {
-                    ui.monospace(row);
-                }
+        egui::CentralPanel::default()
+            .frame(theme::panel_frame(theme::BG_CODE))
+            .show_inside(ui, |ui| {
+                render_code_canvas(ui, snapshot, &model, &mut actions);
             });
-            ui.separator();
-            render_search_projection(ui, snapshot);
-        });
 
         ProjectionViewOutput {
             needs_repaint: false,
@@ -282,22 +242,288 @@ impl ProjectionView {
     }
 }
 
+fn render_top_command_bar(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(theme::heading("Devil IDE"));
+        ui.separator();
+        ui.label(theme::body(&model.layout_title));
+        if ui
+            .button(theme::accent("Save All", theme::ACCENT_CYAN))
+            .clicked()
+        {
+            actions.push(DesktopAction::SaveAll);
+        }
+        if ui.button(theme::body("Search")).clicked() {
+            actions.push(DesktopAction::ShowSearchPrompt {
+                scope: snapshot.search_projection.scope,
+            });
+        }
+        if ui.button(theme::body("Open")).clicked() {
+            actions.push(DesktopAction::ShowOpenPathPrompt);
+        }
+        ui.separator();
+        render_autonomy_scale(ui, model);
+    });
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        render_shell_rows(ui, &model.top_bar_rows);
+    });
+}
+
+fn render_autonomy_scale(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    let active = model
+        .autonomy_rows
+        .first()
+        .map(|row| row.as_str())
+        .unwrap_or("autonomy scale: active=L1 Manual read-only projection");
+    theme::card_frame().show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(theme::eyebrow("Autonomy"));
+            for (level, label, color) in [
+                ("L1", "Manual", theme::TEXT_MUTED),
+                ("L2", "Assisted", theme::ACCENT_CYAN),
+                ("L3", "Co-Pilot", theme::ACCENT_BLUE),
+                ("L4", "Delegated", theme::ACCENT_VIOLET),
+                ("L5", "Fleet", theme::ACCENT_PURPLE),
+            ] {
+                let selected = active.contains(level);
+                let text = format!("{level} {label}");
+                if selected {
+                    ui.label(theme::accent(text, color));
+                } else {
+                    ui.label(theme::muted(text));
+                }
+            }
+        });
+    });
+}
+
+fn render_left_sidebar(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.label(theme::eyebrow("Project"));
+    theme::card_frame().show(ui, |ui| {
+        render_shell_rows(ui, &model.left_sidebar_rows);
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(theme::heading("Explorer"));
+        if ui.button(theme::muted("Refresh")).clicked() {
+            actions.push(DesktopAction::RefreshExplorer);
+        }
+    });
+    egui::ScrollArea::vertical()
+        .id_salt("devil_desktop_explorer_scroll")
+        .max_height(240.0)
+        .show(ui, |ui| {
+            render_explorer_controls(ui, snapshot, state, actions);
+        });
+
+    ui.add_space(6.0);
+    ui.label(theme::eyebrow("Active Fleet"));
+    theme::card_frame().show(ui, |ui| {
+        if model.assistant_rows.is_empty() {
+            ui.label(theme::muted("No projected assistant or delegated activity"));
+        } else {
+            for row in model.assistant_rows.iter().take(5) {
+                ui.label(theme::body(row));
+            }
+        }
+    });
+}
+
+fn render_code_canvas(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(theme::heading("Code Canvas"));
+        render_tab_controls(ui, snapshot, actions);
+    });
+    ui.add_space(4.0);
+    theme::card_frame().show(ui, |ui| {
+        render_shell_rows(ui, &model.main_canvas_rows);
+        for row in &model.editor_status_rows {
+            ui.label(theme::body(row));
+        }
+        for row in &model.viewport_metadata_rows {
+            ui.label(theme::muted(row));
+        }
+        for row in &model.close_prompt_rows {
+            ui.label(theme::accent(row, theme::ACCENT_AMBER));
+        }
+        render_close_dirty_prompt_controls(ui, snapshot, actions);
+    });
+
+    ui.add_space(6.0);
+    theme::panel_frame(theme::BG_CODE).show(ui, |ui| {
+        egui::ScrollArea::both()
+            .id_salt("devil_desktop_code_canvas_scroll")
+            .show(ui, |ui| {
+                for row in &model.active_buffer_lines {
+                    ui.monospace(row);
+                }
+            });
+    });
+
+    ui.separator();
+    render_search_projection(ui, snapshot);
+}
+
+fn render_right_console(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    show_trust: &mut bool,
+    show_auxiliary: &mut bool,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.label(theme::heading("Directive Console"));
+    theme::card_frame().show(ui, |ui| {
+        render_shell_rows(ui, &model.right_console_rows);
+        for row in &model.autonomy_rows {
+            ui.label(theme::muted(row));
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.checkbox(show_trust, "Trust and proposals");
+    if *show_trust {
+        render_console_section(ui, "Approval Queue", &model.proposal_rows, "No proposals");
+        render_proposal_controls(ui, snapshot, actions);
+        render_console_section(ui, "Trust", &model.trust_rows, "No trust warnings");
+    }
+
+    ui.separator();
+    ui.checkbox(show_auxiliary, "Auxiliary surfaces");
+    if *show_auxiliary {
+        render_console_section(
+            ui,
+            "Language",
+            &model.language_rows,
+            "No language tooling activity",
+        );
+        render_console_section(ui, "Terminal", &model.terminal_rows, "No terminal activity");
+        render_console_section(
+            ui,
+            "Operational Health",
+            &model.operational_health_rows,
+            "No health rows",
+        );
+        render_console_section(
+            ui,
+            "Assistant and Delegated Tasks",
+            &model.assistant_rows,
+            "No assistant activity",
+        );
+        render_assistant_controls(ui, snapshot, actions);
+        render_console_section(
+            ui,
+            "Plugin Management",
+            &model.plugin_rows,
+            "No plugin contributions",
+        );
+        render_plugin_management_controls(ui, snapshot, actions);
+        render_console_section(
+            ui,
+            "Collaboration",
+            &model.collaboration_rows,
+            "No collaboration rows",
+        );
+        render_collaboration_controls(ui, snapshot, actions);
+        render_console_section(ui, "Remote Workspace", &model.remote_rows, "No remote rows");
+        render_remote_workspace_controls(ui, snapshot, actions);
+    }
+}
+
+fn render_bottom_console(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(theme::heading("Bottom Console"));
+        ui.label(theme::accent("Terminal", theme::ACCENT_CYAN));
+        ui.label(theme::accent("Tests", theme::ACCENT_GREEN));
+        ui.label(theme::accent("Workflow Logs", theme::ACCENT_AMBER));
+        ui.label(theme::accent("Agent Stream", theme::ACCENT_VIOLET));
+    });
+    ui.add_space(4.0);
+    ui.columns(2, |columns| {
+        theme::card_frame().show(&mut columns[0], |ui| {
+            ui.label(theme::eyebrow("Terminal / Runtime"));
+            render_shell_rows(ui, &model.bottom_console_rows);
+            for row in model.terminal_rows.iter().take(6) {
+                ui.label(theme::body(row));
+            }
+        });
+        theme::card_frame().show(&mut columns[1], |ui| {
+            ui.label(theme::eyebrow("Workflow / Health"));
+            for row in model.operational_health_rows.iter().take(8) {
+                ui.label(theme::body(row));
+            }
+            for row in model.status_rows.iter().take(4) {
+                ui.label(theme::muted(row));
+            }
+        });
+    });
+}
+
+fn render_status_bar(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    ui.horizontal_wrapped(|ui| {
+        for row in &model.status_bar_rows {
+            ui.label(theme::muted(row));
+        }
+    });
+}
+
+fn render_console_section(ui: &mut egui::Ui, title: &str, rows: &[String], empty: &str) {
+    ui.add_space(5.0);
+    ui.label(theme::eyebrow(title));
+    theme::card_frame().show(ui, |ui| {
+        if rows.is_empty() {
+            ui.label(theme::muted(empty));
+        } else {
+            for row in rows.iter().take(8) {
+                ui.label(theme::body(row));
+            }
+            if rows.len() > 8 {
+                ui.label(theme::muted(format!("{} more rows", rows.len() - 8)));
+            }
+        }
+    });
+}
+
+fn render_shell_rows(ui: &mut egui::Ui, rows: &[String]) {
+    for row in rows {
+        ui.label(theme::body(row));
+    }
+}
+
 fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
     let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
-    ui.heading("Search");
-    ui.label(search.header);
+    ui.label(theme::heading("Search"));
+    ui.label(theme::body(search.header));
     for row in &search.status_rows {
-        ui.label(row);
+        ui.label(theme::body(row));
     }
     if search.result_rows.is_empty() {
-        ui.label("<no search results>");
+        ui.label(theme::muted("<no search results>"));
     } else {
         for row in &search.result_rows {
             ui.monospace(row);
         }
     }
     for row in &search.diagnostic_rows {
-        ui.label(row);
+        ui.label(theme::muted(row));
     }
 }
 
@@ -310,6 +536,265 @@ pub struct ProjectionViewOutput {
     pub displayed_title: String,
     /// Adapter actions requested by rendered controls.
     pub actions: Vec<DesktopAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopAutonomyLevel {
+    Manual,
+    Assisted,
+    Copilot,
+    Delegated,
+    Fleet,
+}
+
+impl DesktopAutonomyLevel {
+    fn number(self) -> u8 {
+        match self {
+            Self::Manual => 1,
+            Self::Assisted => 2,
+            Self::Copilot => 3,
+            Self::Delegated => 4,
+            Self::Fleet => 5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Assisted => "Assisted",
+            Self::Copilot => "Co-Pilot",
+            Self::Delegated => "Delegated",
+            Self::Fleet => "Fleet",
+        }
+    }
+}
+
+fn projected_autonomy_level(snapshot: &ShellProjectionSnapshot) -> DesktopAutonomyLevel {
+    let delegated = &snapshot.delegated_task_projection;
+    if delegated.runtime_activation != DelegatedTaskRuntimeActivationState::NotEncoded
+        && delegated.plan_count > 0
+    {
+        return DesktopAutonomyLevel::Fleet;
+    }
+    if delegated.plan_count > 0
+        || !delegated.plan_rows.is_empty()
+        || !delegated.required_approvals.is_empty()
+        || !delegated.proposal_preview_links.is_empty()
+    {
+        return DesktopAutonomyLevel::Delegated;
+    }
+
+    let assisted = &snapshot.assisted_ai_projection;
+    if assisted.request_count > 0
+        || assisted.preview_ready_count > 0
+        || !assisted.proposal_previews.is_empty()
+    {
+        return DesktopAutonomyLevel::Copilot;
+    }
+    if assisted.provider_count > 0 || !assisted.providers.is_empty() {
+        return DesktopAutonomyLevel::Assisted;
+    }
+
+    DesktopAutonomyLevel::Manual
+}
+
+fn autonomy_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let level = projected_autonomy_level(snapshot);
+    let delegated = &snapshot.delegated_task_projection;
+    let mut rows = vec![
+        format!(
+            "autonomy scale: active=L{} {} read-only projection",
+            level.number(),
+            level.label()
+        ),
+        "autonomy scale levels: L1 Manual | L2 Assisted | L3 Co-Pilot | L4 Delegated | L5 Fleet"
+            .to_string(),
+    ];
+
+    if level == DesktopAutonomyLevel::Delegated {
+        rows.push(
+            "autonomy safety: delegated work is approval-gated; autonomous apply unsupported"
+                .to_string(),
+        );
+    } else if level == DesktopAutonomyLevel::Fleet {
+        rows.push(format!(
+            "autonomy safety: fleet display from runtime={:?}; autonomous apply remains proposal-mediated",
+            delegated.runtime_activation
+        ));
+    } else {
+        rows.push("autonomy safety: mode switching is not implemented in the renderer".to_string());
+    }
+    rows.push(
+        "autonomy control: display-only; no provider, terminal, or apply authority".to_string(),
+    );
+    rows
+}
+
+fn top_bar_rows(snapshot: &ShellProjectionSnapshot, flags: &[String]) -> Vec<String> {
+    let active = &snapshot.active_buffer_projection;
+    let workspace = active
+        .workspace_id
+        .map(|workspace| workspace.0.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let buffer = active
+        .buffer_id
+        .map(|buffer| buffer.0.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let status = if flags.is_empty() {
+        "steady".to_string()
+    } else {
+        flags.join(",")
+    };
+    vec![
+        format!(
+            "command bar: {} workspace={} buffer={} status={}",
+            snapshot.layout_projection.layout.title, workspace, buffer, status
+        ),
+        format!(
+            "command affordance: search={} save_all={} proposal_controls={}",
+            snapshot.search_projection.results.len(),
+            snapshot.daily_editing_projection.tabs.tabs.len(),
+            snapshot.proposal_ledger_projection.rows.len()
+        ),
+        format!(
+            "build/status summary: messages={} language_ops={} terminal_rows={}",
+            snapshot.status_messages.len(),
+            snapshot.language_tooling_projection.operations.len(),
+            snapshot.terminal_panel_projection.output_rows.len()
+        ),
+    ]
+}
+
+fn left_sidebar_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let selected = snapshot
+        .explorer_projection
+        .selection
+        .as_ref()
+        .map(|selection| selection.file_id.0.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    vec![
+        format!(
+            "project sidebar: explorer_nodes={} selected_file={}",
+            snapshot.explorer_projection.nodes.len(),
+            selected
+        ),
+        format!(
+            "active fleet summary: assisted_providers={} delegated_plans={} plugin_surfaces={}",
+            snapshot.assisted_ai_projection.provider_count,
+            snapshot.delegated_task_projection.plan_count,
+            snapshot.plugin_contribution_projections.len()
+        ),
+        format!(
+            "context packs: collaboration_sessions={} remote_sessions={}",
+            snapshot.collaboration_gui_projection.session_rows.len(),
+            snapshot.remote_gui_projection.session_rows.len()
+        ),
+    ]
+}
+
+fn main_canvas_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let active = &snapshot.active_buffer_projection;
+    let path = active
+        .file_path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .unwrap_or("<no file>");
+    let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
+    vec![
+        format!(
+            "code canvas: tabs={} active_path={} dirty={} degraded={}",
+            snapshot.daily_editing_projection.tabs.tabs.len(),
+            path,
+            active.dirty,
+            active.degraded
+        ),
+        format!(
+            "language cues: status={:?} problems={} completions={} definitions={} references={}",
+            snapshot.language_tooling_projection.status,
+            snapshot.language_tooling_projection.problems.len(),
+            snapshot.language_tooling_projection.completions.len(),
+            snapshot.language_tooling_projection.definitions.len(),
+            snapshot.language_tooling_projection.references.len()
+        ),
+        format!("search strip: {}", search.header),
+    ]
+}
+
+fn right_console_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    vec![
+        format!(
+            "directive console: proposals={} trust_items={} approval_gates={} proposal-mediated",
+            snapshot.proposal_ledger_projection.rows.len(),
+            snapshot.context_manifest_projection.manifest.items.len(),
+            snapshot.approval_checklist_projection.gates.len()
+        ),
+        format!(
+            "assistant console: requests={} refusals={} previews={}",
+            snapshot.assisted_ai_projection.request_count,
+            snapshot.assisted_ai_projection.refusal_count,
+            snapshot.assisted_ai_projection.preview_ready_count
+        ),
+        format!(
+            "advanced surfaces: delegated={} plugins={} collaboration={} remote={}",
+            snapshot.delegated_task_projection.plan_count,
+            snapshot.plugin_contribution_projections.len(),
+            snapshot.collaboration_gui_projection.session_rows.len(),
+            snapshot.remote_gui_projection.session_rows.len()
+        ),
+    ]
+}
+
+fn bottom_console_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let health_rows = DesktopOperationalHealthSnapshot::from_projection(snapshot).rows();
+    vec![
+        format!(
+            "bottom console: terminal_status={:?} terminal_rows={} omitted={}",
+            snapshot.terminal_panel_projection.status.kind,
+            snapshot.terminal_panel_projection.output_rows.len(),
+            snapshot
+                .terminal_panel_projection
+                .scrollback
+                .omitted_row_count
+        ),
+        format!(
+            "workflow activity: status_messages={} health_rows={} audit=metadata-only",
+            snapshot.status_messages.len(),
+            health_rows.len()
+        ),
+        format!(
+            "agent stream: assisted_requests={} delegated_steps={} shared_reviews={} remote_reviews={}",
+            snapshot.assisted_ai_projection.request_count,
+            snapshot.delegated_task_projection.step_summaries.len(),
+            snapshot
+                .collaboration_gui_projection
+                .shared_proposal_rows
+                .len(),
+            snapshot.remote_gui_projection.proposal_review_rows.len()
+        ),
+    ]
+}
+
+fn status_bar_rows(snapshot: &ShellProjectionSnapshot, flags: &[String]) -> Vec<String> {
+    let active = &snapshot.active_buffer_projection;
+    let path = active
+        .file_path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .unwrap_or("<none>");
+    let status = if flags.is_empty() {
+        "clean".to_string()
+    } else {
+        flags.join(",")
+    };
+    vec![
+        format!("status bar: flags={} path={}", status, path),
+        format!(
+            "status bar metadata: workspace={:?} file={:?} buffer={:?}",
+            active.workspace_id.map(|workspace| workspace.0),
+            active.file_id.map(|file| file.0),
+            active.buffer_id.map(|buffer| buffer.0)
+        ),
+    ]
 }
 
 fn render_tab_controls(
@@ -521,13 +1006,12 @@ fn render_collaboration_controls(
             }
             if let Some(participant_id) =
                 first_collaboration_participant(snapshot, session.session_id)
+                && ui.button("Presence").clicked()
             {
-                if ui.button("Presence").clicked() {
-                    actions.push(DesktopAction::PublishCollaborationPresence {
-                        session_id: session.session_id,
-                        participant_id,
-                    });
-                }
+                actions.push(DesktopAction::PublishCollaborationPresence {
+                    session_id: session.session_id,
+                    participant_id,
+                });
             }
         });
     }
@@ -553,13 +1037,11 @@ fn render_remote_workspace_controls(
     for session in &projection.session_rows {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Remote session {}", session.session_id.0));
-            if session.reconnecting || session.offline {
-                if ui.button("Reconnect").clicked() {
-                    actions.push(DesktopAction::ConnectRemoteWorkspace {
-                        session_id: session.session_id,
-                        authority_label: session.authority_label.clone(),
-                    });
-                }
+            if (session.reconnecting || session.offline) && ui.button("Reconnect").clicked() {
+                actions.push(DesktopAction::ConnectRemoteWorkspace {
+                    session_id: session.session_id,
+                    authority_label: session.authority_label.clone(),
+                });
             }
         });
     }
@@ -1661,6 +2143,14 @@ fn plugin_command_descriptors(
 fn collaboration_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let mut rows = Vec::new();
     let projection = &snapshot.collaboration_gui_projection;
+    if !projection.runtime_enabled
+        && !projection.presence_enabled
+        && projection.session_rows.is_empty()
+        && projection.shared_proposal_rows.is_empty()
+        && snapshot.collaboration_presence_projections.is_empty()
+    {
+        return rows;
+    }
     rows.push(format!(
         "collaboration: status={} runtime_enabled={} presence_enabled={} sessions={} reconnecting={} conflicts={} offline={} shared_proposals={} redaction=metadata-only",
         projection.status_label,
@@ -1723,6 +2213,12 @@ fn collaboration_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 fn remote_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let mut rows = Vec::new();
     let projection = &snapshot.remote_gui_projection;
+    if !projection.runtime_enabled
+        && projection.session_rows.is_empty()
+        && projection.proposal_review_rows.is_empty()
+    {
+        return rows;
+    }
     rows.push(format!(
         "remote workspace: status={} runtime_enabled={} sessions={} connected={} reconnecting={} offline={} proposal_reviews={} redaction=metadata-only",
         projection.status_label,

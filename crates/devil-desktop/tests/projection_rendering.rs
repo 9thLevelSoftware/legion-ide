@@ -305,6 +305,42 @@ fn projection_rendering_populates_required_phase2_surfaces() {
     assert_eq!(model.layout_title, "Foundation Mode");
     assert!(
         model
+            .top_bar_rows
+            .iter()
+            .any(|row| row.contains("command bar: Foundation Mode"))
+    );
+    assert!(
+        model
+            .left_sidebar_rows
+            .iter()
+            .any(|row| row.contains("project sidebar"))
+    );
+    assert!(
+        model
+            .main_canvas_rows
+            .iter()
+            .any(|row| row.contains("code canvas"))
+    );
+    assert!(
+        model
+            .right_console_rows
+            .iter()
+            .any(|row| row.contains("directive console"))
+    );
+    assert!(
+        model
+            .bottom_console_rows
+            .iter()
+            .any(|row| row.contains("bottom console"))
+    );
+    assert!(
+        model
+            .status_bar_rows
+            .iter()
+            .any(|row| row.contains("status bar"))
+    );
+    assert!(
+        model
             .tab_rows
             .iter()
             .any(|row| row.contains("Cargo.toml +"))
@@ -374,6 +410,74 @@ fn projection_rendering_populates_required_phase2_surfaces() {
 }
 
 #[test]
+fn projection_rendering_models_read_only_autonomy_shell() {
+    let populated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
+    assert!(
+        populated
+            .autonomy_rows
+            .iter()
+            .any(|row| row.contains("active=L4 Delegated read-only projection"))
+    );
+    assert!(populated.autonomy_rows.iter().any(|row| {
+        row.contains("approval-gated") && row.contains("autonomous apply unsupported")
+    }));
+    assert!(
+        populated
+            .autonomy_rows
+            .iter()
+            .any(|row| row.contains("no provider, terminal, or apply authority"))
+    );
+
+    let empty =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
+    assert!(
+        empty
+            .autonomy_rows
+            .iter()
+            .any(|row| row.contains("active=L1 Manual read-only projection"))
+    );
+    assert!(
+        empty
+            .autonomy_rows
+            .iter()
+            .any(|row| row.contains("mode switching is not implemented"))
+    );
+}
+
+#[test]
+fn projection_rendering_keeps_advanced_surfaces_metadata_and_projection_derived() {
+    let model = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
+
+    assert!(
+        model
+            .right_console_rows
+            .iter()
+            .any(|row| row.contains("proposal-mediated"))
+    );
+    assert!(
+        model
+            .assistant_rows
+            .iter()
+            .any(|row| row.contains("autonomous_apply=unsupported"))
+    );
+    assert!(model.plugin_rows.iter().any(|row| {
+        row.contains("sandbox=metadata-only") || row.contains("dispatch-intent-only")
+    }));
+    assert!(
+        model
+            .collaboration_rows
+            .iter()
+            .any(|row| row.contains("redaction=metadata-only"))
+    );
+    assert!(
+        model
+            .right_console_rows
+            .iter()
+            .any(|row| row.contains("remote=0"))
+    );
+}
+
+#[test]
 fn projection_rendering_handles_empty_and_degraded_snapshots() {
     let empty_model =
         DesktopProjectionViewModel::from_snapshot(&Shell::empty("Empty").projection_snapshot());
@@ -412,6 +516,12 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
         degraded_model
             .empty_or_degraded_flags
             .contains(&"degraded".to_string())
+    );
+    assert!(
+        degraded_model
+            .status_bar_rows
+            .iter()
+            .any(|row| row.contains("flags=degraded"))
     );
     assert!(
         degraded_model
