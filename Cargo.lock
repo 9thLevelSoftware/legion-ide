@@ -1264,6 +1264,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "devil-vscode-compat"
+version = "0.1.0"
+dependencies = [
+ "devil-protocol",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

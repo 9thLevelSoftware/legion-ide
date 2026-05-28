@@ -152,6 +152,11 @@ Phase 4 activates `devil-agent`, `devil-tracker`, and `devil-memory` only for me
 
 Phase 5 activates `devil-plugin` only as an isolated WASM plugin runtime boundary using protocol DTOs, manifest/capability validation, quota metadata, plugin-scoped storage, and metadata-only observability. It must not depend on app/UI/editor/project internals and must not gain direct filesystem, process, network, terminal, AI, tracker, memory, collaboration, remote, settings, or buffer mutation authority. Plugin mutation outputs must remain proposal-mediated.
 
+- `devil-vscode-compat` may depend on:
+  - `devil-protocol`
+
+Product-readiness activates `devil-vscode-compat` only for metadata-only VS Code extension manifest ingestion, contribution mapping, activation-event classification, compatibility diagnostics, and extension-host planning DTOs. It must not execute VSIX contents, spawn Node.js, run extension code, install marketplace packages, or gain direct filesystem, process, network, terminal, editor, workspace mutation, AI, remote, collaboration, storage, settings, or raw-source authority. Extension commands and mutation outputs remain capability-brokered and proposal-mediated before any later runtime activation.
+
 Compatibility note: the plugin entry above is historical runtime evidence for the previously accepted Phase 5 plugin boundary. GUI Phase 5 is the active productization phase for control, trust, and assisted-AI surfaces. It authorizes only app-owned proposal, trust, permission, privacy, budget, and assisted-AI composition surfaced through protocol DTOs and projection snapshots. `devil-ui` and `devil-desktop` must remain projection and intent layers only; they must not own proposal lifecycle state, provider routing, editor text, workspace mutation, storage authority, raw-source retention, hosted-provider activation, or autonomous apply behavior.
 
 GUI Phase 6 activates only packaging, platform integration, accessibility-smoke evidence, session metadata safety, diagnostics export, and CI/script parity for the existing `devil-desktop` adapter. It does not authorize new crate dependencies, renderer-owned editor/session/text state, direct workspace mutation outside app save workflows, raw-source diagnostics, hosted-provider activation, production collaboration/remote/terminal/LSP surfaces, or changes to legacy Phase 6 collaboration evidence. Acceptance is gated by `plans/evidence/gui-productization/phase-6-packaging-platform-accessibility.md` and the GUI Phase 6 checks in `xtask`.
@@ -673,6 +678,48 @@ Phase 8 production capability names are reserved for security-broker decisions b
   - `StorageEvidenceSummary`
   - `StorageMigrationApplyRequest`
   - `StorageMigrationApplyOutcome`
+  - `VsCodeExtensionId`
+  - `VsCodeExtensionManifest`
+  - `VsCodeExtensionKind`
+  - `VsCodeCompatibilityTier`
+  - `VsCodeCompatibilityStatus`
+  - `VsCodeActivationEvent`
+  - `VsCodeContributionKind`
+  - `VsCodeContributionDescriptor`
+  - `VsCodeExtensionHostRuntime`
+  - `VsCodeExtensionHostSession`
+  - `VsCodeApiCallEnvelope`
+  - `VsCodePermissionRequest`
+  - `VsCodeResourceUsageSnapshot`
+  - `VsCodeExtensionCrashReport`
+  - `VsCodeCompatibilityDiagnostic`
+  - `DebugSessionId`
+  - `DebugBreakpointId`
+  - `DebugSessionState`
+  - `DebugBreakpoint`
+  - `DebugStackFrame`
+  - `DebugVariable`
+  - `TestControllerId`
+  - `TestItemId`
+  - `TestRunId`
+  - `TestRunState`
+  - `TestItemDescriptor`
+  - `TestRunSummary`
+  - `ScmProviderId`
+  - `ScmChangeState`
+  - `ScmDiffHunk`
+  - `ScmMergeConflict`
+  - `ScmReviewComment`
+  - `ScmLocalHistoryEntry`
+  - `WorkbenchAccessibilityProfile`
+  - `WorkbenchFontSettings`
+  - `WorkbenchLayoutSettings`
+  - `WorkbenchTelemetryConsent`
+  - `WorkbenchProviderRoutingSettings`
+  - `EnterpriseProductReadinessGate`
+  - `EnterpriseProductReadinessTrack`
+  - `EnterpriseProductReadinessStatus`
+  - `EnterpriseProductReadinessLedger`
 
 ### 3. Forbidden/Deferred Edges
 
@@ -694,6 +741,7 @@ Phase 8 production capability names are reserved for security-broker decisions b
 
 - Phase 3 activates `devil-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
 - `devil-agent`, `devil-tracker`, and `devil-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `devil-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `devil-collaboration` is activated for the limited Phase 6 deterministic local collaboration runtime described above. `devil-remote` is activated for the limited Phase 7 deterministic edge workspace harness described above. `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` are activated only for the current Phase 8 default-deny implementation slice described above. Standalone production `devil-lsp`, production remote transport, native terminal/PTTY execution, hosted telemetry export, raw-source vault activation, and storage migration apply remain evidence gated until the Phase 8 GA checklist and archived release gates are accepted. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- The product-readiness VS Code compatibility track activates only `devil-vscode-compat` metadata normalization and protocol DTOs. Runtime VSIX installation, extension-host sidecars, webviews, notebooks, custom editors, extension storage, arbitrary extension process/network/filesystem/terminal access, and autonomous extension mutation remain deferred until a later accepted ADR, dependency-policy update, capability policy, sandbox evidence, contract tests, ownership tests, and product evidence ledger entry exist.
 - Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated
   - an explicit dependency-policy entry in this document

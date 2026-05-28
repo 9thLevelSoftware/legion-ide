@@ -7992,3 +7992,316 @@ fn language_terminal_projection_default_surfaces_are_inert() {
     assert!(terminal.output_rows.is_empty());
     assert_eq!(terminal.redaction_hints, vec![RedactionHint::MetadataOnly]);
 }
+
+#[test]
+fn vscode_compatibility_contract_roundtrips_and_requires_identity() {
+    let manifest = VsCodeExtensionManifest {
+        extension_id: VsCodeExtensionId("devil.rust-tools".to_string()),
+        plugin_id: PluginId(501),
+        publisher: "devil".to_string(),
+        name: "rust-tools".to_string(),
+        display_name: "Rust Tools".to_string(),
+        version: "1.0.0".to_string(),
+        engine_vscode: Some("^1.90.0".to_string()),
+        extension_kinds: vec![VsCodeExtensionKind::Workspace],
+        activation_events: vec![VsCodeActivationEvent {
+            raw: "onLanguage:rust".to_string(),
+            tier: VsCodeCompatibilityTier::Tier1ProtocolAdapter,
+            status: VsCodeCompatibilityStatus::SupportedWithPolicy,
+        }],
+        contributions: vec![
+            VsCodeContributionDescriptor {
+                kind: VsCodeContributionKind::Language,
+                contribution_id: "languages".to_string(),
+                count: 1,
+                tier: VsCodeCompatibilityTier::Tier0Declarative,
+                status: VsCodeCompatibilityStatus::Supported,
+                metadata_label: "language".to_string(),
+            },
+            VsCodeContributionDescriptor {
+                kind: VsCodeContributionKind::Debugger,
+                contribution_id: "debuggers".to_string(),
+                count: 1,
+                tier: VsCodeCompatibilityTier::Tier1ProtocolAdapter,
+                status: VsCodeCompatibilityStatus::SupportedWithPolicy,
+                metadata_label: "debug-adapter".to_string(),
+            },
+        ],
+        requested_capabilities: vec![CapabilityId("debug.adapter.dispatch".to_string())],
+        required_tier: VsCodeCompatibilityTier::Tier1ProtocolAdapter,
+        status: VsCodeCompatibilityStatus::SupportedWithPolicy,
+        diagnostics: vec![VsCodeCompatibilityDiagnostic {
+            severity: ProtocolDiagnosticSeverity::Info,
+            code: "vscode.compatibility.policy".to_string(),
+            message: "debugger contribution requires policy review".to_string(),
+            tier: Some(VsCodeCompatibilityTier::Tier1ProtocolAdapter),
+            contribution_kind: Some(VsCodeContributionKind::Debugger),
+        }],
+        correlation_id: CorrelationId(9501),
+        causality_id: causality_id(),
+        sequence: EventSequence(1),
+        schema_version: 1,
+    };
+
+    let encoded = serde_json::to_value(&manifest).expect("manifest serializes");
+    let decoded: VsCodeExtensionManifest =
+        serde_json::from_value(encoded.clone()).expect("manifest roundtrips");
+    assert_eq!(decoded, manifest);
+
+    let mut missing = encoded;
+    remove_required_field::<VsCodeExtensionManifest>(&mut missing, "extension_id");
+
+    let session = VsCodeExtensionHostSession {
+        extension_id: VsCodeExtensionId("devil.rust-tools".to_string()),
+        runtime: VsCodeExtensionHostRuntime::NoneRequired,
+        status: VsCodeCompatibilityStatus::SupportedWithPolicy,
+        process_label: "none-required".to_string(),
+        requested_capabilities: vec![CapabilityId("debug.adapter.dispatch".to_string())],
+        correlation_id: CorrelationId(9501),
+        causality_id: causality_id(),
+        sequence: EventSequence(2),
+        schema_version: 1,
+    };
+    let session_value = serde_json::to_value(&session).expect("session serializes");
+    let session_roundtrip: VsCodeExtensionHostSession =
+        serde_json::from_value(session_value).expect("session roundtrips");
+    assert_eq!(session_roundtrip, session);
+
+    let api_call = VsCodeApiCallEnvelope {
+        extension_id: VsCodeExtensionId("devil.rust-tools".to_string()),
+        call_id: "call-1".to_string(),
+        api_namespace: "commands".to_string(),
+        method: "executeCommand".to_string(),
+        required_capability: CapabilityId("vscode.command.dispatch".to_string()),
+        metadata_label: "command dispatch".to_string(),
+        correlation_id: CorrelationId(9502),
+        causality_id: causality_id(),
+        sequence: EventSequence(3),
+        schema_version: 1,
+    };
+    let api_call_value = serde_json::to_value(&api_call).expect("api call serializes");
+    let api_call_roundtrip: VsCodeApiCallEnvelope =
+        serde_json::from_value(api_call_value).expect("api call roundtrips");
+    assert_eq!(api_call_roundtrip, api_call);
+
+    let permission = VsCodePermissionRequest {
+        extension_id: VsCodeExtensionId("devil.rust-tools".to_string()),
+        capability: CapabilityId("vscode.command.dispatch".to_string()),
+        reason: "command contribution dispatch".to_string(),
+        tier: VsCodeCompatibilityTier::Tier1ProtocolAdapter,
+        correlation_id: CorrelationId(9503),
+        causality_id: causality_id(),
+        sequence: EventSequence(4),
+        schema_version: 1,
+    };
+    let permission_value = serde_json::to_value(&permission).expect("permission serializes");
+    let permission_roundtrip: VsCodePermissionRequest =
+        serde_json::from_value(permission_value).expect("permission roundtrips");
+    assert_eq!(permission_roundtrip, permission);
+
+    let usage = VsCodeResourceUsageSnapshot {
+        extension_id: VsCodeExtensionId("devil.rust-tools".to_string()),
+        runtime: VsCodeExtensionHostRuntime::NodeSidecar,
+        cpu_time_ms: 12,
+        memory_bytes: 1024,
+        host_call_count: 3,
+        event_count: 4,
+        timestamp: TimestampMillis(1700),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let usage_value = serde_json::to_value(&usage).expect("usage serializes");
+    let usage_roundtrip: VsCodeResourceUsageSnapshot =
+        serde_json::from_value(usage_value).expect("usage roundtrips");
+    assert_eq!(usage_roundtrip, usage);
+
+    let crash = VsCodeExtensionCrashReport {
+        extension_id: VsCodeExtensionId("devil.rust-tools".to_string()),
+        runtime: VsCodeExtensionHostRuntime::NodeSidecar,
+        crash_id: "crash-1".to_string(),
+        exit_code: Some(1),
+        signal: None,
+        metadata_summary: "extension host exited".to_string(),
+        correlation_id: CorrelationId(9504),
+        causality_id: causality_id(),
+        sequence: EventSequence(5),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let crash_value = serde_json::to_value(&crash).expect("crash serializes");
+    let crash_roundtrip: VsCodeExtensionCrashReport =
+        serde_json::from_value(crash_value).expect("crash roundtrips");
+    assert_eq!(crash_roundtrip, crash);
+}
+
+#[test]
+fn product_readiness_debug_test_scm_and_workbench_contracts_roundtrip() {
+    let breakpoint = DebugBreakpoint {
+        breakpoint_id: DebugBreakpointId("bp-1".to_string()),
+        session_id: DebugSessionId("debug-1".to_string()),
+        path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+        range: protocol_range(),
+        verified: true,
+        message: None,
+        schema_version: 1,
+    };
+    let frame = DebugStackFrame {
+        session_id: DebugSessionId("debug-1".to_string()),
+        frame_id: 1,
+        name: "main".to_string(),
+        path: Some(CanonicalPath("C:/repo/src/main.rs".to_string())),
+        range: Some(protocol_range()),
+        schema_version: 1,
+    };
+    let variable = DebugVariable {
+        session_id: DebugSessionId("debug-1".to_string()),
+        variables_reference: 7,
+        name: "value".to_string(),
+        value_label: "redacted".to_string(),
+        type_label: Some("usize".to_string()),
+        has_children: false,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let test_item = TestItemDescriptor {
+        controller_id: TestControllerId("cargo-test".to_string()),
+        item_id: TestItemId("unit::fixture".to_string()),
+        parent_id: None,
+        label: "fixture".to_string(),
+        path: Some(CanonicalPath("C:/repo/src/lib.rs".to_string())),
+        range: Some(protocol_range()),
+        schema_version: 1,
+    };
+    let test_run = TestRunSummary {
+        run_id: TestRunId("run-1".to_string()),
+        controller_id: TestControllerId("cargo-test".to_string()),
+        state: TestRunState::Passed,
+        passed: 1,
+        failed: 0,
+        skipped: 0,
+        errored: 0,
+        duration_ms: 25,
+        schema_version: 1,
+    };
+    let hunk = ScmDiffHunk {
+        provider_id: ScmProviderId("git".to_string()),
+        path: CanonicalPath("C:/repo/src/lib.rs".to_string()),
+        old_start: 1,
+        old_count: 1,
+        new_start: 1,
+        new_count: 2,
+        added_lines: 1,
+        removed_lines: 0,
+        metadata_label: "one-line addition".to_string(),
+        schema_version: 1,
+    };
+    let conflict = ScmMergeConflict {
+        provider_id: ScmProviderId("git".to_string()),
+        path: CanonicalPath("C:/repo/src/lib.rs".to_string()),
+        range: protocol_range(),
+        ours_label: "ours".to_string(),
+        theirs_label: "theirs".to_string(),
+        proposal_available: true,
+        schema_version: 1,
+    };
+    let review_comment = ScmReviewComment {
+        provider_id: ScmProviderId("git".to_string()),
+        comment_id: "comment-1".to_string(),
+        path: CanonicalPath("C:/repo/src/lib.rs".to_string()),
+        range: protocol_range(),
+        author_label: "reviewer".to_string(),
+        body_label: "metadata-only comment".to_string(),
+        resolved: false,
+        schema_version: 1,
+    };
+    let history = ScmLocalHistoryEntry {
+        provider_id: ScmProviderId("git".to_string()),
+        entry_id: "history-1".to_string(),
+        path: CanonicalPath("C:/repo/src/lib.rs".to_string()),
+        change_label: "proposal applied".to_string(),
+        timestamp: TimestampMillis(1800),
+        proposal_id: Some(ProposalId(99)),
+        schema_version: 1,
+    };
+    let accessibility = WorkbenchAccessibilityProfile {
+        high_contrast: true,
+        screen_reader_projection: true,
+        reduce_motion: true,
+        ime_diagnostics_enabled: true,
+        schema_version: 1,
+    };
+    let fonts = WorkbenchFontSettings {
+        editor_font_family: "JetBrains Mono".to_string(),
+        editor_font_size_pt: 13,
+        ui_font_family: "Inter".to_string(),
+        ui_font_size_pt: 12,
+        line_height_basis_points: 14000,
+        schema_version: 1,
+    };
+    let layout = WorkbenchLayoutSettings {
+        floating_windows_enabled: true,
+        multi_monitor_restore_enabled: true,
+        panel_layout: "bottom".to_string(),
+        keybinding_profile_label: "default".to_string(),
+        schema_version: 1,
+    };
+    let telemetry = WorkbenchTelemetryConsent {
+        enabled: false,
+        crash_reports_enabled: false,
+        raw_source_allowed: false,
+        consent_label: "local-only".to_string(),
+        schema_version: 1,
+    };
+    let provider_routing = WorkbenchProviderRoutingSettings {
+        preferred_provider_class: AssistedAiProviderClass::Local,
+        cloud_requires_opt_in: true,
+        prefer_local_or_self_hosted: true,
+        policy_label: "enterprise-local-first".to_string(),
+        schema_version: 1,
+    };
+    let gate = EnterpriseProductReadinessGate {
+        track: EnterpriseProductReadinessTrack::VsCodeCompatibility,
+        gate_id: "PR-VSC-001".to_string(),
+        title: "manifest compatibility".to_string(),
+        acceptance_criteria: vec!["manifest ingestion".to_string()],
+        status: EnterpriseProductReadinessStatus::InProgress,
+        evidence_refs: vec!["plans/product-readiness-ledger.md".to_string()],
+        residual_risk: Some("runtime host deferred".to_string()),
+        schema_version: 1,
+    };
+    let ledger = EnterpriseProductReadinessLedger {
+        product_target: "enterprise AI-native IDE".to_string(),
+        gates: vec![gate],
+        substrate_acceptance_separate: true,
+        generated_at: TimestampMillis(1900),
+        schema_version: 1,
+    };
+
+    let payload = json!({
+        "breakpoint": breakpoint,
+        "frame": frame,
+        "variable": variable,
+        "test_item": test_item,
+        "test_run": test_run,
+        "hunk": hunk,
+        "conflict": conflict,
+        "review_comment": review_comment,
+        "history": history,
+        "accessibility": accessibility,
+        "fonts": fonts,
+        "layout": layout,
+        "telemetry": telemetry,
+        "provider_routing": provider_routing,
+        "ledger": ledger
+    });
+
+    let decoded_breakpoint: DebugBreakpoint =
+        serde_json::from_value(payload["breakpoint"].clone()).expect("breakpoint roundtrips");
+    assert!(decoded_breakpoint.verified);
+    let decoded_test_run: TestRunSummary =
+        serde_json::from_value(payload["test_run"].clone()).expect("test run roundtrips");
+    assert_eq!(decoded_test_run.state, TestRunState::Passed);
+    let decoded_ledger: EnterpriseProductReadinessLedger =
+        serde_json::from_value(payload["ledger"].clone()).expect("ledger roundtrips");
+    assert!(decoded_ledger.substrate_acceptance_separate);
+}

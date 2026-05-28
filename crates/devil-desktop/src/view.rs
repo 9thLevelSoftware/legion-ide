@@ -3,10 +3,9 @@
 use std::collections::{BTreeSet, HashSet};
 
 use devil_protocol::{
-    AgentRunId, CollaborationParticipantId, CollaborationSessionId,
     DelegatedTaskRuntimeActivationState, FileId, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, ProposalCancellationReason, ProposalRejectionReason,
-    ProposalRollbackReason, ViewportProjectionMode,
+    PluginContributionProjection, ProposalId, ProposalRejectionReason, ProposalRiskLabel,
+    ViewportProjectionMode,
 };
 use devil_ui::{ShellProjectionSnapshot, StatusSeverity};
 
@@ -181,42 +180,54 @@ impl ProjectionView {
         let mut actions = Vec::new();
 
         egui::Panel::top("devil_desktop_top")
-            .exact_size(76.0)
-            .frame(theme::panel_frame(theme::BG_BASE))
+            .exact_size(52.0)
+            .frame(theme::toolbar_frame())
             .show_inside(ui, |ui| {
                 render_top_command_bar(ui, snapshot, &model, &mut actions);
             });
 
         egui::Panel::left("devil_desktop_explorer")
-            .default_size(286.0)
-            .min_size(220.0)
+            .default_size(272.0)
+            .min_size(236.0)
             .resizable(true)
-            .frame(theme::panel_frame(theme::BG_BASE))
+            .frame(theme::pane_frame(theme::BG_BASE))
             .show_inside(ui, |ui| {
                 render_left_sidebar(ui, snapshot, state, &model, &mut actions);
             });
 
         egui::Panel::bottom("devil_desktop_status")
-            .exact_size(28.0)
+            .exact_size(24.0)
             .frame(theme::panel_frame(theme::BG_CODE))
             .show_inside(ui, |ui| {
                 render_status_bar(ui, &model);
             });
 
+        let bottom_height = match projected_autonomy_level(snapshot) {
+            DesktopAutonomyLevel::Manual => 150.0,
+            DesktopAutonomyLevel::Fleet => 240.0,
+            _ => 200.0,
+        };
         egui::Panel::bottom("devil_desktop_bottom_console")
-            .default_size(208.0)
+            .default_size(bottom_height)
             .min_size(112.0)
             .resizable(true)
-            .frame(theme::panel_frame(theme::BG_CODE))
+            .frame(theme::pane_frame(theme::BG_CODE))
             .show_inside(ui, |ui| {
                 render_bottom_console(ui, &model);
             });
 
+        let right_width = match projected_autonomy_level(snapshot) {
+            DesktopAutonomyLevel::Manual => 260.0,
+            DesktopAutonomyLevel::Assisted => 340.0,
+            DesktopAutonomyLevel::Copilot
+            | DesktopAutonomyLevel::Delegated
+            | DesktopAutonomyLevel::Fleet => 380.0,
+        };
         egui::Panel::right("devil_desktop_trust")
-            .default_size(392.0)
-            .min_size(300.0)
+            .default_size(right_width)
+            .min_size(260.0)
             .resizable(true)
-            .frame(theme::panel_frame(theme::BG_BASE))
+            .frame(theme::pane_frame(theme::BG_BASE))
             .show_inside(ui, |ui| {
                 render_right_console(
                     ui,
@@ -229,7 +240,7 @@ impl ProjectionView {
             });
 
         egui::CentralPanel::default()
-            .frame(theme::panel_frame(theme::BG_CODE))
+            .frame(theme::pane_frame(theme::BG_CODE))
             .show_inside(ui, |ui| {
                 render_code_canvas(ui, snapshot, &model, &mut actions);
             });
@@ -248,30 +259,46 @@ fn render_top_command_bar(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(theme::heading("Devil IDE"));
+    let level = projected_autonomy_level(snapshot);
+    ui.set_height(52.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        render_window_controls(ui);
+        ui.label(theme::title("Devil IDE"));
         ui.separator();
-        ui.label(theme::body(&model.layout_title));
-        if ui
-            .button(theme::accent("Save All", theme::ACCENT_CYAN))
-            .clicked()
-        {
-            actions.push(DesktopAction::SaveAll);
-        }
-        if ui.button(theme::body("Search")).clicked() {
-            actions.push(DesktopAction::ShowSearchPrompt {
-                scope: snapshot.search_projection.scope,
-            });
-        }
-        if ui.button(theme::body("Open")).clicked() {
-            actions.push(DesktopAction::ShowOpenPathPrompt);
-        }
-        ui.separator();
+        ui.label(theme::body_strong(&model.layout_title));
+        render_branch_pill(ui, snapshot);
+        render_engine_status(ui, snapshot, level);
+        ui.add_space(12.0);
         render_autonomy_scale(ui, model);
-    });
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        render_shell_rows(ui, &model.top_bar_rows);
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            avatar(ui, "MK", theme::TEXT_SECONDARY);
+            if soft_button(ui, "Open").clicked() {
+                actions.push(DesktopAction::ShowOpenPathPrompt);
+            }
+            if soft_button(ui, "Search").clicked() {
+                actions.push(DesktopAction::ShowSearchPrompt {
+                    scope: snapshot.search_projection.scope,
+                });
+            }
+            if primary_button(ui, level_primary_action(level), level_color(level)).clicked() {
+                actions.push(match level {
+                    DesktopAutonomyLevel::Manual | DesktopAutonomyLevel::Assisted => {
+                        DesktopAction::StartAiExplain {
+                            instruction_label: "desktop explain".to_string(),
+                        }
+                    }
+                    _ => DesktopAction::StartAiProposal {
+                        instruction_label: "desktop directive".to_string(),
+                    },
+                });
+            }
+            render_resource_strip(ui, snapshot, level);
+            if soft_button(ui, "Save All").clicked() {
+                actions.push(DesktopAction::SaveAll);
+            }
+        });
     });
 }
 
@@ -281,9 +308,9 @@ fn render_autonomy_scale(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) 
         .first()
         .map(|row| row.as_str())
         .unwrap_or("autonomy scale: active=L1 Manual read-only projection");
-    theme::card_frame().show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(theme::eyebrow("Autonomy"));
+    theme::card_frame_tinted(theme::BG_INPUT, theme::BORDER_DEFAULT).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(theme::eyebrow("AUTONOMY LEVEL"));
             for (level, label, color) in [
                 ("L1", "Manual", theme::TEXT_MUTED),
                 ("L2", "Assisted", theme::ACCENT_CYAN),
@@ -291,13 +318,7 @@ fn render_autonomy_scale(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) 
                 ("L4", "Delegated", theme::ACCENT_VIOLET),
                 ("L5", "Fleet", theme::ACCENT_PURPLE),
             ] {
-                let selected = active.contains(level);
-                let text = format!("{level} {label}");
-                if selected {
-                    ui.label(theme::accent(text, color));
-                } else {
-                    ui.label(theme::muted(text));
-                }
+                level_pill(ui, level, label, color, active.contains(level));
             }
         });
     });
@@ -310,35 +331,25 @@ fn render_left_sidebar(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    ui.label(theme::eyebrow("Project"));
-    theme::card_frame().show(ui, |ui| {
-        render_shell_rows(ui, &model.left_sidebar_rows);
-    });
+    let level = projected_autonomy_level(snapshot);
+    sidebar_header(ui, "PROJECT", workspace_label(snapshot));
+    if level == DesktopAutonomyLevel::Fleet {
+        render_context_packs(ui);
+    } else {
+        render_project_tree_panel(ui, snapshot, state, level, actions);
+    }
 
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label(theme::heading("Explorer"));
-        if ui.button(theme::muted("Refresh")).clicked() {
-            actions.push(DesktopAction::RefreshExplorer);
+    match level {
+        DesktopAutonomyLevel::Manual => render_collapsed_ai_rail(ui),
+        DesktopAutonomyLevel::Assisted => render_assistance_toggles(ui),
+        DesktopAutonomyLevel::Copilot => render_session_context(ui, snapshot),
+        DesktopAutonomyLevel::Delegated | DesktopAutonomyLevel::Fleet => {
+            render_agent_roster(ui, snapshot, model, level)
         }
-    });
-    egui::ScrollArea::vertical()
-        .id_salt("devil_desktop_explorer_scroll")
-        .max_height(240.0)
-        .show(ui, |ui| {
-            render_explorer_controls(ui, snapshot, state, actions);
-        });
+    }
 
-    ui.add_space(6.0);
-    ui.label(theme::eyebrow("Active Fleet"));
-    theme::card_frame().show(ui, |ui| {
-        if model.assistant_rows.is_empty() {
-            ui.label(theme::muted("No projected assistant or delegated activity"));
-        } else {
-            for row in model.assistant_rows.iter().take(5) {
-                ui.label(theme::body(row));
-            }
-        }
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+        render_sidebar_footer(ui, snapshot);
     });
 }
 
@@ -348,38 +359,14 @@ fn render_code_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(theme::heading("Code Canvas"));
-        render_tab_controls(ui, snapshot, actions);
-    });
-    ui.add_space(4.0);
-    theme::card_frame().show(ui, |ui| {
-        render_shell_rows(ui, &model.main_canvas_rows);
-        for row in &model.editor_status_rows {
-            ui.label(theme::body(row));
+    match projected_autonomy_level(snapshot) {
+        DesktopAutonomyLevel::Manual | DesktopAutonomyLevel::Assisted => {
+            render_editor_canvas(ui, snapshot, model, actions)
         }
-        for row in &model.viewport_metadata_rows {
-            ui.label(theme::muted(row));
-        }
-        for row in &model.close_prompt_rows {
-            ui.label(theme::accent(row, theme::ACCENT_AMBER));
-        }
-        render_close_dirty_prompt_controls(ui, snapshot, actions);
-    });
-
-    ui.add_space(6.0);
-    theme::panel_frame(theme::BG_CODE).show(ui, |ui| {
-        egui::ScrollArea::both()
-            .id_salt("devil_desktop_code_canvas_scroll")
-            .show(ui, |ui| {
-                for row in &model.active_buffer_lines {
-                    ui.monospace(row);
-                }
-            });
-    });
-
-    ui.separator();
-    render_search_projection(ui, snapshot);
+        DesktopAutonomyLevel::Copilot => render_copilot_canvas(ui, snapshot, model, actions),
+        DesktopAutonomyLevel::Delegated => render_delegated_canvas(ui, snapshot, model, actions),
+        DesktopAutonomyLevel::Fleet => render_fleet_canvas(ui, snapshot, model, actions),
+    }
 }
 
 fn render_right_console(
@@ -387,144 +374,1286 @@ fn render_right_console(
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
     show_trust: &mut bool,
-    show_auxiliary: &mut bool,
+    _show_auxiliary: &mut bool,
     actions: &mut Vec<DesktopAction>,
 ) {
-    ui.label(theme::heading("Directive Console"));
-    theme::card_frame().show(ui, |ui| {
-        render_shell_rows(ui, &model.right_console_rows);
-        for row in &model.autonomy_rows {
-            ui.label(theme::muted(row));
+    match projected_autonomy_level(snapshot) {
+        DesktopAutonomyLevel::Manual => {
+            render_manual_context_inspector(ui, snapshot, model, actions)
         }
-    });
-
-    ui.add_space(6.0);
-    ui.checkbox(show_trust, "Trust and proposals");
-    if *show_trust {
-        render_console_section(ui, "Approval Queue", &model.proposal_rows, "No proposals");
-        render_proposal_controls(ui, snapshot, actions);
-        render_console_section(ui, "Trust", &model.trust_rows, "No trust warnings");
-    }
-
-    ui.separator();
-    ui.checkbox(show_auxiliary, "Auxiliary surfaces");
-    if *show_auxiliary {
-        render_console_section(
-            ui,
-            "Language",
-            &model.language_rows,
-            "No language tooling activity",
-        );
-        render_console_section(ui, "Terminal", &model.terminal_rows, "No terminal activity");
-        render_console_section(
-            ui,
-            "Operational Health",
-            &model.operational_health_rows,
-            "No health rows",
-        );
-        render_console_section(
-            ui,
-            "Assistant and Delegated Tasks",
-            &model.assistant_rows,
-            "No assistant activity",
-        );
-        render_assistant_controls(ui, snapshot, actions);
-        render_console_section(
-            ui,
-            "Plugin Management",
-            &model.plugin_rows,
-            "No plugin contributions",
-        );
-        render_plugin_management_controls(ui, snapshot, actions);
-        render_console_section(
-            ui,
-            "Collaboration",
-            &model.collaboration_rows,
-            "No collaboration rows",
-        );
-        render_collaboration_controls(ui, snapshot, actions);
-        render_console_section(ui, "Remote Workspace", &model.remote_rows, "No remote rows");
-        render_remote_workspace_controls(ui, snapshot, actions);
+        DesktopAutonomyLevel::Assisted => render_assisted_inspector(ui, snapshot, model, actions),
+        DesktopAutonomyLevel::Copilot => render_pair_session_panel(ui, snapshot, model, actions),
+        DesktopAutonomyLevel::Delegated => {
+            render_delegation_console(ui, snapshot, model, show_trust, actions)
+        }
+        DesktopAutonomyLevel::Fleet => render_fleet_console(ui, snapshot, model, actions),
     }
 }
 
 fn render_bottom_console(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(theme::heading("Bottom Console"));
-        ui.label(theme::accent("Terminal", theme::ACCENT_CYAN));
-        ui.label(theme::accent("Tests", theme::ACCENT_GREEN));
-        ui.label(theme::accent("Workflow Logs", theme::ACCENT_AMBER));
-        ui.label(theme::accent("Agent Stream", theme::ACCENT_VIOLET));
+    ui.horizontal(|ui| {
+        console_tab(ui, "Terminal", true, theme::TEXT_PRIMARY);
+        console_tab(ui, "Tests", false, theme::ACCENT_GREEN);
+        console_tab(ui, "Agent Logs", false, theme::ACCENT_CYAN);
+        console_tab(ui, "Workflow", false, theme::ACCENT_VIOLET);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(theme::code_muted("us-west - 42 ms"));
+        });
     });
-    ui.add_space(4.0);
+    ui.separator();
     ui.columns(2, |columns| {
-        theme::card_frame().show(&mut columns[0], |ui| {
-            ui.label(theme::eyebrow("Terminal / Runtime"));
-            render_shell_rows(ui, &model.bottom_console_rows);
-            for row in model.terminal_rows.iter().take(6) {
-                ui.label(theme::body(row));
-            }
-        });
-        theme::card_frame().show(&mut columns[1], |ui| {
-            ui.label(theme::eyebrow("Workflow / Health"));
-            for row in model.operational_health_rows.iter().take(8) {
-                ui.label(theme::body(row));
-            }
-            for row in model.status_rows.iter().take(4) {
-                ui.label(theme::muted(row));
-            }
-        });
+        render_terminal_stream(&mut columns[0], model);
+        render_agent_stream(&mut columns[1], model);
     });
 }
 
 fn render_status_bar(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
-    ui.horizontal_wrapped(|ui| {
+    ui.set_height(24.0);
+    ui.horizontal(|ui| {
+        ui.label(theme::accent("connected", theme::ACCENT_GREEN));
+        ui.label(theme::muted("- fleet-mesh"));
+        ui.separator();
         for row in &model.status_bar_rows {
+            ui.label(theme::code_muted(trim_middle(row, 56)));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(theme::accent("Autonomy", theme::ACCENT_VIOLET));
+            ui.label(theme::code_muted("UTF-8"));
+            ui.label(theme::code_muted("LF"));
+        });
+    });
+}
+
+fn render_console_section(ui: &mut egui::Ui, title: &str, rows: &[String], empty: &str) {
+    section_label(ui, title, None);
+    theme::small_card_frame().show(ui, |ui| {
+        render_compact_rows(ui, rows, empty, 6);
+    });
+}
+
+fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
+    let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
+    section_label(ui, "Search", None);
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::body(search.header));
+        render_compact_rows(ui, &search.status_rows, "Search idle", 2);
+        render_compact_rows(ui, &search.result_rows, "No search results", 5);
+        for row in &search.diagnostic_rows {
             ui.label(theme::muted(row));
         }
     });
 }
 
-fn render_console_section(ui: &mut egui::Ui, title: &str, rows: &[String], empty: &str) {
-    ui.add_space(5.0);
-    ui.label(theme::eyebrow(title));
-    theme::card_frame().show(ui, |ui| {
-        if rows.is_empty() {
-            ui.label(theme::muted(empty));
-        } else {
-            for row in rows.iter().take(8) {
-                ui.label(theme::body(row));
+fn render_window_controls(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        status_dot(ui, theme::ACCENT_RED);
+        status_dot(ui, theme::ACCENT_AMBER);
+        status_dot(ui, theme::ACCENT_GREEN);
+    });
+}
+
+fn render_branch_pill(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
+    let path = current_path(snapshot);
+    let label = if path == "<none>" {
+        "workspace"
+    } else {
+        path.rsplit(['/', '\\']).next().unwrap_or(path)
+    };
+    pill(ui, &format!("branch - {label}"), theme::TEXT_MUTED, false);
+}
+
+fn render_engine_status(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    level: DesktopAutonomyLevel,
+) {
+    let label = match level {
+        DesktopAutonomyLevel::Manual => "Engine idle",
+        DesktopAutonomyLevel::Assisted => "Context indexed",
+        DesktopAutonomyLevel::Copilot => "Pair session active",
+        DesktopAutonomyLevel::Delegated => "Delegated tasks active",
+        DesktopAutonomyLevel::Fleet => "Fleet online",
+    };
+    ui.horizontal(|ui| {
+        status_dot(ui, level_color(level));
+        ui.label(theme::muted(format!(
+            "{label} - {} proposals",
+            snapshot.proposal_ledger_projection.rows.len()
+        )));
+    });
+}
+
+fn render_resource_strip(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    level: DesktopAutonomyLevel,
+) {
+    theme::ghost_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(theme::accent(
+                format!("{}%", resource_load(snapshot, level)),
+                theme::ACCENT_CYAN,
+            ));
+            ui.separator();
+            ui.label(theme::accent(
+                format!("{} tests", snapshot.status_messages.len()),
+                theme::ACCENT_GREEN,
+            ));
+            ui.separator();
+            ui.label(theme::accent(
+                format!("{} agents", projected_agent_count(snapshot)),
+                level_color(level),
+            ));
+        });
+    });
+}
+
+fn render_project_tree_panel(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    level: DesktopAutonomyLevel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.horizontal(|ui| {
+        section_label(ui, "Explorer", None);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if soft_button(ui, "Refresh").clicked() {
+                actions.push(DesktopAction::RefreshExplorer);
             }
-            if rows.len() > 8 {
-                ui.label(theme::muted(format!("{} more rows", rows.len() - 8)));
+        });
+    });
+    egui::ScrollArea::vertical()
+        .id_salt("devil_desktop_explorer_scroll")
+        .max_height(if level == DesktopAutonomyLevel::Manual {
+            520.0
+        } else {
+            240.0
+        })
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            render_explorer_controls(ui, snapshot, state, actions);
+        });
+}
+
+fn render_context_packs(ui: &mut egui::Ui) {
+    section_label(ui, "Context Packs", Some(theme::ACCENT_PURPLE));
+    for pack in [
+        "Auth system",
+        "Billing model",
+        "API routes",
+        "Test suite",
+        "Deployment config",
+    ] {
+        theme::ghost_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                status_dot(ui, theme::TEXT_MUTED);
+                ui.label(theme::body(pack));
+            });
+        });
+        ui.add_space(2.0);
+    }
+}
+
+fn render_collapsed_ai_rail(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    theme::small_card_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(theme::eyebrow("ACTIVE FLEET"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(theme::muted("AI idle"));
+            });
+        });
+    });
+}
+
+fn render_assistance_toggles(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    section_label(ui, "AI Assistance", Some(theme::ACCENT_CYAN));
+    for label in [
+        "Inline completions",
+        "Quick fixes",
+        "Explain selection",
+        "Generate docs",
+        "Test suggestions",
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(theme::body(label));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                pill(ui, "on", theme::ACCENT_CYAN, true);
+            });
+        });
+    }
+}
+
+fn render_session_context(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
+    ui.add_space(8.0);
+    section_label(ui, "Session Context", Some(theme::ACCENT_BLUE));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::eyebrow("CURRENT TASK"));
+        ui.label(theme::body(current_objective(snapshot)));
+        ui.add_space(6.0);
+        ui.label(theme::eyebrow("SELECTED FILE"));
+        ui.label(theme::code(current_path(snapshot)));
+        ui.add_space(6.0);
+        ui.label(theme::eyebrow("RELATED TESTS"));
+        ui.label(theme::muted(format!(
+            "{} terminal rows - {} language ops",
+            snapshot.terminal_panel_projection.output_rows.len(),
+            snapshot.language_tooling_projection.operations.len()
+        )));
+    });
+}
+
+fn render_agent_roster(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    level: DesktopAutonomyLevel,
+) {
+    ui.add_space(8.0);
+    section_label(ui, "Active Fleet", Some(level_color(level)));
+    let mut rendered = 0usize;
+    for provider in snapshot.assisted_ai_projection.providers.iter().take(4) {
+        agent_card(
+            ui,
+            &provider.provider_label,
+            &format!("{:?}", provider.availability),
+            level_color(level),
+            0.55,
+        );
+        rendered += 1;
+    }
+    for plan in snapshot.delegated_task_projection.plan_rows.iter().take(5) {
+        agent_card(
+            ui,
+            &plan.plan_id.0,
+            &format!("{:?}", plan.plan_state),
+            risk_color(plan.risk_label),
+            0.72,
+        );
+        rendered += 1;
+    }
+    if rendered == 0 {
+        render_compact_rows(ui, &model.assistant_rows, "No projected agent activity", 4);
+    }
+}
+
+fn render_sidebar_footer(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
+    ui.separator();
+    footer_metric(
+        ui,
+        "git",
+        snapshot.proposal_ledger_projection.rows.len(),
+        theme::ACCENT_AMBER,
+    );
+    footer_metric(
+        ui,
+        "tests",
+        snapshot.status_messages.len(),
+        theme::ACCENT_GREEN,
+    );
+    footer_metric(
+        ui,
+        "workflows",
+        snapshot.delegated_task_projection.plan_count as usize,
+        theme::ACCENT_CYAN,
+    );
+}
+
+fn render_editor_canvas(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let level = projected_autonomy_level(snapshot);
+    render_tab_strip(ui, snapshot, actions);
+    render_breadcrumb_bar(ui, snapshot, level);
+    theme::code_frame().show(ui, |ui| {
+        egui::ScrollArea::both()
+            .id_salt("devil_desktop_code_canvas_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                render_code_lines(ui, model);
+            });
+    });
+    if level == DesktopAutonomyLevel::Assisted {
+        render_assisted_suggestion_panel(ui);
+    }
+    if level == DesktopAutonomyLevel::Manual {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            theme::ghost_frame().show(ui, |ui| {
+                ui.label(theme::muted("Tab to accept completion"));
+            });
+        });
+    }
+    render_search_projection(ui, snapshot);
+    render_close_dirty_prompt_controls(ui, snapshot, actions);
+}
+
+fn render_tab_strip(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
+        ui.set_height(34.0);
+        ui.horizontal(|ui| {
+            let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+            if tabs.is_empty() {
+                ui.label(theme::muted("<no open tabs>"));
+            }
+            for tab in tabs {
+                let mut title = tab.title.clone();
+                if tab.dirty {
+                    title.push_str(" *");
+                }
+                let color = if tab.active {
+                    theme::TEXT_PRIMARY
+                } else {
+                    theme::TEXT_MUTED
+                };
+                let response = ui.add(
+                    egui::Button::new(theme::accent(title, color))
+                        .fill(if tab.active {
+                            theme::BG_CODE
+                        } else {
+                            theme::BG_BASE
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if tab.active {
+                                theme::BORDER_DEFAULT
+                            } else {
+                                theme::BG_BASE
+                            },
+                        ))
+                        .corner_radius(egui::CornerRadius::same(6)),
+                );
+                if response.clicked() {
+                    actions.push(DesktopAction::SwitchTab {
+                        buffer_id: tab.buffer_id,
+                    });
+                }
+            }
+        });
+    });
+}
+
+fn render_breadcrumb_bar(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    level: DesktopAutonomyLevel,
+) {
+    theme::pane_frame(theme::BG_CODE).show(ui, |ui| {
+        ui.set_height(28.0);
+        ui.horizontal(|ui| {
+            ui.label(theme::code_muted("src"));
+            ui.label(theme::muted(">"));
+            ui.label(theme::code(current_path(snapshot)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(theme::muted("TS - LF - UTF-8"));
+                ui.label(theme::accent("checks ready", theme::ACCENT_GREEN));
+                if level != DesktopAutonomyLevel::Manual {
+                    ui.label(theme::accent("AI suggestions", level_color(level)));
+                }
+            });
+        });
+    });
+}
+
+fn render_code_lines(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    if model.active_buffer_lines.is_empty() {
+        ui.label(theme::muted("<no active buffer>"));
+        return;
+    }
+    for (index, row) in model.active_buffer_lines.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [42.0, 18.0],
+                egui::Label::new(theme::code_muted(format!("{:>3}", index + 1))),
+            );
+            ui.label(theme::code(row));
+        });
+    }
+}
+
+fn render_assisted_suggestion_panel(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    theme::card_frame_tinted(theme::BG_RAISED, theme::dim(theme::ACCENT_CYAN, 80)).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(theme::accent("Suggestions", theme::ACCENT_CYAN));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(theme::code_muted("3 for selection"));
+            });
+        });
+        for action in [
+            "Refactor validation into helper",
+            "Add null-check for selected value",
+            "Generate unit test",
+        ] {
+            ui.label(theme::body(action));
+        }
+    });
+}
+
+fn render_copilot_canvas(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    render_copilot_plan_strip(ui, snapshot);
+    ui.columns(2, |columns| {
+        theme::code_frame().show(&mut columns[0], |ui| {
+            section_label(ui, current_path(snapshot), Some(theme::ACCENT_BLUE));
+            egui::ScrollArea::both().show(ui, |ui| render_code_lines(ui, model));
+        });
+        theme::code_frame().show(&mut columns[1], |ui| {
+            ui.horizontal(|ui| {
+                section_label(ui, "Proposed changes", Some(theme::ACCENT_VIOLET));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if primary_button(ui, "Apply all", theme::ACCENT_BLUE).clicked()
+                        && let Some(proposal_id) = first_proposal_id(snapshot)
+                    {
+                        actions.push(DesktopAction::ApplyProposal { proposal_id });
+                    }
+                });
+            });
+            render_proposal_diff_cards(ui, snapshot, model);
+        });
+    });
+}
+
+fn render_copilot_plan_strip(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
+    theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
+        ui.set_height(40.0);
+        ui.horizontal(|ui| {
+            section_label(ui, "Co-Pilot Plan", Some(theme::ACCENT_BLUE));
+            for (index, label) in [
+                "Inspect current file",
+                "Draft proposal",
+                "Update tests",
+                "Run suite",
+            ]
+            .iter()
+            .enumerate()
+            {
+                pill(
+                    ui,
+                    &format!("{} {label}", index + 1),
+                    if index == 0 {
+                        theme::ACCENT_GREEN
+                    } else {
+                        theme::TEXT_MUTED
+                    },
+                    index == 0,
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(theme::muted(format!(
+                    "{} previews",
+                    snapshot.assisted_ai_projection.proposal_previews.len()
+                )));
+            });
+        });
+    });
+}
+
+fn render_proposal_diff_cards(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+) {
+    let rows = if model.proposal_rows.is_empty() {
+        &model.assistant_rows
+    } else {
+        &model.proposal_rows
+    };
+    if rows.is_empty() {
+        ui.label(theme::muted("No proposal preview projected"));
+        return;
+    }
+    for row in rows.iter().take(8) {
+        let color = if row.contains("diff") {
+            theme::ACCENT_GREEN
+        } else {
+            theme::ACCENT_VIOLET
+        };
+        theme::small_card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                status_dot(ui, color);
+                ui.label(theme::body(trim_middle(row, 96)));
+            });
+        });
+    }
+    if let Some(selected) = snapshot.proposal_ledger_projection.selected_proposal_id {
+        ui.label(theme::code_muted(format!(
+            "selected proposal {}",
+            selected.0
+        )));
+    }
+}
+
+fn render_delegated_canvas(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    theme::pane_frame(theme::BG_CODE).show(ui, |ui| {
+        ui.set_height(220.0);
+        ui.horizontal(|ui| {
+            section_label(ui, "Delegated Diff Review", Some(theme::ACCENT_VIOLET));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if primary_button(ui, "Approve", theme::ACCENT_BLUE).clicked()
+                    && let Some(proposal_id) = first_proposal_id(snapshot)
+                {
+                    actions.push(DesktopAction::ApproveProposal { proposal_id });
+                }
+                if soft_button(ui, "Request Changes").clicked()
+                    && let Some(proposal_id) = first_proposal_id(snapshot)
+                {
+                    actions.push(DesktopAction::RejectProposal {
+                        proposal_id,
+                        reason: ProposalRejectionReason::UserRejected,
+                    });
+                }
+            });
+        });
+        render_compact_rows(
+            ui,
+            &model.proposal_rows,
+            "No delegated proposal selected",
+            8,
+        );
+    });
+    ui.separator();
+    render_task_board(
+        ui,
+        snapshot,
+        model,
+        DesktopAutonomyLevel::Delegated,
+        actions,
+    );
+}
+
+fn render_fleet_canvas(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
+        ui.set_height(84.0);
+        ui.horizontal(|ui| {
+            avatar(ui, "L5", theme::ACCENT_PURPLE);
+            ui.vertical(|ui| {
+                ui.label(theme::accent("MASTER DIRECTIVE", theme::ACCENT_PURPLE));
+                ui.label(theme::title(current_objective(snapshot)));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if soft_button(ui, "Force Review").clicked()
+                    && let Some(proposal_id) = first_proposal_id(snapshot)
+                {
+                    actions.push(DesktopAction::PreviewProposal { proposal_id });
+                }
+                let _ = soft_button(ui, "Pause Fleet");
+                let _ = soft_button(ui, "Add Constraint");
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.label(theme::muted(format!(
+                "{} agents active",
+                projected_agent_count(snapshot)
+            )));
+            ui.separator();
+            ui.label(theme::muted(format!(
+                "{} proposals",
+                snapshot.proposal_ledger_projection.rows.len()
+            )));
+            ui.separator();
+            ui.label(theme::accent("confidence 87%", theme::ACCENT_GREEN));
+        });
+    });
+    render_task_board(ui, snapshot, model, DesktopAutonomyLevel::Fleet, actions);
+}
+
+fn render_task_board(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    level: DesktopAutonomyLevel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let board_height = ui.available_height();
+    egui::ScrollArea::horizontal()
+        .id_salt("devil_desktop_task_board")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_min_height(board_height);
+            ui.horizontal_top(|ui| {
+                task_column(
+                    ui,
+                    "ASSIGNED",
+                    theme::TEXT_MUTED,
+                    delegated_plan_rows(snapshot, model, 0),
+                    actions,
+                );
+                task_column(
+                    ui,
+                    "IN PROGRESS",
+                    theme::ACCENT_BLUE,
+                    delegated_step_rows(snapshot, model),
+                    actions,
+                );
+                task_column(
+                    ui,
+                    "WAITING ON HUMAN",
+                    theme::ACCENT_ORANGE,
+                    proposal_board_rows(snapshot, model),
+                    actions,
+                );
+                task_column(
+                    ui,
+                    if level == DesktopAutonomyLevel::Fleet {
+                        "TESTING / REVIEW"
+                    } else {
+                        "TESTING"
+                    },
+                    theme::ACCENT_VIOLET,
+                    model.language_rows.iter().take(4).cloned().collect(),
+                    actions,
+                );
+                task_column(
+                    ui,
+                    "DONE",
+                    theme::ACCENT_GREEN,
+                    model
+                        .operational_health_rows
+                        .iter()
+                        .take(4)
+                        .cloned()
+                        .collect(),
+                    actions,
+                );
+            });
+        });
+}
+
+fn task_column(
+    ui: &mut egui::Ui,
+    title: &str,
+    color: egui::Color32,
+    rows: Vec<String>,
+    _actions: &mut Vec<DesktopAction>,
+) {
+    theme::card_frame_tinted(theme::BG_CANVAS, theme::BORDER_SUBTLE).show(ui, |ui| {
+        ui.set_width(260.0);
+        ui.horizontal(|ui| {
+            status_dot(ui, color);
+            ui.label(theme::accent(title, theme::TEXT_SECONDARY));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                pill(ui, &rows.len().to_string(), color, false);
+            });
+        });
+        ui.separator();
+        if rows.is_empty() {
+            ui.label(theme::muted("No projected rows"));
+        }
+        for (index, row) in rows.iter().take(5).enumerate() {
+            theme::small_card_frame().show(ui, |ui| {
+                ui.label(theme::body_strong(trim_middle(row, 54)));
+                ui.horizontal(|ui| {
+                    let label = format!("{}", index + 1);
+                    avatar(ui, &label, color);
+                    ui.label(theme::muted("metadata-only"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(theme::accent("review", color));
+                    });
+                });
+                progress_bar(ui, 0.35 + (index as f32 * 0.13).min(0.55), color);
+            });
+        }
+    });
+}
+
+fn render_manual_context_inspector(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    inspector_header(ui, "Context", DesktopAutonomyLevel::Manual);
+    section_label(ui, "Current File", None);
+    ui.label(theme::code(current_path(snapshot)));
+    ui.label(theme::muted(format!(
+        "{} lines projected",
+        model.active_buffer_lines.len()
+    )));
+    section_label(ui, "Symbols", None);
+    render_compact_rows(ui, &model.language_rows, "No language symbols", 5);
+    section_label(ui, "Problems", None);
+    ui.label(theme::muted(format!(
+        "{} problems",
+        snapshot.language_tooling_projection.problems.len()
+    )));
+    section_label(ui, "Git Changes", None);
+    render_compact_rows(ui, &model.proposal_rows, "No projected changes", 5);
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+        if soft_button(ui, "Ask AI").clicked() {
+            actions.push(DesktopAction::StartAiExplain {
+                instruction_label: "desktop ask ai".to_string(),
+            });
+        }
+    });
+}
+
+fn render_assisted_inspector(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    inspector_header(ui, "Assistant", DesktopAutonomyLevel::Assisted);
+    section_label(ui, "Current Selection", Some(theme::ACCENT_CYAN));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::code(current_path(snapshot)));
+        for row in model.active_buffer_lines.iter().take(5) {
+            ui.label(theme::code_muted(trim_middle(row, 48)));
+        }
+    });
+    section_label(ui, "Actions", None);
+    if soft_button(ui, "Suggested Fixes").clicked() {
+        actions.push(DesktopAction::StartAiProposal {
+            instruction_label: "desktop suggested fixes".to_string(),
+        });
+    }
+    if soft_button(ui, "Explain This Function").clicked() {
+        actions.push(DesktopAction::StartAiExplain {
+            instruction_label: "desktop explain function".to_string(),
+        });
+    }
+    if soft_button(ui, "Generate Test").clicked() {
+        actions.push(DesktopAction::StartAiProposal {
+            instruction_label: "desktop generate test".to_string(),
+        });
+    }
+    section_label(ui, "Recent Assists", None);
+    render_compact_rows(ui, &model.assistant_rows, "No recent assistant activity", 5);
+}
+
+fn render_pair_session_panel(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    inspector_header(ui, "Pair Session", DesktopAutonomyLevel::Copilot);
+    section_label(ui, "Current Objective", Some(theme::ACCENT_BLUE));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::body_strong(current_objective(snapshot)));
+        ui.label(theme::code_muted(current_path(snapshot)));
+    });
+    section_label(ui, "AI Plan", None);
+    render_compact_rows(ui, &model.assistant_rows, "No co-pilot plan projected", 6);
+    section_label(ui, "Human Feedback", None);
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::muted(
+            "Guide the co-pilot, revise the plan, or ask for alternatives...",
+        ));
+        if primary_button(ui, "Send", theme::ACCENT_BLUE).clicked() {
+            actions.push(DesktopAction::StartAiExplain {
+                instruction_label: "desktop pair feedback".to_string(),
+            });
+        }
+    });
+}
+
+fn render_delegation_console(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    show_trust: &mut bool,
+    actions: &mut Vec<DesktopAction>,
+) {
+    inspector_header(ui, "Delegation Console", DesktopAutonomyLevel::Delegated);
+    section_label(ui, "Delegate Task", Some(theme::ACCENT_VIOLET));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::muted("Delegate a scoped task to projected agents"));
+        if primary_button(ui, "Delegate", theme::ACCENT_BLUE).clicked() {
+            actions.push(DesktopAction::StartAiProposal {
+                instruction_label: "desktop delegated task".to_string(),
+            });
+        }
+    });
+    section_label(ui, "Approval Queue", Some(theme::ACCENT_ORANGE));
+    render_proposal_cards(ui, snapshot, actions);
+    ui.checkbox(show_trust, "Trust details");
+    if *show_trust {
+        render_console_section(ui, "Trust", &model.trust_rows, "No trust warnings");
+    }
+}
+
+fn render_fleet_console(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    inspector_header(ui, "Fleet Control Panel", DesktopAutonomyLevel::Fleet);
+    section_label(ui, "Current Directive", Some(theme::ACCENT_PURPLE));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::body_strong(current_objective(snapshot)));
+        ui.horizontal(|ui| {
+            status_dot(ui, theme::ACCENT_GREEN);
+            ui.label(theme::muted("Running"));
+            ui.separator();
+            ui.label(theme::muted("proposal-mediated"));
+        });
+    });
+    section_label(ui, "Human Approval Queue", Some(theme::ACCENT_ORANGE));
+    render_proposal_cards(ui, snapshot, actions);
+    section_label(ui, "Agent Decision Feed", None);
+    render_compact_rows(ui, &model.assistant_rows, "No agent decisions projected", 6);
+    section_label(ui, "Risk Monitor", Some(theme::ACCENT_RED));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::accent(
+            "Build Status - projected",
+            theme::ACCENT_GREEN,
+        ));
+        ui.label(theme::accent(
+            format!(
+                "{} proposal rows, {} trust rows",
+                model.proposal_rows.len(),
+                model.trust_rows.len()
+            ),
+            theme::ACCENT_AMBER,
+        ));
+    });
+}
+
+fn render_proposal_cards(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if snapshot.proposal_ledger_projection.rows.is_empty() {
+        ui.label(theme::muted("No pending proposals"));
+        return;
+    }
+    for row in snapshot.proposal_ledger_projection.rows.iter().take(4) {
+        theme::card_frame_tinted(theme::BG_RAISED, theme::dim(theme::ACCENT_ORANGE, 48)).show(
+            ui,
+            |ui| {
+                ui.label(theme::body_strong(&row.title));
+                ui.horizontal(|ui| {
+                    ui.label(theme::muted(format!("{:?}", row.payload_kind)));
+                    ui.separator();
+                    ui.label(theme::accent(
+                        format!("{:?} risk", row.risk_label),
+                        risk_color(row.risk_label),
+                    ));
+                });
+                ui.horizontal(|ui| {
+                    if primary_button(ui, "Approve", theme::ACCENT_GREEN).clicked() {
+                        actions.push(DesktopAction::ApproveProposal {
+                            proposal_id: row.proposal_id,
+                        });
+                    }
+                    if soft_button(ui, "Review").clicked() {
+                        actions.push(DesktopAction::OpenProposalDetails {
+                            proposal_id: row.proposal_id,
+                        });
+                    }
+                    if soft_button(ui, "Reject").clicked() {
+                        actions.push(DesktopAction::RejectProposal {
+                            proposal_id: row.proposal_id,
+                            reason: ProposalRejectionReason::UserRejected,
+                        });
+                    }
+                });
+            },
+        );
+    }
+}
+
+fn render_terminal_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    section_label(ui, "Terminal / Runtime", Some(theme::ACCENT_CYAN));
+    theme::code_frame().show(ui, |ui| {
+        render_compact_rows(ui, &model.terminal_rows, "No terminal activity", 10);
+        if model.terminal_rows.is_empty() {
+            for row in model.bottom_console_rows.iter().take(4) {
+                ui.label(theme::code_muted(row));
             }
         }
     });
 }
 
-fn render_shell_rows(ui: &mut egui::Ui, rows: &[String]) {
-    for row in rows {
-        ui.label(theme::body(row));
+fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    section_label(ui, "Agent Comm Stream", Some(theme::ACCENT_VIOLET));
+    theme::code_frame().show(ui, |ui| {
+        render_compact_rows(ui, &model.assistant_rows, "No agent stream rows", 8);
+        for row in model.operational_health_rows.iter().take(4) {
+            ui.label(theme::code_muted(trim_middle(row, 88)));
+        }
+    });
+}
+
+fn render_compact_rows(ui: &mut egui::Ui, rows: &[String], empty: &str, limit: usize) {
+    if rows.is_empty() {
+        ui.label(theme::muted(empty));
+        return;
+    }
+    for row in rows.iter().take(limit) {
+        ui.label(theme::body(trim_middle(row, 110)));
+    }
+    if rows.len() > limit {
+        ui.label(theme::muted(format!("{} more rows", rows.len() - limit)));
     }
 }
 
-fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
-    let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
-    ui.label(theme::heading("Search"));
-    ui.label(theme::body(search.header));
-    for row in &search.status_rows {
-        ui.label(theme::body(row));
-    }
-    if search.result_rows.is_empty() {
-        ui.label(theme::muted("<no search results>"));
-    } else {
-        for row in &search.result_rows {
-            ui.monospace(row);
+fn sidebar_header(ui: &mut egui::Ui, title: &str, detail: String) {
+    ui.horizontal(|ui| {
+        ui.label(theme::eyebrow(title));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(theme::code_muted(trim_middle(&detail, 24)));
+        });
+    });
+    ui.separator();
+}
+
+fn inspector_header(ui: &mut egui::Ui, title: &str, level: DesktopAutonomyLevel) {
+    ui.horizontal(|ui| {
+        ui.label(theme::heading(title));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            pill(
+                ui,
+                &format!("L{}", level.number()),
+                level_color(level),
+                true,
+            );
+        });
+    });
+    ui.separator();
+}
+
+fn section_label(ui: &mut egui::Ui, label: &str, color: Option<egui::Color32>) {
+    ui.add_space(6.0);
+    match color {
+        Some(color) => {
+            ui.label(theme::accent(label, color));
+        }
+        None => {
+            ui.label(theme::eyebrow(label));
         }
     }
-    for row in &search.diagnostic_rows {
-        ui.label(theme::muted(row));
+}
+
+fn console_tab(ui: &mut egui::Ui, label: &str, active: bool, color: egui::Color32) {
+    if active {
+        pill(ui, label, color, true);
+    } else {
+        ui.label(theme::muted(label));
     }
+}
+
+fn status_dot(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _response) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 3.0, color);
+}
+
+fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) {
+    let fill = if active {
+        theme::dim(color, 28)
+    } else {
+        theme::dim(theme::TEXT_PRIMARY, 10)
+    };
+    egui::Frame::NONE
+        .fill(fill)
+        .stroke(egui::Stroke::new(
+            1.0,
+            if active {
+                theme::dim(color, 90)
+            } else {
+                theme::BORDER_DEFAULT
+            },
+        ))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(7, 3))
+        .show(ui, |ui| {
+            ui.label(theme::accent(label, color));
+        });
+}
+
+fn level_pill(ui: &mut egui::Ui, level: &str, label: &str, color: egui::Color32, selected: bool) {
+    let text = format!("{label} {level}");
+    pill(
+        ui,
+        &text,
+        if selected { color } else { theme::TEXT_MUTED },
+        selected,
+    );
+}
+
+fn avatar(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+    egui::Frame::NONE
+        .fill(theme::dim(color, 30))
+        .stroke(egui::Stroke::new(1.0, theme::dim(color, 90)))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(6, 4))
+        .show(ui, |ui| {
+            ui.label(theme::accent(text, color));
+        });
+}
+
+fn soft_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(theme::label(label))
+            .fill(theme::BG_RAISED)
+            .stroke(egui::Stroke::new(1.0, theme::BORDER_DEFAULT))
+            .corner_radius(egui::CornerRadius::same(6)),
+    )
+}
+
+fn primary_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui::Response {
+    ui.add(
+        egui::Button::new(theme::inverse(label))
+            .fill(color)
+            .stroke(egui::Stroke::new(1.0, theme::dim(color, 180)))
+            .corner_radius(egui::CornerRadius::same(6)),
+    )
+}
+
+fn progress_bar(ui: &mut egui::Ui, value: f32, color: egui::Color32) {
+    ui.add(
+        egui::ProgressBar::new(value.clamp(0.0, 1.0))
+            .fill(color)
+            .desired_width(f32::INFINITY)
+            .desired_height(4.0),
+    );
+}
+
+fn agent_card(ui: &mut egui::Ui, title: &str, subtitle: &str, color: egui::Color32, progress: f32) {
+    theme::small_card_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let initial = title
+                .chars()
+                .next()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "A".to_string());
+            avatar(ui, &initial, color);
+            ui.vertical(|ui| {
+                ui.label(theme::body_strong(trim_middle(title, 30)));
+                ui.label(theme::muted(trim_middle(subtitle, 34)));
+            });
+        });
+        progress_bar(ui, progress, color);
+    });
+}
+
+fn footer_metric(ui: &mut egui::Ui, label: &str, value: usize, color: egui::Color32) {
+    ui.horizontal(|ui| {
+        status_dot(ui, color);
+        ui.label(theme::muted(label));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(theme::code(value.to_string()));
+        });
+    });
+}
+
+fn current_path(snapshot: &ShellProjectionSnapshot) -> &str {
+    snapshot
+        .active_buffer_projection
+        .file_path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .unwrap_or("<none>")
+}
+
+fn workspace_label(snapshot: &ShellProjectionSnapshot) -> String {
+    snapshot
+        .active_buffer_projection
+        .workspace_id
+        .map(|workspace| format!("workspace {}", workspace.0))
+        .unwrap_or_else(|| "no workspace".to_string())
+}
+
+fn current_objective(snapshot: &ShellProjectionSnapshot) -> String {
+    snapshot
+        .proposal_ledger_projection
+        .rows
+        .first()
+        .map(|row| row.title.clone())
+        .or_else(|| {
+            snapshot
+                .delegated_task_projection
+                .plan_rows
+                .first()
+                .map(|row| row.plan_id.0.clone())
+        })
+        .unwrap_or_else(|| {
+            let path = current_path(snapshot);
+            if path == "<none>" {
+                "Inspect the workspace and keep changes proposal-mediated".to_string()
+            } else {
+                format!("Work on {path}")
+            }
+        })
+}
+
+fn first_proposal_id(snapshot: &ShellProjectionSnapshot) -> Option<ProposalId> {
+    snapshot
+        .proposal_ledger_projection
+        .selected_proposal_id
+        .or_else(|| {
+            snapshot
+                .proposal_ledger_projection
+                .rows
+                .first()
+                .map(|row| row.proposal_id)
+        })
+}
+
+fn delegated_plan_rows(
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    skip: usize,
+) -> Vec<String> {
+    let rows = snapshot
+        .delegated_task_projection
+        .plan_rows
+        .iter()
+        .skip(skip)
+        .map(|row| {
+            format!(
+                "{} {:?} {:?} risk={:?}",
+                row.plan_id.0, row.plan_state, row.readiness, row.risk_label
+            )
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        model.assistant_rows.iter().take(3).cloned().collect()
+    } else {
+        rows
+    }
+}
+
+fn delegated_step_rows(
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+) -> Vec<String> {
+    let rows = snapshot
+        .delegated_task_projection
+        .step_summaries
+        .iter()
+        .map(|row| {
+            format!(
+                "{} order={} {:?} proposal={:?}",
+                row.step_id.0,
+                row.order,
+                row.state,
+                row.proposal_id.map(|proposal| proposal.0)
+            )
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        model.main_canvas_rows.iter().take(3).cloned().collect()
+    } else {
+        rows
+    }
+}
+
+fn proposal_board_rows(
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+) -> Vec<String> {
+    let rows = snapshot
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{} payload={:?} risk={:?} lifecycle={}",
+                row.title, row.payload_kind, row.risk_label, row.lifecycle.label
+            )
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        model.proposal_rows.iter().take(3).cloned().collect()
+    } else {
+        rows
+    }
+}
+
+fn projected_agent_count(snapshot: &ShellProjectionSnapshot) -> usize {
+    snapshot.assisted_ai_projection.provider_count as usize
+        + snapshot.delegated_task_projection.plan_count as usize
+        + snapshot.delegated_task_projection.step_summaries.len()
+}
+
+fn resource_load(snapshot: &ShellProjectionSnapshot, level: DesktopAutonomyLevel) -> usize {
+    let base = match level {
+        DesktopAutonomyLevel::Manual => 12,
+        DesktopAutonomyLevel::Assisted => 24,
+        DesktopAutonomyLevel::Copilot => 34,
+        DesktopAutonomyLevel::Delegated => 56,
+        DesktopAutonomyLevel::Fleet => 82,
+    };
+    (base + snapshot.terminal_panel_projection.output_rows.len()).min(99)
+}
+
+fn level_primary_action(level: DesktopAutonomyLevel) -> &'static str {
+    match level {
+        DesktopAutonomyLevel::Manual => "Ask AI",
+        DesktopAutonomyLevel::Assisted => "Run Assist",
+        DesktopAutonomyLevel::Copilot => "Apply Plan",
+        DesktopAutonomyLevel::Delegated => "Run Directive",
+        DesktopAutonomyLevel::Fleet => "Pause Fleet",
+    }
+}
+
+fn level_color(level: DesktopAutonomyLevel) -> egui::Color32 {
+    match level {
+        DesktopAutonomyLevel::Manual => theme::TEXT_MUTED,
+        DesktopAutonomyLevel::Assisted => theme::ACCENT_CYAN,
+        DesktopAutonomyLevel::Copilot => theme::ACCENT_BLUE,
+        DesktopAutonomyLevel::Delegated => theme::ACCENT_VIOLET,
+        DesktopAutonomyLevel::Fleet => theme::ACCENT_PURPLE,
+    }
+}
+
+fn risk_color(risk: ProposalRiskLabel) -> egui::Color32 {
+    match risk {
+        ProposalRiskLabel::Informational => theme::ACCENT_CYAN,
+        ProposalRiskLabel::Low => theme::ACCENT_GREEN,
+        ProposalRiskLabel::Medium => theme::ACCENT_AMBER,
+        ProposalRiskLabel::High => theme::ACCENT_RED,
+        ProposalRiskLabel::Unknown => theme::TEXT_MUTED,
+    }
+}
+
+fn trim_middle(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    if max <= 3 {
+        return "...".to_string();
+    }
+    let keep = max - 3;
+    let head = keep / 2;
+    let tail = keep - head;
+    let start = value.chars().take(head).collect::<String>();
+    let end = value
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{start}...{end}")
 }
 
 /// Adapter-local render output.
@@ -797,40 +1926,6 @@ fn status_bar_rows(snapshot: &ShellProjectionSnapshot, flags: &[String]) -> Vec<
     ]
 }
 
-fn render_tab_controls(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    if ui.button("Save All").clicked() {
-        actions.push(DesktopAction::SaveAll);
-    }
-
-    let tabs = &snapshot.daily_editing_projection.tabs.tabs;
-    if tabs.is_empty() {
-        ui.label("<no open tabs>");
-        return;
-    }
-
-    for tab in tabs {
-        let title = if tab.dirty {
-            format!("{} +", tab.title)
-        } else {
-            tab.title.clone()
-        };
-        if ui.selectable_label(tab.active, title).clicked() {
-            actions.push(DesktopAction::SwitchTab {
-                buffer_id: tab.buffer_id,
-            });
-        }
-        if ui.button("x").clicked() {
-            actions.push(DesktopAction::CloseTab {
-                buffer_id: tab.buffer_id,
-            });
-        }
-    }
-}
-
 fn render_close_dirty_prompt_controls(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -851,211 +1946,6 @@ fn render_close_dirty_prompt_controls(
             });
         }
     });
-}
-
-fn render_proposal_controls(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    for row in &snapshot.proposal_ledger_projection.rows {
-        let proposal_id = row.proposal_id;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Proposal {}", proposal_id.0));
-            if ui.button("Details").clicked() {
-                actions.push(DesktopAction::OpenProposalDetails { proposal_id });
-            }
-            if ui.button("Preview").clicked() {
-                actions.push(DesktopAction::PreviewProposal { proposal_id });
-            }
-            if ui.button("Approve").clicked() {
-                actions.push(DesktopAction::ApproveProposal { proposal_id });
-            }
-            if ui.button("Apply").clicked() {
-                actions.push(DesktopAction::ApplyProposal { proposal_id });
-            }
-            if ui.button("Reject").clicked() {
-                actions.push(DesktopAction::RejectProposal {
-                    proposal_id,
-                    reason: ProposalRejectionReason::UserRejected,
-                });
-            }
-            if ui.button("Cancel").clicked() {
-                actions.push(DesktopAction::CancelProposal {
-                    proposal_id,
-                    reason: ProposalCancellationReason::UserCancelled,
-                });
-            }
-            if ui.button("Rollback").clicked() {
-                actions.push(DesktopAction::RollbackProposal {
-                    proposal_id,
-                    reason: ProposalRollbackReason::UserRequested,
-                });
-            }
-        });
-    }
-}
-
-fn render_assistant_controls(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    if ui.button("Explain").clicked() {
-        actions.push(DesktopAction::StartAiExplain {
-            instruction_label: "desktop explain".to_string(),
-        });
-    }
-    if ui.button("Propose").clicked() {
-        actions.push(DesktopAction::StartAiProposal {
-            instruction_label: "desktop propose".to_string(),
-        });
-    }
-
-    if let Some(run_id) = projected_assisted_run_id(snapshot) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Run {}", run_id.0));
-            if ui.button("Inspect").clicked() {
-                actions.push(DesktopAction::InspectAiRun {
-                    run_id: run_id.clone(),
-                });
-            }
-            if ui.button("Replay").clicked() {
-                actions.push(DesktopAction::ReplayAiRun {
-                    run_id: run_id.clone(),
-                });
-            }
-            if ui.button("Cancel").clicked() {
-                actions.push(DesktopAction::CancelAiRun { run_id });
-            }
-        });
-    }
-
-    render_delegated_task_controls(ui, snapshot, actions);
-}
-
-fn render_delegated_task_controls(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let delegated = &snapshot.delegated_task_projection;
-    for row in &delegated.plan_rows {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Delegated plan {}", row.plan_id.0));
-            if ui.button("Inspect").clicked() {
-                actions.push(DesktopAction::InspectDelegatedTaskPlan {
-                    plan_id: row.plan_id.clone(),
-                });
-            }
-        });
-    }
-    for link in &delegated.proposal_preview_links {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Delegated proposal {}", link.proposal_id.0));
-            if ui.button("Preview").clicked() {
-                actions.push(DesktopAction::OpenDelegatedProposalPreview {
-                    proposal_id: link.proposal_id,
-                });
-            }
-            if ui.button("Details").clicked() {
-                actions.push(DesktopAction::OpenDelegatedProposalDetails {
-                    proposal_id: link.proposal_id,
-                });
-            }
-        });
-    }
-}
-
-fn render_plugin_management_controls(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    if snapshot.plugin_contribution_projections.is_empty() {
-        ui.label("No plugin contributions");
-        return;
-    }
-
-    for projection in &snapshot.plugin_contribution_projections {
-        for command in plugin_command_descriptors(projection) {
-            let label = format!("{} ({})", command.title, command.command_id);
-            if ui.button(label).clicked() {
-                actions.push(DesktopAction::InvokePluginCommand {
-                    plugin_id: projection.plugin_id,
-                    command_id: command.command_id.clone(),
-                });
-            }
-        }
-    }
-}
-
-fn render_collaboration_controls(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let projection = &snapshot.collaboration_gui_projection;
-    for session in &projection.session_rows {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Session {}", session.session_id.0));
-            if ui.button("Leave").clicked() {
-                actions.push(DesktopAction::LeaveCollaborationSession {
-                    session_id: session.session_id,
-                });
-            }
-            if let Some(participant_id) =
-                first_collaboration_participant(snapshot, session.session_id)
-                && ui.button("Presence").clicked()
-            {
-                actions.push(DesktopAction::PublishCollaborationPresence {
-                    session_id: session.session_id,
-                    participant_id,
-                });
-            }
-        });
-    }
-    for review in &projection.shared_proposal_rows {
-        if ui
-            .button(format!("Review shared proposal {}", review.proposal_id.0))
-            .clicked()
-        {
-            actions.push(DesktopAction::OpenSharedProposalReview {
-                session_id: review.session_id,
-                proposal_id: review.proposal_id,
-            });
-        }
-    }
-}
-
-fn render_remote_workspace_controls(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let projection = &snapshot.remote_gui_projection;
-    for session in &projection.session_rows {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Remote session {}", session.session_id.0));
-            if (session.reconnecting || session.offline) && ui.button("Reconnect").clicked() {
-                actions.push(DesktopAction::ConnectRemoteWorkspace {
-                    session_id: session.session_id,
-                    authority_label: session.authority_label.clone(),
-                });
-            }
-        });
-    }
-    for review in &projection.proposal_review_rows {
-        if ui
-            .button(format!("Review remote proposal {}", review.proposal_id.0))
-            .clicked()
-        {
-            actions.push(DesktopAction::OpenRemoteProposalReview {
-                session_id: review.session_id,
-                proposal_id: review.proposal_id,
-            });
-        }
-    }
 }
 
 fn render_explorer_controls(
@@ -2012,12 +2902,6 @@ fn bounded_join(values: &[String]) -> String {
     }
 }
 
-fn projected_assisted_run_id(snapshot: &ShellProjectionSnapshot) -> Option<AgentRunId> {
-    let projection_id = snapshot.assisted_ai_projection.projection_id.as_str();
-    let run_index = projection_id.find("phase4-run-")?;
-    Some(AgentRunId(projection_id[run_index..].to_string()))
-}
-
 fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let language = &snapshot.language_tooling_projection;
     let mut rows = Vec::new();
@@ -2259,16 +3143,4 @@ fn remote_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         )
     }));
     rows
-}
-
-fn first_collaboration_participant(
-    snapshot: &ShellProjectionSnapshot,
-    session_id: CollaborationSessionId,
-) -> Option<CollaborationParticipantId> {
-    snapshot
-        .collaboration_presence_projections
-        .iter()
-        .filter(|presence| presence.session_id == session_id)
-        .map(|presence| presence.participant_id)
-        .min_by_key(|participant_id| participant_id.0)
 }

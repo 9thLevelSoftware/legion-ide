@@ -15701,6 +15701,724 @@ pub struct TerminalCapability {
 }
 
 // -----------------------------------------------------------------------------
+// Product-readiness and VS Code compatibility contracts
+// -----------------------------------------------------------------------------
+
+/// Stable VS Code-compatible extension identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VsCodeExtensionId(pub String);
+
+/// Debug-adapter session identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DebugSessionId(pub String);
+
+/// Debug breakpoint identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DebugBreakpointId(pub String);
+
+/// Test-controller identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TestControllerId(pub String);
+
+/// Test-item identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TestItemId(pub String);
+
+/// Test-run identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TestRunId(pub String);
+
+/// Source-control provider identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ScmProviderId(pub String);
+
+/// VS Code extension placement requested by a manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VsCodeExtensionKind {
+    /// UI-local extension kind.
+    Ui,
+    /// Workspace-side extension kind.
+    Workspace,
+    /// Web extension kind.
+    Web,
+    /// Unknown extension kind retained as metadata only.
+    Unknown,
+}
+
+/// Devil compatibility tier for a VS Code extension surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum VsCodeCompatibilityTier {
+    /// Tier 0: declarative manifest-only contributions.
+    Tier0Declarative,
+    /// Tier 1: protocol-adapter contributions.
+    Tier1ProtocolAdapter,
+    /// Tier 2: isolated extension-host sidecar contributions.
+    Tier2ExtensionHostSidecar,
+    /// Tier 3: webview, notebook, or custom editor contributions.
+    Tier3WebviewNotebookCustomEditor,
+}
+
+/// Support status for a VS Code-compatible surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VsCodeCompatibilityStatus {
+    /// The surface is supported without additional runtime authority.
+    Supported,
+    /// The surface is supported only after policy and capability checks.
+    SupportedWithPolicy,
+    /// The surface is intentionally deferred behind product gates.
+    Deferred,
+    /// The surface is unsupported by this compatibility slice.
+    Unsupported,
+}
+
+/// VS Code activation event classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeActivationEvent {
+    /// Raw manifest activation event.
+    pub raw: String,
+    /// Compatibility tier required by this activation event.
+    pub tier: VsCodeCompatibilityTier,
+    /// Compatibility status for this activation event.
+    pub status: VsCodeCompatibilityStatus,
+}
+
+/// VS Code contribution kind mapped into Devil contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VsCodeContributionKind {
+    /// Theme contribution.
+    Theme,
+    /// File icon theme contribution.
+    IconTheme,
+    /// Snippet contribution.
+    Snippet,
+    /// Keybinding contribution.
+    Keybinding,
+    /// Language declaration contribution.
+    Language,
+    /// TextMate grammar contribution.
+    Grammar,
+    /// Command contribution.
+    Command,
+    /// Configuration contribution.
+    Configuration,
+    /// Menu contribution.
+    Menu,
+    /// Language-server contribution.
+    Lsp,
+    /// Debug-adapter contribution.
+    Debugger,
+    /// Test contribution.
+    Test,
+    /// Source-control contribution.
+    Scm,
+    /// View contribution.
+    View,
+    /// Webview contribution.
+    Webview,
+    /// Notebook contribution.
+    Notebook,
+    /// Custom editor contribution.
+    CustomEditor,
+    /// Task contribution.
+    Task,
+    /// Unknown contribution retained for diagnostics only.
+    Unknown,
+}
+
+/// VS Code contribution descriptor normalized from a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeContributionDescriptor {
+    /// Contribution kind.
+    pub kind: VsCodeContributionKind,
+    /// Source manifest key or contribution identifier.
+    pub contribution_id: String,
+    /// Number of entries under this contribution key.
+    pub count: u32,
+    /// Compatibility tier required by this contribution.
+    pub tier: VsCodeCompatibilityTier,
+    /// Compatibility status for this contribution.
+    pub status: VsCodeCompatibilityStatus,
+    /// Metadata-only label suitable for diagnostics and UI.
+    pub metadata_label: String,
+}
+
+/// Compatibility diagnostic for a VS Code-compatible extension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeCompatibilityDiagnostic {
+    /// Diagnostic severity.
+    pub severity: ProtocolDiagnosticSeverity,
+    /// Stable diagnostic code.
+    pub code: String,
+    /// Human-readable diagnostic message without raw source payloads.
+    pub message: String,
+    /// Related compatibility tier, when known.
+    pub tier: Option<VsCodeCompatibilityTier>,
+    /// Related contribution kind, when known.
+    pub contribution_kind: Option<VsCodeContributionKind>,
+}
+
+/// Normalized VS Code extension manifest contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeExtensionManifest {
+    /// Stable extension identifier.
+    pub extension_id: VsCodeExtensionId,
+    /// Devil plugin identifier reserved for policy correlation.
+    pub plugin_id: PluginId,
+    /// Publisher from package metadata.
+    pub publisher: String,
+    /// Extension package name.
+    pub name: String,
+    /// Display name shown to users.
+    pub display_name: String,
+    /// Extension package version.
+    pub version: String,
+    /// Declared VS Code engine range.
+    pub engine_vscode: Option<String>,
+    /// Declared extension kinds.
+    pub extension_kinds: Vec<VsCodeExtensionKind>,
+    /// Activation events normalized from the manifest.
+    pub activation_events: Vec<VsCodeActivationEvent>,
+    /// Contribution descriptors normalized from the manifest.
+    pub contributions: Vec<VsCodeContributionDescriptor>,
+    /// Capabilities that must be granted before activation.
+    pub requested_capabilities: Vec<CapabilityId>,
+    /// Highest compatibility tier required by the manifest.
+    pub required_tier: VsCodeCompatibilityTier,
+    /// Aggregate compatibility status.
+    pub status: VsCodeCompatibilityStatus,
+    /// Compatibility diagnostics.
+    pub diagnostics: Vec<VsCodeCompatibilityDiagnostic>,
+    /// Cross-domain correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Runtime class for a VS Code-compatible extension host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VsCodeExtensionHostRuntime {
+    /// No extension host is required.
+    NoneRequired,
+    /// A Node.js sidecar would be required.
+    NodeSidecar,
+    /// A web-worker sidecar would be required.
+    WebWorkerSidecar,
+    /// Runtime is deferred behind a later product gate.
+    Deferred,
+}
+
+/// Extension-host session descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeExtensionHostSession {
+    /// Extension identifier.
+    pub extension_id: VsCodeExtensionId,
+    /// Required host runtime.
+    pub runtime: VsCodeExtensionHostRuntime,
+    /// Session support status.
+    pub status: VsCodeCompatibilityStatus,
+    /// Process label without command-line arguments or raw paths.
+    pub process_label: String,
+    /// Capabilities that must be granted before host activation.
+    pub requested_capabilities: Vec<CapabilityId>,
+    /// Cross-domain correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Versioned envelope for a VS Code API facade call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeApiCallEnvelope {
+    /// Extension identifier.
+    pub extension_id: VsCodeExtensionId,
+    /// Extension-host call identifier.
+    pub call_id: String,
+    /// API namespace such as `workspace` or `commands`.
+    pub api_namespace: String,
+    /// API method name.
+    pub method: String,
+    /// Capability required for dispatch.
+    pub required_capability: CapabilityId,
+    /// Metadata-only label for audit and UI surfaces.
+    pub metadata_label: String,
+    /// Cross-domain correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Permission request raised by a VS Code-compatible extension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodePermissionRequest {
+    /// Extension identifier.
+    pub extension_id: VsCodeExtensionId,
+    /// Requested capability.
+    pub capability: CapabilityId,
+    /// Human-readable reason shown for permission review.
+    pub reason: String,
+    /// Compatibility tier that requires this permission.
+    pub tier: VsCodeCompatibilityTier,
+    /// Cross-domain correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Resource usage snapshot for extension health UI and audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeResourceUsageSnapshot {
+    /// Extension identifier.
+    pub extension_id: VsCodeExtensionId,
+    /// Runtime class being measured.
+    pub runtime: VsCodeExtensionHostRuntime,
+    /// CPU time in milliseconds.
+    pub cpu_time_ms: u64,
+    /// Resident memory bytes.
+    pub memory_bytes: u64,
+    /// Host API call count.
+    pub host_call_count: u64,
+    /// Extension-emitted event count.
+    pub event_count: u64,
+    /// Snapshot timestamp.
+    pub timestamp: TimestampMillis,
+    /// Redaction hints for this snapshot.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Crash report for a VS Code-compatible extension host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VsCodeExtensionCrashReport {
+    /// Extension identifier.
+    pub extension_id: VsCodeExtensionId,
+    /// Runtime class that crashed.
+    pub runtime: VsCodeExtensionHostRuntime,
+    /// Stable crash identifier.
+    pub crash_id: String,
+    /// Exit code when available.
+    pub exit_code: Option<i32>,
+    /// Signal label when available.
+    pub signal: Option<String>,
+    /// Metadata-only crash summary.
+    pub metadata_summary: String,
+    /// Cross-domain correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// Redaction hints for this report.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Debug session state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DebugSessionState {
+    /// Session is configured but not launched.
+    Configured,
+    /// Session is launching.
+    Launching,
+    /// Session is running.
+    Running,
+    /// Session is paused at a stop point.
+    Paused,
+    /// Session exited normally.
+    Exited,
+    /// Session failed.
+    Failed,
+}
+
+/// Debug breakpoint projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugBreakpoint {
+    /// Breakpoint identifier.
+    pub breakpoint_id: DebugBreakpointId,
+    /// Owning debug session.
+    pub session_id: DebugSessionId,
+    /// File path for source breakpoints.
+    pub path: CanonicalPath,
+    /// Text range for the breakpoint.
+    pub range: ProtocolTextRange,
+    /// Whether the runtime verified this breakpoint.
+    pub verified: bool,
+    /// Verification or failure message.
+    pub message: Option<String>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Debug stack frame projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugStackFrame {
+    /// Owning debug session.
+    pub session_id: DebugSessionId,
+    /// Frame identifier from the debug adapter.
+    pub frame_id: u64,
+    /// Display name.
+    pub name: String,
+    /// Optional source path.
+    pub path: Option<CanonicalPath>,
+    /// Optional source range.
+    pub range: Option<ProtocolTextRange>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Debug variable projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugVariable {
+    /// Owning debug session.
+    pub session_id: DebugSessionId,
+    /// Variable reference from the debug adapter.
+    pub variables_reference: u64,
+    /// Variable name.
+    pub name: String,
+    /// Redacted or metadata-only value label.
+    pub value_label: String,
+    /// Variable type label.
+    pub type_label: Option<String>,
+    /// Whether children are available through another request.
+    pub has_children: bool,
+    /// Redaction hints for the value label.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Test-run state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TestRunState {
+    /// Test has not run.
+    NotRun,
+    /// Test is queued.
+    Queued,
+    /// Test is running.
+    Running,
+    /// Test passed.
+    Passed,
+    /// Test failed.
+    Failed,
+    /// Test was skipped.
+    Skipped,
+    /// Test errored before assertion evaluation.
+    Errored,
+}
+
+/// Test item descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestItemDescriptor {
+    /// Owning controller.
+    pub controller_id: TestControllerId,
+    /// Test item identifier.
+    pub item_id: TestItemId,
+    /// Optional parent item.
+    pub parent_id: Option<TestItemId>,
+    /// Display label.
+    pub label: String,
+    /// Optional source path.
+    pub path: Option<CanonicalPath>,
+    /// Optional source range.
+    pub range: Option<ProtocolTextRange>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Summary for a test run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestRunSummary {
+    /// Test-run identifier.
+    pub run_id: TestRunId,
+    /// Owning controller.
+    pub controller_id: TestControllerId,
+    /// Aggregate run state.
+    pub state: TestRunState,
+    /// Passed test count.
+    pub passed: u32,
+    /// Failed test count.
+    pub failed: u32,
+    /// Skipped test count.
+    pub skipped: u32,
+    /// Errored test count.
+    pub errored: u32,
+    /// Duration in milliseconds.
+    pub duration_ms: u64,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Source-control change state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScmChangeState {
+    /// File is untracked.
+    Untracked,
+    /// File is modified.
+    Modified,
+    /// File is added.
+    Added,
+    /// File is deleted.
+    Deleted,
+    /// File is renamed.
+    Renamed,
+    /// File has a merge conflict.
+    Conflicted,
+}
+
+/// Source-control diff hunk projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmDiffHunk {
+    /// Owning SCM provider.
+    pub provider_id: ScmProviderId,
+    /// File path for this hunk.
+    pub path: CanonicalPath,
+    /// Old start line.
+    pub old_start: u32,
+    /// Old line count.
+    pub old_count: u32,
+    /// New start line.
+    pub new_start: u32,
+    /// New line count.
+    pub new_count: u32,
+    /// Added line count.
+    pub added_lines: u32,
+    /// Removed line count.
+    pub removed_lines: u32,
+    /// Metadata-only hunk label.
+    pub metadata_label: String,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Merge-conflict projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmMergeConflict {
+    /// Owning SCM provider.
+    pub provider_id: ScmProviderId,
+    /// Conflicted path.
+    pub path: CanonicalPath,
+    /// Conflict range.
+    pub range: ProtocolTextRange,
+    /// Ours label.
+    pub ours_label: String,
+    /// Theirs label.
+    pub theirs_label: String,
+    /// Whether a proposal is available for resolution.
+    pub proposal_available: bool,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Inline source-control review comment projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmReviewComment {
+    /// Owning SCM provider.
+    pub provider_id: ScmProviderId,
+    /// Review comment identifier.
+    pub comment_id: String,
+    /// Related path.
+    pub path: CanonicalPath,
+    /// Related range.
+    pub range: ProtocolTextRange,
+    /// Author display label.
+    pub author_label: String,
+    /// Redacted comment body label.
+    pub body_label: String,
+    /// Whether this thread is resolved.
+    pub resolved: bool,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Local history entry projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmLocalHistoryEntry {
+    /// Owning SCM provider.
+    pub provider_id: ScmProviderId,
+    /// Entry identifier.
+    pub entry_id: String,
+    /// Related path.
+    pub path: CanonicalPath,
+    /// Metadata-only change label.
+    pub change_label: String,
+    /// Timestamp for the entry.
+    pub timestamp: TimestampMillis,
+    /// Related proposal identifier.
+    pub proposal_id: Option<ProposalId>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Workbench accessibility profile settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchAccessibilityProfile {
+    /// Whether high contrast is enabled.
+    pub high_contrast: bool,
+    /// Whether screen-reader projection is enabled.
+    pub screen_reader_projection: bool,
+    /// Whether reduced motion is enabled.
+    pub reduce_motion: bool,
+    /// Whether IME composition diagnostics are enabled.
+    pub ime_diagnostics_enabled: bool,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Workbench font settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchFontSettings {
+    /// Editor font family.
+    pub editor_font_family: String,
+    /// Editor font size in points.
+    pub editor_font_size_pt: u16,
+    /// UI font family.
+    pub ui_font_family: String,
+    /// UI font size in points.
+    pub ui_font_size_pt: u16,
+    /// Line height multiplier in basis points.
+    pub line_height_basis_points: u16,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Workbench layout settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchLayoutSettings {
+    /// Whether floating windows are allowed.
+    pub floating_windows_enabled: bool,
+    /// Whether multi-monitor restore is allowed.
+    pub multi_monitor_restore_enabled: bool,
+    /// Panel layout label.
+    pub panel_layout: String,
+    /// Serialized keybinding profile label.
+    pub keybinding_profile_label: String,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Workbench telemetry consent settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchTelemetryConsent {
+    /// Whether telemetry is enabled.
+    pub enabled: bool,
+    /// Whether crash reports are enabled.
+    pub crash_reports_enabled: bool,
+    /// Whether raw-source telemetry is allowed.
+    pub raw_source_allowed: bool,
+    /// Consent record label.
+    pub consent_label: String,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Workbench provider routing settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchProviderRoutingSettings {
+    /// Preferred provider class.
+    pub preferred_provider_class: AssistedAiProviderClass,
+    /// Whether cloud providers require explicit opt-in.
+    pub cloud_requires_opt_in: bool,
+    /// Whether local or self-hosted providers are preferred.
+    pub prefer_local_or_self_hosted: bool,
+    /// Provider policy label.
+    pub policy_label: String,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Product-readiness track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnterpriseProductReadinessTrack {
+    /// Performance, renderer, UI, and accessibility.
+    PerformanceUiAccessibility,
+    /// Language, debugging, testing, and source-control workflows.
+    LanguageDebugTestScm,
+    /// AI control plane and proposal safety.
+    AiControlPlane,
+    /// VS Code compatibility.
+    VsCodeCompatibility,
+    /// Remote, collaboration, and enterprise controls.
+    RemoteCollaborationEnterprise,
+    /// Packaging, licensing, and release readiness.
+    PackagingLicensingRelease,
+}
+
+/// Product-readiness status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnterpriseProductReadinessStatus {
+    /// Gate is not started.
+    NotStarted,
+    /// Gate has active implementation work.
+    InProgress,
+    /// Gate is blocked by an explicit dependency or decision.
+    Blocked,
+    /// Gate has evidence but is not release accepted.
+    EvidenceReady,
+    /// Gate is accepted for the named product scope.
+    Accepted,
+}
+
+/// Product-readiness gate entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterpriseProductReadinessGate {
+    /// Readiness track.
+    pub track: EnterpriseProductReadinessTrack,
+    /// Gate identifier.
+    pub gate_id: String,
+    /// Human-readable gate title.
+    pub title: String,
+    /// Acceptance criteria summary.
+    pub acceptance_criteria: Vec<String>,
+    /// Current readiness status.
+    pub status: EnterpriseProductReadinessStatus,
+    /// Evidence references, usually plan or evidence paths.
+    pub evidence_refs: Vec<String>,
+    /// Residual risk summary.
+    pub residual_risk: Option<String>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Product-readiness ledger projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterpriseProductReadinessLedger {
+    /// Product target label.
+    pub product_target: String,
+    /// Ledger gates.
+    pub gates: Vec<EnterpriseProductReadinessGate>,
+    /// Whether substrate acceptance is explicitly separated from product acceptance.
+    pub substrate_acceptance_separate: bool,
+    /// Generated timestamp.
+    pub generated_at: TimestampMillis,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+// -----------------------------------------------------------------------------
 // Plugin and capability contracts
 // -----------------------------------------------------------------------------
 
