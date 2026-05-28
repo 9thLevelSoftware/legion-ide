@@ -3,7 +3,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use devil_protocol::{
-    AgentRunId, FileId, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
+    AgentRunId, CollaborationParticipantId, CollaborationSessionId, FileId,
+    PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
     ProposalCancellationReason, ProposalRejectionReason, ProposalRollbackReason,
     ViewportProjectionMode,
 };
@@ -239,6 +240,7 @@ impl ProjectionView {
                     for row in &model.collaboration_rows {
                         ui.label(row);
                     }
+                    render_collaboration_controls(ui, snapshot, &mut actions);
                 }
             });
 
@@ -455,6 +457,45 @@ fn render_plugin_management_controls(
                     command_id: command.command_id.clone(),
                 });
             }
+        }
+    }
+}
+
+fn render_collaboration_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let projection = &snapshot.collaboration_gui_projection;
+    for session in &projection.session_rows {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Session {}", session.session_id.0));
+            if ui.button("Leave").clicked() {
+                actions.push(DesktopAction::LeaveCollaborationSession {
+                    session_id: session.session_id,
+                });
+            }
+            if let Some(participant_id) =
+                first_collaboration_participant(snapshot, session.session_id)
+            {
+                if ui.button("Presence").clicked() {
+                    actions.push(DesktopAction::PublishCollaborationPresence {
+                        session_id: session.session_id,
+                        participant_id,
+                    });
+                }
+            }
+        });
+    }
+    for review in &projection.shared_proposal_rows {
+        if ui
+            .button(format!("Review shared proposal {}", review.proposal_id.0))
+            .clicked()
+        {
+            actions.push(DesktopAction::OpenSharedProposalReview {
+                session_id: review.session_id,
+                proposal_id: review.proposal_id,
+            });
         }
     }
 }
@@ -1439,14 +1480,75 @@ fn plugin_command_descriptors(
 }
 
 fn collaboration_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let mut rows = Vec::new();
+    let projection = &snapshot.collaboration_gui_projection;
+    rows.push(format!(
+        "collaboration: status={} runtime_enabled={} presence_enabled={} sessions={} reconnecting={} conflicts={} offline={} shared_proposals={} redaction=metadata-only",
+        projection.status_label,
+        projection.runtime_enabled,
+        projection.presence_enabled,
+        projection.session_rows.len(),
+        projection.reconnecting_session_count,
+        projection.conflict_session_count,
+        projection.offline_session_count,
+        projection.shared_proposal_rows.len()
+    ));
+    rows.extend(projection.session_rows.iter().map(|session| {
+        format!(
+            "collaboration session {}: state={:?} participants={} presence={} reconnecting={} conflicts={} operations={} acknowledgements={} gaps={} offline={} status={}",
+            session.session_id.0,
+            session.state,
+            session.participant_count,
+            session.presence_count,
+            session.reconnecting_participant_count,
+            session.conflict_count,
+            session.operation_count,
+            session.acknowledgement_count,
+            session.causal_gap_count,
+            session.offline,
+            session.status_label
+        )
+    }));
+    rows.extend(projection.shared_proposal_rows.iter().map(|review| {
+        format!(
+            "shared proposal session {} proposal {}: required={} authorized={} approvals={} denials={} pending={} operations={} stale={} status={} proposal-mediated",
+            review.session_id.0,
+            review.proposal_id.0,
+            review.required_approver_count,
+            review.authorized_approver_count,
+            review.approval_count,
+            review.denial_count,
+            review.pending_count,
+            review.applied_operation_count,
+            review.stale,
+            review.status_label
+        )
+    }));
+    rows.extend(
+        snapshot
+            .collaboration_presence_projections
+            .iter()
+            .map(|presence| {
+                format!(
+                    "collaboration presence {} participant {} reconnecting={} activity={}",
+                    presence.session_id.0,
+                    presence.participant_id.0,
+                    presence.reconnecting,
+                    presence.activity_label.as_deref().unwrap_or("<none>")
+                )
+            }),
+    );
+    rows
+}
+
+fn first_collaboration_participant(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: CollaborationSessionId,
+) -> Option<CollaborationParticipantId> {
     snapshot
         .collaboration_presence_projections
         .iter()
-        .map(|presence| {
-            format!(
-                "collaboration {} participant {} reconnecting={}",
-                presence.session_id.0, presence.participant_id.0, presence.reconnecting
-            )
-        })
-        .collect()
+        .filter(|presence| presence.session_id == session_id)
+        .map(|presence| presence.participant_id)
+        .min_by_key(|participant_id| participant_id.0)
 }

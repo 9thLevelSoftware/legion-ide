@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 
 use devil_protocol::{
-    AgentRunId, BufferId, FileId, ProposalCancellationReason, ProposalId, ProposalRejectionReason,
-    ProposalRollbackReason, ProtocolTextRange, TerminalSessionId, TextCoordinate, ViewportScroll,
+    AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, FileId,
+    ProposalCancellationReason, ProposalId, ProposalRejectionReason, ProposalRollbackReason,
+    ProtocolTextRange, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
 use devil_protocol::{PluginContribution, PluginId};
 use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
@@ -141,6 +142,30 @@ pub enum DesktopAction {
         plugin_id: PluginId,
         /// Command identifier selected from projection data.
         command_id: String,
+    },
+    /// Join a collaboration session through app-owned collaboration authority.
+    JoinCollaborationSession {
+        /// Session identifier selected from projected collaboration GUI data.
+        session_id: CollaborationSessionId,
+    },
+    /// Leave a projected collaboration session.
+    LeaveCollaborationSession {
+        /// Session identifier selected from projected collaboration GUI data.
+        session_id: CollaborationSessionId,
+    },
+    /// Publish metadata-only presence for a projected collaboration session.
+    PublishCollaborationPresence {
+        /// Session identifier selected from projected collaboration GUI data.
+        session_id: CollaborationSessionId,
+        /// Participant identifier selected from projected collaboration GUI data.
+        participant_id: CollaborationParticipantId,
+    },
+    /// Open shared collaboration proposal review through proposal details.
+    OpenSharedProposalReview {
+        /// Session identifier selected from projected collaboration GUI data.
+        session_id: CollaborationSessionId,
+        /// Shared proposal identifier selected from projected collaboration GUI data.
+        proposal_id: ProposalId,
     },
     /// Insert text at a projected coordinate.
     InsertText {
@@ -377,6 +402,31 @@ pub enum DesktopBridgeError {
         /// Unknown command id.
         command_id: String,
     },
+    /// Collaboration session id was zero.
+    #[error("collaboration session id must be non-zero")]
+    InvalidCollaborationSession,
+    /// Collaboration participant id was zero.
+    #[error("collaboration participant id must be non-zero")]
+    InvalidCollaborationParticipant,
+    /// Collaboration runtime is not enabled in the current app projection.
+    #[error("collaboration runtime is disabled by policy")]
+    CollaborationRuntimeUnavailable,
+    /// Collaboration session was not present in current projections.
+    #[error("unknown collaboration session: {session_id:?}")]
+    UnknownCollaborationSession {
+        /// Unknown collaboration session.
+        session_id: CollaborationSessionId,
+    },
+    /// Shared collaboration proposal row was not present in current projections.
+    #[error(
+        "unknown shared collaboration proposal: session {session_id:?} proposal {proposal_id:?}"
+    )]
+    UnknownSharedCollaborationProposal {
+        /// Collaboration session id.
+        session_id: CollaborationSessionId,
+        /// Proposal id.
+        proposal_id: ProposalId,
+    },
     /// Target buffer does not own the active dirty-close prompt.
     #[error("dirty-close prompt is not active for buffer {buffer_id:?}")]
     DirtyClosePromptMissing {
@@ -564,6 +614,32 @@ impl DesktopCommandBridge {
                 plugin_id,
                 command_id,
             } => self.with_known_plugin_command(snapshot, plugin_id, command_id),
+            DesktopAction::JoinCollaborationSession { session_id } => {
+                self.with_collaboration_join(snapshot, session_id)
+            }
+            DesktopAction::LeaveCollaborationSession { session_id } => self
+                .with_known_collaboration_session(snapshot, session_id, |session_id| {
+                    CommandDispatchIntent::LeaveCollaborationSession { session_id }
+                }),
+            DesktopAction::PublishCollaborationPresence {
+                session_id,
+                participant_id,
+            } => {
+                if participant_id.0 == 0 {
+                    DesktopBridgeOutput::Error(DesktopBridgeError::InvalidCollaborationParticipant)
+                } else {
+                    self.with_known_collaboration_session(snapshot, session_id, |session_id| {
+                        CommandDispatchIntent::PublishCollaborationPresence {
+                            session_id,
+                            participant_id,
+                        }
+                    })
+                }
+            }
+            DesktopAction::OpenSharedProposalReview {
+                session_id,
+                proposal_id,
+            } => self.with_known_shared_collaboration_proposal(snapshot, session_id, proposal_id),
             DesktopAction::InsertText { text, at }
             | DesktopAction::ClipboardPaste { text, at }
             | DesktopAction::ImeCommit { text, at } => {
@@ -862,6 +938,60 @@ impl DesktopCommandBridge {
             ),
         })
     }
+
+    fn with_collaboration_join(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: CollaborationSessionId,
+    ) -> DesktopBridgeOutput {
+        if session_id.0 == 0 {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidCollaborationSession);
+        }
+        if !snapshot.collaboration_gui_projection.runtime_enabled {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::CollaborationRuntimeUnavailable);
+        }
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::JoinCollaborationSession { session_id })
+    }
+
+    fn with_known_collaboration_session(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: CollaborationSessionId,
+        build: impl FnOnce(CollaborationSessionId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if session_id.0 == 0 {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidCollaborationSession);
+        }
+        if collaboration_session_is_known(snapshot, session_id) {
+            DesktopBridgeOutput::Intent(build(session_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownCollaborationSession {
+                session_id,
+            })
+        }
+    }
+
+    fn with_known_shared_collaboration_proposal(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: CollaborationSessionId,
+        proposal_id: ProposalId,
+    ) -> DesktopBridgeOutput {
+        if session_id.0 == 0 {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidCollaborationSession);
+        }
+        if !shared_collaboration_proposal_is_known(snapshot, session_id, proposal_id) {
+            return DesktopBridgeOutput::Error(
+                DesktopBridgeError::UnknownSharedCollaborationProposal {
+                    session_id,
+                    proposal_id,
+                },
+            );
+        }
+        self.with_known_proposal(snapshot, proposal_id, |proposal_id| {
+            CommandDispatchIntent::OpenProposalDetails { proposal_id }
+        })
+    }
 }
 
 fn normalized_path(path: String) -> Option<String> {
@@ -939,6 +1069,33 @@ fn assisted_ai_projection_references_run(
     }
 
     projected_assisted_run_id(snapshot).is_some_and(|projected| projected == needle)
+}
+
+fn collaboration_session_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: CollaborationSessionId,
+) -> bool {
+    snapshot
+        .collaboration_gui_projection
+        .session_rows
+        .iter()
+        .any(|row| row.session_id == session_id)
+        || snapshot
+            .collaboration_presence_projections
+            .iter()
+            .any(|projection| projection.session_id == session_id)
+}
+
+fn shared_collaboration_proposal_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: CollaborationSessionId,
+    proposal_id: ProposalId,
+) -> bool {
+    snapshot
+        .collaboration_gui_projection
+        .shared_proposal_rows
+        .iter()
+        .any(|row| row.session_id == session_id && row.proposal_id == proposal_id)
 }
 
 fn projected_assisted_run_id(snapshot: &ShellProjectionSnapshot) -> Option<&str> {

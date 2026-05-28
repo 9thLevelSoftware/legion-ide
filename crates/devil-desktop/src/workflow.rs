@@ -13,10 +13,10 @@ use devil_app::{
     AppSessionRestoreOutcome,
 };
 use devil_protocol::{
-    AgentRunId, BufferId, CanonicalPath, PluginDenialReason, PluginHostCallResponse, PluginId,
-    PluginManifest, PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
-    ProposalResponse, ProtocolTextRange, SessionPanelState, TextCoordinate, ViewportScroll,
-    WorkspaceSessionRecord, WorkspaceTrustState,
+    AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, PluginDenialReason,
+    PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
+    SessionPanelState, TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
     CommandDispatchIntent, SearchScopeProjection, Shell, ShellProjectionSnapshot,
@@ -288,6 +288,15 @@ pub enum DesktopWorkflowOutcome {
         /// User-visible status summary.
         message: String,
     },
+    /// Collaboration workflow state changed through app-owned collaboration/proposal authority.
+    CollaborationUpdated {
+        /// Collaboration session represented by the outcome, if available.
+        session_id: Option<CollaborationSessionId>,
+        /// Normalized desktop collaboration status.
+        status: DesktopCollaborationStatus,
+        /// User-visible status summary.
+        message: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -313,6 +322,19 @@ pub enum DesktopPluginCommandStatus {
     Denied,
     /// Plugin runtime was absent or unavailable for a projected command.
     NoRuntime,
+}
+
+/// Desktop-facing status for collaboration GUI workflows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopCollaborationStatus {
+    /// Session join completed through app authority.
+    Joined,
+    /// Session leave completed through app authority.
+    Left,
+    /// Metadata-only presence publication completed.
+    PresencePublished,
+    /// Collaboration operation was accepted by app/editor authority.
+    OperationApplied,
 }
 
 /// Renderer-backed desktop runtime.
@@ -466,6 +488,16 @@ impl DesktopRuntime {
         );
         self.refresh_projection()?;
         Ok(plugin_id)
+    }
+
+    /// Enable app-owned local collaboration runtime for explicit test or launch harnesses.
+    pub fn enable_local_collaboration_runtime(&mut self) -> Result<()> {
+        self.app.enable_local_collaboration_runtime();
+        self.set_status(
+            StatusSeverity::Info,
+            "Collaboration runtime enabled by app policy",
+        );
+        self.refresh_projection()
     }
 
     /// Returns whether an explorer path is expanded by adapter-local state.
@@ -807,12 +839,53 @@ impl DesktopRuntime {
                 };
                 self.map_plugin_command_response(plugin_id, command_id, response.as_ref())
             }
-            AppCommandOutcome::CollaborationSessionJoined(_)
-            | AppCommandOutcome::CollaborationSessionLeft(_)
-            | AppCommandOutcome::CollaborationPresencePublished(_)
-            | AppCommandOutcome::CollaborationOperationApplied(_) => {
-                self.set_status(StatusSeverity::Info, "Command handled");
-                DesktopWorkflowOutcome::Noop
+            AppCommandOutcome::CollaborationSessionJoined(session_id) => {
+                let message = format!("Collaboration session joined {}", session_id.0);
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::CollaborationUpdated {
+                    session_id: Some(session_id),
+                    status: DesktopCollaborationStatus::Joined,
+                    message,
+                }
+            }
+            AppCommandOutcome::CollaborationSessionLeft(session_id) => {
+                let message = format!("Collaboration session left {}", session_id.0);
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::CollaborationUpdated {
+                    session_id: Some(session_id),
+                    status: DesktopCollaborationStatus::Left,
+                    message,
+                }
+            }
+            AppCommandOutcome::CollaborationPresencePublished(session_id) => {
+                let message = format!("Collaboration presence published {}", session_id.0);
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::CollaborationUpdated {
+                    session_id: Some(session_id),
+                    status: DesktopCollaborationStatus::PresencePublished,
+                    message,
+                }
+            }
+            AppCommandOutcome::CollaborationOperationApplied(descriptor) => {
+                let session_id = match &descriptor.source {
+                    devil_protocol::TransactionSource::CollaborationParticipant {
+                        session_id,
+                        ..
+                    } => Some(*session_id),
+                    _ => None,
+                };
+                let message = match session_id {
+                    Some(session_id) => {
+                        format!("Collaboration operation applied {}", session_id.0)
+                    }
+                    None => "Collaboration operation applied".to_string(),
+                };
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::CollaborationUpdated {
+                    session_id,
+                    status: DesktopCollaborationStatus::OperationApplied,
+                    message,
+                }
             }
         }
     }

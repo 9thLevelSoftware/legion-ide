@@ -2,15 +2,15 @@
 
 use devil_protocol::{
     AgentRunId, AssistedAiProjection, BufferId, CanonicalPath, CheckpointRollbackProjection,
-    CollaborationParticipantId, CollaborationPresenceProjection, CollaborationSessionId,
-    ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
-    ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
-    LanguageToolingProjection, PermissionBudgetProjection, PluginContributionProjection, PluginId,
-    PrivacyInspectorProjection, ProposalApprovalChecklistProjection, ProposalCancellationReason,
-    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
-    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
-    TerminalPanelProjection, TerminalSessionId, TextCoordinate, TimestampMillis, ViewportScroll,
-    WorkspaceId,
+    CollaborationGuiProjection, CollaborationParticipantId, CollaborationPresenceProjection,
+    CollaborationSessionId, ContextManifestEgressStatus, ContextManifestProjection,
+    ContextManifestPurpose, ContextManifestRecord, DelegatedTaskProjection,
+    DelegatedTaskRuntimeActivationState, FileId, LanguageToolingProjection,
+    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
+    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
+    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
+    ProposalRollbackReason, ProtocolTextRange, RedactionHint, TerminalPanelProjection,
+    TerminalSessionId, TextCoordinate, TimestampMillis, ViewportScroll, WorkspaceId,
 };
 use thiserror::Error;
 
@@ -735,6 +735,8 @@ pub struct ShellProjectionSnapshot {
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Collaboration presence projections supplied by the application layer.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
+    /// Collaboration GUI summary projection supplied by the application layer.
+    pub collaboration_gui_projection: CollaborationGuiProjection,
     /// Daily-editing projection supplied by the application layer.
     pub daily_editing_projection: DailyEditingProjection,
     /// Search projection supplied by the application layer.
@@ -790,6 +792,8 @@ pub struct Shell {
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Static collaboration presence projections.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
+    /// Static collaboration GUI summary projection.
+    pub collaboration_gui_projection: CollaborationGuiProjection,
     /// Static daily-editing projection.
     pub daily_editing_projection: DailyEditingProjection,
     /// Static search projection.
@@ -820,6 +824,7 @@ impl Shell {
             delegated_task_projection: snapshot.delegated_task_projection,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
+            collaboration_gui_projection: snapshot.collaboration_gui_projection,
             daily_editing_projection: snapshot.daily_editing_projection,
             search_projection: snapshot.search_projection,
             language_tooling_projection: snapshot.language_tooling_projection,
@@ -848,6 +853,7 @@ impl Shell {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -872,6 +878,7 @@ impl Shell {
             delegated_task_projection: self.delegated_task_projection.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
+            collaboration_gui_projection: self.collaboration_gui_projection.clone(),
             daily_editing_projection: self.daily_editing_projection.clone(),
             search_projection: self.search_projection.clone(),
             language_tooling_projection: self.language_tooling_projection.clone(),
@@ -895,6 +902,7 @@ impl Shell {
         self.delegated_task_projection = snapshot.delegated_task_projection;
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
         self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
+        self.collaboration_gui_projection = snapshot.collaboration_gui_projection;
         self.daily_editing_projection = snapshot.daily_editing_projection;
         self.search_projection = snapshot.search_projection;
         self.language_tooling_projection = snapshot.language_tooling_projection;
@@ -2173,6 +2181,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2220,6 +2229,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2269,6 +2279,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2326,6 +2337,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2377,6 +2389,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2551,6 +2564,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2638,6 +2652,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2712,6 +2727,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2850,6 +2866,7 @@ mod tests {
             delegated_task_projection: empty_delegated_task_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),
@@ -2936,6 +2953,7 @@ mod tests {
             delegated_task_projection: delegated.clone(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
             language_tooling_projection: LanguageToolingProjection::empty(),

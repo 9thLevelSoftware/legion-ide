@@ -1628,6 +1628,101 @@ pub struct CollaborationPresenceProjection {
     pub schema_version: u16,
 }
 
+/// Metadata-only collaboration GUI projection for session and review surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationGuiProjection {
+    /// Whether app policy currently enables local collaboration runtime sessions.
+    pub runtime_enabled: bool,
+    /// Whether app policy currently enables metadata-only presence publication.
+    pub presence_enabled: bool,
+    /// Session summary rows.
+    pub session_rows: Vec<CollaborationSessionGuiRow>,
+    /// Shared proposal review summary rows.
+    pub shared_proposal_rows: Vec<CollaborationSharedProposalGuiRow>,
+    /// Total sessions with reconnecting participants.
+    pub reconnecting_session_count: usize,
+    /// Total sessions with conflicts, causal gaps, or resync-required acknowledgements.
+    pub conflict_session_count: usize,
+    /// Total sessions not currently active for collaboration work.
+    pub offline_session_count: usize,
+    /// Metadata-only status label.
+    pub status_label: String,
+    /// Redaction hints for displayed collaboration metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl CollaborationGuiProjection {
+    /// Empty projection for the default disabled policy state.
+    pub fn disabled() -> Self {
+        Self {
+            runtime_enabled: false,
+            presence_enabled: false,
+            session_rows: Vec::new(),
+            shared_proposal_rows: Vec::new(),
+            reconnecting_session_count: 0,
+            conflict_session_count: 0,
+            offline_session_count: 0,
+            status_label: "collaboration runtime disabled by policy".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
+/// Metadata-only row for one collaboration session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationSessionGuiRow {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Session lifecycle state.
+    pub state: CollaborationSessionState,
+    /// Number of projected participants known to the GUI layer.
+    pub participant_count: usize,
+    /// Number of projected participant presence records.
+    pub presence_count: usize,
+    /// Number of reconnecting participants.
+    pub reconnecting_participant_count: usize,
+    /// Accepted operation count.
+    pub operation_count: usize,
+    /// Acknowledgement count.
+    pub acknowledgement_count: usize,
+    /// Causal gap count.
+    pub causal_gap_count: usize,
+    /// Conflict/resync count derived from acknowledgements and causal gaps.
+    pub conflict_count: usize,
+    /// Whether the session is closed, denied, or otherwise offline for GUI work.
+    pub offline: bool,
+    /// Metadata-only session status label.
+    pub status_label: String,
+}
+
+/// Metadata-only row for a shared collaboration proposal review gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollaborationSharedProposalGuiRow {
+    /// Session identifier.
+    pub session_id: CollaborationSessionId,
+    /// Proposal identifier reviewed through app-owned proposal lifecycle actions.
+    pub proposal_id: ProposalId,
+    /// Required approver count.
+    pub required_approver_count: usize,
+    /// Authorized approver count.
+    pub authorized_approver_count: usize,
+    /// Recorded approval count.
+    pub approval_count: usize,
+    /// Recorded denial count.
+    pub denial_count: usize,
+    /// Pending required approval count.
+    pub pending_count: usize,
+    /// Linked collaboration operation count.
+    pub applied_operation_count: usize,
+    /// Whether the approval gate is stale or superseded.
+    pub stale: bool,
+    /// Metadata-only review status label.
+    pub status_label: String,
+}
+
 /// Shared proposal approval disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CollaborationSharedProposalDisposition {

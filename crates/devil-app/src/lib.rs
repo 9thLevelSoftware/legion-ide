@@ -40,17 +40,18 @@ use devil_protocol::{
     BatchProposalPayload, BufferId, ByteRange, CancellationTokenId, CanonicalPath,
     CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityId,
     CapabilityNamespace, CapabilityRequest, CapabilityRequestContext, CapabilityResponse,
-    CausalityId, CollaborationAuditRecord, CollaborationDocumentBinding,
-    CollaborationDocumentEpoch, CollaborationDocumentOperation, CollaborationDocumentOperationKind,
-    CollaborationParticipant, CollaborationParticipantId, CollaborationParticipantRole,
-    CollaborationPermission, CollaborationPresenceProjection, CollaborationSessionDescriptor,
+    CausalityId, CollaborationAcknowledgementStatus, CollaborationAuditRecord,
+    CollaborationDocumentBinding, CollaborationDocumentEpoch, CollaborationDocumentOperation,
+    CollaborationDocumentOperationKind, CollaborationGuiProjection, CollaborationParticipant,
+    CollaborationParticipantId, CollaborationParticipantRole, CollaborationPermission,
+    CollaborationPresenceProjection, CollaborationSessionDescriptor, CollaborationSessionGuiRow,
     CollaborationSessionId, CollaborationSessionState, CollaborationSharedProposalApproval,
-    CollaborationSharedProposalDisposition, CollaborationTransportEnvelope,
-    CollaborationTransportPayload, CorrelationId, EditBatch, EditorApplyTransactionRequest,
-    EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
-    FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
-    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode, LanguageCompletionProjection,
-    LanguageHoverProjection, LanguageId, LanguageLocationProjection,
+    CollaborationSharedProposalDisposition, CollaborationSharedProposalGuiRow,
+    CollaborationTransportEnvelope, CollaborationTransportPayload, CorrelationId, EditBatch,
+    EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest,
+    FileConflictContext, FileConflictLifecycleState, FileConflictReason, FileConflictState,
+    FileContentVersion, FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode,
+    LanguageCompletionProjection, LanguageHoverProjection, LanguageId, LanguageLocationProjection,
     LanguageOutlineSymbolProjection, LanguageProblemProjection, LanguageToolingOperationKind,
     LanguageToolingOperationProjection, LanguageToolingProjection, LanguageToolingStatusKind,
     LspEditProposalConversionInput, LspRequestCorrelation, PluginContributionProjection,
@@ -7188,6 +7189,152 @@ impl CollaborationComposition {
             .sort_by_key(|projection| (projection.session_id.0, projection.participant_id.0));
         projections
     }
+
+    fn gui_projection(&self) -> CollaborationGuiProjection {
+        let mut session_rows = self
+            .sessions
+            .values()
+            .map(collaboration_session_gui_row)
+            .collect::<Vec<_>>();
+        session_rows.sort_by_key(|row| row.session_id.0);
+
+        let mut shared_proposal_rows = self
+            .shared_proposals
+            .iter()
+            .map(|(&(session_id, proposal_id), gate)| {
+                collaboration_shared_proposal_gui_row(session_id, proposal_id, gate)
+            })
+            .collect::<Vec<_>>();
+        shared_proposal_rows.sort_by_key(|row| (row.session_id.0, row.proposal_id.0));
+
+        let reconnecting_session_count = session_rows
+            .iter()
+            .filter(|row| row.reconnecting_participant_count > 0)
+            .count();
+        let conflict_session_count = session_rows
+            .iter()
+            .filter(|row| row.conflict_count > 0)
+            .count();
+        let offline_session_count = session_rows.iter().filter(|row| row.offline).count();
+        let status_label = if !self.runtime_sessions_enabled {
+            "collaboration runtime disabled by policy".to_string()
+        } else if session_rows.is_empty() {
+            "collaboration runtime enabled with no active sessions".to_string()
+        } else if conflict_session_count > 0 {
+            format!("collaboration conflicts visible: {conflict_session_count}")
+        } else if reconnecting_session_count > 0 {
+            format!("collaboration reconnecting sessions: {reconnecting_session_count}")
+        } else {
+            format!("collaboration sessions active: {}", session_rows.len())
+        };
+
+        CollaborationGuiProjection {
+            runtime_enabled: self.runtime_sessions_enabled,
+            presence_enabled: self.presence_enabled,
+            session_rows,
+            shared_proposal_rows,
+            reconnecting_session_count,
+            conflict_session_count,
+            offline_session_count,
+            status_label,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
+fn collaboration_session_gui_row(
+    runtime: &CollaborationSessionRuntime,
+) -> CollaborationSessionGuiRow {
+    let presence = runtime.presence();
+    let reconnecting_participant_count = presence
+        .iter()
+        .filter(|projection| projection.reconnecting)
+        .count();
+    let resync_ack_count = runtime
+        .acknowledgements()
+        .iter()
+        .filter(|acknowledgement| {
+            matches!(
+                acknowledgement.status,
+                CollaborationAcknowledgementStatus::GapDetected
+                    | CollaborationAcknowledgementStatus::ResyncRequired
+                    | CollaborationAcknowledgementStatus::Stale
+                    | CollaborationAcknowledgementStatus::Denied
+            )
+        })
+        .count();
+    let conflict_count = runtime.causal_gaps().len() + resync_ack_count;
+    let state = runtime.session_state();
+    let offline = matches!(
+        state,
+        CollaborationSessionState::Closing
+            | CollaborationSessionState::Closed
+            | CollaborationSessionState::Denied
+    );
+    let status_label = if conflict_count > 0 {
+        format!("conflict metadata visible: {conflict_count}")
+    } else if reconnecting_participant_count > 0 || state == CollaborationSessionState::Reconnecting
+    {
+        "reconnecting".to_string()
+    } else if offline {
+        format!("offline: {state:?}")
+    } else {
+        format!("{state:?}")
+    };
+
+    CollaborationSessionGuiRow {
+        session_id: runtime.session_id(),
+        state,
+        participant_count: presence.len().max(1),
+        presence_count: presence.len(),
+        reconnecting_participant_count,
+        operation_count: runtime.operations().len(),
+        acknowledgement_count: runtime.acknowledgements().len(),
+        causal_gap_count: runtime.causal_gaps().len(),
+        conflict_count,
+        offline,
+        status_label,
+    }
+}
+
+fn collaboration_shared_proposal_gui_row(
+    session_id: CollaborationSessionId,
+    proposal_id: ProposalId,
+    gate: &SharedProposalGate,
+) -> CollaborationSharedProposalGuiRow {
+    let required_approver_count = gate.required_approvers.len();
+    let approval_count = gate.approvals.len();
+    let denial_count = gate.denials.len();
+    let pending_count = gate
+        .required_approvers
+        .iter()
+        .filter(|participant| {
+            !gate.approvals.contains_key(participant) && !gate.denials.contains_key(participant)
+        })
+        .count();
+    let status_label = if gate.stale {
+        "shared proposal stale".to_string()
+    } else if denial_count > 0 {
+        format!("shared proposal denied by {denial_count}")
+    } else if pending_count == 0 {
+        "shared proposal approved".to_string()
+    } else {
+        format!("shared proposal pending approvals: {pending_count}")
+    };
+
+    CollaborationSharedProposalGuiRow {
+        session_id,
+        proposal_id,
+        required_approver_count,
+        authorized_approver_count: gate.authorized_approvers.len(),
+        approval_count,
+        denial_count,
+        pending_count,
+        applied_operation_count: gate.applied_operation_ids.len(),
+        stale: gate.stale,
+        status_label,
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -9824,6 +9971,7 @@ impl AppComposition {
             },
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
+            collaboration_gui_projection: self.collaboration.gui_projection(),
             daily_editing_projection: ProjectionBuilder::daily_editing_projection(
                 &self.active_documents,
                 &self.editor,
