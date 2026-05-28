@@ -445,6 +445,41 @@ fn render_assistant_controls(
             }
         });
     }
+
+    render_delegated_task_controls(ui, snapshot, actions);
+}
+
+fn render_delegated_task_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let delegated = &snapshot.delegated_task_projection;
+    for row in &delegated.plan_rows {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Delegated plan {}", row.plan_id.0));
+            if ui.button("Inspect").clicked() {
+                actions.push(DesktopAction::InspectDelegatedTaskPlan {
+                    plan_id: row.plan_id.clone(),
+                });
+            }
+        });
+    }
+    for link in &delegated.proposal_preview_links {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Delegated proposal {}", link.proposal_id.0));
+            if ui.button("Preview").clicked() {
+                actions.push(DesktopAction::OpenDelegatedProposalPreview {
+                    proposal_id: link.proposal_id,
+                });
+            }
+            if ui.button("Details").clicked() {
+                actions.push(DesktopAction::OpenDelegatedProposalDetails {
+                    proposal_id: link.proposal_id,
+                });
+            }
+        });
+    }
 }
 
 fn render_plugin_management_controls(
@@ -1354,15 +1389,118 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     }));
 
     let delegated = &snapshot.delegated_task_projection;
-    if delegated.plan_count > 0
-        || delegated.blocked_plan_count > 0
-        || delegated.refused_plan_count > 0
+    if delegated.plan_count == 0
+        && delegated.plan_rows.is_empty()
+        && delegated.step_summaries.is_empty()
+        && delegated.blockers.is_empty()
+        && delegated.refusals.is_empty()
+        && delegated.required_approvals.is_empty()
+        && delegated.proposal_preview_links.is_empty()
+        && delegated.audit_readiness.is_empty()
     {
-        rows.push(format!(
-            "delegated tasks: {} plans, {} blocked, runtime {:?}",
-            delegated.plan_count, delegated.blocked_plan_count, delegated.runtime_activation
-        ));
+        return rows;
     }
+    rows.push(format!(
+        "delegated task command center: projection={} plans={} blocked={} refused={} runtime={:?} autonomous_apply=unsupported redaction={}",
+        delegated.projection_id,
+        delegated.plan_count,
+        delegated.blocked_plan_count,
+        delegated.refused_plan_count,
+        delegated.runtime_activation,
+        redaction_label(&delegated.redaction_hints)
+    ));
+    rows.extend(delegated.plan_only_disclaimers.iter().map(|disclaimer| {
+        format!("delegated task disclaimer: {disclaimer} autonomous apply unsupported")
+    }));
+    rows.extend(delegated.plan_rows.iter().map(|plan| {
+        format!(
+            "delegated task plan {}: state={:?} readiness={:?} steps={} targets={} blockers={} refusals={} proposal_previews={} risk={:?} privacy={:?} runtime={:?} labels={}",
+            plan.plan_id.0,
+            plan.plan_state,
+            plan.readiness,
+            plan.step_count,
+            plan.affected_target_count,
+            plan.blocker_count,
+            plan.refusal_count,
+            plan.proposal_preview_link_count,
+            plan.risk_label,
+            plan.privacy_label,
+            plan.runtime_activation,
+            bounded_join(&plan.labels)
+        )
+    }));
+    rows.extend(delegated.step_summaries.iter().map(|step| {
+        format!(
+            "delegated task step {} plan={} order={} op={:?} state={:?} deps={} targets={} proposal={:?} blockers={} risk={:?} privacy={:?}",
+            step.step_id.0,
+            step.plan_id.0,
+            step.order,
+            step.operation_class,
+            step.state,
+            step.dependency_count,
+            step.target_count,
+            step.proposal_id.map(|proposal| proposal.0),
+            step.blocker_count,
+            step.risk_label,
+            step.privacy_label
+        )
+    }));
+    rows.extend(delegated.required_approvals.iter().map(|gate| {
+        format!(
+            "delegated task trust gate {:?}: required={} satisfied={} risk={:?} privacy={:?} reasons={}",
+            gate.kind,
+            gate.required,
+            gate.satisfied,
+            gate.risk_label,
+            gate.privacy_label,
+            bounded_join(&gate.reasons)
+        )
+    }));
+    rows.extend(delegated.blockers.iter().map(|blocker| {
+        format!(
+            "delegated task blocker {}: gate={:?} proposal={:?} label={} reasons={}",
+            blocker.reason_code,
+            blocker.gate,
+            blocker.proposal_id.map(|proposal| proposal.0),
+            blocker.label,
+            bounded_join(&blocker.reasons)
+        )
+    }));
+    rows.extend(delegated.refusals.iter().map(|refusal| {
+        format!(
+            "delegated task refusal {}: gate={:?} proposal={:?} label={} reasons={}",
+            refusal.reason_code,
+            refusal.gate,
+            refusal.proposal_id.map(|proposal| proposal.0),
+            refusal.label,
+            bounded_join(&refusal.reasons)
+        )
+    }));
+    rows.extend(delegated.proposal_preview_links.iter().map(|link| {
+        format!(
+            "delegated task proposal preview {}: proposal={} payload={:?} lifecycle={:?} targets={} hunks={} source_redacted={} proposal-mediated",
+            link.link_id,
+            link.proposal_id.0,
+            link.payload_kind,
+            link.lifecycle_state,
+            link.target_count,
+            link.hunk_count,
+            link.full_source_redacted
+        )
+    }));
+    rows.extend(delegated.audit_readiness.iter().map(|readiness| {
+        format!(
+            "delegated task audit readiness {}: readiness={:?} runtime={:?} core_ids={} blockers={} refusals={} proposal_previews={} labels={}",
+            readiness.readiness_id,
+            readiness.readiness,
+            readiness.runtime_activation,
+            readiness.correlation_causality_valid,
+            readiness.blocker_count,
+            readiness.refusal_count,
+            readiness.proposal_preview_link_count,
+            bounded_join(&readiness.labels)
+        )
+    }));
     rows
 }
 

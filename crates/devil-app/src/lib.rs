@@ -47,11 +47,12 @@ use devil_protocol::{
     CollaborationPresenceProjection, CollaborationSessionDescriptor, CollaborationSessionGuiRow,
     CollaborationSessionId, CollaborationSessionState, CollaborationSharedProposalApproval,
     CollaborationSharedProposalDisposition, CollaborationSharedProposalGuiRow,
-    CollaborationTransportEnvelope, CollaborationTransportPayload, CorrelationId, EditBatch,
-    EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest,
-    FileConflictContext, FileConflictLifecycleState, FileConflictReason, FileConflictState,
-    FileContentVersion, FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode,
-    LanguageCompletionProjection, LanguageHoverProjection, LanguageId, LanguageLocationProjection,
+    CollaborationTransportEnvelope, CollaborationTransportPayload, CorrelationId,
+    DelegatedTaskPlanContract, DelegatedTaskProjection, EditBatch, EditorApplyTransactionRequest,
+    EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
+    FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
+    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode, LanguageCompletionProjection,
+    LanguageHoverProjection, LanguageId, LanguageLocationProjection,
     LanguageOutlineSymbolProjection, LanguageProblemProjection, LanguageToolingOperationKind,
     LanguageToolingOperationProjection, LanguageToolingProjection, LanguageToolingStatusKind,
     LspEditProposalConversionInput, LspRequestCorrelation, PluginContributionProjection,
@@ -7555,6 +7556,7 @@ pub struct AppComposition {
     plugin_contribution_projections: Vec<PluginContributionProjection>,
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
+    delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
     search_projection: SearchProjection,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
@@ -7597,6 +7599,7 @@ impl AppComposition {
             plugin_contribution_projections: Vec::new(),
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
+            delegated_task_plan_contracts: Vec::new(),
             search_projection: SearchProjection::idle(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
@@ -8446,6 +8449,23 @@ impl AppComposition {
     /// Return projection-safe remote session descriptors.
     pub fn remote_session_projections(&self) -> Vec<RemoteWorkspaceSessionDescriptor> {
         self.remote.session_descriptors()
+    }
+
+    /// Replace delegated-task plan contracts used for projection-only command-center surfaces.
+    pub fn seed_delegated_task_plan_contracts(&mut self, plans: Vec<DelegatedTaskPlanContract>) {
+        self.delegated_task_plan_contracts = plans
+            .into_iter()
+            .filter(|plan| !plan.plan_id.0.trim().is_empty())
+            .collect();
+    }
+
+    fn delegated_task_projection(&self, generated_at: TimestampMillis) -> DelegatedTaskProjection {
+        devil_protocol::delegated_task_projection_from_plan_contracts(
+            "delegated-task:app-command-center",
+            self.delegated_task_plan_contracts.clone(),
+            generated_at,
+            1,
+        )
     }
 
     /// Seed an ephemeral deterministic remote fixture file for Phase 7 validation.
@@ -10131,24 +10151,7 @@ impl AppComposition {
                 .assisted_ai_projection
                 .clone()
                 .unwrap_or_else(empty_assisted_ai_projection),
-            delegated_task_projection: devil_protocol::DelegatedTaskProjection {
-                projection_id: "delegated-task:empty".to_string(),
-                plan_rows: Vec::new(),
-                step_summaries: Vec::new(),
-                blockers: Vec::new(),
-                refusals: Vec::new(),
-                required_approvals: Vec::new(),
-                proposal_preview_links: Vec::new(),
-                audit_readiness: Vec::new(),
-                plan_only_disclaimers: vec!["delegated_task.plan_only.no_runtime".to_string()],
-                plan_count: 0,
-                blocked_plan_count: 0,
-                refused_plan_count: 0,
-                runtime_activation: devil_protocol::DelegatedTaskRuntimeActivationState::NotEncoded,
-                generated_at: TimestampMillis(0),
-                redaction_hints: vec![devil_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
+            delegated_task_projection: self.delegated_task_projection(generated_at),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),

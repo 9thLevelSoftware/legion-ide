@@ -134,7 +134,7 @@ Phase 7 status: Complete; accepted and review passed on 2026-05-27.
 **Plans**: 5
 
 ### Phase 8: Advanced Platform GUI GA
-Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-04 complete.
+Phase 8 status: In progress on 2026-05-27; Plans 08-01 through 08-05 complete.
 
 **Goal**: Expose accepted advanced runtime surfaces through production-grade GUI workflows.
 

@@ -13,10 +13,10 @@ use devil_app::{
     AppSessionRestoreOutcome,
 };
 use devil_protocol::{
-    AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, PluginDenialReason,
-    PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
-    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
-    RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
+    AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, DelegatedTaskPlanContract,
+    DelegatedTaskPlanId, PluginDenialReason, PluginHostCallResponse, PluginId, PluginManifest,
+    PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse,
+    ProtocolTextRange, RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
     WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
@@ -307,6 +307,17 @@ pub enum DesktopWorkflowOutcome {
         /// User-visible status summary.
         message: String,
     },
+    /// Delegated task command-center review changed through app-owned proposal authority.
+    DelegatedTaskReviewed {
+        /// Delegated task plan represented by the outcome, if plan-scoped.
+        plan_id: Option<DelegatedTaskPlanId>,
+        /// Proposal represented by the outcome, if proposal-scoped.
+        proposal_id: Option<ProposalId>,
+        /// Normalized desktop delegated task status.
+        status: DesktopDelegatedTaskStatus,
+        /// User-visible status summary.
+        message: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -352,6 +363,17 @@ pub enum DesktopCollaborationStatus {
 pub enum DesktopRemoteStatus {
     /// Remote workspace session connected or reconnected through app authority.
     Connected,
+}
+
+/// Desktop-facing status for delegated task command-center workflows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopDelegatedTaskStatus {
+    /// Plan metadata was inspected without runtime activation.
+    PlanInspected,
+    /// Linked proposal preview was opened through proposal authority.
+    ProposalPreviewOpened,
+    /// Linked proposal details were opened through proposal authority.
+    ProposalDetailsOpened,
 }
 
 /// Renderer-backed desktop runtime.
@@ -523,6 +545,20 @@ impl DesktopRuntime {
         self.set_status(
             StatusSeverity::Info,
             "Remote workspace runtime enabled by app policy",
+        );
+        self.refresh_projection()
+    }
+
+    /// Seed delegated task plan contracts for projection-only command-center harnesses.
+    pub fn seed_delegated_task_plan_contracts(
+        &mut self,
+        plans: Vec<DelegatedTaskPlanContract>,
+    ) -> Result<()> {
+        let plan_count = plans.len();
+        self.app.seed_delegated_task_plan_contracts(plans);
+        self.set_status(
+            StatusSeverity::Info,
+            format!("Delegated task plan contracts projected: {plan_count}"),
         );
         self.refresh_projection()
     }
@@ -709,6 +745,69 @@ impl DesktopRuntime {
                     Ok(DesktopWorkflowOutcome::Error(message))
                 }
             },
+            DesktopAppRequest::InspectDelegatedTaskPlan { plan_id } => {
+                let message = format!(
+                    "Delegated task plan inspected {}: approval-gated, autonomous apply unsupported",
+                    plan_id.0
+                );
+                self.set_status(StatusSeverity::Info, message.clone());
+                Ok(DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                    plan_id: Some(plan_id),
+                    proposal_id: None,
+                    status: DesktopDelegatedTaskStatus::PlanInspected,
+                    message,
+                })
+            }
+            DesktopAppRequest::OpenDelegatedProposalPreview { proposal_id } => {
+                match self
+                    .app
+                    .dispatch_ui_intent(CommandDispatchIntent::PreviewProposal { proposal_id })
+                {
+                    Ok(_) => {
+                        let message = format!(
+                            "Delegated task proposal preview opened {}: proposal-mediated",
+                            proposal_id.0
+                        );
+                        self.set_status(StatusSeverity::Info, message.clone());
+                        Ok(DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                            plan_id: None,
+                            proposal_id: Some(proposal_id),
+                            status: DesktopDelegatedTaskStatus::ProposalPreviewOpened,
+                            message,
+                        })
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
+            DesktopAppRequest::OpenDelegatedProposalDetails { proposal_id } => {
+                match self
+                    .app
+                    .dispatch_ui_intent(CommandDispatchIntent::OpenProposalDetails { proposal_id })
+                {
+                    Ok(_) => {
+                        let message = format!(
+                            "Delegated task proposal details opened {}: proposal-mediated",
+                            proposal_id.0
+                        );
+                        self.set_status(StatusSeverity::Info, message.clone());
+                        Ok(DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                            plan_id: None,
+                            proposal_id: Some(proposal_id),
+                            status: DesktopDelegatedTaskStatus::ProposalDetailsOpened,
+                            message,
+                        })
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
         }
     }
 

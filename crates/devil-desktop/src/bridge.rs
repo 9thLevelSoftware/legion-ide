@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 
 use devil_protocol::{
-    AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, FileId,
-    ProposalCancellationReason, ProposalId, ProposalRejectionReason, ProposalRollbackReason,
-    ProtocolTextRange, RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
+    AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, DelegatedTaskPlanId,
+    FileId, ProposalCancellationReason, ProposalId, ProposalRejectionReason,
+    ProposalRollbackReason, ProtocolTextRange, RemoteWorkspaceSessionId, TerminalSessionId,
+    TextCoordinate, ViewportScroll,
 };
 use devil_protocol::{PluginContribution, PluginId};
 use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
@@ -179,6 +180,21 @@ pub enum DesktopAction {
         /// Session identifier selected from projected remote GUI data.
         session_id: RemoteWorkspaceSessionId,
         /// Remote proposal identifier selected from projected remote GUI data.
+        proposal_id: ProposalId,
+    },
+    /// Inspect a delegated task plan without activating an agent runtime.
+    InspectDelegatedTaskPlan {
+        /// Delegated task plan identifier selected from projection data.
+        plan_id: DelegatedTaskPlanId,
+    },
+    /// Open a proposal preview linked from delegated task metadata.
+    OpenDelegatedProposalPreview {
+        /// Proposal identifier linked from projected delegated task data.
+        proposal_id: ProposalId,
+    },
+    /// Open proposal details linked from delegated task metadata.
+    OpenDelegatedProposalDetails {
+        /// Proposal identifier linked from projected delegated task data.
         proposal_id: ProposalId,
     },
     /// Insert text at a projected coordinate.
@@ -358,6 +374,21 @@ pub enum DesktopAppRequest {
         /// Display-safe remote authority label or stable hash.
         authority_label: String,
     },
+    /// Inspect delegated task plan metadata without runtime activation.
+    InspectDelegatedTaskPlan {
+        /// Delegated task plan identifier.
+        plan_id: DelegatedTaskPlanId,
+    },
+    /// Open proposal preview linked from delegated task metadata.
+    OpenDelegatedProposalPreview {
+        /// Proposal identifier.
+        proposal_id: ProposalId,
+    },
+    /// Open proposal details linked from delegated task metadata.
+    OpenDelegatedProposalDetails {
+        /// Proposal identifier.
+        proposal_id: ProposalId,
+    },
 }
 
 /// Result of translating a desktop action.
@@ -469,6 +500,21 @@ pub enum DesktopBridgeError {
         /// Remote workspace session id.
         session_id: RemoteWorkspaceSessionId,
         /// Proposal id.
+        proposal_id: ProposalId,
+    },
+    /// Delegated task plan id was empty.
+    #[error("delegated task plan id is empty")]
+    InvalidDelegatedTaskPlan,
+    /// Delegated task plan was not present in current projections.
+    #[error("unknown delegated task plan: {plan_id:?}")]
+    UnknownDelegatedTaskPlan {
+        /// Unknown delegated task plan.
+        plan_id: DelegatedTaskPlanId,
+    },
+    /// Delegated proposal-preview link was not present in current projections.
+    #[error("unknown delegated proposal preview: {proposal_id:?}")]
+    UnknownDelegatedProposalPreview {
+        /// Unknown proposal id.
         proposal_id: ProposalId,
     },
     /// Target buffer does not own the active dirty-close prompt.
@@ -692,6 +738,17 @@ impl DesktopCommandBridge {
                 session_id,
                 proposal_id,
             } => self.with_known_remote_proposal(snapshot, session_id, proposal_id),
+            DesktopAction::InspectDelegatedTaskPlan { plan_id } => {
+                self.with_known_delegated_plan(snapshot, plan_id)
+            }
+            DesktopAction::OpenDelegatedProposalPreview { proposal_id } => self
+                .with_known_delegated_proposal(snapshot, proposal_id, |proposal_id| {
+                    DesktopAppRequest::OpenDelegatedProposalPreview { proposal_id }
+                }),
+            DesktopAction::OpenDelegatedProposalDetails { proposal_id } => self
+                .with_known_delegated_proposal(snapshot, proposal_id, |proposal_id| {
+                    DesktopAppRequest::OpenDelegatedProposalDetails { proposal_id }
+                }),
             DesktopAction::InsertText { text, at }
             | DesktopAction::ClipboardPaste { text, at }
             | DesktopAction::ImeCommit { text, at } => {
@@ -1090,6 +1147,39 @@ impl DesktopCommandBridge {
             CommandDispatchIntent::OpenProposalDetails { proposal_id }
         })
     }
+
+    fn with_known_delegated_plan(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        plan_id: DelegatedTaskPlanId,
+    ) -> DesktopBridgeOutput {
+        if plan_id.0.trim().is_empty() {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidDelegatedTaskPlan);
+        }
+        if delegated_plan_is_known(snapshot, &plan_id) {
+            DesktopBridgeOutput::AppRequest(DesktopAppRequest::InspectDelegatedTaskPlan { plan_id })
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDelegatedTaskPlan { plan_id })
+        }
+    }
+
+    fn with_known_delegated_proposal(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        proposal_id: ProposalId,
+        build: impl FnOnce(ProposalId) -> DesktopAppRequest,
+    ) -> DesktopBridgeOutput {
+        if !delegated_proposal_preview_is_known(snapshot, proposal_id) {
+            return DesktopBridgeOutput::Error(
+                DesktopBridgeError::UnknownDelegatedProposalPreview { proposal_id },
+            );
+        }
+        if proposal_is_known(snapshot, proposal_id) {
+            DesktopBridgeOutput::AppRequest(build(proposal_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownProposal { proposal_id })
+        }
+    }
 }
 
 fn normalized_path(path: String) -> Option<String> {
@@ -1226,6 +1316,33 @@ fn remote_proposal_is_known(
         .proposal_review_rows
         .iter()
         .any(|row| row.session_id == session_id && row.proposal_id == proposal_id)
+}
+
+fn delegated_plan_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    plan_id: &DelegatedTaskPlanId,
+) -> bool {
+    snapshot
+        .delegated_task_projection
+        .plan_rows
+        .iter()
+        .any(|row| &row.plan_id == plan_id)
+}
+
+fn delegated_proposal_preview_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    proposal_id: ProposalId,
+) -> bool {
+    snapshot
+        .delegated_task_projection
+        .proposal_preview_links
+        .iter()
+        .any(|link| link.proposal_id == proposal_id)
+        || snapshot
+            .delegated_task_projection
+            .step_summaries
+            .iter()
+            .any(|step| step.proposal_id == Some(proposal_id))
 }
 
 fn projected_assisted_run_id(snapshot: &ShellProjectionSnapshot) -> Option<&str> {

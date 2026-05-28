@@ -284,6 +284,6 @@ pub fn phase7_unsupported_surfaces() -> Vec<String> {
         "Hosted provider activation: unsupported".to_string(),
         "Signed installer: unsupported".to_string(),
         "Cross-platform parity: unsupported".to_string(),
-        "Autonomous apply: unsupported".to_string(),
+        "Autonomous apply: unsupported (autonomous execution unavailable)".to_string(),
     ]
 }
