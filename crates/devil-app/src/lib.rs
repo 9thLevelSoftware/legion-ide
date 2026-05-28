@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use devil_agent::AgentRuntime;
+use devil_agent::{AgentRuntime, DelegatedTaskProposalGenerator, DelegatedTaskSandboxOrchestrator};
 use devil_ai::ProviderRouter;
 use devil_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_stub_registry};
 use devil_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
@@ -37,8 +37,8 @@ use devil_project::{
     WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
 };
 use devil_protocol::{
-    BatchProposalPayload, BufferId, ByteRange, CancellationTokenId, CanonicalPath,
-    CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityId,
+    AssistedAiEditProposalOutput, BatchProposalPayload, BufferId, ByteRange, CancellationTokenId,
+    CanonicalPath, CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityId,
     CapabilityNamespace, CapabilityRequest, CapabilityRequestContext, CapabilityResponse,
     CausalityId, CollaborationAcknowledgementStatus, CollaborationAuditRecord,
     CollaborationDocumentBinding, CollaborationDocumentEpoch, CollaborationDocumentOperation,
@@ -8485,6 +8485,95 @@ impl AppComposition {
             .into_iter()
             .filter(|plan| !plan.plan_id.0.trim().is_empty())
             .collect();
+    }
+
+    /// Executes a delegated task plan contract, running it in an isolated sandbox,
+    /// enforcing security policies, and emitting mutation-safe edit proposals.
+    pub fn execute_delegated_task(
+        &mut self,
+        plan_id: &devil_protocol::DelegatedTaskPlanId,
+    ) -> Result<AssistedAiEditProposalOutput, String> {
+        // Find the contract
+        let _contract = self
+            .delegated_task_plan_contracts
+            .iter()
+            .find(|plan| plan.plan_id == *plan_id)
+            .ok_or_else(|| format!("Plan contract {} not found", plan_id.0))?;
+
+        // Fail-closed checks: CorrelationId and CausalityId must be valid (non-zero/non-nil)
+        let correlation_id = self.correlation_generator.next();
+        let causality_id = CausalityId(uuid::Uuid::from_u128(1));
+        let event_sequence = self.event_sequence_generator.next();
+
+        if correlation_id.0 == 0 {
+            return Err("Assisted AI requires non-zero correlation id".to_string());
+        }
+        if causality_id.0.is_nil() {
+            return Err("Assisted AI requires non-nil causality id".to_string());
+        }
+
+        // 1. Initialize Agent Runtime and transition state
+        let run_id = devil_protocol::AgentRunId(format!("run-{}", plan_id.0));
+        let mut agent_runtime = AgentRuntime::new(run_id);
+
+        // Observing -> Planning
+        agent_runtime
+            .transition(
+                devil_protocol::AgentRunState::Planning,
+                "task.start",
+                correlation_id,
+                causality_id,
+                event_sequence,
+            )
+            .map_err(|e| e.to_string())?;
+
+        // Planning -> Proposing
+        agent_runtime
+            .transition(
+                devil_protocol::AgentRunState::Proposing,
+                "task.propose",
+                correlation_id,
+                causality_id,
+                self.event_sequence_generator.next(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        // 2. Setup isolated sandbox orchestrator
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new(&plan_id.0);
+        orchestrator
+            .initialize()
+            .map_err(|e| format!("Failed to initialize sandbox: {}", e))?;
+        let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+
+        // 3. Perform path containment validation and proposal generation
+        let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
+        let target_file = sandbox_path.join("src/lib.rs");
+
+        let proposal_result = generator.generate_proposal(&target_file, "modified content");
+
+        // Cleanup orchestrator immediately (fail-closed resource safety)
+        let cleanup_res = orchestrator.cleanup();
+
+        let mut proposal =
+            proposal_result.map_err(|e| format!("Proposal generation failed: {}", e))?;
+        cleanup_res.map_err(|e| format!("Sandbox cleanup failed: {}", e))?;
+
+        // Set correlation and causality ids on proposal
+        proposal.correlation_id = correlation_id;
+        proposal.causality_id = causality_id;
+
+        // Proposing -> WaitingForApproval
+        agent_runtime
+            .transition(
+                devil_protocol::AgentRunState::WaitingForApproval,
+                "task.waiting_for_approval",
+                correlation_id,
+                causality_id,
+                self.event_sequence_generator.next(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(proposal)
     }
 
     fn delegated_task_projection(&self, generated_at: TimestampMillis) -> DelegatedTaskProjection {

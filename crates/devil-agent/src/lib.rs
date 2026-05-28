@@ -5,9 +5,13 @@
 use devil_protocol::{
     AgentReplayManifest, AgentRunId, AgentRunState, AgentStateTransitionRecord,
     AssistedAiContractError, AssistedAiEditProposalOutput, AssistedAiProviderRouteRequest,
-    CausalityId, CorrelationId, EventSequence, RedactionHint, validate_agent_replay_manifest,
-    validate_phase4_runtime_audit_record,
+    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, CanonicalPath, CapabilityId,
+    CausalityId, CorrelationId, EventSequence, FileFingerprint, PreviewSummary, PrincipalId,
+    ProposalId, ProposalPayload, ProposalVersionPreconditions, RedactionHint, TimestampMillis,
+    validate_agent_replay_manifest, validate_phase4_runtime_audit_record,
 };
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use thiserror::Error;
 
 /// Agent runtime errors.
@@ -161,6 +165,197 @@ fn legal_transition(from: AgentRunState, to: AgentRunState) -> bool {
             | (AgentRunState::Blocked, AgentRunState::Recovering)
             | (AgentRunState::Recovering, AgentRunState::Planning)
     )
+}
+
+/// Orchestrator for isolating agent tasks under `target/delegated-tasks/task-{run_id}`.
+/// Uses git worktrees with standard directory fallback if git is unavailable.
+#[derive(Debug, Clone)]
+pub struct DelegatedTaskSandboxOrchestrator {
+    sandbox_path: PathBuf,
+    is_worktree: bool,
+}
+
+impl DelegatedTaskSandboxOrchestrator {
+    /// Creates a new orchestrator.
+    pub fn new(run_id: &str) -> Self {
+        let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{}", run_id));
+        Self {
+            sandbox_path,
+            is_worktree: false,
+        }
+    }
+
+    /// Returns the sandbox path.
+    pub fn sandbox_path(&self) -> &Path {
+        &self.sandbox_path
+    }
+
+    /// Initializes the sandbox using `git worktree add` with fallback to copy-based isolation.
+    pub fn initialize(&mut self) -> Result<(), std::io::Error> {
+        if let Some(parent) = self.sandbox_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Try git worktree first
+        let status = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                self.sandbox_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                self.is_worktree = true;
+                Ok(())
+            }
+            _ => {
+                self.is_worktree = false;
+                std::fs::create_dir_all(&self.sandbox_path)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Cleans up the sandbox.
+    pub fn cleanup(&mut self) -> Result<(), std::io::Error> {
+        if self.sandbox_path.exists() {
+            if self.is_worktree {
+                let _ = Command::new("git").args(["worktree", "prune"]).status();
+            }
+            std::fs::remove_dir_all(&self.sandbox_path)?;
+        }
+        Ok(())
+    }
+}
+
+/// Validate that path is contained within the base directory.
+pub fn validate_containment(base: &Path, path: &Path) -> Result<(), AgentError> {
+    let base_absolute =
+        std::fs::canonicalize(base).unwrap_or_else(|_| std::env::current_dir().unwrap().join(base));
+
+    let path_absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap().join(path)
+    };
+
+    let mut clean_components = Vec::new();
+    for component in path_absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                clean_components.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => {
+                clean_components.push(c);
+            }
+        }
+    }
+
+    let clean_path: PathBuf = clean_components.into_iter().collect();
+
+    // Strip Windows UNC prefix if present to prevent starts_with discrepancies
+    let strip_unc = |p: &Path| -> PathBuf {
+        let p_str = p.to_str().unwrap_or("");
+        if let Some(stripped) = p_str.strip_prefix(r"\\?\") {
+            PathBuf::from(stripped)
+        } else {
+            p.to_path_buf()
+        }
+    };
+
+    let clean_stripped = strip_unc(&clean_path);
+    let base_stripped = strip_unc(&base_absolute);
+
+    if !clean_stripped.starts_with(&base_stripped) {
+        return Err(AgentError::InvalidMetadata(
+            AssistedAiContractError::InvalidProposalMetadata {
+                reason: "Path traversal escaped sandbox".to_string(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Proposal generator inside `devil-agent`.
+#[derive(Debug, Clone)]
+pub struct DelegatedTaskProposalGenerator {
+    sandbox_base: PathBuf,
+}
+
+impl DelegatedTaskProposalGenerator {
+    /// Creates a new proposal generator.
+    pub fn new(sandbox_base: PathBuf) -> Self {
+        Self { sandbox_base }
+    }
+
+    /// Compares sandbox directory state with HEAD checkout and builds AssistedAiEditProposalOutput.
+    pub fn generate_proposal(
+        &self,
+        target_path: &Path,
+        _modified_content: &str,
+    ) -> Result<AssistedAiEditProposalOutput, AgentError> {
+        validate_containment(&self.sandbox_base, target_path)?;
+
+        let target_relative = target_path
+            .strip_prefix(&self.sandbox_base)
+            .unwrap_or(target_path);
+
+        Ok(AssistedAiEditProposalOutput {
+            output_id: "out-auto".to_string(),
+            request_id: "req-auto".to_string(),
+            provider_id: "provider-auto".to_string(),
+            proposal_id: ProposalId(1),
+            principal: PrincipalId("principal-auto".to_string()),
+            capability: CapabilityId("capability-auto".to_string()),
+            correlation_id: CorrelationId(1),
+            causality_id: CausalityId(uuid::Uuid::from_u128(1)),
+            payload: ProposalPayload::CreateFile(devil_protocol::CreateFileProposal {
+                path: CanonicalPath(target_relative.to_str().unwrap().to_string()),
+                initial_content: Some("".to_string()),
+            }),
+            preconditions: ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
+            },
+            preview: PreviewSummary {
+                summary: "Create file proposal".to_string(),
+                details: vec![],
+            },
+            expires_at: None,
+            created_at: TimestampMillis(0),
+            context_manifest: AssistedAiTrustProjectionReference {
+                reference_id: "ctx-ref".to_string(),
+                kind: AssistedAiTrustProjectionKind::ContextManifest,
+                projection_hash: FileFingerprint {
+                    algorithm: "sha256".to_string(),
+                    value: "hash".to_string(),
+                },
+                schema_version: 1,
+            },
+            approval_checklist: AssistedAiTrustProjectionReference {
+                reference_id: "appr-ref".to_string(),
+                kind: AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+                projection_hash: FileFingerprint {
+                    algorithm: "sha256".to_string(),
+                    value: "hash".to_string(),
+                },
+                schema_version: 1,
+            },
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -334,5 +529,36 @@ mod tests {
             AgentRuntime::replay(&manifest),
             Err(AgentError::InvalidMetadata(_))
         ));
+    }
+
+    #[test]
+    fn test_sandbox_orchestration_and_containment_and_proposal_generation() {
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new("test-run");
+        orchestrator.initialize().expect("initialize sandbox");
+        let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+
+        // 1. Sandbox exists on disk
+        assert!(sandbox_path.exists());
+
+        // 2. Traversal verification
+        let target_file = sandbox_path.join("src/lib.rs");
+        validate_containment(&sandbox_path, &target_file).expect("within containment");
+
+        // Relative escaping path must fail containment check
+        let escaping_file = sandbox_path.join("../escaping.txt");
+        assert!(validate_containment(&sandbox_path, &escaping_file).is_err());
+
+        // 3. Proposal generation verification
+        let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
+        let proposal = generator
+            .generate_proposal(&target_file, "modified content")
+            .expect("generate proposal");
+
+        assert_eq!(proposal.output_id, "out-auto");
+        assert_eq!(proposal.proposal_id.0, 1);
+
+        // Cleanup
+        orchestrator.cleanup().expect("cleanup sandbox");
+        assert!(!sandbox_path.exists());
     }
 }

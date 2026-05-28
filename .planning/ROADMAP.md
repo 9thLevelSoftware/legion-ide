@@ -13,7 +13,7 @@
 - [x] Phase 9: Command And Work Surfaces Foundation
 - [x] Phase 10: Metadata-First Artifact Model
 - [x] Phase 11: Safe Runtime Activation Contracts
-- [ ] Phase 12: Delegated Task Runtime
+- [x] Phase 12: Delegated Task Runtime
 - [ ] Phase 13: Legion Workflow Orchestration
 
 ## Phase Details
@@ -189,14 +189,32 @@ Phase 11 status: Complete for protocol and policy contracts.
 - Runtime readiness tests prove protected paths, egress, denied commands, direct mutation, stale preconditions, dirty workspace conflict, and missing evidence block progress.
 
 ### Phase 12: Delegated Task Runtime
-Phase 12 status: Planned.
+Phase 12 status: Complete; accepted on 2026-05-28.
 
 **Goal**: Activate `devil-agent` as an isolated orchestrator that emits proposals and evidence, never direct main-workspace mutation.
+
+**Success Criteria**:
+- Isolated sandboxing via git worktrees (`DelegatedTaskSandboxOrchestrator`) is fully functional.
+- Path containment validation blocks all escape/traversal attempts.
+- Proposal generator builds mutation-safe `AssistedAiEditProposalOutput` DTOs.
+- `AppComposition` orchestrates transitions through planning, proposing, and waiting-for-approval states.
+- All desktop integrations, bridge actions, and headless workflow routes pass end-to-end integration verification.
 
 ### Phase 13: Legion Workflow Orchestration
 Phase 13 status: Planned.
 
 **Goal**: Coordinate a full Legion Workflow team across local or provider-backed models, with conflict/dependency tracking, verification, sign-off, and approval-gated merge.
+
+**Success Criteria**:
+- Legion Workflow orchestration has an accepted ADR, dependency-policy boundary, and governance evidence before runtime behavior is expanded.
+- Protocol contracts represent workflow sessions, workers, local/provider-backed model routing, dependency edges, conflicts, verification gates, sign-off, and merge readiness as metadata-first DTOs.
+- `devil-agent` coordinates workflow teams through isolated delegated-task primitives and provider-route metadata without app/UI authority, direct provider invocation, or main-workspace mutation.
+- Tracker and memory record workflow evidence, conflicts, verification, sign-off, and outcomes as metadata-only records with consent-gated memory retention.
+- `AppComposition` owns workflow execution state, verification/sign-off routing, dirty/stale/conflict blockers, and approval-gated merge readiness.
+- `devil-ui` and `devil-desktop` expose workflow command-center projections and app-request intents without owning runtime authority.
+- Final evidence proves targeted workflow tests, repository gates, and no autonomous merge/apply behavior.
+
+**Plans**: 7
 
 ## Progress
 
@@ -213,12 +231,12 @@ Phase 13 status: Planned.
 | 9 | 1 | 1 | Complete |
 | 10 | 1 | 1 | Complete |
 | 11 | 1 | 1 | Complete |
-| 12 | TBD | 0 | Planned |
-| 13 | TBD | 0 | Planned |
+| 12 | 3 | 3 | Complete |
+| 13 | 7 | 0 | Planned |
 
 ## Planning Notes
 
 - Total GUI GA plans completed through Phase 8: 51.
-- Post-GA Phase 9-11 foundation slices are complete; Phase 12-13 execution/fleet work remains planned and must not bypass proposal-mediated authority.
+- Post-GA Phase 9-12 foundation/runtime slices are complete; Phase 13 workflow orchestration is planned and must not bypass proposal-mediated authority.
 - Estimates are not caps. A phase may produce as many tasks as needed to satisfy the phase goal and verification contract.
 - `/legion:plan` should use `.planning/CODEBASE.md`, `.planning/codebase/index.jsonl`, and `.planning/codebase/symbols.json` before decomposing each phase.

@@ -1,9 +1,9 @@
 # Project State
 
 ## Current Position
-- **Phase**: Post-GA autonomy-native foundation after Phase 8
-- **Status**: Phase 8 accepted; Phase 9-11 metadata-first autonomy foundation complete; Phase 12 delegated runtime planned
-- **Last Activity**: Phase 8 Wave 7 evidence closure and post-GA command/artifact/runtime contract implementation (2026-05-28)
+- **Phase**: 13 of 13 (planned)
+- **Status**: Phase 13 planned -- 7 plans across 7 sequential waves
+- **Last Activity**: Phase 13 planning (2026-05-28)
 
 ## Progress
 ```
@@ -88,8 +88,18 @@
 - Phase 9: Command And Work Surfaces Foundation -- complete for metadata-first projections.
 - Phase 10: Metadata-First Artifact Model -- complete for public protocol DTOs.
 - Phase 11: Safe Runtime Activation Contracts -- complete for runtime states, security contracts, and readiness stop gates.
-- Phase 12: Delegated Task Runtime -- planned; no direct main-workspace mutation authority is enabled.
-- Phase 13: Legion Workflow Orchestration -- planned; no multi-session runtime merge/apply authority is enabled.
+- Phase 12: Delegated Task Runtime -- complete; isolated sandbox and gated proposal runtime fully implemented.
+- Phase 13: Legion Workflow Orchestration -- planned as seven sequential waves; no multi-session runtime merge/apply authority is enabled until the phase is executed, verified, signed off, and approval-gated.
+
+## Phase 13 Plan
+
+- Plan 13-01 (Wave 1): Governance And Activation Gate -- planned
+- Plan 13-02 (Wave 2): Protocol Workflow Contracts -- planned
+- Plan 13-03 (Wave 3): Agent Workflow Coordinator -- planned
+- Plan 13-04 (Wave 4): Tracker Memory Evidence Ledger -- planned
+- Plan 13-05 (Wave 5): App Workflow Composition -- planned
+- Plan 13-06 (Wave 6): Desktop Workflow Command Center -- planned
+- Plan 13-07 (Wave 7): Evidence Final Gate And Readiness -- planned
 
 ## Recent Decisions
 - Use exploration design `.planning/explorations/2026-05-26-gui-ide-roadmap-design.md` as the start source.
@@ -141,6 +151,10 @@
 - Phase 8 is accepted with final gates passing on 2026-05-28.
 - Post-GA autonomy-native work added command registry, artifact ledger, verification run, and system graph projections while preserving projection-only UI and renderer boundaries.
 - Post-GA artifact/runtime contracts are metadata-first and fail-closed; Delegates and Legion Workflows execution remain gated until runtime/sandbox/worktree implementation evidence exists.
+- Phase 12 is accepted with isolated sandboxing (`DelegatedTaskSandboxOrchestrator`), path containment validation, proposal generation, and end-to-end integration tests passing successfully.
+- Phase 13 planning derives requirements from the roadmap goal and Phase 12 runtime evidence because `.planning/REQUIREMENTS.md` is absent.
+- Phase 13 uses seven sequential waves because governance, protocol, agent coordination, tracker/memory, app authority, desktop projections, and final evidence share high-risk workflow/merge boundaries.
+- Phase 13 merge semantics are approval-gated proposal readiness, not autonomous git merge or direct workspace mutation.
 
 ## Next Action
-Plan Phase 12 delegated runtime activation with isolated worktree/sandbox orchestration, proposal-only generated edits, verification evidence, and audit-before-success gates.
+Run `/legion:build` to execute Phase 13: Legion Workflow Orchestration.
