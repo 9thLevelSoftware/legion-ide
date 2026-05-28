@@ -11,7 +11,12 @@ import {
   Coins,
   Users,
   ChevronDown,
+  ShieldOff,
+  Wrench,
+  Bug,
+  FlaskConical,
 } from "lucide-react";
+import { MANUAL_TOOLCHAIN } from "../manualModeProjection";
 
 function ResourceChip({ icon: Icon, value, sub, color = "#B6B7C3" }: any) {
   return (
@@ -24,7 +29,7 @@ function ResourceChip({ icon: Icon, value, sub, color = "#B6B7C3" }: any) {
 }
 
 const LEVEL_STATUS: Record<number, { label: string; engine: string; engineColor: string; pulse: boolean }> = {
-  1: { label: "Manual Mode", engine: "Legion Engine Idle", engineColor: "#6B6E7D", pulse: false },
+  1: { label: "Manual", engine: "AI Disabled · Local Tools Only", engineColor: "#4B8CFF", pulse: false },
   2: { label: "Assisted Coding Active", engine: "Context indexed", engineColor: "#39D7FF", pulse: true },
   3: { label: "Pair Programming Active", engine: "Primary Co-Pilot: GPT-5.5", engineColor: "#4B8CFF", pulse: true },
   4: { label: "Delegated Tasks Active", engine: "4 agents · 3 approvals pending", engineColor: "#8B5CFF", pulse: true },
@@ -33,6 +38,9 @@ const LEVEL_STATUS: Record<number, { label: string; engine: string; engineColor:
 
 export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number) => void }) {
   const status = LEVEL_STATUS[level];
+  const manualToolsHealthy = MANUAL_TOOLCHAIN.filter((tool) =>
+    ["running", "ready", "idle", "healthy"].includes(tool.health)
+  ).length;
   return (
     <div
       className="h-[52px] shrink-0 flex items-center justify-between px-3 border-b select-none relative z-50"
@@ -97,7 +105,7 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
       <div className="flex items-center gap-1.5 flex-1 justify-end">
         <button className="h-7 px-2.5 flex items-center gap-2 rounded-md bg-white/[0.03] border border-white/[0.07] text-[11px] text-white/55 hover:text-white/85 hover:bg-white/[0.06]">
           <Search className="w-3.5 h-3.5" />
-          <span>Run command</span>
+          <span>{level === 1 ? "Command Center" : "Run command"}</span>
           <span className="ml-1 inline-flex items-center gap-0.5 text-[10px] text-white/35 font-mono">
             <Command className="w-3 h-3" />K
           </span>
@@ -112,7 +120,17 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
 
         {/* Resources */}
         <div className="h-7 flex items-center gap-0 rounded-md bg-white/[0.02] border border-white/[0.06] px-1">
-          {level === 5 ? (
+          {level === 1 ? (
+            <>
+              <ResourceChip icon={ShieldOff} value="AI Off" color="#7E8190" />
+              <span className="w-px h-3 bg-white/[0.07]" />
+              <ResourceChip icon={Wrench} value={`${manualToolsHealthy}/${MANUAL_TOOLCHAIN.length}`} sub="tools" color="#4B8CFF" />
+              <span className="w-px h-3 bg-white/[0.07]" />
+              <ResourceChip icon={Bug} value="2" sub="problems" color="#FFCC66" />
+              <span className="w-px h-3 bg-white/[0.07]" />
+              <ResourceChip icon={FlaskConical} value="412" sub="tests" color="#4ADE80" />
+            </>
+          ) : level === 5 ? (
             <>
               <ResourceChip icon={Cpu} value="82%" color="#39D7FF" />
               <span className="w-px h-3 bg-white/[0.07]" />
@@ -155,12 +173,14 @@ export function TopBar({ level, onLevel }: { level: number; onLevel: (n: number)
           <button
             className="h-7 pl-2 pr-2.5 flex items-center gap-1.5 rounded-md text-[11px] font-semibold"
             style={{
-              color: "#09090D",
-              background: "linear-gradient(135deg, #39D7FF 0%, #8B5CFF 100%)",
+              color: level === 1 ? "#F4F4F6" : "#09090D",
+              background: level === 1
+                ? "linear-gradient(135deg, #343848 0%, #4B8CFF 100%)"
+                : "linear-gradient(135deg, #39D7FF 0%, #8B5CFF 100%)",
             }}
           >
             <Play className="w-3 h-3 fill-current" />
-            Run Directive
+            {level === 1 ? "Run Task" : "Run Directive"}
           </button>
         )}
 

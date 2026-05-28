@@ -37,7 +37,7 @@ const CODE_MANUAL: Line[] = [
   { n: 20, html: `&nbsp;&nbsp;<span class="tk-key">const</span> token = <span class="tk-fn">cookies</span>().<span class="tk-fn">get</span>(COOKIE)?.value;` },
   { n: 21, html: `&nbsp;&nbsp;<span class="tk-key">if</span> (!token) <span class="tk-key">return null</span>;` },
   { n: 22, html: `&nbsp;&nbsp;<span class="tk-key">try</span> {` },
-  { n: 23, html: `&nbsp;&nbsp;&nbsp;&nbsp;<span class="tk-key">const</span> { payload } = <span class="tk-key">await</span> <span class="tk-fn">jwtVerify</span>(token, SECRET);`, ghost: "    return payload as { sub: string; role: string };" },
+  { n: 23, html: `&nbsp;&nbsp;&nbsp;&nbsp;<span class="tk-key">const</span> { payload } = <span class="tk-key">await</span> <span class="tk-fn">jwtVerify</span>(token, SECRET);` },
   { n: 24, html: `&nbsp;&nbsp;} <span class="tk-key">catch</span> {` },
   { n: 25, html: `&nbsp;&nbsp;&nbsp;&nbsp;<span class="tk-key">return null</span>;` },
   { n: 26, html: `&nbsp;&nbsp;}` },
@@ -269,7 +269,7 @@ export function CodeCanvas({ level = 3 }: { level?: number }) {
             </>
           )}
 
-          {/* Manual mode: tiny ghost-completion hint */}
+          {/* Manual mode: deterministic language-tool completion hint */}
           {manual && (
             <div
               className="absolute right-6 top-[480px] flex items-center gap-2 px-2 py-1 rounded-md text-[10.5px] backdrop-blur"
@@ -279,8 +279,10 @@ export function CodeCanvas({ level = 3 }: { level?: number }) {
                 color: "#B6B7C3",
               }}
             >
+              <span>LSP completion</span>
+              <span className="text-white/30">·</span>
               <span className="font-mono text-white/55">Tab</span>
-              <span>to accept completion</span>
+              <span>applies selected item</span>
               <CornerDownLeft className="w-3 h-3 text-white/35" />
             </div>
           )}

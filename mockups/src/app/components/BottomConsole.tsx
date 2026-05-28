@@ -1,5 +1,23 @@
-import { TerminalSquare, ScrollText, FlaskConical, Radio, ChevronDown, Circle, Play, Sparkles, Check, Brain } from "lucide-react";
+import {
+  TerminalSquare,
+  ScrollText,
+  FlaskConical,
+  Radio,
+  ChevronDown,
+  Circle,
+  Sparkles,
+  Brain,
+  Bug,
+  ListChecks,
+  Wrench,
+  Database,
+  Globe2,
+  ShieldCheck,
+  Activity,
+  Gauge,
+} from "lucide-react";
 import { useState } from "react";
+import { MANUAL_COMMAND_TARGETS, MANUAL_TOOLCHAIN } from "../manualModeProjection";
 
 const TABS_FULL = [
   { key: "terminal", icon: TerminalSquare, label: "Terminal" },
@@ -10,8 +28,16 @@ const TABS_FULL = [
 
 const TABS_MANUAL = [
   { key: "terminal", icon: TerminalSquare, label: "Terminal" },
+  { key: "problems", icon: Bug, label: "Problems", badge: "2" },
+  { key: "tasks", icon: ListChecks, label: "Tasks", badge: "8" },
   { key: "tests", icon: FlaskConical, label: "Tests", badge: "412" },
-  { key: "workflow", icon: ScrollText, label: "Output" },
+  { key: "debug", icon: Wrench, label: "Debug" },
+  { key: "logs", icon: ScrollText, label: "Logs" },
+  { key: "observability", icon: Activity, label: "Observability" },
+  { key: "database", icon: Database, label: "Database" },
+  { key: "api", icon: Globe2, label: "API" },
+  { key: "performance", icon: Gauge, label: "Performance" },
+  { key: "security", icon: ShieldCheck, label: "Security" },
 ];
 
 const TABS_DELEGATED = [
@@ -116,10 +142,11 @@ export function BottomConsole({ level = 3 }: { level?: number }) {
   const TABS = manual ? TABS_MANUAL : assisted ? TABS_ASSISTED : copilot ? TABS_COPILOT : delegated ? TABS_DELEGATED : TABS_FULL;
   const [tab, setTab] = useState(manual ? "terminal" : assisted ? "ai" : copilot ? "reasoning" : delegated ? "agentlogs" : "comm");
   const effectiveTab = TABS.find((t) => t.key === tab) ? tab : TABS[0].key;
+  const manualDiagnostics = MANUAL_TOOLCHAIN.flatMap((tool) => tool.diagnostics);
   return (
     <div
       className="shrink-0 border-t flex flex-col"
-      style={{ height: manual ? 150 : 200, background: "#0B0B10", borderColor: "rgba(255,255,255,0.05)" }}
+      style={{ height: manual ? 260 : 200, background: "#0B0B10", borderColor: "rgba(255,255,255,0.05)" }}
     >
       <div className="h-8 shrink-0 flex items-center justify-between px-2 border-b" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
         <div className="flex items-center gap-0.5">
@@ -149,7 +176,7 @@ export function BottomConsole({ level = 3 }: { level?: number }) {
           })}
         </div>
         <div className="flex items-center gap-2 text-[10.5px] text-white/40 pr-1">
-          <span className="font-mono">us-west · 42 ms</span>
+          <span className="font-mono">{manual ? "local · no model calls" : "us-west · 42 ms"}</span>
           <button className="h-6 w-6 grid place-items-center rounded-md hover:bg-white/[0.05]">
             <ChevronDown className="w-3.5 h-3.5" />
           </button>
@@ -184,6 +211,156 @@ export function BottomConsole({ level = 3 }: { level?: number }) {
             <div style={{ color: "#4ADE80" }}>✓ auth/session.test.ts <span className="text-white/40">(19)</span></div>
             <div style={{ color: "#4ADE80" }}>✓ models/user.test.ts <span className="text-white/40">(11)</span></div>
             <div className="text-white/45 mt-1">412 passed · 0 failed · coverage 91.4%</div>
+          </div>
+        )}
+
+        {effectiveTab === "problems" && manual && (
+          <div className="space-y-1">
+            {manualDiagnostics.map((problem) => (
+              <div key={`${problem.source}-${problem.target}`} className="grid grid-cols-[72px_180px_1fr] gap-3 items-start">
+                <span className="uppercase tracking-wide text-[10px]" style={{ color: problem.severity === "warning" ? "#FFCC66" : "#4B8CFF" }}>
+                  {problem.severity}
+                </span>
+                <span className="font-mono text-white/45 truncate">{problem.target}</span>
+                <span className="text-white/75 truncate">{problem.message}</span>
+              </div>
+            ))}
+            <div className="text-white/40 mt-1">LSP diagnostics, linter output, task matchers, test failures, and stack traces merge here.</div>
+          </div>
+        )}
+
+        {effectiveTab === "tasks" && manual && (
+          <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-white/75">
+            {[
+              ["dev", "pnpm dev", "running"],
+              ["test", "pnpm test", "ready"],
+              ["typecheck", "tsc --noEmit", "ready"],
+              ["lint", "eslint .", "ready"],
+              ["build", "next build", "ready"],
+              ["db:migrate", "prisma migrate dev", "blocked until confirmed"],
+            ].map(([name, command, state]) => (
+              <div key={name} className="grid grid-cols-[96px_1fr_130px] gap-3">
+                <span className="font-mono text-white/85">{name}</span>
+                <span className="font-mono text-white/45 truncate">{command}</span>
+                <span style={{ color: state === "running" ? "#4ADE80" : state === "ready" ? "#4B8CFF" : "#FFCC66" }}>{state}</span>
+              </div>
+            ))}
+            <div className="col-span-2 text-white/40 mt-1">Problem matchers map compiler and task output back to source ranges.</div>
+          </div>
+        )}
+
+        {effectiveTab === "debug" && manual && (
+          <div className="grid grid-cols-[1fr_1fr_1fr] gap-5 text-white/75">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Call Stack</div>
+              <div>node:9229 · paused at <span className="font-mono text-white/60">auth.ts:23</span></div>
+              <div className="text-white/45">issueSession → jwtVerify → readSession</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Breakpoints</div>
+              <div>2 enabled · 1 conditional · 1 logpoint</div>
+              <div className="text-white/45">auth.ts:23 · webhook.ts:41</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Watch</div>
+              <div><span className="font-mono">payload.sub</span> = "usr_42"</div>
+              <div><span className="font-mono">payload.role</span> = "admin"</div>
+            </div>
+          </div>
+        )}
+
+        {effectiveTab === "logs" && manual && (
+          <div className="space-y-0.5">
+            {[
+              ["12:08:51", "web", "GET /api/auth/session 200 18ms"],
+              ["12:08:53", "api", "POST /billing/checkout 201 96ms"],
+              ["12:08:54", "worker", "subscription.sync completed event=sub_created"],
+              ["12:08:56", "postgres", "slow query 142ms public.subscriptions"],
+            ].map(([time, source, body]) => (
+              <div key={`${time}-${source}`} className="flex gap-3">
+                <span className="text-white/30">{time}</span>
+                <span className="w-16 text-[#4B8CFF]">{source}</span>
+                <span className="text-white/75 truncate">{body}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {effectiveTab === "observability" && manual && (
+          <div className="grid grid-cols-[1.2fr_1fr] gap-6 text-white/75">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Request Timeline</div>
+              <div>POST /billing/checkout · 96ms · trace <span className="font-mono text-white/55">5f43a</span></div>
+              <div className="text-white/45">controller 12ms → db 31ms → stripe 42ms → serialize 4ms</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">OpenTelemetry</div>
+              <div>traces idle · metrics live · logs live</div>
+              <div className="text-white/45">local collector · no hosted export</div>
+            </div>
+          </div>
+        )}
+
+        {effectiveTab === "database" && manual && (
+          <div className="grid grid-cols-[220px_1fr] gap-5 text-white/75">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Schema</div>
+              <div className="font-mono">public.users</div>
+              <div className="font-mono">public.subscriptions</div>
+              <div className="font-mono">public.webhook_events</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Query</div>
+              <div className="font-mono text-white/60">select status, count(*) from subscriptions group by status;</div>
+              <div className="text-white/45">Explain plan ready · safe local connection</div>
+            </div>
+          </div>
+        )}
+
+        {effectiveTab === "api" && manual && (
+          <div className="grid grid-cols-[1fr_1fr] gap-6 text-white/75">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">billing.http</div>
+              <div className="font-mono">POST {"{{apiUrl}}"}/billing/checkout</div>
+              <div className="text-white/45">env: local · auth profile: dev-user</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Response</div>
+              <div>201 Created · 96ms · 1.4 KB</div>
+              <div className="text-white/45">headers, cookies, timeline, assertions available</div>
+            </div>
+          </div>
+        )}
+
+        {effectiveTab === "performance" && manual && (
+          <div className="grid grid-cols-4 gap-5 text-white/75">
+            {[
+              ["CPU", "18%", "profiler ready"],
+              ["Memory", "412 MB", "heap snapshot ready"],
+              ["Bundle", "184 KB", "analyzer ready"],
+              ["Queries", "1 slow", "142 ms max"],
+            ].map(([label, value, note]) => (
+              <div key={label}>
+                <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">{label}</div>
+                <div className="font-mono text-white/90">{value}</div>
+                <div className="text-white/45">{note}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {effectiveTab === "security" && manual && (
+          <div className="grid grid-cols-[1fr_1fr] gap-6 text-white/75">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Supply Chain</div>
+              <div>0 critical vulnerabilities · 0 secrets · SBOM available</div>
+              <div className="text-white/45">license review clean · lockfile diff clean</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-white/35 mb-1">Policy Gates</div>
+              <div>No lifecycle script alerts</div>
+              <div className="text-white/45">Manual Mode blocks AI-capable extension activation</div>
+            </div>
           </div>
         )}
 

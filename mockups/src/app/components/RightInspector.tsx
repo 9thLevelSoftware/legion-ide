@@ -16,7 +16,14 @@ import {
   BookOpen,
   MessageSquare,
   ArrowRight,
+  GitBranch,
+  Gauge,
+  Database,
+  Braces,
+  Wrench,
+  ShieldOff,
 } from "lucide-react";
+import { MANUAL_COMMAND_TARGETS, MANUAL_TOOLCHAIN, MANUAL_TRUST_BOUNDARY } from "../manualModeProjection";
 
 const APPROVALS = [
   {
@@ -49,34 +56,82 @@ const ACTIVITY = [
 ];
 
 function ManualContextInspector({ level }: { level: number }) {
+  const diagnostics = MANUAL_TOOLCHAIN.flatMap((tool) => tool.diagnostics);
+  const featuredTools = MANUAL_TOOLCHAIN.filter((tool) =>
+    ["typescript-lsp", "tree-sitter", "vitest", "dap", "git", "postgres", "supply-chain"].includes(tool.id)
+  );
+  const tabs = [
+    "Symbols",
+    "Problems",
+    "Tests",
+    "Git",
+    "Debug",
+    "Docs",
+    "Security",
+    "Performance",
+  ];
+
   return (
     <div
-      className="w-[260px] shrink-0 h-full flex flex-col border-l"
+      className="w-[340px] shrink-0 h-full flex flex-col border-l"
       style={{ background: "#111118", borderColor: "rgba(255,255,255,0.05)" }}
     >
       <div
         className="h-9 shrink-0 flex items-center justify-between px-3 border-b"
         style={{ borderColor: "rgba(255,255,255,0.05)" }}
       >
-        <span className="text-[12px] text-white/85 font-medium tracking-tight">Context</span>
+        <div className="flex items-center gap-2">
+          <Wrench className="w-3.5 h-3.5" style={{ color: "#4B8CFF" }} />
+          <span className="text-[12px] text-white/85 font-medium tracking-tight">Manual Tooling</span>
+        </div>
         <span
           className="px-1.5 py-[2px] rounded text-[10px] font-mono"
-          style={{ color: "#B6B7C3", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}
+          style={{ color: "#A8C3FF", background: "rgba(75,140,255,0.10)", border: "1px solid rgba(75,140,255,0.24)" }}
         >
-          L{level}
+          L{level} · AI OFF
         </span>
+      </div>
+
+      <div className="h-8 shrink-0 flex items-center gap-1 px-2 border-b overflow-x-auto" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+        {tabs.map((tab, index) => (
+          <span
+            key={tab}
+            className="h-6 px-2 inline-flex items-center rounded-md text-[10.5px] whitespace-nowrap"
+            style={{
+              color: index === 0 ? "#F4F4F6" : "rgba(255,255,255,0.50)",
+              background: index === 0 ? "rgba(255,255,255,0.05)" : "transparent",
+            }}
+          >
+            {tab}
+          </span>
+        ))}
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4 text-[11.5px]">
         <section>
-          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Current File</div>
-          <div className="text-white/80 font-mono">auth.ts</div>
-          <div className="text-white/40 text-[10.5px]">src/api/auth · 27 lines · 612 B</div>
+          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Trust Boundary</div>
+          <div className="grid grid-cols-2 gap-1">
+            {MANUAL_TRUST_BOUNDARY.map((item) => (
+              <div key={item} className="px-2 py-1.5 rounded-md border text-[10.5px] text-white/65 flex items-center gap-1.5" style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.06)" }}>
+                <ShieldOff className="w-3 h-3 text-white/35" />
+                <span className="truncate">{item}</span>
+              </div>
+            ))}
+          </div>
         </section>
 
         <section>
-          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Symbols</div>
-          <div className="space-y-1">
+          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Current File</div>
+          <div className="text-white/80 font-mono">auth.ts</div>
+          <div className="text-white/40 text-[10.5px]">src/api/auth · LSP live · Tree-sitter 18 ms</div>
+        </section>
+
+        <section>
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35">Symbols</div>
+            <span className="text-[10px] text-white/40">LSP + parser</span>
+          </div>
+          <div className="space-y-1 rounded-md border p-2" style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.06)" }}>
             {[
               { kind: "fn", name: "issueSession", line: 9, color: "#FFCC66" },
               { kind: "fn", name: "readSession", line: 19, color: "#FFCC66" },
@@ -95,13 +150,45 @@ function ManualContextInspector({ level }: { level: number }) {
         </section>
 
         <section>
-          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Problems</div>
-          <div className="text-white/45 text-[11px]">No problems</div>
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35">Problems</div>
+            <span className="text-[10px] text-white/40">{diagnostics.length} mapped</span>
+          </div>
+          <div className="space-y-1.5">
+            {diagnostics.map((problem) => (
+              <div key={`${problem.source}-${problem.target}`} className="rounded-md border p-2" style={{ background: "#15151F", borderColor: problem.severity === "warning" ? "rgba(255,204,102,0.20)" : "rgba(75,140,255,0.16)" }}>
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  <AlertTriangle className="w-3 h-3" style={{ color: problem.severity === "warning" ? "#FFCC66" : "#4B8CFF" }} />
+                  <span className="uppercase tracking-wide" style={{ color: problem.severity === "warning" ? "#FFCC66" : "#4B8CFF" }}>{problem.severity}</span>
+                  <span className="text-white/30">·</span>
+                  <span className="font-mono text-white/45">{problem.target}</span>
+                </div>
+                <div className="mt-1 text-white/75 leading-snug">{problem.message}</div>
+              </div>
+            ))}
+          </div>
         </section>
 
         <section>
-          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Git Changes</div>
-          <div className="space-y-0.5 text-white/65">
+          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Test Explorer</div>
+          <div className="rounded-md border p-2 space-y-1" style={{ background: "#15151F", borderColor: "rgba(74,222,128,0.14)" }}>
+            {[
+              ["auth/session.test.ts", "19 passed", "#4ADE80"],
+              ["billing/webhook.test.ts", "8 passed", "#4ADE80"],
+              ["coverage", "91.4%", "#4B8CFF"],
+            ].map(([name, status, color]) => (
+              <div key={name} className="flex items-center gap-2 text-[11px]">
+                <TestTube2 className="w-3 h-3" style={{ color }} />
+                <span className="font-mono text-white/70 truncate">{name}</span>
+                <span className="ml-auto font-mono" style={{ color }}>{status}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Git Cockpit</div>
+          <div className="space-y-0.5 text-white/65 rounded-md border p-2" style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.06)" }}>
             {[
               { f: "auth.ts", t: "M", c: "#FFCC66" },
               { f: "subscriptions.ts", t: "M", c: "#FFCC66" },
@@ -112,18 +199,66 @@ function ManualContextInspector({ level }: { level: number }) {
                 <span className="truncate text-white/70">{g.f}</span>
               </div>
             ))}
+            <div className="pt-1 mt-1 border-t flex items-center gap-1.5 text-[10.5px]" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+              <GitBranch className="w-3 h-3 text-white/35" />
+              <span className="text-white/45">worktree</span>
+              <span className="ml-auto font-mono text-white/65">feature/stripe-subscriptions</span>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Debugger + Tools</div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {featuredTools.map((tool) => (
+              <div key={tool.id} className="rounded-md border p-2" style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.06)" }}>
+                <div className="flex items-center gap-1.5 text-white/75">
+                  {tool.providerKind === "database" ? (
+                    <Database className="w-3 h-3" style={{ color: "#4B8CFF" }} />
+                  ) : tool.providerKind === "profiler" ? (
+                    <Gauge className="w-3 h-3" style={{ color: "#FFCC66" }} />
+                  ) : tool.providerKind === "parser" ? (
+                    <Braces className="w-3 h-3" style={{ color: "#4B8CFF" }} />
+                  ) : (
+                    <Check className="w-3 h-3" style={{ color: "#4ADE80" }} />
+                  )}
+                  <span className="truncate">{tool.label}</span>
+                </div>
+                <div className="mt-1 text-[10px] text-white/40 font-mono">{tool.freshness}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <div className="text-[9.5px] uppercase tracking-[0.18em] text-white/35 mb-1.5">Command Targets</div>
+          <div className="space-y-1">
+            {MANUAL_COMMAND_TARGETS.slice(0, 5).map((target) => (
+              <div key={target.id} className="h-7 px-2 rounded-md border flex items-center gap-2" style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.06)" }}>
+                <span className="text-[9.5px] uppercase tracking-wide text-white/35 w-14">{target.kind}</span>
+                <span className="text-white/70 truncate">{target.label}</span>
+                <span className="ml-auto font-mono text-[10px] text-white/40">{target.status}</span>
+              </div>
+            ))}
           </div>
         </section>
       </div>
 
       <div className="border-t px-3 py-2" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
-        <button
-          className="w-full h-7 flex items-center justify-center gap-1.5 rounded-md text-[11px] text-white/70 hover:text-white border"
-          style={{ background: "rgba(255,255,255,0.03)", borderColor: "rgba(255,255,255,0.08)" }}
-        >
-          <Sparkles className="w-3 h-3" /> Ask AI
-          <span className="ml-1 text-[10px] text-white/35 font-mono">⌘L</span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            className="flex-1 h-7 flex items-center justify-center gap-1.5 rounded-md text-[11px] text-white/75 hover:text-white border"
+            style={{ background: "rgba(75,140,255,0.10)", borderColor: "rgba(75,140,255,0.22)" }}
+          >
+            Run Task <span className="ml-1 text-[10px] text-white/35 font-mono">⌘K</span>
+          </button>
+          <button
+            className="flex-1 h-7 flex items-center justify-center gap-1.5 rounded-md text-[11px] text-white/60 hover:text-white border"
+            style={{ background: "rgba(255,255,255,0.03)", borderColor: "rgba(255,255,255,0.08)" }}
+          >
+            Open Problems
+          </button>
+        </div>
       </div>
     </div>
   );

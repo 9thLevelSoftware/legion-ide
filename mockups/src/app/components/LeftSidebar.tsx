@@ -16,7 +16,13 @@ import {
   TestTube2,
   Lightbulb,
   Check,
+  Wrench,
+  Server,
+  Database,
+  ShieldCheck,
+  ShieldOff,
 } from "lucide-react";
+import { MANUAL_TOOLCHAIN, MANUAL_TRUST_BOUNDARY } from "../manualModeProjection";
 
 type Status =
   | "planning"
@@ -39,6 +45,113 @@ const AGENTS: { name: string; model: string; role: string; status: Status; task:
   { name: "Gemini", model: "2.5-pro", role: "Reviewer", status: "reviewing", task: "auth/session.ts · 3 nits", progress: 80 },
   { name: "Local", model: "qwen3-32b", role: "QA", status: "testing", task: "billing.test.ts · 6/14", progress: 42 },
 ];
+
+const WORKSPACE_PACKAGES = [
+  { name: "apps/web", status: "active", detail: "Next.js" },
+  { name: "apps/api", status: "healthy", detail: "Node :8080" },
+  { name: "packages/auth", status: "watched", detail: "12 tests" },
+  { name: "packages/billing", status: "changed", detail: "3 files" },
+];
+
+const MANUAL_SERVICES = [
+  { name: "web", detail: ":3000", status: "running", color: "#4ADE80" },
+  { name: "api", detail: ":8080", status: "running", color: "#4ADE80" },
+  { name: "postgres", detail: ":5432", status: "healthy", color: "#4B8CFF" },
+  { name: "redis", detail: ":6379", status: "healthy", color: "#4B8CFF" },
+];
+
+const TOOL_HEALTH_COLOR: Record<string, string> = {
+  running: "#4ADE80",
+  ready: "#4B8CFF",
+  healthy: "#4ADE80",
+  idle: "#7E8190",
+  degraded: "#FFCC66",
+};
+
+function ManualToolchainPanel() {
+  return (
+    <div className="border-t flex-1 min-h-0 overflow-y-auto" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+      <div className="px-2 pt-2.5 pb-2">
+        <div className="px-1 flex items-center justify-between mb-1.5">
+          <span className="text-[10px] uppercase tracking-[0.16em] text-white/35 flex items-center gap-1.5">
+            <Boxes className="w-3 h-3" style={{ color: "#4B8CFF" }} /> Workspace Packages
+          </span>
+          <span className="text-[10px] text-white/40 font-mono">{WORKSPACE_PACKAGES.length}</span>
+        </div>
+        <div className="space-y-1">
+          {WORKSPACE_PACKAGES.map((pkg) => (
+            <div key={pkg.name} className="h-7 px-1.5 rounded-md flex items-center justify-between bg-white/[0.02] border border-white/[0.04]">
+              <span className="font-mono text-[11px] text-white/70 truncate">{pkg.name}</span>
+              <span className="text-[10px] text-white/40">{pkg.detail}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="px-2 py-2 border-t" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+        <div className="px-1 flex items-center justify-between mb-1.5">
+          <span className="text-[10px] uppercase tracking-[0.16em] text-white/35 flex items-center gap-1.5">
+            <Server className="w-3 h-3" style={{ color: "#4ADE80" }} /> Services
+          </span>
+          <span className="text-[10px] text-white/40">local</span>
+        </div>
+        <div className="grid grid-cols-2 gap-1">
+          {MANUAL_SERVICES.map((service) => (
+            <div key={service.name} className="rounded-md border px-2 py-1.5" style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.06)" }}>
+              <div className="flex items-center gap-1.5 text-[11px] text-white/75">
+                <span className="w-1.5 h-1.5 rounded-full" style={{ background: service.color }} />
+                <span className="truncate">{service.name}</span>
+              </div>
+              <div className="mt-0.5 flex items-center justify-between text-[9.5px] font-mono">
+                <span className="text-white/35">{service.detail}</span>
+                <span style={{ color: service.color }}>{service.status}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="px-2 py-2 border-t" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+        <div className="px-1 flex items-center justify-between mb-1.5">
+          <span className="text-[10px] uppercase tracking-[0.16em] text-white/35 flex items-center gap-1.5">
+            <Wrench className="w-3 h-3" style={{ color: "#4B8CFF" }} /> Local Toolchain
+          </span>
+          <span className="text-[10px] text-white/40">deterministic</span>
+        </div>
+        <div className="space-y-1">
+          {MANUAL_TOOLCHAIN.slice(0, 8).map((tool) => (
+            <div key={tool.id} className="rounded-md border px-2 py-1.5" style={{ background: "#15151F", borderColor: "rgba(255,255,255,0.06)" }}>
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: TOOL_HEALTH_COLOR[tool.health] }} />
+                <span className="text-[11.5px] text-white/80 truncate">{tool.label}</span>
+                <span className="ml-auto text-[9.5px] uppercase tracking-wide" style={{ color: TOOL_HEALTH_COLOR[tool.health] }}>
+                  {tool.health}
+                </span>
+              </div>
+              <div className="mt-0.5 flex items-center justify-between text-[9.5px] text-white/35">
+                <span>{tool.providerKind}</span>
+                <span className="font-mono">{tool.freshness}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="px-2 py-2 border-t" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+        <div className="px-1 text-[10px] uppercase tracking-[0.16em] text-white/35 flex items-center gap-1.5 mb-1.5">
+          <ShieldCheck className="w-3 h-3" style={{ color: "#7E8190" }} /> Manual Trust Boundary
+        </div>
+        <div className="flex flex-wrap gap-1 px-1">
+          {MANUAL_TRUST_BOUNDARY.map((item) => (
+            <span key={item} className="px-1.5 py-[2px] rounded text-[9.5px] text-white/55 bg-white/[0.03] border border-white/[0.06]">
+              {item}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function FileRow({
   icon,
@@ -169,8 +282,8 @@ export function LeftSidebar({ level = 3 }: { level?: number }) {
         <div
           className="px-1.5 pt-2 pb-2 overflow-y-auto flex-shrink-0"
           style={{
-            maxHeight: manual ? "100%" : assisted ? "56%" : copilot ? "32%" : delegated ? "26%" : "44%",
-            flex: manual ? "1 1 auto" : "0 0 auto",
+            maxHeight: manual ? "38%" : assisted ? "56%" : copilot ? "32%" : delegated ? "26%" : "44%",
+            flex: "0 0 auto",
           }}
         >
           <div className="space-y-[1px]">
@@ -287,22 +400,9 @@ export function LeftSidebar({ level = 3 }: { level?: number }) {
         </div>
       )}
 
-      {/* Active Fleet — collapsed in Manual */}
+      {/* Deterministic local tooling in Manual; fleet UI starts at higher autonomy. */}
       {manual ? (
-        <div
-          className="border-t flex items-center justify-between px-3 h-9"
-          style={{ borderColor: "rgba(255,255,255,0.05)" }}
-        >
-          <div className="flex items-center gap-2 text-[10.5px] text-white/45">
-            <Boxes className="w-3 h-3" />
-            <span className="uppercase tracking-[0.16em] text-[10px]">Active Fleet</span>
-          </div>
-          <div className="flex items-center gap-1.5 text-[10.5px] text-white/45">
-            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#6B6E7D" }} />
-            <span>AI Idle</span>
-            <ChevronRight className="w-3 h-3 text-white/30" />
-          </div>
-        </div>
+        <ManualToolchainPanel />
       ) : fleet ? (
         <div
           className="border-t pt-2.5 px-1.5 flex-1 overflow-y-auto"
@@ -456,9 +556,13 @@ export function LeftSidebar({ level = 3 }: { level?: number }) {
         </div>
         <div className="flex items-center justify-between text-white/55">
           <span className="flex items-center gap-1.5">
-            <Workflow className="w-3 h-3" style={{ color: "#39D7FF" }} /> workflows
+            {manual ? (
+              <ShieldOff className="w-3 h-3" style={{ color: "#7E8190" }} />
+            ) : (
+              <Workflow className="w-3 h-3" style={{ color: "#39D7FF" }} />
+            )} {manual ? "AI" : "workflows"}
           </span>
-          <span className="text-white/70 font-mono">2 active</span>
+          <span className="text-white/70 font-mono">{manual ? "disabled" : "2 active"}</span>
         </div>
       </div>
     </div>

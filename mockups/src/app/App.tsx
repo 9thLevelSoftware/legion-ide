@@ -6,7 +6,8 @@ import { RightInspector } from "./components/RightInspector";
 import { BottomConsole } from "./components/BottomConsole";
 
 export default function App() {
-  const [level, setLevel] = useState(5);
+  const [level, setLevel] = useState(1);
+  const manual = level === 1;
 
   return (
     <div
@@ -52,17 +53,18 @@ export default function App() {
       >
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#4ADE80" }} /> connected · fleet-mesh
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#4ADE80" }} /> connected · {manual ? "local tools" : "fleet-mesh"}
           </span>
           <span className="font-mono">feature/stripe-subscriptions</span>
           <span className="font-mono">↑2 ↓0</span>
           <span>TypeScript 5.6</span>
+          {manual && <span>AI disabled · no model calls</span>}
         </div>
         <div className="flex items-center gap-3 font-mono">
           <span>Ln 15, Col 22</span>
           <span>UTF-8</span>
           <span>LF</span>
-          <span style={{ color: "#C8B5FF" }}>Autonomy · L{level}</span>
+          <span style={{ color: manual ? "#A8C3FF" : "#C8B5FF" }}>{manual ? "Manual · AI Disabled" : `Autonomy · L${level}`}</span>
         </div>
       </div>
     </div>
