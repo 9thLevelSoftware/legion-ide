@@ -69,6 +69,8 @@ pub struct DesktopProjectionViewModel {
     pub terminal_rows: Vec<String>,
     /// Operational health summary rows.
     pub operational_health_rows: Vec<String>,
+    /// Manual-mode local control and trust-boundary rows derived from projections.
+    pub manual_control_rows: Vec<String>,
     /// Plugin contribution summary rows.
     pub plugin_rows: Vec<String>,
     /// Collaboration presence rows.
@@ -134,6 +136,7 @@ impl DesktopProjectionViewModel {
             language_rows: language_rows(snapshot),
             terminal_rows: terminal_rows(snapshot),
             operational_health_rows: operational_health_rows(snapshot),
+            manual_control_rows: manual_control_rows(snapshot),
             plugin_rows: plugin_rows(snapshot),
             collaboration_rows: collaboration_rows(snapshot),
             remote_rows: remote_rows(snapshot),
@@ -333,7 +336,7 @@ fn render_left_sidebar(
     }
 
     match level {
-        DesktopProductMode::Manual => render_collapsed_ai_rail(ui),
+        DesktopProductMode::Manual => render_collapsed_ai_rail(ui, model),
         DesktopProductMode::Delegates => {
             if delegated_activity_projected(snapshot) {
                 render_agent_roster(ui, snapshot, model, level)
@@ -558,15 +561,21 @@ fn render_context_packs(ui: &mut egui::Ui) {
     }
 }
 
-fn render_collapsed_ai_rail(ui: &mut egui::Ui) {
+fn render_collapsed_ai_rail(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
     ui.add_space(8.0);
     theme::small_card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(theme::eyebrow("MANUAL MODE"));
+            ui.label(theme::eyebrow("MANUAL CONTROL"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::muted("AI disabled"));
+                ui.label(theme::accent("AI disabled", theme::ACCENT_BLUE));
             });
         });
+        render_compact_rows(
+            ui,
+            &model.manual_control_rows,
+            "Manual controls are projection-only",
+            4,
+        );
     });
 }
 
@@ -1102,6 +1111,13 @@ fn render_manual_context_inspector(
         "{} problems",
         snapshot.language_tooling_projection.problems.len()
     )));
+    section_label(ui, "Manual Control Boundary", Some(theme::ACCENT_BLUE));
+    render_compact_rows(
+        ui,
+        &model.manual_control_rows,
+        "Manual controls are projection-only",
+        5,
+    );
     section_label(ui, "Git Changes", None);
     render_compact_rows(ui, &model.proposal_rows, "No projected changes", 5);
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -1299,7 +1315,11 @@ fn render_terminal_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel)
 fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
     section_label(ui, "Agent Comm Stream", Some(theme::ACCENT_VIOLET));
     theme::code_frame().show(ui, |ui| {
-        render_compact_rows(ui, &model.assistant_rows, "No agent stream rows", 8);
+        if model.assistant_rows.is_empty() {
+            render_compact_rows(ui, &model.manual_control_rows, "No agent stream rows", 4);
+        } else {
+            render_compact_rows(ui, &model.assistant_rows, "No agent stream rows", 8);
+        }
         for row in model.operational_health_rows.iter().take(4) {
             ui.label(theme::code_muted(trim_middle(row, 88)));
         }
@@ -2891,6 +2911,52 @@ fn bounded_join(values: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+
+fn manual_control_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let level = projected_product_mode(snapshot);
+    let language = &snapshot.language_tooling_projection;
+    let terminal = &snapshot.terminal_panel_projection;
+    let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
+    let active = &snapshot.active_buffer_projection;
+    let mut rows = Vec::new();
+
+    if level != DesktopProductMode::Manual {
+        rows.push(format!(
+            "manual control center: inactive because active product mode is {}",
+            level.label()
+        ));
+        return rows;
+    }
+
+    rows.push(
+        "manual control center: AI Disabled; Local Tools Only; No Model Calls; No Agent Context"
+            .to_string(),
+    );
+    rows.push(format!(
+        "manual toolchain: language={:?} problems={} completions={} terminal={:?} search={} verification_runs={}",
+        language.status,
+        language.problems.len(),
+        language.completions.len(),
+        terminal.status.kind,
+        search.header,
+        snapshot.verification_run_projection.rows.len()
+    ));
+    rows.push(format!(
+        "manual commands: save_all proposal-mediated; search/read/navigation intents only; no direct apply; statuses={}",
+        snapshot.status_messages.len()
+    ));
+    rows.push(format!(
+        "manual editor: dirty={} degraded={} active_buffer={:?} no autonomous writes",
+        active.dirty,
+        active.degraded,
+        active.buffer_id.map(|buffer| buffer.0)
+    ));
+    rows.push(
+        "manual trust boundary: no provider dispatch, no agent context, no terminal authority, no direct apply"
+            .to_string(),
+    );
+    rows
 }
 
 fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

@@ -785,3 +785,9 @@ Phase 8 production capability names are reserved for security-broker decisions b
 - `xtask check-deps` fails when required internal dependencies are missing.
 - `xtask check-deps` fails when required protocol symbols are absent from `crates/devil-protocol/src/lib.rs`.
 - `xtask check-deps` fails when any workspace package other than `devil-desktop` declares renderer/windowing dependencies or when this policy stops documenting the `devil-desktop` renderer boundary.
+
+### Phase 13 Legion Workflow orchestration boundary
+
+Phase 13 authorizes only policy-first, metadata-first Legion Workflow orchestration. `devil-protocol` may define `LegionWorkflowSession`, worker, dependency, conflict, verification, sign-off, projection, and merge-readiness DTOs without taking dependencies on runtime crates. `devil-agent` may later coordinate workflow teams only through existing delegated-task primitives and assisted-AI provider-route metadata; it must not gain `devil-app`, `devil-ui`, `devil-desktop`, `devil-editor`, `devil-project`, `devil-terminal`, or direct workspace mutation authority. `devil-tracker` and `devil-memory` may later persist metadata-only workflow/evidence records through their existing storage boundaries and retention policies. `devil-app` remains the sole composition owner for workflow execution, verification, sign-off, dirty/stale/conflict blockers, proposal lifecycle, and approval-gated merge readiness. `devil-ui` and `devil-desktop` remain projection/request-only surfaces for Legion Workflow command centers and must not own workflow state, provider calls, terminal execution, proposal application, tracker records, or memory retention.
+
+Autonomous merge/apply remains forbidden. Main-workspace mutation must continue through app-owned proposal-mediated authority, with explicit approval and rollback/checkpoint metadata before any merge-readiness claim can progress.

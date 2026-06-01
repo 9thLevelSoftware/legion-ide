@@ -7520,6 +7520,850 @@ pub enum ProductMode {
     LegionWorkflows,
 }
 
+/// Stable Legion workflow session identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowSessionId(pub String);
+
+/// Stable Legion workflow worker identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowWorkerId(pub String);
+
+/// Lifecycle state for a metadata-only Legion workflow session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowState {
+    /// Session metadata has been planned but no runtime is active.
+    Planned,
+    /// Session is assigning bounded workers.
+    Assigning,
+    /// Workers are producing proposal-preview metadata.
+    Running,
+    /// Session is blocked on verification, conflicts, sign-off, or approval.
+    Blocked,
+    /// Session is waiting for explicit human approval.
+    WaitingForApproval,
+    /// Session completed after required proposal/approval gates were satisfied.
+    Completed,
+    /// Session failed closed.
+    Failed,
+    /// Session was cancelled.
+    Cancelled,
+}
+
+/// Lifecycle state for a Legion workflow worker assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowWorkerState {
+    /// Worker is assigned but not started.
+    Assigned,
+    /// Worker is running through a bounded delegated-task primitive.
+    Running,
+    /// Worker is waiting on dependency, approval, or provider route metadata.
+    Waiting,
+    /// Worker produced proposal-preview metadata.
+    ProposalReady,
+    /// Worker is blocked.
+    Blocked,
+    /// Worker is complete.
+    Complete,
+    /// Worker failed closed.
+    Failed,
+}
+
+/// Role assigned to a Legion workflow worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowWorkerRole {
+    /// Coordinates plan slicing and dependency ordering.
+    Coordinator,
+    /// Implements a bounded proposal-producing task.
+    Implementer,
+    /// Reviews proposal metadata and conflicts.
+    Reviewer,
+    /// Runs or evaluates verification metadata.
+    Verifier,
+    /// Performs security, privacy, or policy review.
+    Auditor,
+}
+
+/// Metadata-only model backend selected for a Legion workflow worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowModelBackend {
+    /// Local model or deterministic local tool; no provider payload is stored.
+    Local {
+        /// Display-safe backend label.
+        model_label: String,
+    },
+    /// Provider-backed model routed through assisted-AI consent/provider metadata.
+    ProviderBacked {
+        /// Display-safe provider identifier.
+        provider_id: String,
+        /// Display-safe provider route reference.
+        route_id: String,
+        /// Display-safe model label.
+        model_label: String,
+    },
+    /// Backend is unavailable and must fail closed.
+    Unavailable {
+        /// Display-safe unavailable reason.
+        reason: String,
+    },
+}
+
+/// Dependency state between Legion workflow workers or task slices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowDependencyState {
+    /// Dependency is declared but not complete.
+    Pending,
+    /// Dependency is complete.
+    Satisfied,
+    /// Dependency is blocked.
+    Blocked,
+    /// Dependency became stale.
+    Stale,
+}
+
+/// Kind of metadata-only Legion workflow conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowConflictKind {
+    /// Multiple workers target overlapping files, symbols, or proposals.
+    WorkerOverlap,
+    /// Main workspace is dirty or changed outside the workflow.
+    DirtyWorkspace,
+    /// Proposal preconditions are stale.
+    StaleProposal,
+    /// Verification evidence conflicts with proposed readiness.
+    VerificationMismatch,
+    /// Required sign-off or approval evidence is missing.
+    MissingApproval,
+}
+
+/// State of a metadata-only Legion workflow conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowConflictState {
+    /// Conflict is open and blocks readiness.
+    Open,
+    /// Conflict is being reviewed.
+    Reviewing,
+    /// Conflict has been resolved by proposal/approval metadata.
+    Resolved,
+    /// Conflict was waived by explicit approval metadata.
+    Waived,
+}
+
+/// Verification gate state for Legion workflow merge readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowVerificationGateState {
+    /// Verification has not run.
+    Pending,
+    /// Verification passed.
+    Passed,
+    /// Verification failed.
+    Failed,
+    /// Verification is blocked by policy or environment.
+    Blocked,
+    /// Verification evidence is stale.
+    Stale,
+}
+
+/// Human or automated review sign-off state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowSignoffState {
+    /// Sign-off is required but absent.
+    Missing,
+    /// Sign-off is waiting for a reviewer.
+    Pending,
+    /// Sign-off has been granted.
+    Approved,
+    /// Sign-off has been rejected.
+    Rejected,
+}
+
+/// Approval-gated merge readiness state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowMergeReadinessState {
+    /// Merge is blocked and must not be applied.
+    Blocked,
+    /// Merge is waiting for explicit approval.
+    WaitingForApproval,
+    /// Metadata indicates readiness after all gates are satisfied.
+    Ready,
+}
+
+/// Metadata-only worker assignment for Legion workflow orchestration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowWorkerAssignment {
+    /// Stable worker identifier.
+    pub worker_id: LegionWorkflowWorkerId,
+    /// Worker role.
+    pub role: LegionWorkflowWorkerRole,
+    /// Worker lifecycle state.
+    pub state: LegionWorkflowWorkerState,
+    /// Metadata-only backend selection.
+    pub model_backend: LegionWorkflowModelBackend,
+    /// Display-safe model label.
+    pub model_label: String,
+    /// Display-safe command classes allowed for this worker.
+    pub allowed_command_classes: Vec<String>,
+    /// Linked delegated-task plan, if any.
+    pub linked_delegated_plan_id: Option<DelegatedTaskPlanId>,
+    /// Risk label for this worker assignment.
+    pub risk_label: ProposalRiskLabel,
+    /// Privacy label for this worker assignment.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Correlation identifier for audit continuity.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier for audit continuity.
+    pub causality_id: CausalityId,
+    /// Redaction hints for this assignment.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Assignment schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only dependency edge between workflow workers or task slices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowDependencyEdge {
+    /// Stable dependency identifier.
+    pub dependency_id: String,
+    /// Upstream worker identifier.
+    pub from_worker_id: LegionWorkflowWorkerId,
+    /// Downstream worker identifier.
+    pub to_worker_id: LegionWorkflowWorkerId,
+    /// Dependency state.
+    pub state: LegionWorkflowDependencyState,
+    /// Display-safe dependency label.
+    pub label: String,
+    /// Edge schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only Legion workflow conflict summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowConflictSummary {
+    /// Stable conflict identifier.
+    pub conflict_id: String,
+    /// Conflict kind.
+    pub kind: LegionWorkflowConflictKind,
+    /// Conflict state.
+    pub state: LegionWorkflowConflictState,
+    /// Display-safe conflict label.
+    pub label: String,
+    /// Related proposal identifier when known.
+    pub proposal_id: Option<ProposalId>,
+    /// Risk label.
+    pub risk_label: ProposalRiskLabel,
+    /// Privacy label.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Redaction hints for the conflict.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Conflict schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only verification gate for Legion workflow readiness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowVerificationGate {
+    /// Stable verification gate identifier.
+    pub gate_id: String,
+    /// Display-safe gate label.
+    pub label: String,
+    /// Gate state.
+    pub state: LegionWorkflowVerificationGateState,
+    /// Whether this gate is required for merge readiness.
+    pub required: bool,
+    /// Linked verification run identifier when known.
+    pub verification_run_id: Option<String>,
+    /// Linked evidence artifact identifier when known.
+    pub evidence_artifact_id: Option<String>,
+    /// Redaction hints for this gate.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Gate schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only sign-off record for Legion workflow readiness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowSignoffRecord {
+    /// Stable sign-off identifier.
+    pub signoff_id: String,
+    /// Display-safe reviewer label.
+    pub reviewer_label: String,
+    /// Sign-off state.
+    pub state: LegionWorkflowSignoffState,
+    /// Whether this sign-off is required for readiness.
+    pub required: bool,
+    /// Linked approval artifact identifier when known.
+    pub approval_artifact_id: Option<String>,
+    /// Correlation identifier for audit continuity.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier for audit continuity.
+    pub causality_id: CausalityId,
+    /// Redaction hints for this sign-off.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Sign-off schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only merge approval record for a Legion workflow session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowMergeApproval {
+    /// Stable approval identifier.
+    pub approval_id: String,
+    /// Whether explicit human approval has been granted.
+    pub approved: bool,
+    /// Whether rollback metadata is available before apply.
+    pub rollback_available: bool,
+    /// Linked approval artifact identifier.
+    pub approval_artifact_id: Option<String>,
+    /// Linked checkpoint or rollback artifact identifier.
+    pub rollback_artifact_id: Option<String>,
+    /// Approval schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only Legion workflow session contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowSession {
+    /// Stable session identifier.
+    pub session_id: LegionWorkflowSessionId,
+    /// Directive artifact identifier; raw directive text is not stored here.
+    pub directive_artifact_id: String,
+    /// Specification artifact identifier; raw specification text is not stored here.
+    pub spec_artifact_id: String,
+    /// Task graph artifact identifier; raw task graph text is not stored here.
+    pub task_graph_artifact_id: String,
+    /// Product mode. Valid sessions must use `ProductMode::LegionWorkflows`.
+    pub product_mode: ProductMode,
+    /// Worker assignments.
+    pub worker_assignments: Vec<LegionWorkflowWorkerAssignment>,
+    /// Dependency edges.
+    pub dependency_edges: Vec<LegionWorkflowDependencyEdge>,
+    /// Conflict summaries.
+    pub conflicts: Vec<LegionWorkflowConflictSummary>,
+    /// Verification gates.
+    pub verification_gates: Vec<LegionWorkflowVerificationGate>,
+    /// Sign-off records.
+    pub signoffs: Vec<LegionWorkflowSignoffRecord>,
+    /// Linked proposal identifiers.
+    pub proposal_ids: Vec<ProposalId>,
+    /// Merge approval metadata.
+    pub merge_approval: Option<LegionWorkflowMergeApproval>,
+    /// Session lifecycle state.
+    pub state: LegionWorkflowState,
+    /// Whether the main workspace is dirty and therefore blocks readiness.
+    pub dirty_main_workspace: bool,
+    /// Whether proposal preconditions are stale and therefore block readiness.
+    pub stale_proposal_preconditions: bool,
+    /// Whether audit-before-success evidence has been recorded.
+    pub audit_before_success_recorded: bool,
+    /// Projection or session generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for the session.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Session schema version.
+    pub schema_version: u16,
+}
+
+/// Merge-readiness evaluation result for a Legion workflow session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowMergeReadiness {
+    /// Evaluated readiness state.
+    pub state: LegionWorkflowMergeReadinessState,
+    /// Display-safe blocker labels.
+    pub blockers: Vec<String>,
+    /// Display-safe satisfied-gate labels.
+    pub satisfied: Vec<String>,
+    /// Redaction hints for the readiness result.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Readiness schema version.
+    pub schema_version: u16,
+}
+
+/// Display-safe row for a Legion workflow projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowProjectionRow {
+    /// Linked workflow session identifier.
+    pub session_id: LegionWorkflowSessionId,
+    /// Display-safe row label.
+    pub label: String,
+    /// Worker count.
+    pub worker_count: u32,
+    /// Open or unresolved conflict count.
+    pub conflict_count: u32,
+    /// Linked proposal identifiers.
+    pub proposal_ids: Vec<ProposalId>,
+    /// Merge-readiness state.
+    pub merge_readiness: LegionWorkflowMergeReadinessState,
+    /// Redaction hints for this row.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Row schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only Legion workflow projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowProjection {
+    /// Stable projection identifier.
+    pub projection_id: String,
+    /// Projected workflow rows.
+    pub rows: Vec<LegionWorkflowProjectionRow>,
+    /// Total worker count.
+    pub worker_count: u32,
+    /// Total conflict count.
+    pub conflict_count: u32,
+    /// Number of rows omitted by bounds.
+    pub omitted_row_count: u32,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for the projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+/// Error raised by Legion workflow metadata validators.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LegionWorkflowValidationError {
+    /// Required identifier or label was empty.
+    #[error("legion workflow metadata has empty field: {field}")]
+    EmptyField {
+        /// Field name.
+        field: String,
+    },
+    /// Schema version was zero.
+    #[error("legion workflow metadata has zero schema version: {field}")]
+    ZeroSchemaVersion {
+        /// Field name.
+        field: String,
+    },
+    /// Correlation id was zero.
+    #[error("legion workflow metadata requires non-zero correlation id")]
+    ZeroCorrelationId,
+    /// Causality id was nil.
+    #[error("legion workflow metadata requires non-nil causality id")]
+    NilCausalityId,
+    /// Redaction hints were missing or included `None`.
+    #[error("legion workflow metadata has unsafe redaction hints: {field}")]
+    UnsafeRedactionHints {
+        /// Field name.
+        field: String,
+    },
+    /// Product mode was not Legion Workflows.
+    #[error("legion workflow session must use ProductMode::LegionWorkflows")]
+    InvalidProductMode,
+    /// Provider-backed worker did not include provider route metadata.
+    #[error("provider-backed legion worker is missing route metadata")]
+    MissingProviderRoute,
+    /// Metadata attempted to retain raw or payload-like material.
+    #[error("legion workflow metadata is not metadata-only: {field}: {reason}")]
+    NonMetadataOnly {
+        /// Field name.
+        field: String,
+        /// Stable reason code.
+        reason: String,
+    },
+}
+
+impl LegionWorkflowSession {
+    /// Validates the metadata-only Legion workflow session contract.
+    pub fn validate(&self) -> Result<(), LegionWorkflowValidationError> {
+        validate_legion_workflow_session(self)
+    }
+
+    /// Evaluates approval-gated merge readiness for this session.
+    pub fn merge_readiness(&self) -> LegionWorkflowMergeReadiness {
+        evaluate_legion_workflow_merge_readiness(self)
+    }
+}
+
+/// Validates a Legion workflow session and all nested metadata records.
+pub fn validate_legion_workflow_session(
+    session: &LegionWorkflowSession,
+) -> Result<(), LegionWorkflowValidationError> {
+    validate_legion_schema("session.schema_version", session.schema_version)?;
+    validate_legion_id("session_id", &session.session_id.0)?;
+    validate_legion_metadata("directive_artifact_id", &session.directive_artifact_id)?;
+    validate_legion_metadata("spec_artifact_id", &session.spec_artifact_id)?;
+    validate_legion_metadata("task_graph_artifact_id", &session.task_graph_artifact_id)?;
+    validate_legion_redaction("session.redaction_hints", &session.redaction_hints)?;
+    if session.product_mode != ProductMode::LegionWorkflows {
+        return Err(LegionWorkflowValidationError::InvalidProductMode);
+    }
+    if session.worker_assignments.is_empty() {
+        return Err(LegionWorkflowValidationError::EmptyField {
+            field: "worker_assignments".to_string(),
+        });
+    }
+    for worker in &session.worker_assignments {
+        validate_legion_workflow_worker_assignment(worker)?;
+    }
+    for edge in &session.dependency_edges {
+        validate_legion_schema("dependency.schema_version", edge.schema_version)?;
+        validate_legion_metadata("dependency_id", &edge.dependency_id)?;
+        validate_legion_id("dependency.from_worker_id", &edge.from_worker_id.0)?;
+        validate_legion_id("dependency.to_worker_id", &edge.to_worker_id.0)?;
+        validate_legion_metadata("dependency.label", &edge.label)?;
+    }
+    for conflict in &session.conflicts {
+        validate_legion_workflow_conflict(conflict)?;
+    }
+    for gate in &session.verification_gates {
+        validate_legion_workflow_verification_gate(gate)?;
+    }
+    for signoff in &session.signoffs {
+        validate_legion_workflow_signoff(signoff)?;
+    }
+    for proposal_id in &session.proposal_ids {
+        if proposal_id.0 == 0 {
+            return Err(LegionWorkflowValidationError::EmptyField {
+                field: "proposal_ids".to_string(),
+            });
+        }
+    }
+    if let Some(approval) = &session.merge_approval {
+        validate_legion_schema("merge_approval.schema_version", approval.schema_version)?;
+        validate_legion_metadata("merge_approval.approval_id", &approval.approval_id)?;
+        if let Some(artifact_id) = &approval.approval_artifact_id {
+            validate_legion_metadata("merge_approval.approval_artifact_id", artifact_id)?;
+        }
+        if let Some(artifact_id) = &approval.rollback_artifact_id {
+            validate_legion_metadata("merge_approval.rollback_artifact_id", artifact_id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a Legion workflow worker assignment.
+pub fn validate_legion_workflow_worker_assignment(
+    worker: &LegionWorkflowWorkerAssignment,
+) -> Result<(), LegionWorkflowValidationError> {
+    validate_legion_schema("worker.schema_version", worker.schema_version)?;
+    validate_legion_id("worker_id", &worker.worker_id.0)?;
+    validate_legion_metadata("worker.model_label", &worker.model_label)?;
+    validate_legion_correlation(worker.correlation_id, worker.causality_id)?;
+    validate_legion_redaction("worker.redaction_hints", &worker.redaction_hints)?;
+    for command_class in &worker.allowed_command_classes {
+        validate_legion_metadata("worker.allowed_command_classes", command_class)?;
+    }
+    if let Some(plan_id) = &worker.linked_delegated_plan_id {
+        validate_legion_metadata("worker.linked_delegated_plan_id", &plan_id.0)?;
+    }
+    match &worker.model_backend {
+        LegionWorkflowModelBackend::Local { model_label } => {
+            validate_legion_metadata("worker.backend.local.model_label", model_label)?;
+        }
+        LegionWorkflowModelBackend::ProviderBacked {
+            provider_id,
+            route_id,
+            model_label,
+        } => {
+            validate_legion_metadata("worker.backend.provider_id", provider_id)?;
+            validate_legion_metadata("worker.backend.route_id", route_id)?;
+            validate_legion_metadata("worker.backend.model_label", model_label)?;
+            if provider_id.trim().is_empty() || route_id.trim().is_empty() {
+                return Err(LegionWorkflowValidationError::MissingProviderRoute);
+            }
+        }
+        LegionWorkflowModelBackend::Unavailable { reason } => {
+            validate_legion_metadata("worker.backend.unavailable.reason", reason)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a Legion workflow conflict summary.
+pub fn validate_legion_workflow_conflict(
+    conflict: &LegionWorkflowConflictSummary,
+) -> Result<(), LegionWorkflowValidationError> {
+    validate_legion_schema("conflict.schema_version", conflict.schema_version)?;
+    validate_legion_metadata("conflict_id", &conflict.conflict_id)?;
+    validate_legion_metadata("conflict.label", &conflict.label)?;
+    validate_legion_redaction("conflict.redaction_hints", &conflict.redaction_hints)
+}
+
+/// Validates a Legion workflow verification gate.
+pub fn validate_legion_workflow_verification_gate(
+    gate: &LegionWorkflowVerificationGate,
+) -> Result<(), LegionWorkflowValidationError> {
+    validate_legion_schema("verification.schema_version", gate.schema_version)?;
+    validate_legion_metadata("verification.gate_id", &gate.gate_id)?;
+    validate_legion_metadata("verification.label", &gate.label)?;
+    if let Some(run_id) = &gate.verification_run_id {
+        validate_legion_metadata("verification.run_id", run_id)?;
+    }
+    if let Some(artifact_id) = &gate.evidence_artifact_id {
+        validate_legion_metadata("verification.evidence_artifact_id", artifact_id)?;
+    }
+    validate_legion_redaction("verification.redaction_hints", &gate.redaction_hints)
+}
+
+/// Validates a Legion workflow sign-off record.
+pub fn validate_legion_workflow_signoff(
+    signoff: &LegionWorkflowSignoffRecord,
+) -> Result<(), LegionWorkflowValidationError> {
+    validate_legion_schema("signoff.schema_version", signoff.schema_version)?;
+    validate_legion_metadata("signoff.signoff_id", &signoff.signoff_id)?;
+    validate_legion_metadata("signoff.reviewer_label", &signoff.reviewer_label)?;
+    validate_legion_correlation(signoff.correlation_id, signoff.causality_id)?;
+    if let Some(artifact_id) = &signoff.approval_artifact_id {
+        validate_legion_metadata("signoff.approval_artifact_id", artifact_id)?;
+    }
+    validate_legion_redaction("signoff.redaction_hints", &signoff.redaction_hints)
+}
+
+/// Evaluates approval-gated merge readiness for a Legion workflow session.
+pub fn evaluate_legion_workflow_merge_readiness(
+    session: &LegionWorkflowSession,
+) -> LegionWorkflowMergeReadiness {
+    let mut blockers = Vec::new();
+    let mut satisfied = Vec::new();
+    if let Err(error) = validate_legion_workflow_session(session) {
+        blockers.push(format!("invalid metadata: {error}"));
+    }
+    if session.worker_assignments.is_empty() {
+        blockers.push("no workers assigned".to_string());
+    }
+    for worker in &session.worker_assignments {
+        if matches!(
+            worker.model_backend,
+            LegionWorkflowModelBackend::Unavailable { .. }
+        ) {
+            blockers.push(format!("worker {} backend unavailable", worker.worker_id.0));
+        }
+        if matches!(
+            worker.state,
+            LegionWorkflowWorkerState::Blocked | LegionWorkflowWorkerState::Failed
+        ) {
+            blockers.push(format!(
+                "worker {} is {:?}",
+                worker.worker_id.0, worker.state
+            ));
+        }
+    }
+    for edge in &session.dependency_edges {
+        if edge.state != LegionWorkflowDependencyState::Satisfied {
+            blockers.push(format!(
+                "dependency {} is {:?}",
+                edge.dependency_id, edge.state
+            ));
+        }
+    }
+    for conflict in &session.conflicts {
+        if !matches!(
+            conflict.state,
+            LegionWorkflowConflictState::Resolved | LegionWorkflowConflictState::Waived
+        ) {
+            blockers.push(format!(
+                "conflict {} is {:?}",
+                conflict.conflict_id, conflict.state
+            ));
+        }
+    }
+    if session.verification_gates.is_empty() {
+        blockers.push("missing verification evidence".to_string());
+    }
+    for gate in &session.verification_gates {
+        if gate.required && gate.state != LegionWorkflowVerificationGateState::Passed {
+            blockers.push(format!("verification {} is {:?}", gate.gate_id, gate.state));
+        } else if gate.required {
+            satisfied.push(format!("verification {} passed", gate.gate_id));
+        }
+    }
+    if session
+        .signoffs
+        .iter()
+        .filter(|signoff| signoff.required)
+        .count()
+        == 0
+    {
+        blockers.push("missing required sign-off".to_string());
+    }
+    for signoff in &session.signoffs {
+        if signoff.required && signoff.state != LegionWorkflowSignoffState::Approved {
+            blockers.push(format!(
+                "signoff {} is {:?}",
+                signoff.signoff_id, signoff.state
+            ));
+        } else if signoff.required {
+            satisfied.push(format!("signoff {} approved", signoff.signoff_id));
+        }
+    }
+    if session.proposal_ids.is_empty() {
+        blockers.push("missing proposal id".to_string());
+    }
+    if session.dirty_main_workspace {
+        blockers.push("dirty main workspace conflict".to_string());
+    }
+    if session.stale_proposal_preconditions {
+        blockers.push("stale proposal preconditions".to_string());
+    }
+    if !session.audit_before_success_recorded {
+        blockers.push("missing audit-before-success evidence".to_string());
+    }
+
+    let approval_ready = session.merge_approval.as_ref().is_some_and(|approval| {
+        approval.approved
+            && approval.rollback_available
+            && approval.approval_artifact_id.is_some()
+            && approval.rollback_artifact_id.is_some()
+    });
+    if !approval_ready {
+        blockers.push("missing merge approval or rollback metadata".to_string());
+    }
+
+    let state = if blockers.is_empty() {
+        LegionWorkflowMergeReadinessState::Ready
+    } else if session
+        .merge_approval
+        .as_ref()
+        .is_some_and(|approval| approval.approved)
+    {
+        LegionWorkflowMergeReadinessState::Blocked
+    } else {
+        LegionWorkflowMergeReadinessState::WaitingForApproval
+    };
+    LegionWorkflowMergeReadiness {
+        state,
+        blockers,
+        satisfied,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+/// Builds a metadata-only Legion workflow projection from sessions.
+pub fn legion_workflow_projection_from_sessions(
+    projection_id: impl Into<String>,
+    sessions: &[LegionWorkflowSession],
+    generated_at: TimestampMillis,
+    row_limit: usize,
+) -> LegionWorkflowProjection {
+    let projection_id = projection_id.into();
+    let take_count = sessions.len().min(row_limit);
+    let rows = sessions
+        .iter()
+        .take(take_count)
+        .map(|session| {
+            let readiness = evaluate_legion_workflow_merge_readiness(session);
+            let conflict_count = session
+                .conflicts
+                .iter()
+                .filter(|conflict| {
+                    !matches!(
+                        conflict.state,
+                        LegionWorkflowConflictState::Resolved | LegionWorkflowConflictState::Waived
+                    )
+                })
+                .count() as u32;
+            LegionWorkflowProjectionRow {
+                session_id: session.session_id.clone(),
+                label: format!(
+                    "Legion Workflow {}: {:?}, workers={}, proposals={}",
+                    session.session_id.0,
+                    session.state,
+                    session.worker_assignments.len(),
+                    session.proposal_ids.len()
+                ),
+                worker_count: session.worker_assignments.len() as u32,
+                conflict_count,
+                proposal_ids: session.proposal_ids.clone(),
+                merge_readiness: readiness.state,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }
+        })
+        .collect::<Vec<_>>();
+    LegionWorkflowProjection {
+        projection_id,
+        worker_count: sessions
+            .iter()
+            .map(|session| session.worker_assignments.len() as u32)
+            .sum(),
+        conflict_count: sessions
+            .iter()
+            .map(|session| session.conflicts.len() as u32)
+            .sum(),
+        omitted_row_count: sessions.len().saturating_sub(take_count) as u32,
+        rows,
+        generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn validate_legion_schema(
+    field: &str,
+    schema_version: u16,
+) -> Result<(), LegionWorkflowValidationError> {
+    if schema_version == 0 {
+        return Err(LegionWorkflowValidationError::ZeroSchemaVersion {
+            field: field.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_legion_correlation(
+    correlation_id: CorrelationId,
+    causality_id: CausalityId,
+) -> Result<(), LegionWorkflowValidationError> {
+    if correlation_id.0 == 0 {
+        return Err(LegionWorkflowValidationError::ZeroCorrelationId);
+    }
+    if causality_id.0 == Uuid::nil() {
+        return Err(LegionWorkflowValidationError::NilCausalityId);
+    }
+    Ok(())
+}
+
+fn validate_legion_id(field: &str, value: &str) -> Result<(), LegionWorkflowValidationError> {
+    if value.trim().is_empty() {
+        return Err(LegionWorkflowValidationError::EmptyField {
+            field: field.to_string(),
+        });
+    }
+    validate_legion_metadata(field, value)
+}
+
+fn validate_legion_metadata(field: &str, value: &str) -> Result<(), LegionWorkflowValidationError> {
+    if value.trim().is_empty() {
+        return Err(LegionWorkflowValidationError::EmptyField {
+            field: field.to_string(),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    for marker in [
+        "raw prompt",
+        "source_body",
+        "raw source",
+        "provider payload",
+        "terminal output body",
+        "raw worker log",
+        "secret=",
+        "api_key",
+    ] {
+        if lower.contains(marker) {
+            return Err(LegionWorkflowValidationError::NonMetadataOnly {
+                field: field.to_string(),
+                reason: "forbidden.raw_or_payload_marker".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_legion_redaction(
+    field: &str,
+    hints: &[RedactionHint],
+) -> Result<(), LegionWorkflowValidationError> {
+    if hints.is_empty() || hints.contains(&RedactionHint::None) {
+        return Err(LegionWorkflowValidationError::UnsafeRedactionHints {
+            field: field.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Risk label for command-registry entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandRiskLabel {

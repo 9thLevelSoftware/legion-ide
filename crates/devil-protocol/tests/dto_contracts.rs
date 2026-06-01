@@ -8662,3 +8662,252 @@ fn product_readiness_debug_test_scm_and_workbench_contracts_roundtrip() {
         serde_json::from_value(payload["ledger"].clone()).expect("ledger roundtrips");
     assert!(decoded_ledger.substrate_acceptance_separate);
 }
+
+fn legion_workflow_worker() -> LegionWorkflowWorkerAssignment {
+    LegionWorkflowWorkerAssignment {
+        worker_id: LegionWorkflowWorkerId("worker-implementer".to_string()),
+        role: LegionWorkflowWorkerRole::Implementer,
+        state: LegionWorkflowWorkerState::ProposalReady,
+        model_backend: LegionWorkflowModelBackend::ProviderBacked {
+            provider_id: "provider-local-gateway".to_string(),
+            route_id: "route-approved-metadata".to_string(),
+            model_label: "display-safe model".to_string(),
+        },
+        model_label: "display-safe model".to_string(),
+        allowed_command_classes: vec![
+            "proposal-preview".to_string(),
+            "verification-metadata".to_string(),
+        ],
+        linked_delegated_plan_id: Some(DelegatedTaskPlanId("plan-auth-001".to_string())),
+        risk_label: ProposalRiskLabel::Medium,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        correlation_id: CorrelationId(1302),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn valid_legion_workflow_session() -> LegionWorkflowSession {
+    LegionWorkflowSession {
+        session_id: LegionWorkflowSessionId("session-phase13".to_string()),
+        directive_artifact_id: "artifact-directive".to_string(),
+        spec_artifact_id: "artifact-spec".to_string(),
+        task_graph_artifact_id: "artifact-task-graph".to_string(),
+        product_mode: ProductMode::LegionWorkflows,
+        worker_assignments: vec![legion_workflow_worker()],
+        dependency_edges: vec![LegionWorkflowDependencyEdge {
+            dependency_id: "dependency-review-after-implementation".to_string(),
+            from_worker_id: LegionWorkflowWorkerId("worker-implementer".to_string()),
+            to_worker_id: LegionWorkflowWorkerId("worker-implementer".to_string()),
+            state: LegionWorkflowDependencyState::Satisfied,
+            label: "implementation metadata ready before review".to_string(),
+            schema_version: 1,
+        }],
+        conflicts: vec![LegionWorkflowConflictSummary {
+            conflict_id: "conflict-overlap-reviewed".to_string(),
+            kind: LegionWorkflowConflictKind::WorkerOverlap,
+            state: LegionWorkflowConflictState::Resolved,
+            label: "overlap resolved by proposal ordering".to_string(),
+            proposal_id: Some(ProposalId(42)),
+            risk_label: ProposalRiskLabel::Medium,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        verification_gates: vec![LegionWorkflowVerificationGate {
+            gate_id: "verification-unit-tests".to_string(),
+            label: "unit test metadata passed".to_string(),
+            state: LegionWorkflowVerificationGateState::Passed,
+            required: true,
+            verification_run_id: Some("verify-001".to_string()),
+            evidence_artifact_id: Some("artifact-evidence".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        signoffs: vec![LegionWorkflowSignoffRecord {
+            signoff_id: "signoff-human-review".to_string(),
+            reviewer_label: "human reviewer".to_string(),
+            state: LegionWorkflowSignoffState::Approved,
+            required: true,
+            approval_artifact_id: Some("artifact-approval".to_string()),
+            correlation_id: CorrelationId(1302),
+            causality_id: causality_id(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        proposal_ids: vec![ProposalId(42)],
+        merge_approval: Some(LegionWorkflowMergeApproval {
+            approval_id: "merge-approval".to_string(),
+            approved: true,
+            rollback_available: true,
+            approval_artifact_id: Some("artifact-approval".to_string()),
+            rollback_artifact_id: Some("artifact-rollback".to_string()),
+            schema_version: 1,
+        }),
+        state: LegionWorkflowState::WaitingForApproval,
+        dirty_main_workspace: false,
+        stale_proposal_preconditions: false,
+        audit_before_success_recorded: true,
+        generated_at: TimestampMillis(1302),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+#[test]
+fn legion_workflow_session_round_trips_and_projects_metadata_only() {
+    let session = valid_legion_workflow_session();
+    validate_legion_workflow_session(&session).expect("valid legion workflow session");
+    let encoded = serde_json::to_value(&session).expect("serialize legion workflow session");
+    assert!(encoded.to_string().contains("session-phase13"));
+    assert!(!encoded.to_string().contains("raw prompt"));
+    assert!(!encoded.to_string().contains("source_body"));
+    let decoded: LegionWorkflowSession =
+        serde_json::from_value(encoded).expect("deserialize session");
+    assert_eq!(decoded, session);
+
+    let readiness = evaluate_legion_workflow_merge_readiness(&decoded);
+    assert_eq!(readiness.state, LegionWorkflowMergeReadinessState::Ready);
+    assert!(readiness.blockers.is_empty());
+
+    let projection = legion_workflow_projection_from_sessions(
+        "legion-workflows:phase13",
+        std::slice::from_ref(&decoded),
+        TimestampMillis(1400),
+        8,
+    );
+    assert_eq!(projection.rows.len(), 1);
+    assert_eq!(projection.worker_count, 1);
+    assert_eq!(
+        projection.rows[0].merge_readiness,
+        LegionWorkflowMergeReadinessState::Ready
+    );
+    assert!(
+        projection
+            .redaction_hints
+            .contains(&RedactionHint::MetadataOnly)
+    );
+}
+
+#[test]
+fn legion_workflow_validators_reject_invalid_metadata() {
+    let mut session = valid_legion_workflow_session();
+    session.worker_assignments[0].correlation_id = CorrelationId(0);
+    assert!(matches!(
+        validate_legion_workflow_session(&session),
+        Err(LegionWorkflowValidationError::ZeroCorrelationId)
+    ));
+
+    let mut session = valid_legion_workflow_session();
+    session.worker_assignments[0].causality_id = CausalityId(Uuid::nil());
+    assert!(matches!(
+        validate_legion_workflow_session(&session),
+        Err(LegionWorkflowValidationError::NilCausalityId)
+    ));
+
+    let mut session = valid_legion_workflow_session();
+    session.schema_version = 0;
+    assert!(matches!(
+        validate_legion_workflow_session(&session),
+        Err(LegionWorkflowValidationError::ZeroSchemaVersion { .. })
+    ));
+
+    let mut session = valid_legion_workflow_session();
+    session.redaction_hints = vec![RedactionHint::None];
+    assert!(matches!(
+        validate_legion_workflow_session(&session),
+        Err(LegionWorkflowValidationError::UnsafeRedactionHints { .. })
+    ));
+
+    let mut session = valid_legion_workflow_session();
+    session.directive_artifact_id = "raw prompt: build everything".to_string();
+    assert!(matches!(
+        validate_legion_workflow_session(&session),
+        Err(LegionWorkflowValidationError::NonMetadataOnly { .. })
+    ));
+
+    let mut session = valid_legion_workflow_session();
+    session.worker_assignments[0].model_backend = LegionWorkflowModelBackend::ProviderBacked {
+        provider_id: "provider".to_string(),
+        route_id: "".to_string(),
+        model_label: "model".to_string(),
+    };
+    assert!(matches!(
+        validate_legion_workflow_session(&session),
+        Err(LegionWorkflowValidationError::EmptyField { .. })
+    ));
+}
+
+#[test]
+fn legion_workflow_merge_readiness_fails_closed_for_missing_gates() {
+    let mut session = valid_legion_workflow_session();
+    session.conflicts[0].state = LegionWorkflowConflictState::Open;
+    assert_eq!(
+        evaluate_legion_workflow_merge_readiness(&session).state,
+        LegionWorkflowMergeReadinessState::Blocked
+    );
+
+    let mut session = valid_legion_workflow_session();
+    session.verification_gates[0].state = LegionWorkflowVerificationGateState::Failed;
+    let readiness = evaluate_legion_workflow_merge_readiness(&session);
+    assert_eq!(readiness.state, LegionWorkflowMergeReadinessState::Blocked);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("verification"))
+    );
+
+    let mut session = valid_legion_workflow_session();
+    session.signoffs[0].state = LegionWorkflowSignoffState::Missing;
+    assert!(
+        evaluate_legion_workflow_merge_readiness(&session)
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("signoff"))
+    );
+
+    let mut session = valid_legion_workflow_session();
+    session.dirty_main_workspace = true;
+    assert!(
+        evaluate_legion_workflow_merge_readiness(&session)
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("dirty main workspace"))
+    );
+
+    let mut session = valid_legion_workflow_session();
+    session.stale_proposal_preconditions = true;
+    assert!(
+        evaluate_legion_workflow_merge_readiness(&session)
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("stale proposal"))
+    );
+
+    let mut session = valid_legion_workflow_session();
+    session.audit_before_success_recorded = false;
+    assert!(
+        evaluate_legion_workflow_merge_readiness(&session)
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("audit-before-success"))
+    );
+
+    let mut session = valid_legion_workflow_session();
+    session.proposal_ids.clear();
+    assert!(
+        evaluate_legion_workflow_merge_readiness(&session)
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("missing proposal id"))
+    );
+
+    let mut session = valid_legion_workflow_session();
+    session.merge_approval = None;
+    assert_eq!(
+        evaluate_legion_workflow_merge_readiness(&session).state,
+        LegionWorkflowMergeReadinessState::WaitingForApproval
+    );
+}
