@@ -540,6 +540,14 @@ fn projection_rendering_models_read_only_product_mode_shell() {
             .iter()
             .any(|row| row.contains("Manual Mode has no AI dispatch path"))
     );
+    assert!(empty.manual_control_rows.iter().any(|row| {
+        row.contains("AI Disabled")
+            && row.contains("Local Tools Only")
+            && row.contains("No Model Calls")
+    }));
+    assert!(empty.manual_control_rows.iter().any(|row| {
+        row.contains("save_all proposal-mediated") && row.contains("no direct apply")
+    }));
 }
 
 #[test]

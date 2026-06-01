@@ -14,7 +14,7 @@
 - [x] Phase 10: Metadata-First Artifact Model
 - [x] Phase 11: Safe Runtime Activation Contracts
 - [x] Phase 12: Delegated Task Runtime
-- [ ] Phase 13: Legion Workflow Orchestration
+- [x] Phase 13: Legion Workflow Orchestration
 
 ## Phase Details
 
@@ -201,7 +201,7 @@ Phase 12 status: Complete; accepted on 2026-05-28.
 - All desktop integrations, bridge actions, and headless workflow routes pass end-to-end integration verification.
 
 ### Phase 13: Legion Workflow Orchestration
-Phase 13 status: Planned.
+Phase 13 status: Complete; accepted and review passed on 2026-05-28 after final gates.
 
 **Goal**: Coordinate a full Legion Workflow team across local or provider-backed models, with conflict/dependency tracking, verification, sign-off, and approval-gated merge.
 
@@ -232,11 +232,11 @@ Phase 13 status: Planned.
 | 10 | 1 | 1 | Complete |
 | 11 | 1 | 1 | Complete |
 | 12 | 3 | 3 | Complete |
-| 13 | 7 | 0 | Planned |
+| 13 | 7 | 7 | Complete |
 
 ## Planning Notes
 
 - Total GUI GA plans completed through Phase 8: 51.
-- Post-GA Phase 9-12 foundation/runtime slices are complete; Phase 13 workflow orchestration is planned and must not bypass proposal-mediated authority.
+- Post-GA Phase 9-13 foundation/runtime slices are complete; Phase 13 workflow orchestration preserves proposal-mediated authority and review-fixed incomplete-worker readiness.
 - Estimates are not caps. A phase may produce as many tasks as needed to satisfy the phase goal and verification contract.
 - `/legion:plan` should use `.planning/CODEBASE.md`, `.planning/codebase/index.jsonl`, and `.planning/codebase/symbols.json` before decomposing each phase.

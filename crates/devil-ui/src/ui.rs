@@ -6,12 +6,14 @@ use devil_protocol::{
     CollaborationPresenceProjection, CollaborationSessionId, CommandRegistryProjection,
     ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
     ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
-    LanguageToolingProjection, PermissionBudgetProjection, PluginContributionProjection, PluginId,
-    PrivacyInspectorProjection, ProposalApprovalChecklistProjection, ProposalCancellationReason,
-    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
-    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
-    RemoteGuiProjection, SystemGraphProjection, TerminalPanelProjection, TerminalSessionId,
-    TextCoordinate, TimestampMillis, VerificationRunProjection, ViewportScroll, WorkspaceId,
+    LanguageToolingProjection, LegionWorkflowConflictId, LegionWorkflowProjection,
+    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowVerificationGateId,
+    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
+    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
+    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
+    ProposalRollbackReason, ProtocolTextRange, RedactionHint, RemoteGuiProjection,
+    SystemGraphProjection, TerminalPanelProjection, TerminalSessionId, TextCoordinate,
+    TimestampMillis, VerificationRunProjection, ViewportScroll, WorkspaceId,
 };
 use thiserror::Error;
 
@@ -647,6 +649,51 @@ pub enum CommandDispatchIntent {
         /// Proposal identifier selected from projection data.
         proposal_id: ProposalId,
     },
+    /// Inspect a Legion workflow session using projection metadata.
+    InspectLegionWorkflowSession {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+    },
+    /// Open a Legion workflow linked proposal preview through app authority.
+    OpenLegionWorkflowProposalPreview {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal identifier selected from projection data.
+        proposal_id: ProposalId,
+    },
+    /// Open Legion workflow linked proposal details through app authority.
+    OpenLegionWorkflowProposalDetails {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal identifier selected from projection data.
+        proposal_id: ProposalId,
+    },
+    /// Request verification metadata recording for a Legion workflow gate.
+    RequestLegionWorkflowVerification {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Verification gate identifier selected from projection data.
+        gate_id: LegionWorkflowVerificationGateId,
+    },
+    /// Request sign-off metadata recording for a Legion workflow.
+    RequestLegionWorkflowSignOff {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Sign-off identifier selected from projection data.
+        sign_off_id: LegionWorkflowSignOffId,
+    },
+    /// Request conflict resolution metadata for a Legion workflow.
+    ResolveLegionWorkflowConflict {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Conflict identifier selected from projection data.
+        conflict_id: LegionWorkflowConflictId,
+    },
+    /// Request app-owned merge readiness evaluation for a Legion workflow.
+    RequestLegionWorkflowMergeReadiness {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+    },
     /// Start a Phase 4 AI run through app-owned composition.
     StartAiRun {
         /// Display-safe instruction label.
@@ -740,6 +787,8 @@ pub struct ShellProjectionSnapshot {
     pub assisted_ai_projection: AssistedAiProjection,
     /// Delegated-task plan projection supplied by the application layer.
     pub delegated_task_projection: DelegatedTaskProjection,
+    /// Legion workflow projection supplied by the application layer.
+    pub legion_workflow_projection: LegionWorkflowProjection,
     /// Plugin contribution projections supplied by the application layer.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Collaboration presence projections supplied by the application layer.
@@ -807,6 +856,8 @@ pub struct Shell {
     pub assisted_ai_projection: AssistedAiProjection,
     /// Static delegated-task plan projection.
     pub delegated_task_projection: DelegatedTaskProjection,
+    /// Static Legion workflow projection.
+    pub legion_workflow_projection: LegionWorkflowProjection,
     /// Static plugin contribution projections.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Static collaboration presence projections.
@@ -847,6 +898,7 @@ impl Shell {
             checkpoint_rollback_projection: snapshot.checkpoint_rollback_projection,
             assisted_ai_projection: snapshot.assisted_ai_projection,
             delegated_task_projection: snapshot.delegated_task_projection,
+            legion_workflow_projection: snapshot.legion_workflow_projection,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
             collaboration_gui_projection: snapshot.collaboration_gui_projection,
@@ -881,6 +933,7 @@ impl Shell {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -911,6 +964,7 @@ impl Shell {
             checkpoint_rollback_projection: self.checkpoint_rollback_projection.clone(),
             assisted_ai_projection: self.assisted_ai_projection.clone(),
             delegated_task_projection: self.delegated_task_projection.clone(),
+            legion_workflow_projection: self.legion_workflow_projection.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
             collaboration_gui_projection: self.collaboration_gui_projection.clone(),
@@ -940,6 +994,7 @@ impl Shell {
         self.checkpoint_rollback_projection = snapshot.checkpoint_rollback_projection;
         self.assisted_ai_projection = snapshot.assisted_ai_projection;
         self.delegated_task_projection = snapshot.delegated_task_projection;
+        self.legion_workflow_projection = snapshot.legion_workflow_projection;
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
         self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
         self.collaboration_gui_projection = snapshot.collaboration_gui_projection;
@@ -1312,6 +1367,31 @@ impl Shell {
                     step.target_count,
                     step.proposal_id.map(|proposal| proposal.0),
                     step.blocker_count
+                );
+            }
+        }
+        if !self.legion_workflow_projection.rows.is_empty() {
+            let workflows = &self.legion_workflow_projection;
+            println!(
+                "Legion workflows {} | sessions={} omitted={} autonomous_merge=unsupported_until_approval",
+                workflows.projection_id, workflows.total_session_count, workflows.omitted_row_count
+            );
+            for row in &workflows.rows {
+                println!(
+                    "- workflow {} state={:?} workers={} provider_routes={} dependencies={} conflicts={} verification={}/{} signoff={}/{} proposals={} merge={:?} labels={}",
+                    row.session_id.0,
+                    row.lifecycle_state,
+                    row.worker_count,
+                    row.provider_route_required_count,
+                    row.dependency_count,
+                    row.unresolved_conflict_count,
+                    row.passed_verification_count,
+                    row.verification_gate_count,
+                    row.signed_off_count,
+                    row.sign_off_count,
+                    row.linked_proposals.len(),
+                    row.merge_readiness.state,
+                    row.display_safe_labels.join("|")
                 );
             }
         }
@@ -1749,6 +1829,69 @@ impl Shell {
                 CommandDispatchIntent::OpenProposalDetails { proposal_id },
             )));
         }
+        if let Some(session_id) = parse_legion_session_id(trimmed.strip_prefix(":legion-inspect "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::InspectLegionWorkflowSession { session_id },
+            )));
+        }
+        if let Some((session_id, proposal_id)) =
+            parse_legion_session_proposal(trimmed.strip_prefix(":legion-proposal-preview "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::OpenLegionWorkflowProposalPreview {
+                    session_id,
+                    proposal_id,
+                },
+            )));
+        }
+        if let Some((session_id, proposal_id)) =
+            parse_legion_session_proposal(trimmed.strip_prefix(":legion-proposal-details "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::OpenLegionWorkflowProposalDetails {
+                    session_id,
+                    proposal_id,
+                },
+            )));
+        }
+        if let Some((session_id, gate_id)) =
+            parse_legion_session_label(trimmed.strip_prefix(":legion-verify "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestLegionWorkflowVerification {
+                    session_id,
+                    gate_id: LegionWorkflowVerificationGateId(gate_id),
+                },
+            )));
+        }
+        if let Some((session_id, sign_off_id)) =
+            parse_legion_session_label(trimmed.strip_prefix(":legion-signoff "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestLegionWorkflowSignOff {
+                    session_id,
+                    sign_off_id: LegionWorkflowSignOffId(sign_off_id),
+                },
+            )));
+        }
+        if let Some((session_id, conflict_id)) =
+            parse_legion_session_label(trimmed.strip_prefix(":legion-resolve "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::ResolveLegionWorkflowConflict {
+                    session_id,
+                    conflict_id: LegionWorkflowConflictId(conflict_id),
+                },
+            )));
+        }
+        if let Some(session_id) =
+            parse_legion_session_id(trimmed.strip_prefix(":legion-readiness "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { session_id },
+            )));
+        }
 
         if let Some(payload) = trimmed.strip_prefix(":i ") {
             let buffer_id = self.active_buffer_id()?;
@@ -2071,10 +2214,42 @@ fn empty_delegated_task_projection() -> DelegatedTaskProjection {
     }
 }
 
+fn empty_legion_workflow_projection() -> LegionWorkflowProjection {
+    LegionWorkflowProjection::empty("legion-workflow:empty", TimestampMillis(0), 1)
+}
+
 fn parse_proposal_id(payload: Option<&str>) -> Option<ProposalId> {
     payload
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(ProposalId)
+}
+
+fn parse_legion_session_id(payload: Option<&str>) -> Option<LegionWorkflowSessionId> {
+    payload
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| LegionWorkflowSessionId(value.to_string()))
+}
+
+fn parse_legion_session_label(payload: Option<&str>) -> Option<(LegionWorkflowSessionId, String)> {
+    let mut split = payload?.split_whitespace();
+    let session_id = split.next()?.trim();
+    let metadata_id = split.next()?.trim();
+    if session_id.is_empty() || metadata_id.is_empty() || split.next().is_some() {
+        return None;
+    }
+    Some((
+        LegionWorkflowSessionId(session_id.to_string()),
+        metadata_id.to_string(),
+    ))
+}
+
+fn parse_legion_session_proposal(
+    payload: Option<&str>,
+) -> Option<(LegionWorkflowSessionId, ProposalId)> {
+    let (session_id, proposal_id) = parse_legion_session_label(payload)?;
+    let proposal_id = proposal_id.parse::<u64>().ok().map(ProposalId)?;
+    Some((session_id, proposal_id))
 }
 
 fn parse_collaboration_session_id(payload: Option<&str>) -> Option<CollaborationSessionId> {
@@ -2108,6 +2283,45 @@ mod tests {
             character,
             byte_offset: Some(character as u64),
             utf16_offset: None,
+        }
+    }
+
+    fn test_legion_workflow_projection() -> LegionWorkflowProjection {
+        LegionWorkflowProjection {
+            projection_id: "legion-workflow:test".to_string(),
+            rows: vec![devil_protocol::LegionWorkflowProjectionRow {
+                session_id: LegionWorkflowSessionId("session:legion:test".to_string()),
+                lifecycle_state: devil_protocol::LegionWorkflowState::WaitingForApproval,
+                worker_count: 3,
+                provider_route_required_count: 1,
+                dependency_count: 2,
+                unresolved_conflict_count: 1,
+                verification_gate_count: 2,
+                passed_verification_count: 1,
+                sign_off_count: 2,
+                signed_off_count: 1,
+                linked_proposals: vec![ProposalId(42)],
+                merge_readiness: devil_protocol::LegionWorkflowMergeReadiness {
+                    state: devil_protocol::LegionWorkflowMergeReadinessState::WaitingForApproval,
+                    blockers: vec![
+                        devil_protocol::LegionWorkflowMergeReadinessBlocker::ApprovalRequired,
+                    ],
+                    labels: vec!["legion_workflow.waiting_for_approval".to_string()],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                },
+                display_safe_labels: vec![
+                    "implementer.local".to_string(),
+                    "Autonomous merge unsupported until approval".to_string(),
+                ],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            total_session_count: 1,
+            omitted_row_count: 0,
+            generated_at: TimestampMillis(1),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
         }
     }
 
@@ -2317,6 +2531,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -2370,6 +2585,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -2533,6 +2749,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -2596,6 +2813,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -2653,6 +2871,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -2833,6 +3052,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -2926,6 +3146,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -3006,6 +3227,7 @@ mod tests {
             checkpoint_rollback_projection: rollback.clone(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -3150,6 +3372,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: assisted.clone(),
             delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -3242,6 +3465,7 @@ mod tests {
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
             delegated_task_projection: delegated.clone(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -3263,6 +3487,97 @@ mod tests {
             Some(ProposalId(42))
         );
         assert!(shell.command_dispatch_intents.is_empty());
+    }
+
+    #[test]
+    fn legion_workflow_empty_projection_is_metadata_only() {
+        let shell = Shell::empty("legion");
+        let snapshot = shell.projection_snapshot();
+
+        assert!(snapshot.legion_workflow_projection.rows.is_empty());
+        assert_eq!(
+            snapshot.legion_workflow_projection.redaction_hints,
+            vec![RedactionHint::MetadataOnly]
+        );
+    }
+
+    #[test]
+    fn legion_workflow_projection_roundtrips_without_ui_authority() {
+        let mut snapshot = Shell::empty("legion").projection_snapshot();
+        snapshot.legion_workflow_projection = test_legion_workflow_projection();
+
+        let shell = Shell::new(snapshot.clone());
+        let roundtrip = shell.projection_snapshot();
+
+        assert_eq!(
+            roundtrip.legion_workflow_projection,
+            snapshot.legion_workflow_projection
+        );
+        assert_eq!(
+            roundtrip.legion_workflow_projection.rows[0]
+                .merge_readiness
+                .state,
+            devil_protocol::LegionWorkflowMergeReadinessState::WaitingForApproval
+        );
+        assert!(shell.command_dispatch_intents.is_empty());
+    }
+
+    #[test]
+    fn legion_workflow_commands_emit_projection_only_intents() {
+        let mut shell = Shell::empty("legion commands");
+
+        let inspect = shell
+            .handle_command(":legion-inspect session:legion:test")
+            .expect("legion inspect parses")
+            .expect("intent emitted");
+        assert_eq!(
+            inspect,
+            CommandDispatchIntent::InspectLegionWorkflowSession {
+                session_id: LegionWorkflowSessionId("session:legion:test".to_string())
+            }
+        );
+
+        let verify = shell
+            .handle_command(":legion-verify session:legion:test verification:unit")
+            .expect("legion verification parses")
+            .expect("intent emitted");
+        assert_eq!(
+            verify,
+            CommandDispatchIntent::RequestLegionWorkflowVerification {
+                session_id: LegionWorkflowSessionId("session:legion:test".to_string()),
+                gate_id: LegionWorkflowVerificationGateId("verification:unit".to_string()),
+            }
+        );
+
+        let readiness = shell
+            .handle_command(":legion-readiness session:legion:test")
+            .expect("legion readiness parses")
+            .expect("intent emitted");
+        assert_eq!(
+            readiness,
+            CommandDispatchIntent::RequestLegionWorkflowMergeReadiness {
+                session_id: LegionWorkflowSessionId("session:legion:test".to_string())
+            }
+        );
+        assert_eq!(shell.command_dispatch_intents.len(), 3);
+    }
+
+    #[test]
+    fn legion_workflow_malformed_command_does_not_emit_privileged_intent() {
+        let mut shell = Shell::empty("legion malformed");
+        let before = shell.projection_snapshot();
+
+        assert_eq!(
+            shell
+                .handle_command(":legion-verify session-only")
+                .expect("malformed command is ignored"),
+            Some(CommandDispatchIntent::Noop)
+        );
+        assert_eq!(shell.projection_snapshot(), before);
+        assert_eq!(
+            shell.command_dispatch_intents,
+            vec![CommandDispatchIntent::Noop]
+        );
     }
 
     #[test]

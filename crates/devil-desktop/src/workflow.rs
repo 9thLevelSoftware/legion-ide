@@ -14,9 +14,10 @@ use devil_app::{
 };
 use devil_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, DelegatedTaskPlanContract,
-    DelegatedTaskPlanId, PluginDenialReason, PluginHostCallResponse, PluginId, PluginManifest,
-    PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse,
-    ProtocolTextRange, RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
+    DelegatedTaskPlanId, LegionWorkflowMergeReadinessState, LegionWorkflowSessionId,
+    PluginDenialReason, PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
+    RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
     WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
@@ -318,6 +319,17 @@ pub enum DesktopWorkflowOutcome {
         /// User-visible status summary.
         message: String,
     },
+    /// Legion workflow command-center request changed through app-owned workflow authority.
+    LegionWorkflowReviewed {
+        /// Workflow session represented by the outcome.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal represented by the outcome, if proposal-scoped.
+        proposal_id: Option<ProposalId>,
+        /// Normalized desktop Legion workflow status.
+        status: DesktopLegionWorkflowStatus,
+        /// User-visible status summary.
+        message: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -374,6 +386,29 @@ pub enum DesktopDelegatedTaskStatus {
     ProposalPreviewOpened,
     /// Linked proposal details were opened through proposal authority.
     ProposalDetailsOpened,
+}
+
+/// Desktop-facing status for Legion workflow command-center requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopLegionWorkflowStatus {
+    /// Session metadata was inspected without execution.
+    SessionInspected,
+    /// Linked proposal preview was requested through proposal authority.
+    ProposalPreviewOpened,
+    /// Linked proposal details were requested through proposal authority.
+    ProposalDetailsOpened,
+    /// Verification metadata recording was requested.
+    VerificationRequested,
+    /// Sign-off metadata recording was requested.
+    SignOffRequested,
+    /// Conflict-resolution metadata was requested.
+    ConflictResolutionRequested,
+    /// Merge readiness was requested and remains blocked.
+    MergeReadinessBlocked,
+    /// Merge readiness was requested and waits for approval.
+    MergeReadinessWaitingForApproval,
+    /// Merge readiness was requested and is proposal-mediated ready.
+    MergeReadinessReady,
 }
 
 /// Renderer-backed desktop runtime.
@@ -808,6 +843,161 @@ impl DesktopRuntime {
                     }
                 }
             }
+            DesktopAppRequest::InspectLegionWorkflowSession { session_id } => {
+                let message = format!(
+                    "Legion workflow session inspected {}: app-owned, proposal-mediated, autonomous merge unsupported",
+                    session_id.0
+                );
+                self.set_status(StatusSeverity::Info, message.clone());
+                Ok(DesktopWorkflowOutcome::LegionWorkflowReviewed {
+                    session_id,
+                    proposal_id: None,
+                    status: DesktopLegionWorkflowStatus::SessionInspected,
+                    message,
+                })
+            }
+            DesktopAppRequest::OpenLegionWorkflowProposalPreview {
+                session_id,
+                proposal_id,
+            } => match self
+                .app
+                .dispatch_ui_intent(CommandDispatchIntent::PreviewProposal { proposal_id })
+            {
+                Ok(_) => {
+                    let message = format!(
+                        "Legion workflow proposal preview opened {} for {}: proposal-mediated",
+                        proposal_id.0, session_id.0
+                    );
+                    self.set_status(StatusSeverity::Info, message.clone());
+                    Ok(DesktopWorkflowOutcome::LegionWorkflowReviewed {
+                        session_id,
+                        proposal_id: Some(proposal_id),
+                        status: DesktopLegionWorkflowStatus::ProposalPreviewOpened,
+                        message,
+                    })
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.set_status(StatusSeverity::Error, message.clone());
+                    Ok(DesktopWorkflowOutcome::Error(message))
+                }
+            },
+            DesktopAppRequest::OpenLegionWorkflowProposalDetails {
+                session_id,
+                proposal_id,
+            } => match self
+                .app
+                .dispatch_ui_intent(CommandDispatchIntent::OpenProposalDetails { proposal_id })
+            {
+                Ok(_) => {
+                    let message = format!(
+                        "Legion workflow proposal details opened {} for {}: proposal-mediated",
+                        proposal_id.0, session_id.0
+                    );
+                    self.set_status(StatusSeverity::Info, message.clone());
+                    Ok(DesktopWorkflowOutcome::LegionWorkflowReviewed {
+                        session_id,
+                        proposal_id: Some(proposal_id),
+                        status: DesktopLegionWorkflowStatus::ProposalDetailsOpened,
+                        message,
+                    })
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.set_status(StatusSeverity::Error, message.clone());
+                    Ok(DesktopWorkflowOutcome::Error(message))
+                }
+            },
+            DesktopAppRequest::RequestLegionWorkflowVerification {
+                session_id,
+                gate_id,
+            } => {
+                let message = format!(
+                    "Legion workflow verification requested {} gate={}: app-owned metadata request",
+                    session_id.0, gate_id.0
+                );
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    DesktopLegionWorkflowStatus::VerificationRequested,
+                    message,
+                ))
+            }
+            DesktopAppRequest::RequestLegionWorkflowSignOff {
+                session_id,
+                sign_off_id,
+            } => {
+                let message = format!(
+                    "Legion workflow sign-off requested {} signoff={}: app-owned metadata request",
+                    session_id.0, sign_off_id.0
+                );
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    DesktopLegionWorkflowStatus::SignOffRequested,
+                    message,
+                ))
+            }
+            DesktopAppRequest::ResolveLegionWorkflowConflict {
+                session_id,
+                conflict_id,
+            } => {
+                let message = format!(
+                    "Legion workflow conflict resolution requested {} conflict={}: app-owned metadata request",
+                    session_id.0, conflict_id.0
+                );
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    DesktopLegionWorkflowStatus::ConflictResolutionRequested,
+                    message,
+                ))
+            }
+            DesktopAppRequest::RequestLegionWorkflowMergeReadiness { session_id } => {
+                let readiness_state = self
+                    .projection_snapshot()
+                    .legion_workflow_projection
+                    .rows
+                    .iter()
+                    .find(|row| row.session_id == session_id)
+                    .map(|row| row.merge_readiness.state)
+                    .unwrap_or(LegionWorkflowMergeReadinessState::Blocked);
+                let status = match readiness_state {
+                    LegionWorkflowMergeReadinessState::Ready => {
+                        DesktopLegionWorkflowStatus::MergeReadinessReady
+                    }
+                    LegionWorkflowMergeReadinessState::WaitingForApproval => {
+                        DesktopLegionWorkflowStatus::MergeReadinessWaitingForApproval
+                    }
+                    LegionWorkflowMergeReadinessState::Blocked => {
+                        DesktopLegionWorkflowStatus::MergeReadinessBlocked
+                    }
+                };
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    status,
+                    format!(
+                        "Legion workflow merge readiness requested: {readiness_state:?}; Autonomous merge unsupported until approval"
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn legion_workflow_request_outcome(
+        &mut self,
+        session_id: LegionWorkflowSessionId,
+        proposal_id: Option<ProposalId>,
+        status: DesktopLegionWorkflowStatus,
+        message: String,
+    ) -> DesktopWorkflowOutcome {
+        self.set_status(StatusSeverity::Info, message.clone());
+        DesktopWorkflowOutcome::LegionWorkflowReviewed {
+            session_id,
+            proposal_id,
+            status,
+            message,
         }
     }
 

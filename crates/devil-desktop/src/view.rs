@@ -63,12 +63,16 @@ pub struct DesktopProjectionViewModel {
     pub trust_rows: Vec<String>,
     /// Assisted-AI and delegated-task summary rows.
     pub assistant_rows: Vec<String>,
+    /// Legion workflow command-center rows.
+    pub legion_workflow_rows: Vec<String>,
     /// Language tooling summary rows.
     pub language_rows: Vec<String>,
     /// Terminal panel summary rows.
     pub terminal_rows: Vec<String>,
     /// Operational health summary rows.
     pub operational_health_rows: Vec<String>,
+    /// Manual-mode local control and trust-boundary rows derived from projections.
+    pub manual_control_rows: Vec<String>,
     /// Plugin contribution summary rows.
     pub plugin_rows: Vec<String>,
     /// Collaboration presence rows.
@@ -131,9 +135,11 @@ impl DesktopProjectionViewModel {
             proposal_rows: proposal_rows(snapshot),
             trust_rows: trust_rows(snapshot),
             assistant_rows: assistant_rows(snapshot),
+            legion_workflow_rows: legion_workflow_rows(snapshot),
             language_rows: language_rows(snapshot),
             terminal_rows: terminal_rows(snapshot),
             operational_health_rows: operational_health_rows(snapshot),
+            manual_control_rows: manual_control_rows(snapshot),
             plugin_rows: plugin_rows(snapshot),
             collaboration_rows: collaboration_rows(snapshot),
             remote_rows: remote_rows(snapshot),
@@ -333,7 +339,7 @@ fn render_left_sidebar(
     }
 
     match level {
-        DesktopProductMode::Manual => render_collapsed_ai_rail(ui),
+        DesktopProductMode::Manual => render_collapsed_ai_rail(ui, model),
         DesktopProductMode::Delegates => {
             if delegated_activity_projected(snapshot) {
                 render_agent_roster(ui, snapshot, model, level)
@@ -558,15 +564,21 @@ fn render_context_packs(ui: &mut egui::Ui) {
     }
 }
 
-fn render_collapsed_ai_rail(ui: &mut egui::Ui) {
+fn render_collapsed_ai_rail(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
     ui.add_space(8.0);
     theme::small_card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(theme::eyebrow("MANUAL MODE"));
+            ui.label(theme::eyebrow("MANUAL CONTROL"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::muted("AI disabled"));
+                ui.label(theme::accent("AI disabled", theme::ACCENT_BLUE));
             });
         });
+        render_compact_rows(
+            ui,
+            &model.manual_control_rows,
+            "Manual controls are projection-only",
+            4,
+        );
     });
 }
 
@@ -1102,6 +1114,13 @@ fn render_manual_context_inspector(
         "{} problems",
         snapshot.language_tooling_projection.problems.len()
     )));
+    section_label(ui, "Manual Control Boundary", Some(theme::ACCENT_BLUE));
+    render_compact_rows(
+        ui,
+        &model.manual_control_rows,
+        "Manual controls are projection-only",
+        5,
+    );
     section_label(ui, "Git Changes", None);
     render_compact_rows(ui, &model.proposal_rows, "No projected changes", 5);
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -1299,7 +1318,11 @@ fn render_terminal_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel)
 fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
     section_label(ui, "Agent Comm Stream", Some(theme::ACCENT_VIOLET));
     theme::code_frame().show(ui, |ui| {
-        render_compact_rows(ui, &model.assistant_rows, "No agent stream rows", 8);
+        if model.assistant_rows.is_empty() {
+            render_compact_rows(ui, &model.manual_control_rows, "No agent stream rows", 4);
+        } else {
+            render_compact_rows(ui, &model.assistant_rows, "No agent stream rows", 8);
+        }
         for row in model.operational_health_rows.iter().take(4) {
             ui.label(theme::code_muted(trim_middle(row, 88)));
         }
@@ -1679,6 +1702,9 @@ impl DesktopProductMode {
 }
 
 fn projected_product_mode(snapshot: &ShellProjectionSnapshot) -> DesktopProductMode {
+    if !snapshot.legion_workflow_projection.rows.is_empty() {
+        return DesktopProductMode::LegionWorkflows;
+    }
     let delegated = &snapshot.delegated_task_projection;
     if delegated.runtime_activation.is_encoded() && delegated.plan_count > 1 {
         return DesktopProductMode::LegionWorkflows;
@@ -1706,7 +1732,6 @@ fn projected_product_mode(snapshot: &ShellProjectionSnapshot) -> DesktopProductM
 
 fn product_mode_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let level = projected_product_mode(snapshot);
-    let delegated = &snapshot.delegated_task_projection;
     let mut rows = vec![
         format!(
             "product mode: active={} read-only projection",
@@ -1722,8 +1747,8 @@ fn product_mode_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         );
     } else if level == DesktopProductMode::LegionWorkflows {
         rows.push(format!(
-            "product-mode safety: Legion Workflow display from runtime={:?}; apply remains proposal-mediated",
-            delegated.runtime_activation
+            "product-mode safety: Legion Workflow sessions={}; apply remains proposal-mediated; Autonomous merge unsupported until approval",
+            snapshot.legion_workflow_projection.total_session_count
         ));
     } else {
         rows.push("product-mode safety: Manual Mode has no AI dispatch path".to_string());
@@ -2632,6 +2657,7 @@ fn trust_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 
 fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let mut rows = Vec::new();
+    rows.extend(legion_workflow_rows(snapshot));
     let assisted = &snapshot.assisted_ai_projection;
     if assisted.provider_count > 0 || assisted.request_count > 0 || assisted.refusal_count > 0 {
         rows.push(format!(
@@ -2867,6 +2893,56 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     rows
 }
 
+fn legion_workflow_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let workflows = &snapshot.legion_workflow_projection;
+    if workflows.rows.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = vec![format!(
+        "legion workflow command center: projection={} sessions={} omitted={} Autonomous merge unsupported until approval redaction={}",
+        workflows.projection_id,
+        workflows.total_session_count,
+        workflows.omitted_row_count,
+        redaction_label(&workflows.redaction_hints)
+    )];
+    rows.extend(workflows.rows.iter().map(|row| {
+        format!(
+            "legion workflow session {}: state={:?} workers={} provider_routes={} dependencies={} conflicts={} verification={}/{} signoff={}/{} proposals={} merge={:?} blockers={} labels={}",
+            row.session_id.0,
+            row.lifecycle_state,
+            row.worker_count,
+            row.provider_route_required_count,
+            row.dependency_count,
+            row.unresolved_conflict_count,
+            row.passed_verification_count,
+            row.verification_gate_count,
+            row.signed_off_count,
+            row.sign_off_count,
+            row.linked_proposals.len(),
+            row.merge_readiness.state,
+            row.merge_readiness.blockers.len(),
+            bounded_join(&row.display_safe_labels)
+        )
+    }));
+    rows.extend(workflows.rows.iter().flat_map(|row| {
+        row.linked_proposals.iter().map(move |proposal_id| {
+            format!(
+                "legion workflow proposal link session={} proposal={} proposal-mediated",
+                row.session_id.0, proposal_id.0
+            )
+        })
+    }));
+    rows.extend(workflows.rows.iter().flat_map(|row| {
+        row.merge_readiness.labels.iter().map(move |label| {
+            format!(
+                "legion workflow merge readiness {}: state={:?} label={} approval-gated",
+                row.session_id.0, row.merge_readiness.state, label
+            )
+        })
+    }));
+    rows
+}
+
 fn redaction_label(redaction_hints: &[devil_protocol::RedactionHint]) -> String {
     if redaction_hints.is_empty() {
         "none".to_string()
@@ -2891,6 +2967,52 @@ fn bounded_join(values: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+
+fn manual_control_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let level = projected_product_mode(snapshot);
+    let language = &snapshot.language_tooling_projection;
+    let terminal = &snapshot.terminal_panel_projection;
+    let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
+    let active = &snapshot.active_buffer_projection;
+    let mut rows = Vec::new();
+
+    if level != DesktopProductMode::Manual {
+        rows.push(format!(
+            "manual control center: inactive because active product mode is {}",
+            level.label()
+        ));
+        return rows;
+    }
+
+    rows.push(
+        "manual control center: AI Disabled; Local Tools Only; No Model Calls; No Agent Context"
+            .to_string(),
+    );
+    rows.push(format!(
+        "manual toolchain: language={:?} problems={} completions={} terminal={:?} search={} verification_runs={}",
+        language.status,
+        language.problems.len(),
+        language.completions.len(),
+        terminal.status.kind,
+        search.header,
+        snapshot.verification_run_projection.rows.len()
+    ));
+    rows.push(format!(
+        "manual commands: save_all proposal-mediated; search/read/navigation intents only; no direct apply; statuses={}",
+        snapshot.status_messages.len()
+    ));
+    rows.push(format!(
+        "manual editor: dirty={} degraded={} active_buffer={:?} no autonomous writes",
+        active.dirty,
+        active.degraded,
+        active.buffer_id.map(|buffer| buffer.0)
+    ));
+    rows.push(
+        "manual trust boundary: no provider dispatch, no agent context, no terminal authority, no direct apply"
+            .to_string(),
+    );
+    rows
 }
 
 fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

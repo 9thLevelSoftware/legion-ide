@@ -7,7 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use devil_agent::{AgentRuntime, DelegatedTaskProposalGenerator, DelegatedTaskSandboxOrchestrator};
+use devil_agent::{
+    AgentRuntime, DelegatedTaskProposalGenerator, DelegatedTaskSandboxOrchestrator,
+    LegionWorkflowCoordinator, LegionWorkflowCoordinatorOutput,
+};
 use devil_ai::ProviderRouter;
 use devil_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_stub_registry};
 use devil_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
@@ -18,7 +21,9 @@ use devil_editor::{
 use devil_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, SemanticIndex, SourceDocument,
 };
-use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
+use devil_memory::{
+    LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryConsentState, MemoryService,
+};
 use devil_observability::{
     SharedEventSink, agent_replay_manifest_recorded_event, collaboration_audit_recorded_event,
     event_metadata_record, phase4_runtime_audit_recorded_event, plugin_event_envelope,
@@ -55,18 +60,24 @@ use devil_protocol::{
     LanguageHoverProjection, LanguageId, LanguageLocationProjection,
     LanguageOutlineSymbolProjection, LanguageProblemProjection, LanguageToolingOperationKind,
     LanguageToolingOperationProjection, LanguageToolingProjection, LanguageToolingStatusKind,
-    LspEditProposalConversionInput, LspRequestCorrelation, PluginContributionProjection,
-    PluginHostCallKind, PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest,
-    PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
-    ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
-    ProposalFailureReason, ProposalId, ProposalLedgerProjection, ProposalLifecycleAction,
-    ProposalLifecycleCommand, ProposalLifecycleCommandReason, ProposalLifecycleState,
-    ProposalLifecycleTransition, ProposalPartialFailureDisposition, ProposalPartialFailureRecord,
-    ProposalPayload, ProposalPort, ProposalPreviewWarning, ProposalPreviewWarningKind,
-    ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackReason,
-    ProposalStaleReason, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
-    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
-    ProtocolResult, ProtocolTextRange, RedactionHint, RemoteAgentDescriptor, RemoteAuditRecord,
+    LegionWorkflowConflictId, LegionWorkflowConflictState, LegionWorkflowDependencyState,
+    LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState,
+    LegionWorkflowProjection, LegionWorkflowSession, LegionWorkflowSessionId,
+    LegionWorkflowSignOffId, LegionWorkflowSignOffState, LegionWorkflowState,
+    LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState, LegionWorkflowWorkerId,
+    LegionWorkflowWorkerState, LspEditProposalConversionInput, LspRequestCorrelation,
+    PluginContributionProjection, PluginHostCallKind, PluginHostCallRequest,
+    PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary, PrincipalId,
+    ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem, ProposalBatchRollbackPolicy,
+    ProposalCancellationReason, ProposalDenialReason, ProposalFailureReason, ProposalId,
+    ProposalLedgerProjection, ProposalLifecycleAction, ProposalLifecycleCommand,
+    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalPartialFailureDisposition, ProposalPartialFailureRecord, ProposalPayload, ProposalPort,
+    ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
+    ProposalResponse, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
+    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
+    ProtocolTextRange, RedactionHint, RemoteAgentDescriptor, RemoteAuditRecord,
     RemoteAuthorityDescriptor, RemoteCapabilityKind, RemoteGuiProjection,
     RemoteProposalReviewGuiRow, RemoteTransportEnvelope, RemoteTransportPayload,
     RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionGuiRow,
@@ -92,7 +103,9 @@ use devil_remote::{RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRunti
 use devil_security::{DenyByDefaultBroker, SecurityPolicy};
 use devil_storage::InMemoryStorageRepositoryPort;
 use devil_terminal::{TerminalFixtureConfig, TerminalFixtureRuntime};
-use devil_tracker::{TrackerLedger, TrackerRunLedgerRecord};
+use devil_tracker::{
+    LegionWorkflowTrackerLedger, LegionWorkflowTrackerRecord, TrackerLedger, TrackerRunLedgerRecord,
+};
 use devil_ui::ui::{
     CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
     EditorViewportStateProjection, SearchProjection, SearchResultProjection, SearchScopeProjection,
@@ -179,6 +192,9 @@ pub enum AppCompositionError {
     /// Terminal workflow failed.
     #[error("terminal request failed: {0}")]
     Terminal(String),
+    /// Legion workflow orchestration failed at the app authority boundary.
+    #[error("legion workflow request failed: {0}")]
+    LegionWorkflow(String),
 }
 
 #[cfg(test)]
@@ -227,6 +243,23 @@ pub enum OpenFileIntent {
     Existing,
     /// Open may create an empty editor buffer only under explicit safe-new-file preconditions.
     CreateNew,
+}
+
+/// Result of an app-owned Legion workflow execution pass.
+#[derive(Debug, Clone)]
+pub struct AppLegionWorkflowExecution {
+    /// Workflow session that was executed.
+    pub session_id: LegionWorkflowSessionId,
+    /// Coordinator outputs produced without applying proposals or invoking providers.
+    pub outputs: Vec<LegionWorkflowCoordinatorOutput>,
+    /// Current proposal-mediated merge readiness.
+    pub merge_readiness: LegionWorkflowMergeReadiness,
+    /// Current metadata-only workflow projection.
+    pub projection: LegionWorkflowProjection,
+    /// Number of tracker records after this execution pass.
+    pub tracker_record_count: usize,
+    /// Whether a metadata-only memory candidate was proposed without retention.
+    pub memory_candidate_proposed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -5394,7 +5427,16 @@ impl CommandDispatcher {
             | CommandDispatchIntent::ApplyProposal { .. }
             | CommandDispatchIntent::RollbackProposal { .. }
             | CommandDispatchIntent::CancelProposal { .. }
-            | CommandDispatchIntent::OpenProposalDetails { .. } => Ok(AppCommandRequest::Noop),
+            | CommandDispatchIntent::OpenProposalDetails { .. }
+            | CommandDispatchIntent::InspectLegionWorkflowSession { .. }
+            | CommandDispatchIntent::OpenLegionWorkflowProposalPreview { .. }
+            | CommandDispatchIntent::OpenLegionWorkflowProposalDetails { .. }
+            | CommandDispatchIntent::RequestLegionWorkflowVerification { .. }
+            | CommandDispatchIntent::RequestLegionWorkflowSignOff { .. }
+            | CommandDispatchIntent::ResolveLegionWorkflowConflict { .. }
+            | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
+                Ok(AppCommandRequest::Noop)
+            }
         }
     }
 
@@ -7578,6 +7620,7 @@ pub struct AppComposition {
     event_sink: SharedEventSink,
     ai_registry: devil_ai::ProviderRegistry,
     tracker_ledger: TrackerLedger,
+    legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger,
     memory_service: MemoryService,
     phase4_projection_state: Phase4ProjectionState,
     plugin_runtime: PluginRuntimeHost,
@@ -7585,6 +7628,7 @@ pub struct AppComposition {
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
+    legion_workflow_sessions: Vec<LegionWorkflowSession>,
     search_projection: SearchProjection,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
@@ -7621,6 +7665,7 @@ impl AppComposition {
             event_sink,
             ai_registry: make_stub_registry(),
             tracker_ledger: TrackerLedger::new(),
+            legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger::new(),
             memory_service: MemoryService::new(),
             phase4_projection_state: Phase4ProjectionState::default(),
             plugin_runtime: PluginRuntimeHost::new(),
@@ -7628,6 +7673,7 @@ impl AppComposition {
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
             delegated_task_plan_contracts: Vec::new(),
+            legion_workflow_sessions: Vec::new(),
             search_projection: SearchProjection::idle(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
@@ -8574,6 +8620,496 @@ impl AppComposition {
             .map_err(|e| e.to_string())?;
 
         Ok(proposal)
+    }
+
+    /// Replace app-owned Legion workflow session metadata for tests and smoke harnesses.
+    pub fn seed_legion_workflow_sessions(
+        &mut self,
+        sessions: Vec<LegionWorkflowSession>,
+    ) -> Result<(), AppCompositionError> {
+        let mut seen = HashSet::new();
+        let mut valid_sessions = Vec::new();
+        for session in sessions {
+            if session.session_id.0.trim().is_empty()
+                || session.schema_version == 0
+                || session.correlation_id.0 == 0
+                || session.causality_id.0.is_nil()
+                || devil_protocol::validate_legion_workflow_session(&session).is_err()
+            {
+                continue;
+            }
+            if !seen.insert(session.session_id.0.clone()) {
+                return Err(AppCompositionError::LegionWorkflow(format!(
+                    "duplicate workflow session {}",
+                    session.session_id.0
+                )));
+            }
+            valid_sessions.push(session);
+        }
+        self.legion_workflow_sessions = valid_sessions;
+        Ok(())
+    }
+
+    /// Returns a metadata-only Legion workflow projection owned by the app layer.
+    pub fn legion_workflow_projection(
+        &self,
+        generated_at: TimestampMillis,
+    ) -> LegionWorkflowProjection {
+        devil_protocol::legion_workflow_projection_from_sessions(
+            "legion-workflow:app-command-center",
+            &self.legion_workflow_sessions,
+            generated_at,
+            64,
+            1,
+        )
+    }
+
+    /// Returns app-owned tracker metadata records for Legion workflows.
+    pub fn legion_workflow_tracker_records(&self) -> &[LegionWorkflowTrackerRecord] {
+        self.legion_workflow_tracker_ledger.records()
+    }
+
+    /// Returns one app-owned Legion workflow session by id.
+    pub fn legion_workflow_session(
+        &self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Option<&LegionWorkflowSession> {
+        self.legion_workflow_sessions
+            .iter()
+            .find(|session| &session.session_id == session_id)
+    }
+
+    /// Executes one metadata-only Legion workflow coordination pass.
+    pub fn execute_legion_workflow(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Result<AppLegionWorkflowExecution, AppCompositionError> {
+        let session_index = self
+            .legion_workflow_sessions
+            .iter()
+            .position(|session| &session.session_id == session_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow session {} not found",
+                    session_id.0
+                ))
+            })?;
+        let mut session = self.legion_workflow_sessions[session_index].clone();
+        let event_context = self.next_event_context();
+        let mut coordinator = LegionWorkflowCoordinator::new(session.clone())
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        let mut outputs = Vec::new();
+        for conflict in coordinator.conflicts() {
+            if !session
+                .conflict_summaries
+                .iter()
+                .any(|existing| existing.conflict_id == conflict.conflict_id)
+            {
+                session.conflict_summaries.push(conflict.clone());
+            }
+            outputs.push(LegionWorkflowCoordinatorOutput::Conflict(Box::new(
+                conflict.clone(),
+            )));
+        }
+
+        for worker in coordinator.next_ready_workers() {
+            match worker.model_backend {
+                devil_protocol::LegionWorkflowModelBackend::ProviderBacked => {
+                    let output = coordinator
+                        .provider_route_for_worker(&worker.worker_id)
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    self.set_legion_workflow_worker_state(
+                        &mut session,
+                        &worker.worker_id,
+                        LegionWorkflowWorkerState::ProviderRouteRequired,
+                    );
+                    outputs.push(output);
+                }
+                devil_protocol::LegionWorkflowModelBackend::Local => {
+                    let Some(plan_id) = worker.linked_delegated_plan_id.clone() else {
+                        let output = coordinator
+                            .mark_worker_blocked(
+                                &worker.worker_id,
+                                vec!["legion_workflow.local_worker_missing_plan".to_string()],
+                            )
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
+                            &worker.worker_id,
+                            LegionWorkflowWorkerState::Blocked,
+                        );
+                        outputs.push(output);
+                        continue;
+                    };
+                    let mut proposal_output =
+                        self.execute_delegated_task(&plan_id).map_err(|error| {
+                            AppCompositionError::LegionWorkflow(format!(
+                                "worker {} failed: {error}",
+                                worker.worker_id.0
+                            ))
+                        })?;
+                    proposal_output.proposal_id = self.proposal_coordinator.next_id();
+                    proposal_output.output_id = format!(
+                        "legion-output:{}:{}",
+                        session.session_id.0, worker.worker_id.0
+                    );
+                    proposal_output.request_id = format!(
+                        "legion-request:{}:{}",
+                        session.session_id.0, worker.worker_id.0
+                    );
+                    proposal_output.provider_id = worker.display_safe_model_label.clone();
+                    proposal_output.correlation_id = worker.correlation_id;
+                    proposal_output.causality_id = worker.causality_id;
+                    proposal_output.created_at = TimestampMillis::now();
+                    let output = coordinator
+                        .record_proposal_output(&worker.worker_id, proposal_output.clone())
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    coordinator
+                        .mark_worker_completed(&worker.worker_id)
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    self.set_legion_workflow_worker_state(
+                        &mut session,
+                        &worker.worker_id,
+                        LegionWorkflowWorkerState::Completed,
+                    );
+                    self.satisfy_legion_workflow_dependencies(&mut session, &worker.worker_id);
+                    if !session.proposal_ids.contains(&proposal_output.proposal_id) {
+                        session.proposal_ids.push(proposal_output.proposal_id);
+                    }
+                    outputs.push(output);
+                }
+                devil_protocol::LegionWorkflowModelBackend::Unavailable => {
+                    let output = coordinator
+                        .mark_worker_blocked(
+                            &worker.worker_id,
+                            vec!["legion_workflow.worker_backend_unavailable".to_string()],
+                        )
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    self.set_legion_workflow_worker_state(
+                        &mut session,
+                        &worker.worker_id,
+                        LegionWorkflowWorkerState::Blocked,
+                    );
+                    outputs.push(output);
+                }
+            }
+        }
+
+        self.apply_legion_workflow_dirty_workspace_gate(&mut session);
+        let merge_readiness = devil_protocol::evaluate_legion_workflow_merge_readiness(&session);
+        session.lifecycle_state = match merge_readiness.state {
+            LegionWorkflowMergeReadinessState::Ready => LegionWorkflowState::Completed,
+            LegionWorkflowMergeReadinessState::WaitingForApproval => {
+                LegionWorkflowState::WaitingForApproval
+            }
+            LegionWorkflowMergeReadinessState::Blocked => LegionWorkflowState::Blocked,
+        };
+        self.append_legion_workflow_tracker_record(&session, &merge_readiness, event_context)?;
+        let memory_candidate_proposed = self
+            .propose_legion_workflow_memory_candidate(&session, MemoryConsentState::NotGranted)?;
+        self.legion_workflow_sessions[session_index] = session.clone();
+        outputs.push(LegionWorkflowCoordinatorOutput::MergeReadiness(
+            merge_readiness.clone(),
+        ));
+        Ok(AppLegionWorkflowExecution {
+            session_id: session.session_id.clone(),
+            outputs,
+            merge_readiness,
+            projection: self.legion_workflow_projection(TimestampMillis::now()),
+            tracker_record_count: self.legion_workflow_tracker_ledger.records().len(),
+            memory_candidate_proposed,
+        })
+    }
+
+    /// Records app-owned verification evidence metadata for a Legion workflow gate.
+    pub fn record_legion_workflow_verification(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        gate_id: &LegionWorkflowVerificationGateId,
+        state: LegionWorkflowVerificationGateState,
+        evidence_artifact_id: Option<String>,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let session = self.legion_workflow_session_mut(session_id)?;
+        let gate = session
+            .verification_gates
+            .iter_mut()
+            .find(|gate| &gate.gate_id == gate_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "verification gate {} not found",
+                    gate_id.0
+                ))
+            })?;
+        gate.state = state;
+        gate.evidence_artifact_id = evidence_artifact_id;
+        session.lifecycle_state = LegionWorkflowState::Verifying;
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    /// Records reviewer sign-off metadata for a Legion workflow.
+    pub fn record_legion_workflow_sign_off(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        sign_off_id: &LegionWorkflowSignOffId,
+        state: LegionWorkflowSignOffState,
+        reviewer_principal_id: Option<PrincipalId>,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let session = self.legion_workflow_session_mut(session_id)?;
+        let signoff = session
+            .sign_off_records
+            .iter_mut()
+            .find(|signoff| &signoff.sign_off_id == sign_off_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!("sign-off {} not found", sign_off_id.0))
+            })?;
+        signoff.state = if reviewer_principal_id
+            .as_ref()
+            .is_some_and(|principal| principal.0.trim().is_empty())
+        {
+            LegionWorkflowSignOffState::Rejected
+        } else {
+            state
+        };
+        signoff.reviewer_principal_id = reviewer_principal_id;
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    /// Records merge approval metadata without applying or merging the workflow proposal.
+    pub fn record_legion_workflow_merge_approval(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        approval_granted: bool,
+        rollback_available: bool,
+        audit_persisted_before_success: bool,
+        proposal_preconditions_stale: bool,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let dirty = self.has_dirty_open_buffers();
+        let session = self.legion_workflow_session_mut(session_id)?;
+        session.merge_approval = Some(LegionWorkflowMergeApproval {
+            approval_artifact_id: Some(format!("legion-approval:{}", session.session_id.0)),
+            approval_granted,
+            rollback_available,
+            audit_persisted_before_success,
+            main_workspace_dirty_conflict: dirty,
+            proposal_preconditions_stale,
+            labels: vec!["legion_workflow.app_merge_approval".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    /// Resolves a Legion workflow conflict by metadata id.
+    pub fn resolve_legion_workflow_conflict(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        conflict_id: &LegionWorkflowConflictId,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let session = self.legion_workflow_session_mut(session_id)?;
+        let conflict = session
+            .conflict_summaries
+            .iter_mut()
+            .find(|conflict| &conflict.conflict_id == conflict_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!("conflict {} not found", conflict_id.0))
+            })?;
+        conflict.state = LegionWorkflowConflictState::Resolved;
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    fn legion_workflow_session_mut(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Result<&mut LegionWorkflowSession, AppCompositionError> {
+        self.legion_workflow_sessions
+            .iter_mut()
+            .find(|session| &session.session_id == session_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow session {} not found",
+                    session_id.0
+                ))
+            })
+    }
+
+    fn set_legion_workflow_worker_state(
+        &self,
+        session: &mut LegionWorkflowSession,
+        worker_id: &LegionWorkflowWorkerId,
+        state: LegionWorkflowWorkerState,
+    ) {
+        if let Some(worker) = session
+            .worker_assignments
+            .iter_mut()
+            .find(|worker| &worker.worker_id == worker_id)
+        {
+            worker.state = state;
+        }
+    }
+
+    fn satisfy_legion_workflow_dependencies(
+        &self,
+        session: &mut LegionWorkflowSession,
+        worker_id: &LegionWorkflowWorkerId,
+    ) {
+        for dependency in session
+            .dependency_edges
+            .iter_mut()
+            .filter(|dependency| &dependency.predecessor_worker_id == worker_id)
+        {
+            dependency.state = LegionWorkflowDependencyState::Satisfied;
+        }
+    }
+
+    fn has_dirty_open_buffers(&self) -> bool {
+        self.active_documents
+            .open_tabs
+            .iter()
+            .any(|buffer_id| self.editor.is_dirty(*buffer_id).unwrap_or(true))
+    }
+
+    fn apply_legion_workflow_dirty_workspace_gate(&self, session: &mut LegionWorkflowSession) {
+        if !self.has_dirty_open_buffers() {
+            return;
+        }
+        if let Some(approval) = session.merge_approval.as_mut() {
+            approval.main_workspace_dirty_conflict = true;
+            if !approval
+                .labels
+                .iter()
+                .any(|label| label == "legion_workflow.dirty_workspace")
+            {
+                approval
+                    .labels
+                    .push("legion_workflow.dirty_workspace".to_string());
+            }
+            return;
+        }
+        session.merge_approval = Some(LegionWorkflowMergeApproval {
+            approval_artifact_id: None,
+            approval_granted: false,
+            rollback_available: true,
+            audit_persisted_before_success: true,
+            main_workspace_dirty_conflict: true,
+            proposal_preconditions_stale: false,
+            labels: vec!["legion_workflow.dirty_workspace".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    }
+
+    fn append_legion_workflow_tracker_record(
+        &mut self,
+        session: &LegionWorkflowSession,
+        readiness: &LegionWorkflowMergeReadiness,
+        event_context: EventContext,
+    ) -> Result<(), AppCompositionError> {
+        let unresolved_conflict_count = session
+            .conflict_summaries
+            .iter()
+            .filter(|conflict| conflict.state == LegionWorkflowConflictState::Unresolved)
+            .count() as u32;
+        let failed_verification_count = session
+            .verification_gates
+            .iter()
+            .filter(|gate| {
+                gate.state == LegionWorkflowVerificationGateState::Failed
+                    || gate.state == LegionWorkflowVerificationGateState::Blocked
+            })
+            .count() as u32;
+        let signed_off_count = session
+            .sign_off_records
+            .iter()
+            .filter(|signoff| signoff.state == LegionWorkflowSignOffState::SignedOff)
+            .count() as u32;
+        self.legion_workflow_tracker_ledger
+            .append(LegionWorkflowTrackerRecord {
+                record_id: format!(
+                    "legion-tracker:{}:{}",
+                    session.session_id.0, event_context.correlation_id.0
+                ),
+                workflow_session_id: session.session_id.clone(),
+                worker_id: None,
+                linked_proposal_ids: session.proposal_ids.clone(),
+                verification_gate_ids: session
+                    .verification_gates
+                    .iter()
+                    .map(|gate| gate.gate_id.clone())
+                    .collect(),
+                conflict_ids: session
+                    .conflict_summaries
+                    .iter()
+                    .map(|conflict| conflict.conflict_id.clone())
+                    .collect(),
+                unresolved_conflict_count,
+                failed_verification_count,
+                required_sign_off_count: session.sign_off_records.len() as u32,
+                signed_off_count,
+                merge_readiness_state: readiness.state,
+                risk_labels: session
+                    .worker_assignments
+                    .iter()
+                    .flat_map(|worker| {
+                        worker
+                            .risk_labels
+                            .iter()
+                            .map(|risk| format!("worker_risk:{risk:?}"))
+                    })
+                    .collect(),
+                privacy_labels: vec![devil_protocol::PrivacyClassification::Metadata],
+                summary_hash: metadata_fingerprint(
+                    "legion-workflow-session",
+                    &format!(
+                        "{}:{}:{}:{}",
+                        session.session_id.0,
+                        session.worker_assignments.len(),
+                        session.proposal_ids.len(),
+                        readiness.labels.join("|")
+                    ),
+                ),
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                labels: readiness.labels.clone(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: session.schema_version.max(1),
+            })
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))
+    }
+
+    fn propose_legion_workflow_memory_candidate(
+        &mut self,
+        session: &LegionWorkflowSession,
+        consent: MemoryConsentState,
+    ) -> Result<bool, AppCompositionError> {
+        let candidate = LegionWorkflowOutcomeCandidate::from_session_metadata(
+            session,
+            consent,
+            metadata_fingerprint(
+                "legion-workflow-outcome",
+                &format!(
+                    "{}:{}:{}",
+                    session.session_id.0,
+                    session.proposal_ids.len(),
+                    session.conflict_summaries.len()
+                ),
+            ),
+        )
+        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        self.memory_service
+            .propose_legion_workflow_candidate(candidate)
+            .map(|_| true)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))
     }
 
     fn delegated_task_projection(&self, generated_at: TimestampMillis) -> DelegatedTaskProjection {
@@ -10570,6 +11106,7 @@ impl AppComposition {
                 .clone()
                 .unwrap_or_else(empty_assisted_ai_projection),
             delegated_task_projection,
+            legion_workflow_projection: self.legion_workflow_projection(generated_at),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),
