@@ -22680,6 +22680,325 @@ pub struct LegionWorkflowVerificationGateId(pub String);
 #[serde(transparent)]
 pub struct LegionWorkflowSignOffId(pub String);
 
+/// Stable Legion task-packet identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionTaskPacketId(pub String);
+
+/// Metadata-only file scope carried in a Legion task packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionTaskFileScope {
+    /// Stable scope identifier.
+    pub scope_id: String,
+    /// Canonical path for display and policy matching.
+    pub path: CanonicalPath,
+    /// Optional fingerprint for stale-scope detection.
+    pub fingerprint: Option<FileFingerprint>,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Scope schema version.
+    pub schema_version: u16,
+}
+
+/// Kind of context reference represented in a Legion task packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionTaskContextRefKind {
+    /// Redacted snippet reference.
+    ContextSnippet,
+    /// Full-file reference by hash or artifact id.
+    FullFile,
+    /// Command-output reference by hash or artifact id.
+    CommandOutput,
+}
+
+/// Metadata-only context reference for worker packet construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionTaskContextRef {
+    /// Stable reference identifier.
+    pub reference_id: String,
+    /// Context reference kind.
+    pub kind: LegionTaskContextRefKind,
+    /// Hash of referenced payload stored outside the DTO.
+    pub payload_hash: FileFingerprint,
+    /// Display-safe redacted summary.
+    pub redacted_summary: String,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Reference schema version.
+    pub schema_version: u16,
+}
+
+/// Worker result kind required or produced by a Legion packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkerResultKind {
+    /// Worker produced a proposal-mediated patch.
+    PatchProposal,
+    /// Worker produced proposal-mediated documentation.
+    DocumentationProposal,
+    /// Worker produced analysis metadata only.
+    AnalysisOnly,
+    /// Worker is blocked by a fail-closed gate.
+    Blocked,
+    /// Worker result is invalid.
+    Invalid,
+}
+
+/// Evidence kind required or produced by a Legion worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionEvidenceKind {
+    /// Command execution evidence.
+    CommandRun,
+    /// Static analysis evidence.
+    StaticAnalysis,
+    /// Code-review evidence.
+    Review,
+    /// Manual approval evidence.
+    ManualApproval,
+}
+
+/// Output contract for a Legion task packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionTaskOutputContract {
+    /// Expected worker result kind.
+    pub expected_result_kind: LegionWorkerResultKind,
+    /// Whether output must remain proposal-only.
+    pub proposal_only: bool,
+    /// Whether direct workspace mutation is allowed; Legion packets require false.
+    pub direct_mutation_allowed: bool,
+    /// Evidence kinds required for completion.
+    pub required_evidence_kinds: Vec<LegionEvidenceKind>,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Contract schema version.
+    pub schema_version: u16,
+}
+
+/// Validation plan carried with a Legion task packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionTaskValidationPlan {
+    /// Display-safe command labels required for validation.
+    pub required_commands: Vec<String>,
+    /// Success criteria labels.
+    pub success_criteria: Vec<String>,
+    /// Stop-condition labels.
+    pub stop_conditions: Vec<String>,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Plan schema version.
+    pub schema_version: u16,
+}
+
+/// Preferred provider locality for Legion routing metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionProviderLocalityPreference {
+    /// Prefer local model/runtime where possible.
+    LocalPreferred,
+    /// Local-only routing.
+    LocalOnly,
+    /// Remote provider is allowed by policy metadata.
+    RemoteAllowed,
+}
+
+/// Privacy policy represented in Legion provider metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionProviderPrivacyPolicy {
+    /// Metadata-only routing; no raw prompt/source payload in the DTO.
+    MetadataOnly,
+    /// Redacted source references may be routed.
+    RedactedReferencesOnly,
+    /// Provider route is denied.
+    Denied,
+}
+
+/// Policy envelope for a Legion task packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionTaskPolicy {
+    /// Locality preference.
+    pub locality_preference: LegionProviderLocalityPreference,
+    /// Privacy policy.
+    pub privacy_policy: LegionProviderPrivacyPolicy,
+    /// Optional cost budget in cents.
+    pub cost_budget_cents: Option<u32>,
+    /// Optional latency budget in milliseconds.
+    pub latency_budget_ms: Option<u32>,
+    /// Whether network use is allowed.
+    pub allow_network: bool,
+    /// Whether direct workspace mutation is allowed; Legion packets require false.
+    pub allow_direct_workspace_mutation: bool,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Policy schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only worker task packet produced by Legion planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionTaskPacket {
+    /// Stable packet id.
+    pub packet_id: LegionTaskPacketId,
+    /// Workspace id.
+    pub workspace_id: WorkspaceId,
+    /// Hash of the objective summary; raw objective text is external.
+    pub objective_summary_hash: FileFingerprint,
+    /// Allowed file scopes.
+    pub allowed_files: Vec<LegionTaskFileScope>,
+    /// Forbidden file scopes.
+    pub forbidden_files: Vec<LegionTaskFileScope>,
+    /// Redacted context snippet references.
+    pub context_snippet_refs: Vec<LegionTaskContextRef>,
+    /// Full-file references by hash/artifact.
+    pub full_file_refs: Vec<LegionTaskContextRef>,
+    /// Command-output references by hash/artifact.
+    pub command_output_refs: Vec<LegionTaskContextRef>,
+    /// Output contract.
+    pub output_contract: LegionTaskOutputContract,
+    /// Validation plan.
+    pub validation_plan: LegionTaskValidationPlan,
+    /// Policy envelope.
+    pub policy: LegionTaskPolicy,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Packet schema version.
+    pub schema_version: u16,
+}
+
+/// Provider model capability represented without provider payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionModelCapability {
+    /// Code patch production.
+    CodePatch,
+    /// Documentation drafting.
+    Documentation,
+    /// Code review or analysis.
+    Review,
+}
+
+/// Health of a provider route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionProviderRouteHealth {
+    /// Route is healthy.
+    Healthy,
+    /// Route is degraded.
+    Degraded,
+    /// Route is unavailable.
+    Unavailable,
+}
+
+/// Metadata-only provider route record for Legion worker execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionProviderRouteMetadata {
+    /// Stable route id.
+    pub route_id: String,
+    /// Locality preference.
+    pub locality_preference: LegionProviderLocalityPreference,
+    /// Optional cost budget in cents.
+    pub cost_budget_cents: Option<u32>,
+    /// Optional latency budget in milliseconds.
+    pub latency_budget_ms: Option<u32>,
+    /// Privacy policy.
+    pub privacy_policy: LegionProviderPrivacyPolicy,
+    /// Required model capability.
+    pub model_capability: LegionModelCapability,
+    /// Provider class.
+    pub provider_class: AssistedAiProviderClass,
+    /// Route health.
+    pub route_health: LegionProviderRouteHealth,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Route schema version.
+    pub schema_version: u16,
+}
+
+/// Source of Legion evidence metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionEvidenceSource {
+    /// Local command produced evidence.
+    LocalCommand,
+    /// Local model/tool produced evidence.
+    LocalTool,
+    /// Provider route produced metadata-only evidence.
+    ProviderMetadata,
+    /// Human review produced evidence.
+    HumanReview,
+}
+
+/// Privacy scope for Legion evidence metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionEvidencePrivacyScope {
+    /// Workspace metadata only.
+    WorkspaceMetadata,
+    /// Fully redacted evidence.
+    FullyRedacted,
+}
+
+/// Metadata-only evidence record linked to a Legion worker result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionEvidenceRecord {
+    /// Stable evidence id.
+    pub evidence_id: String,
+    /// Evidence kind.
+    pub kind: LegionEvidenceKind,
+    /// Evidence source.
+    pub source: LegionEvidenceSource,
+    /// Hash of external evidence payload.
+    pub payload_hash: FileFingerprint,
+    /// Display-safe redacted payload summary.
+    pub redacted_payload_summary: String,
+    /// Display-safe command label, when command-backed.
+    pub command_label: Option<String>,
+    /// Exit status, when command-backed.
+    pub exit_status: Option<i32>,
+    /// Privacy scope.
+    pub privacy_scope: LegionEvidencePrivacyScope,
+    /// Generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Evidence schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only result returned by a Legion worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkerResult {
+    /// Stable result id.
+    pub result_id: String,
+    /// Packet id this result satisfies.
+    pub packet_id: LegionTaskPacketId,
+    /// Result kind.
+    pub result_kind: LegionWorkerResultKind,
+    /// Proposal id for patch output.
+    pub patch_proposal: Option<ProposalId>,
+    /// Proposal id for documentation output.
+    pub documentation_proposal: Option<ProposalId>,
+    /// Display-safe analysis summary.
+    pub analysis_summary: Option<String>,
+    /// Display-safe test-plan summary.
+    pub test_plan_summary: Option<String>,
+    /// Display-safe blocked reason when blocked.
+    pub blocked_reason: Option<String>,
+    /// Display-safe invalid reason when invalid.
+    pub invalid_reason: Option<String>,
+    /// Evidence records.
+    pub evidence_records: Vec<LegionEvidenceRecord>,
+    /// Provider route metadata when provider-backed.
+    pub provider_route: Option<LegionProviderRouteMetadata>,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Result schema version.
+    pub schema_version: u16,
+}
+
 /// Workflow lifecycle state for Legion orchestration metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegionWorkflowState {
@@ -23154,7 +23473,7 @@ impl LegionWorkflowProjection {
     }
 }
 
-fn validate_legion_redaction(
+fn validate_legion_contract_redaction(
     redaction_hints: &[RedactionHint],
     field: &str,
 ) -> Result<(), ProtocolError> {
@@ -23202,8 +23521,8 @@ pub fn validate_mcp_registry_snapshot(snapshot: &McpRegistrySnapshot) -> Result<
             "MCP registry schema versions must be non-zero",
         ));
     }
-    validate_legion_redaction(&snapshot.redaction_hints, "mcp registry redaction_hints")?;
-    validate_legion_redaction(
+    validate_legion_contract_redaction(&snapshot.redaction_hints, "mcp registry redaction_hints")?;
+    validate_legion_contract_redaction(
         &snapshot.server.redaction_hints,
         "mcp server redaction_hints",
     )?;
@@ -23222,7 +23541,7 @@ pub fn validate_mcp_registry_snapshot(snapshot: &McpRegistrySnapshot) -> Result<
                 "MCP tool descriptor must match registry server and use non-zero schema",
             ));
         }
-        validate_legion_redaction(&tool.redaction_hints, "mcp tool redaction_hints")?;
+        validate_legion_contract_redaction(&tool.redaction_hints, "mcp tool redaction_hints")?;
     }
     for resource in &snapshot.resources {
         validate_legion_non_empty(&resource.server_id.0, "mcp resource server_id")?;
@@ -23233,7 +23552,10 @@ pub fn validate_mcp_registry_snapshot(snapshot: &McpRegistrySnapshot) -> Result<
                 "MCP resource descriptor must match registry server and use non-zero schema",
             ));
         }
-        validate_legion_redaction(&resource.redaction_hints, "mcp resource redaction_hints")?;
+        validate_legion_contract_redaction(
+            &resource.redaction_hints,
+            "mcp resource redaction_hints",
+        )?;
     }
     for prompt in &snapshot.prompts {
         validate_legion_non_empty(&prompt.server_id.0, "mcp prompt server_id")?;
@@ -23244,7 +23566,7 @@ pub fn validate_mcp_registry_snapshot(snapshot: &McpRegistrySnapshot) -> Result<
                 "MCP prompt descriptor must match registry server and use non-zero schema",
             ));
         }
-        validate_legion_redaction(&prompt.redaction_hints, "mcp prompt redaction_hints")?;
+        validate_legion_contract_redaction(&prompt.redaction_hints, "mcp prompt redaction_hints")?;
     }
     Ok(())
 }
@@ -23276,7 +23598,7 @@ pub fn validate_legion_workflow_decision_feed_entry(
             "decision-feed event sequence must be non-zero",
         ));
     }
-    validate_legion_redaction(&entry.redaction_hints, "decision-feed redaction_hints")?;
+    validate_legion_contract_redaction(&entry.redaction_hints, "decision-feed redaction_hints")?;
     Ok(())
 }
 
@@ -23301,7 +23623,7 @@ pub fn validate_legion_workflow_risk_monitor_snapshot(
             "halted risk monitor requires a halt reason",
         ));
     }
-    validate_legion_redaction(&snapshot.redaction_hints, "risk monitor redaction_hints")?;
+    validate_legion_contract_redaction(&snapshot.redaction_hints, "risk monitor redaction_hints")?;
     Ok(())
 }
 
@@ -23340,7 +23662,276 @@ pub fn validate_legion_workflow_kill_switch(
             "triggered kill-switch requires principal, reason, and timestamp",
         ));
     }
-    validate_legion_redaction(&kill_switch.redaction_hints, "kill-switch redaction_hints")?;
+    validate_legion_contract_redaction(
+        &kill_switch.redaction_hints,
+        "kill-switch redaction_hints",
+    )?;
+    Ok(())
+}
+
+fn legion_contract_invalid(field: &str, reason: &str) -> AssistedAiContractError {
+    AssistedAiContractError::NonMetadataOnlyAuditRecord {
+        field: field.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn validate_legion_schema(field: &str, schema_version: u16) -> Result<(), AssistedAiContractError> {
+    if schema_version == 0 {
+        return Err(legion_contract_invalid(field, "schema.zero"));
+    }
+    Ok(())
+}
+
+fn validate_legion_ai_redaction(
+    field: &str,
+    redaction_hints: &[RedactionHint],
+) -> Result<(), AssistedAiContractError> {
+    if redaction_hints.is_empty() || redaction_hints.contains(&RedactionHint::None) {
+        return Err(legion_contract_invalid(
+            field,
+            "redaction.not_metadata_only",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_legion_string(field: &str, value: &str) -> Result<(), AssistedAiContractError> {
+    if value.trim().is_empty() {
+        return Err(legion_contract_invalid(field, "empty"));
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("secret=") || lower.contains("raw_source") || lower.contains("raw source") {
+        return Err(legion_contract_invalid(field, "raw_secret_marker"));
+    }
+    validate_assisted_ai_audit_string(field, value)
+}
+
+fn validate_legion_fingerprint(
+    field: &str,
+    fingerprint: &FileFingerprint,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_string(field, &fingerprint.algorithm)?;
+    validate_legion_string(field, &fingerprint.value)
+}
+
+fn validate_legion_file_scope(scope: &LegionTaskFileScope) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema("legion.file_scope.schema_version", scope.schema_version)?;
+    validate_legion_ai_redaction("legion.file_scope.redaction_hints", &scope.redaction_hints)?;
+    validate_legion_string("legion.file_scope.scope_id", &scope.scope_id)?;
+    validate_legion_string("legion.file_scope.path", &scope.path.0)?;
+    if let Some(fingerprint) = &scope.fingerprint {
+        validate_legion_fingerprint("legion.file_scope.fingerprint", fingerprint)?;
+    }
+    Ok(())
+}
+
+fn validate_legion_context_ref(
+    reference: &LegionTaskContextRef,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema(
+        "legion.context_ref.schema_version",
+        reference.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.context_ref.redaction_hints",
+        &reference.redaction_hints,
+    )?;
+    validate_legion_string("legion.context_ref.reference_id", &reference.reference_id)?;
+    validate_legion_fingerprint("legion.context_ref.payload_hash", &reference.payload_hash)?;
+    validate_legion_string(
+        "legion.context_ref.redacted_summary",
+        &reference.redacted_summary,
+    )
+}
+
+/// Validates a metadata-only Legion task packet.
+pub fn validate_legion_task_packet(
+    packet: &LegionTaskPacket,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(packet.correlation_id, packet.causality_id)?;
+    validate_legion_schema("legion.task_packet.schema_version", packet.schema_version)?;
+    validate_legion_ai_redaction(
+        "legion.task_packet.redaction_hints",
+        &packet.redaction_hints,
+    )?;
+    validate_legion_string("legion.task_packet.packet_id", &packet.packet_id.0)?;
+    validate_legion_fingerprint(
+        "legion.task_packet.objective_summary_hash",
+        &packet.objective_summary_hash,
+    )?;
+    for scope in packet
+        .allowed_files
+        .iter()
+        .chain(packet.forbidden_files.iter())
+    {
+        validate_legion_file_scope(scope)?;
+    }
+    for reference in packet
+        .context_snippet_refs
+        .iter()
+        .chain(packet.full_file_refs.iter())
+        .chain(packet.command_output_refs.iter())
+    {
+        validate_legion_context_ref(reference)?;
+    }
+    validate_legion_schema(
+        "legion.output_contract.schema_version",
+        packet.output_contract.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.output_contract.redaction_hints",
+        &packet.output_contract.redaction_hints,
+    )?;
+    if !packet.output_contract.proposal_only {
+        return Err(legion_contract_invalid(
+            "legion.output_contract.proposal_only",
+            "proposal_only.required",
+        ));
+    }
+    if packet.output_contract.direct_mutation_allowed {
+        return Err(legion_contract_invalid(
+            "legion.output_contract.direct_mutation_allowed",
+            "direct_mutation.allowed",
+        ));
+    }
+    validate_legion_schema(
+        "legion.validation_plan.schema_version",
+        packet.validation_plan.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.validation_plan.redaction_hints",
+        &packet.validation_plan.redaction_hints,
+    )?;
+    for value in packet
+        .validation_plan
+        .required_commands
+        .iter()
+        .chain(packet.validation_plan.success_criteria.iter())
+        .chain(packet.validation_plan.stop_conditions.iter())
+    {
+        validate_legion_string("legion.validation_plan.label", value)?;
+    }
+    validate_legion_schema("legion.policy.schema_version", packet.policy.schema_version)?;
+    validate_legion_ai_redaction(
+        "legion.policy.redaction_hints",
+        &packet.policy.redaction_hints,
+    )?;
+    if packet.policy.allow_direct_workspace_mutation {
+        return Err(legion_contract_invalid(
+            "legion.policy.allow_direct_workspace_mutation",
+            "direct_mutation.allowed",
+        ));
+    }
+    if packet.policy.privacy_policy == LegionProviderPrivacyPolicy::Denied
+        && packet.policy.allow_network
+    {
+        return Err(legion_contract_invalid(
+            "legion.policy.allow_network",
+            "privacy.denied_network",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates metadata-only provider route metadata for Legion.
+pub fn validate_legion_provider_route_metadata(
+    route: &LegionProviderRouteMetadata,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema("legion.provider_route.schema_version", route.schema_version)?;
+    validate_legion_ai_redaction(
+        "legion.provider_route.redaction_hints",
+        &route.redaction_hints,
+    )?;
+    validate_legion_string("legion.provider_route.route_id", &route.route_id)?;
+    for label in &route.labels {
+        validate_legion_string("legion.provider_route.labels", label)?;
+    }
+    if route.privacy_policy == LegionProviderPrivacyPolicy::Denied {
+        return Err(legion_contract_invalid(
+            "legion.provider_route.privacy_policy",
+            "privacy.denied",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates metadata-only Legion evidence.
+pub fn validate_legion_evidence_record(
+    record: &LegionEvidenceRecord,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema("legion.evidence.schema_version", record.schema_version)?;
+    validate_legion_ai_redaction("legion.evidence.redaction_hints", &record.redaction_hints)?;
+    validate_legion_string("legion.evidence.evidence_id", &record.evidence_id)?;
+    validate_legion_fingerprint("legion.evidence.payload_hash", &record.payload_hash)?;
+    validate_legion_string(
+        "legion.evidence.redacted_payload_summary",
+        &record.redacted_payload_summary,
+    )?;
+    if let Some(command_label) = &record.command_label {
+        validate_legion_string("legion.evidence.command_label", command_label)?;
+    }
+    Ok(())
+}
+
+/// Validates metadata-only Legion worker result metadata.
+pub fn validate_legion_worker_result(
+    result: &LegionWorkerResult,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(result.correlation_id, result.causality_id)?;
+    validate_legion_schema("legion.worker_result.schema_version", result.schema_version)?;
+    validate_legion_ai_redaction(
+        "legion.worker_result.redaction_hints",
+        &result.redaction_hints,
+    )?;
+    validate_legion_string("legion.worker_result.result_id", &result.result_id)?;
+    validate_legion_string("legion.worker_result.packet_id", &result.packet_id.0)?;
+    for summary in [
+        &result.analysis_summary,
+        &result.test_plan_summary,
+        &result.blocked_reason,
+        &result.invalid_reason,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_legion_string("legion.worker_result.summary", summary)?;
+    }
+    for evidence in &result.evidence_records {
+        validate_legion_evidence_record(evidence)?;
+    }
+    if let Some(route) = &result.provider_route {
+        validate_legion_provider_route_metadata(route)?;
+    }
+    match result.result_kind {
+        LegionWorkerResultKind::PatchProposal if result.patch_proposal.is_none() => {
+            return Err(legion_contract_invalid(
+                "legion.worker_result.patch_proposal",
+                "patch_proposal.missing",
+            ));
+        }
+        LegionWorkerResultKind::DocumentationProposal
+            if result.documentation_proposal.is_none() =>
+        {
+            return Err(legion_contract_invalid(
+                "legion.worker_result.documentation_proposal",
+                "documentation_proposal.missing",
+            ));
+        }
+        LegionWorkerResultKind::Blocked if result.blocked_reason.is_none() => {
+            return Err(legion_contract_invalid(
+                "legion.worker_result.blocked_reason",
+                "blocked.reason_missing",
+            ));
+        }
+        LegionWorkerResultKind::Invalid if result.invalid_reason.is_none() => {
+            return Err(legion_contract_invalid(
+                "legion.worker_result.invalid_reason",
+                "invalid.reason_missing",
+            ));
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -23368,7 +23959,7 @@ pub fn validate_legion_workflow_worker_assignment(
             "worker causality id must be non-nil",
         ));
     }
-    validate_legion_redaction(&assignment.redaction_hints, "worker redaction_hints")?;
+    validate_legion_contract_redaction(&assignment.redaction_hints, "worker redaction_hints")?;
     if assignment.model_backend == LegionWorkflowModelBackend::ProviderBacked
         && assignment.assisted_ai_route.is_none()
     {
@@ -23411,7 +24002,7 @@ pub fn validate_legion_workflow_conflict(
             "conflict schema version must be non-zero",
         ));
     }
-    validate_legion_redaction(&conflict.redaction_hints, "conflict redaction_hints")?;
+    validate_legion_contract_redaction(&conflict.redaction_hints, "conflict redaction_hints")?;
     Ok(())
 }
 
@@ -23430,7 +24021,7 @@ pub fn validate_legion_workflow_verification_gate(
             "verification schema version must be non-zero",
         ));
     }
-    validate_legion_redaction(&gate.redaction_hints, "verification redaction_hints")?;
+    validate_legion_contract_redaction(&gate.redaction_hints, "verification redaction_hints")?;
     if gate.state == LegionWorkflowVerificationGateState::Passed
         && gate
             .evidence_artifact_id
@@ -23456,7 +24047,7 @@ pub fn validate_legion_workflow_signoff(
             "sign-off schema version must be non-zero",
         ));
     }
-    validate_legion_redaction(&signoff.redaction_hints, "sign-off redaction_hints")?;
+    validate_legion_contract_redaction(&signoff.redaction_hints, "sign-off redaction_hints")?;
     if signoff.state == LegionWorkflowSignOffState::SignedOff
         && signoff.reviewer_principal_id.is_none()
     {
@@ -23495,7 +24086,7 @@ pub fn validate_legion_workflow_session(
             "session causality id must be non-nil",
         ));
     }
-    validate_legion_redaction(&session.redaction_hints, "session redaction_hints")?;
+    validate_legion_contract_redaction(&session.redaction_hints, "session redaction_hints")?;
     if session.worker_assignments.is_empty() {
         return Err(ProtocolError::validation(
             "session must have at least one worker assignment",
@@ -23556,7 +24147,10 @@ pub fn validate_legion_workflow_session(
                 "merge approval schema version must be non-zero",
             ));
         }
-        validate_legion_redaction(&approval.redaction_hints, "merge approval redaction_hints")?;
+        validate_legion_contract_redaction(
+            &approval.redaction_hints,
+            "merge approval redaction_hints",
+        )?;
     }
     Ok(())
 }
