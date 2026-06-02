@@ -86,6 +86,22 @@ fn fingerprint(value: &str) -> FileFingerprint {
     }
 }
 
+fn assert_legion_contract_error(
+    result: Result<(), AssistedAiContractError>,
+    expected_field: &str,
+    expected_reason: &str,
+) {
+    match result {
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { field, reason }) => {
+            assert_eq!(field, expected_field);
+            assert_eq!(reason, expected_reason);
+        }
+        other => panic!(
+            "expected NonMetadataOnlyAuditRecord({expected_field}, {expected_reason}), got {other:?}"
+        ),
+    }
+}
+
 fn chunk_hash(value: &str) -> FileFingerprint {
     FileFingerprint {
         algorithm: "blake3-devil-text-chunk".to_string(),
@@ -9809,6 +9825,14 @@ fn dto_contracts_legion_task_packet_roundtrips_and_rejects_direct_mutation() {
         Err(AssistedAiContractError::NilCausalityId)
     );
 
+    let mut zero_workspace = packet.clone();
+    zero_workspace.workspace_id = WorkspaceId(0);
+    assert_legion_contract_error(
+        validate_legion_task_packet(&zero_workspace),
+        "legion.task_packet.workspace_id",
+        "workspace_id.zero",
+    );
+
     let mut direct_mutation = packet.clone();
     direct_mutation.output_contract.direct_mutation_allowed = true;
     assert!(matches!(
@@ -9816,6 +9840,55 @@ fn dto_contracts_legion_task_packet_roundtrips_and_rejects_direct_mutation() {
         Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { reason, .. })
             if reason == "direct_mutation.allowed"
     ));
+
+    let mut mismatched_snippet_kind = packet.clone();
+    mismatched_snippet_kind.context_snippet_refs[0].kind = LegionTaskContextRefKind::FullFile;
+    assert_legion_contract_error(
+        validate_legion_task_packet(&mismatched_snippet_kind),
+        "legion.task_packet.context_snippet_refs",
+        "kind.mismatch",
+    );
+
+    let mut mismatched_full_file_kind = packet.clone();
+    mismatched_full_file_kind.full_file_refs[0].kind = LegionTaskContextRefKind::CommandOutput;
+    assert_legion_contract_error(
+        validate_legion_task_packet(&mismatched_full_file_kind),
+        "legion.task_packet.full_file_refs",
+        "kind.mismatch",
+    );
+
+    let mut mismatched_command_output_kind = packet.clone();
+    mismatched_command_output_kind.command_output_refs[0].kind =
+        LegionTaskContextRefKind::ContextSnippet;
+    assert_legion_contract_error(
+        validate_legion_task_packet(&mismatched_command_output_kind),
+        "legion.task_packet.command_output_refs",
+        "kind.mismatch",
+    );
+
+    let mut empty_required_command = packet.clone();
+    empty_required_command.validation_plan.required_commands[0].clear();
+    assert_legion_contract_error(
+        validate_legion_task_packet(&empty_required_command),
+        "legion.validation_plan.required_commands",
+        "empty",
+    );
+
+    let mut empty_success_criterion = packet.clone();
+    empty_success_criterion.validation_plan.success_criteria[0].clear();
+    assert_legion_contract_error(
+        validate_legion_task_packet(&empty_success_criterion),
+        "legion.validation_plan.success_criteria",
+        "empty",
+    );
+
+    let mut empty_stop_condition = packet.clone();
+    empty_stop_condition.validation_plan.stop_conditions[0].clear();
+    assert_legion_contract_error(
+        validate_legion_task_packet(&empty_stop_condition),
+        "legion.validation_plan.stop_conditions",
+        "empty",
+    );
 }
 
 #[test]
@@ -9869,6 +9942,81 @@ fn dto_contracts_legion_worker_result_evidence_and_route_metadata_are_metadata_o
         schema_version: 1,
     };
     validate_legion_worker_result(&result).expect("result should be valid");
+
+    let mut raw_analysis_summary = result.clone();
+    raw_analysis_summary.analysis_summary = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_analysis_summary),
+        "legion.worker_result.analysis_summary",
+        "raw_secret_marker",
+    );
+
+    let mut raw_test_plan_summary = result.clone();
+    raw_test_plan_summary.test_plan_summary = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_test_plan_summary),
+        "legion.worker_result.test_plan_summary",
+        "raw_secret_marker",
+    );
+
+    let mut raw_blocked_reason = result.clone();
+    raw_blocked_reason.blocked_reason = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_blocked_reason),
+        "legion.worker_result.blocked_reason",
+        "raw_secret_marker",
+    );
+
+    let mut raw_invalid_reason = result.clone();
+    raw_invalid_reason.invalid_reason = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_invalid_reason),
+        "legion.worker_result.invalid_reason",
+        "raw_secret_marker",
+    );
+
+    let mut patch_with_blocked_reason = result.clone();
+    patch_with_blocked_reason.blocked_reason = Some("blocked by policy".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&patch_with_blocked_reason),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_patch_proposal",
+    );
+
+    let mut documentation_with_patch = result.clone();
+    documentation_with_patch.result_kind = LegionWorkerResultKind::DocumentationProposal;
+    documentation_with_patch.documentation_proposal = Some(ProposalId(45));
+    assert_legion_contract_error(
+        validate_legion_worker_result(&documentation_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_documentation_proposal",
+    );
+
+    let mut analysis_with_patch = result.clone();
+    analysis_with_patch.result_kind = LegionWorkerResultKind::AnalysisOnly;
+    assert_legion_contract_error(
+        validate_legion_worker_result(&analysis_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_analysis_only",
+    );
+
+    let mut blocked_with_patch = result.clone();
+    blocked_with_patch.result_kind = LegionWorkerResultKind::Blocked;
+    blocked_with_patch.blocked_reason = Some("blocked by policy".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&blocked_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_blocked",
+    );
+
+    let mut invalid_with_patch = result.clone();
+    invalid_with_patch.result_kind = LegionWorkerResultKind::Invalid;
+    invalid_with_patch.invalid_reason = Some("invalid packet contract".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&invalid_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_invalid",
+    );
 
     let mut invalid = result.clone();
     invalid.result_kind = LegionWorkerResultKind::Invalid;

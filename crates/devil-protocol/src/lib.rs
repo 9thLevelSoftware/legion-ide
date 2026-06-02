@@ -23745,11 +23745,31 @@ fn validate_legion_context_ref(
     )
 }
 
+fn validate_legion_context_refs_for_kind(
+    field: &str,
+    expected_kind: LegionTaskContextRefKind,
+    references: &[LegionTaskContextRef],
+) -> Result<(), AssistedAiContractError> {
+    for reference in references {
+        if reference.kind != expected_kind {
+            return Err(legion_contract_invalid(field, "kind.mismatch"));
+        }
+        validate_legion_context_ref(reference)?;
+    }
+    Ok(())
+}
+
 /// Validates a metadata-only Legion task packet.
 pub fn validate_legion_task_packet(
     packet: &LegionTaskPacket,
 ) -> Result<(), AssistedAiContractError> {
     validate_assisted_ai_correlation(packet.correlation_id, packet.causality_id)?;
+    if packet.workspace_id.0 == 0 {
+        return Err(legion_contract_invalid(
+            "legion.task_packet.workspace_id",
+            "workspace_id.zero",
+        ));
+    }
     validate_legion_schema("legion.task_packet.schema_version", packet.schema_version)?;
     validate_legion_ai_redaction(
         "legion.task_packet.redaction_hints",
@@ -23767,14 +23787,21 @@ pub fn validate_legion_task_packet(
     {
         validate_legion_file_scope(scope)?;
     }
-    for reference in packet
-        .context_snippet_refs
-        .iter()
-        .chain(packet.full_file_refs.iter())
-        .chain(packet.command_output_refs.iter())
-    {
-        validate_legion_context_ref(reference)?;
-    }
+    validate_legion_context_refs_for_kind(
+        "legion.task_packet.context_snippet_refs",
+        LegionTaskContextRefKind::ContextSnippet,
+        &packet.context_snippet_refs,
+    )?;
+    validate_legion_context_refs_for_kind(
+        "legion.task_packet.full_file_refs",
+        LegionTaskContextRefKind::FullFile,
+        &packet.full_file_refs,
+    )?;
+    validate_legion_context_refs_for_kind(
+        "legion.task_packet.command_output_refs",
+        LegionTaskContextRefKind::CommandOutput,
+        &packet.command_output_refs,
+    )?;
     validate_legion_schema(
         "legion.output_contract.schema_version",
         packet.output_contract.schema_version,
@@ -23803,14 +23830,14 @@ pub fn validate_legion_task_packet(
         "legion.validation_plan.redaction_hints",
         &packet.validation_plan.redaction_hints,
     )?;
-    for value in packet
-        .validation_plan
-        .required_commands
-        .iter()
-        .chain(packet.validation_plan.success_criteria.iter())
-        .chain(packet.validation_plan.stop_conditions.iter())
-    {
-        validate_legion_string("legion.validation_plan.label", value)?;
+    for command in &packet.validation_plan.required_commands {
+        validate_legion_string("legion.validation_plan.required_commands", command)?;
+    }
+    for criterion in &packet.validation_plan.success_criteria {
+        validate_legion_string("legion.validation_plan.success_criteria", criterion)?;
+    }
+    for condition in &packet.validation_plan.stop_conditions {
+        validate_legion_string("legion.validation_plan.stop_conditions", condition)?;
     }
     validate_legion_schema("legion.policy.schema_version", packet.policy.schema_version)?;
     validate_legion_ai_redaction(
@@ -23886,16 +23913,17 @@ pub fn validate_legion_worker_result(
     )?;
     validate_legion_string("legion.worker_result.result_id", &result.result_id)?;
     validate_legion_string("legion.worker_result.packet_id", &result.packet_id.0)?;
-    for summary in [
-        &result.analysis_summary,
-        &result.test_plan_summary,
-        &result.blocked_reason,
-        &result.invalid_reason,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        validate_legion_string("legion.worker_result.summary", summary)?;
+    if let Some(analysis_summary) = &result.analysis_summary {
+        validate_legion_string("legion.worker_result.analysis_summary", analysis_summary)?;
+    }
+    if let Some(test_plan_summary) = &result.test_plan_summary {
+        validate_legion_string("legion.worker_result.test_plan_summary", test_plan_summary)?;
+    }
+    if let Some(blocked_reason) = &result.blocked_reason {
+        validate_legion_string("legion.worker_result.blocked_reason", blocked_reason)?;
+    }
+    if let Some(invalid_reason) = &result.invalid_reason {
+        validate_legion_string("legion.worker_result.invalid_reason", invalid_reason)?;
     }
     for evidence in &result.evidence_records {
         validate_legion_evidence_record(evidence)?;
@@ -23904,33 +23932,86 @@ pub fn validate_legion_worker_result(
         validate_legion_provider_route_metadata(route)?;
     }
     match result.result_kind {
-        LegionWorkerResultKind::PatchProposal if result.patch_proposal.is_none() => {
-            return Err(legion_contract_invalid(
-                "legion.worker_result.patch_proposal",
-                "patch_proposal.missing",
-            ));
+        LegionWorkerResultKind::PatchProposal => {
+            if result.patch_proposal.is_none() {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.patch_proposal",
+                    "patch_proposal.missing",
+                ));
+            }
+            if result.documentation_proposal.is_some()
+                || result.blocked_reason.is_some()
+                || result.invalid_reason.is_some()
+            {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.result_kind",
+                    "invalid_fields_for_patch_proposal",
+                ));
+            }
         }
-        LegionWorkerResultKind::DocumentationProposal
-            if result.documentation_proposal.is_none() =>
-        {
-            return Err(legion_contract_invalid(
-                "legion.worker_result.documentation_proposal",
-                "documentation_proposal.missing",
-            ));
+        LegionWorkerResultKind::DocumentationProposal => {
+            if result.documentation_proposal.is_none() {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.documentation_proposal",
+                    "documentation_proposal.missing",
+                ));
+            }
+            if result.patch_proposal.is_some()
+                || result.blocked_reason.is_some()
+                || result.invalid_reason.is_some()
+            {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.result_kind",
+                    "invalid_fields_for_documentation_proposal",
+                ));
+            }
         }
-        LegionWorkerResultKind::Blocked if result.blocked_reason.is_none() => {
-            return Err(legion_contract_invalid(
-                "legion.worker_result.blocked_reason",
-                "blocked.reason_missing",
-            ));
+        LegionWorkerResultKind::AnalysisOnly => {
+            if result.patch_proposal.is_some()
+                || result.documentation_proposal.is_some()
+                || result.blocked_reason.is_some()
+                || result.invalid_reason.is_some()
+            {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.result_kind",
+                    "invalid_fields_for_analysis_only",
+                ));
+            }
         }
-        LegionWorkerResultKind::Invalid if result.invalid_reason.is_none() => {
-            return Err(legion_contract_invalid(
-                "legion.worker_result.invalid_reason",
-                "invalid.reason_missing",
-            ));
+        LegionWorkerResultKind::Blocked => {
+            if result.blocked_reason.is_none() {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.blocked_reason",
+                    "blocked.reason_missing",
+                ));
+            }
+            if result.patch_proposal.is_some()
+                || result.documentation_proposal.is_some()
+                || result.invalid_reason.is_some()
+            {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.result_kind",
+                    "invalid_fields_for_blocked",
+                ));
+            }
         }
-        _ => {}
+        LegionWorkerResultKind::Invalid => {
+            if result.invalid_reason.is_none() {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.invalid_reason",
+                    "invalid.reason_missing",
+                ));
+            }
+            if result.patch_proposal.is_some()
+                || result.documentation_proposal.is_some()
+                || result.blocked_reason.is_some()
+            {
+                return Err(legion_contract_invalid(
+                    "legion.worker_result.result_kind",
+                    "invalid_fields_for_invalid",
+                ));
+            }
+        }
     }
     Ok(())
 }
