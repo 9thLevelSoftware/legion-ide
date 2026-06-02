@@ -14,27 +14,29 @@ use std::sync::{
 use devil_observability::{SharedEventSink, event_metadata_record};
 use devil_protocol::{
     AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
-    CollaborationAuditRecord, CollaborationSessionId, CorrelationId,
-    DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
-    EventSinkPort, EventSinkRequest, FileId, FileMetadata, HostedTelemetrySpoolRecord,
-    Phase4RuntimeAuditRecord, PluginDenialReason, PluginStorageOperation, PluginStorageRecord,
-    PrincipalId, ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult,
-    RawSourceRetentionAccessAudit, RemoteAuditRecord, RemoteTransportAuditSummary,
-    RemoteWorkspaceSessionId, SemanticMetadataBatch, SemanticMetadataFreshnessKey,
-    SemanticMetadataQuery, SemanticMetadataReadResult, SemanticMetadataRecord,
-    SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId, StorageBackupMarker,
-    StorageChecksum, StorageMigrationDryRunReport, StorageMigrationStep, StorageRecoveryOutcome,
-    StorageRepairRequest, StorageRepositoryPort, StorageRepositoryRequest,
+    CollaborationAuditRecord, CollaborationSessionId, CorrelationId, DebugAdapterAuditRecord,
+    DebugBreakpointRecord, DebugSessionId, DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId,
+    EventMetadataRecord, EventSequence, EventSinkPort, EventSinkRequest, FileId, FileMetadata,
+    HostedTelemetrySpoolRecord, Phase4RuntimeAuditRecord, PluginDenialReason,
+    PluginStorageOperation, PluginStorageRecord, PrincipalId, ProposalAuditRecord, ProposalId,
+    ProtocolError, ProtocolResult, RawSourceRetentionAccessAudit, RemoteAuditRecord,
+    RemoteTransportAuditSummary, RemoteWorkspaceSessionId, SemanticMetadataBatch,
+    SemanticMetadataFreshnessKey, SemanticMetadataQuery, SemanticMetadataReadResult,
+    SemanticMetadataRecord, SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId,
+    StorageBackupMarker, StorageChecksum, StorageMigrationDryRunReport, StorageMigrationStep,
+    StorageRecoveryOutcome, StorageRepairRequest, StorageRepositoryPort, StorageRepositoryRequest,
     StorageRepositoryResponse, StorageSchemaManifest, TerminalAuditRecord, TerminalSessionId,
     TrustRecord, WorkspaceConfigSnapshot, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
     validate_agent_replay_manifest, validate_assisted_ai_audit_record,
-    validate_collaboration_audit_record, validate_delegated_task_audit_linkage_record,
-    validate_hosted_telemetry_spool_record, validate_phase4_runtime_audit_record,
-    validate_plugin_storage_record, validate_raw_source_retention_access_audit,
-    validate_remote_audit_record, validate_remote_transport_audit_summary,
-    validate_storage_backup_marker, validate_storage_migration_dry_run_report,
-    validate_storage_recovery_outcome, validate_storage_repair_request,
-    validate_storage_schema_manifest, validate_terminal_audit_record,
+    validate_collaboration_audit_record, validate_debug_adapter_audit_record,
+    validate_debug_breakpoint_identity, validate_debug_breakpoint_record,
+    validate_delegated_task_audit_linkage_record, validate_hosted_telemetry_spool_record,
+    validate_phase4_runtime_audit_record, validate_plugin_storage_record,
+    validate_raw_source_retention_access_audit, validate_remote_audit_record,
+    validate_remote_transport_audit_summary, validate_storage_backup_marker,
+    validate_storage_migration_dry_run_report, validate_storage_recovery_outcome,
+    validate_storage_repair_request, validate_storage_schema_manifest,
+    validate_terminal_audit_record,
 };
 use devil_security::TrustState;
 use serde::{Deserialize, Serialize};
@@ -78,6 +80,27 @@ pub struct SessionRecord {
     pub workspace_path: CanonicalPath,
     /// Persisted trust state.
     pub trust_state: WorkspaceTrustState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Persisted dock layout state for one dock side in one product mode.
+pub struct DockLayoutStorageRecord {
+    /// Owning workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Stable product mode label, for example `Manual`, `Assist`, `Delegate`, or `Automate`.
+    pub mode: String,
+    /// Stable dock side label, for example `Left`, `Right`, or `Bottom`.
+    pub side: String,
+    /// Stable panel id pinned as the side default.
+    pub pinned_default_panel_id: String,
+    /// Stable panel ids in the custom toolkit region.
+    pub custom_toolkit_panel_ids: Vec<String>,
+    /// Persisted splitter fraction for the side.
+    pub splitter_fraction: f32,
+    /// Whether this dock side is collapsed.
+    pub collapsed: bool,
+    /// Storage record schema version.
+    pub schema_version: u16,
 }
 
 #[derive(Debug, Error)]
@@ -175,6 +198,31 @@ pub trait WorkspaceSessionRepository {
     fn delete_session(&mut self, session_id: &str) -> StorageResult<()>;
 }
 
+/// Mode-scoped dock layout persistence API.
+pub trait DockLayoutRepository {
+    /// Persist one dock side layout record.
+    fn save_dock_side_layout(&mut self, record: DockLayoutStorageRecord) -> StorageResult<()>;
+    /// Load one dock side layout record.
+    fn load_dock_side_layout(
+        &self,
+        workspace_id: WorkspaceId,
+        mode: &str,
+        side: &str,
+    ) -> StorageResult<DockLayoutStorageRecord>;
+    /// Load all dock side layout records for a workspace.
+    fn load_dock_layouts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> StorageResult<Vec<DockLayoutStorageRecord>>;
+    /// Delete one dock side layout record.
+    fn delete_dock_side_layout(
+        &mut self,
+        workspace_id: WorkspaceId,
+        mode: &str,
+        side: &str,
+    ) -> StorageResult<()>;
+}
+
 /// Metadata-only semantic persistence API.
 pub trait SemanticMetadataRepository {
     /// Persist metadata-only semantic records and tombstones.
@@ -204,6 +252,7 @@ pub struct InMemoryStorage {
     trust: HashMap<(WorkspaceId, String), TrustDecisionRecord>,
     metadata: HashMap<(WorkspaceId, String), FileMetadataRecord>,
     sessions: HashMap<String, SessionRecord>,
+    dock_layouts: HashMap<String, DockLayoutStorageRecord>,
     protocol_workspace_configs: HashMap<WorkspaceId, WorkspaceConfigSnapshot>,
     protocol_file_metadata: HashMap<FileId, FileMetadata>,
     protocol_sessions: HashMap<String, WorkspaceSessionRecord>,
@@ -217,6 +266,8 @@ pub struct InMemoryStorage {
     protocol_remote_audit: HashMap<String, RemoteAuditRecord>,
     protocol_remote_transport_audit: HashMap<String, RemoteTransportAuditSummary>,
     protocol_terminal_audit: HashMap<String, TerminalAuditRecord>,
+    protocol_debug_breakpoints: HashMap<String, DebugBreakpointRecord>,
+    protocol_debug_adapter_audit: HashMap<String, DebugAdapterAuditRecord>,
     protocol_hosted_telemetry_spool: HashMap<String, HostedTelemetrySpoolRecord>,
     protocol_raw_source_retention_access_audit: HashMap<String, RawSourceRetentionAccessAudit>,
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
@@ -452,6 +503,8 @@ struct PersistedState {
     metadata: HashMap<(WorkspaceId, String), FileMetadataRecord>,
     sessions: HashMap<String, SessionRecord>,
     #[serde(default)]
+    dock_layouts: HashMap<String, DockLayoutStorageRecord>,
+    #[serde(default)]
     protocol_proposal_audit: HashMap<ProposalId, ProposalAuditRecord>,
     #[serde(default)]
     protocol_assisted_ai_audit: HashMap<String, AssistedAiAuditRecord>,
@@ -470,6 +523,10 @@ struct PersistedState {
     #[serde(default)]
     protocol_terminal_audit: HashMap<String, TerminalAuditRecord>,
     #[serde(default)]
+    protocol_debug_breakpoints: HashMap<String, DebugBreakpointRecord>,
+    #[serde(default)]
+    protocol_debug_adapter_audit: HashMap<String, DebugAdapterAuditRecord>,
+    #[serde(default)]
     protocol_hosted_telemetry_spool: HashMap<String, HostedTelemetrySpoolRecord>,
     #[serde(default)]
     protocol_raw_source_retention_access_audit: HashMap<String, RawSourceRetentionAccessAudit>,
@@ -484,11 +541,12 @@ struct PersistedState {
 impl From<&InMemoryStorage> for PersistedState {
     fn from(value: &InMemoryStorage) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             workspace_configs: value.workspace_configs.clone(),
             trust: value.trust.clone(),
             metadata: value.metadata.clone(),
             sessions: value.sessions.clone(),
+            dock_layouts: value.dock_layouts.clone(),
             protocol_proposal_audit: value.protocol_proposal_audit.clone(),
             protocol_assisted_ai_audit: value.protocol_assisted_ai_audit.clone(),
             protocol_delegated_task_audit_linkage: value
@@ -500,6 +558,8 @@ impl From<&InMemoryStorage> for PersistedState {
             protocol_remote_audit: value.protocol_remote_audit.clone(),
             protocol_remote_transport_audit: value.protocol_remote_transport_audit.clone(),
             protocol_terminal_audit: value.protocol_terminal_audit.clone(),
+            protocol_debug_breakpoints: value.protocol_debug_breakpoints.clone(),
+            protocol_debug_adapter_audit: value.protocol_debug_adapter_audit.clone(),
             protocol_hosted_telemetry_spool: value.protocol_hosted_telemetry_spool.clone(),
             protocol_raw_source_retention_access_audit: value
                 .protocol_raw_source_retention_access_audit
@@ -519,6 +579,7 @@ impl Clone for InMemoryStorage {
             trust: self.trust.clone(),
             metadata: self.metadata.clone(),
             sessions: self.sessions.clone(),
+            dock_layouts: self.dock_layouts.clone(),
             protocol_workspace_configs: self.protocol_workspace_configs.clone(),
             protocol_file_metadata: self.protocol_file_metadata.clone(),
             protocol_sessions: self.protocol_sessions.clone(),
@@ -534,6 +595,8 @@ impl Clone for InMemoryStorage {
             protocol_remote_audit: self.protocol_remote_audit.clone(),
             protocol_remote_transport_audit: self.protocol_remote_transport_audit.clone(),
             protocol_terminal_audit: self.protocol_terminal_audit.clone(),
+            protocol_debug_breakpoints: self.protocol_debug_breakpoints.clone(),
+            protocol_debug_adapter_audit: self.protocol_debug_adapter_audit.clone(),
             protocol_hosted_telemetry_spool: self.protocol_hosted_telemetry_spool.clone(),
             protocol_raw_source_retention_access_audit: self
                 .protocol_raw_source_retention_access_audit
@@ -683,6 +746,7 @@ impl From<PersistedState> for InMemoryStorage {
             trust: value.trust,
             metadata: value.metadata,
             sessions: value.sessions,
+            dock_layouts: value.dock_layouts,
             protocol_workspace_configs: HashMap::new(),
             protocol_file_metadata: HashMap::new(),
             protocol_sessions: HashMap::new(),
@@ -696,6 +760,8 @@ impl From<PersistedState> for InMemoryStorage {
             protocol_remote_audit: value.protocol_remote_audit,
             protocol_remote_transport_audit: value.protocol_remote_transport_audit,
             protocol_terminal_audit: value.protocol_terminal_audit,
+            protocol_debug_breakpoints: value.protocol_debug_breakpoints,
+            protocol_debug_adapter_audit: value.protocol_debug_adapter_audit,
             protocol_hosted_telemetry_spool: value.protocol_hosted_telemetry_spool,
             protocol_raw_source_retention_access_audit: value
                 .protocol_raw_source_retention_access_audit,
@@ -948,6 +1014,40 @@ impl WorkspaceSessionRepository for FileBackedStorage {
     }
 }
 
+impl DockLayoutRepository for FileBackedStorage {
+    fn save_dock_side_layout(&mut self, record: DockLayoutStorageRecord) -> StorageResult<()> {
+        self.state.save_dock_side_layout(record)?;
+        self.flush()
+    }
+
+    fn load_dock_side_layout(
+        &self,
+        workspace_id: WorkspaceId,
+        mode: &str,
+        side: &str,
+    ) -> StorageResult<DockLayoutStorageRecord> {
+        self.state.load_dock_side_layout(workspace_id, mode, side)
+    }
+
+    fn load_dock_layouts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> StorageResult<Vec<DockLayoutStorageRecord>> {
+        self.state.load_dock_layouts(workspace_id)
+    }
+
+    fn delete_dock_side_layout(
+        &mut self,
+        workspace_id: WorkspaceId,
+        mode: &str,
+        side: &str,
+    ) -> StorageResult<()> {
+        self.state
+            .delete_dock_side_layout(workspace_id, mode, side)?;
+        self.flush()
+    }
+}
+
 impl SemanticMetadataRepository for FileBackedStorage {
     fn save_semantic_metadata_batch(&mut self, batch: SemanticMetadataBatch) -> StorageResult<()> {
         self.state.save_semantic_metadata_batch(batch)?;
@@ -1114,6 +1214,35 @@ impl InMemoryStorage {
                 self.protocol_terminal_audit.insert(key.clone(), record);
                 Ok(Self::protocol_saved(format!("terminal_audit:{key}")))
             }
+            StorageRepositoryRequest::SaveDebugBreakpointRecord(record) => {
+                Self::validate_debug_breakpoint_record(&record)?;
+                let key = debug_breakpoint_storage_key(record.workspace_id, &record.breakpoint_id);
+                self.protocol_debug_breakpoints.insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!("debug_breakpoint:{key}")))
+            }
+            StorageRepositoryRequest::DeleteDebugBreakpointRecord {
+                workspace_id,
+                breakpoint_id,
+            } => {
+                validate_debug_breakpoint_identity(workspace_id, &breakpoint_id).map_err(
+                    |error| StorageError::Failed {
+                        message: error.message,
+                    },
+                )?;
+                let key = debug_breakpoint_storage_key(workspace_id, &breakpoint_id);
+                self.protocol_debug_breakpoints.remove(&key);
+                Ok(Self::protocol_saved(format!(
+                    "debug_breakpoint_deleted:{key}"
+                )))
+            }
+            StorageRepositoryRequest::SaveDebugAdapterAuditRecord(record) => {
+                Self::validate_debug_adapter_audit_record(&record)?;
+                let key =
+                    debug_adapter_audit_storage_key(&record.session_id, record.event_sequence);
+                self.protocol_debug_adapter_audit
+                    .insert(key.clone(), record);
+                Ok(Self::protocol_saved(format!("debug_adapter_audit:{key}")))
+            }
             StorageRepositoryRequest::SaveHostedTelemetrySpoolRecord(record) => {
                 Self::validate_hosted_telemetry_spool_record(&record)?;
                 let key = record.record_id.clone();
@@ -1242,6 +1371,29 @@ impl InMemoryStorage {
                     .get(&terminal_audit_storage_key(session_id, event_sequence))
                     .cloned(),
             ))),
+            StorageRepositoryRequest::ReadDebugBreakpointRecords { workspace_id } => {
+                let mut records = self
+                    .protocol_debug_breakpoints
+                    .values()
+                    .filter(|record| record.workspace_id == workspace_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                records.sort_by(|left, right| left.breakpoint_id.0.cmp(&right.breakpoint_id.0));
+                Ok(StorageRepositoryResponse::DebugBreakpointRecords(records))
+            }
+            StorageRepositoryRequest::ReadDebugAdapterAuditRecord {
+                session_id,
+                event_sequence,
+            } => Ok(StorageRepositoryResponse::DebugAdapterAuditRecord(
+                Box::new(
+                    self.protocol_debug_adapter_audit
+                        .get(&debug_adapter_audit_storage_key(
+                            &session_id,
+                            event_sequence,
+                        ))
+                        .cloned(),
+                ),
+            )),
             StorageRepositoryRequest::ReadHostedTelemetrySpoolRecord(record_id) => Ok(
                 StorageRepositoryResponse::HostedTelemetrySpoolRecord(Box::new(
                     self.protocol_hosted_telemetry_spool
@@ -1558,6 +1710,18 @@ impl InMemoryStorage {
         })
     }
 
+    fn validate_debug_breakpoint_record(record: &DebugBreakpointRecord) -> StorageResult<()> {
+        validate_debug_breakpoint_record(record).map_err(|error| StorageError::Failed {
+            message: error.message,
+        })
+    }
+
+    fn validate_debug_adapter_audit_record(record: &DebugAdapterAuditRecord) -> StorageResult<()> {
+        validate_debug_adapter_audit_record(record).map_err(|error| StorageError::Failed {
+            message: error.message,
+        })
+    }
+
     fn validate_hosted_telemetry_spool_record(
         record: &HostedTelemetrySpoolRecord,
     ) -> StorageResult<()> {
@@ -1657,6 +1821,20 @@ fn terminal_audit_storage_key(
     format!("{}:{}", session_id.0, event_sequence.0)
 }
 
+fn debug_breakpoint_storage_key(
+    workspace_id: WorkspaceId,
+    breakpoint_id: &devil_protocol::DebugBreakpointId,
+) -> String {
+    format!("{}:{}", workspace_id.0, breakpoint_id.0)
+}
+
+fn debug_adapter_audit_storage_key(
+    session_id: &DebugSessionId,
+    event_sequence: EventSequence,
+) -> String {
+    format!("{}:{}", session_id.0, event_sequence.0)
+}
+
 fn raw_source_retention_access_audit_storage_key(
     bundle_id: &str,
     event_sequence: EventSequence,
@@ -1733,6 +1911,73 @@ fn devil_protocol_stable_hash(value: &str) -> u128 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish() as u128
+}
+
+fn dock_layout_storage_key(workspace_id: WorkspaceId, mode: &str, side: &str) -> String {
+    format!("dock_layout:{}:{mode}:{side}", workspace_id.0)
+}
+
+fn validate_dock_layout_record(record: &DockLayoutStorageRecord) -> StorageResult<()> {
+    validate_dock_layout_key(&record.mode, &record.side)?;
+    if record.schema_version == 0 {
+        return Err(StorageError::Failed {
+            message: "dock layout schema version must be non-zero".to_string(),
+        });
+    }
+    if record.pinned_default_panel_id.trim().is_empty() {
+        return Err(StorageError::Failed {
+            message: "dock layout pinned default panel id must not be empty".to_string(),
+        });
+    }
+    if record
+        .custom_toolkit_panel_ids
+        .iter()
+        .any(|panel_id| panel_id.trim().is_empty())
+    {
+        return Err(StorageError::Failed {
+            message: "dock layout custom toolkit panel ids must not be empty".to_string(),
+        });
+    }
+    if !record.splitter_fraction.is_finite() || !(0.05..=0.95).contains(&record.splitter_fraction) {
+        return Err(StorageError::Failed {
+            message: "dock layout splitter fraction must be finite and between 0.05 and 0.95"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_dock_layout_key(mode: &str, side: &str) -> StorageResult<()> {
+    if dock_mode_order(mode) == u8::MAX {
+        return Err(StorageError::Failed {
+            message: format!("unknown dock layout mode `{mode}`"),
+        });
+    }
+    if dock_side_order(side) == u8::MAX {
+        return Err(StorageError::Failed {
+            message: format!("unknown dock layout side `{side}`"),
+        });
+    }
+    Ok(())
+}
+
+fn dock_mode_order(mode: &str) -> u8 {
+    match mode {
+        "Manual" => 0,
+        "Assist" => 1,
+        "Delegate" => 2,
+        "Automate" => 3,
+        _ => u8::MAX,
+    }
+}
+
+fn dock_side_order(side: &str) -> u8 {
+    match side {
+        "Left" => 0,
+        "Right" => 1,
+        "Bottom" => 2,
+        _ => u8::MAX,
+    }
 }
 
 impl WorkspaceConfigRepository for InMemoryStorage {
@@ -1851,6 +2096,63 @@ impl WorkspaceSessionRepository for InMemoryStorage {
             .ok_or_else(|| StorageError::NotFound {
                 key: format!("session:{session_id}"),
             })
+    }
+}
+
+impl DockLayoutRepository for InMemoryStorage {
+    fn save_dock_side_layout(&mut self, record: DockLayoutStorageRecord) -> StorageResult<()> {
+        validate_dock_layout_record(&record)?;
+        let key = dock_layout_storage_key(record.workspace_id, &record.mode, &record.side);
+        self.dock_layouts.insert(key, record);
+        Ok(())
+    }
+
+    fn load_dock_side_layout(
+        &self,
+        workspace_id: WorkspaceId,
+        mode: &str,
+        side: &str,
+    ) -> StorageResult<DockLayoutStorageRecord> {
+        validate_dock_layout_key(mode, side)?;
+        let key = dock_layout_storage_key(workspace_id, mode, side);
+        self.dock_layouts
+            .get(&key)
+            .cloned()
+            .ok_or(StorageError::NotFound { key })
+    }
+
+    fn load_dock_layouts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> StorageResult<Vec<DockLayoutStorageRecord>> {
+        let mut layouts = self
+            .dock_layouts
+            .values()
+            .filter(|record| record.workspace_id == workspace_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        layouts.sort_by_key(|record| {
+            (
+                dock_mode_order(&record.mode),
+                dock_side_order(&record.side),
+                record.pinned_default_panel_id.clone(),
+            )
+        });
+        Ok(layouts)
+    }
+
+    fn delete_dock_side_layout(
+        &mut self,
+        workspace_id: WorkspaceId,
+        mode: &str,
+        side: &str,
+    ) -> StorageResult<()> {
+        validate_dock_layout_key(mode, side)?;
+        let key = dock_layout_storage_key(workspace_id, mode, side);
+        self.dock_layouts
+            .remove(&key)
+            .map(|_| ())
+            .ok_or(StorageError::NotFound { key })
     }
 }
 
@@ -1977,15 +2279,17 @@ mod tests {
         AgentReplayManifest, AgentRunId, AgentStateTransitionRecord,
         AssistedAiAuditOutcomeCategory, AssistedAiAuditPrivacyDisposition,
         AssistedAiAuditRedactionState, AssistedAiProviderInvocationState, ByteRange, CapabilityId,
-        EventId, FileContentVersion, FileFingerprint, LanguageId, LineIndexRange,
-        PermissionBudgetEvaluationDisposition, Phase4RuntimeAuditRecord, ProposalLifecycleState,
-        ProposalPayloadKind, ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRiskLabel,
-        ProtocolDiagnosticSeverity, RedactionHint, RetentionLabel, SemanticFileFingerprintIdentity,
-        SemanticFreshnessState, SemanticGrammarVersion, SemanticMetadataChunkReference,
-        SemanticMetadataDescriptorIdentity, SemanticMetadataDiagnosticSummary,
-        SemanticMetadataFreshnessKey, SemanticMetadataSourceKind, SemanticMetadataSymbolRecord,
-        SemanticModelVersion, SemanticRecordId, SemanticRecordProvenance, SemanticRecordSource,
-        SemanticSymbolId, SnapshotId, WorkspaceGeneration,
+        DebugBreakpointId, DebugBreakpointRecord, EventId, FileContentVersion, FileFingerprint,
+        LanguageId, LineIndexRange, PermissionBudgetEvaluationDisposition,
+        Phase4RuntimeAuditRecord, ProposalLifecycleState, ProposalPayloadKind,
+        ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRiskLabel,
+        ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, RetentionLabel,
+        SemanticFileFingerprintIdentity, SemanticFreshnessState, SemanticGrammarVersion,
+        SemanticMetadataChunkReference, SemanticMetadataDescriptorIdentity,
+        SemanticMetadataDiagnosticSummary, SemanticMetadataFreshnessKey,
+        SemanticMetadataSourceKind, SemanticMetadataSymbolRecord, SemanticModelVersion,
+        SemanticRecordId, SemanticRecordProvenance, SemanticRecordSource, SemanticSymbolId,
+        SnapshotId, TextCoordinate, WorkspaceGeneration,
     };
     use serde_json::json;
 
@@ -2012,6 +2316,42 @@ mod tests {
     fn event_id() -> EventId {
         serde_json::from_value(json!("018f0000-0000-7000-8000-000000000002"))
             .expect("valid event id")
+    }
+
+    fn debug_breakpoint_record(
+        workspace_id: WorkspaceId,
+        breakpoint_id: &str,
+    ) -> DebugBreakpointRecord {
+        DebugBreakpointRecord {
+            breakpoint_id: DebugBreakpointId(breakpoint_id.to_string()),
+            workspace_id,
+            session_id: None,
+            path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+            range: ProtocolTextRange {
+                start: TextCoordinate {
+                    line: 4,
+                    character: 0,
+                    byte_offset: Some(48),
+                    utf16_offset: Some(48),
+                },
+                end: TextCoordinate {
+                    line: 4,
+                    character: 0,
+                    byte_offset: Some(48),
+                    utf16_offset: Some(48),
+                },
+            },
+            enabled: true,
+            condition: Some("count > 2".to_string()),
+            hit_condition: Some("3".to_string()),
+            log_message: Some("count changed".to_string()),
+            verified: false,
+            message: Some("pending adapter verification".to_string()),
+            correlation_id: CorrelationId(900),
+            causality_id: non_nil_causality_id(),
+            sequence: EventSequence(1),
+            schema_version: 1,
+        }
     }
 
     fn storage_repair_request() -> StorageRepairRequest {
@@ -2212,6 +2552,24 @@ mod tests {
             retention: RetentionLabel::Audit,
             redaction: RedactionHint::MetadataOnly,
             occurred_at: devil_protocol::TimestampMillis(1),
+            schema_version: 1,
+        }
+    }
+
+    fn dock_layout_record(
+        workspace_id: WorkspaceId,
+        mode: &str,
+        side: &str,
+        pinned_default_panel_id: &str,
+    ) -> DockLayoutStorageRecord {
+        DockLayoutStorageRecord {
+            workspace_id,
+            mode: mode.to_string(),
+            side: side.to_string(),
+            pinned_default_panel_id: pinned_default_panel_id.to_string(),
+            custom_toolkit_panel_ids: vec!["symbol_outline".to_string()],
+            splitter_fraction: 0.42,
+            collapsed: false,
             schema_version: 1,
         }
     }
@@ -3043,6 +3401,80 @@ mod tests {
     }
 
     #[test]
+    fn in_memory_storage_roundtrips_mode_scoped_dock_layouts() {
+        let mut storage = InMemoryStorage::new();
+        let manual_left = dock_layout_record(WorkspaceId(55), "Manual", "Left", "project_explorer");
+        let assist_right = DockLayoutStorageRecord {
+            custom_toolkit_panel_ids: vec!["assistant".to_string(), "context".to_string()],
+            collapsed: true,
+            ..dock_layout_record(WorkspaceId(55), "Assist", "Right", "assistant")
+        };
+
+        storage
+            .save_dock_side_layout(manual_left.clone())
+            .expect("save manual left layout");
+        storage
+            .save_dock_side_layout(assist_right.clone())
+            .expect("save assist right layout");
+
+        let loaded = storage
+            .load_dock_side_layout(WorkspaceId(55), "Manual", "Left")
+            .expect("load manual left layout");
+        assert_eq!(loaded, manual_left);
+
+        let layouts = storage
+            .load_dock_layouts(WorkspaceId(55))
+            .expect("load all dock layouts");
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[0].mode, "Manual");
+        assert_eq!(layouts[1].mode, "Assist");
+        assert!(layouts[1].collapsed);
+
+        storage
+            .delete_dock_side_layout(WorkspaceId(55), "Manual", "Left")
+            .expect("delete manual left layout");
+        assert!(
+            storage
+                .load_dock_side_layout(WorkspaceId(55), "Manual", "Left")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn dock_layout_storage_rejects_invalid_records() {
+        let mut storage = InMemoryStorage::new();
+        let invalid_mode = dock_layout_record(WorkspaceId(55), "Agents", "Left", "assistant");
+        assert!(matches!(
+            storage.save_dock_side_layout(invalid_mode),
+            Err(StorageError::Failed { message }) if message.contains("unknown dock layout mode")
+        ));
+
+        let invalid_side = dock_layout_record(WorkspaceId(55), "Manual", "Center", "assistant");
+        assert!(matches!(
+            storage.save_dock_side_layout(invalid_side),
+            Err(StorageError::Failed { message }) if message.contains("unknown dock layout side")
+        ));
+
+        let invalid_splitter = DockLayoutStorageRecord {
+            splitter_fraction: f32::NAN,
+            ..dock_layout_record(WorkspaceId(55), "Manual", "Left", "project_explorer")
+        };
+        assert!(matches!(
+            storage.save_dock_side_layout(invalid_splitter),
+            Err(StorageError::Failed { message }) if message.contains("splitter fraction")
+        ));
+
+        let zero_schema = DockLayoutStorageRecord {
+            schema_version: 0,
+            ..dock_layout_record(WorkspaceId(55), "Manual", "Left", "project_explorer")
+        };
+        assert!(matches!(
+            storage.save_dock_side_layout(zero_schema),
+            Err(StorageError::Failed { message }) if message.contains("schema version")
+        ));
+    }
+
+    #[test]
     fn file_backed_storage_roundtrips_protocol_audit_and_event_metadata() {
         let path = temp_storage_path("protocol-roundtrip");
         let audit = audit_record();
@@ -3168,6 +3600,65 @@ mod tests {
     }
 
     #[test]
+    fn file_backed_protocol_debug_breakpoint_delete_survives_restore() {
+        let path = temp_storage_path("debug-breakpoint-delete");
+        let workspace_id = WorkspaceId(91);
+        let breakpoint_id = DebugBreakpointId("bp-delete".to_string());
+        let record = debug_breakpoint_record(workspace_id, &breakpoint_id.0);
+
+        {
+            let mut storage = FileBackedStorage::open(&path).expect("open storage");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveDebugBreakpointRecord(
+                    record,
+                ))
+                .expect("save breakpoint");
+            storage.flush().expect("flush saved breakpoint");
+        }
+
+        {
+            let mut storage = FileBackedStorage::open(&path).expect("reopen saved breakpoint");
+            match storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::ReadDebugBreakpointRecords {
+                    workspace_id,
+                })
+                .expect("read saved breakpoint")
+            {
+                StorageRepositoryResponse::DebugBreakpointRecords(records) => {
+                    assert_eq!(records.len(), 1);
+                }
+                other => panic!("unexpected breakpoint read response: {other:?}"),
+            }
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::DeleteDebugBreakpointRecord {
+                    workspace_id,
+                    breakpoint_id: breakpoint_id.clone(),
+                })
+                .expect("delete breakpoint");
+            storage.flush().expect("flush deleted breakpoint");
+        }
+
+        let mut reopened = FileBackedStorage::open(&path).expect("reopen deleted breakpoint");
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadDebugBreakpointRecords {
+                workspace_id,
+            })
+            .expect("read after delete")
+        {
+            StorageRepositoryResponse::DebugBreakpointRecords(records) => {
+                assert!(records.is_empty());
+            }
+            other => panic!("unexpected breakpoint read response after delete: {other:?}"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn file_backed_storage_opens_schema_one_without_protocol_metadata() {
         let path = temp_storage_path("schema-one-migration");
         fs::write(
@@ -3190,7 +3681,7 @@ mod tests {
         assert!(
             fs::read_to_string(&path)
                 .expect("read migrated state")
-                .contains("\"schema_version\": 2")
+                .contains("\"schema_version\": 3")
         );
 
         let _ = fs::remove_file(path);
@@ -3484,6 +3975,41 @@ mod tests {
 
         assert_eq!(loaded_config.snapshot_id, SnapshotId(123));
         assert_eq!(loaded_session.workspace_id, WorkspaceId(88));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backed_storage_roundtrips_dock_layouts() {
+        let path = temp_storage_path("dock-layout-roundtrip");
+        let record = DockLayoutStorageRecord {
+            custom_toolkit_panel_ids: vec![
+                "diagnostics".to_string(),
+                "quick_fixes".to_string(),
+                "terminal".to_string(),
+            ],
+            splitter_fraction: 0.64,
+            collapsed: true,
+            ..dock_layout_record(WorkspaceId(90), "Delegate", "Bottom", "terminal")
+        };
+
+        {
+            let mut storage = FileBackedStorage::open(&path).expect("open file-backed storage");
+            storage
+                .save_dock_side_layout(record.clone())
+                .expect("save dock layout");
+        }
+
+        let persisted = fs::read_to_string(&path).expect("read persisted storage");
+        assert!(persisted.contains("dock_layouts"));
+        assert!(persisted.contains("Delegate"));
+        assert!(persisted.contains("quick_fixes"));
+
+        let reopened = FileBackedStorage::open(&path).expect("reopen storage");
+        let loaded = reopened
+            .load_dock_side_layout(WorkspaceId(90), "Delegate", "Bottom")
+            .expect("load dock layout");
+        assert_eq!(loaded, record);
 
         let _ = fs::remove_file(path);
     }

@@ -2,13 +2,18 @@
 
 #![warn(missing_docs)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 
 use devil_protocol::{
-    AssistedAiProviderClass, AssistedAiProviderInvocationState, AssistedAiProviderRouteRequest,
-    AssistedAiProviderRouteResponse, AssistedAiRefusalMetadata, AssistedAiRequestDisposition,
-    AssistedAiRouteDecision, CapabilityBrokerPort, CapabilityRequest, CapabilityResponse,
-    ProposalRiskLabel, RedactionHint, validate_assisted_ai_provider_route_request,
+    AssistedAiOperationClass, AssistedAiProviderClass, AssistedAiProviderInvocationState,
+    AssistedAiProviderRouteRequest, AssistedAiProviderRouteResponse, AssistedAiRefusalMetadata,
+    AssistedAiRequestDisposition, AssistedAiRouteDecision, CapabilityBrokerPort, CapabilityRequest,
+    CapabilityResponse, InlinePredictionFreshness, InlinePredictionGhostText,
+    InlinePredictionProviderMetadata, InlinePredictionResult, InlinePredictionResultId,
+    InlinePredictionResultState, InlinePredictionRetention, ProposalRiskLabel, ProtocolTextRange,
+    RedactionHint, validate_assisted_ai_provider_route_request,
+    validate_inline_prediction_request_metadata, validate_inline_prediction_result,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -144,6 +149,30 @@ pub struct EmbeddingResponse {
     pub metadata: HashMap<String, String>,
 }
 
+/// Request payload for inline next-edit prediction providers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlinePredictionRequest {
+    /// Provider selected for the request.
+    pub provider: ProviderId,
+    /// Model name or display-safe alias expected by the provider.
+    pub model: String,
+    /// Protocol request metadata without raw source bodies.
+    pub metadata: devil_protocol::InlinePredictionRequestMetadata,
+}
+
+/// Response payload for inline next-edit prediction providers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlinePredictionResponse {
+    /// Provider identifier that produced the response.
+    pub provider: ProviderId,
+    /// Model identifier used by the provider.
+    pub model: String,
+    /// Protocol inline prediction result.
+    pub result: InlinePredictionResult,
+    /// Provider-side metadata without raw prompt or source bodies.
+    pub metadata: HashMap<String, String>,
+}
+
 /// Capabilities exposed by a provider implementation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ProviderCapabilities {
@@ -151,6 +180,8 @@ pub struct ProviderCapabilities {
     pub completion: bool,
     /// Supports vector embedding generation.
     pub embedding: bool,
+    /// Supports inline next-edit prediction distinct from chat/proposal output.
+    pub inline_prediction: bool,
 }
 
 impl Default for ProviderCapabilities {
@@ -158,6 +189,7 @@ impl Default for ProviderCapabilities {
         Self {
             completion: true,
             embedding: false,
+            inline_prediction: false,
         }
     }
 }
@@ -236,6 +268,153 @@ pub trait ModelProvider {
 
     /// Sends an embedding request to the provider implementation.
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError>;
+
+    /// Sends an inline prediction request to the provider implementation.
+    fn predict_inline(
+        &self,
+        request: InlinePredictionRequest,
+    ) -> Result<InlinePredictionResponse, ProviderError> {
+        Err(ProviderError::unsupported(
+            request.provider,
+            "predict_inline",
+        ))
+    }
+}
+
+/// Deterministic local inline predictor for tests and offline metadata-only flows.
+pub struct DeterministicInlinePredictionProvider {
+    id: ProviderId,
+}
+
+impl DeterministicInlinePredictionProvider {
+    /// Creates a deterministic inline prediction provider.
+    pub fn new(id: impl Into<ProviderId>) -> Self {
+        Self { id: id.into() }
+    }
+}
+
+impl ModelProvider for DeterministicInlinePredictionProvider {
+    fn provider_id(&self) -> ProviderId {
+        self.id.clone()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            inline_prediction: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+
+    fn predict_inline(
+        &self,
+        request: InlinePredictionRequest,
+    ) -> Result<InlinePredictionResponse, ProviderError> {
+        deterministic_inline_prediction(&self.id, request)
+    }
+}
+
+fn deterministic_inline_prediction(
+    provider_id: &str,
+    request: InlinePredictionRequest,
+) -> Result<InlinePredictionResponse, ProviderError> {
+    validate_inline_prediction_request_metadata(&request.metadata).map_err(|error| {
+        ProviderError::RequestRejected {
+            message: format!("invalid inline prediction metadata: {error}"),
+        }
+    })?;
+
+    let text = deterministic_inline_text(&request.metadata, request.metadata.max_prediction_bytes);
+    let byte_len = text.len() as u32;
+    let line_count = text.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
+    let provider_metadata = InlinePredictionProviderMetadata {
+        provider_id: provider_id.to_string(),
+        model_label: request.model.clone(),
+        operation_class: AssistedAiOperationClass::InlinePrediction,
+        invocation_state: AssistedAiProviderInvocationState::Completed,
+        latency: devil_protocol::InlinePredictionLatencyMetadata {
+            queued_ms: 0,
+            inference_ms: 1,
+            total_ms: 1,
+            timed_out: false,
+        },
+        ..request.metadata.provider.clone()
+    };
+    let insert_range = ProtocolTextRange {
+        start: request.metadata.cursor,
+        end: request.metadata.cursor,
+    };
+    let result = InlinePredictionResult {
+        result_id: InlinePredictionResultId(format!("{}:result", request.metadata.request_id.0)),
+        request_id: request.metadata.request_id.clone(),
+        state: InlinePredictionResultState::Available,
+        retention: InlinePredictionRetention::EphemeralDisplay,
+        insert_range,
+        ghost_text: Some(InlinePredictionGhostText {
+            text,
+            byte_len,
+            line_count,
+            text_fingerprint: devil_protocol::FileFingerprint {
+                algorithm: "deterministic-inline-v1".to_string(),
+                value: format!(
+                    "{}:{}:{}",
+                    request.metadata.language_id.0, request.metadata.cursor.line, byte_len
+                ),
+            },
+        }),
+        fingerprint: request.metadata.fingerprint.clone(),
+        freshness: InlinePredictionFreshness::fresh(request.metadata.schema_version),
+        provider: provider_metadata,
+        refusal: None,
+        generated_at: request.metadata.requested_at,
+        expires_at: None,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: request.metadata.schema_version,
+    };
+    validate_inline_prediction_result(&result).map_err(|error| ProviderError::RequestRejected {
+        message: format!("invalid deterministic inline prediction result: {error}"),
+    })?;
+
+    Ok(InlinePredictionResponse {
+        provider: provider_id.to_string(),
+        model: request.model,
+        result,
+        metadata: [("redaction".to_string(), "metadata-only".to_string())]
+            .into_iter()
+            .collect(),
+    })
+}
+
+fn deterministic_inline_text(
+    metadata: &devil_protocol::InlinePredictionRequestMetadata,
+    max_bytes: u32,
+) -> String {
+    let line = metadata.cursor.line.saturating_add(1);
+    let base = match metadata.language_id.0.to_ascii_lowercase().as_str() {
+        "rust" | "typescript" | "javascript" => format!(" // next edit line {line}"),
+        "python" => format!("  # next edit line {line}"),
+        _ => format!(" next edit line {line}"),
+    };
+    bounded_ascii_prefix(&base, max_bytes)
+}
+
+fn bounded_ascii_prefix(value: &str, max_bytes: u32) -> String {
+    let max_bytes = max_bytes as usize;
+    // `get(..max_bytes)` returns `None` if `max_bytes` is past the end or lands
+    // inside a multi-byte UTF-8 char, so falling back to the full value keeps
+    // this panic-free even if a non-ASCII base string is ever introduced.
+    value.get(..max_bytes).unwrap_or(value).to_string()
 }
 
 /// A provider registry resolves provider implementations by identifier.
@@ -300,14 +479,14 @@ impl<'a> ProviderRouter<'a> {
             }
         })?;
 
-        if !matches!(
+        if matches!(
             request.provider_class,
-            AssistedAiProviderClass::Local | AssistedAiProviderClass::LocalLoopback
+            AssistedAiProviderClass::Gateway | AssistedAiProviderClass::Unknown
         ) {
             return Ok(self.refused_response(
                 &request,
-                "provider.remote_deferred",
-                "remote provider activation is deferred",
+                "provider.class_unsupported",
+                "provider class is not authorized for direct routing",
             ));
         }
 
@@ -354,12 +533,16 @@ impl<'a> ProviderRouter<'a> {
         }
 
         let completion = provider.complete(
-            ChatCompletionRequest::new(&request.provider_id, &request.model_label, "metadata-only")
-                .with_metadata(
-                    "context_manifest",
-                    request.context_manifest.reference_id.clone(),
-                )
-                .with_metadata("route_id", request.route_id.clone()),
+            ChatCompletionRequest::new(
+                &request.provider_id,
+                &request.model_label,
+                route_prompt(&request),
+            )
+            .with_metadata(
+                "context_manifest",
+                request.context_manifest.reference_id.clone(),
+            )
+            .with_metadata("route_id", request.route_id.clone()),
         )?;
 
         Ok(AssistedAiProviderRouteResponse {
@@ -368,7 +551,7 @@ impl<'a> ProviderRouter<'a> {
             route_decision: allowed_route_decision(),
             provider_id: request.provider_id.clone(),
             model_label: request.model_label.clone(),
-            output_labels: vec![format!("response.bytes:{}", completion.text.len())],
+            output_labels: route_output_labels(&completion),
             refusal: None,
             correlation_id: request.correlation_id,
             causality_id: request.causality_id,
@@ -437,17 +620,79 @@ fn allowed_route_decision() -> AssistedAiRouteDecision {
     }
 }
 
+fn route_prompt(request: &AssistedAiProviderRouteRequest) -> String {
+    format!(
+        "operation={:?}\ncontext_ref={}\nprivacy_ref={}\npermission_ref={}\nintent_labels={}\ntarget_count={}\nredaction=metadata-only",
+        request.operation_class,
+        request.context_manifest.reference_id,
+        request.privacy_inspector.reference_id,
+        request.permission_budget.reference_id,
+        request.proposal_intent.labels.join(","),
+        request.proposal_intent.target_coverage.targets.len(),
+    )
+}
+
+fn route_output_labels(completion: &ChatCompletionResponse) -> Vec<String> {
+    let mut labels = vec![
+        format!("answer.fingerprint:{}", stable_label_hash(&completion.text)),
+        format!("response.bytes:{}", completion.text.len()),
+    ];
+    if let Some(answer_label) = completion.metadata.get("answer.label") {
+        labels.push(format!(
+            "answer.label:{}",
+            bounded_metadata_label(answer_label, 96)
+        ));
+    }
+    if let Some(redaction) = completion.metadata.get("redaction")
+        && redaction == "metadata-only"
+    {
+        labels.push("redaction:metadata-only".to_string());
+    }
+    labels
+}
+
+fn stable_label_hash(value: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn bounded_metadata_label(value: &str, limit: usize) -> String {
+    let mut label = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric()
+                || matches!(character, ':' | '.' | '_' | '-' | '/' | '#')
+            {
+                character
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>();
+    if label.len() > limit {
+        label.truncate(limit);
+    }
+    label
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use devil_protocol::{
         AssistedAiOperationClass, AssistedAiProposalTargetIntent, AssistedAiProviderClass,
-        AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, CancellationTokenId,
-        CapabilityId, CausalityId, CorrelationId, EventSequence, FileFingerprint, NetworkTarget,
-        PrincipalId, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
-        ProposalTargetCoverage, ProposalTargetCoverageKind, WorkspaceTrustState,
+        AssistedAiProviderInvocationState, AssistedAiTrustProjectionKind,
+        AssistedAiTrustProjectionReference, BufferId, BufferVersion, CancellationTokenId,
+        CapabilityId, CapabilityNamespace, CausalityId, CorrelationId, EventSequence,
+        FileContentVersion, FileFingerprint, FileId, InlinePredictionFingerprintMetadata,
+        InlinePredictionLatencyMetadata, InlinePredictionProviderMetadata,
+        InlinePredictionRequestId, InlinePredictionRequestMetadata, InlinePredictionResultState,
+        InlinePredictionTriggerKind, LanguageId, NetworkTarget, PrincipalId, ProposalPayloadKind,
+        ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetCoverage,
+        ProposalTargetCoverageKind, RedactionHint, SnapshotId, TimestampMillis,
+        WorkspaceGeneration, WorkspaceId, WorkspaceTrustState, validate_inline_prediction_result,
     };
-    use devil_security::DenyByDefaultBroker;
+    use devil_security::{AiProviderPolicy, DenyByDefaultBroker, NetworkPolicy, SecurityPolicy};
     use uuid::Uuid;
 
     struct LocalProvider;
@@ -485,6 +730,7 @@ mod tests {
             ProviderCapabilities {
                 completion: false,
                 embedding: false,
+                inline_prediction: false,
             }
         }
 
@@ -567,6 +813,119 @@ mod tests {
         }
     }
 
+    fn inline_prediction_request(max_prediction_bytes: u32) -> InlinePredictionRequest {
+        InlinePredictionRequest {
+            provider: "deterministic-inline".to_string(),
+            model: "zeta2-style-deterministic".to_string(),
+            metadata: InlinePredictionRequestMetadata {
+                request_id: InlinePredictionRequestId("inline:req:ai:1".to_string()),
+                workspace_id: WorkspaceId(11),
+                buffer_id: BufferId(22),
+                file_id: Some(FileId(33)),
+                language_id: LanguageId("rust".to_string()),
+                cursor: devil_protocol::TextCoordinate {
+                    line: 4,
+                    character: 8,
+                    byte_offset: Some(120),
+                    utf16_offset: Some(120),
+                },
+                selection: None,
+                visible_range: None,
+                trigger: InlinePredictionTriggerKind::Automatic,
+                fingerprint: InlinePredictionFingerprintMetadata {
+                    snapshot_id: SnapshotId(66),
+                    buffer_version: BufferVersion(55),
+                    file_content_version: Some(FileContentVersion(44)),
+                    workspace_generation: WorkspaceGeneration(77),
+                    content_fingerprint: Some(FileFingerprint {
+                        algorithm: "sha256".to_string(),
+                        value: "content".to_string(),
+                    }),
+                    context_fingerprint: FileFingerprint {
+                        algorithm: "sha256".to_string(),
+                        value: "context".to_string(),
+                    },
+                    schema_version: 1,
+                },
+                provider: InlinePredictionProviderMetadata {
+                    provider_id: "deterministic-inline".to_string(),
+                    model_label: "zeta2-style-deterministic".to_string(),
+                    provider_class: AssistedAiProviderClass::Local,
+                    operation_class: AssistedAiOperationClass::InlinePrediction,
+                    invocation_state: AssistedAiProviderInvocationState::Planned,
+                    latency: InlinePredictionLatencyMetadata {
+                        queued_ms: 0,
+                        inference_ms: 0,
+                        total_ms: 0,
+                        timed_out: false,
+                    },
+                    health_labels: vec!["deterministic".to_string()],
+                    cost_labels: vec!["local".to_string()],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                },
+                max_prediction_bytes,
+                timeout_ms: 100,
+                requested_at: TimestampMillis(2000),
+                cancellation_token: CancellationTokenId(
+                    Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+                ),
+                required_capability: CapabilityId("ai.inline_prediction.invoke".to_string()),
+                principal_id: PrincipalId("principal".to_string()),
+                workspace_trust_state: WorkspaceTrustState::Trusted,
+                correlation_id: CorrelationId(7),
+                causality_id: CausalityId(
+                    Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap(),
+                ),
+                event_sequence: EventSequence(3),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn deterministic_inline_prediction_provider_uses_inline_path_not_chat_completion() {
+        let provider = DeterministicInlinePredictionProvider::new("deterministic-inline");
+        let capabilities = provider.capabilities();
+        assert!(!capabilities.completion);
+        assert!(capabilities.inline_prediction);
+
+        let chat_error = provider
+            .complete(ChatCompletionRequest::new(
+                "deterministic-inline",
+                "zeta2-style-deterministic",
+                "do not route through chat",
+            ))
+            .expect_err("inline predictor must not accept chat completion");
+        assert!(matches!(
+            chat_error,
+            ProviderError::OperationUnavailable { operation, .. } if operation == "complete"
+        ));
+
+        let response = provider
+            .predict_inline(inline_prediction_request(18))
+            .expect("deterministic inline prediction succeeds");
+
+        assert_eq!(response.provider, "deterministic-inline");
+        assert_eq!(
+            response.result.state,
+            InlinePredictionResultState::Available
+        );
+        assert_eq!(
+            response.result.provider.operation_class,
+            AssistedAiOperationClass::InlinePrediction
+        );
+        let ghost_text = response
+            .result
+            .ghost_text
+            .as_ref()
+            .expect("deterministic path returns bounded ghost text");
+        assert!(ghost_text.byte_len <= 18);
+        assert_eq!(ghost_text.byte_len, ghost_text.text.len() as u32);
+        validate_inline_prediction_result(&response.result).expect("protocol result is valid");
+    }
+
     #[test]
     fn router_invokes_local_provider_only_after_policy_approval() {
         let mut registry = ProviderRegistry::new();
@@ -582,20 +941,33 @@ mod tests {
             response.invocation_state,
             AssistedAiProviderInvocationState::Completed
         );
-        assert_eq!(
-            response.output_labels,
-            vec!["response.bytes:13".to_string()]
+        assert!(
+            response
+                .output_labels
+                .iter()
+                .any(|label| label.starts_with("answer.fingerprint:"))
+        );
+        assert!(
+            response
+                .output_labels
+                .contains(&"response.bytes:13".to_string())
         );
     }
 
     #[test]
-    fn router_refuses_remote_provider_without_invocation() {
+    fn router_refuses_remote_provider_when_policy_denies_target() {
         let registry = ProviderRegistry::new();
         let broker = DenyByDefaultBroker::default();
         let router = ProviderRouter::new(&registry, &broker);
 
+        let mut request = route_request(AssistedAiProviderClass::HostedRemote);
+        request.network_target = Some(NetworkTarget {
+            scheme: "https".to_string(),
+            host: "api.openai.com".to_string(),
+            port: Some(443),
+        });
         let response = router
-            .route_completion(route_request(AssistedAiProviderClass::HostedRemote))
+            .route_completion(request)
             .expect("remote route refusal is represented as metadata");
 
         assert_eq!(
@@ -605,6 +977,52 @@ mod tests {
         assert_eq!(
             response.output_labels,
             vec!["output.not_encoded".to_string()]
+        );
+        assert_eq!(
+            response.refusal.as_ref().unwrap().reason_code,
+            "capability.denied"
+        );
+    }
+
+    #[test]
+    fn router_invokes_remote_byok_provider_when_policy_allows_target() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(LocalProvider));
+        let policy = SecurityPolicy {
+            network_policy: NetworkPolicy {
+                allowlist: vec!["api.openai.com".to_string()],
+                air_gap: false,
+                local_provider_only: false,
+                ..NetworkPolicy::default()
+            },
+            ai_provider_policy: AiProviderPolicy {
+                allow_remote_provider: true,
+                ..AiProviderPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let router = ProviderRouter::new(&registry, &broker);
+        let mut request = route_request(AssistedAiProviderClass::ByokRemote);
+        request.network_target = Some(NetworkTarget {
+            scheme: "https".to_string(),
+            host: "api.openai.com".to_string(),
+            port: Some(443),
+        });
+
+        let response = router
+            .route_completion(request)
+            .expect("allowed remote route completes");
+
+        assert_eq!(
+            response.invocation_state,
+            AssistedAiProviderInvocationState::Completed
+        );
+        assert!(
+            response
+                .output_labels
+                .iter()
+                .any(|label| label.starts_with("answer.fingerprint:"))
         );
     }
 

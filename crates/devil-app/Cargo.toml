@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["ai"]
+ai = ["dep:devil-agent", "dep:devil-ai", "dep:devil-ai-providers"]
+offline = []
+
 [dependencies]
 anyhow = { workspace = true }
 devil-editor = { workspace = true }
@@ -19,11 +24,12 @@ devil-security = { workspace = true }
 devil-storage = { workspace = true }
 devil-terminal = { workspace = true }
 devil-ui = { workspace = true }
-devil-agent = { workspace = true }
-devil-ai = { workspace = true }
-devil-ai-providers = { workspace = true }
+devil-agent = { workspace = true, optional = true }
+devil-ai = { workspace = true, optional = true }
+devil-ai-providers = { workspace = true, optional = true }
 devil-tracker = { workspace = true }
 devil-memory = { workspace = true }
 devil-plugin = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+serde_json = { workspace = true }

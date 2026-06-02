@@ -6,14 +6,18 @@ use std::collections::{HashMap, HashSet};
 
 use devil_protocol::{
     CancellationTokenId, CanonicalPath, CapabilityDecision, CorrelationId, EventSequence,
-    FileContentVersion, FileFingerprint, FileId, ProposalId, RedactionHint, RemoteAuditRecord,
-    RemoteFilesystemOperation, RemoteFilesystemOperationKind, RemoteFilesystemSnapshot,
-    RemoteNetworkHealthState, RemoteOfflineResumeManifest, RemoteOperationId,
-    RemoteOperationLogCheckpoint, RemoteProcessDescriptor, RemotePtyDescriptor,
-    RemoteSemanticQueryDescriptor, RemoteTransportEnvelope, RemoteTransportPayload,
-    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
-    RemoteWritePreconditions, RetentionLabel, SnapshotId, WorkspaceGeneration,
+    FileContentVersion, FileFingerprint, FileId, PrincipalId, ProposalId, RedactionHint,
+    RemoteAgentDescriptor, RemoteAgentId, RemoteAuditRecord, RemoteAuthorityDescriptor,
+    RemoteAuthorityId, RemoteCapabilityKind, RemoteFilesystemOperation,
+    RemoteFilesystemOperationKind, RemoteFilesystemSnapshot, RemoteNetworkHealthState,
+    RemoteOfflineResumeManifest, RemoteOperationId, RemoteOperationLogCheckpoint,
+    RemoteProcessDescriptor, RemotePtyDescriptor, RemoteSemanticQueryDescriptor,
+    RemoteTransportEnvelope, RemoteTransportPayload, RemoteWorkspaceLifecycleState,
+    RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId, RemoteWritePreconditions,
+    RetentionLabel, SnapshotId, TimestampMillis, WorkspaceGeneration, WorkspaceId,
+    WorkspaceTrustState,
 };
+use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -113,6 +117,241 @@ impl Default for RemoteRuntimeConfig {
             max_output_bytes: 256 * 1024,
         }
     }
+}
+
+/// Remote connection kind accepted by the policy-gated session planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteConnectionKind {
+    /// SSH authority backed by a headless remote agent.
+    Ssh,
+    /// Devcontainer authority backed by a headless remote agent.
+    Devcontainer,
+}
+
+/// Policy-validated remote connection request metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteConnectionSpec {
+    /// Session identifier assigned by app-owned composition.
+    pub session_id: RemoteWorkspaceSessionId,
+    /// Authority identifier assigned by app-owned composition.
+    pub authority_id: RemoteAuthorityId,
+    /// Agent identifier assigned by app-owned composition.
+    pub agent_id: RemoteAgentId,
+    /// Local workspace projection identifier.
+    pub workspace_id: WorkspaceId,
+    /// Principal requesting the session.
+    pub principal_id: PrincipalId,
+    /// Redacted authority label, for example `ssh:user@host` or `devcontainer:name`.
+    pub authority_label: String,
+    /// Redacted workspace root label.
+    pub workspace_root_label: String,
+    /// Credential reference label or hash.
+    pub credential_reference_label: String,
+    /// Remote agent version label.
+    pub agent_version: String,
+    /// Trust state observed before activation.
+    pub trust_state: WorkspaceTrustState,
+    /// Capability kinds granted by policy for this session.
+    pub granted_capabilities: Vec<RemoteCapabilityKind>,
+}
+
+/// Parsed, metadata-only devcontainer configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteDevcontainerConfig {
+    /// Display-safe devcontainer name.
+    pub name_label: String,
+    /// Display-safe image or Dockerfile label.
+    pub image_label: String,
+    /// Display-safe remote user label.
+    pub remote_user_label: Option<String>,
+    /// Display-safe workspace folder label.
+    pub workspace_folder_label: Option<String>,
+    /// Number of declared features.
+    pub feature_count: usize,
+    /// Number of declared mounts.
+    pub mount_count: usize,
+}
+
+/// Policy-gated remote connection plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteConnectionPlan {
+    /// Connection kind.
+    pub kind: RemoteConnectionKind,
+    /// Session descriptor accepted by `RemoteSessionRuntime`.
+    pub descriptor: RemoteWorkspaceSessionDescriptor,
+    /// Display-safe workspace root label.
+    pub workspace_root_label: String,
+    /// Credential reference label or hash.
+    pub credential_reference_label: String,
+    /// Parsed devcontainer metadata, when applicable.
+    pub devcontainer: Option<RemoteDevcontainerConfig>,
+}
+
+/// Build an active SSH remote session plan without spawning ambient processes.
+pub fn plan_ssh_session(
+    spec: RemoteConnectionSpec,
+) -> Result<RemoteConnectionPlan, RemoteRuntimeError> {
+    validate_connection_spec(&spec)?;
+    Ok(RemoteConnectionPlan {
+        kind: RemoteConnectionKind::Ssh,
+        descriptor: descriptor_from_connection_spec(&spec),
+        workspace_root_label: spec.workspace_root_label,
+        credential_reference_label: spec.credential_reference_label,
+        devcontainer: None,
+    })
+}
+
+/// Parse `devcontainer.json` and build an active devcontainer remote session plan.
+pub fn plan_devcontainer_session_from_json(
+    spec: RemoteConnectionSpec,
+    devcontainer_json: &str,
+) -> Result<RemoteConnectionPlan, RemoteRuntimeError> {
+    validate_connection_spec(&spec)?;
+    let value = serde_json::from_str::<Value>(devcontainer_json).map_err(|error| {
+        RemoteRuntimeError::InvalidSession {
+            reason: format!("invalid devcontainer.json: {error}"),
+        }
+    })?;
+    let devcontainer = parse_devcontainer_config(&value)?;
+    Ok(RemoteConnectionPlan {
+        kind: RemoteConnectionKind::Devcontainer,
+        descriptor: descriptor_from_connection_spec(&spec),
+        workspace_root_label: spec.workspace_root_label,
+        credential_reference_label: spec.credential_reference_label,
+        devcontainer: Some(devcontainer),
+    })
+}
+
+/// Returns the conservative remote capabilities granted by connection planners.
+pub fn default_remote_capabilities() -> Vec<RemoteCapabilityKind> {
+    vec![
+        RemoteCapabilityKind::Connect,
+        RemoteCapabilityKind::FilesystemRead,
+        RemoteCapabilityKind::FilesystemWrite,
+        RemoteCapabilityKind::TerminalAccess,
+        RemoteCapabilityKind::LspLaunch,
+        RemoteCapabilityKind::AuditExport,
+        RemoteCapabilityKind::OfflineResume,
+    ]
+}
+
+fn validate_connection_spec(spec: &RemoteConnectionSpec) -> Result<(), RemoteRuntimeError> {
+    if spec.session_id.0 == 0 || spec.authority_id.0 == 0 || spec.agent_id.0 == 0 {
+        return Err(RemoteRuntimeError::InvalidSession {
+            reason: "remote identifiers must be non-zero".to_string(),
+        });
+    }
+    if spec.authority_label.trim().is_empty()
+        || spec.workspace_root_label.trim().is_empty()
+        || spec.credential_reference_label.trim().is_empty()
+        || spec.agent_version.trim().is_empty()
+        || spec.principal_id.0.trim().is_empty()
+    {
+        return Err(RemoteRuntimeError::InvalidSession {
+            reason: "connection labels and principal must be non-empty".to_string(),
+        });
+    }
+    if spec.trust_state != WorkspaceTrustState::Trusted {
+        return Err(RemoteRuntimeError::PolicyDenied {
+            reason: "remote connection requires a trusted workspace".to_string(),
+        });
+    }
+    if !spec
+        .granted_capabilities
+        .contains(&RemoteCapabilityKind::Connect)
+    {
+        return Err(RemoteRuntimeError::PolicyDenied {
+            reason: "remote connection requires Connect capability".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn descriptor_from_connection_spec(
+    spec: &RemoteConnectionSpec,
+) -> RemoteWorkspaceSessionDescriptor {
+    RemoteWorkspaceSessionDescriptor {
+        session_id: spec.session_id,
+        authority: RemoteAuthorityDescriptor {
+            authority_id: spec.authority_id,
+            authority_label: spec.authority_label.clone(),
+            workspace_id: spec.workspace_id,
+            trust_state: spec.trust_state.clone(),
+            principal_id: spec.principal_id.clone(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        agent: RemoteAgentDescriptor {
+            agent_id: spec.agent_id,
+            authority_id: spec.authority_id,
+            agent_version: spec.agent_version.clone(),
+            runtime_enabled: true,
+            schema_version: 1,
+        },
+        state: RemoteWorkspaceLifecycleState::Active,
+        granted_capabilities: spec.granted_capabilities.clone(),
+        created_at: TimestampMillis::now(),
+        last_heartbeat_at: Some(TimestampMillis::now()),
+        schema_version: 1,
+    }
+}
+
+fn parse_devcontainer_config(
+    value: &Value,
+) -> Result<RemoteDevcontainerConfig, RemoteRuntimeError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| RemoteRuntimeError::InvalidSession {
+            reason: "devcontainer.json root must be an object".to_string(),
+        })?;
+    let name_label = object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("devcontainer")
+        .to_string();
+    let image_label = object
+        .get("image")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .get("build")
+                .and_then(|build| build.get("dockerfile"))
+                .and_then(Value::as_str)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| RemoteRuntimeError::InvalidSession {
+            reason: "devcontainer.json requires image or build.dockerfile".to_string(),
+        })?
+        .to_string();
+    let remote_user_label = object
+        .get("remoteUser")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let workspace_folder_label = object
+        .get("workspaceFolder")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let feature_count = object
+        .get("features")
+        .and_then(Value::as_object)
+        .map(|features| features.len())
+        .unwrap_or(0);
+    let mount_count = object
+        .get("mounts")
+        .and_then(Value::as_array)
+        .map(|mounts| mounts.len())
+        .unwrap_or(0);
+    Ok(RemoteDevcontainerConfig {
+        name_label,
+        image_label,
+        remote_user_label,
+        workspace_folder_label,
+        feature_count,
+        mount_count,
+    })
 }
 
 /// Remote operation disposition emitted by the deterministic runtime.
@@ -1176,6 +1415,92 @@ mod tests {
             RemoteRuntimeConfig::enabled(),
         )
         .expect("remote runtime should start")
+    }
+
+    fn connection_spec(
+        session_id: u128,
+        authority_label: &str,
+        credential_reference_label: &str,
+    ) -> RemoteConnectionSpec {
+        RemoteConnectionSpec {
+            session_id: RemoteWorkspaceSessionId(session_id),
+            authority_id: devil_protocol::RemoteAuthorityId(session_id + 1),
+            agent_id: devil_protocol::RemoteAgentId(session_id + 2),
+            workspace_id: WorkspaceId(11),
+            principal_id: PrincipalId("principal-remote".to_string()),
+            authority_label: authority_label.to_string(),
+            workspace_root_label: "/workspace/project".to_string(),
+            credential_reference_label: credential_reference_label.to_string(),
+            agent_version: "devil-remote-agent:metadata".to_string(),
+            trust_state: WorkspaceTrustState::Trusted,
+            granted_capabilities: default_remote_capabilities(),
+        }
+    }
+
+    #[test]
+    fn ssh_connection_plan_activates_remote_runtime() {
+        let plan = plan_ssh_session(connection_spec(
+            9101,
+            "ssh:principal@example.invalid",
+            "credential:ssh-key:test",
+        ))
+        .expect("ssh plan should be accepted");
+
+        assert_eq!(plan.kind, RemoteConnectionKind::Ssh);
+        assert!(plan.descriptor.activation_is_policy_ready());
+        let runtime = RemoteSessionRuntime::new(
+            plan.descriptor,
+            WorkspaceGeneration(1),
+            RemoteRuntimeConfig::enabled(),
+        )
+        .expect("planned ssh descriptor should activate runtime");
+        assert_eq!(runtime.state(), RemoteWorkspaceLifecycleState::Active);
+    }
+
+    #[test]
+    fn devcontainer_connection_plan_parses_config_and_activates_runtime() {
+        let plan = plan_devcontainer_session_from_json(
+            connection_spec(9201, "devcontainer:test", "credential:docker-context:test"),
+            r#"{
+                "name": "Rust",
+                "image": "mcr.microsoft.com/devcontainers/rust:latest",
+                "remoteUser": "vscode",
+                "workspaceFolder": "/workspaces/devil",
+                "features": {
+                    "ghcr.io/devcontainers/features/rust:1": {}
+                },
+                "mounts": ["source=cache,target=/cache,type=volume"]
+            }"#,
+        )
+        .expect("devcontainer plan should be accepted");
+
+        assert_eq!(plan.kind, RemoteConnectionKind::Devcontainer);
+        let devcontainer = plan.devcontainer.expect("devcontainer metadata");
+        assert_eq!(devcontainer.name_label, "Rust");
+        assert_eq!(devcontainer.feature_count, 1);
+        assert_eq!(devcontainer.mount_count, 1);
+        let runtime = RemoteSessionRuntime::new(
+            plan.descriptor,
+            WorkspaceGeneration(1),
+            RemoteRuntimeConfig::enabled(),
+        )
+        .expect("planned devcontainer descriptor should activate runtime");
+        assert_eq!(runtime.state(), RemoteWorkspaceLifecycleState::Active);
+    }
+
+    #[test]
+    fn devcontainer_connection_plan_fails_closed_without_image_or_dockerfile() {
+        let error = plan_devcontainer_session_from_json(
+            connection_spec(9301, "devcontainer:test", "credential:docker-context:test"),
+            r#"{ "name": "missing image" }"#,
+        )
+        .expect_err("devcontainer without image/dockerfile must fail closed");
+
+        assert!(matches!(
+            error,
+            RemoteRuntimeError::InvalidSession { reason }
+                if reason.contains("image or build.dockerfile")
+        ));
     }
 
     #[test]

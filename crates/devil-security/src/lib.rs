@@ -11,7 +11,10 @@ use std::{
 use devil_protocol::{
     CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityDenial,
     CapabilityGrant, CapabilityId, CapabilityNamespace, CapabilityRequest,
-    CapabilityRequestContext, CapabilityResponse, CorrelationId, PrincipalId, WorkspaceTrustState,
+    CapabilityRequestContext, CapabilityResponse, CorrelationId,
+    DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionRequest,
+    DelegatedTaskToolPermissionRequestInput, McpServerId, McpToolDescriptor, McpToolName,
+    PrincipalId, WorkspaceTrustState, delegated_task_tool_permission_request,
 };
 use thiserror::Error;
 
@@ -179,6 +182,50 @@ impl Default for PathPolicy {
             max_write_bytes: 512 * 1024,
         }
     }
+}
+
+/// Builds the canonical MCP tool permission target identifier.
+pub fn mcp_tool_target_id(server_id: &McpServerId, tool_name: &McpToolName) -> String {
+    format!("mcp-tool:{}|{}", server_id.0, tool_name.0)
+}
+
+/// Builds display-safe policy labels for an MCP tool permission request.
+pub fn mcp_tool_permission_labels(
+    session_label: impl Into<String>,
+    tool: &McpToolDescriptor,
+) -> Vec<String> {
+    vec![
+        "automate.permission.mcp_tool_call".to_string(),
+        session_label.into(),
+        format!("mcp.server:{}", tool.server_id.0),
+        format!("mcp.tool:{}", tool.name.0),
+        format!("mcp.capability:{}", tool.capability.0),
+    ]
+}
+
+/// Builds an MCP tool permission request from the security-owned descriptor policy.
+pub fn mcp_tool_permission_request(
+    request_id: impl Into<String>,
+    tool: &McpToolDescriptor,
+    decision: DelegatedTaskToolPermissionDecision,
+    session_label: impl Into<String>,
+    schema_version: u16,
+) -> DelegatedTaskToolPermissionRequest {
+    delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+        request_id: request_id.into(),
+        profile: tool.required_permission_profile,
+        action_class: tool.action_class,
+        capability: Some(tool.capability.clone()),
+        target_id: Some(mcp_tool_target_id(&tool.server_id, &tool.name)),
+        decision,
+        labels: mcp_tool_permission_labels(session_label, tool),
+        schema_version,
+    })
+}
+
+/// Evaluates whether an MCP tool permission allows runtime invocation.
+pub fn mcp_tool_permission_allows_runtime(permission: &DelegatedTaskToolPermissionRequest) -> bool {
+    permission.runtime_allowed && permission.human_approval_recorded && !permission.deny_overrides
 }
 
 impl fmt::Display for TrustState {
@@ -1612,7 +1659,11 @@ impl CapabilityBrokerPort for DenyByDefaultBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devil_protocol::CapabilityRequest;
+    use devil_protocol::{
+        CapabilityRequest, DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
+        FileFingerprint, McpToolDescriptor, McpToolName, PermissionBudgetActionClass,
+        ProposalRiskLabel, RedactionHint,
+    };
 
     #[test]
     fn trust_state_conversion_roundtrips() {
@@ -1658,6 +1709,58 @@ mod tests {
         };
 
         assert!(!policy.can_access("/repo/root/../../outside.txt", PathAccess::Write));
+    }
+
+    #[test]
+    fn mcp_tool_permission_policy_uses_descriptor_fields_and_deny_override() {
+        let server_id = McpServerId("mcp:test".to_string());
+        let tool = McpToolDescriptor {
+            server_id: server_id.clone(),
+            name: McpToolName("write_file".to_string()),
+            description_label: "write file".to_string(),
+            input_schema_hash: FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: "schema".to_string(),
+            },
+            risk_label: ProposalRiskLabel::High,
+            required_permission_profile: DelegatedTaskToolPermissionProfile::Write,
+            action_class: PermissionBudgetActionClass::InvokeLocalTool,
+            capability: CapabilityId("mcp.tool.call".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+
+        let allow = mcp_tool_permission_request(
+            "permission:allow",
+            &tool,
+            DelegatedTaskToolPermissionDecision::Allow,
+            "legion.session:session:test",
+            1,
+        );
+        assert_eq!(allow.profile, DelegatedTaskToolPermissionProfile::Write);
+        assert_eq!(
+            allow.action_class,
+            PermissionBudgetActionClass::InvokeLocalTool
+        );
+        assert_eq!(
+            allow.capability,
+            Some(CapabilityId("mcp.tool.call".to_string()))
+        );
+        assert_eq!(
+            allow.target_id,
+            Some("mcp-tool:mcp:test|write_file".to_string())
+        );
+        assert!(mcp_tool_permission_allows_runtime(&allow));
+
+        let deny = mcp_tool_permission_request(
+            "permission:deny",
+            &tool,
+            DelegatedTaskToolPermissionDecision::Deny,
+            "legion.session:session:test",
+            1,
+        );
+        assert!(!mcp_tool_permission_allows_runtime(&deny));
+        assert!(deny.deny_overrides);
     }
 
     #[test]

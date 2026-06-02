@@ -12,12 +12,16 @@ use std::{
 
 use devil_platform::{PtyKillMode, PtyRequest, PtyService};
 use devil_protocol::{
-    CausalityId, CorrelationId, EventSequence, RedactionHint, TerminalAuditRecord,
+    CanonicalPath, CausalityId, CorrelationId, DebugAdapterAuditRecord, DebugAdapterLaunchRequest,
+    DebugBreakpointRecord, DebugConsoleCategory, DebugConsoleEntry, DebugInlineValue,
+    DebugSessionId, DebugSessionState, DebugStackFrame, DebugStepKind, DebugVariable,
+    DebugWatchExpression, EventSequence, ProtocolTextRange, RedactionHint, TerminalAuditRecord,
     TerminalCloseRequest, TerminalInput, TerminalKillEscalation, TerminalKillRequest,
     TerminalLaunchPolicyContract, TerminalOutputChunk, TerminalResize, TerminalRuntimeState,
-    TerminalSessionId, WorkspaceTrustState, validate_terminal_audit_record,
-    validate_terminal_close_request, validate_terminal_input, validate_terminal_kill_request,
-    validate_terminal_launch_policy_contract, validate_terminal_resize,
+    TerminalSessionId, TextCoordinate, WorkspaceTrustState, validate_debug_adapter_audit_record,
+    validate_terminal_audit_record, validate_terminal_close_request, validate_terminal_input,
+    validate_terminal_kill_request, validate_terminal_launch_policy_contract,
+    validate_terminal_resize,
 };
 use thiserror::Error;
 
@@ -61,6 +65,242 @@ pub enum TerminalRuntimeError {
         /// Backend failure reason.
         reason: String,
     },
+}
+
+/// Debug adapter fixture error.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DapAdapterFixtureError {
+    /// Fixture runtime is disabled.
+    #[error("DAP adapter fixture is disabled")]
+    Disabled,
+    /// Launch request was invalid.
+    #[error("DAP adapter fixture denied launch: {reason}")]
+    Denied {
+        /// Display-safe denial reason.
+        reason: String,
+    },
+}
+
+/// Deterministic DAP adapter fixture configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DapAdapterFixtureConfig {
+    /// Whether fixture behavior is enabled.
+    pub enabled: bool,
+}
+
+impl DapAdapterFixtureConfig {
+    /// Return an enabled fixture configuration.
+    pub fn enabled() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Deterministic DAP launch/step projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DapAdapterFixtureOutcome {
+    /// Metadata-only adapter audit.
+    pub audit: DebugAdapterAuditRecord,
+    /// Verified breakpoint metadata.
+    pub breakpoints: Vec<DebugBreakpointRecord>,
+    /// Projected stack frames.
+    pub stack_frames: Vec<DebugStackFrame>,
+    /// Projected variables.
+    pub variables: Vec<DebugVariable>,
+    /// Projected watch expressions.
+    pub watches: Vec<DebugWatchExpression>,
+    /// Projected inline values.
+    pub inline_values: Vec<DebugInlineValue>,
+    /// Projected debug console entries.
+    pub console: Vec<DebugConsoleEntry>,
+}
+
+/// Deterministic metadata-only DAP adapter fixture runtime.
+#[derive(Debug, Clone)]
+pub struct DapAdapterFixtureRuntime {
+    config: DapAdapterFixtureConfig,
+}
+
+impl DapAdapterFixtureRuntime {
+    /// Construct a runtime from configuration.
+    pub fn new(config: DapAdapterFixtureConfig) -> Self {
+        Self { config }
+    }
+
+    /// Launch a deterministic paused debug session.
+    pub fn launch(
+        &self,
+        request: DebugAdapterLaunchRequest,
+    ) -> Result<DapAdapterFixtureOutcome, DapAdapterFixtureError> {
+        if !self.config.enabled {
+            return Err(DapAdapterFixtureError::Disabled);
+        }
+        if request.workspace_id.0 == 0
+            || request.configuration_id.0.trim().is_empty()
+            || request.adapter_type.trim().is_empty()
+            || request.schema_version == 0
+        {
+            return Err(DapAdapterFixtureError::Denied {
+                reason: "debug launch request is incomplete".to_string(),
+            });
+        }
+        let session_id = DebugSessionId(format!(
+            "debug:{}:{}",
+            request.workspace_id.0, request.configuration_id.0
+        ));
+        let sequence = EventSequence(1);
+        let audit = DebugAdapterAuditRecord {
+            session_id: session_id.clone(),
+            state: DebugSessionState::Paused,
+            adapter_type: request.adapter_type.clone(),
+            event_sequence: sequence,
+            correlation_id: CorrelationId(request.workspace_id.0 as u64),
+            causality_id: CausalityId(uuid_from_value(request.workspace_id.0 as u64)),
+            metadata_summary: format!(
+                "action=launch state=paused adapter={} breakpoints={}",
+                request.adapter_type,
+                request.breakpoints.len()
+            ),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_debug_adapter_audit_record(&audit).map_err(|err| {
+            DapAdapterFixtureError::Denied {
+                reason: err.message,
+            }
+        })?;
+        let breakpoints = request
+            .breakpoints
+            .into_iter()
+            .map(|mut breakpoint| {
+                breakpoint.session_id = Some(session_id.clone());
+                breakpoint.verified = true;
+                breakpoint.message = Some("verified by deterministic DAP fixture".to_string());
+                breakpoint
+            })
+            .collect::<Vec<_>>();
+        let first_path = breakpoints
+            .first()
+            .map(|breakpoint| breakpoint.path.clone())
+            .unwrap_or_else(|| CanonicalPath("workspace://debug-entry".to_string()));
+        let first_range = breakpoints
+            .first()
+            .map(|breakpoint| breakpoint.range)
+            .unwrap_or_else(debug_zero_range);
+        Ok(DapAdapterFixtureOutcome {
+            audit: audit.clone(),
+            breakpoints,
+            stack_frames: vec![DebugStackFrame {
+                session_id: session_id.clone(),
+                frame_id: 1,
+                name: "main".to_string(),
+                path: Some(first_path.clone()),
+                range: Some(first_range),
+                schema_version: 1,
+            }],
+            variables: vec![DebugVariable {
+                session_id: session_id.clone(),
+                variables_reference: 1,
+                name: "count".to_string(),
+                value_label: "metadata-only".to_string(),
+                type_label: Some("i32".to_string()),
+                has_children: false,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            watches: Vec::new(),
+            inline_values: vec![DebugInlineValue {
+                session_id: session_id.clone(),
+                path: first_path,
+                range: first_range,
+                expression_label: "count".to_string(),
+                value_label: "metadata-only".to_string(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            console: vec![DebugConsoleEntry {
+                session_id,
+                category: DebugConsoleCategory::Adapter,
+                message_label: format!(
+                    "launch adapter={} configuration={}",
+                    request.adapter_type, request.configuration_id.0
+                ),
+                sequence,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+        })
+    }
+
+    /// Project a deterministic paused step outcome.
+    pub fn step(
+        &self,
+        session_id: DebugSessionId,
+        kind: DebugStepKind,
+    ) -> Result<DapAdapterFixtureOutcome, DapAdapterFixtureError> {
+        if !self.config.enabled {
+            return Err(DapAdapterFixtureError::Disabled);
+        }
+        if session_id.0.trim().is_empty() {
+            return Err(DapAdapterFixtureError::Denied {
+                reason: "debug session id is required".to_string(),
+            });
+        }
+        let label = match kind {
+            DebugStepKind::Continue => "continue",
+            DebugStepKind::Over => "over",
+            DebugStepKind::Into => "into",
+            DebugStepKind::Out => "out",
+            DebugStepKind::Back => "back",
+        };
+        let audit = DebugAdapterAuditRecord {
+            session_id: session_id.clone(),
+            state: DebugSessionState::Paused,
+            adapter_type: "lldb-dap".to_string(),
+            event_sequence: EventSequence(2),
+            correlation_id: CorrelationId(2),
+            causality_id: CausalityId(uuid_from_value(2)),
+            metadata_summary: format!("action=step state=paused step={label}"),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_debug_adapter_audit_record(&audit).map_err(|err| {
+            DapAdapterFixtureError::Denied {
+                reason: err.message,
+            }
+        })?;
+        Ok(DapAdapterFixtureOutcome {
+            audit,
+            breakpoints: Vec::new(),
+            stack_frames: vec![DebugStackFrame {
+                session_id: session_id.clone(),
+                frame_id: 1,
+                name: "main".to_string(),
+                path: None,
+                range: None,
+                schema_version: 1,
+            }],
+            variables: vec![DebugVariable {
+                session_id: session_id.clone(),
+                variables_reference: 1,
+                name: "count".to_string(),
+                value_label: "metadata-only".to_string(),
+                type_label: Some("i32".to_string()),
+                has_children: false,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            watches: Vec::new(),
+            inline_values: Vec::new(),
+            console: vec![DebugConsoleEntry {
+                session_id,
+                category: DebugConsoleCategory::Adapter,
+                message_label: format!("step={label} state=paused"),
+                sequence: EventSequence(2),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+        })
+    }
 }
 
 /// Production terminal runtime configuration.
@@ -746,6 +986,23 @@ fn redact_terminal_projection(output: &str, limit: u64) -> String {
 
 fn uuid_from_value(value: u64) -> uuid::Uuid {
     uuid::Uuid::from_u128(0x018f_0000_0000_7000_8000_1000_0000_0000_u128 + value as u128)
+}
+
+fn debug_zero_range() -> ProtocolTextRange {
+    ProtocolTextRange {
+        start: TextCoordinate {
+            line: 0,
+            character: 0,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+        end: TextCoordinate {
+            line: 0,
+            character: 0,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+    }
 }
 
 #[cfg(test)]

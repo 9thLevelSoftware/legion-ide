@@ -5,9 +5,17 @@
 pub mod ui;
 
 pub use ui::{
-    ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
-    ExplorerSelectionProjection, Layout, RenderMode, SearchProjection, SearchResultProjection,
-    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, Shell,
-    ShellCommandError, ShellLayoutProjection, ShellProjectionSnapshot, StatusMessageProjection,
-    StatusSeverity,
+    ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
+    AssistInlinePredictionStatusProjection, CommandDispatchIntent, DebugBreakpointProjection,
+    DebugConfigurationProjection, DebugConsoleProjection, DebugInlineValueProjection,
+    DebugProjection, DebugStackFrameProjection, DebugStatusKindProjection, DebugStatusProjection,
+    DebugStepKindProjection, DebugVariableProjection, DebugWatchProjection, DockLayout, DockMode,
+    DockPanel, DockPanelDescriptor, DockPanelStateError, DockSide, DockSideLayout,
+    ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
+    GitBlameLineProjection, GitCommitProjection, GitConflictProjection, GitDiffStrategyProjection,
+    GitFileProjection, GitHunkProjection, GitHunkStageProjection, GitProjection, Layout, PanelId,
+    PanelRegistry, RenderMode, SearchProjection, SearchResultProjection, SearchScopeProjection,
+    SearchStatusKindProjection, SearchStatusProjection, Shell, ShellCommandError,
+    ShellLayoutProjection, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
 };

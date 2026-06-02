@@ -1,20 +1,24 @@
 //! Projection-only UI primitives for the native shell.
 
 use devil_protocol::{
-    AgentRunId, ArtifactLedgerProjection, AssistedAiProjection, BufferId, CanonicalPath,
-    CheckpointRollbackProjection, CollaborationGuiProjection, CollaborationParticipantId,
-    CollaborationPresenceProjection, CollaborationSessionId, CommandRegistryProjection,
-    ContextManifestEgressStatus, ContextManifestProjection, ContextManifestPurpose,
-    ContextManifestRecord, DelegatedTaskProjection, DelegatedTaskRuntimeActivationState, FileId,
-    LanguageToolingProjection, LegionWorkflowConflictId, LegionWorkflowProjection,
-    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowVerificationGateId,
-    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
+    AgentRunId, ArtifactLedgerProjection, AssistedAiProjection, BufferId, BufferVersion,
+    CanonicalPath, CheckpointRollbackProjection, CollaborationGuiProjection,
+    CollaborationParticipantId, CollaborationPresenceProjection, CollaborationSessionId,
+    CommandRegistryProjection, ContextManifestEgressStatus, ContextManifestProjection,
+    ContextManifestPurpose, ContextManifestRecord, DebugBreakpointId, DebugConfigurationId,
+    DebugSessionId, DebugSessionState, DelegatedTaskProjection,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskRuntimeActivationState,
+    DelegatedTaskToolPermissionDecision, FileFingerprint, FileId, LanguageToolingProjection,
+    LegionWorkflowConflictId, LegionWorkflowProjection, LegionWorkflowSessionId,
+    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, PermissionBudgetProjection,
+    PluginContributionProjection, PluginId, PrivacyInspectorProjection,
     ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
     ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
-    ProposalRollbackReason, ProtocolTextRange, RedactionHint, RemoteGuiProjection,
+    ProposalRollbackReason, ProtocolTextRange, RedactionHint, RemoteGuiProjection, SnapshotId,
     SystemGraphProjection, TerminalPanelProjection, TerminalSessionId, TextCoordinate,
     TimestampMillis, VerificationRunProjection, ViewportScroll, WorkspaceId,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Render mode for shell projections.
@@ -94,6 +98,523 @@ impl ShellLayoutProjection {
     }
 }
 
+/// Product mode used by dock registry filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum DockMode {
+    /// Manual deterministic mode. AI-backed panels are not constructible here.
+    Manual,
+    /// Assist mode exposes inline/model-assisted panels without delegation.
+    Assist,
+    /// Delegate mode exposes chat, approval, and bounded delegated-task panels.
+    Delegate,
+    /// Automate mode exposes workflow/fleet panels.
+    Automate,
+}
+
+impl DockMode {
+    /// Stable user-facing label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Assist => "Assist",
+            Self::Delegate => "Delegate",
+            Self::Automate => "Automate",
+        }
+    }
+}
+
+/// Stable dock side identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum DockSide {
+    /// Left dock.
+    Left,
+    /// Right dock.
+    Right,
+    /// Bottom dock.
+    Bottom,
+}
+
+impl DockSide {
+    /// Stable user-facing label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::Bottom => "Bottom",
+        }
+    }
+}
+
+/// Stable panel identifier used by shared dock registry and persisted layouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum PanelId {
+    /// Workspace file explorer.
+    ProjectExplorer,
+    /// Symbol outline.
+    SymbolOutline,
+    /// Search results.
+    Search,
+    /// Diagnostics/problems.
+    Diagnostics,
+    /// Quick-fix/code action projection.
+    QuickFixes,
+    /// References/definitions results.
+    References,
+    /// Structural search and replace toolkit.
+    StructuralSearch,
+    /// Git status/history/diff projection.
+    Git,
+    /// Debugger projection.
+    Debug,
+    /// Test explorer.
+    TestExplorer,
+    /// Coverage projection.
+    Coverage,
+    /// Dependency/security inspector.
+    DependencyInspector,
+    /// REPL/scratchpad terminal.
+    Repl,
+    /// Terminal panel.
+    Terminal,
+    /// Manual trust/context inspector.
+    Context,
+    /// Inline assistant panel.
+    Assistant,
+    /// Delegated task panel.
+    Delegation,
+    /// Approval queue panel.
+    ApprovalQueue,
+    /// Automate/fleet console.
+    AgentFleet,
+    /// Agent decision feed.
+    DecisionFeed,
+    /// Agent log stream.
+    AgentLogs,
+    /// Legion workflow command center.
+    Workflow,
+    /// Plugin contribution manager.
+    PluginManager,
+    /// Collaboration panel.
+    Collaboration,
+    /// Remote workspace panel.
+    RemoteWorkspace,
+}
+
+impl PanelId {
+    /// Stable lowercase identifier used in persisted layout state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectExplorer => "project_explorer",
+            Self::SymbolOutline => "symbol_outline",
+            Self::Search => "search",
+            Self::Diagnostics => "diagnostics",
+            Self::QuickFixes => "quick_fixes",
+            Self::References => "references",
+            Self::StructuralSearch => "structural_search",
+            Self::Git => "git",
+            Self::Debug => "debug",
+            Self::TestExplorer => "test_explorer",
+            Self::Coverage => "coverage",
+            Self::DependencyInspector => "dependency_inspector",
+            Self::Repl => "repl",
+            Self::Terminal => "terminal",
+            Self::Context => "context",
+            Self::Assistant => "assistant",
+            Self::Delegation => "delegation",
+            Self::ApprovalQueue => "approval_queue",
+            Self::AgentFleet => "agent_fleet",
+            Self::DecisionFeed => "decision_feed",
+            Self::AgentLogs => "agent_logs",
+            Self::Workflow => "workflow",
+            Self::PluginManager => "plugin_manager",
+            Self::Collaboration => "collaboration",
+            Self::RemoteWorkspace => "remote_workspace",
+        }
+    }
+}
+
+/// Registered dock panel metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockPanelDescriptor {
+    /// Stable panel id.
+    pub id: PanelId,
+    /// Display title.
+    pub title: String,
+    /// Short icon label for renderers that do not have an icon set.
+    pub icon: String,
+    /// Default dock side.
+    pub default_dock: DockSide,
+    /// Whether constructing this panel requires AI-capable product mode.
+    pub requires_ai: bool,
+}
+
+impl DockPanelDescriptor {
+    /// Construct a panel descriptor.
+    pub fn new(
+        id: PanelId,
+        title: impl Into<String>,
+        icon: impl Into<String>,
+        default_dock: DockSide,
+        requires_ai: bool,
+    ) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            icon: icon.into(),
+            default_dock,
+            requires_ai,
+        }
+    }
+}
+
+/// Errors returned when persisted dock-panel state cannot be restored.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DockPanelStateError {
+    /// Persisted state is malformed or belongs to another panel.
+    #[error("invalid dock panel state: {message}")]
+    InvalidState {
+        /// Display-safe validation reason.
+        message: String,
+    },
+}
+
+/// Projection-safe dock panel contract.
+///
+/// The UI crate owns panel identity, default placement, AI filtering, and
+/// persistence metadata. Renderer-specific drawing stays in adapter crates such
+/// as `devil-desktop` so `devil-ui` remains projection-only and egui-free.
+pub trait DockPanel {
+    /// Stable panel id.
+    fn id(&self) -> PanelId;
+
+    /// Display title.
+    fn title(&self) -> &str;
+
+    /// Short icon label for renderers that do not have an icon set.
+    fn icon(&self) -> &str;
+
+    /// Default dock side.
+    fn default_dock(&self) -> DockSide;
+
+    /// Whether constructing this panel requires AI-capable product mode.
+    fn requires_ai(&self) -> bool;
+
+    /// Return this panel as a registry descriptor.
+    fn descriptor(&self) -> DockPanelDescriptor {
+        DockPanelDescriptor::new(
+            self.id(),
+            self.title(),
+            self.icon(),
+            self.default_dock(),
+            self.requires_ai(),
+        )
+    }
+
+    /// Serialize panel-owned projection state.
+    fn persist_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id().as_str(),
+            "schema_version": 1,
+        })
+    }
+
+    /// Restore panel-owned projection state.
+    fn restore_state(&mut self, value: serde_json::Value) -> Result<(), DockPanelStateError> {
+        let state = value
+            .as_object()
+            .ok_or_else(|| DockPanelStateError::InvalidState {
+                message: "state must be an object".to_string(),
+            })?;
+        let schema_version = state
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| DockPanelStateError::InvalidState {
+                message: "schema_version is required".to_string(),
+            })?;
+        if schema_version != 1 {
+            return Err(DockPanelStateError::InvalidState {
+                message: format!("unsupported schema_version {schema_version}"),
+            });
+        }
+        let state_id = state
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| DockPanelStateError::InvalidState {
+                message: "id is required".to_string(),
+            })?;
+        if state_id != self.id().as_str() {
+            return Err(DockPanelStateError::InvalidState {
+                message: format!(
+                    "state id `{state_id}` does not match panel `{}`",
+                    self.id().as_str()
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl DockPanel for DockPanelDescriptor {
+    fn id(&self) -> PanelId {
+        self.id
+    }
+
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn icon(&self) -> &str {
+        &self.icon
+    }
+
+    fn default_dock(&self) -> DockSide {
+        self.default_dock
+    }
+
+    fn requires_ai(&self) -> bool {
+        self.requires_ai
+    }
+}
+
+/// Shared panel registry filtered by product mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelRegistry {
+    panels: Vec<DockPanelDescriptor>,
+}
+
+impl PanelRegistry {
+    /// Construct the standard dock panel registry.
+    pub fn standard() -> Self {
+        use DockSide::{Bottom, Left, Right};
+        use PanelId::{
+            AgentFleet, AgentLogs, ApprovalQueue, Assistant, Collaboration, Context, Coverage,
+            Debug, DecisionFeed, Delegation, DependencyInspector, Diagnostics, Git, PluginManager,
+            ProjectExplorer, QuickFixes, References, RemoteWorkspace, Repl, Search,
+            StructuralSearch, SymbolOutline, Terminal, TestExplorer, Workflow,
+        };
+
+        Self {
+            panels: vec![
+                DockPanelDescriptor::new(ProjectExplorer, "Project", "files", Left, false),
+                DockPanelDescriptor::new(SymbolOutline, "Outline", "outline", Left, false),
+                DockPanelDescriptor::new(Search, "Search", "search", Bottom, false),
+                DockPanelDescriptor::new(Diagnostics, "Problems", "alert", Bottom, false),
+                DockPanelDescriptor::new(QuickFixes, "Quick Fixes", "lightbulb", Bottom, false),
+                DockPanelDescriptor::new(References, "References", "target", Bottom, false),
+                DockPanelDescriptor::new(
+                    StructuralSearch,
+                    "Structural Search",
+                    "tree-search",
+                    Right,
+                    false,
+                ),
+                DockPanelDescriptor::new(Git, "Git", "branch", Left, false),
+                DockPanelDescriptor::new(Debug, "Debug", "bug", Right, false),
+                DockPanelDescriptor::new(TestExplorer, "Tests", "test", Left, false),
+                DockPanelDescriptor::new(Coverage, "Coverage", "coverage", Right, false),
+                DockPanelDescriptor::new(
+                    DependencyInspector,
+                    "Dependencies",
+                    "shield",
+                    Right,
+                    false,
+                ),
+                DockPanelDescriptor::new(Repl, "Scratchpad", "repl", Bottom, false),
+                DockPanelDescriptor::new(Terminal, "Terminal", "terminal", Bottom, false),
+                DockPanelDescriptor::new(Context, "Context", "context", Right, false),
+                DockPanelDescriptor::new(PluginManager, "Plugins", "plug", Right, false),
+                DockPanelDescriptor::new(Collaboration, "Collaboration", "users", Right, false),
+                DockPanelDescriptor::new(RemoteWorkspace, "Remote", "cloud", Right, false),
+                DockPanelDescriptor::new(Assistant, "Assistant", "spark", Right, true),
+                DockPanelDescriptor::new(Delegation, "Delegation", "delegate", Right, true),
+                DockPanelDescriptor::new(ApprovalQueue, "Approval Queue", "checklist", Right, true),
+                DockPanelDescriptor::new(AgentFleet, "Agent Fleet", "fleet", Right, true),
+                DockPanelDescriptor::new(DecisionFeed, "Decision Feed", "feed", Right, true),
+                DockPanelDescriptor::new(AgentLogs, "Agent Logs", "logs", Bottom, true),
+                DockPanelDescriptor::new(Workflow, "Workflow", "workflow", Bottom, true),
+            ],
+        }
+    }
+
+    /// Construct a registry from panel descriptors.
+    pub fn from_panel_descriptors(panels: impl IntoIterator<Item = DockPanelDescriptor>) -> Self {
+        Self {
+            panels: panels.into_iter().collect(),
+        }
+    }
+
+    /// Construct a registry from projection-safe panel contracts.
+    pub fn from_dock_panels<'a>(panels: impl IntoIterator<Item = &'a dyn DockPanel>) -> Self {
+        Self {
+            panels: panels.into_iter().map(DockPanel::descriptor).collect(),
+        }
+    }
+
+    /// Returns all registered panels.
+    pub fn panels(&self) -> &[DockPanelDescriptor] {
+        &self.panels
+    }
+
+    /// Look up a panel by id.
+    pub fn panel(&self, id: PanelId) -> Option<&DockPanelDescriptor> {
+        self.panels.iter().find(|panel| panel.id == id)
+    }
+
+    /// Return panels constructible in the requested mode.
+    pub fn visible_for(&self, mode: DockMode) -> Vec<&DockPanelDescriptor> {
+        self.panels
+            .iter()
+            .filter(|panel| mode != DockMode::Manual || !panel.requires_ai)
+            .collect()
+    }
+
+    /// Whether a panel can be constructed in the requested mode.
+    pub fn is_visible_in(&self, id: PanelId, mode: DockMode) -> bool {
+        self.panel(id)
+            .is_some_and(|panel| mode != DockMode::Manual || !panel.requires_ai)
+    }
+}
+
+impl Default for PanelRegistry {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+/// Persisted layout state for one dock side in one product mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DockSideLayout {
+    /// Pinned primary panel for the side.
+    pub pinned_default: PanelId,
+    /// Additional toolkit panels rendered below/alongside the pinned panel.
+    pub custom_toolkit: Vec<PanelId>,
+    /// Splitter fraction in the inclusive range `[0.15, 0.85]`.
+    pub splitter_fraction: f32,
+    /// Whether this side is collapsed.
+    pub collapsed: bool,
+}
+
+impl DockSideLayout {
+    /// Construct a side layout and normalize the splitter fraction.
+    pub fn new(
+        pinned_default: PanelId,
+        custom_toolkit: Vec<PanelId>,
+        splitter_fraction: f32,
+        collapsed: bool,
+    ) -> Self {
+        Self {
+            pinned_default,
+            custom_toolkit,
+            splitter_fraction: splitter_fraction.clamp(0.15, 0.85),
+            collapsed,
+        }
+    }
+
+    /// Panel ids for this side, with the pinned panel first.
+    pub fn panel_ids(&self) -> impl Iterator<Item = PanelId> + '_ {
+        std::iter::once(self.pinned_default).chain(self.custom_toolkit.iter().copied())
+    }
+}
+
+/// Mode-scoped dock layout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DockLayout {
+    /// Product mode the layout belongs to.
+    pub mode: DockMode,
+    /// Left dock state.
+    pub left: DockSideLayout,
+    /// Right dock state.
+    pub right: DockSideLayout,
+    /// Bottom dock state.
+    pub bottom: DockSideLayout,
+}
+
+impl DockLayout {
+    /// Construct the standard layout for a mode.
+    pub fn standard(mode: DockMode) -> Self {
+        use PanelId::{
+            AgentFleet, AgentLogs, ApprovalQueue, Assistant, Context, DecisionFeed, Delegation,
+            DependencyInspector, Diagnostics, PluginManager, ProjectExplorer, Search,
+            StructuralSearch, SymbolOutline, Terminal, TestExplorer, Workflow,
+        };
+
+        match mode {
+            DockMode::Manual => Self {
+                mode,
+                left: DockSideLayout::new(
+                    ProjectExplorer,
+                    vec![SymbolOutline, TestExplorer],
+                    0.32,
+                    false,
+                ),
+                right: DockSideLayout::new(
+                    Context,
+                    vec![
+                        Search,
+                        Diagnostics,
+                        StructuralSearch,
+                        DependencyInspector,
+                        PluginManager,
+                    ],
+                    0.42,
+                    false,
+                ),
+                bottom: DockSideLayout::new(Terminal, vec![Diagnostics], 0.28, false),
+            },
+            DockMode::Assist => Self {
+                mode,
+                left: DockSideLayout::new(ProjectExplorer, vec![SymbolOutline], 0.30, false),
+                right: DockSideLayout::new(Assistant, vec![Context, Search], 0.48, false),
+                bottom: DockSideLayout::new(Terminal, vec![Diagnostics], 0.30, false),
+            },
+            DockMode::Delegate => Self {
+                mode,
+                left: DockSideLayout::new(ProjectExplorer, vec![SymbolOutline], 0.30, false),
+                right: DockSideLayout::new(Delegation, vec![ApprovalQueue, Context], 0.52, false),
+                bottom: DockSideLayout::new(Terminal, vec![AgentLogs, Diagnostics], 0.34, false),
+            },
+            DockMode::Automate => Self {
+                mode,
+                left: DockSideLayout::new(ProjectExplorer, vec![AgentFleet], 0.28, false),
+                right: DockSideLayout::new(
+                    AgentFleet,
+                    vec![DecisionFeed, ApprovalQueue],
+                    0.55,
+                    false,
+                ),
+                bottom: DockSideLayout::new(Workflow, vec![AgentLogs, Terminal], 0.38, false),
+            },
+        }
+    }
+
+    /// Construct layouts for all modes.
+    pub fn standard_all_modes() -> Vec<Self> {
+        vec![
+            Self::standard(DockMode::Manual),
+            Self::standard(DockMode::Assist),
+            Self::standard(DockMode::Delegate),
+            Self::standard(DockMode::Automate),
+        ]
+    }
+
+    /// Return the side layout.
+    pub fn side(&self, side: DockSide) -> &DockSideLayout {
+        match side {
+            DockSide::Left => &self.left,
+            DockSide::Right => &self.right,
+            DockSide::Bottom => &self.bottom,
+        }
+    }
+
+    /// Return panel ids visible in this layout for the given registry.
+    pub fn visible_panel_ids(&self, side: DockSide, registry: &PanelRegistry) -> Vec<PanelId> {
+        self.side(side)
+            .panel_ids()
+            .filter(|id| registry.is_visible_in(*id, self.mode))
+            .collect()
+    }
+}
+
 /// Active editor-buffer projection received by the UI from application state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveBufferProjection {
@@ -137,6 +658,130 @@ impl ActiveBufferProjection {
 }
 
 impl Default for ActiveBufferProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Status for a projected inline Assist prediction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistInlinePredictionStatusProjection {
+    /// No prediction is currently available.
+    Idle,
+    /// A prediction request was issued and is pending.
+    Requested,
+    /// A provider is streaming or incrementally preparing the prediction.
+    Streaming,
+    /// A prediction is ready to display as ghost text.
+    Ready,
+    /// The prediction no longer matches the projected buffer metadata.
+    Stale,
+    /// The prediction was accepted through app/editor authority.
+    Accepted,
+    /// The prediction was dismissed locally or by app authority.
+    Dismissed,
+    /// The prediction request was cancelled.
+    Cancelled,
+    /// The prediction request failed without producing ghost text.
+    Failed,
+}
+
+/// One display-only inline Assist prediction row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistInlinePredictionRowProjection {
+    /// Projection-local prediction identifier supplied by the app layer.
+    pub prediction_id: String,
+    /// Workspace that produced the prediction, when available.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Buffer that produced the prediction, when available.
+    pub buffer_id: Option<BufferId>,
+    /// File that produced the prediction, when available.
+    pub file_id: Option<FileId>,
+    /// Display-safe provider label supplied by the app layer.
+    pub provider_label: String,
+    /// Stable status used by UI branching.
+    pub status: AssistInlinePredictionStatusProjection,
+    /// Display-safe status label supplied by the app layer.
+    pub status_label: String,
+    /// Provider latency in milliseconds, when measured.
+    pub latency_ms: Option<u64>,
+    /// Time the prediction was requested.
+    pub requested_at: TimestampMillis,
+    /// Time the prediction completed, when known.
+    pub completed_at: Option<TimestampMillis>,
+    /// Snapshot id used to produce the prediction, when supplied.
+    pub snapshot_id: Option<SnapshotId>,
+    /// Buffer version used to produce the prediction, when supplied.
+    pub buffer_version: Option<BufferVersion>,
+    /// File fingerprint used to produce the prediction, when supplied.
+    pub file_fingerprint: Option<FileFingerprint>,
+    /// Whether the prediction is stale relative to current projected metadata.
+    pub stale: bool,
+    /// Display-safe stale reason label supplied by the app layer.
+    pub stale_reason_label: Option<String>,
+    /// Bounded ghost text display label supplied by the app layer.
+    pub ghost_text_label: String,
+    /// Bounded replacement preview label supplied by the app layer.
+    pub replacement_preview_label: Option<String>,
+    /// Range the app would replace if the prediction is accepted.
+    pub apply_range: ProtocolTextRange,
+    /// Display-safe apply range label supplied by the app layer.
+    pub apply_range_label: String,
+    /// Display-safe diagnostics for prediction state.
+    pub diagnostics: Vec<String>,
+}
+
+/// Projection-only Assist inline prediction surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistInlinePredictionProjection {
+    /// Current ghost prediction, if one should be shown.
+    pub active_prediction: Option<AssistInlinePredictionRowProjection>,
+    /// Bounded recent prediction rows supplied by the app layer.
+    pub rows: Vec<AssistInlinePredictionRowProjection>,
+    /// Whether an app-owned prediction request is currently in flight.
+    pub request_in_flight: bool,
+    /// Number of omitted or stale prediction rows represented by metadata.
+    pub stale_prediction_count: usize,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl AssistInlinePredictionProjection {
+    /// Construct an empty Assist inline prediction projection.
+    pub fn empty() -> Self {
+        Self {
+            active_prediction: None,
+            rows: Vec::new(),
+            request_in_flight: false,
+            stale_prediction_count: 0,
+            generated_at: TimestampMillis(0),
+            schema_version: 1,
+        }
+    }
+
+    /// Count display rows including the current active prediction when it is not duplicated.
+    pub fn display_row_count(&self) -> usize {
+        self.rows.len()
+            + usize::from(self.active_prediction.as_ref().is_some_and(|active| {
+                !self
+                    .rows
+                    .iter()
+                    .any(|row| row.prediction_id == active.prediction_id)
+            }))
+    }
+
+    /// Return whether any Assist prediction metadata should activate Assist UI mode.
+    pub fn has_activity(&self) -> bool {
+        self.request_in_flight
+            || self.active_prediction.is_some()
+            || !self.rows.is_empty()
+            || self.stale_prediction_count > 0
+    }
+}
+
+impl Default for AssistInlinePredictionProjection {
     fn default() -> Self {
         Self::empty()
     }
@@ -375,6 +1020,483 @@ impl Default for SearchProjection {
     }
 }
 
+/// One metavariable capture projected by structural search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralSearchCaptureProjection {
+    /// Capture name without the `$` prefix.
+    pub name: String,
+    /// Display-safe captured value.
+    pub value: String,
+    /// Captured source range.
+    pub range: ProtocolTextRange,
+}
+
+/// One structural search result projected to the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralSearchMatchProjection {
+    /// Query id that produced this row.
+    pub query_id: String,
+    /// Workspace containing the match.
+    pub workspace_id: WorkspaceId,
+    /// File containing the match.
+    pub file_id: FileId,
+    /// Canonical path containing the match.
+    pub file_path: CanonicalPath,
+    /// Matched source range.
+    pub range: ProtocolTextRange,
+    /// Captured metavariable values.
+    pub captures: Vec<StructuralSearchCaptureProjection>,
+    /// Bounded matched source snippet.
+    pub snippet: String,
+    /// Replacement preview for this row, when a rewrite template was provided.
+    pub replacement_preview: Option<String>,
+}
+
+/// Projection-only structural search and replace surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralSearchProjection {
+    /// Current query id when structural search has run.
+    pub query_id: Option<String>,
+    /// Search scope used for the current result set.
+    pub scope: SearchScopeProjection,
+    /// Display-safe structural pattern label.
+    pub pattern_label: String,
+    /// Display-safe rewrite label, when supplied.
+    pub rewrite_label: Option<String>,
+    /// Current status.
+    pub status: SearchStatusProjection,
+    /// Bounded structural match rows.
+    pub matches: Vec<StructuralSearchMatchProjection>,
+    /// Applied result limit.
+    pub result_limit: usize,
+    /// Count of match rows omitted by result limit.
+    pub omitted_match_count: usize,
+    /// Count of files skipped or omitted by bounds/errors.
+    pub omitted_file_count: usize,
+    /// Display-safe diagnostics for skipped, suppressed, or invalid structural searches.
+    pub diagnostics: Vec<String>,
+    /// Proposal preview created for rewrite-capable search, when available.
+    pub proposal_id: Option<ProposalId>,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl StructuralSearchProjection {
+    /// Construct an idle structural search projection.
+    pub fn idle() -> Self {
+        Self {
+            query_id: None,
+            scope: SearchScopeProjection::Workspace,
+            pattern_label: String::new(),
+            rewrite_label: None,
+            status: SearchStatusProjection::idle(),
+            matches: Vec::new(),
+            result_limit: 0,
+            omitted_match_count: 0,
+            omitted_file_count: 0,
+            diagnostics: Vec::new(),
+            proposal_id: None,
+            generated_at: TimestampMillis(0),
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for StructuralSearchProjection {
+    fn default() -> Self {
+        Self::idle()
+    }
+}
+
+/// Diff strategy shown for a changed git file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitDiffStrategyProjection {
+    /// Syntax-aware diff metadata is available.
+    Syntactic,
+    /// Line diff fallback is being used.
+    LineFallback,
+}
+
+/// Current stage of a projected git hunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHunkStageProjection {
+    /// Hunk is in the working tree only.
+    Unstaged,
+    /// Hunk is in the git index.
+    Staged,
+}
+
+/// One changed file in the git projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitFileProjection {
+    /// Repository-relative path.
+    pub path: String,
+    /// Two-column porcelain status.
+    pub status: String,
+    /// Inserted line count.
+    pub inserted_lines: u32,
+    /// Deleted line count.
+    pub deleted_lines: u32,
+    /// Number of unstaged hunks.
+    pub unstaged_hunk_count: usize,
+    /// Number of staged hunks.
+    pub staged_hunk_count: usize,
+    /// Whether stage/unstage hunk actions are available.
+    pub stageable: bool,
+    /// Diff strategy used for this file.
+    pub diff_strategy: GitDiffStrategyProjection,
+    /// Reason for line fallback, when present.
+    pub fallback_reason: Option<String>,
+    /// Whether conflict markers were detected.
+    pub conflict: bool,
+}
+
+/// One hunk in the git projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHunkProjection {
+    /// Stable hunk identifier.
+    pub hunk_id: String,
+    /// Repository-relative path.
+    pub path: String,
+    /// Current hunk stage.
+    pub stage: GitHunkStageProjection,
+    /// Unified diff hunk header.
+    pub header: String,
+    /// Added line count.
+    pub added_lines: u32,
+    /// Deleted line count.
+    pub deleted_lines: u32,
+    /// Optional scope/function context.
+    pub context: Option<String>,
+}
+
+/// One inline blame row for the active file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBlameLineProjection {
+    /// Repository-relative path.
+    pub path: String,
+    /// One-based line number.
+    pub line_number: u32,
+    /// Short commit hash.
+    pub commit_short: String,
+    /// Author label.
+    pub author: String,
+    /// Commit summary.
+    pub summary: String,
+    /// Bounded source preview.
+    pub line_preview: String,
+}
+
+/// One commit row in the git graph/history projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommitProjection {
+    /// Full commit hash.
+    pub hash: String,
+    /// Short commit hash.
+    pub short_hash: String,
+    /// Author label.
+    pub author: String,
+    /// Commit date label.
+    pub date: String,
+    /// Commit summary.
+    pub summary: String,
+    /// Number of parents.
+    pub parent_count: usize,
+    /// Decorated refs.
+    pub refs: Vec<String>,
+}
+
+/// One conflict marker summary in the git projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitConflictProjection {
+    /// Repository-relative path.
+    pub path: String,
+    /// Number of conflict marker lines.
+    pub marker_count: usize,
+    /// Projected conflict resolution actions.
+    pub actions: Vec<String>,
+}
+
+/// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitProjection {
+    /// Repository root label.
+    pub root_label: Option<String>,
+    /// Current branch label.
+    pub branch_label: Option<String>,
+    /// Current short HEAD hash.
+    pub head_short: Option<String>,
+    /// Changed files.
+    pub changed_files: Vec<GitFileProjection>,
+    /// Staged and unstaged hunks.
+    pub hunks: Vec<GitHunkProjection>,
+    /// Inline blame rows for the active file.
+    pub blame_lines: Vec<GitBlameLineProjection>,
+    /// Commit graph/history rows.
+    pub commits: Vec<GitCommitProjection>,
+    /// Conflict marker rows.
+    pub conflicts: Vec<GitConflictProjection>,
+    /// Display-safe diagnostics.
+    pub diagnostics: Vec<String>,
+    /// Generated timestamp.
+    pub generated_at: TimestampMillis,
+    /// Projection schema version.
+    pub schema_version: u32,
+}
+
+impl GitProjection {
+    /// Construct an idle git projection.
+    pub fn idle() -> Self {
+        Self {
+            root_label: None,
+            branch_label: None,
+            head_short: None,
+            changed_files: Vec::new(),
+            hunks: Vec::new(),
+            blame_lines: Vec::new(),
+            commits: Vec::new(),
+            conflicts: Vec::new(),
+            diagnostics: Vec::new(),
+            generated_at: TimestampMillis(0),
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for GitProjection {
+    fn default() -> Self {
+        Self::idle()
+    }
+}
+
+/// Debugger status kind projected by the application layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugStatusKindProjection {
+    /// No debug workflow has run.
+    Idle,
+    /// Debug configuration or adapter launch is running.
+    Launching,
+    /// Program is running.
+    Running,
+    /// Program is paused at a breakpoint or step.
+    Paused,
+    /// Debug session exited.
+    Exited,
+    /// Debug workflow was denied.
+    Denied,
+    /// Debug workflow failed.
+    Failed,
+}
+
+/// Debugger status projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugStatusProjection {
+    /// Status kind.
+    pub kind: DebugStatusKindProjection,
+    /// Display-safe status message.
+    pub message: String,
+}
+
+impl DebugStatusProjection {
+    /// Construct an idle debug status.
+    pub fn idle() -> Self {
+        Self {
+            kind: DebugStatusKindProjection::Idle,
+            message: "Debug idle".to_string(),
+        }
+    }
+}
+
+/// Debug stepping operation selected from UI projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugStepKindProjection {
+    /// Continue execution.
+    Continue,
+    /// Step over.
+    Over,
+    /// Step into.
+    Into,
+    /// Step out.
+    Out,
+    /// Step backward.
+    Back,
+}
+
+/// Projected debug launch configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugConfigurationProjection {
+    /// Configuration identifier.
+    pub configuration_id: DebugConfigurationId,
+    /// Display name.
+    pub name: String,
+    /// Adapter type.
+    pub adapter_type: String,
+    /// Program label.
+    pub program_label: String,
+    /// Cargo package name.
+    pub cargo_package: Option<String>,
+    /// Cargo target name.
+    pub cargo_target: Option<String>,
+    /// Whether this configuration is deterministic/manual eligible.
+    pub deterministic: bool,
+}
+
+/// Projected debug breakpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugBreakpointProjection {
+    /// Breakpoint identifier.
+    pub breakpoint_id: DebugBreakpointId,
+    /// Last verifying session, if any.
+    pub session_id: Option<DebugSessionId>,
+    /// Source path label.
+    pub path: CanonicalPath,
+    /// One-based line label.
+    pub line: u32,
+    /// Whether the breakpoint is enabled.
+    pub enabled: bool,
+    /// Conditional expression label.
+    pub condition: Option<String>,
+    /// Hit condition label.
+    pub hit_condition: Option<String>,
+    /// Logpoint message label.
+    pub log_message: Option<String>,
+    /// Whether the adapter verified this breakpoint.
+    pub verified: bool,
+    /// Verification message.
+    pub message: Option<String>,
+}
+
+/// Projected debug stack frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugStackFrameProjection {
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Frame id from the adapter.
+    pub frame_id: u64,
+    /// Display name.
+    pub name: String,
+    /// Source path label.
+    pub path: Option<CanonicalPath>,
+    /// One-based line label.
+    pub line: Option<u32>,
+}
+
+/// Projected debug variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugVariableProjection {
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Variable name.
+    pub name: String,
+    /// Metadata-only value label.
+    pub value_label: String,
+    /// Optional type label.
+    pub type_label: Option<String>,
+    /// Whether children are available.
+    pub has_children: bool,
+}
+
+/// Projected debug watch expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugWatchProjection {
+    /// Watch identifier.
+    pub watch_id: devil_protocol::DebugWatchId,
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Expression label.
+    pub expression_label: String,
+    /// Metadata-only value label.
+    pub value_label: String,
+    /// Optional type label.
+    pub type_label: Option<String>,
+}
+
+/// Projected debug console entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugConsoleProjection {
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Category label.
+    pub category_label: String,
+    /// Metadata-only message label.
+    pub message_label: String,
+}
+
+/// Projected inline debug value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugInlineValueProjection {
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Source path.
+    pub path: CanonicalPath,
+    /// One-based line label.
+    pub line: u32,
+    /// Expression label.
+    pub expression_label: String,
+    /// Metadata-only value label.
+    pub value_label: String,
+}
+
+/// Projection-only debugger surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugProjection {
+    /// Current status.
+    pub status: DebugStatusProjection,
+    /// Active session id.
+    pub active_session_id: Option<DebugSessionId>,
+    /// Active session state.
+    pub session_state: Option<DebugSessionState>,
+    /// Discovered launch configurations.
+    pub configurations: Vec<DebugConfigurationProjection>,
+    /// Persisted breakpoints.
+    pub breakpoints: Vec<DebugBreakpointProjection>,
+    /// Variables for the right dock.
+    pub variables: Vec<DebugVariableProjection>,
+    /// Watch expressions for the right dock.
+    pub watches: Vec<DebugWatchProjection>,
+    /// Call stack frames for the bottom dock.
+    pub stack_frames: Vec<DebugStackFrameProjection>,
+    /// Debug console rows for the bottom dock.
+    pub console: Vec<DebugConsoleProjection>,
+    /// Inline values projected in-editor.
+    pub inline_values: Vec<DebugInlineValueProjection>,
+    /// Display-safe diagnostics.
+    pub diagnostics: Vec<String>,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl DebugProjection {
+    /// Construct an empty debug projection.
+    pub fn empty() -> Self {
+        Self {
+            status: DebugStatusProjection::idle(),
+            active_session_id: None,
+            session_state: None,
+            configurations: Vec::new(),
+            breakpoints: Vec::new(),
+            variables: Vec::new(),
+            watches: Vec::new(),
+            stack_frames: Vec::new(),
+            console: Vec::new(),
+            inline_values: Vec::new(),
+            diagnostics: Vec::new(),
+            generated_at: TimestampMillis(0),
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for DebugProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 /// UI status severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusSeverity {
@@ -402,6 +1524,11 @@ pub enum CommandDispatchIntent {
     Noop,
     /// Quit the active shell loop.
     Quit,
+    /// Set the app-owned product mode used for dock filtering and AI dispatch gates.
+    SetProductMode {
+        /// Target product mode.
+        mode: DockMode,
+    },
     /// Undo through application/editor authority for the target buffer.
     Undo {
         /// Target buffer identifier.
@@ -484,10 +1611,83 @@ pub enum CommandDispatchIntent {
         /// Requested result limit; zero means app default.
         limit: usize,
     },
+    /// Run deterministic structural search/rewrite preview through app authority.
+    RunStructuralSearch {
+        /// Search scope.
+        scope: SearchScopeProjection,
+        /// User-provided structural pattern.
+        pattern: String,
+        /// Optional rewrite template.
+        rewrite: Option<String>,
+        /// Requested result limit; zero means app default.
+        limit: usize,
+    },
     /// Cancel the currently projected search by query id.
     CancelSearch {
         /// Query id to cancel.
         query_id: String,
+    },
+    /// Refresh git status, syntactic diff, blame, graph, and conflict projections.
+    RefreshGit,
+    /// Stage one projected git hunk through app-owned git authority.
+    StageGitHunk {
+        /// Projected hunk identifier.
+        hunk_id: String,
+    },
+    /// Unstage one projected git hunk through app-owned git authority.
+    UnstageGitHunk {
+        /// Projected hunk identifier.
+        hunk_id: String,
+    },
+    /// Refresh debug launch configurations and persisted breakpoints.
+    RefreshDebugConfigurations,
+    /// Toggle a source breakpoint through app-owned debug authority.
+    ToggleDebugBreakpoint {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based line.
+        line: u32,
+        /// Conditional expression label.
+        condition: Option<String>,
+        /// Hit condition label.
+        hit_condition: Option<String>,
+        /// Logpoint message label.
+        log_message: Option<String>,
+    },
+    /// Launch a debug session through app-owned debug authority.
+    LaunchDebugSession {
+        /// Configuration identifier selected from projection data.
+        configuration_id: DebugConfigurationId,
+    },
+    /// Step or continue a debug session.
+    DebugStep {
+        /// Session identifier selected from projection data.
+        session_id: DebugSessionId,
+        /// Step kind.
+        kind: DebugStepKindProjection,
+    },
+    /// Run to a projected cursor position.
+    DebugRunToCursor {
+        /// Session identifier selected from projection data.
+        session_id: DebugSessionId,
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Evaluate a selected expression.
+    DebugEvaluateSelection {
+        /// Session identifier selected from projection data.
+        session_id: DebugSessionId,
+        /// Bounded expression label.
+        expression_label: String,
+    },
+    /// Add a watch expression.
+    DebugAddWatch {
+        /// Session identifier selected from projection data.
+        session_id: DebugSessionId,
+        /// Bounded expression label.
+        expression_label: String,
     },
     /// Request hover data through app-owned language tooling.
     RequestHover {
@@ -502,6 +1702,34 @@ pub enum CommandDispatchIntent {
         buffer_id: BufferId,
         /// Cursor position from projection space.
         position: TextCoordinate,
+    },
+    /// Request an Assist inline prediction through app-owned provider authority.
+    RequestAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
+    /// Accept the currently projected Assist ghost prediction through app authority.
+    AcceptAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Current prediction identifier selected from projection data, when available.
+        prediction_id: Option<String>,
+    },
+    /// Dismiss the currently projected Assist ghost prediction through app authority.
+    DismissAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Current prediction identifier selected from projection data, when available.
+        prediction_id: Option<String>,
+    },
+    /// Cancel an in-flight Assist inline prediction through app authority.
+    CancelAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Current prediction identifier selected from projection data, when available.
+        prediction_id: Option<String>,
     },
     /// Request definition locations through app-owned language tooling.
     GoToDefinition {
@@ -694,6 +1922,24 @@ pub enum CommandDispatchIntent {
         /// Workflow session identifier selected from projection data.
         session_id: LegionWorkflowSessionId,
     },
+    /// Record a human decision for an Automate MCP tool permission request.
+    RecordLegionWorkflowToolPermission {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// MCP server identifier selected from projection data.
+        server_id: devil_protocol::McpServerId,
+        /// MCP tool name selected from projection data.
+        tool_name: devil_protocol::McpToolName,
+        /// Human decision.
+        decision: DelegatedTaskToolPermissionDecision,
+    },
+    /// Trigger the hard Automate kill switch for a workflow session.
+    TriggerLegionWorkflowKillSwitch {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Display-safe reason label.
+        reason_label: String,
+    },
     /// Start a Phase 4 AI run through app-owned composition.
     StartAiRun {
         /// Display-safe instruction label.
@@ -708,6 +1954,27 @@ pub enum CommandDispatchIntent {
     StartAiProposal {
         /// Display-safe instruction label.
         instruction_label: String,
+    },
+    /// Send a Delegate chat turn with codebase-context retrieval.
+    SendDelegateChat {
+        /// Display-safe prompt label.
+        prompt_label: String,
+    },
+    /// Record a human decision for one Delegate proposal hunk.
+    ReviewDelegateProposalHunk {
+        /// Proposal being reviewed.
+        proposal_id: ProposalId,
+        /// Stable Delegate hunk identifier.
+        hunk_id: String,
+        /// Human disposition for the hunk.
+        disposition: DelegatedTaskProposalHunkDisposition,
+    },
+    /// Record a human decision for one Delegate tool permission request.
+    RecordDelegateToolPermission {
+        /// Permission request identifier.
+        request_id: String,
+        /// Human permission decision.
+        decision: DelegatedTaskToolPermissionDecision,
     },
     /// Cancel a Phase 4 AI run through app-owned composition.
     CancelAiRun {
@@ -757,6 +2024,8 @@ pub enum CommandDispatchIntent {
 pub struct ShellProjectionSnapshot {
     /// Layout projection.
     pub layout_projection: ShellLayoutProjection,
+    /// App-owned product mode used by projection and dock filtering.
+    pub product_mode: DockMode,
     /// Explorer projection.
     pub explorer_projection: ExplorerProjection,
     /// Active buffer projection.
@@ -785,6 +2054,8 @@ pub struct ShellProjectionSnapshot {
     pub checkpoint_rollback_projection: CheckpointRollbackProjection,
     /// Assisted-AI projection supplied by the application layer.
     pub assisted_ai_projection: AssistedAiProjection,
+    /// Assist inline prediction projection supplied by the application layer.
+    pub assist_inline_prediction_projection: AssistInlinePredictionProjection,
     /// Delegated-task plan projection supplied by the application layer.
     pub delegated_task_projection: DelegatedTaskProjection,
     /// Legion workflow projection supplied by the application layer.
@@ -801,6 +2072,12 @@ pub struct ShellProjectionSnapshot {
     pub daily_editing_projection: DailyEditingProjection,
     /// Search projection supplied by the application layer.
     pub search_projection: SearchProjection,
+    /// Structural search projection supplied by the application layer.
+    pub structural_search_projection: StructuralSearchProjection,
+    /// Git status, syntactic diff, blame, graph, and conflict projection supplied by app layer.
+    pub git_projection: GitProjection,
+    /// Debugger projection supplied by the application layer.
+    pub debug_projection: DebugProjection,
     /// Language tooling projection supplied by the application layer.
     pub language_tooling_projection: LanguageToolingProjection,
     /// Terminal panel projection supplied by the application layer.
@@ -819,6 +2096,9 @@ pub enum ShellCommandError {
     /// A terminal command requires an active terminal session projection.
     #[error("active terminal session projection is missing")]
     ActiveTerminalSessionMissing,
+    /// A debug command requires an active debug session projection.
+    #[error("active debug session projection is missing")]
+    ActiveDebugSessionMissing,
 }
 
 /// Projection-only IDE shell state.
@@ -826,6 +2106,8 @@ pub enum ShellCommandError {
 pub struct Shell {
     /// Projection-only layout state.
     pub layout_projection: ShellLayoutProjection,
+    /// App-owned product mode used by projection and dock filtering.
+    pub product_mode: DockMode,
     /// Projection-only explorer state.
     pub explorer_projection: ExplorerProjection,
     /// Projection-only active buffer state.
@@ -854,6 +2136,8 @@ pub struct Shell {
     pub checkpoint_rollback_projection: CheckpointRollbackProjection,
     /// Static assisted-AI projection.
     pub assisted_ai_projection: AssistedAiProjection,
+    /// Static Assist inline prediction projection.
+    pub assist_inline_prediction_projection: AssistInlinePredictionProjection,
     /// Static delegated-task plan projection.
     pub delegated_task_projection: DelegatedTaskProjection,
     /// Static Legion workflow projection.
@@ -870,6 +2154,12 @@ pub struct Shell {
     pub daily_editing_projection: DailyEditingProjection,
     /// Static search projection.
     pub search_projection: SearchProjection,
+    /// Static structural search projection.
+    pub structural_search_projection: StructuralSearchProjection,
+    /// Static git projection.
+    pub git_projection: GitProjection,
+    /// Static debugger projection.
+    pub debug_projection: DebugProjection,
     /// Static language tooling projection.
     pub language_tooling_projection: LanguageToolingProjection,
     /// Static terminal panel projection.
@@ -883,6 +2173,7 @@ impl Shell {
     pub fn new(snapshot: ShellProjectionSnapshot) -> Self {
         Self {
             layout_projection: snapshot.layout_projection,
+            product_mode: snapshot.product_mode,
             explorer_projection: snapshot.explorer_projection,
             active_buffer_projection: snapshot.active_buffer_projection,
             status_messages: snapshot.status_messages,
@@ -897,6 +2188,7 @@ impl Shell {
             approval_checklist_projection: snapshot.approval_checklist_projection,
             checkpoint_rollback_projection: snapshot.checkpoint_rollback_projection,
             assisted_ai_projection: snapshot.assisted_ai_projection,
+            assist_inline_prediction_projection: snapshot.assist_inline_prediction_projection,
             delegated_task_projection: snapshot.delegated_task_projection,
             legion_workflow_projection: snapshot.legion_workflow_projection,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
@@ -905,6 +2197,9 @@ impl Shell {
             remote_gui_projection: snapshot.remote_gui_projection,
             daily_editing_projection: snapshot.daily_editing_projection,
             search_projection: snapshot.search_projection,
+            structural_search_projection: snapshot.structural_search_projection,
+            git_projection: snapshot.git_projection,
+            debug_projection: snapshot.debug_projection,
             language_tooling_projection: snapshot.language_tooling_projection,
             terminal_panel_projection: snapshot.terminal_panel_projection,
             command_dispatch_intents: Vec::new(),
@@ -914,6 +2209,7 @@ impl Shell {
     /// Create an empty projection-only shell.
     pub fn empty(title: impl Into<String>) -> Self {
         Self::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain(title),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -932,6 +2228,7 @@ impl Shell {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -940,6 +2237,9 @@ impl Shell {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         })
@@ -948,6 +2248,7 @@ impl Shell {
     /// Return a cloned shell projection snapshot.
     pub fn projection_snapshot(&self) -> ShellProjectionSnapshot {
         ShellProjectionSnapshot {
+            product_mode: self.product_mode,
             layout_projection: self.layout_projection.clone(),
             explorer_projection: self.explorer_projection.clone(),
             active_buffer_projection: self.active_buffer_projection.clone(),
@@ -963,6 +2264,7 @@ impl Shell {
             approval_checklist_projection: self.approval_checklist_projection.clone(),
             checkpoint_rollback_projection: self.checkpoint_rollback_projection.clone(),
             assisted_ai_projection: self.assisted_ai_projection.clone(),
+            assist_inline_prediction_projection: self.assist_inline_prediction_projection.clone(),
             delegated_task_projection: self.delegated_task_projection.clone(),
             legion_workflow_projection: self.legion_workflow_projection.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
@@ -971,6 +2273,9 @@ impl Shell {
             remote_gui_projection: self.remote_gui_projection.clone(),
             daily_editing_projection: self.daily_editing_projection.clone(),
             search_projection: self.search_projection.clone(),
+            structural_search_projection: self.structural_search_projection.clone(),
+            git_projection: self.git_projection.clone(),
+            debug_projection: self.debug_projection.clone(),
             language_tooling_projection: self.language_tooling_projection.clone(),
             terminal_panel_projection: self.terminal_panel_projection.clone(),
         }
@@ -979,6 +2284,7 @@ impl Shell {
     /// Replace all render projections at once.
     pub fn replace_projection_snapshot(&mut self, snapshot: ShellProjectionSnapshot) {
         self.layout_projection = snapshot.layout_projection;
+        self.product_mode = snapshot.product_mode;
         self.explorer_projection = snapshot.explorer_projection;
         self.active_buffer_projection = snapshot.active_buffer_projection;
         self.status_messages = snapshot.status_messages;
@@ -993,6 +2299,7 @@ impl Shell {
         self.approval_checklist_projection = snapshot.approval_checklist_projection;
         self.checkpoint_rollback_projection = snapshot.checkpoint_rollback_projection;
         self.assisted_ai_projection = snapshot.assisted_ai_projection;
+        self.assist_inline_prediction_projection = snapshot.assist_inline_prediction_projection;
         self.delegated_task_projection = snapshot.delegated_task_projection;
         self.legion_workflow_projection = snapshot.legion_workflow_projection;
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
@@ -1001,6 +2308,9 @@ impl Shell {
         self.remote_gui_projection = snapshot.remote_gui_projection;
         self.daily_editing_projection = snapshot.daily_editing_projection;
         self.search_projection = snapshot.search_projection;
+        self.structural_search_projection = snapshot.structural_search_projection;
+        self.git_projection = snapshot.git_projection;
+        self.debug_projection = snapshot.debug_projection;
         self.language_tooling_projection = snapshot.language_tooling_projection;
         self.terminal_panel_projection = snapshot.terminal_panel_projection;
     }
@@ -1328,6 +2638,32 @@ impl Shell {
                 );
             }
         }
+        if self.assist_inline_prediction_projection.has_activity() {
+            let assist = &self.assist_inline_prediction_projection;
+            println!(
+                "Assist inline predictions | active={} rows={} in_flight={} stale={} generated_at={}",
+                assist.active_prediction.is_some(),
+                assist.rows.len(),
+                assist.request_in_flight,
+                assist.stale_prediction_count,
+                assist.generated_at.0
+            );
+            if let Some(prediction) = &assist.active_prediction {
+                println!(
+                    "- ghost {} provider={} status={:?} latency={:?} stale={} range={} preview={}",
+                    prediction.prediction_id,
+                    prediction.provider_label,
+                    prediction.status,
+                    prediction.latency_ms,
+                    prediction.stale,
+                    prediction.apply_range_label,
+                    prediction
+                        .replacement_preview_label
+                        .as_deref()
+                        .unwrap_or("<none>")
+                );
+            }
+        }
         if !self.delegated_task_projection.plan_rows.is_empty()
             || !self.delegated_task_projection.blockers.is_empty()
             || !self.delegated_task_projection.refusals.is_empty()
@@ -1444,8 +2780,61 @@ impl Shell {
                 println!("- [{}] {}", row.sequence.0, row.redacted_payload);
             }
         }
+        if self.debug_projection.active_session_id.is_some()
+            || !self.debug_projection.configurations.is_empty()
+            || !self.debug_projection.breakpoints.is_empty()
+        {
+            let debug = &self.debug_projection;
+            println!(
+                "Debug {:?} | session={:?} configs={} breakpoints={} frames={} variables={} watches={} console={}",
+                debug.status.kind,
+                debug
+                    .active_session_id
+                    .as_ref()
+                    .map(|session| session.0.as_str()),
+                debug.configurations.len(),
+                debug.breakpoints.len(),
+                debug.stack_frames.len(),
+                debug.variables.len(),
+                debug.watches.len(),
+                debug.console.len()
+            );
+            for config in &debug.configurations {
+                println!(
+                    "- debug config {} adapter={} program={}",
+                    config.configuration_id.0, config.adapter_type, config.program_label
+                );
+            }
+            for breakpoint in &debug.breakpoints {
+                println!(
+                    "- debug breakpoint {} {}:{} verified={}",
+                    breakpoint.breakpoint_id.0,
+                    breakpoint.path.0,
+                    breakpoint.line,
+                    breakpoint.verified
+                );
+            }
+            for frame in &debug.stack_frames {
+                println!("- debug frame {} {}", frame.frame_id, frame.name);
+            }
+            for variable in &debug.variables {
+                println!(
+                    "- debug variable {}={}",
+                    variable.name, variable.value_label
+                );
+            }
+            for watch in &debug.watches {
+                println!(
+                    "- debug watch {}={}",
+                    watch.expression_label, watch.value_label
+                );
+            }
+            for entry in &debug.console {
+                println!("- debug console {}", entry.message_label);
+            }
+        }
         println!(
-            "Commands: :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :ai-explain label | :ai-propose label | :u | :redo | :q"
+            "Commands: :mode manual|assist|delegate|automate | :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :tab | :assist-predict offset | :assist-dismiss | :assist-cancel | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :debug-configs | :debug-launch id | :debug-step over | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :ai-explain label | :ai-propose label | :u | :redo | :q"
         );
     }
 
@@ -1457,6 +2846,13 @@ impl Shell {
         let trimmed = input.trim();
         if trimmed == ":q" {
             return Ok(Some(self.push_intent(CommandDispatchIntent::Quit)));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":mode") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::SetProductMode {
+                    mode: parse_dock_mode(payload.trim()),
+                },
+            )));
         }
         if trimmed == ":u" {
             let buffer_id = self.active_buffer_id()?;
@@ -1478,6 +2874,46 @@ impl Shell {
         }
         if trimmed == ":wa" {
             return Ok(Some(self.push_intent(CommandDispatchIntent::SaveAll)));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":assist-predict") {
+            let buffer_id = self.active_buffer_id()?;
+            let position = self.command_position(payload.trim());
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestAssistInlinePrediction {
+                    buffer_id,
+                    position,
+                },
+            )));
+        }
+        if trimmed == ":tab" || trimmed == ":assist-accept" {
+            let buffer_id = self.active_buffer_id()?;
+            let prediction_id = self.active_assist_prediction_id();
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::AcceptAssistInlinePrediction {
+                    buffer_id,
+                    prediction_id,
+                },
+            )));
+        }
+        if trimmed == ":assist-dismiss" {
+            let buffer_id = self.active_buffer_id()?;
+            let prediction_id = self.active_assist_prediction_id();
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::DismissAssistInlinePrediction {
+                    buffer_id,
+                    prediction_id,
+                },
+            )));
+        }
+        if trimmed == ":assist-cancel" {
+            let buffer_id = self.active_buffer_id()?;
+            let prediction_id = self.active_assist_prediction_id();
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::CancelAssistInlinePrediction {
+                    buffer_id,
+                    prediction_id,
+                },
+            )));
         }
         if let Some(buffer_id) = parse_buffer_id(trimmed.strip_prefix(":tab ")) {
             return Ok(Some(
@@ -1607,6 +3043,92 @@ impl Shell {
                 },
             )));
         }
+        if trimmed == ":git-refresh" {
+            return Ok(Some(self.push_intent(CommandDispatchIntent::RefreshGit)));
+        }
+        if let Some(hunk_id) = trimmed.strip_prefix(":git-stage-hunk ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::StageGitHunk {
+                    hunk_id: hunk_id.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(hunk_id) = trimmed.strip_prefix(":git-unstage-hunk ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::UnstageGitHunk {
+                    hunk_id: hunk_id.trim().to_string(),
+                },
+            )));
+        }
+        if trimmed == ":debug-configs" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::RefreshDebugConfigurations),
+            ));
+        }
+        if let Some(configuration_id) = trimmed.strip_prefix(":debug-launch ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::LaunchDebugSession {
+                    configuration_id: DebugConfigurationId(configuration_id.trim().to_string()),
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":debug-breakpoint ") {
+            let buffer_id = self.active_buffer_id()?;
+            let mut parts = payload.splitn(4, ',');
+            let line = parts
+                .next()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+            let condition = non_empty_string(parts.next().map(str::trim));
+            let hit_condition = non_empty_string(parts.next().map(str::trim));
+            let log_message = non_empty_string(parts.next().map(str::trim));
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::ToggleDebugBreakpoint {
+                    buffer_id,
+                    line,
+                    condition,
+                    hit_condition,
+                    log_message,
+                },
+            )));
+        }
+        if let Some(kind) = trimmed.strip_prefix(":debug-step ") {
+            let session_id = self.active_debug_session_id()?;
+            return Ok(Some(self.push_intent(CommandDispatchIntent::DebugStep {
+                session_id,
+                kind: parse_debug_step_kind(kind.trim()),
+            })));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":debug-run-to-cursor ") {
+            let session_id = self.active_debug_session_id()?;
+            let buffer_id = self.active_buffer_id()?;
+            let position = self.command_position(payload.trim());
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::DebugRunToCursor {
+                    session_id,
+                    buffer_id,
+                    position,
+                },
+            )));
+        }
+        if let Some(expression_label) = trimmed.strip_prefix(":debug-eval ") {
+            let session_id = self.active_debug_session_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::DebugEvaluateSelection {
+                    session_id,
+                    expression_label: expression_label.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(expression_label) = trimmed.strip_prefix(":debug-watch ") {
+            let session_id = self.active_debug_session_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::DebugAddWatch {
+                    session_id,
+                    expression_label: expression_label.trim().to_string(),
+                },
+            )));
+        }
         if let Some(command_label) = trimmed.strip_prefix(":term-launch ") {
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::TerminalLaunch {
@@ -1703,6 +3225,54 @@ impl Shell {
                     },
                 },
             )));
+        }
+        if let Some(prompt) = trimmed.strip_prefix(":delegate-chat") {
+            let prompt_label = prompt.trim();
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::SendDelegateChat {
+                    prompt_label: if prompt_label.is_empty() {
+                        "delegate.context".to_string()
+                    } else {
+                        prompt_label.to_string()
+                    },
+                },
+            )));
+        }
+        if let Some(payload) = trimmed.strip_prefix(":delegate-hunk ") {
+            let mut split = payload.splitn(3, ' ');
+            let proposal_id = split
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(ProposalId);
+            let hunk_id = split.next().unwrap_or_default().trim();
+            let disposition = parse_delegate_hunk_disposition(split.next().unwrap_or_default());
+            if let (Some(proposal_id), Some(disposition)) = (proposal_id, disposition)
+                && !hunk_id.is_empty()
+            {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::ReviewDelegateProposalHunk {
+                        proposal_id,
+                        hunk_id: hunk_id.to_string(),
+                        disposition,
+                    },
+                )));
+            }
+        }
+        if let Some(payload) = trimmed.strip_prefix(":delegate-permission ") {
+            let mut split = payload.splitn(2, ' ');
+            let request_id = split.next().unwrap_or_default().trim();
+            let decision =
+                parse_delegate_tool_permission_decision(split.next().unwrap_or_default());
+            if !request_id.is_empty()
+                && let Some(decision) = decision
+            {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::RecordDelegateToolPermission {
+                        request_id: request_id.to_string(),
+                        decision,
+                    },
+                )));
+            }
         }
         if let Some(run_id) = trimmed.strip_prefix(":ai-cancel ") {
             return Ok(Some(self.push_intent(CommandDispatchIntent::CancelAiRun {
@@ -1892,6 +3462,28 @@ impl Shell {
                 CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { session_id },
             )));
         }
+        if let Some((session_id, server_id, tool_name, decision)) =
+            parse_legion_tool_permission(trimmed.strip_prefix(":legion-permission "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RecordLegionWorkflowToolPermission {
+                    session_id,
+                    server_id,
+                    tool_name,
+                    decision,
+                },
+            )));
+        }
+        if let Some((session_id, reason_label)) =
+            parse_legion_kill_switch(trimmed.strip_prefix(":legion-kill "))
+        {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::TriggerLegionWorkflowKillSwitch {
+                    session_id,
+                    reason_label,
+                },
+            )));
+        }
 
         if let Some(payload) = trimmed.strip_prefix(":i ") {
             let buffer_id = self.active_buffer_id()?;
@@ -1950,6 +3542,20 @@ impl Shell {
         self.terminal_panel_projection
             .active_session_id
             .ok_or(ShellCommandError::ActiveTerminalSessionMissing)
+    }
+
+    fn active_debug_session_id(&self) -> Result<DebugSessionId, ShellCommandError> {
+        self.debug_projection
+            .active_session_id
+            .clone()
+            .ok_or(ShellCommandError::ActiveDebugSessionMissing)
+    }
+
+    fn active_assist_prediction_id(&self) -> Option<String> {
+        self.assist_inline_prediction_projection
+            .active_prediction
+            .as_ref()
+            .map(|prediction| prediction.prediction_id.clone())
     }
 
     fn push_intent(&mut self, intent: CommandDispatchIntent) -> CommandDispatchIntent {
@@ -2011,6 +3617,99 @@ fn parse_buffer_id(input: Option<&str>) -> Option<BufferId> {
         .and_then(|value| value.trim().parse::<u128>().ok())
         .filter(|value| *value != 0)
         .map(BufferId)
+}
+
+fn non_empty_string(input: Option<&str>) -> Option<String> {
+    input
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_debug_step_kind(input: &str) -> DebugStepKindProjection {
+    match input {
+        "continue" | "cont" => DebugStepKindProjection::Continue,
+        "into" | "in" => DebugStepKindProjection::Into,
+        "out" => DebugStepKindProjection::Out,
+        "back" => DebugStepKindProjection::Back,
+        _ => DebugStepKindProjection::Over,
+    }
+}
+
+fn parse_dock_mode(input: &str) -> DockMode {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "assist" | "a" => DockMode::Assist,
+        "delegate" | "delegates" | "d" => DockMode::Delegate,
+        "automate" | "automation" | "legion" | "workflow" | "workflows" | "w" => DockMode::Automate,
+        _ => DockMode::Manual,
+    }
+}
+
+fn parse_delegate_hunk_disposition(input: &str) -> Option<DelegatedTaskProposalHunkDisposition> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "pending" | "p" => Some(DelegatedTaskProposalHunkDisposition::Pending),
+        "accept" | "accepted" | "a" => Some(DelegatedTaskProposalHunkDisposition::Accepted),
+        "reject" | "rejected" | "r" => Some(DelegatedTaskProposalHunkDisposition::Rejected),
+        _ => None,
+    }
+}
+
+fn parse_delegate_tool_permission_decision(
+    input: &str,
+) -> Option<DelegatedTaskToolPermissionDecision> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "confirm" | "c" => Some(DelegatedTaskToolPermissionDecision::Confirm),
+        "allow" | "a" => Some(DelegatedTaskToolPermissionDecision::Allow),
+        "deny" | "d" => Some(DelegatedTaskToolPermissionDecision::Deny),
+        "always" => Some(DelegatedTaskToolPermissionDecision::Always),
+        _ => None,
+    }
+}
+
+fn parse_legion_tool_permission(
+    payload: Option<&str>,
+) -> Option<(
+    LegionWorkflowSessionId,
+    devil_protocol::McpServerId,
+    devil_protocol::McpToolName,
+    DelegatedTaskToolPermissionDecision,
+)> {
+    let mut split = payload?.split_whitespace();
+    let session_id = split.next()?.trim();
+    let server_id = split.next()?.trim();
+    let tool_name = split.next()?.trim();
+    let decision = parse_delegate_tool_permission_decision(split.next().unwrap_or_default())?;
+    if session_id.is_empty()
+        || server_id.is_empty()
+        || tool_name.is_empty()
+        || split.next().is_some()
+    {
+        return None;
+    }
+    Some((
+        LegionWorkflowSessionId(session_id.to_string()),
+        devil_protocol::McpServerId(server_id.to_string()),
+        devil_protocol::McpToolName(tool_name.to_string()),
+        decision,
+    ))
+}
+
+fn parse_legion_kill_switch(payload: Option<&str>) -> Option<(LegionWorkflowSessionId, String)> {
+    let payload = payload?.trim();
+    let mut split = payload.splitn(2, char::is_whitespace);
+    let session_id = split.next()?.trim();
+    let reason = split.next().unwrap_or("user requested").trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    Some((
+        LegionWorkflowSessionId(session_id.to_string()),
+        if reason.is_empty() {
+            "user requested".to_string()
+        } else {
+            reason.to_string()
+        },
+    ))
 }
 
 fn empty_proposal_ledger_projection() -> ProposalLedgerProjection {
@@ -2208,6 +3907,14 @@ fn empty_delegated_task_projection() -> DelegatedTaskProjection {
         blocked_plan_count: 0,
         refused_plan_count: 0,
         runtime_activation: DelegatedTaskRuntimeActivationState::NotEncoded,
+        chat_messages: Vec::new(),
+        context_citations: Vec::new(),
+        proposal_reviews: Vec::new(),
+        tool_permission_requests: Vec::new(),
+        chat_message_count: 0,
+        context_citation_count: 0,
+        proposal_review_count: 0,
+        tool_permission_request_count: 0,
         generated_at: TimestampMillis(0),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
@@ -2277,6 +3984,99 @@ mod tests {
         WorkspaceId,
     };
 
+    #[test]
+    fn panel_registry_filters_ai_panels_out_of_manual_mode() {
+        let registry = PanelRegistry::standard();
+        let manual = registry.visible_for(DockMode::Manual);
+
+        assert!(!manual.is_empty());
+        assert!(
+            manual.iter().all(|panel| !panel.requires_ai),
+            "manual mode must not construct AI panels: {manual:?}"
+        );
+        assert!(!registry.is_visible_in(PanelId::Assistant, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::AgentFleet, DockMode::Manual));
+        assert!(registry.is_visible_in(PanelId::Assistant, DockMode::Assist));
+        assert!(registry.is_visible_in(PanelId::AgentFleet, DockMode::Automate));
+    }
+
+    #[test]
+    fn dock_panel_descriptor_roundtrips_projection_state() {
+        let mut panel = DockPanelDescriptor::new(
+            PanelId::Diagnostics,
+            "Problems",
+            "alert",
+            DockSide::Bottom,
+            false,
+        );
+
+        let state = panel.persist_state();
+        assert_eq!(state["id"], "diagnostics");
+        panel
+            .restore_state(state)
+            .expect("descriptor state restores");
+
+        let error = panel
+            .restore_state(serde_json::json!({
+                "id": "assistant",
+                "schema_version": 1,
+            }))
+            .expect_err("state for another panel is rejected");
+        assert!(matches!(
+            error,
+            DockPanelStateError::InvalidState { message } if message.contains("does not match")
+        ));
+    }
+
+    #[test]
+    fn panel_registry_constructs_from_dock_panel_contracts() {
+        let diagnostics = DockPanelDescriptor::new(
+            PanelId::Diagnostics,
+            "Problems",
+            "alert",
+            DockSide::Bottom,
+            false,
+        );
+        let assistant = DockPanelDescriptor::new(
+            PanelId::Assistant,
+            "Assistant",
+            "spark",
+            DockSide::Right,
+            true,
+        );
+        let panels: [&dyn DockPanel; 2] = [&diagnostics, &assistant];
+
+        let registry = PanelRegistry::from_dock_panels(panels);
+
+        assert!(registry.is_visible_in(PanelId::Diagnostics, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::Assistant, DockMode::Manual));
+        assert!(registry.is_visible_in(PanelId::Assistant, DockMode::Assist));
+    }
+
+    #[test]
+    fn dock_layouts_are_mode_scoped_and_manual_layout_is_ai_free() {
+        let registry = PanelRegistry::standard();
+        let manual = DockLayout::standard(DockMode::Manual);
+        let automate = DockLayout::standard(DockMode::Automate);
+
+        for side in [DockSide::Left, DockSide::Right, DockSide::Bottom] {
+            let visible = manual.visible_panel_ids(side, &registry);
+            assert!(
+                visible
+                    .iter()
+                    .all(|id| registry.is_visible_in(*id, DockMode::Manual)),
+                "manual {side:?} layout exposed an AI panel: {visible:?}"
+            );
+        }
+
+        assert!(
+            automate
+                .visible_panel_ids(DockSide::Right, &registry)
+                .contains(&PanelId::AgentFleet)
+        );
+        assert_ne!(manual.right.pinned_default, automate.right.pinned_default);
+    }
+
     fn test_coordinate(line: u32, character: u32) -> TextCoordinate {
         TextCoordinate {
             line,
@@ -2317,7 +4117,17 @@ mod tests {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             }],
+            mcp_registries: Vec::new(),
+            decision_feed: Vec::new(),
+            risk_monitors: Vec::new(),
+            kill_switches: Vec::new(),
+            tool_permission_requests: Vec::new(),
             total_session_count: 1,
+            mcp_registry_count: 0,
+            decision_feed_count: 0,
+            risk_monitor_count: 0,
+            kill_switch_count: 0,
+            tool_permission_request_count: 0,
             omitted_row_count: 0,
             generated_at: TimestampMillis(1),
             redaction_hints: vec![RedactionHint::MetadataOnly],
@@ -2503,6 +4313,7 @@ mod tests {
     #[test]
     fn shell_parses_commands_into_dispatch_intents_without_editor_ownership() {
         let mut shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("t"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -2530,6 +4341,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -2538,6 +4350,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -2566,6 +4381,7 @@ mod tests {
     fn shell_renders_proposal_ledger_from_static_snapshot() {
         let ledger = test_proposal_ledger_projection();
         let shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("t"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -2584,6 +4400,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -2592,6 +4409,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -2721,6 +4541,7 @@ mod tests {
     fn shell_snapshot_large_file_projection_carries_only_viewport_slices() {
         let large_source_len = 6 * 1024 * 1024;
         let shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("large"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -2748,6 +4569,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -2756,6 +4578,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -2785,6 +4610,7 @@ mod tests {
     #[test]
     fn shell_proposal_intents_do_not_mutate_editor_or_workspace_projection() {
         let mut shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("t"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -2812,6 +4638,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -2820,6 +4647,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -2843,6 +4673,7 @@ mod tests {
     #[test]
     fn control_trust_command_intents_remain_projection_only() {
         let mut shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("control-trust"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -2870,6 +4701,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -2878,6 +4710,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -2945,6 +4780,27 @@ mod tests {
                 ":ai-propose add guard",
                 CommandDispatchIntent::StartAiProposal {
                     instruction_label: "add guard".to_string(),
+                },
+            ),
+            (
+                ":delegate-chat explain impacted files",
+                CommandDispatchIntent::SendDelegateChat {
+                    prompt_label: "explain impacted files".to_string(),
+                },
+            ),
+            (
+                ":delegate-hunk 42 delegate-hunk-1 accept",
+                CommandDispatchIntent::ReviewDelegateProposalHunk {
+                    proposal_id: ProposalId(42),
+                    hunk_id: "delegate-hunk-1".to_string(),
+                    disposition: DelegatedTaskProposalHunkDisposition::Accepted,
+                },
+            ),
+            (
+                ":delegate-permission delegate-permission-1 always",
+                CommandDispatchIntent::RecordDelegateToolPermission {
+                    request_id: "delegate-permission-1".to_string(),
+                    decision: DelegatedTaskToolPermissionDecision::Always,
                 },
             ),
             (
@@ -3033,6 +4889,7 @@ mod tests {
             });
 
         let shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("trust"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -3051,6 +4908,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -3059,6 +4917,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -3127,6 +4988,7 @@ mod tests {
         }];
 
         let shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("trust"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -3145,6 +5007,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -3153,6 +5016,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -3208,6 +5074,7 @@ mod tests {
         }];
 
         let shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("trust"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -3226,6 +5093,7 @@ mod tests {
             approval_checklist_projection: checklist.clone(),
             checkpoint_rollback_projection: rollback.clone(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -3234,6 +5102,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -3353,6 +5224,7 @@ mod tests {
         }];
 
         let shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("assisted"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -3371,6 +5243,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: assisted.clone(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -3379,6 +5252,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -3446,6 +5322,7 @@ mod tests {
         }];
 
         let shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
             layout_projection: ShellLayoutProjection::plain("delegated"),
             explorer_projection: ExplorerProjection {
                 nodes: Vec::new(),
@@ -3464,6 +5341,7 @@ mod tests {
             approval_checklist_projection: empty_approval_checklist_projection(),
             checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
             assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: delegated.clone(),
             legion_workflow_projection: empty_legion_workflow_projection(),
             plugin_contribution_projections: Vec::new(),
@@ -3472,6 +5350,9 @@ mod tests {
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });

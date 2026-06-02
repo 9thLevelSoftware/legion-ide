@@ -8,6 +8,7 @@ use std::{
 use devil_desktop::{
     bridge::DesktopAction,
     search::DesktopSearchViewModel,
+    view::DesktopProjectionViewModel,
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use devil_protocol::{ProtocolTextRange, TextCoordinate, TimestampMillis};
@@ -134,6 +135,60 @@ fn search_workflow_runs_workspace_search() {
         DesktopSearchViewModel::from_projection(&snapshot.search_projection)
             .header
             .contains("workspace")
+    );
+}
+
+#[test]
+fn structural_search_workflow_runs_workspace_preview() {
+    let workspace = TempWorkspace::new();
+    let first = workspace.write("one.rs", "pub fn alpha() {}\n");
+    let second = workspace.write("two.rs", "pub fn beta() {}\n");
+    let mut runtime = open_runtime(workspace.path(), &first);
+
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::RunStructuralSearch {
+                scope: SearchScopeProjection::Workspace,
+                pattern: "fn $NAME ( )".to_string(),
+                rewrite: Some("fn renamed_$NAME ( )".to_string()),
+                limit: 10,
+            })
+            .expect("structural search should route through app authority"),
+        DesktopWorkflowOutcome::StructuralSearchUpdated
+    );
+
+    let snapshot = runtime.projection_snapshot();
+    let structural = &snapshot.structural_search_projection;
+    assert_eq!(
+        structural.status.kind,
+        SearchStatusKindProjection::Completed
+    );
+    assert_eq!(structural.matches.len(), 2);
+    assert_eq!(
+        structural.rewrite_label.as_deref(),
+        Some("fn renamed_$NAME ( )")
+    );
+    assert!(structural.proposal_id.is_some());
+    assert!(
+        structural
+            .matches
+            .iter()
+            .any(|result| result.replacement_preview.as_deref() == Some("fn renamed_alpha ( )"))
+    );
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert!(
+        model
+            .structural_search_rows
+            .iter()
+            .any(|row| row.contains("structural search: Completed matches=2"))
+    );
+    assert_eq!(
+        fs::read_to_string(first).expect("first file should remain unchanged"),
+        "pub fn alpha() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(second).expect("second file should remain unchanged"),
+        "pub fn beta() {}\n"
     );
 }
 

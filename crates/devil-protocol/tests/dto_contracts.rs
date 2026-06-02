@@ -4143,6 +4143,26 @@ fn dto_contracts_storage_request_response_schema_golden() {
         roundtrip[9],
         StorageRepositoryRequest::ReadProposalAuditRecord(_)
     ));
+    let delete_breakpoint_request = StorageRepositoryRequest::DeleteDebugBreakpointRecord {
+        workspace_id: WorkspaceId(11),
+        breakpoint_id: DebugBreakpointId("bp-main-1".to_string()),
+    };
+    let delete_breakpoint_value =
+        serde_json::to_value(&delete_breakpoint_request).expect("serialize delete breakpoint");
+    assert_eq!(
+        delete_breakpoint_value["DeleteDebugBreakpointRecord"]["workspace_id"],
+        11
+    );
+    assert_eq!(
+        delete_breakpoint_value["DeleteDebugBreakpointRecord"]["breakpoint_id"],
+        "bp-main-1"
+    );
+    let delete_breakpoint_roundtrip: StorageRepositoryRequest =
+        serde_json::from_value(delete_breakpoint_value).expect("deserialize delete breakpoint");
+    assert!(matches!(
+        delete_breakpoint_roundtrip,
+        StorageRepositoryRequest::DeleteDebugBreakpointRecord { .. }
+    ));
     let serialized_semantic = serde_json::to_string(&response_value[5]).expect("semantic json");
     assert!(!serialized_semantic.contains("fn main"));
     assert!(!serialized_semantic.contains("source_body"));
@@ -4757,6 +4777,90 @@ fn assisted_ai_audit(proposal_id: Option<ProposalId>) -> AssistedAiAuditRecord {
             "agent.disabled".to_string(),
             "terminal.disabled".to_string(),
         ],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn inline_prediction_provider_metadata() -> InlinePredictionProviderMetadata {
+    InlinePredictionProviderMetadata {
+        provider_id: "deterministic-local".to_string(),
+        model_label: "zeta2-style-deterministic".to_string(),
+        provider_class: AssistedAiProviderClass::Local,
+        operation_class: AssistedAiOperationClass::InlinePrediction,
+        invocation_state: AssistedAiProviderInvocationState::Completed,
+        latency: InlinePredictionLatencyMetadata {
+            queued_ms: 1,
+            inference_ms: 2,
+            total_ms: 3,
+            timed_out: false,
+        },
+        health_labels: vec!["deterministic".to_string()],
+        cost_labels: vec!["local".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn inline_prediction_fingerprint(value: &str) -> InlinePredictionFingerprintMetadata {
+    InlinePredictionFingerprintMetadata {
+        snapshot_id: SnapshotId(66),
+        buffer_version: BufferVersion(55),
+        file_content_version: Some(FileContentVersion(44)),
+        workspace_generation: WorkspaceGeneration(77),
+        content_fingerprint: Some(fingerprint(value)),
+        context_fingerprint: fingerprint(&format!("context:{value}")),
+        schema_version: 1,
+    }
+}
+
+fn inline_prediction_request_metadata() -> InlinePredictionRequestMetadata {
+    InlinePredictionRequestMetadata {
+        request_id: InlinePredictionRequestId("inline:req:1".to_string()),
+        workspace_id: WorkspaceId(11),
+        buffer_id: BufferId(22),
+        file_id: Some(FileId(33)),
+        language_id: LanguageId("rust".to_string()),
+        cursor: protocol_range().end,
+        selection: None,
+        visible_range: Some(protocol_range()),
+        trigger: InlinePredictionTriggerKind::Explicit,
+        fingerprint: inline_prediction_fingerprint("content"),
+        provider: inline_prediction_provider_metadata(),
+        max_prediction_bytes: 64,
+        timeout_ms: 100,
+        requested_at: TimestampMillis(2000),
+        cancellation_token: cancellation_token_id(),
+        required_capability: CapabilityId("ai.inline_prediction.invoke".to_string()),
+        principal_id: PrincipalId("principal-1".to_string()),
+        workspace_trust_state: WorkspaceTrustState::Trusted,
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        event_sequence: EventSequence(80),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn inline_prediction_result(state: InlinePredictionResultState) -> InlinePredictionResult {
+    InlinePredictionResult {
+        result_id: InlinePredictionResultId("inline:result:1".to_string()),
+        request_id: InlinePredictionRequestId("inline:req:1".to_string()),
+        state,
+        retention: InlinePredictionRetention::EphemeralDisplay,
+        insert_range: protocol_range(),
+        ghost_text: Some(InlinePredictionGhostText {
+            text: " // next edit".to_string(),
+            byte_len: 13,
+            line_count: 1,
+            text_fingerprint: fingerprint("ghost-text"),
+        }),
+        fingerprint: inline_prediction_fingerprint("content"),
+        freshness: InlinePredictionFreshness::fresh(1),
+        provider: inline_prediction_provider_metadata(),
+        refusal: None,
+        generated_at: TimestampMillis(2003),
+        expires_at: Some(TimestampMillis(2600)),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
@@ -5580,6 +5684,170 @@ fn dto_contracts_provider_route_request_requires_complete_runtime_metadata() {
 }
 
 #[test]
+fn dto_contracts_inline_prediction_request_result_projection_are_bounded_and_metadata_only() {
+    let request = inline_prediction_request_metadata();
+    validate_inline_prediction_request_metadata(&request).expect("request metadata is valid");
+    assert_eq!(
+        request.provider.operation_class,
+        AssistedAiOperationClass::InlinePrediction
+    );
+    assert_ne!(
+        request.provider.operation_class,
+        AssistedAiOperationClass::ProposeEdit
+    );
+
+    let result = inline_prediction_result(InlinePredictionResultState::Available);
+    validate_inline_prediction_result(&result).expect("bounded ghost text result is valid");
+    let ghost_text = result.ghost_text.as_ref().expect("visible ghost text");
+    assert_eq!(ghost_text.byte_len, ghost_text.text.len() as u32);
+    assert!(ghost_text.byte_len <= request.max_prediction_bytes);
+
+    let projection = inline_prediction_projection_from_results(
+        "inline:projection:1",
+        request.workspace_id,
+        request.buffer_id,
+        Some(request.request_id.clone()),
+        vec![result.clone()],
+        TimestampMillis(2004),
+        1,
+    )
+    .expect("projection validates");
+
+    assert_eq!(projection.result_count, 1);
+    assert_eq!(projection.available_count, 1);
+    assert_eq!(projection.stale_count, 0);
+    assert_eq!(projection.refusal_count, 0);
+    assert_eq!(
+        projection.provider_invocation,
+        AssistedAiProviderInvocationState::Completed
+    );
+
+    let value = serde_json::to_value(&projection).expect("serialize inline projection");
+    assert_eq!(value["results"][0]["state"], "Available");
+    assert_eq!(
+        value["results"][0]["provider"]["operation_class"],
+        "InlinePrediction"
+    );
+    assert_eq!(value["results"][0]["retention"], "EphemeralDisplay");
+
+    let serialized = serde_json::to_string(&value).expect("stringify inline projection");
+    assert!(serialized.contains("next edit"));
+    assert!(serialized.contains("MetadataOnly"));
+    assert!(!serialized.contains("raw_source"));
+    assert!(!serialized.contains("source_body"));
+    assert!(!serialized.contains("raw prompt"));
+    assert!(!serialized.contains("provider_payload"));
+    assert!(!serialized.contains("ChatCompletionRequest"));
+    assert!(!serialized.contains("fn main"));
+
+    let roundtrip: InlinePredictionProjection =
+        serde_json::from_value(value.clone()).expect("deserialize inline projection");
+    assert_eq!(roundtrip.results[0], result);
+
+    let mut missing = value;
+    remove_required_field::<InlinePredictionProjection>(&mut missing, "schema_version");
+}
+
+#[test]
+fn dto_contracts_inline_prediction_stale_lifecycle_and_audit_metadata_validate() {
+    let expected = inline_prediction_fingerprint("content");
+    let mut observed = inline_prediction_fingerprint("changed");
+    observed.snapshot_id = SnapshotId(67);
+    let freshness = InlinePredictionFreshness::from_fingerprints(&expected, &observed, 1);
+    assert_eq!(freshness.state, InlinePredictionFreshnessState::Stale);
+    assert!(
+        freshness
+            .stale_reasons
+            .contains(&InlinePredictionStaleReason::SnapshotChanged)
+    );
+    assert!(
+        freshness
+            .stale_reasons
+            .contains(&InlinePredictionStaleReason::ContentFingerprintChanged)
+    );
+
+    let mut stale_result = inline_prediction_result(InlinePredictionResultState::Stale);
+    stale_result.fingerprint = observed;
+    stale_result.freshness = freshness;
+    stale_result.ghost_text = None;
+    validate_inline_prediction_result(&stale_result).expect("stale result metadata is valid");
+
+    let mut invalid_available_stale = stale_result.clone();
+    invalid_available_stale.state = InlinePredictionResultState::Available;
+    assert!(matches!(
+        validate_inline_prediction_result(&invalid_available_stale),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
+    ));
+
+    let mut audit_result = inline_prediction_result(InlinePredictionResultState::Available);
+    audit_result.retention = InlinePredictionRetention::MetadataOnlyAudit;
+    audit_result.ghost_text = None;
+    validate_inline_prediction_result(&audit_result)
+        .expect("metadata-only audit result omits ghost text");
+
+    let mut leaking_audit_result = audit_result.clone();
+    leaking_audit_result.ghost_text = Some(InlinePredictionGhostText {
+        text: " // audit leak".to_string(),
+        byte_len: 14,
+        line_count: 1,
+        text_fingerprint: fingerprint("audit-leak"),
+    });
+    assert!(matches!(
+        validate_inline_prediction_result(&leaking_audit_result),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
+    ));
+
+    let cancel = InlinePredictionLifecycleCommand {
+        request_id: InlinePredictionRequestId("inline:req:1".to_string()),
+        result_id: None,
+        action: InlinePredictionLifecycleAction::Cancel,
+        cancellation_token: Some(cancellation_token_id()),
+        dismissal_id: None,
+        acceptance_id: None,
+        reason_labels: vec!["user.cancelled".to_string()],
+        requested_at: TimestampMillis(2010),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        event_sequence: EventSequence(81),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_inline_prediction_lifecycle_command(&cancel).expect("cancel id is valid");
+
+    let dismiss = InlinePredictionLifecycleCommand {
+        action: InlinePredictionLifecycleAction::Dismiss,
+        result_id: Some(InlinePredictionResultId("inline:result:1".to_string())),
+        cancellation_token: None,
+        dismissal_id: Some(InlinePredictionDismissalId(
+            Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+        )),
+        reason_labels: vec!["cursor.moved".to_string()],
+        ..cancel.clone()
+    };
+    validate_inline_prediction_lifecycle_command(&dismiss).expect("dismiss id is valid");
+
+    let accept = InlinePredictionLifecycleCommand {
+        action: InlinePredictionLifecycleAction::Accept,
+        dismissal_id: None,
+        acceptance_id: Some(InlinePredictionAcceptanceId(
+            Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap(),
+        )),
+        reason_labels: vec!["accepted.full".to_string()],
+        ..dismiss.clone()
+    };
+    validate_inline_prediction_lifecycle_command(&accept).expect("accept id is valid");
+
+    let missing_acceptance_id = InlinePredictionLifecycleCommand {
+        acceptance_id: None,
+        ..accept
+    };
+    assert!(matches!(
+        validate_inline_prediction_lifecycle_command(&missing_acceptance_id),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
+    ));
+}
+
+#[test]
 fn dto_contracts_assisted_ai_audit_outcomes_are_metadata_only_without_invocation() {
     let mut route_refused = assisted_ai_audit(None);
     route_refused.outcome_category = AssistedAiAuditOutcomeCategory::RouteRefused;
@@ -5899,6 +6167,340 @@ fn dto_contracts_delegated_task_plan_and_projection_are_metadata_only() {
     assert_eq!(roundtrip.plan_rows[0].plan_id, plan.plan_id);
     let mut missing = value;
     remove_required_field::<DelegatedTaskProjection>(&mut missing, "schema_version");
+}
+
+#[test]
+fn dto_contracts_delegated_task_chat_reviews_and_permissions_are_metadata_only() {
+    let mut projection = delegated_task_projection_from_plan_contracts(
+        "delegated-task:p7-chat",
+        vec![delegated_task_plan_from_boundary_input(
+            delegated_task_input(ProposalId(805)),
+        )],
+        TimestampMillis(2500),
+        1,
+    );
+    projection
+        .context_citations
+        .push(DelegatedTaskContextCitation {
+            citation_id: "delegate:citation:1".to_string(),
+            workspace_id: Some(WorkspaceId(7)),
+            file_id: Some(FileId(8)),
+            path: Some(CanonicalPath("src/lib.rs".to_string())),
+            byte_range: Some(ByteRange::new(0, 16)),
+            line_range: Some(LineIndexRange { start: 0, end: 1 }),
+            freshness_fingerprint: Some(fingerprint("fresh")),
+            chunk_hash: Some(fingerprint("chunk")),
+            score_basis_points: 8750,
+            metadata_label: "src/lib.rs chunk".to_string(),
+            labels: vec!["delegate.context.retrieval_citation".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    projection.chat_messages.push(DelegatedTaskChatMessage {
+        message_id: "delegate:assistant:1".to_string(),
+        role: DelegatedTaskChatRole::Assistant,
+        content_label: "Delegate context retrieved 1 citation".to_string(),
+        plan_id: Some(DelegatedTaskPlanId("plan:p7".to_string())),
+        proposal_id: Some(ProposalId(805)),
+        citation_ids: vec!["delegate:citation:1".to_string()],
+        tool_permission_request_ids: vec!["delegate:permission:1".to_string()],
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        created_at: TimestampMillis(2501),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    });
+    let hunk = DelegatedTaskProposalHunkReview {
+        hunk_id: "delegate:hunk:1".to_string(),
+        proposal_id: ProposalId(805),
+        target_id: Some("target:file".to_string()),
+        payload_kind: ProposalPayloadKind::WorkspaceEdit,
+        path: Some(CanonicalPath("src/lib.rs".to_string())),
+        byte_range: Some(ByteRange::new(0, 16)),
+        changed_line_count: 2,
+        inserted_line_count: 2,
+        deleted_line_count: 0,
+        content_hash: Some(fingerprint("hunk")),
+        disposition: DelegatedTaskProposalHunkDisposition::Accepted,
+        risk_label: ProposalRiskLabel::Low,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        labels: vec!["delegate.proposal_hunk.human_review".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    projection
+        .proposal_reviews
+        .push(DelegatedTaskProposalReview::from_hunks(
+            "delegate:review:805",
+            ProposalId(805),
+            vec![hunk],
+            vec!["delegate.proposal_review.human_approval_queue".to_string()],
+            1,
+        ));
+    projection
+        .tool_permission_requests
+        .push(delegated_task_tool_permission_request(
+            DelegatedTaskToolPermissionRequestInput {
+                request_id: "delegate:permission:1".to_string(),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+                capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                target_id: Some("plan:p7".to_string()),
+                decision: DelegatedTaskToolPermissionDecision::Confirm,
+                labels: vec!["delegate.permission.write.runtime_allocation".to_string()],
+                schema_version: 1,
+            },
+        ));
+    projection.chat_message_count = projection.chat_messages.len() as u32;
+    projection.context_citation_count = projection.context_citations.len() as u32;
+    projection.proposal_review_count = projection.proposal_reviews.len() as u32;
+    projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
+
+    let value = serde_json::to_value(&projection).expect("serialize delegate projection");
+    assert_eq!(value["chat_message_count"], json!(1));
+    assert_eq!(value["context_citation_count"], json!(1));
+    assert_eq!(value["proposal_reviews"][0]["ready_for_apply"], json!(true));
+    assert_eq!(
+        value["tool_permission_requests"][0]["disposition"],
+        json!("WaitingForConfirmation")
+    );
+    let serialized = serde_json::to_string(&value).expect("stringify delegate projection");
+    assert!(serialized.contains("MetadataOnly"));
+    assert!(serialized.contains("delegate.context.retrieval_citation"));
+    assert!(!serialized.contains("raw prompt"));
+    assert!(!serialized.contains("secret"));
+    assert!(!serialized.contains("provider_payload"));
+    assert!(!serialized.contains("tool_call_arguments"));
+    assert!(!serialized.contains("fn main"));
+
+    let roundtrip: DelegatedTaskProjection =
+        serde_json::from_value(value).expect("deserialize delegate projection");
+    assert_eq!(
+        roundtrip.chat_messages[0].role,
+        DelegatedTaskChatRole::Assistant
+    );
+    assert_eq!(
+        roundtrip.proposal_reviews[0].hunks[0].disposition,
+        DelegatedTaskProposalHunkDisposition::Accepted
+    );
+    assert_eq!(
+        roundtrip.tool_permission_requests[0].decision,
+        DelegatedTaskToolPermissionDecision::Confirm
+    );
+
+    let mut missing_chat =
+        serde_json::to_value(&roundtrip.chat_messages[0]).expect("serialize chat message");
+    remove_required_field::<DelegatedTaskChatMessage>(&mut missing_chat, "message_id");
+    let mut missing_permission = serde_json::to_value(&roundtrip.tool_permission_requests[0])
+        .expect("serialize tool permission");
+    remove_required_field::<DelegatedTaskToolPermissionRequest>(
+        &mut missing_permission,
+        "decision",
+    );
+}
+
+#[test]
+fn dto_contracts_delegated_task_tool_permission_decisions_fail_closed() {
+    let confirm = delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+        request_id: "delegate:permission:confirm".to_string(),
+        profile: DelegatedTaskToolPermissionProfile::Ask,
+        action_class: PermissionBudgetActionClass::ReadSemanticMetadata,
+        capability: Some(CapabilityId("delegated.context.retrieve".to_string())),
+        target_id: Some("workspace:7".to_string()),
+        decision: DelegatedTaskToolPermissionDecision::Confirm,
+        labels: Vec::new(),
+        schema_version: 1,
+    });
+    assert!(confirm.human_approval_required);
+    assert!(!confirm.human_approval_recorded);
+    assert!(!confirm.runtime_allowed);
+
+    let allow = delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+        request_id: "delegate:permission:allow".to_string(),
+        profile: DelegatedTaskToolPermissionProfile::Write,
+        action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+        capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+        target_id: Some("plan:p7".to_string()),
+        decision: DelegatedTaskToolPermissionDecision::Allow,
+        labels: Vec::new(),
+        schema_version: 1,
+    });
+    assert!(allow.human_approval_recorded);
+    assert!(allow.runtime_allowed);
+    assert!(!allow.deny_overrides);
+
+    let deny = delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+        request_id: "delegate:permission:deny".to_string(),
+        profile: DelegatedTaskToolPermissionProfile::Write,
+        action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+        capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+        target_id: Some("plan:p7".to_string()),
+        decision: DelegatedTaskToolPermissionDecision::Deny,
+        labels: Vec::new(),
+        schema_version: 1,
+    });
+    assert!(deny.human_approval_recorded);
+    assert!(!deny.runtime_allowed);
+    assert!(deny.deny_overrides);
+
+    let always = delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+        request_id: "delegate:permission:always".to_string(),
+        profile: DelegatedTaskToolPermissionProfile::Write,
+        action_class: PermissionBudgetActionClass::InvokeLocalTool,
+        capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+        target_id: Some("plan:p7".to_string()),
+        decision: DelegatedTaskToolPermissionDecision::Always,
+        labels: Vec::new(),
+        schema_version: 1,
+    });
+    assert!(always.human_approval_recorded);
+    assert!(always.runtime_allowed);
+    assert_eq!(
+        always.disposition,
+        DelegatedTaskToolPermissionDisposition::AlwaysAllowed
+    );
+}
+
+#[test]
+fn dto_contracts_automate_mcp_registry_decision_feed_and_risk_rows_are_metadata_only() {
+    let server_id = McpServerId("mcp:filesystem".to_string());
+    let tool_name = McpToolName("write_file".to_string());
+    let registry = McpRegistrySnapshot {
+        registry_id: "mcp-registry:filesystem:1".to_string(),
+        server: McpServerDescriptor {
+            server_id: server_id.clone(),
+            transport_kind: McpTransportKind::Stdio,
+            display_label: "Filesystem MCP".to_string(),
+            endpoint_label: "stdio:filesystem".to_string(),
+            tools_list_changed: true,
+            resources_list_changed: true,
+            prompts_list_changed: true,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        tools: vec![McpToolDescriptor {
+            server_id: server_id.clone(),
+            name: tool_name.clone(),
+            description_label: "Write a file through proposal-gated tooling".to_string(),
+            input_schema_hash: FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: "schema-hash".to_string(),
+            },
+            risk_label: ProposalRiskLabel::High,
+            required_permission_profile: DelegatedTaskToolPermissionProfile::Write,
+            action_class: PermissionBudgetActionClass::InvokeLocalTool,
+            capability: CapabilityId("mcp.tool.call".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        resources: vec![McpResourceDescriptor {
+            server_id: server_id.clone(),
+            uri: McpResourceUri("workspace://metadata".to_string()),
+            name_label: "workspace metadata".to_string(),
+            mime_type_label: "application/json".to_string(),
+            subscribable: true,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        prompts: vec![McpPromptDescriptor {
+            server_id: server_id.clone(),
+            name: McpPromptName("review".to_string()),
+            description_label: "Review prompt".to_string(),
+            argument_labels: vec!["scope".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        last_notification_kind: Some(McpListChangedKind::Tools),
+        list_version: 2,
+        generated_at: TimestampMillis(123),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_mcp_registry_snapshot(&registry).expect("registry is valid");
+    validate_mcp_json_rpc_envelope(&McpJsonRpcEnvelope::request(
+        "request:1",
+        "tools/call",
+        json!({"name": tool_name.0, "arguments": {"path_hash": "abc"}}),
+    ))
+    .expect("json-rpc 2.0 envelope");
+
+    let session_id = LegionWorkflowSessionId("session:automate:metadata".to_string());
+    let decision = LegionWorkflowDecisionFeedEntry {
+        decision_id: LegionWorkflowDecisionId("decision:1".to_string()),
+        session_id: session_id.clone(),
+        worker_id: Some(LegionWorkflowWorkerId("worker:supervisor".to_string())),
+        kind: LegionWorkflowDecisionKind::ToolApprovalRequested,
+        summary_label: "Tool approval requested".to_string(),
+        rationale_labels: vec!["human_in_the_loop".to_string()],
+        risk_label: ProposalRiskLabel::High,
+        mcp_server_id: Some(server_id),
+        mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+        tool_permission_request_id: Some("permission:1".to_string()),
+        correlation_id: CorrelationId(1),
+        causality_id: causality_id(),
+        event_sequence: EventSequence(1),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_legion_workflow_decision_feed_entry(&decision).expect("decision row is valid");
+    let monitor = LegionWorkflowRiskMonitorSnapshot {
+        monitor_id: LegionWorkflowRiskMonitorId("risk:1".to_string()),
+        session_id: session_id.clone(),
+        state: LegionWorkflowRiskMonitorState::Halted,
+        risk_score: 5,
+        halt_threshold: 3,
+        high_risk_action_count: 3,
+        denied_tool_count: 0,
+        stale_mcp_registry_detected: false,
+        halt_reason: Some(LegionWorkflowRiskHaltReason::HighRiskToolThreshold),
+        labels: vec!["risk.high".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_legion_workflow_risk_monitor_snapshot(&monitor).expect("halt reason required");
+    let kill_switch = LegionWorkflowKillSwitch {
+        kill_switch_id: LegionWorkflowKillSwitchId("kill:1".to_string()),
+        session_id,
+        state: LegionWorkflowKillSwitchState::Triggered,
+        triggered_by: Some(PrincipalId("user:test".to_string())),
+        reason_label: Some("operator stop".to_string()),
+        triggered_at: Some(TimestampMillis(456)),
+        correlation_id: CorrelationId(2),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_legion_workflow_kill_switch(&kill_switch).expect("trigger metadata required");
+
+    let projection = LegionWorkflowProjection {
+        projection_id: "legion-workflow:automate:test".to_string(),
+        rows: Vec::new(),
+        mcp_registries: vec![registry],
+        decision_feed: vec![decision],
+        risk_monitors: vec![monitor],
+        kill_switches: vec![kill_switch],
+        tool_permission_requests: Vec::new(),
+        total_session_count: 0,
+        mcp_registry_count: 1,
+        decision_feed_count: 1,
+        risk_monitor_count: 1,
+        kill_switch_count: 1,
+        tool_permission_request_count: 0,
+        omitted_row_count: 0,
+        generated_at: TimestampMillis(789),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let value = serde_json::to_value(&projection).expect("serialize projection");
+    assert_eq!(value["mcp_registry_count"], 1);
+    assert_eq!(value["decision_feed_count"], 1);
+    assert_eq!(value["risk_monitor_count"], 1);
+    assert_eq!(value["kill_switch_count"], 1);
+    assert!(
+        !serde_json::to_string(&projection)
+            .expect("projection json")
+            .contains("raw_source")
+    );
 }
 
 #[test]
@@ -8210,6 +8812,58 @@ fn language_terminal_projection_roundtrips_language_surface() {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         }],
+        quick_fixes: vec![LanguageQuickFixProjection {
+            action_id: "quickfix:index.lexical.todo:0:0:0".to_string(),
+            title: "Prepare code action for index.lexical.todo".to_string(),
+            kind_label: "quickfix.diagnostic".to_string(),
+            problem_code_label: Some("index.lexical.todo".to_string()),
+            problem_range: Some(protocol_range()),
+            severity: ProtocolDiagnosticSeverity::Warning,
+            source_label: Some("lexical-index".to_string()),
+            proposal_id: Some(ProposalId(700)),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        breadcrumbs: vec![LanguageBreadcrumbProjection {
+            breadcrumb_id: "breadcrumb:outline-1".to_string(),
+            label: "main".to_string(),
+            kind_label: "function".to_string(),
+            range: Some(protocol_range()),
+            depth: 0,
+            source_label: "devil-index".to_string(),
+            schema_version: 1,
+        }],
+        sticky_scopes: vec![LanguageStickyScopeProjection {
+            scope_id: "sticky:outline-1".to_string(),
+            label: "main".to_string(),
+            kind_label: "function".to_string(),
+            range: Some(protocol_range()),
+            depth: 0,
+            active: true,
+            source_label: "devil-index".to_string(),
+            schema_version: 1,
+        }],
+        inlay_hints: vec![LanguageInlayHintProjection {
+            hint_id: "inlay:outline-1".to_string(),
+            label: ": function".to_string(),
+            kind_label: "symbol-kind".to_string(),
+            position: protocol_range().end,
+            range: Some(protocol_range()),
+            padding_left: true,
+            padding_right: false,
+            source_label: "devil-index".to_string(),
+            schema_version: 1,
+        }],
+        code_lenses: vec![LanguageCodeLensProjection {
+            lens_id: "codelens:outline-1:references".to_string(),
+            title: "1 reference".to_string(),
+            command_label: "Find references".to_string(),
+            kind_label: "references".to_string(),
+            range: Some(protocol_range()),
+            data_label: Some("references=1".to_string()),
+            source_label: "devil-index".to_string(),
+            schema_version: 1,
+        }],
         hover: Some(LanguageHoverProjection {
             hover_id: "hover-1".to_string(),
             file_id: Some(FileId(33)),
@@ -8272,6 +8926,14 @@ fn language_terminal_projection_roundtrips_language_surface() {
     let encoded = serde_json::to_value(&projection).expect("language projection serializes");
     assert!(encoded.get("raw_source_text").is_none());
     assert!(encoded.get("raw_lsp_payload").is_none());
+    assert_eq!(
+        encoded["quick_fixes"][0]["action_id"],
+        "quickfix:index.lexical.todo:0:0:0"
+    );
+    assert_eq!(encoded["breadcrumbs"][0]["label"], "main");
+    assert_eq!(encoded["sticky_scopes"][0]["active"], true);
+    assert_eq!(encoded["inlay_hints"][0]["label"], ": function");
+    assert_eq!(encoded["code_lenses"][0]["title"], "1 reference");
     let decoded: LanguageToolingProjection =
         serde_json::from_value(encoded).expect("language projection roundtrips");
     assert_eq!(decoded, projection);
@@ -8663,7 +9325,107 @@ fn product_readiness_debug_test_scm_and_workbench_contracts_roundtrip() {
     assert!(decoded_ledger.substrate_acceptance_separate);
 }
 
-<<<<<<< ours
+#[test]
+fn dap_client_contract_frames_requests_and_matches_responses() {
+    let mut client = DapClientState::new(DebugSessionId("debug-1".to_string()));
+    let request = client
+        .prepare_request("initialize", json!({ "clientID": "devil-ide" }))
+        .expect("initialize request should be accepted");
+
+    assert_eq!(request.seq, 1);
+    assert_eq!(request.message_type, DapMessageType::Request);
+    assert_eq!(request.command.as_deref(), Some("initialize"));
+    assert_eq!(client.pending_request_count(), 1);
+
+    let encoded = encode_dap_message(&request).expect("dap request should encode");
+    let encoded_text = String::from_utf8(encoded.clone()).expect("dap frame is utf8");
+    assert!(encoded_text.starts_with("Content-Length: "));
+    assert!(encoded_text.contains("\r\n\r\n"));
+
+    let decoded = decode_dap_message(&encoded).expect("dap request should decode");
+    assert_eq!(decoded, request);
+
+    let response = DapProtocolMessage::response(
+        2,
+        request.seq,
+        "initialize",
+        true,
+        json!({ "supportsConfigurationDoneRequest": true }),
+    );
+    let matched = client
+        .match_response(response)
+        .expect("response should match pending request");
+    assert_eq!(matched.request_seq, request.seq);
+    assert_eq!(matched.command, "initialize");
+    assert_eq!(client.pending_request_count(), 0);
+
+    let stray = DapProtocolMessage::response(3, 99, "launch", true, json!({}));
+    assert!(client.match_response(stray).is_err());
+}
+
+#[test]
+fn debug_breakpoint_launch_and_projection_contracts_are_session_independent() {
+    let breakpoint = DebugBreakpointRecord {
+        breakpoint_id: DebugBreakpointId("bp-main-1".to_string()),
+        workspace_id: WorkspaceId(11),
+        session_id: None,
+        path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+        range: protocol_range(),
+        enabled: true,
+        condition: Some("count > 2".to_string()),
+        hit_condition: Some("3".to_string()),
+        log_message: Some("count changed".to_string()),
+        verified: false,
+        message: Some("pending adapter verification".to_string()),
+        correlation_id: CorrelationId(42),
+        causality_id: causality_id(),
+        sequence: EventSequence(1),
+        schema_version: 1,
+    };
+    validate_debug_breakpoint_record(&breakpoint).expect("breakpoint record is valid");
+    let breakpoint_roundtrip: DebugBreakpointRecord =
+        serde_json::from_value(serde_json::to_value(&breakpoint).expect("serialize breakpoint"))
+            .expect("breakpoint roundtrips");
+    assert_eq!(breakpoint_roundtrip.session_id, None);
+    assert_eq!(breakpoint_roundtrip.condition.as_deref(), Some("count > 2"));
+
+    let config = DebugLaunchConfiguration {
+        configuration_id: DebugConfigurationId("cargo:sample:bin:sample".to_string()),
+        workspace_id: WorkspaceId(11),
+        name: "Debug sample".to_string(),
+        adapter_type: "lldb-dap".to_string(),
+        request: DebugLaunchRequestKind::Launch,
+        program_label: "target/debug/sample".to_string(),
+        cwd: CanonicalPath("C:/repo".to_string()),
+        cargo_package: Some("sample".to_string()),
+        cargo_target: Some("sample".to_string()),
+        cargo_args: vec![
+            "build".to_string(),
+            "--package".to_string(),
+            "sample".to_string(),
+            "--bin".to_string(),
+            "sample".to_string(),
+        ],
+        stop_on_entry: false,
+        deterministic: true,
+        schema_version: 1,
+    };
+    validate_debug_launch_configuration(&config).expect("cargo debug config is valid");
+
+    let audit = DebugAdapterAuditRecord {
+        session_id: DebugSessionId("debug-1".to_string()),
+        state: DebugSessionState::Paused,
+        adapter_type: "lldb-dap".to_string(),
+        event_sequence: EventSequence(2),
+        correlation_id: CorrelationId(43),
+        causality_id: causality_id(),
+        metadata_summary: "action=launch state=paused breakpoints=1".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_debug_adapter_audit_record(&audit).expect("debug audit is valid");
+}
+
 fn legion_workflow_worker(
     id: &str,
     backend: LegionWorkflowModelBackend,
@@ -8689,34 +9451,12 @@ fn legion_workflow_worker(
         risk_labels: vec![CommandRiskLabel::Review],
         privacy_labels: vec![PrivacyClassification::Metadata],
         correlation_id: CorrelationId(901),
-=======
-fn legion_workflow_worker() -> LegionWorkflowWorkerAssignment {
-    LegionWorkflowWorkerAssignment {
-        worker_id: LegionWorkflowWorkerId("worker-implementer".to_string()),
-        role: LegionWorkflowWorkerRole::Implementer,
-        state: LegionWorkflowWorkerState::ProposalReady,
-        model_backend: LegionWorkflowModelBackend::ProviderBacked {
-            provider_id: "provider-local-gateway".to_string(),
-            route_id: "route-approved-metadata".to_string(),
-            model_label: "display-safe model".to_string(),
-        },
-        model_label: "display-safe model".to_string(),
-        allowed_command_classes: vec![
-            "proposal-preview".to_string(),
-            "verification-metadata".to_string(),
-        ],
-        linked_delegated_plan_id: Some(DelegatedTaskPlanId("plan-auth-001".to_string())),
-        risk_label: ProposalRiskLabel::Medium,
-        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
-        correlation_id: CorrelationId(1302),
->>>>>>> theirs
         causality_id: causality_id(),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
 }
 
-<<<<<<< ours
 fn legion_workflow_session() -> LegionWorkflowSession {
     LegionWorkflowSession {
         session_id: LegionWorkflowSessionId("legion-workflow:session:1".to_string()),
@@ -8776,77 +9516,10 @@ fn legion_workflow_session() -> LegionWorkflowSession {
         schema_version: 1,
         correlation_id: CorrelationId(901),
         causality_id: causality_id(),
-=======
-fn valid_legion_workflow_session() -> LegionWorkflowSession {
-    LegionWorkflowSession {
-        session_id: LegionWorkflowSessionId("session-phase13".to_string()),
-        directive_artifact_id: "artifact-directive".to_string(),
-        spec_artifact_id: "artifact-spec".to_string(),
-        task_graph_artifact_id: "artifact-task-graph".to_string(),
-        product_mode: ProductMode::LegionWorkflows,
-        worker_assignments: vec![legion_workflow_worker()],
-        dependency_edges: vec![LegionWorkflowDependencyEdge {
-            dependency_id: "dependency-review-after-implementation".to_string(),
-            from_worker_id: LegionWorkflowWorkerId("worker-implementer".to_string()),
-            to_worker_id: LegionWorkflowWorkerId("worker-implementer".to_string()),
-            state: LegionWorkflowDependencyState::Satisfied,
-            label: "implementation metadata ready before review".to_string(),
-            schema_version: 1,
-        }],
-        conflicts: vec![LegionWorkflowConflictSummary {
-            conflict_id: "conflict-overlap-reviewed".to_string(),
-            kind: LegionWorkflowConflictKind::WorkerOverlap,
-            state: LegionWorkflowConflictState::Resolved,
-            label: "overlap resolved by proposal ordering".to_string(),
-            proposal_id: Some(ProposalId(42)),
-            risk_label: ProposalRiskLabel::Medium,
-            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }],
-        verification_gates: vec![LegionWorkflowVerificationGate {
-            gate_id: "verification-unit-tests".to_string(),
-            label: "unit test metadata passed".to_string(),
-            state: LegionWorkflowVerificationGateState::Passed,
-            required: true,
-            verification_run_id: Some("verify-001".to_string()),
-            evidence_artifact_id: Some("artifact-evidence".to_string()),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }],
-        signoffs: vec![LegionWorkflowSignoffRecord {
-            signoff_id: "signoff-human-review".to_string(),
-            reviewer_label: "human reviewer".to_string(),
-            state: LegionWorkflowSignoffState::Approved,
-            required: true,
-            approval_artifact_id: Some("artifact-approval".to_string()),
-            correlation_id: CorrelationId(1302),
-            causality_id: causality_id(),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }],
-        proposal_ids: vec![ProposalId(42)],
-        merge_approval: Some(LegionWorkflowMergeApproval {
-            approval_id: "merge-approval".to_string(),
-            approved: true,
-            rollback_available: true,
-            approval_artifact_id: Some("artifact-approval".to_string()),
-            rollback_artifact_id: Some("artifact-rollback".to_string()),
-            schema_version: 1,
-        }),
-        state: LegionWorkflowState::WaitingForApproval,
-        dirty_main_workspace: false,
-        stale_proposal_preconditions: false,
-        audit_before_success_recorded: true,
-        generated_at: TimestampMillis(1302),
-        redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
->>>>>>> theirs
     }
 }
 
 #[test]
-<<<<<<< ours
 fn dto_contracts_legion_workflow_session_roundtrips_and_projects_metadata_only() {
     let session = legion_workflow_session();
 
@@ -8884,44 +9557,10 @@ fn dto_contracts_legion_workflow_session_roundtrips_and_projects_metadata_only()
     assert_eq!(
         projection.redaction_hints,
         vec![RedactionHint::MetadataOnly]
-=======
-fn legion_workflow_session_round_trips_and_projects_metadata_only() {
-    let session = valid_legion_workflow_session();
-    validate_legion_workflow_session(&session).expect("valid legion workflow session");
-    let encoded = serde_json::to_value(&session).expect("serialize legion workflow session");
-    assert!(encoded.to_string().contains("session-phase13"));
-    assert!(!encoded.to_string().contains("raw prompt"));
-    assert!(!encoded.to_string().contains("source_body"));
-    let decoded: LegionWorkflowSession =
-        serde_json::from_value(encoded).expect("deserialize session");
-    assert_eq!(decoded, session);
-
-    let readiness = evaluate_legion_workflow_merge_readiness(&decoded);
-    assert_eq!(readiness.state, LegionWorkflowMergeReadinessState::Ready);
-    assert!(readiness.blockers.is_empty());
-
-    let projection = legion_workflow_projection_from_sessions(
-        "legion-workflows:phase13",
-        std::slice::from_ref(&decoded),
-        TimestampMillis(1400),
-        8,
-    );
-    assert_eq!(projection.rows.len(), 1);
-    assert_eq!(projection.worker_count, 1);
-    assert_eq!(
-        projection.rows[0].merge_readiness,
-        LegionWorkflowMergeReadinessState::Ready
-    );
-    assert!(
-        projection
-            .redaction_hints
-            .contains(&RedactionHint::MetadataOnly)
->>>>>>> theirs
     );
 }
 
 #[test]
-<<<<<<< ours
 fn dto_contracts_legion_workflow_rejects_invalid_core_metadata() {
     let mut zero_schema = legion_workflow_session();
     zero_schema.schema_version = 0;
@@ -9061,125 +9700,4 @@ fn dto_contracts_legion_workflow_waits_for_approval_without_applying() {
             .labels
             .contains(&"legion_workflow.waiting_for_approval".to_string())
     );
-=======
-fn legion_workflow_validators_reject_invalid_metadata() {
-    let mut session = valid_legion_workflow_session();
-    session.worker_assignments[0].correlation_id = CorrelationId(0);
-    assert!(matches!(
-        validate_legion_workflow_session(&session),
-        Err(LegionWorkflowValidationError::ZeroCorrelationId)
-    ));
-
-    let mut session = valid_legion_workflow_session();
-    session.worker_assignments[0].causality_id = CausalityId(Uuid::nil());
-    assert!(matches!(
-        validate_legion_workflow_session(&session),
-        Err(LegionWorkflowValidationError::NilCausalityId)
-    ));
-
-    let mut session = valid_legion_workflow_session();
-    session.schema_version = 0;
-    assert!(matches!(
-        validate_legion_workflow_session(&session),
-        Err(LegionWorkflowValidationError::ZeroSchemaVersion { .. })
-    ));
-
-    let mut session = valid_legion_workflow_session();
-    session.redaction_hints = vec![RedactionHint::None];
-    assert!(matches!(
-        validate_legion_workflow_session(&session),
-        Err(LegionWorkflowValidationError::UnsafeRedactionHints { .. })
-    ));
-
-    let mut session = valid_legion_workflow_session();
-    session.directive_artifact_id = "raw prompt: build everything".to_string();
-    assert!(matches!(
-        validate_legion_workflow_session(&session),
-        Err(LegionWorkflowValidationError::NonMetadataOnly { .. })
-    ));
-
-    let mut session = valid_legion_workflow_session();
-    session.worker_assignments[0].model_backend = LegionWorkflowModelBackend::ProviderBacked {
-        provider_id: "provider".to_string(),
-        route_id: "".to_string(),
-        model_label: "model".to_string(),
-    };
-    assert!(matches!(
-        validate_legion_workflow_session(&session),
-        Err(LegionWorkflowValidationError::EmptyField { .. })
-    ));
-}
-
-#[test]
-fn legion_workflow_merge_readiness_fails_closed_for_missing_gates() {
-    let mut session = valid_legion_workflow_session();
-    session.conflicts[0].state = LegionWorkflowConflictState::Open;
-    assert_eq!(
-        evaluate_legion_workflow_merge_readiness(&session).state,
-        LegionWorkflowMergeReadinessState::Blocked
-    );
-
-    let mut session = valid_legion_workflow_session();
-    session.verification_gates[0].state = LegionWorkflowVerificationGateState::Failed;
-    let readiness = evaluate_legion_workflow_merge_readiness(&session);
-    assert_eq!(readiness.state, LegionWorkflowMergeReadinessState::Blocked);
-    assert!(
-        readiness
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("verification"))
-    );
-
-    let mut session = valid_legion_workflow_session();
-    session.signoffs[0].state = LegionWorkflowSignoffState::Missing;
-    assert!(
-        evaluate_legion_workflow_merge_readiness(&session)
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("signoff"))
-    );
-
-    let mut session = valid_legion_workflow_session();
-    session.dirty_main_workspace = true;
-    assert!(
-        evaluate_legion_workflow_merge_readiness(&session)
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("dirty main workspace"))
-    );
-
-    let mut session = valid_legion_workflow_session();
-    session.stale_proposal_preconditions = true;
-    assert!(
-        evaluate_legion_workflow_merge_readiness(&session)
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("stale proposal"))
-    );
-
-    let mut session = valid_legion_workflow_session();
-    session.audit_before_success_recorded = false;
-    assert!(
-        evaluate_legion_workflow_merge_readiness(&session)
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("audit-before-success"))
-    );
-
-    let mut session = valid_legion_workflow_session();
-    session.proposal_ids.clear();
-    assert!(
-        evaluate_legion_workflow_merge_readiness(&session)
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("missing proposal id"))
-    );
-
-    let mut session = valid_legion_workflow_session();
-    session.merge_approval = None;
-    assert_eq!(
-        evaluate_legion_workflow_merge_readiness(&session).state,
-        LegionWorkflowMergeReadinessState::WaitingForApproval
-    );
->>>>>>> theirs
 }

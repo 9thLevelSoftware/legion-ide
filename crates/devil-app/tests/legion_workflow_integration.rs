@@ -1,25 +1,35 @@
+#![cfg(feature = "ai")]
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use devil_agent::LegionWorkflowCoordinatorOutput;
-use devil_app::AppComposition;
+use devil_ai_providers::{McpClient, McpClientError, McpTransport};
+use devil_app::{
+    AppAutomateToolCallOutcome, AppComposition, AppMcpClientToolRuntime, AppProductMode,
+};
 use devil_editor::{TextEdit, TextPosition};
 use devil_protocol::{
-    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, ByteRange, CausalityId,
-    CommandRiskLabel, CorrelationId, DelegatedTaskAffectedTargetSummary,
+    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, ByteRange, CapabilityId,
+    CausalityId, CommandRiskLabel, CorrelationId, DelegatedTaskAffectedTargetSummary,
     DelegatedTaskOperationClass, DelegatedTaskPlanId, DelegatedTaskPlanningBoundaryInput,
-    FileFingerprint, LegionWorkflowConflictState, LegionWorkflowDependency,
+    DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile, FileFingerprint,
+    LegionWorkflowConflictState, LegionWorkflowDecisionKind, LegionWorkflowDependency,
     LegionWorkflowDependencyId, LegionWorkflowDependencyState, LegionWorkflowMergeApproval,
     LegionWorkflowMergeReadinessBlocker, LegionWorkflowMergeReadinessState,
-    LegionWorkflowModelBackend, LegionWorkflowSession, LegionWorkflowSessionId,
-    LegionWorkflowSignOff, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
-    LegionWorkflowState, LegionWorkflowVerificationGate, LegionWorkflowVerificationGateId,
-    LegionWorkflowVerificationGateState, LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId,
-    LegionWorkflowWorkerRole, LegionWorkflowWorkerState, PrincipalId, PrivacyClassification,
-    ProductMode, ProposalId, ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetKind,
-    RedactionHint, TimestampMillis, WorkspaceId, WorkspaceTrustState,
-    delegated_task_plan_from_boundary_input,
+    LegionWorkflowModelBackend, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
+    LegionWorkflowSessionId, LegionWorkflowSignOff, LegionWorkflowSignOffId,
+    LegionWorkflowSignOffState, LegionWorkflowState, LegionWorkflowVerificationGate,
+    LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
+    LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerRole,
+    LegionWorkflowWorkerState, McpJsonRpcEnvelope, McpListChangedKind, McpRegistrySnapshot,
+    McpServerDescriptor, McpServerId, McpToolDescriptor, McpToolName, McpTransportKind,
+    PermissionBudgetActionClass, PrincipalId, PrivacyClassification, ProductMode, ProposalId,
+    ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetKind, RedactionHint, TimestampMillis,
+    WorkspaceId, WorkspaceTrustState, delegated_task_plan_from_boundary_input,
 };
+use serde_json::{Value, json};
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -31,6 +41,31 @@ fn fingerprint(value: &str) -> FileFingerprint {
     FileFingerprint {
         algorithm: "sha256".to_string(),
         value: value.to_string(),
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingMcpTransport {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingMcpTransport {
+    fn call_count(&self) -> usize {
+        self.calls.lock().expect("calls lock").len()
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+}
+
+impl McpTransport for RecordingMcpTransport {
+    fn send(&self, envelope: &McpJsonRpcEnvelope) -> Result<Value, McpClientError> {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(envelope.method.clone());
+        Ok(json!({ "result_label": "mcp.write_file.completed" }))
     }
 }
 
@@ -230,9 +265,59 @@ fn temp_workspace(label: &str) -> PathBuf {
     root
 }
 
+fn automate_app() -> AppComposition {
+    let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Automate);
+    app
+}
+
+fn test_mcp_registry(server_id: &McpServerId, tool_name: &McpToolName) -> McpRegistrySnapshot {
+    McpRegistrySnapshot {
+        registry_id: format!("mcp-registry:{}:1", server_id.0),
+        server: McpServerDescriptor {
+            server_id: server_id.clone(),
+            transport_kind: McpTransportKind::StreamableHttp,
+            display_label: "Test MCP".to_string(),
+            endpoint_label: "https://mcp.invalid".to_string(),
+            tools_list_changed: true,
+            resources_list_changed: true,
+            prompts_list_changed: true,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        tools: vec![McpToolDescriptor {
+            server_id: server_id.clone(),
+            name: tool_name.clone(),
+            description_label: "High risk test tool".to_string(),
+            input_schema_hash: fingerprint("mcp-schema"),
+            risk_label: ProposalRiskLabel::High,
+            required_permission_profile: DelegatedTaskToolPermissionProfile::Write,
+            action_class: PermissionBudgetActionClass::InvokeLocalTool,
+            capability: CapabilityId("mcp.tool.call".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        resources: Vec::new(),
+        prompts: Vec::new(),
+        last_notification_kind: None,
+        list_version: 1,
+        generated_at: TimestampMillis(1),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn allow_delegated_runtime(app: &mut AppComposition, plan_id: &DelegatedTaskPlanId) {
+    app.record_delegate_tool_permission_decision(
+        format!("delegate:permission:{}:runtime", plan_id.0),
+        DelegatedTaskToolPermissionDecision::Allow,
+    )
+    .expect("allow delegated runtime");
+}
+
 #[test]
 fn legion_workflow_session_not_found_fails_closed() {
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     let err = app
         .execute_legion_workflow(&LegionWorkflowSessionId("session:missing".to_string()))
         .expect_err("missing session fails");
@@ -240,11 +325,31 @@ fn legion_workflow_session_not_found_fails_closed() {
 }
 
 #[test]
-fn legion_workflow_local_worker_reaches_waiting_for_approval_metadata() {
+fn manual_mode_rejects_local_legion_workflow_execution() {
     let mut app = AppComposition::new();
-    let (session, plan_id) = local_session("waiting", false);
+    let (session, plan_id) = local_session("manual-reject", false);
     let session_id = session.session_id.clone();
     app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let err = app
+        .execute_legion_workflow(&session_id)
+        .expect_err("manual mode rejects automate execution");
+
+    assert!(
+        err.to_string()
+            .contains("Automate workflow dispatch requires")
+    );
+}
+
+#[test]
+fn legion_workflow_local_worker_reaches_waiting_for_approval_metadata() {
+    let mut app = automate_app();
+    let (session, plan_id) = local_session("waiting", false);
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
+    allow_delegated_runtime(&mut app, &plan_id);
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed workflow");
 
@@ -276,7 +381,7 @@ fn legion_workflow_local_worker_reaches_waiting_for_approval_metadata() {
 
 #[test]
 fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker() {
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     let root_plan_id = DelegatedTaskPlanId("plan-chain-root".to_string());
     let child_plan_id = DelegatedTaskPlanId("plan-chain-child".to_string());
     let mut session = workflow_session(
@@ -314,9 +419,11 @@ fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker()
     });
     let session_id = session.session_id.clone();
     app.seed_delegated_task_plan_contracts(vec![
-        delegated_contract(root_plan_id),
-        delegated_contract(child_plan_id),
+        delegated_contract(root_plan_id.clone()),
+        delegated_contract(child_plan_id.clone()),
     ]);
+    allow_delegated_runtime(&mut app, &root_plan_id);
+    allow_delegated_runtime(&mut app, &child_plan_id);
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed workflow");
 
@@ -390,7 +497,7 @@ fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker()
 
 #[test]
 fn legion_workflow_provider_worker_emits_route_required_metadata_without_invocation() {
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     let session = workflow_session(
         "provider",
         vec![worker(
@@ -433,7 +540,7 @@ fn legion_workflow_provider_worker_emits_route_required_metadata_without_invocat
 
 #[test]
 fn legion_workflow_same_target_conflict_blocks_merge_readiness() {
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     let session = workflow_session(
         "conflict",
         vec![
@@ -489,7 +596,7 @@ fn legion_workflow_same_target_conflict_blocks_merge_readiness() {
 #[test]
 fn legion_workflow_dirty_main_workspace_blocks_merge_readiness() {
     let root = temp_workspace("dirty-workspace");
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     app.open_workspace(
         &root,
         WorkspaceTrustState::Trusted,
@@ -525,7 +632,7 @@ fn legion_workflow_dirty_main_workspace_blocks_merge_readiness() {
 
 #[test]
 fn legion_workflow_missing_verification_blocks_merge_readiness() {
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     let (mut session, plan_id) = local_session("missing-verification", true);
     session.verification_gates.clear();
     let session_id = session.session_id.clone();
@@ -551,7 +658,7 @@ fn legion_workflow_missing_verification_blocks_merge_readiness() {
 
 #[test]
 fn legion_workflow_missing_signoff_blocks_merge_readiness() {
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     let (mut session, plan_id) = local_session("missing-signoff", true);
     session.sign_off_records.clear();
     let session_id = session.session_id.clone();
@@ -578,7 +685,7 @@ fn legion_workflow_missing_signoff_blocks_merge_readiness() {
 #[test]
 fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutation() {
     let root = temp_workspace("merge-ready");
-    let mut app = AppComposition::new();
+    let mut app = automate_app();
     app.open_workspace(
         &root,
         WorkspaceTrustState::Trusted,
@@ -605,7 +712,8 @@ fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutatio
         None,
     );
     let session_id = session.session_id.clone();
-    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
+    allow_delegated_runtime(&mut app, &plan_id);
     app.seed_legion_workflow_sessions(vec![session.clone()])
         .expect("seed workflow");
 
@@ -647,4 +755,183 @@ fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutatio
         LegionWorkflowState::Completed
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn automate_mcp_tool_permissions_decision_feed_risk_halt_and_kill_switch_are_projected() {
+    let mut app = automate_app();
+    let (session, plan_id) = local_session("mcp-risk", false);
+    let session_id = session.session_id.clone();
+    let server_id = McpServerId("mcp:test".to_string());
+    let tool_name = McpToolName("write_file".to_string());
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    let projection = app
+        .seed_legion_workflow_mcp_registry(test_mcp_registry(&server_id, &tool_name))
+        .expect("seed mcp registry");
+    assert_eq!(projection.mcp_registry_count, 1);
+
+    let waiting = app
+        .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &tool_name)
+        .expect("prepare tool call");
+    let request = match waiting {
+        AppAutomateToolCallOutcome::WaitingForToolPermission { request } => request,
+        other => panic!("expected waiting for permission, got {other:?}"),
+    };
+    assert_eq!(
+        request.decision,
+        DelegatedTaskToolPermissionDecision::Confirm
+    );
+    assert!(!request.runtime_allowed);
+
+    let projection = app
+        .record_legion_workflow_tool_permission_decision(
+            &session_id,
+            &server_id,
+            &tool_name,
+            DelegatedTaskToolPermissionDecision::Allow,
+        )
+        .expect("record allow");
+    assert_eq!(projection.tool_permission_request_count, 1);
+    assert!(projection.decision_feed_count >= 2);
+
+    let ready = app
+        .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &tool_name)
+        .expect("prepare allowed tool call");
+    assert!(matches!(ready, AppAutomateToolCallOutcome::Ready { .. }));
+
+    let halted = app
+        .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &tool_name)
+        .expect("second high-risk call");
+    assert!(matches!(halted, AppAutomateToolCallOutcome::Halted { .. }));
+    let projection = app.legion_workflow_projection(TimestampMillis::now());
+    assert!(projection.risk_monitors.iter().any(|monitor| {
+        monitor.session_id == session_id && monitor.state == LegionWorkflowRiskMonitorState::Halted
+    }));
+    assert!(
+        projection
+            .decision_feed
+            .iter()
+            .any(|entry| entry.summary_label.contains("risk monitor"))
+    );
+
+    let projection = app
+        .apply_legion_workflow_mcp_list_changed(&session_id, &server_id, McpListChangedKind::Tools)
+        .expect("list changed");
+    assert!(
+        projection
+            .mcp_registries
+            .iter()
+            .any(|registry| registry.last_notification_kind.is_none() && registry.list_version == 2)
+    );
+    assert!(
+        projection
+            .decision_feed
+            .iter()
+            .any(|entry| entry.kind == LegionWorkflowDecisionKind::McpRegistryReloaded)
+    );
+
+    let projection = app
+        .trigger_legion_workflow_kill_switch(
+            &session_id,
+            PrincipalId("user:test".to_string()),
+            "operator stop".to_string(),
+        )
+        .expect("kill switch");
+    assert!(projection.kill_switches.iter().any(|switch| {
+        switch.session_id == session_id
+            && switch.state == devil_protocol::LegionWorkflowKillSwitchState::Triggered
+    }));
+}
+
+#[test]
+fn legion_workflow_mcp_worker_waits_for_permission_and_resumes_after_allow() {
+    let mut app = automate_app();
+    let server_id = McpServerId("mcp:test".to_string());
+    let tool_name = McpToolName("write_file".to_string());
+    let transport = RecordingMcpTransport::default();
+    let session = workflow_session(
+        "mcp-worker",
+        vec![worker(
+            "worker:mcp",
+            LegionWorkflowModelBackend::Unavailable,
+            None,
+            "mcp-tool:mcp:test|write_file",
+            91,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        Vec::new(),
+        Some(approval(true)),
+    );
+    let session_id = session.session_id.clone();
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    let registry = test_mcp_registry(&server_id, &tool_name);
+    app.seed_legion_workflow_mcp_registry(registry.clone())
+        .expect("seed mcp registry");
+    let client = McpClient::new(registry, transport.clone()).expect("valid mcp client");
+    app.register_legion_workflow_mcp_tool_runtime(
+        server_id.clone(),
+        Arc::new(AppMcpClientToolRuntime::new(client)),
+    )
+    .expect("register mcp runtime");
+
+    let first = app
+        .execute_legion_workflow(&session_id)
+        .expect("first mcp worker pass");
+
+    assert!(
+        first
+            .outputs
+            .iter()
+            .any(|output| matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
+                if reasons.iter().any(|reason| reason.contains("mcp_worker_waiting_for_tool_permission"))))
+    );
+    assert_eq!(first.projection.tool_permission_request_count, 1);
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("stored session")
+            .worker_assignments[0]
+            .state,
+        LegionWorkflowWorkerState::ProviderRouteRequired
+    );
+
+    app.record_legion_workflow_tool_permission_decision(
+        &session_id,
+        &server_id,
+        &tool_name,
+        DelegatedTaskToolPermissionDecision::Allow,
+    )
+    .expect("allow mcp tool");
+    let second = app
+        .execute_legion_workflow(&session_id)
+        .expect("second mcp worker pass");
+
+    assert!(
+        second
+            .projection
+            .decision_feed
+            .iter()
+            .any(|entry| entry.kind == LegionWorkflowDecisionKind::ToolCallReady)
+    );
+    assert!(
+        second
+            .projection
+            .decision_feed
+            .iter()
+            .any(|entry| entry.kind == LegionWorkflowDecisionKind::ToolCallExecuted)
+    );
+    assert_eq!(transport.call_count(), 1);
+    assert_eq!(transport.methods(), vec!["tools/call".to_string()]);
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("stored session")
+            .worker_assignments[0]
+            .state,
+        LegionWorkflowWorkerState::Completed
+    );
 }

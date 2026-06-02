@@ -9,10 +9,10 @@ const FULL_CACHE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 use devil_app::{
     AppCommandExecutionState, AppCommandOutcome, AppCommandRequest, AppComposition,
-    AppEditorCommandPort, AppSaveOutcome, AppWorkspaceCommandPort, BatchExecutionJournalItemState,
-    BatchExecutionJournalStageState, BatchExecutionStage, BatchPlanningSemantics,
-    BatchPreflightRoute, BatchRollbackContractStatus, CommandDispatcher, CommandExecutionService,
-    OpenFileIntent,
+    AppEditorCommandPort, AppProductMode, AppSaveOutcome, AppWorkspaceCommandPort,
+    BatchExecutionJournalItemState, BatchExecutionJournalStageState, BatchExecutionStage,
+    BatchPlanningSemantics, BatchPreflightRoute, BatchRollbackContractStatus, CommandDispatcher,
+    CommandExecutionService, OpenFileIntent,
 };
 use devil_editor::{TextEdit, TextPosition};
 use devil_observability::{InMemoryEventSink, SharedEventSink};
@@ -32,8 +32,8 @@ use devil_protocol::{
     ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackAction,
     ProposalRollbackReason, ProposalRollbackStep, ProposalStaleReason, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions, RedactionHint,
-    RemoteFilesystemOperation, RemoteFilesystemOperationKind, RemoteOperationId,
-    RemoteTransportEnvelope, RemoteTransportPayload, RemoteWorkspaceSessionId,
+    RemoteCapabilityKind, RemoteFilesystemOperation, RemoteFilesystemOperationKind,
+    RemoteOperationId, RemoteTransportEnvelope, RemoteTransportPayload, RemoteWorkspaceSessionId,
     RemoteWritePreconditions, SaveConflictPolicy, SaveFileProposal, SaveIntent, SnapshotId,
     StorageRepositoryRequest, StorageRepositoryResponse, TextCoordinate, TextOffset, TextRange,
     TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
@@ -4562,6 +4562,7 @@ fn workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_o
     .expect("open workspace");
     app.open_file(target.to_string_lossy())
         .expect("open active file");
+    app.set_product_mode(AppProductMode::Assist);
 
     let outcome = app
         .start_ai_run("phase4.integration")
@@ -4905,6 +4906,44 @@ fn workspace_vfs_integration_remote_session_is_app_owned_projection_and_metadata
         }
         other => panic!("unexpected remote audit response: {other:?}"),
     }
+}
+
+#[test]
+fn workspace_vfs_integration_devcontainer_remote_session_uses_policy_planner() {
+    let root = create_root();
+    let (mut app, _sink) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-devcontainer".to_string()),
+    )
+    .expect("open trusted workspace");
+    app.enable_remote_development_runtime();
+
+    let descriptor = app
+        .connect_devcontainer_workspace_session_from_json(
+            RemoteWorkspaceSessionId(7003),
+            "devcontainer:fixture",
+            r#"{
+                "name": "fixture",
+                "image": "mcr.microsoft.com/devcontainers/rust:latest",
+                "remoteUser": "vscode",
+                "workspaceFolder": "/workspace/devil"
+            }"#,
+        )
+        .expect("devcontainer session should be planned and connected");
+
+    assert_eq!(descriptor.session_id, RemoteWorkspaceSessionId(7003));
+    assert_eq!(
+        descriptor.agent.agent_version,
+        "devil-remote-devcontainer-agent/1"
+    );
+    assert!(
+        descriptor
+            .granted_capabilities
+            .contains(&RemoteCapabilityKind::Connect)
+    );
+    assert_eq!(app.remote_session_projections().len(), 1);
 }
 
 #[test]

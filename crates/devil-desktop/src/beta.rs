@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use devil_app::AppProductMode;
 use devil_protocol::TextCoordinate;
 use devil_ui::SearchScopeProjection;
 
@@ -289,6 +290,7 @@ fn run_beta_workflow_inner(
     .with_session_state(config.session_state.clone())
     .with_diagnostics_export(config.diagnostics_export.clone());
     let mut runtime = DesktopRuntime::open(launch_config)?;
+    runtime.set_product_mode(AppProductMode::Assist)?;
     let mut errors = Vec::new();
 
     let browse_status = run_browse_actions(&mut runtime);

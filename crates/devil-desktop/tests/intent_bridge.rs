@@ -4,12 +4,16 @@ use devil_desktop::bridge::{
     DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput, DesktopCommandBridge,
 };
 use devil_protocol::{
-    BufferId, CanonicalPath, FileId, ProtocolTextRange, TextCoordinate, ViewportScroll,
+    BufferId, BufferVersion, CanonicalPath, DebugConfigurationId, DebugSessionId, FileFingerprint,
+    FileId, ProtocolTextRange, SnapshotId, TextCoordinate, TimestampMillis, ViewportScroll,
+    WorkspaceId,
 };
 use devil_ui::ui::{DailyEditingProjection, EditorTabProjection, EditorTabsProjection};
 use devil_ui::{
-    ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
-    SearchScopeProjection, Shell,
+    ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
+    AssistInlinePredictionStatusProjection, CommandDispatchIntent, DebugConfigurationProjection,
+    DebugStepKindProjection, ExplorerNodeProjection, ExplorerProjection, SearchScopeProjection,
+    Shell,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -89,6 +93,63 @@ fn snapshot_with_daily_tabs() -> devil_ui::ShellProjectionSnapshot {
 
 fn snapshot_without_active_buffer() -> devil_ui::ShellProjectionSnapshot {
     Shell::empty("Bridge").projection_snapshot()
+}
+
+fn snapshot_with_debug_projection() -> devil_ui::ShellProjectionSnapshot {
+    let mut snapshot = snapshot_with_daily_tabs();
+    snapshot.debug_projection.active_session_id = Some(DebugSessionId("debug-1".to_string()));
+    snapshot
+        .debug_projection
+        .configurations
+        .push(DebugConfigurationProjection {
+            configuration_id: DebugConfigurationId("cargo:sample:bin:sample".to_string()),
+            name: "Debug sample".to_string(),
+            adapter_type: "lldb-dap".to_string(),
+            program_label: "target/debug/sample".to_string(),
+            cargo_package: Some("sample".to_string()),
+            cargo_target: Some("sample".to_string()),
+            deterministic: true,
+        });
+    snapshot
+}
+
+fn snapshot_with_assist_inline_prediction() -> devil_ui::ShellProjectionSnapshot {
+    let mut snapshot = snapshot_with_active_buffer();
+    snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(1));
+    snapshot.active_buffer_projection.file_id = Some(FileId(4));
+    snapshot.assist_inline_prediction_projection = AssistInlinePredictionProjection {
+        active_prediction: Some(AssistInlinePredictionRowProjection {
+            prediction_id: "assist:prediction:1".to_string(),
+            workspace_id: Some(WorkspaceId(1)),
+            buffer_id: Some(BufferId(9)),
+            file_id: Some(FileId(4)),
+            provider_label: "Local fixture".to_string(),
+            status: AssistInlinePredictionStatusProjection::Ready,
+            status_label: "ready".to_string(),
+            latency_ms: Some(38),
+            requested_at: TimestampMillis(100),
+            completed_at: Some(TimestampMillis(138)),
+            snapshot_id: Some(SnapshotId(5)),
+            buffer_version: Some(BufferVersion(12)),
+            file_fingerprint: Some(FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: "fingerprint-a".to_string(),
+            }),
+            stale: false,
+            stale_reason_label: None,
+            ghost_text_label: ".await".to_string(),
+            replacement_preview_label: Some("future.await".to_string()),
+            apply_range: range(4, 4),
+            apply_range_label: "0:4..0:4".to_string(),
+            diagnostics: Vec::new(),
+        }),
+        rows: Vec::new(),
+        request_in_flight: false,
+        stale_prediction_count: 0,
+        generated_at: TimestampMillis(150),
+        schema_version: 1,
+    };
+    snapshot
 }
 
 fn translate(action: DesktopAction) -> DesktopBridgeOutput {
@@ -247,6 +308,32 @@ fn intent_bridge_routes_explorer_actions_and_adapter_local_toggle() {
         ),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id: FileId(3) })
     );
+    assert_eq!(
+        bridge.translate(DesktopAction::RefreshGit, &snapshot),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshGit)
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::StageGitHunk {
+                hunk_id: "git-hunk:1".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::StageGitHunk {
+            hunk_id: "git-hunk:1".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::UnstageGitHunk {
+                hunk_id: "git-hunk:1".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::UnstageGitHunk {
+            hunk_id: "git-hunk:1".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -256,6 +343,14 @@ fn intent_bridge_routes_search_actions() {
             scope: SearchScopeProjection::Workspace,
         }),
         DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowSearchPrompt {
+            scope: SearchScopeProjection::Workspace,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::ShowStructuralSearchPrompt {
+            scope: SearchScopeProjection::Workspace,
+        }),
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowStructuralSearchPrompt {
             scope: SearchScopeProjection::Workspace,
         })
     );
@@ -272,11 +367,164 @@ fn intent_bridge_routes_search_actions() {
         })
     );
     assert_eq!(
+        translate(DesktopAction::RunStructuralSearch {
+            scope: SearchScopeProjection::Workspace,
+            pattern: "fn $NAME ( )".to_string(),
+            rewrite: Some("fn renamed_$NAME ( )".to_string()),
+            limit: 11,
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::RunStructuralSearch {
+            scope: SearchScopeProjection::Workspace,
+            pattern: "fn $NAME ( )".to_string(),
+            rewrite: Some("fn renamed_$NAME ( )".to_string()),
+            limit: 11,
+        })
+    );
+    assert_eq!(
         translate(DesktopAction::CancelSearch {
             query_id: "search:1".to_string(),
         }),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelSearch {
             query_id: "search:1".to_string(),
+        })
+    );
+}
+
+#[test]
+fn intent_bridge_routes_debug_actions() {
+    let snapshot = snapshot_with_debug_projection();
+    let bridge = DesktopCommandBridge::new();
+    let configuration_id = DebugConfigurationId("cargo:sample:bin:sample".to_string());
+    let session_id = DebugSessionId("debug-1".to_string());
+    let position = coord(12, 4, 88);
+
+    assert_eq!(
+        bridge.translate(DesktopAction::RefreshDebugConfigurations, &snapshot),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshDebugConfigurations)
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::ToggleDebugBreakpoint {
+                line: 12,
+                condition: Some("count > 2".to_string()),
+                hit_condition: Some("3".to_string()),
+                log_message: Some("count changed".to_string()),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ToggleDebugBreakpoint {
+            buffer_id: BufferId(9),
+            line: 12,
+            condition: Some("count > 2".to_string()),
+            hit_condition: Some("3".to_string()),
+            log_message: Some("count changed".to_string()),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::LaunchDebugSession {
+                configuration_id: configuration_id.clone(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::LaunchDebugSession { configuration_id })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::DebugStep {
+                session_id: session_id.clone(),
+                kind: DebugStepKindProjection::Over,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::DebugStep {
+            session_id: session_id.clone(),
+            kind: DebugStepKindProjection::Over,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::DebugRunToCursor {
+                session_id: session_id.clone(),
+                position,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::DebugRunToCursor {
+            session_id: session_id.clone(),
+            buffer_id: BufferId(9),
+            position,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::DebugEvaluateSelection {
+                session_id: session_id.clone(),
+                expression_label: "count".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::DebugEvaluateSelection {
+            session_id: session_id.clone(),
+            expression_label: "count".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::DebugAddWatch {
+                session_id: session_id.clone(),
+                expression_label: "count".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::DebugAddWatch {
+            session_id,
+            expression_label: "count".to_string(),
+        })
+    );
+}
+
+#[test]
+fn intent_bridge_routes_assist_inline_prediction_actions() {
+    let snapshot = snapshot_with_assist_inline_prediction();
+    let bridge = DesktopCommandBridge::new();
+    let position = coord(0, 4, 4);
+
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::RequestAssistInlinePrediction { position },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::RequestAssistInlinePrediction {
+            buffer_id: BufferId(9),
+            position,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::AcceptCurrentAssistInlinePrediction,
+            &snapshot
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::AcceptAssistInlinePrediction {
+            buffer_id: BufferId(9),
+            prediction_id: Some("assist:prediction:1".to_string()),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::DismissCurrentAssistInlinePrediction,
+            &snapshot
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::DismissAssistInlinePrediction {
+            buffer_id: BufferId(9),
+            prediction_id: Some("assist:prediction:1".to_string()),
+        })
+    );
+    assert_eq!(
+        bridge.translate(DesktopAction::CancelAssistInlinePrediction, &snapshot),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelAssistInlinePrediction {
+            buffer_id: BufferId(9),
+            prediction_id: Some("assist:prediction:1".to_string()),
         })
     );
 }

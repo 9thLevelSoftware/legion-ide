@@ -46,8 +46,22 @@ pub const DEFAULT_GRAMMAR_VERSION: &str = "lexical-fallback-grammar-v1";
 /// Default non-vector model metadata version used for deterministic ranking records.
 pub const DEFAULT_MODEL_VERSION: &str = "semantic-ranking-metadata-v1";
 
+/// Deterministic retrieval chunking contract version for local code chunks.
+pub const RETRIEVAL_CHUNKING_VERSION: &str = "devil-index-retrieval-chunks-v1";
+
+/// Deterministic local embedding version; this does not identify a model dependency.
+pub const LOCAL_RETRIEVAL_EMBEDDING_VERSION: &str = "devil-index-local-embedding-v1";
+
+/// Fixed dimensionality for deterministic local retrieval embeddings.
+pub const LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS: usize = 64;
+
+/// Freshness hash algorithm recorded for retrieval chunks.
+pub const RETRIEVAL_CHUNK_SHA256_ALGORITHM: &str = "sha256";
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+const RETRIEVAL_DEFAULT_RESULT_LIMIT: usize = 20;
+const RETRIEVAL_MAX_RESULT_LIMIT: usize = 100;
 
 /// Result alias for indexing operations.
 pub type IndexResult<T> = Result<T, IndexError>;
@@ -2387,6 +2401,118 @@ impl ParserWorker for LexicalFallbackParser {
     }
 }
 
+/// Deterministic local embedding vector used for retrieval ranking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalEmbeddingVector {
+    /// Embedding algorithm version; this is local and model-free.
+    pub model_version: SemanticModelVersion,
+    /// Number of dimensions in `values`.
+    pub dimensions: u16,
+    /// Signed fixed-point vector values.
+    pub values: Vec<i16>,
+}
+
+/// Metadata-only citation for a retrieved chunk.
+#[derive(Debug, Clone)]
+pub struct RetrievalCitation {
+    /// Stable citation identifier derived from range and chunk fingerprint.
+    pub citation_id: String,
+    /// Workspace containing the cited chunk.
+    pub workspace_id: WorkspaceId,
+    /// File containing the cited chunk.
+    pub file_id: FileId,
+    /// Canonical path for the cited chunk.
+    pub path: CanonicalPath,
+    /// Protocol text range represented by the cited chunk.
+    pub range: ProtocolTextRange,
+    /// Byte range represented by the cited chunk.
+    pub byte_range: ByteRange,
+    /// Line range represented by the cited chunk.
+    pub line_range: LineIndexRange,
+    /// SHA-256 fingerprint of the chunk body.
+    pub chunk_fingerprint: FileFingerprint,
+    /// Freshness metadata keyed by the chunk SHA-256 fingerprint.
+    pub freshness: SemanticFreshness,
+    /// Citation schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only retrieval chunk record with deterministic local embedding data.
+#[derive(Debug, Clone)]
+pub struct RetrievalChunkRecord {
+    /// Stable chunk record identifier.
+    pub chunk_id: SemanticRecordId,
+    /// Display-safe label derived from syntax metadata.
+    pub label: String,
+    /// Language identifier for the chunk.
+    pub language_id: LanguageId,
+    /// Metadata-only citation for the chunk.
+    pub citation: RetrievalCitation,
+    /// Deterministic local embedding vector.
+    pub embedding: LocalEmbeddingVector,
+    /// Provenance for chunking and embedding metadata.
+    pub provenance: SemanticRecordProvenance,
+    /// Chunk record schema version.
+    pub schema_version: u16,
+}
+
+/// Query request for local retrieval over deterministic chunk embeddings.
+#[derive(Debug, Clone)]
+pub struct RetrievalQuery {
+    /// Workspace to query.
+    pub workspace_id: WorkspaceId,
+    /// Bounded query text used only to build a transient local embedding.
+    pub query_text: String,
+    /// Optional file id filter.
+    pub file_ids: Vec<FileId>,
+    /// Optional path filter.
+    pub paths: Vec<CanonicalPath>,
+    /// Optional language filter.
+    pub language_ids: Vec<LanguageId>,
+    /// Privacy scope requested by the caller.
+    pub privacy_scope: SemanticPrivacyScope,
+    /// Freshness policy for returned chunks.
+    pub freshness_policy: SemanticQueryFreshnessPolicy,
+    /// Maximum number of results; zero selects the default bound.
+    pub limit: usize,
+    /// Query schema version.
+    pub schema_version: u16,
+}
+
+/// One local vector-style retrieval result.
+#[derive(Debug, Clone)]
+pub struct RetrievalSearchResult {
+    /// Stable result identifier derived from the query score and chunk identity.
+    pub result_id: SemanticRecordId,
+    /// Display-safe result label.
+    pub label: String,
+    /// Similarity score in basis points.
+    pub score_basis_points: u16,
+    /// Metadata-only citation for the result.
+    pub citation: RetrievalCitation,
+    /// Freshness metadata copied from the cited chunk.
+    pub freshness: SemanticFreshness,
+    /// Provenance for the retrieval result.
+    pub provenance: SemanticRecordProvenance,
+    /// Result schema version.
+    pub schema_version: u16,
+}
+
+/// Response returned by deterministic local retrieval search.
+#[derive(Debug, Clone)]
+pub struct RetrievalSearchResponse {
+    /// Query status after freshness filtering and result bounds.
+    pub status: SemanticQueryStatus,
+    /// Results in deterministic score order.
+    pub results: Vec<RetrievalSearchResult>,
+    /// Number of matching chunks omitted by `limit`.
+    pub omitted_result_count: usize,
+    /// Metadata-only diagnostics emitted during retrieval.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Response schema version.
+    pub schema_version: u16,
+}
+
 /// File-level semantic records extracted from a source document.
 #[derive(Debug, Clone)]
 pub struct FileSemanticIndex {
@@ -2410,6 +2536,8 @@ pub struct FileSemanticIndex {
     pub symbols: Vec<SymbolFileMapRecord>,
     /// Normalized semantic graph records.
     pub graph_records: Vec<SemanticGraphRecord>,
+    /// Deterministic retrieval chunk records without source bodies.
+    pub retrieval_chunks: Vec<RetrievalChunkRecord>,
     /// Diagnostics emitted during extraction.
     pub diagnostics: Vec<ProtocolDiagnostic>,
 }
@@ -2556,6 +2684,7 @@ pub struct SemanticIndex {
     files: HashMap<(WorkspaceId, FileId), FileSemanticIndex>,
     symbol_records: Vec<SymbolFileMapRecord>,
     graph_records: Vec<SemanticGraphRecord>,
+    retrieval_chunk_records: Vec<RetrievalChunkRecord>,
 }
 
 impl SemanticIndex {
@@ -2601,6 +2730,81 @@ impl SemanticIndex {
     /// Returns all semantic graph records in deterministic order.
     pub fn graph_records(&self) -> &[SemanticGraphRecord] {
         &self.graph_records
+    }
+
+    /// Returns all retrieval chunk records in deterministic order.
+    pub fn retrieval_chunks(&self) -> &[RetrievalChunkRecord] {
+        &self.retrieval_chunk_records
+    }
+
+    /// Runs deterministic local vector-style retrieval over metadata-only chunk records.
+    pub fn search_retrieval(&self, request: &RetrievalQuery) -> RetrievalSearchResponse {
+        let query_embedding = deterministic_local_embedding(&request.query_text);
+        let mut scored = self
+            .retrieval_chunk_records
+            .iter()
+            .filter(|chunk| retrieval_chunk_in_scope(chunk, request))
+            .map(|chunk| {
+                let score = embedding_similarity_basis_points(&query_embedding, &chunk.embedding);
+                (score, chunk)
+            })
+            .collect::<Vec<_>>();
+
+        scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.citation.path.0.cmp(&right.citation.path.0))
+                .then_with(|| {
+                    left.citation
+                        .byte_range
+                        .start
+                        .cmp(&right.citation.byte_range.start)
+                })
+                .then_with(|| left.chunk_id.0.cmp(&right.chunk_id.0))
+        });
+
+        let total = scored.len();
+        let limit = normalize_retrieval_result_limit(request.limit);
+        if scored.len() > limit {
+            scored.truncate(limit);
+        }
+
+        let results = scored
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (score, chunk))| RetrievalSearchResult {
+                result_id: SemanticRecordId(format!(
+                    "retrieval-result:{}:{}:{ordinal}",
+                    chunk.chunk_id.0, score
+                )),
+                label: chunk.label.clone(),
+                score_basis_points: score,
+                citation: chunk.citation.clone(),
+                freshness: chunk.citation.freshness.clone(),
+                provenance: chunk.provenance.clone(),
+                schema_version: INDEX_SCHEMA_VERSION,
+            })
+            .collect::<Vec<_>>();
+
+        let status = if request.freshness_policy == SemanticQueryFreshnessPolicy::RequireFresh
+            && results
+                .iter()
+                .any(|result| result.freshness.state != SemanticFreshnessState::Fresh)
+        {
+            SemanticQueryStatus::Stale
+        } else if total > results.len() {
+            SemanticQueryStatus::Partial
+        } else {
+            SemanticQueryStatus::Fresh
+        };
+
+        RetrievalSearchResponse {
+            status,
+            results,
+            omitted_result_count: total.saturating_sub(limit),
+            diagnostics: Vec::new(),
+            schema_version: INDEX_SCHEMA_VERSION,
+        }
     }
 
     /// Serves a pure semantic query without mutating buffers, files, or workspace state.
@@ -2675,8 +2879,28 @@ impl SemanticIndex {
             .collect::<Vec<_>>();
         graph_records.sort_by_key(|record| record.record_id.0.clone());
 
+        let mut retrieval_chunk_records = self
+            .files
+            .values()
+            .flat_map(|file| file.retrieval_chunks.clone())
+            .collect::<Vec<_>>();
+        retrieval_chunk_records.sort_by(|left, right| {
+            left.citation
+                .path
+                .0
+                .cmp(&right.citation.path.0)
+                .then_with(|| {
+                    left.citation
+                        .byte_range
+                        .start
+                        .cmp(&right.citation.byte_range.start)
+                })
+                .then_with(|| left.chunk_id.0.cmp(&right.chunk_id.0))
+        });
+
         self.symbol_records = symbol_records;
         self.graph_records = graph_records;
+        self.retrieval_chunk_records = retrieval_chunk_records;
     }
 
     fn query_symbols(&self, request: &SemanticQueryRequest) -> Vec<SemanticQueryResult> {
@@ -2813,6 +3037,87 @@ impl SemanticIndex {
     }
 }
 
+/// Query input for deterministic structural search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralSearchQuery {
+    /// Token-pattern text. `$NAME` tokens capture syntax-token spans between literal anchors.
+    pub pattern: String,
+    /// Optional rewrite template used to build proposal previews.
+    pub rewrite: Option<String>,
+    /// Maximum number of matches to project; zero selects the default bound.
+    pub result_limit: usize,
+}
+
+/// One metavariable capture from a structural search match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralSearchCapture {
+    /// Capture name without the `$` prefix.
+    pub name: String,
+    /// Captured source text.
+    pub value: String,
+    /// Captured source range.
+    pub range: ProtocolTextRange,
+}
+
+/// One deterministic structural search match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralSearchMatch {
+    /// Stable match identifier derived from file identity, range, and pattern.
+    pub match_id: String,
+    /// Workspace containing the match.
+    pub workspace_id: WorkspaceId,
+    /// File containing the match.
+    pub file_id: FileId,
+    /// Canonical path containing the match.
+    pub path: CanonicalPath,
+    /// Matched source range.
+    pub range: ProtocolTextRange,
+    /// Captured metavariable values.
+    pub captures: Vec<StructuralSearchCapture>,
+    /// Bounded display snippet for the matched source range.
+    pub snippet: String,
+    /// Rewrite preview for this match when a rewrite template was supplied.
+    pub replacement_preview: Option<String>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl StructuralSearchMatch {
+    /// Return the captured value for `name`, when present.
+    pub fn capture_value(&self, name: &str) -> Option<&str> {
+        self.captures
+            .iter()
+            .find(|capture| capture.name == name)
+            .map(|capture| capture.value.as_str())
+    }
+}
+
+/// Structural search report for one source document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralSearchReport {
+    /// Display-safe pattern label.
+    pub pattern_label: String,
+    /// Display-safe rewrite label, when supplied.
+    pub rewrite_label: Option<String>,
+    /// Bounded match rows.
+    pub matches: Vec<StructuralSearchMatch>,
+    /// Count of matches omitted by the result bound.
+    pub omitted_match_count: usize,
+    /// Display-safe diagnostics from validation, suppression, or bounds.
+    pub diagnostics: Vec<ProtocolDiagnostic>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+/// File-scoped structural rewrite input for proposal payload construction.
+#[derive(Debug, Clone, Copy)]
+pub struct StructuralRewriteFileInput<'a> {
+    /// Source document that supplied identity and preconditions.
+    pub document: &'a SourceDocument,
+    /// Matches selected for rewrite in this file.
+    pub matches: &'a [StructuralSearchMatch],
+}
+
 /// Stateless shallow lexical indexer producing protocol semantic DTOs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LexicalIndexer;
@@ -2879,6 +3184,8 @@ impl LexicalIndexer {
         });
 
         let graph_records = build_graph_records(document, &lexical, &symbols, &invalidation_key);
+        let retrieval_chunks =
+            build_retrieval_chunks(document, &lexical, &invalidation_key, source_descriptor);
         let diagnostics = lexical.diagnostics;
 
         FileSemanticIndex {
@@ -2892,6 +3199,7 @@ impl LexicalIndexer {
             syntax_tree,
             symbols,
             graph_records,
+            retrieval_chunks,
             diagnostics,
         }
     }
@@ -3324,6 +3632,362 @@ fn line_graph_record(
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RetrievalLineSpan<'a> {
+    line: u32,
+    text: &'a str,
+    start_byte: usize,
+    end_byte: usize,
+}
+
+fn build_retrieval_chunks(
+    document: &SourceDocument,
+    lexical: &LexicalFacts,
+    file_invalidation_key: &SemanticInvalidationKey,
+    source_descriptor: &SemanticSourceDescriptor,
+) -> Vec<RetrievalChunkRecord> {
+    let mut declarations = lexical.declarations.iter().collect::<Vec<_>>();
+    declarations.sort_by_key(|candidate| candidate.range.start.byte_offset.unwrap_or(0));
+
+    let mut chunks = Vec::new();
+    for segment in lexical_text_segments(document) {
+        let spans = retrieval_line_spans(&segment);
+        if spans.is_empty() {
+            continue;
+        }
+
+        let declarations_in_segment = declarations
+            .iter()
+            .filter(|candidate| is_retrieval_chunk_boundary_kind(&candidate.kind))
+            .filter_map(|candidate| {
+                let line_index = spans
+                    .iter()
+                    .position(|span| span.line == candidate.range.start.line)?;
+                Some((line_index, *candidate))
+            })
+            .collect::<Vec<_>>();
+
+        if declarations_in_segment.is_empty() {
+            if let Some((start_index, end_index)) = non_empty_span_bounds(&spans) {
+                push_retrieval_chunk(
+                    document,
+                    file_invalidation_key,
+                    source_descriptor,
+                    &mut chunks,
+                    &segment,
+                    &spans,
+                    start_index,
+                    end_index,
+                    "file chunk".to_string(),
+                );
+            }
+            continue;
+        }
+
+        for (ordinal, (start_index, candidate)) in declarations_in_segment.iter().enumerate() {
+            let next_start = declarations_in_segment
+                .get(ordinal + 1)
+                .map(|(line_index, _)| *line_index)
+                .unwrap_or(spans.len());
+            let mut end_index = next_start;
+            while end_index > *start_index + 1 && spans[end_index - 1].text.trim().is_empty() {
+                end_index -= 1;
+            }
+            push_retrieval_chunk(
+                document,
+                file_invalidation_key,
+                source_descriptor,
+                &mut chunks,
+                &segment,
+                &spans,
+                *start_index,
+                end_index,
+                format!("{} {}", candidate.kind, candidate.name),
+            );
+        }
+    }
+
+    chunks.sort_by(|left, right| {
+        left.citation
+            .path
+            .0
+            .cmp(&right.citation.path.0)
+            .then_with(|| {
+                left.citation
+                    .byte_range
+                    .start
+                    .cmp(&right.citation.byte_range.start)
+            })
+            .then_with(|| left.chunk_id.0.cmp(&right.chunk_id.0))
+    });
+    chunks
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_retrieval_chunk(
+    document: &SourceDocument,
+    file_invalidation_key: &SemanticInvalidationKey,
+    source_descriptor: &SemanticSourceDescriptor,
+    chunks: &mut Vec<RetrievalChunkRecord>,
+    segment: &LexicalTextSegment<'_>,
+    spans: &[RetrievalLineSpan<'_>],
+    start_index: usize,
+    end_index: usize,
+    label: String,
+) {
+    if start_index >= end_index || end_index > spans.len() {
+        return;
+    }
+
+    let start = spans[start_index];
+    let end = spans[end_index - 1];
+    let relative_start = start.start_byte.saturating_sub(segment.start_byte);
+    let relative_end = end.end_byte.saturating_sub(segment.start_byte);
+    if relative_start > relative_end
+        || relative_end > segment.text.len()
+        || !segment.text.is_char_boundary(relative_start)
+        || !segment.text.is_char_boundary(relative_end)
+    {
+        return;
+    }
+
+    let chunk_text = &segment.text[relative_start..relative_end];
+    if chunk_text.trim().is_empty() {
+        return;
+    }
+
+    let chunk_fingerprint = sha256_fingerprint(chunk_text.as_bytes());
+    let freshness = retrieval_chunk_freshness(
+        file_invalidation_key,
+        chunk_fingerprint.clone(),
+        source_descriptor,
+    );
+    let range = ProtocolTextRange {
+        start: TextCoordinate {
+            line: start.line,
+            character: 0,
+            byte_offset: Some(start.start_byte as u64),
+            utf16_offset: Some(0),
+        },
+        end: TextCoordinate {
+            line: end.line,
+            character: end.text.len() as u32,
+            byte_offset: Some(end.end_byte as u64),
+            utf16_offset: Some(end.text.len() as u64),
+        },
+    };
+    let byte_range = ByteRange::new(start.start_byte as u64, end.end_byte as u64);
+    let line_range = LineIndexRange {
+        start: start.line,
+        end: end.line.saturating_add(1),
+    };
+    let citation_id = retrieval_citation_id(
+        document.identity.workspace_id,
+        document.identity.file_id,
+        byte_range,
+        &chunk_fingerprint,
+    );
+    let citation = RetrievalCitation {
+        citation_id,
+        workspace_id: document.identity.workspace_id,
+        file_id: document.identity.file_id,
+        path: document.identity.canonical_path.clone(),
+        range,
+        byte_range,
+        line_range,
+        chunk_fingerprint: chunk_fingerprint.clone(),
+        freshness,
+        schema_version: INDEX_SCHEMA_VERSION,
+    };
+    let chunk_id = SemanticRecordId(format!(
+        "retrieval-chunk:{}:{}:{}:{}",
+        document.identity.workspace_id.0,
+        document.identity.file_id.0,
+        byte_range.start,
+        chunk_fingerprint.value
+    ));
+
+    chunks.push(RetrievalChunkRecord {
+        chunk_id,
+        label,
+        language_id: document.language_id.clone(),
+        citation,
+        embedding: deterministic_local_embedding(chunk_text),
+        provenance: retrieval_provenance(),
+        schema_version: INDEX_SCHEMA_VERSION,
+    });
+}
+
+fn retrieval_line_spans<'a>(segment: &LexicalTextSegment<'a>) -> Vec<RetrievalLineSpan<'a>> {
+    let mut spans = Vec::new();
+    let mut cursor = segment.start_byte;
+    for (line_index, line) in segment.text.lines().enumerate() {
+        let end_byte = cursor.saturating_add(line.len());
+        spans.push(RetrievalLineSpan {
+            line: segment.start_line.saturating_add(line_index as u32),
+            text: line,
+            start_byte: cursor,
+            end_byte,
+        });
+        cursor = end_byte.saturating_add(1);
+    }
+    spans
+}
+
+fn non_empty_span_bounds(spans: &[RetrievalLineSpan<'_>]) -> Option<(usize, usize)> {
+    let start = spans.iter().position(|span| !span.text.trim().is_empty())?;
+    let end = spans
+        .iter()
+        .rposition(|span| !span.text.trim().is_empty())?
+        .saturating_add(1);
+    Some((start, end))
+}
+
+fn is_retrieval_chunk_boundary_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function"
+            | "class"
+            | "struct"
+            | "enum"
+            | "trait"
+            | "interface"
+            | "type"
+            | "module"
+            | "implementation"
+            | "constant"
+            | "static"
+    )
+}
+
+fn retrieval_chunk_freshness(
+    file_invalidation_key: &SemanticInvalidationKey,
+    chunk_fingerprint: FileFingerprint,
+    source_descriptor: &SemanticSourceDescriptor,
+) -> SemanticFreshness {
+    let mut key = file_invalidation_key.clone();
+    key.content_hash = chunk_fingerprint;
+    SemanticFreshness {
+        state: source_descriptor.freshness_state,
+        key,
+        degraded_reasons: source_descriptor.degraded_reasons.clone(),
+        observed_at: TimestampMillis::now(),
+    }
+}
+
+fn retrieval_citation_id(
+    workspace_id: WorkspaceId,
+    file_id: FileId,
+    byte_range: ByteRange,
+    chunk_fingerprint: &FileFingerprint,
+) -> String {
+    format!(
+        "citation:{}:{}:{}:{}:{}",
+        workspace_id.0, file_id.0, byte_range.start, byte_range.end, chunk_fingerprint.value
+    )
+}
+
+fn retrieval_provenance() -> SemanticRecordProvenance {
+    SemanticRecordProvenance {
+        source: SemanticRecordSource::ModelMetadata,
+        server_id: None,
+        extraction_version: LOCAL_RETRIEVAL_EMBEDDING_VERSION.to_string(),
+        confidence_basis_points: 10_000,
+    }
+}
+
+fn retrieval_chunk_in_scope(chunk: &RetrievalChunkRecord, request: &RetrievalQuery) -> bool {
+    chunk.citation.workspace_id == request.workspace_id
+        && (request.file_ids.is_empty() || request.file_ids.contains(&chunk.citation.file_id))
+        && (request.paths.is_empty() || request.paths.contains(&chunk.citation.path))
+        && (request.language_ids.is_empty() || request.language_ids.contains(&chunk.language_id))
+        && privacy_visible(
+            chunk.citation.freshness.key.privacy_scope,
+            request.privacy_scope,
+        )
+}
+
+/// Clamps a caller-supplied result limit: `0` means "use the default", any
+/// other value is capped at `max`. Shared by retrieval and structural search so
+/// their pagination semantics cannot drift apart.
+fn clamp_result_limit(limit: usize, default: usize, max: usize) -> usize {
+    if limit == 0 {
+        default
+    } else {
+        limit.min(max)
+    }
+}
+
+fn normalize_retrieval_result_limit(limit: usize) -> usize {
+    clamp_result_limit(
+        limit,
+        RETRIEVAL_DEFAULT_RESULT_LIMIT,
+        RETRIEVAL_MAX_RESULT_LIMIT,
+    )
+}
+
+fn deterministic_local_embedding(text: &str) -> LocalEmbeddingVector {
+    let mut values = [0i32; LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS];
+    for token in retrieval_embedding_tokens(text) {
+        let digest = sha256_digest(token.as_bytes());
+        let index = (((usize::from(digest[0])) << 8) | usize::from(digest[1]))
+            % LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS;
+        let sign = if digest[2] & 1 == 0 { 1 } else { -1 };
+        let weight = 1 + i32::from(digest[3] % 3);
+        values[index] += sign * weight;
+    }
+
+    LocalEmbeddingVector {
+        model_version: SemanticModelVersion(LOCAL_RETRIEVAL_EMBEDDING_VERSION.to_string()),
+        dimensions: LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS as u16,
+        values: values
+            .into_iter()
+            .map(|value| value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
+            .collect(),
+    }
+}
+
+fn retrieval_embedding_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn embedding_similarity_basis_points(
+    left: &LocalEmbeddingVector,
+    right: &LocalEmbeddingVector,
+) -> u16 {
+    let mut dot = 0i64;
+    let mut left_norm = 0i64;
+    let mut right_norm = 0i64;
+    for (left_value, right_value) in left.values.iter().zip(&right.values) {
+        let left_i64 = i64::from(*left_value);
+        let right_i64 = i64::from(*right_value);
+        dot += left_i64 * right_i64;
+        left_norm += left_i64 * left_i64;
+        right_norm += right_i64 * right_i64;
+    }
+
+    if dot <= 0 || left_norm == 0 || right_norm == 0 {
+        return 0;
+    }
+
+    let denominator = (left_norm as f64).sqrt() * (right_norm as f64).sqrt();
+    ((dot as f64 / denominator) * 10_000.0)
+        .round()
+        .clamp(0.0, 10_000.0) as u16
+}
+
 /// Constructs a cancellation token descriptor for semantic work owned by this crate.
 pub fn semantic_cancellation_token(
     token_id: CancellationTokenId,
@@ -3345,6 +4009,194 @@ pub fn semantic_cancellation_token(
         reason: None,
         issued_at: TimestampMillis::now(),
         expires_at: None,
+        schema_version: INDEX_SCHEMA_VERSION,
+    }
+}
+
+/// Runs deterministic structural search over one bounded source document.
+pub fn run_structural_search(
+    document: &SourceDocument,
+    query: &StructuralSearchQuery,
+) -> StructuralSearchReport {
+    let pattern_label = query.pattern.trim().to_string();
+    let rewrite_label = query
+        .rewrite
+        .as_ref()
+        .map(|rewrite| rewrite.trim().to_string());
+    let mut diagnostics = Vec::new();
+    let Some(source) = source_text(document) else {
+        diagnostics.push(diagnostic(
+            "structural_search.source_unavailable",
+            "structural search requires bounded source text",
+            ProtocolDiagnosticSeverity::Warning,
+            Some(document.identity.canonical_path.clone()),
+            None,
+        ));
+        return StructuralSearchReport {
+            pattern_label,
+            rewrite_label,
+            matches: Vec::new(),
+            omitted_match_count: 0,
+            diagnostics,
+            schema_version: INDEX_SCHEMA_VERSION,
+        };
+    };
+
+    let pattern = parse_structural_pattern(&pattern_label);
+    if pattern.is_empty() {
+        diagnostics.push(diagnostic(
+            "structural_search.empty_pattern",
+            "structural search pattern must contain at least one token",
+            ProtocolDiagnosticSeverity::Error,
+            Some(document.identity.canonical_path.clone()),
+            None,
+        ));
+        return StructuralSearchReport {
+            pattern_label,
+            rewrite_label,
+            matches: Vec::new(),
+            omitted_match_count: 0,
+            diagnostics,
+            schema_version: INDEX_SCHEMA_VERSION,
+        };
+    }
+
+    let source_tokens = structural_tokens_from_document(document);
+    let lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let limit = normalize_structural_result_limit(query.result_limit);
+    let mut matches = Vec::new();
+    let mut omitted_match_count = 0usize;
+    let mut index = 0usize;
+    while index < source_tokens.len() {
+        let Some(candidate) = match_structural_pattern(
+            &source_tokens,
+            index,
+            &pattern,
+            source,
+            query.rewrite.as_deref(),
+        ) else {
+            index += 1;
+            continue;
+        };
+
+        let suppressed = structural_match_suppressed(&lines, candidate.range.start.line);
+        if suppressed {
+            diagnostics.push(diagnostic(
+                "structural_search.suppressed",
+                "structural search match suppressed by ast-grep-ignore comment",
+                ProtocolDiagnosticSeverity::Info,
+                Some(document.identity.canonical_path.clone()),
+                Some(candidate.range),
+            ));
+        } else if matches.len() < limit {
+            matches.push(StructuralSearchMatch {
+                match_id: structural_match_id(document, candidate.range, &pattern_label),
+                workspace_id: document.identity.workspace_id,
+                file_id: document.identity.file_id,
+                path: document.identity.canonical_path.clone(),
+                range: candidate.range,
+                captures: candidate.captures,
+                snippet: structural_snippet(source, candidate.range),
+                replacement_preview: candidate.replacement_preview,
+                schema_version: INDEX_SCHEMA_VERSION,
+            });
+        } else {
+            omitted_match_count = omitted_match_count.saturating_add(1);
+        }
+
+        index = candidate.end_index.max(index + 1);
+    }
+
+    StructuralSearchReport {
+        pattern_label,
+        rewrite_label,
+        matches,
+        omitted_match_count,
+        diagnostics,
+        schema_version: INDEX_SCHEMA_VERSION,
+    }
+}
+
+/// Builds a proposal-ready structural rewrite payload without applying edits.
+pub fn build_structural_rewrite_preview_payload(
+    workspace_id: WorkspaceId,
+    title: impl Into<String>,
+    files: &[StructuralRewriteFileInput<'_>],
+) -> devil_protocol::WorkspaceEditProposalPayload {
+    let title = title.into();
+    let mut targets = Vec::new();
+    let mut file_edits = Vec::new();
+    let mut diagnostics = Vec::new();
+    for input in files {
+        let edits = input
+            .matches
+            .iter()
+            .filter_map(|matched| {
+                matched
+                    .replacement_preview
+                    .as_ref()
+                    .map(|replacement| TextEdit {
+                        range: protocol_to_text_range(matched.range),
+                        replacement: replacement.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        if edits.is_empty() {
+            if !input.matches.is_empty() {
+                diagnostics.push(diagnostic(
+                    "structural_search.rewrite_missing",
+                    "structural rewrite preview requires a rewrite template",
+                    ProtocolDiagnosticSeverity::Warning,
+                    Some(input.document.identity.canonical_path.clone()),
+                    None,
+                ));
+            }
+            continue;
+        }
+
+        let byte_ranges = input
+            .matches
+            .iter()
+            .filter_map(|matched| protocol_range_to_byte_range(matched.range))
+            .collect::<Vec<_>>();
+        targets.push(ProposalAffectedTarget {
+            target_id: format!("structural-target-{}", input.document.identity.file_id.0),
+            kind: ProposalTargetKind::ClosedFile,
+            workspace_id: Some(input.document.identity.workspace_id),
+            file_id: Some(input.document.identity.file_id),
+            buffer_id: None,
+            path: Some(input.document.identity.canonical_path.clone()),
+            terminal_session_id: None,
+            plugin_id: None,
+            remote_authority: None,
+            collaboration_session_id: None,
+            byte_ranges,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        });
+        file_edits.push(WorkspaceTextEdit {
+            file: structural_file_identity(input.document),
+            buffer_id: None,
+            edits: EditBatch { edits },
+            preconditions: structural_preconditions(input.document),
+        });
+    }
+
+    devil_protocol::WorkspaceEditProposalPayload {
+        workspace_id,
+        edit_id: deterministic_structural_preview_uuid(workspace_id, &title, &file_edits),
+        title,
+        source: devil_protocol::WorkspaceEditSourceKind::StructuralSearchReplace,
+        target_coverage: ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets,
+            omitted_target_count: 0,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        },
+        file_edits,
+        file_operations: Vec::new(),
+        required_capability: CapabilityId("editor.write".to_string()),
+        diagnostics,
         schema_version: INDEX_SCHEMA_VERSION,
     }
 }
@@ -3434,6 +4286,434 @@ pub fn build_rename_preview_payload(
         diagnostics: Vec::new(),
         schema_version: INDEX_SCHEMA_VERSION,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuralToken {
+    text: String,
+    range: ProtocolTextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StructuralPatternToken {
+    Literal(String),
+    Capture(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuralMatchCandidate {
+    end_index: usize,
+    range: ProtocolTextRange,
+    captures: Vec<StructuralSearchCapture>,
+    replacement_preview: Option<String>,
+}
+
+const STRUCTURAL_DEFAULT_RESULT_LIMIT: usize = 100;
+const STRUCTURAL_MAX_RESULT_LIMIT: usize = 1_000;
+const STRUCTURAL_SNIPPET_LIMIT_BYTES: usize = 160;
+
+fn normalize_structural_result_limit(limit: usize) -> usize {
+    clamp_result_limit(
+        limit,
+        STRUCTURAL_DEFAULT_RESULT_LIMIT,
+        STRUCTURAL_MAX_RESULT_LIMIT,
+    )
+}
+
+fn source_text(document: &SourceDocument) -> Option<&str> {
+    match &document.source {
+        SemanticSourceInput::BoundedFullText { text, .. } => Some(text.text.as_str()),
+        _ => None,
+    }
+}
+
+fn structural_tokens_from_document(document: &SourceDocument) -> Vec<StructuralToken> {
+    lexical_text_segments(document)
+        .into_iter()
+        .flat_map(|segment| {
+            structural_tokens_from_text(segment.text, segment.start_line, segment.start_byte)
+        })
+        .collect()
+}
+
+fn structural_tokens_from_text(
+    text: &str,
+    start_line: u32,
+    start_byte: usize,
+) -> Vec<StructuralToken> {
+    let mut tokens = Vec::new();
+    let mut absolute_byte = start_byte;
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = start_line.saturating_add(line_index as u32);
+        tokens.extend(structural_tokens_from_line(
+            line,
+            line_number,
+            absolute_byte,
+            false,
+        ));
+        absolute_byte = absolute_byte.saturating_add(line.len()).saturating_add(1);
+    }
+    tokens
+}
+
+fn structural_tokens_from_line(
+    line: &str,
+    line_number: u32,
+    base_byte: usize,
+    allow_metavariables: bool,
+) -> Vec<StructuralToken> {
+    let mut tokens = Vec::new();
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if ch.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if allow_metavariables && ch == '$' {
+            let start = index;
+            index += 1;
+            if index < bytes.len() && is_identifier_start(bytes[index] as char) {
+                index += 1;
+                while index < bytes.len() && is_identifier_continue(bytes[index] as char) {
+                    index += 1;
+                }
+                tokens.push(StructuralToken {
+                    text: line[start..index].to_string(),
+                    range: range_for_cols(line_number, start, index, base_byte),
+                });
+                continue;
+            }
+            tokens.push(StructuralToken {
+                text: "$".to_string(),
+                range: range_for_cols(line_number, start, index, base_byte),
+            });
+            continue;
+        }
+        if is_identifier_start(ch) || ch.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (is_identifier_continue(bytes[index] as char)
+                    || (bytes[index] as char).is_ascii_digit())
+            {
+                index += 1;
+            }
+            tokens.push(StructuralToken {
+                text: line[start..index].to_string(),
+                range: range_for_cols(line_number, start, index, base_byte),
+            });
+            continue;
+        }
+        let start = index;
+        let end = if index + 1 < bytes.len()
+            && matches!(
+                &line[index..index + 2],
+                "::" | "->" | "=>" | "==" | "!=" | "<=" | ">=" | "&&" | "||"
+            ) {
+            index + 2
+        } else {
+            index + ch.len_utf8()
+        };
+        index = end;
+        tokens.push(StructuralToken {
+            text: line[start..end].to_string(),
+            range: range_for_cols(line_number, start, end, base_byte),
+        });
+    }
+    tokens
+}
+
+fn parse_structural_pattern(pattern: &str) -> Vec<StructuralPatternToken> {
+    structural_tokens_from_line(pattern, 0, 0, true)
+        .into_iter()
+        .map(|token| {
+            if let Some(name) = token.text.strip_prefix('$')
+                && !name.is_empty()
+            {
+                return StructuralPatternToken::Capture(name.to_string());
+            }
+            StructuralPatternToken::Literal(token.text)
+        })
+        .collect()
+}
+
+fn match_structural_pattern(
+    source_tokens: &[StructuralToken],
+    start_index: usize,
+    pattern: &[StructuralPatternToken],
+    source: &str,
+    rewrite: Option<&str>,
+) -> Option<StructuralMatchCandidate> {
+    let mut source_index = start_index;
+    let mut pattern_index = 0usize;
+    let mut captures = Vec::new();
+    let mut capture_values = HashMap::<String, String>::new();
+
+    while pattern_index < pattern.len() {
+        match &pattern[pattern_index] {
+            StructuralPatternToken::Literal(literal) => {
+                if source_tokens.get(source_index)?.text != *literal {
+                    return None;
+                }
+                source_index += 1;
+                pattern_index += 1;
+            }
+            StructuralPatternToken::Capture(name) => {
+                let capture_start = source_index;
+                let capture_end = capture_end_for_pattern(
+                    source_tokens,
+                    capture_start,
+                    &pattern[pattern_index + 1..],
+                )?;
+                if capture_end <= capture_start {
+                    return None;
+                }
+                let range = merge_token_ranges(
+                    source_tokens[capture_start].range,
+                    source_tokens[capture_end - 1].range,
+                );
+                let value =
+                    capture_value_from_source(source, source_tokens, capture_start, capture_end);
+                if let Some(previous) = capture_values.get(name) {
+                    if previous != &value {
+                        return None;
+                    }
+                } else {
+                    capture_values.insert(name.clone(), value.clone());
+                }
+                captures.push(StructuralSearchCapture {
+                    name: name.clone(),
+                    value,
+                    range,
+                });
+                source_index = capture_end;
+                pattern_index += 1;
+            }
+        }
+    }
+
+    if source_index <= start_index {
+        return None;
+    }
+    let range = merge_token_ranges(
+        source_tokens[start_index].range,
+        source_tokens[source_index - 1].range,
+    );
+    let replacement_preview =
+        rewrite.map(|template| apply_structural_rewrite_template(template, &capture_values));
+    Some(StructuralMatchCandidate {
+        end_index: source_index,
+        range,
+        captures,
+        replacement_preview,
+    })
+}
+
+fn capture_end_for_pattern(
+    source_tokens: &[StructuralToken],
+    capture_start: usize,
+    rest: &[StructuralPatternToken],
+) -> Option<usize> {
+    if capture_start >= source_tokens.len() {
+        return None;
+    }
+    let Some(next_literal) = rest.iter().find_map(|token| match token {
+        StructuralPatternToken::Literal(literal) => Some(literal.as_str()),
+        StructuralPatternToken::Capture(_) => None,
+    }) else {
+        return Some(capture_start + 1);
+    };
+    let mut cursor = capture_start;
+    while cursor < source_tokens.len() {
+        if source_tokens[cursor].text == next_literal {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn capture_value_from_source(
+    source: &str,
+    tokens: &[StructuralToken],
+    start: usize,
+    end: usize,
+) -> String {
+    let Some(byte_start) = tokens[start].range.start.byte_offset else {
+        return tokens[start..end]
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+    };
+    let Some(byte_end) = tokens[end - 1].range.end.byte_offset else {
+        return tokens[start..end]
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+    };
+    let byte_start = byte_start as usize;
+    let byte_end = byte_end as usize;
+    if byte_start <= byte_end
+        && byte_end <= source.len()
+        && source.is_char_boundary(byte_start)
+        && source.is_char_boundary(byte_end)
+    {
+        source[byte_start..byte_end].to_string()
+    } else {
+        tokens[start..end]
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn apply_structural_rewrite_template(template: &str, captures: &HashMap<String, String>) -> String {
+    let mut output = String::new();
+    let mut chars = template.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch != '$' {
+            output.push(ch);
+            continue;
+        }
+        let Some((name_start, first)) = chars.peek().copied() else {
+            output.push('$');
+            continue;
+        };
+        if !is_identifier_start(first) {
+            output.push('$');
+            continue;
+        }
+        chars.next();
+        let mut name_end = name_start + first.len_utf8();
+        while let Some((next_index, next_ch)) = chars.peek().copied() {
+            if is_identifier_continue(next_ch) {
+                chars.next();
+                name_end = next_index + next_ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let name = &template[name_start..name_end];
+        if let Some(value) = captures.get(name) {
+            output.push_str(value);
+        } else {
+            output.push_str(&template[index..name_end]);
+        }
+    }
+    output
+}
+
+fn merge_token_ranges(start: ProtocolTextRange, end: ProtocolTextRange) -> ProtocolTextRange {
+    ProtocolTextRange {
+        start: start.start,
+        end: end.end,
+    }
+}
+
+fn structural_match_suppressed(lines: &[String], line: u32) -> bool {
+    let line = line as usize;
+    let current = lines
+        .get(line)
+        .is_some_and(|value| value.contains("ast-grep-ignore"));
+    let previous = line
+        .checked_sub(1)
+        .and_then(|previous| lines.get(previous))
+        .is_some_and(|value| value.contains("ast-grep-ignore"));
+    current || previous
+}
+
+fn structural_snippet(source: &str, range: ProtocolTextRange) -> String {
+    let byte_start = range.start.byte_offset.unwrap_or(0) as usize;
+    let byte_end = range
+        .end
+        .byte_offset
+        .unwrap_or(range.start.byte_offset.unwrap_or(0)) as usize;
+    if byte_start > byte_end
+        || byte_end > source.len()
+        || !source.is_char_boundary(byte_start)
+        || !source.is_char_boundary(byte_end)
+    {
+        return String::new();
+    }
+    let snippet = &source[byte_start..byte_end];
+    if snippet.len() <= STRUCTURAL_SNIPPET_LIMIT_BYTES {
+        return snippet.to_string();
+    }
+    let mut end = STRUCTURAL_SNIPPET_LIMIT_BYTES;
+    while end > 0 && !snippet.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &snippet[..end])
+}
+
+fn structural_match_id(
+    document: &SourceDocument,
+    range: ProtocolTextRange,
+    pattern: &str,
+) -> String {
+    let start = range.start.byte_offset.unwrap_or(0);
+    let end = range.end.byte_offset.unwrap_or(start);
+    let hash = hash64(pattern.as_bytes(), FNV_OFFSET);
+    format!(
+        "structural:{}:{}:{start}:{end}:{hash:016x}",
+        document.identity.workspace_id.0, document.identity.file_id.0
+    )
+}
+
+fn structural_file_identity(document: &SourceDocument) -> FileIdentity {
+    FileIdentity {
+        file_id: document.identity.file_id,
+        workspace_id: document.identity.workspace_id,
+        canonical_path: document.identity.canonical_path.clone(),
+        content_version: document.identity.file_content_version,
+        content_hash: Some(document.identity.content_hash.value.clone()),
+    }
+}
+
+fn structural_preconditions(document: &SourceDocument) -> ProposalVersionPreconditions {
+    ProposalVersionPreconditions {
+        file_version: Some(document.identity.file_content_version),
+        buffer_version: None,
+        snapshot_id: document.snapshot_id,
+        generation: Some(document.identity.workspace_generation),
+        file_content_version: Some(document.identity.file_content_version),
+        workspace_generation: Some(document.identity.workspace_generation),
+        expected_fingerprint: Some(document.identity.content_hash.clone()),
+        expected_file_length: document.identity.byte_len,
+        expected_modified_at: document.identity.modified_at,
+    }
+}
+
+fn deterministic_structural_preview_uuid(
+    workspace_id: WorkspaceId,
+    title: &str,
+    file_edits: &[WorkspaceTextEdit],
+) -> uuid::Uuid {
+    let mut seed = format!("structural:{}:{title}", workspace_id.0);
+    for file_edit in file_edits {
+        seed.push_str(&format!(
+            ":{}:{}",
+            file_edit.file.file_id.0,
+            file_edit.edits.edits.len()
+        ));
+        for edit in &file_edit.edits.edits {
+            seed.push_str(&format!(
+                ":{}-{}={}",
+                edit.range.start.value, edit.range.end.value, edit.replacement
+            ));
+        }
+    }
+    let mut bytes = [0u8; 16];
+    let hash = hash_to_u128(seed.as_bytes(), 0x0577_5ea2_cafe_f00d);
+    bytes.copy_from_slice(&hash.to_be_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
 }
 
 fn result_from_symbol(
@@ -3798,6 +5078,176 @@ fn content_fingerprint(bytes: &[u8]) -> FileFingerprint {
         algorithm: "fnv1a64-devil-index-v1".to_string(),
         value: format!("{:016x}", hash64(bytes, FNV_OFFSET)),
     }
+}
+
+fn sha256_fingerprint(bytes: &[u8]) -> FileFingerprint {
+    FileFingerprint {
+        algorithm: RETRIEVAL_CHUNK_SHA256_ALGORITHM.to_string(),
+        value: sha256_hex(bytes),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = sha256_digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
+    const H0: [u32; 8] = [
+        0x6a09_e667,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
+    ];
+    const K: [u32; 64] = [
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
+    ];
+
+    let mut message = bytes.to_vec();
+    let bit_len = (message.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut h = H0;
+    for chunk in message.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (word_index, word_bytes) in chunk.chunks_exact(4).take(16).enumerate() {
+            w[word_index] =
+                u32::from_be_bytes([word_bytes[0], word_bytes[1], word_bytes[2], word_bytes[3]]);
+        }
+        for word_index in 16..64 {
+            let s0 = w[word_index - 15].rotate_right(7)
+                ^ w[word_index - 15].rotate_right(18)
+                ^ (w[word_index - 15] >> 3);
+            let s1 = w[word_index - 2].rotate_right(17)
+                ^ w[word_index - 2].rotate_right(19)
+                ^ (w[word_index - 2] >> 10);
+            w[word_index] = w[word_index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[word_index - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut h_working = h[7];
+
+        for round in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = h_working
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[round])
+                .wrapping_add(w[round]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            h_working = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(h_working);
+    }
+
+    let mut digest = [0u8; 32];
+    for (index, word) in h.into_iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
 }
 
 fn discovery_file_id(record: &WorkspaceDiscoveryRecord) -> Option<FileId> {

@@ -28,6 +28,111 @@ pub enum VsCodeCompatError {
     /// Protocol control identifiers are invalid.
     #[error("invalid protocol control identifiers")]
     InvalidControlIds,
+    /// Open VSX registry metadata is invalid or incomplete.
+    #[error("invalid Open VSX extension metadata: {0}")]
+    InvalidOpenVsxMetadata(String),
+}
+
+/// Resolved Open VSX extension metadata required before loading package JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenVsxResolvedExtension {
+    /// Publisher or namespace.
+    pub namespace: String,
+    /// Extension name.
+    pub name: String,
+    /// Extension version.
+    pub version: String,
+    /// Registry-provided VSIX download URL.
+    pub download_url: String,
+    /// Registry origin label.
+    pub registry_label: String,
+}
+
+/// Loaded Open VSX extension metadata and host-session descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenVsxLoadedExtension {
+    /// Resolved Open VSX metadata.
+    pub resolved: OpenVsxResolvedExtension,
+    /// Normalized compatibility manifest.
+    pub manifest: VsCodeExtensionManifest,
+    /// Policy-gated extension-host session descriptor.
+    pub host_session: VsCodeExtensionHostSession,
+}
+
+/// Resolve required Open VSX registry fields from one extension metadata response.
+pub fn resolve_open_vsx_extension_metadata(
+    registry_label: impl Into<String>,
+    metadata: &Value,
+) -> Result<OpenVsxResolvedExtension, VsCodeCompatError> {
+    let namespace = optional_string(metadata, "namespace")
+        .or_else(|| optional_string(metadata, "publisher"))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| VsCodeCompatError::InvalidOpenVsxMetadata("missing namespace".into()))?;
+    let name = optional_string(metadata, "name")
+        .or_else(|| optional_string(metadata, "extensionName"))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            VsCodeCompatError::InvalidOpenVsxMetadata("missing extension name".into())
+        })?;
+    let version = optional_string(metadata, "version")
+        .or_else(|| {
+            metadata
+                .get("versionAlias")
+                .and_then(|aliases| aliases.get("latest"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| VsCodeCompatError::InvalidOpenVsxMetadata("missing version".into()))?;
+    let download_url = metadata
+        .get("files")
+        .and_then(|files| files.get("download"))
+        .and_then(Value::as_str)
+        .or_else(|| metadata.get("downloadUrl").and_then(Value::as_str))
+        .filter(|value| value.starts_with("https://"))
+        .ok_or_else(|| {
+            VsCodeCompatError::InvalidOpenVsxMetadata("missing HTTPS VSIX download URL".to_string())
+        })?
+        .to_string();
+    Ok(OpenVsxResolvedExtension {
+        namespace,
+        name,
+        version,
+        download_url,
+        registry_label: registry_label.into(),
+    })
+}
+
+/// Load an Open VSX extension package manifest into compatibility metadata.
+pub fn load_open_vsx_extension(
+    plugin_id: PluginId,
+    resolved: OpenVsxResolvedExtension,
+    package_json: Value,
+    correlation_id: CorrelationId,
+    causality_id: CausalityId,
+    sequence: EventSequence,
+) -> Result<OpenVsxLoadedExtension, VsCodeCompatError> {
+    let manifest = manifest_from_package_json(
+        plugin_id,
+        package_json,
+        correlation_id,
+        causality_id,
+        sequence,
+    )?;
+    if manifest.publisher != resolved.namespace
+        || manifest.name != resolved.name
+        || manifest.version != resolved.version
+    {
+        return Err(VsCodeCompatError::InvalidOpenVsxMetadata(
+            "Open VSX metadata does not match package.json identity".to_string(),
+        ));
+    }
+    let host_session = extension_host_session_for_manifest(&manifest);
+    Ok(OpenVsxLoadedExtension {
+        resolved,
+        manifest,
+        host_session,
+    })
 }
 
 /// Normalizes a VS Code `package.json` manifest into Devil compatibility DTOs.
@@ -655,5 +760,105 @@ mod tests {
         assert!(!diagnostics[0].message.contains("some"));
 
         let _redaction_marker = RedactionHint::MetadataOnly;
+    }
+
+    #[test]
+    fn open_vsx_extension_metadata_resolves_and_loads_package_manifest() {
+        let resolved = resolve_open_vsx_extension_metadata(
+            "https://open-vsx.org",
+            &json!({
+                "namespace": "devil",
+                "name": "theme-fixture",
+                "version": "1.0.0",
+                "files": {
+                    "download": "https://open-vsx.org/api/devil/theme-fixture/1.0.0/file/devil.theme-fixture-1.0.0.vsix"
+                }
+            }),
+        )
+        .expect("Open VSX metadata resolves");
+
+        let loaded = load_open_vsx_extension(
+            PluginId(12),
+            resolved,
+            json!({
+                "publisher": "devil",
+                "name": "theme-fixture",
+                "displayName": "Theme Fixture",
+                "version": "1.0.0",
+                "engines": { "vscode": "^1.90.0" },
+                "contributes": {
+                    "themes": [{ "label": "Devil Dark" }]
+                }
+            }),
+            CorrelationId(6),
+            causality_id(),
+            EventSequence(6),
+        )
+        .expect("Open VSX package manifest loads");
+
+        assert_eq!(loaded.resolved.namespace, "devil");
+        assert_eq!(loaded.manifest.extension_id.0, "devil.theme-fixture");
+        assert_eq!(
+            loaded.host_session.runtime,
+            VsCodeExtensionHostRuntime::NoneRequired
+        );
+        assert_eq!(
+            loaded.host_session.status,
+            VsCodeCompatibilityStatus::Supported
+        );
+    }
+
+    #[test]
+    fn open_vsx_extension_metadata_requires_https_download_url() {
+        let error = resolve_open_vsx_extension_metadata(
+            "https://open-vsx.org",
+            &json!({
+                "namespace": "devil",
+                "name": "bad-fixture",
+                "version": "1.0.0",
+                "files": { "download": "http://example.invalid/bad.vsix" }
+            }),
+        )
+        .expect_err("non-HTTPS downloads must fail closed");
+
+        assert!(matches!(
+            error,
+            VsCodeCompatError::InvalidOpenVsxMetadata(reason)
+                if reason.contains("HTTPS")
+        ));
+    }
+
+    #[test]
+    fn open_vsx_load_rejects_metadata_package_identity_mismatch() {
+        let resolved = resolve_open_vsx_extension_metadata(
+            "https://open-vsx.org",
+            &json!({
+                "namespace": "devil",
+                "name": "theme-fixture",
+                "version": "1.0.0",
+                "downloadUrl": "https://open-vsx.org/api/devil/theme-fixture/1.0.0/file/devil.theme-fixture-1.0.0.vsix"
+            }),
+        )
+        .expect("Open VSX metadata resolves");
+
+        let error = load_open_vsx_extension(
+            PluginId(13),
+            resolved,
+            json!({
+                "publisher": "devil",
+                "name": "other-fixture",
+                "version": "1.0.0"
+            }),
+            CorrelationId(7),
+            causality_id(),
+            EventSequence(7),
+        )
+        .expect_err("identity mismatch must fail closed");
+
+        assert!(matches!(
+            error,
+            VsCodeCompatError::InvalidOpenVsxMetadata(reason)
+                if reason.contains("does not match")
+        ));
     }
 }

@@ -6,12 +6,13 @@ use devil_protocol::{
     AgentReplayManifest, AgentRunId, AgentRunState, AgentStateTransitionRecord,
     AssistedAiContractError, AssistedAiEditProposalOutput, AssistedAiOperationClass,
     AssistedAiProposalTargetIntent, AssistedAiProviderClass, AssistedAiProviderRouteRequest,
-    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, CancellationTokenId,
-    CanonicalPath, CapabilityId, CausalityId, CorrelationId, EventSequence, FileFingerprint,
-    LegionWorkflowConflict, LegionWorkflowConflictId, LegionWorkflowConflictKind,
-    LegionWorkflowConflictState, LegionWorkflowDependencyState, LegionWorkflowMergeReadiness,
-    LegionWorkflowModelBackend, LegionWorkflowSession, LegionWorkflowWorkerAssignment,
-    LegionWorkflowWorkerId, LegionWorkflowWorkerState, PreviewSummary, PrincipalId,
+    AssistedAiTrustProjectionReference, CancellationTokenId, CanonicalPath, CapabilityId,
+    CausalityId, CorrelationId, DelegatedTaskToolPermissionProfile,
+    DelegatedTaskToolPermissionRequest, EventSequence, LegionWorkflowConflict,
+    LegionWorkflowConflictId, LegionWorkflowConflictKind, LegionWorkflowConflictState,
+    LegionWorkflowDependencyState, LegionWorkflowMergeReadiness, LegionWorkflowModelBackend,
+    LegionWorkflowSession, LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId,
+    LegionWorkflowWorkerState, PermissionBudgetActionClass, PreviewSummary, PrincipalId,
     ProposalAffectedTarget, ProposalId, ProposalPayload, ProposalPayloadKind, ProposalPrivacyLabel,
     ProposalRiskLabel, ProposalTargetCoverage, ProposalTargetCoverageKind,
     ProposalVersionPreconditions, RedactionHint, TimestampMillis, WorkspaceTrustState,
@@ -212,23 +213,27 @@ impl DelegatedTaskSandboxOrchestrator {
     }
 
     /// Initializes the sandbox using `git worktree add` with fallback to copy-based isolation.
-    pub fn initialize(&mut self) -> Result<(), std::io::Error> {
+    pub fn initialize(
+        &mut self,
+        permission: &DelegatedTaskToolPermissionRequest,
+    ) -> Result<(), std::io::Error> {
+        validate_sandbox_permission(permission, "initialize")?;
         if let Some(parent) = self.sandbox_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         // Try git worktree first
-        let status = Command::new("git")
+        let output = Command::new("git")
             .args([
                 "worktree",
                 "add",
                 self.sandbox_path.to_str().unwrap(),
                 "HEAD",
             ])
-            .status();
+            .output();
 
-        match status {
-            Ok(s) if s.success() => {
+        match output {
+            Ok(output) if output.status.success() => {
                 self.is_worktree = true;
                 Ok(())
             }
@@ -241,15 +246,62 @@ impl DelegatedTaskSandboxOrchestrator {
     }
 
     /// Cleans up the sandbox.
-    pub fn cleanup(&mut self) -> Result<(), std::io::Error> {
+    pub fn cleanup(
+        &mut self,
+        permission: &DelegatedTaskToolPermissionRequest,
+    ) -> Result<(), std::io::Error> {
+        validate_sandbox_permission(permission, "cleanup")?;
         if self.sandbox_path.exists() {
             if self.is_worktree {
-                let _ = Command::new("git").args(["worktree", "prune"]).status();
+                let output = Command::new("git")
+                    .arg("worktree")
+                    .arg("remove")
+                    .arg("--force")
+                    .arg(&self.sandbox_path)
+                    .output()?;
+                if !output.status.success() {
+                    let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    return Err(std::io::Error::other(format!(
+                        "git worktree remove failed for {}: {}",
+                        self.sandbox_path.display(),
+                        message
+                    )));
+                }
+            } else {
+                std::fs::remove_dir_all(&self.sandbox_path)?;
             }
-            std::fs::remove_dir_all(&self.sandbox_path)?;
         }
         Ok(())
     }
+}
+
+fn validate_sandbox_permission(
+    permission: &DelegatedTaskToolPermissionRequest,
+    operation: &str,
+) -> Result<(), std::io::Error> {
+    let write_profile = permission.profile == DelegatedTaskToolPermissionProfile::Write;
+    let sandbox_action = matches!(
+        permission.action_class,
+        PermissionBudgetActionClass::AccessWorkspaceFiles
+            | PermissionBudgetActionClass::InvokeLocalTool
+    );
+    let delegated_runtime_capability = permission
+        .capability
+        .as_ref()
+        .is_some_and(|capability| capability.0 == "delegated.runtime.allocate");
+    if write_profile
+        && sandbox_action
+        && delegated_runtime_capability
+        && permission.runtime_allowed
+        && permission.human_approval_recorded
+        && !permission.deny_overrides
+    {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("delegated sandbox {operation} requires approved Write tool permission"),
+    ))
 }
 
 /// Validate that path is contained within the base directory.
@@ -307,6 +359,37 @@ pub struct DelegatedTaskProposalGenerator {
     sandbox_base: PathBuf,
 }
 
+/// Request-scoped inputs for delegated task proposal generation.
+#[derive(Debug, Clone)]
+pub struct DelegatedTaskProposalInput<'a> {
+    /// Target path inside the delegated task sandbox.
+    pub target_path: &'a Path,
+    /// Provider-produced file content for create-file proposals.
+    pub modified_content: &'a str,
+    /// Output identifier assigned by the caller.
+    pub output_id: String,
+    /// Provider request identifier associated with the proposal.
+    pub request_id: String,
+    /// Provider identifier that produced the proposed content.
+    pub provider_id: String,
+    /// Proposal identifier assigned by the caller.
+    pub proposal_id: ProposalId,
+    /// Principal on whose behalf the proposal was generated.
+    pub principal: PrincipalId,
+    /// Capability authorizing proposal generation.
+    pub capability: CapabilityId,
+    /// Correlation identifier for observability.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier for observability.
+    pub causality_id: CausalityId,
+    /// Creation timestamp assigned by the caller.
+    pub created_at: TimestampMillis,
+    /// Metadata-only context manifest reference used to generate the proposal.
+    pub context_manifest: AssistedAiTrustProjectionReference,
+    /// Metadata-only approval checklist reference gating the proposal.
+    pub approval_checklist: AssistedAiTrustProjectionReference,
+}
+
 impl DelegatedTaskProposalGenerator {
     /// Creates a new proposal generator.
     pub fn new(sandbox_base: PathBuf) -> Self {
@@ -316,27 +399,32 @@ impl DelegatedTaskProposalGenerator {
     /// Compares sandbox directory state with HEAD checkout and builds AssistedAiEditProposalOutput.
     pub fn generate_proposal(
         &self,
-        target_path: &Path,
-        _modified_content: &str,
+        input: DelegatedTaskProposalInput<'_>,
     ) -> Result<AssistedAiEditProposalOutput, AgentError> {
-        validate_containment(&self.sandbox_base, target_path)?;
+        validate_containment(&self.sandbox_base, input.target_path)?;
 
-        let target_relative = target_path
+        let target_relative = input
+            .target_path
             .strip_prefix(&self.sandbox_base)
-            .unwrap_or(target_path);
+            .unwrap_or(input.target_path);
+        let target_relative = target_relative.to_str().ok_or_else(|| {
+            AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
+                reason: "Proposal target path is not valid UTF-8".to_string(),
+            })
+        })?;
 
         Ok(AssistedAiEditProposalOutput {
-            output_id: "out-auto".to_string(),
-            request_id: "req-auto".to_string(),
-            provider_id: "provider-auto".to_string(),
-            proposal_id: ProposalId(1),
-            principal: PrincipalId("principal-auto".to_string()),
-            capability: CapabilityId("capability-auto".to_string()),
-            correlation_id: CorrelationId(1),
-            causality_id: CausalityId(uuid::Uuid::from_u128(1)),
+            output_id: input.output_id,
+            request_id: input.request_id,
+            provider_id: input.provider_id,
+            proposal_id: input.proposal_id,
+            principal: input.principal,
+            capability: input.capability,
+            correlation_id: input.correlation_id,
+            causality_id: input.causality_id,
             payload: ProposalPayload::CreateFile(devil_protocol::CreateFileProposal {
-                path: CanonicalPath(target_relative.to_str().unwrap().to_string()),
-                initial_content: Some("".to_string()),
+                path: CanonicalPath(target_relative.to_string()),
+                initial_content: Some(input.modified_content.to_string()),
             }),
             preconditions: ProposalVersionPreconditions {
                 file_version: None,
@@ -354,25 +442,9 @@ impl DelegatedTaskProposalGenerator {
                 details: vec![],
             },
             expires_at: None,
-            created_at: TimestampMillis(0),
-            context_manifest: AssistedAiTrustProjectionReference {
-                reference_id: "ctx-ref".to_string(),
-                kind: AssistedAiTrustProjectionKind::ContextManifest,
-                projection_hash: FileFingerprint {
-                    algorithm: "sha256".to_string(),
-                    value: "hash".to_string(),
-                },
-                schema_version: 1,
-            },
-            approval_checklist: AssistedAiTrustProjectionReference {
-                reference_id: "appr-ref".to_string(),
-                kind: AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
-                projection_hash: FileFingerprint {
-                    algorithm: "sha256".to_string(),
-                    value: "hash".to_string(),
-                },
-                schema_version: 1,
-            },
+            created_at: input.created_at,
+            context_manifest: input.context_manifest,
+            approval_checklist: input.approval_checklist,
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         })
@@ -766,12 +838,13 @@ fn provider_route_request_from_worker(
 mod tests {
     use super::*;
     use devil_protocol::{
-        AgentReplayManifest, CommandRiskLabel, ContextManifestItemCount,
-        DelegatedTaskAffectedTargetSummary, DelegatedTaskOperationClass, DelegatedTaskPlanId,
-        LegionWorkflowDependency, LegionWorkflowDependencyId, LegionWorkflowDependencyState,
-        LegionWorkflowMergeApproval, LegionWorkflowMergeReadinessBlocker, LegionWorkflowSessionId,
-        LegionWorkflowSignOff, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
-        LegionWorkflowState, LegionWorkflowVerificationGate, LegionWorkflowVerificationGateId,
+        AgentReplayManifest, AssistedAiTrustProjectionKind, CommandRiskLabel,
+        ContextManifestItemCount, DelegatedTaskAffectedTargetSummary, DelegatedTaskOperationClass,
+        DelegatedTaskPlanId, FileFingerprint, LegionWorkflowDependency, LegionWorkflowDependencyId,
+        LegionWorkflowDependencyState, LegionWorkflowMergeApproval,
+        LegionWorkflowMergeReadinessBlocker, LegionWorkflowSessionId, LegionWorkflowSignOff,
+        LegionWorkflowSignOffId, LegionWorkflowSignOffState, LegionWorkflowState,
+        LegionWorkflowVerificationGate, LegionWorkflowVerificationGateId,
         LegionWorkflowVerificationGateState, LegionWorkflowWorkerRole, LegionWorkflowWorkerState,
         PrivacyClassification, ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetKind,
         RedactionHint, validate_legion_workflow_session,
@@ -948,7 +1021,10 @@ mod tests {
     #[test]
     fn test_sandbox_orchestration_and_containment_and_proposal_generation() {
         let mut orchestrator = DelegatedTaskSandboxOrchestrator::new("test-run");
-        orchestrator.initialize().expect("initialize sandbox");
+        let permission = approved_sandbox_permission("sandbox:init");
+        orchestrator
+            .initialize(&permission)
+            .expect("initialize sandbox");
         let sandbox_path = orchestrator.sandbox_path().to_path_buf();
 
         // 1. Sandbox exists on disk
@@ -964,16 +1040,94 @@ mod tests {
 
         // 3. Proposal generation verification
         let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
+        let modified_content = "fn generated_from_request() {}\n";
         let proposal = generator
-            .generate_proposal(&target_file, "modified content")
+            .generate_proposal(proposal_input(&target_file, modified_content))
             .expect("generate proposal");
 
-        assert_eq!(proposal.output_id, "out-auto");
-        assert_eq!(proposal.proposal_id.0, 1);
+        assert_eq!(proposal.output_id, "output:request-derived");
+        assert_eq!(proposal.request_id, "request:delegate");
+        assert_eq!(proposal.provider_id, "provider:local-deterministic");
+        assert_eq!(proposal.proposal_id, ProposalId(4242));
+        assert_eq!(
+            proposal.principal,
+            PrincipalId("principal:user".to_string())
+        );
+        assert_eq!(
+            proposal.capability,
+            CapabilityId("capability:write-proposal".to_string())
+        );
+        assert_eq!(proposal.correlation_id, CorrelationId(42));
+        assert_eq!(proposal.causality_id, causality(42));
+        assert_eq!(proposal.created_at, TimestampMillis(424242));
+        assert_eq!(proposal.context_manifest.reference_id, "context:manifest");
+        assert_eq!(
+            proposal.context_manifest.kind,
+            AssistedAiTrustProjectionKind::ContextManifest
+        );
+        assert_eq!(
+            proposal.approval_checklist.reference_id,
+            "approval:checklist"
+        );
+        assert_eq!(
+            proposal.approval_checklist.kind,
+            AssistedAiTrustProjectionKind::ProposalApprovalChecklist
+        );
+        assert_eq!(proposal.redaction_hints, vec![RedactionHint::MetadataOnly]);
+        match &proposal.payload {
+            ProposalPayload::CreateFile(create_file) => {
+                assert_eq!(create_file.path.0, "src/lib.rs");
+                assert_eq!(
+                    create_file.initial_content.as_deref(),
+                    Some(modified_content)
+                );
+            }
+            _ => panic!("expected create-file proposal"),
+        }
 
         // Cleanup
-        orchestrator.cleanup().expect("cleanup sandbox");
+        orchestrator.cleanup(&permission).expect("cleanup sandbox");
         assert!(!sandbox_path.exists());
+    }
+
+    #[test]
+    fn delegated_sandbox_requires_approved_write_tool_permission() {
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new("permission-test-run");
+        let denied = devil_protocol::delegated_task_tool_permission_request(
+            devil_protocol::DelegatedTaskToolPermissionRequestInput {
+                request_id: "sandbox:denied".to_string(),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+                capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                target_id: Some("target/delegated-tasks".to_string()),
+                decision: devil_protocol::DelegatedTaskToolPermissionDecision::Deny,
+                labels: vec!["test".to_string()],
+                schema_version: 1,
+            },
+        );
+
+        let error = orchestrator
+            .initialize(&denied)
+            .expect_err("denied permission blocks sandbox init");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!orchestrator.sandbox_path().exists());
+    }
+
+    fn approved_sandbox_permission(
+        request_id: &str,
+    ) -> devil_protocol::DelegatedTaskToolPermissionRequest {
+        devil_protocol::delegated_task_tool_permission_request(
+            devil_protocol::DelegatedTaskToolPermissionRequestInput {
+                request_id: request_id.to_string(),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+                capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                target_id: Some("target/delegated-tasks".to_string()),
+                decision: devil_protocol::DelegatedTaskToolPermissionDecision::Allow,
+                labels: vec!["test".to_string()],
+                schema_version: 1,
+            },
+        )
     }
 
     fn workflow_hash(value: &str) -> FileFingerprint {
@@ -989,6 +1143,45 @@ mod tests {
             kind: AssistedAiTrustProjectionKind::AssistedAiProjection,
             projection_hash: workflow_hash(id),
             schema_version: 1,
+        }
+    }
+
+    fn proposal_ref(
+        id: &str,
+        kind: AssistedAiTrustProjectionKind,
+    ) -> AssistedAiTrustProjectionReference {
+        AssistedAiTrustProjectionReference {
+            reference_id: id.to_string(),
+            kind,
+            projection_hash: workflow_hash(id),
+            schema_version: 1,
+        }
+    }
+
+    fn proposal_input<'a>(
+        target_path: &'a Path,
+        modified_content: &'a str,
+    ) -> DelegatedTaskProposalInput<'a> {
+        DelegatedTaskProposalInput {
+            target_path,
+            modified_content,
+            output_id: "output:request-derived".to_string(),
+            request_id: "request:delegate".to_string(),
+            provider_id: "provider:local-deterministic".to_string(),
+            proposal_id: ProposalId(4242),
+            principal: PrincipalId("principal:user".to_string()),
+            capability: CapabilityId("capability:write-proposal".to_string()),
+            correlation_id: CorrelationId(42),
+            causality_id: causality(42),
+            created_at: TimestampMillis(424242),
+            context_manifest: proposal_ref(
+                "context:manifest",
+                AssistedAiTrustProjectionKind::ContextManifest,
+            ),
+            approval_checklist: proposal_ref(
+                "approval:checklist",
+                AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+            ),
         }
     }
 
@@ -1226,8 +1419,9 @@ mod tests {
         let sandbox = PathBuf::from("target/legion-workflow-agent-test");
         std::fs::create_dir_all(&sandbox).expect("create sandbox");
         let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let target_path = sandbox.join("generated.txt");
         let proposal = generator
-            .generate_proposal(&sandbox.join("generated.txt"), "proposal metadata")
+            .generate_proposal(proposal_input(&target_path, "proposal metadata"))
             .expect("proposal output");
 
         let output = coordinator
@@ -1239,8 +1433,17 @@ mod tests {
 
         match output {
             LegionWorkflowCoordinatorOutput::ProposalReady(proposal) => {
-                assert_eq!(proposal.proposal_id, ProposalId(1));
+                assert_eq!(proposal.proposal_id, ProposalId(4242));
                 assert_eq!(proposal.redaction_hints, vec![RedactionHint::MetadataOnly]);
+                match &proposal.payload {
+                    ProposalPayload::CreateFile(create_file) => {
+                        assert_eq!(
+                            create_file.initial_content.as_deref(),
+                            Some("proposal metadata")
+                        );
+                    }
+                    _ => panic!("expected create-file proposal"),
+                }
             }
             _ => panic!("expected proposal-ready metadata"),
         }
