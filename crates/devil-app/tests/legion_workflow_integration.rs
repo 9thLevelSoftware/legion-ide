@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use devil_agent::LegionWorkflowCoordinatorOutput;
 use devil_ai_providers::{McpClient, McpClientError, McpTransport};
 use devil_app::{
-    AppAutomateToolCallOutcome, AppComposition, AppMcpClientToolRuntime, AppProductMode,
+    AppAutomateToolCallOutcome, AppComposition, AppCompositionError, AppMcpClientToolRuntime,
+    AppProductMode,
 };
 use devil_editor::{TextEdit, TextPosition};
 use devil_protocol::{
@@ -755,6 +756,58 @@ fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutatio
         LegionWorkflowState::Completed
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn automate_mcp_tool_permission_decision_requires_projected_request() {
+    let mut app = automate_app();
+    let (session, plan_id) = local_session("mcp-preauth", false);
+    let session_id = session.session_id.clone();
+    let server_id = McpServerId("mcp:test".to_string());
+    let tool_name = McpToolName("write_file".to_string());
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    app.seed_legion_workflow_mcp_registry(test_mcp_registry(&server_id, &tool_name))
+        .expect("seed mcp registry");
+
+    let pre_authorized = app.record_legion_workflow_tool_permission_decision(
+        &session_id,
+        &server_id,
+        &tool_name,
+        DelegatedTaskToolPermissionDecision::Allow,
+    );
+    assert!(
+        matches!(pre_authorized, Err(AppCompositionError::LegionWorkflow(message))
+            if message.contains("has not been projected"))
+    );
+    assert_eq!(
+        app.legion_workflow_projection(TimestampMillis::now())
+            .tool_permission_request_count,
+        0
+    );
+
+    let waiting = app
+        .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &tool_name)
+        .expect("prepare tool call");
+    assert!(matches!(
+        waiting,
+        AppAutomateToolCallOutcome::WaitingForToolPermission { .. }
+    ));
+    let projection = app
+        .record_legion_workflow_tool_permission_decision(
+            &session_id,
+            &server_id,
+            &tool_name,
+            DelegatedTaskToolPermissionDecision::Allow,
+        )
+        .expect("record projected allow");
+    assert_eq!(projection.tool_permission_request_count, 1);
+
+    let ready = app
+        .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &tool_name)
+        .expect("prepare allowed tool call");
+    assert!(matches!(ready, AppAutomateToolCallOutcome::Ready { .. }));
 }
 
 #[test]
