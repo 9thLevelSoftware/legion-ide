@@ -29,6 +29,8 @@ use devil_protocol::{
     PermissionBudgetActionClass, PrincipalId, PrivacyClassification, ProductMode, ProposalId,
     ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetKind, RedactionHint, TimestampMillis,
     WorkspaceId, WorkspaceTrustState, delegated_task_plan_from_boundary_input,
+    validate_legion_evidence_record, validate_legion_provider_route_metadata,
+    validate_legion_task_packet, validate_legion_worker_result,
 };
 use serde_json::{Value, json};
 
@@ -83,7 +85,7 @@ fn affected_target(target_id: &str) -> DelegatedTaskAffectedTargetSummary {
     DelegatedTaskAffectedTargetSummary {
         target_id: target_id.to_string(),
         kind: ProposalTargetKind::MetadataOnly,
-        workspace_id: None,
+        workspace_id: Some(WorkspaceId(1)),
         file_id: None,
         buffer_id: None,
         ranges: vec![ByteRange::new(0, 0)],
@@ -968,6 +970,12 @@ fn legion_workflow_mcp_worker_waits_for_permission_and_resumes_after_allow() {
             .any(|output| matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
                 if reasons.iter().any(|reason| reason.contains("mcp_worker_waiting_for_tool_permission"))))
     );
+    assert!(
+        !first
+            .outputs
+            .iter()
+            .any(|output| matches!(output, LegionWorkflowCoordinatorOutput::TaskPacketReady(_)))
+    );
     assert_eq!(first.projection.tool_permission_request_count, 1);
     assert_eq!(
         app.legion_workflow_session(&session_id)
@@ -988,6 +996,12 @@ fn legion_workflow_mcp_worker_waits_for_permission_and_resumes_after_allow() {
         .execute_legion_workflow(&session_id)
         .expect("second mcp worker pass");
 
+    assert!(
+        !second
+            .outputs
+            .iter()
+            .any(|output| matches!(output, LegionWorkflowCoordinatorOutput::TaskPacketReady(_)))
+    );
     assert!(
         second
             .projection
@@ -1010,5 +1024,258 @@ fn legion_workflow_mcp_worker_waits_for_permission_and_resumes_after_allow() {
             .worker_assignments[0]
             .state,
         LegionWorkflowWorkerState::Completed
+    );
+}
+
+#[test]
+fn legion_workflow_local_worker_emits_canonical_task_packet_worker_result_and_evidence() {
+    let mut app = automate_app();
+    let (session, plan_id) = local_session("canonical-local", false);
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
+    allow_delegated_runtime(&mut app, &plan_id);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let outcome = app
+        .execute_legion_workflow(&session_id)
+        .expect("execute workflow");
+
+    assert!(
+        outcome.outputs.iter().any(|output| {
+            matches!(output, LegionWorkflowCoordinatorOutput::TaskPacketReady(_))
+        })
+    );
+    assert!(outcome.outputs.iter().any(|output| {
+        matches!(
+            output,
+            LegionWorkflowCoordinatorOutput::WorkerResultReady(_)
+        )
+    }));
+    assert!(
+        outcome
+            .outputs
+            .iter()
+            .any(|output| { matches!(output, LegionWorkflowCoordinatorOutput::EvidenceReady(_)) })
+    );
+
+    let packet = outcome
+        .outputs
+        .iter()
+        .find_map(|output| match output {
+            LegionWorkflowCoordinatorOutput::TaskPacketReady(p) => Some(p.as_ref()),
+            _ => None,
+        })
+        .expect("task packet");
+    validate_legion_task_packet(packet).expect("task packet validates");
+
+    let result = outcome
+        .outputs
+        .iter()
+        .find_map(|output| match output {
+            LegionWorkflowCoordinatorOutput::WorkerResultReady(r) => Some(r.as_ref()),
+            _ => None,
+        })
+        .expect("worker result");
+    validate_legion_worker_result(result).expect("worker result validates");
+
+    let evidence = outcome
+        .outputs
+        .iter()
+        .find_map(|output| match output {
+            LegionWorkflowCoordinatorOutput::EvidenceReady(e) => Some(e.as_ref()),
+            _ => None,
+        })
+        .expect("evidence record");
+    validate_legion_evidence_record(evidence).expect("evidence validates");
+}
+
+#[test]
+fn legion_workflow_provider_worker_emits_canonical_provider_route_metadata() {
+    let mut app = automate_app();
+    let session = workflow_session(
+        "provider-canonical",
+        vec![worker(
+            "worker:provider-canonical",
+            LegionWorkflowModelBackend::ProviderBacked,
+            None,
+            "target:provider-canonical",
+            141,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        vec![ProposalId(144)],
+        Some(approval(false)),
+    );
+    let session_id = session.session_id.clone();
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let outcome = app
+        .execute_legion_workflow(&session_id)
+        .expect("execute provider workflow");
+
+    assert!(outcome.outputs.iter().any(|output| {
+        matches!(
+            output,
+            LegionWorkflowCoordinatorOutput::ProviderRouteMetadataReady(_)
+        )
+    }));
+
+    let route = outcome
+        .outputs
+        .iter()
+        .find_map(|output| match output {
+            LegionWorkflowCoordinatorOutput::ProviderRouteMetadataReady(r) => Some(r.as_ref()),
+            _ => None,
+        })
+        .expect("provider route metadata");
+    validate_legion_provider_route_metadata(route).expect("provider route metadata validates");
+}
+
+#[test]
+fn legion_workflow_provider_worker_repeated_execution_does_not_duplicate_route_outputs() {
+    let mut app = automate_app();
+    let session = workflow_session(
+        "provider-dedup",
+        vec![worker(
+            "worker:provider-dedup",
+            LegionWorkflowModelBackend::ProviderBacked,
+            None,
+            "target:provider-dedup",
+            151,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        vec![ProposalId(155)],
+        Some(approval(false)),
+    );
+    let session_id = session.session_id.clone();
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let first = app
+        .execute_legion_workflow(&session_id)
+        .expect("first provider workflow execution");
+    let second = app
+        .execute_legion_workflow(&session_id)
+        .expect("second provider workflow execution");
+
+    let first_routes = first
+        .outputs
+        .iter()
+        .filter(|output| {
+            matches!(
+                output,
+                LegionWorkflowCoordinatorOutput::ProviderRouteRequired(_)
+            )
+        })
+        .count();
+    let first_metadata = first
+        .outputs
+        .iter()
+        .filter(|output| {
+            matches!(
+                output,
+                LegionWorkflowCoordinatorOutput::ProviderRouteMetadataReady(_)
+            )
+        })
+        .count();
+
+    let second_routes = second
+        .outputs
+        .iter()
+        .filter(|output| {
+            matches!(
+                output,
+                LegionWorkflowCoordinatorOutput::ProviderRouteRequired(_)
+            )
+        })
+        .count();
+    let second_metadata = second
+        .outputs
+        .iter()
+        .filter(|output| {
+            matches!(
+                output,
+                LegionWorkflowCoordinatorOutput::ProviderRouteMetadataReady(_)
+            )
+        })
+        .count();
+
+    assert_eq!(
+        first_routes, 1,
+        "first execution must emit exactly one ProviderRouteRequired"
+    );
+    assert_eq!(
+        first_metadata, 1,
+        "first execution must emit exactly one ProviderRouteMetadataReady"
+    );
+    assert_eq!(
+        second_routes, 1,
+        "second execution must emit exactly one ProviderRouteRequired (not duplicate)"
+    );
+    assert_eq!(
+        second_metadata, 1,
+        "second execution must emit exactly one ProviderRouteMetadataReady (not duplicate)"
+    );
+
+    let stored = app
+        .legion_workflow_session(&session_id)
+        .expect("stored session");
+    assert_eq!(
+        stored.worker_assignments[0].state,
+        LegionWorkflowWorkerState::ProviderRouteRequired,
+        "worker remains in ProviderRouteRequired across executions"
+    );
+}
+
+#[test]
+fn legion_workflow_canonical_output_rejects_direct_workspace_mutation() {
+    let mut app = automate_app();
+    let (session, plan_id) = local_session("mutation-reject", false);
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
+    allow_delegated_runtime(&mut app, &plan_id);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let outcome = app
+        .execute_legion_workflow(&session_id)
+        .expect("execute workflow");
+
+    let packet = outcome
+        .outputs
+        .iter()
+        .find_map(|output| match output {
+            LegionWorkflowCoordinatorOutput::TaskPacketReady(p) => Some(p.as_ref()),
+            _ => None,
+        })
+        .expect("task packet");
+    assert!(packet.output_contract.proposal_only);
+    assert!(!packet.output_contract.direct_mutation_allowed);
+
+    let result = outcome
+        .outputs
+        .iter()
+        .find_map(|output| match output {
+            LegionWorkflowCoordinatorOutput::WorkerResultReady(r) => Some(r.as_ref()),
+            _ => None,
+        })
+        .expect("worker result");
+    assert!(
+        result
+            .evidence_records
+            .iter()
+            .all(|e| !e.redacted_payload_summary.is_empty())
+    );
+    assert!(
+        result
+            .redaction_hints
+            .contains(&RedactionHint::MetadataOnly)
     );
 }

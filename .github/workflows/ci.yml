@@ -84,6 +84,13 @@ jobs:
       - name: Phase 8 evidence gate
         run: cargo run -p devil-cli -- evidence check --phase phase8
 
+      - name: Reclaim Linux runner disk before cargo-deny
+        if: runner.os == 'Linux'
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h
+
       - name: Cargo deny check
         if: runner.os == 'Linux'
         uses: EmbarkStudios/cargo-deny-action@v2
