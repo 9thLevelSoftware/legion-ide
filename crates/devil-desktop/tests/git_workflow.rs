@@ -34,6 +34,7 @@ impl TempGitRepo {
         ));
         fs::create_dir(&root).expect("temp git repo should be created");
         run_git(&root, ["init"]);
+        run_git(&root, ["branch", "-M", "master"]);
         run_git(&root, ["config", "user.email", "devil@example.test"]);
         run_git(&root, ["config", "user.name", "Devil Test"]);
         Self { root }
@@ -163,4 +164,101 @@ fn desktop_git_workflow_projects_diff_blame_graph_and_hunk_actions() {
     let cached = run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"]);
     assert!(cached.contains("first_changed"));
     assert!(!cached.contains("second_changed"));
+}
+
+#[test]
+fn desktop_git_workflow_resolves_conflicts_through_bridge_actions() {
+    let repo = TempGitRepo::new();
+    let source = repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {\n    original();\n}\n\npub fn beta() {\n    original_beta();\n}\n",
+    );
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+
+    run_git(repo.path(), ["checkout", "-b", "feature"]);
+    repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {\n    incoming_alpha();\n}\n\npub fn beta() {\n    incoming_beta();\n}\n",
+    );
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "feature"]);
+
+    run_git(repo.path(), ["checkout", "master"]);
+    repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {\n    current_alpha();\n}\n\npub fn beta() {\n    current_beta();\n}\n",
+    );
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "master"]);
+
+    let _ = Command::new("git")
+        .current_dir(repo.path())
+        .args(["merge", "feature"])
+        .output()
+        .expect("git merge command should run");
+
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        repo.path().to_path_buf(),
+        Some(source.to_string_lossy().into_owned()),
+    ))
+    .expect("desktop runtime should open git workspace");
+
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::RefreshGit)
+            .expect("git refresh should route"),
+        DesktopWorkflowOutcome::GitUpdated
+    );
+    let snapshot = runtime.projection_snapshot();
+    assert!(
+        !snapshot.git_projection.conflicts.is_empty(),
+        "conflicts should be present after merge"
+    );
+    assert!(
+        snapshot
+            .git_projection
+            .conflicts
+            .iter()
+            .any(|c| c.path == "src/lib.rs"),
+        "src/lib.rs should be conflicted"
+    );
+
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::AcceptGitConflictCurrent {
+                path: "src/lib.rs".to_string(),
+            })
+            .expect("accept current should route"),
+        DesktopWorkflowOutcome::GitUpdated
+    );
+
+    let snapshot = runtime.projection_snapshot();
+    assert!(
+        !snapshot
+            .git_projection
+            .conflicts
+            .iter()
+            .any(|c| c.path == "src/lib.rs"),
+        "src/lib.rs conflict should be resolved"
+    );
+
+    let content = fs::read_to_string(&source).expect("file should be readable");
+    assert!(
+        content.contains("current_alpha"),
+        "resolved content should contain current_alpha"
+    );
+    assert!(
+        content.contains("current_beta"),
+        "resolved content should contain current_beta"
+    );
+    assert!(!content.contains("<<<<<<<"), "markers should be removed");
+    assert!(!content.contains("======="), "markers should be removed");
+    assert!(!content.contains(">>>>>>>"), "markers should be removed");
+
+    let unmerged = run_git(repo.path(), ["diff", "--name-only", "--diff-filter=U"]);
+    assert!(
+        !unmerged.contains("src/lib.rs"),
+        "src/lib.rs should no longer be in unmerged state after resolution"
+    );
 }

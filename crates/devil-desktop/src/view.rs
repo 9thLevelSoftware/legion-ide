@@ -446,6 +446,25 @@ fn render_left_sidebar(
         render_compact_rows(ui, &model.git_rows, "No projected git rows", 5);
     }
 
+    if !snapshot.git_projection.conflicts.is_empty() {
+        section_label(ui, "Conflicts", Some(theme::ACCENT_RED));
+        for conflict in snapshot.git_projection.conflicts.iter().take(4) {
+            ui.horizontal(|ui| {
+                ui.label(theme::body(trim_middle(&conflict.path, 24)));
+                if soft_button(ui, "Current").clicked() {
+                    actions.push(DesktopAction::AcceptGitConflictCurrent {
+                        path: conflict.path.clone(),
+                    });
+                }
+                if soft_button(ui, "Incoming").clicked() {
+                    actions.push(DesktopAction::AcceptGitConflictIncoming {
+                        path: conflict.path.clone(),
+                    });
+                }
+            });
+        }
+    }
+
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         render_sidebar_footer(ui, snapshot);
     });

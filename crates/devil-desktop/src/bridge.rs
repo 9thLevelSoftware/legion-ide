@@ -12,8 +12,8 @@ use devil_protocol::{
 };
 use devil_protocol::{PluginContribution, PluginId};
 use devil_ui::{
-    CommandDispatchIntent, DebugStepKindProjection, DockMode, SearchScopeProjection,
-    ShellProjectionSnapshot,
+    CommandDispatchIntent, DebugStepKindProjection, DockMode, GitConflictChoiceProjection,
+    SearchScopeProjection, ShellProjectionSnapshot,
 };
 use thiserror::Error;
 
@@ -133,6 +133,16 @@ pub enum DesktopAction {
     UnstageGitHunk {
         /// Projected hunk identifier.
         hunk_id: String,
+    },
+    /// Accept the current (ours) side of a conflicted file.
+    AcceptGitConflictCurrent {
+        /// Repository-relative path of the conflicted file.
+        path: String,
+    },
+    /// Accept the incoming (theirs) side of a conflicted file.
+    AcceptGitConflictIncoming {
+        /// Repository-relative path of the conflicted file.
+        path: String,
     },
     /// Toggle adapter-local explorer expansion for a canonical path.
     ToggleExplorerPath {
@@ -1011,6 +1021,18 @@ impl DesktopCommandBridge {
             }
             DesktopAction::UnstageGitHunk { hunk_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::UnstageGitHunk { hunk_id })
+            }
+            DesktopAction::AcceptGitConflictCurrent { path } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ResolveGitConflict {
+                    path,
+                    choice: GitConflictChoiceProjection::AcceptCurrent,
+                })
+            }
+            DesktopAction::AcceptGitConflictIncoming { path } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ResolveGitConflict {
+                    path,
+                    choice: GitConflictChoiceProjection::AcceptIncoming,
+                })
             }
             DesktopAction::ToggleExplorerPath { path } => match normalized_path(path) {
                 Some(path) => {

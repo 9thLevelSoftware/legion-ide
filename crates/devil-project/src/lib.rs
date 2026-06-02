@@ -561,6 +561,237 @@ pub fn unstage_git_hunk(
     .map(|_| ())
 }
 
+/// Which side of a conflict to keep when resolving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitConflictChoice {
+    /// Keep the current (ours) side.
+    AcceptCurrent,
+    /// Keep the incoming (theirs) side.
+    AcceptIncoming,
+}
+
+/// Discover the Git repository root for the given workspace root.
+pub fn git_repository_root(root: impl AsRef<Path>) -> Result<PathBuf, GitInspectionError> {
+    let root = root.as_ref();
+    let out = git_stdout(root, &["rev-parse", "--show-toplevel"], None)?;
+    Ok(PathBuf::from(out.trim()))
+}
+
+/// Resolve one conflicted file by keeping the chosen side for every conflict block.
+pub fn resolve_git_conflict(
+    root: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+    choice: GitConflictChoice,
+) -> Result<(), GitInspectionError> {
+    let root = root.as_ref();
+    let repository_root =
+        PathBuf::from(git_stdout(root, &["rev-parse", "--show-toplevel"], None)?.trim());
+    let path = path.as_ref();
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repository_root.join(path)
+    };
+    let canonical_target =
+        canonicalize_path_or_existing_parent(&absolute).unwrap_or_else(|| absolute.clone());
+    let canonical_repo = canonicalize_path_or_existing_parent(&repository_root)
+        .unwrap_or_else(|| repository_root.clone());
+    if !canonical_target.starts_with(&canonical_repo) {
+        return Err(GitInspectionError::Parse(format!(
+            "path `{}` is outside repository root boundary",
+            absolute.display()
+        )));
+    }
+    let status_entries = git_status_entries(root)?;
+    let relative_path = match canonical_target.strip_prefix(&canonical_repo) {
+        Ok(p) => p.to_string_lossy().replace('\\', "/"),
+        Err(_) => absolute.to_string_lossy().replace('\\', "/"),
+    };
+    let relative_path = relative_path.trim_start_matches('/');
+    let status_code = status_entries.get(relative_path);
+    let is_unmerged = match status_code {
+        Some(code) => {
+            code.bytes().any(|b| b == b'U')
+                || matches!(
+                    code.as_str(),
+                    "AA" | "DD" | "AU" | "UA" | "DU" | "UD" | "UU"
+                )
+        }
+        None => false,
+    };
+    if !is_unmerged {
+        return Err(GitInspectionError::Parse(format!(
+            "path `{}` is not in an unmerged conflict state (status: {})",
+            relative_path,
+            status_code.map_or("??", |v| v.as_str())
+        )));
+    }
+    let text = std::fs::read_to_string(&absolute).map_err(|source| GitInspectionError::Launch {
+        command: "read conflict file".to_string(),
+        source,
+    })?;
+    let ours_blob = git_stdout(root, &["show", &format!(":2:{relative_path}")], None).ok();
+    let theirs_blob = git_stdout(root, &["show", &format!(":3:{relative_path}")], None).ok();
+    let stage_blobs = ours_blob.as_deref().zip(theirs_blob.as_deref());
+    let resolved = parse_and_resolve_conflict(&text, choice, stage_blobs)?;
+    std::fs::write(&absolute, resolved).map_err(|source| GitInspectionError::Launch {
+        command: "write resolved file".to_string(),
+        source,
+    })?;
+    git_stdout(
+        root,
+        &["add", "--", absolute.to_string_lossy().as_ref()],
+        None,
+    )?;
+    Ok(())
+}
+
+fn parse_and_resolve_conflict(
+    text: &str,
+    choice: GitConflictChoice,
+    stage_blobs: Option<(&str, &str)>,
+) -> Result<String, GitInspectionError> {
+    let mut result = String::new();
+    let segments: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut conflict_block_found = false;
+    let mut index = 0;
+
+    while let Some(segment) = segments.get(index).copied() {
+        let trimmed = segment.trim_end_matches(['\r', '\n']);
+        let Some(marker_len) = conflict_marker_length(trimmed, '<') else {
+            result.push_str(segment);
+            index += 1;
+            continue;
+        };
+
+        conflict_block_found = true;
+        let block_start = index + 1;
+        let mut end_indices = Vec::new();
+        let mut scan = block_start;
+        while let Some(inner) = segments.get(scan).copied() {
+            let inner_trimmed = inner.trim_end_matches(['\r', '\n']);
+            if scan > block_start && conflict_marker_length(inner_trimmed, '<').is_some() {
+                if end_indices.is_empty() {
+                    return Err(GitInspectionError::Parse(
+                        "ambiguous conflict markers: nested opening marker".to_string(),
+                    ));
+                }
+                break;
+            }
+            if is_conflict_end(inner_trimmed, marker_len) {
+                end_indices.push(scan);
+            }
+            scan += 1;
+        }
+        let [end_index] = end_indices.as_slice() else {
+            return Err(GitInspectionError::Parse(
+                "malformed conflict markers: unbalanced block".to_string(),
+            ));
+        };
+        let end_index = *end_index;
+        if let Some((ours_blob, theirs_blob)) = stage_blobs {
+            let raw_block = segments[index..=end_index].concat();
+            if ours_blob.contains(&raw_block) && theirs_blob.contains(&raw_block) {
+                return Err(GitInspectionError::Parse(
+                    "ambiguous conflict markers: literal marker block present in both stages"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let separators: Vec<usize> = (block_start..end_index)
+            .filter(|candidate| {
+                segments
+                    .get(*candidate)
+                    .map(|line| {
+                        is_conflict_separator(line.trim_end_matches(['\r', '\n']), marker_len)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        let Some(mut separator_index) = separators.first().copied() else {
+            return Err(GitInspectionError::Parse(
+                "malformed conflict markers: unbalanced block".to_string(),
+            ));
+        };
+
+        let mut current_end = separator_index;
+        if let Some(base_index) = (block_start..end_index).find(|candidate| {
+            segments
+                .get(*candidate)
+                .map(|line| is_conflict_base(line.trim_end_matches(['\r', '\n']), marker_len))
+                .unwrap_or(false)
+                && separators.iter().any(|separator| *separator > *candidate)
+        }) {
+            if matches!(choice, GitConflictChoice::AcceptCurrent) {
+                return Err(GitInspectionError::Parse(
+                    "ambiguous conflict markers: base marker on current side".to_string(),
+                ));
+            }
+            current_end = base_index;
+            let separators_after_base: Vec<usize> = separators
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate > base_index)
+                .collect();
+            let [candidate] = separators_after_base.as_slice() else {
+                return Err(GitInspectionError::Parse(
+                    "ambiguous conflict markers: multiple separator lines".to_string(),
+                ));
+            };
+            separator_index = *candidate;
+        } else if separators.len() != 1 {
+            return Err(GitInspectionError::Parse(
+                "ambiguous conflict markers: multiple separator lines".to_string(),
+            ));
+        }
+
+        match choice {
+            GitConflictChoice::AcceptCurrent => {
+                for l in &segments[block_start..current_end] {
+                    result.push_str(l);
+                }
+            }
+            GitConflictChoice::AcceptIncoming => {
+                for l in &segments[(separator_index + 1)..end_index] {
+                    result.push_str(l);
+                }
+            }
+        }
+        index = end_index + 1;
+    }
+
+    if !conflict_block_found {
+        return Err(GitInspectionError::Parse(
+            "no conflict markers found in file".to_string(),
+        ));
+    }
+    Ok(result)
+}
+
+fn conflict_marker_length(line: &str, marker_char: char) -> Option<usize> {
+    let prefix_len = line.chars().take_while(|c| *c == marker_char).count();
+    if prefix_len >= 7 && line.as_bytes().get(prefix_len).copied() == Some(b' ') {
+        Some(prefix_len)
+    } else {
+        None
+    }
+}
+
+fn is_conflict_separator(line: &str, expected_len: usize) -> bool {
+    line.len() == expected_len && line.chars().all(|c| c == '=')
+}
+
+fn is_conflict_base(line: &str, expected_len: usize) -> bool {
+    let prefix_len = line.chars().take_while(|c| *c == '|').count();
+    prefix_len == expected_len && line.as_bytes().get(prefix_len).copied() == Some(b' ')
+}
+
+fn is_conflict_end(line: &str, expected_len: usize) -> bool {
+    let prefix_len = line.chars().take_while(|c| *c == '>').count();
+    prefix_len == expected_len && line.as_bytes().get(prefix_len).copied() == Some(b' ')
+}
+
 fn git_stdout(
     root: &Path,
     args: &[&str],
