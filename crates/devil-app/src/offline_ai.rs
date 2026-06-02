@@ -4,10 +4,6 @@
 //! It keeps protocol projections and proposal-mediated workflows available while
 //! avoiding any dependency on `devil-ai`, `devil-ai-providers`, or `devil-agent`.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
 use devil_protocol::{
     AgentRunId, AgentRunState, AgentStateTransitionRecord, AssistedAiEditProposalOutput,
     AssistedAiOperationClass, AssistedAiProposalTargetIntent, AssistedAiProviderClass,
@@ -16,6 +12,11 @@ use devil_protocol::{
     AssistedAiRouteDecision, AssistedAiTrustProjectionReference, CancellationTokenId,
     CanonicalPath, CapabilityBrokerPort, CapabilityId, CausalityId, CorrelationId,
     DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequest, EventSequence,
+    FileFingerprint, LegionEvidenceKind, LegionEvidencePrivacyScope, LegionEvidenceRecord,
+    LegionEvidenceSource, LegionModelCapability, LegionProviderLocalityPreference,
+    LegionProviderPrivacyPolicy, LegionProviderRouteHealth, LegionProviderRouteMetadata,
+    LegionTaskFileScope, LegionTaskOutputContract, LegionTaskPacket, LegionTaskPacketId,
+    LegionTaskPolicy, LegionTaskValidationPlan, LegionWorkerResult, LegionWorkerResultKind,
     LegionWorkflowConflict, LegionWorkflowConflictId, LegionWorkflowConflictKind,
     LegionWorkflowConflictState, LegionWorkflowDependencyState, LegionWorkflowMergeReadiness,
     LegionWorkflowModelBackend, LegionWorkflowSession, LegionWorkflowWorkerAssignment,
@@ -23,9 +24,14 @@ use devil_protocol::{
     PrincipalId, ProposalAffectedTarget, ProposalId, ProposalPayload, ProposalPayloadKind,
     ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetCoverage, ProposalTargetCoverageKind,
     ProposalVersionPreconditions, RedactionHint, TimestampMillis, WorkspaceTrustState,
-    evaluate_legion_workflow_merge_readiness, validate_legion_workflow_session,
+    evaluate_legion_workflow_merge_readiness, validate_legion_evidence_record,
+    validate_legion_provider_route_metadata, validate_legion_task_packet,
+    validate_legion_worker_result, validate_legion_workflow_session,
     validate_phase4_runtime_audit_record,
 };
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Deterministic provider id used by existing app projections in offline builds.
 pub const DETERMINISTIC_LOCAL_PROVIDER_ID: &str = "offline-ai-disabled";
@@ -461,6 +467,14 @@ pub enum LegionWorkflowCoordinatorOutput {
         /// Display-safe reason labels.
         reasons: Vec<String>,
     },
+    /// Canonical task packet metadata is ready for a worker.
+    TaskPacketReady(Box<LegionTaskPacket>),
+    /// Canonical provider route metadata is ready for a provider-backed worker.
+    ProviderRouteMetadataReady(Box<LegionProviderRouteMetadata>),
+    /// Canonical worker result metadata is ready.
+    WorkerResultReady(Box<LegionWorkerResult>),
+    /// Canonical evidence record is ready.
+    EvidenceReady(Box<LegionEvidenceRecord>),
 }
 
 /// Bounded Legion workflow coordinator over existing delegated-task primitives.
@@ -472,6 +486,10 @@ pub struct LegionWorkflowCoordinator {
     provider_route_requests: Vec<AssistedAiProviderRouteRequest>,
     proposal_outputs: Vec<AssistedAiEditProposalOutput>,
     conflicts: Vec<LegionWorkflowConflict>,
+    task_packets: Vec<LegionTaskPacket>,
+    worker_results: Vec<LegionWorkerResult>,
+    evidence_records: Vec<LegionEvidenceRecord>,
+    provider_route_metadata: Vec<LegionProviderRouteMetadata>,
 }
 
 impl LegionWorkflowCoordinator {
@@ -509,6 +527,10 @@ impl LegionWorkflowCoordinator {
             blocked_worker_ids,
             provider_route_requests: Vec::new(),
             proposal_outputs: Vec::new(),
+            task_packets: Vec::new(),
+            worker_results: Vec::new(),
+            evidence_records: Vec::new(),
+            provider_route_metadata: Vec::new(),
         })
     }
 
@@ -525,6 +547,49 @@ impl LegionWorkflowCoordinator {
     /// Returns proposal-only outputs emitted by this coordinator.
     pub fn proposal_outputs(&self) -> &[AssistedAiEditProposalOutput] {
         &self.proposal_outputs
+    }
+
+    /// Returns canonical task packets emitted by this coordinator.
+    pub fn task_packets(&self) -> &[LegionTaskPacket] {
+        &self.task_packets
+    }
+
+    /// Returns canonical worker results emitted by this coordinator.
+    pub fn worker_results(&self) -> &[LegionWorkerResult] {
+        &self.worker_results
+    }
+
+    /// Returns canonical evidence records emitted by this coordinator.
+    pub fn evidence_records(&self) -> &[LegionEvidenceRecord] {
+        &self.evidence_records
+    }
+
+    /// Returns canonical provider route metadata emitted by this coordinator.
+    pub fn provider_route_metadata(&self) -> &[LegionProviderRouteMetadata] {
+        &self.provider_route_metadata
+    }
+
+    /// Returns the worker result for a specific worker, if any.
+    pub fn worker_result_for_worker(
+        &self,
+        worker_id: &LegionWorkflowWorkerId,
+    ) -> Option<&LegionWorkerResult> {
+        let expected_id = format!("legion-result:{}", worker_id.0);
+        self.worker_results
+            .iter()
+            .find(|r| r.result_id == expected_id)
+    }
+
+    /// Returns evidence records for a specific worker.
+    pub fn evidence_records_for_worker(
+        &self,
+        worker_id: &LegionWorkflowWorkerId,
+    ) -> Vec<&LegionEvidenceRecord> {
+        let expected_id = format!("legion-evidence:{}", worker_id.0);
+        self.evidence_records
+            .iter()
+            .filter(|e| e.evidence_id == expected_id)
+            .collect()
     }
 
     /// Returns workers whose dependencies are satisfied and that have not already ended.
@@ -573,7 +638,8 @@ impl LegionWorkflowCoordinator {
         })
     }
 
-    /// Emits provider route metadata for a provider-backed worker without invocation.
+    /// Emits a `ProviderRouteRequired` for a provider-backed worker without invocation.
+    /// Records provider-route metadata internally; repeated calls return the stored request.
     pub fn provider_route_for_worker(
         &mut self,
         worker_id: &LegionWorkflowWorkerId,
@@ -584,16 +650,191 @@ impl LegionWorkflowCoordinator {
                 "provider route requested for non-provider worker".to_string(),
             ));
         }
+        let route_id = format!("legion-route:{}", worker.worker_id.0);
+        if let Some(existing) = self
+            .provider_route_requests
+            .iter()
+            .find(|r| r.route_id == route_id)
+        {
+            return Ok(LegionWorkflowCoordinatorOutput::ProviderRouteRequired(
+                Box::new(existing.clone()),
+            ));
+        }
         let route_ref = worker.assisted_ai_route.clone().ok_or_else(|| {
             OfflineAiError::InvalidLegionWorkflow(
                 "provider-backed worker missing route metadata".to_string(),
             )
         })?;
         let route_request = provider_route_request_from_worker(&worker, route_ref);
+        let metadata = legion_provider_route_metadata_from_worker(&worker, &route_request);
+        validate_legion_provider_route_metadata(&metadata).map_err(|e| {
+            OfflineAiError::InvalidLegionWorkflow(format!("provider route metadata invalid: {e:?}"))
+        })?;
         self.provider_route_requests.push(route_request.clone());
+        if self
+            .provider_route_metadata
+            .iter()
+            .all(|m| m.route_id != route_id)
+        {
+            self.provider_route_metadata.push(metadata.clone());
+        }
         Ok(LegionWorkflowCoordinatorOutput::ProviderRouteRequired(
             Box::new(route_request),
         ))
+    }
+
+    /// Returns canonical provider route metadata for a provider-backed worker.
+    pub fn provider_route_metadata_for_worker(
+        &mut self,
+        worker_id: &LegionWorkflowWorkerId,
+    ) -> Result<LegionWorkflowCoordinatorOutput, OfflineAiError> {
+        let worker = self.find_worker(worker_id)?.clone();
+        if worker.model_backend != LegionWorkflowModelBackend::ProviderBacked {
+            return Err(OfflineAiError::InvalidLegionWorkflow(
+                "provider route metadata requested for non-provider worker".to_string(),
+            ));
+        }
+        let route_id = format!("legion-route:{}", worker.worker_id.0);
+        if let Some(metadata) = self
+            .provider_route_metadata
+            .iter()
+            .find(|m| m.route_id == route_id)
+        {
+            return Ok(LegionWorkflowCoordinatorOutput::ProviderRouteMetadataReady(
+                Box::new(metadata.clone()),
+            ));
+        }
+        let route_ref = worker.assisted_ai_route.clone().ok_or_else(|| {
+            OfflineAiError::InvalidLegionWorkflow(
+                "provider-backed worker missing route metadata".to_string(),
+            )
+        })?;
+        let route_request = provider_route_request_from_worker(&worker, route_ref);
+        let metadata = legion_provider_route_metadata_from_worker(&worker, &route_request);
+        validate_legion_provider_route_metadata(&metadata).map_err(|e| {
+            OfflineAiError::InvalidLegionWorkflow(format!("provider route metadata invalid: {e:?}"))
+        })?;
+        self.provider_route_metadata.push(metadata.clone());
+        Ok(LegionWorkflowCoordinatorOutput::ProviderRouteMetadataReady(
+            Box::new(metadata),
+        ))
+    }
+
+    /// Derives the canonical packet ID for a given worker.
+    pub fn packet_id_for_worker(&self, worker_id: &LegionWorkflowWorkerId) -> LegionTaskPacketId {
+        LegionTaskPacketId(format!("legion-packet:{}", worker_id.0))
+    }
+
+    /// Builds and validates a canonical task packet for a worker.
+    /// Idempotent: repeated calls for the same worker return the stored packet.
+    pub fn task_packet_for_worker(
+        &mut self,
+        worker_id: &LegionWorkflowWorkerId,
+    ) -> Result<LegionWorkflowCoordinatorOutput, OfflineAiError> {
+        let worker = self.find_worker(worker_id)?.clone();
+        let packet_id = self.packet_id_for_worker(worker_id);
+        if let Some(existing) = self.task_packets.iter().find(|p| p.packet_id == packet_id) {
+            return Ok(LegionWorkflowCoordinatorOutput::TaskPacketReady(Box::new(
+                existing.clone(),
+            )));
+        }
+        let workspace_id = worker
+            .affected_targets
+            .iter()
+            .find_map(|t| t.workspace_id)
+            .ok_or(OfflineAiError::InvalidLegionWorkflow(
+                "task packet requires workspace-scoped target".to_string(),
+            ))?;
+        let objective_summary_hash = FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: format!("legion-objective-hash:{}", worker.worker_id.0),
+        };
+        let allowed_files: Vec<LegionTaskFileScope> = worker
+            .affected_targets
+            .iter()
+            .map(|target| {
+                let path = target
+                    .workspace_id
+                    .map(|_| format!("workspace://{}", target.target_id))
+                    .unwrap_or_else(|| format!("metadata://{}", target.target_id));
+                LegionTaskFileScope {
+                    scope_id: format!("scope:{}", target.target_id),
+                    path: CanonicalPath(path),
+                    fingerprint: Some(FileFingerprint {
+                        algorithm: "sha256".to_string(),
+                        value: format!("legion-fingerprint:{}", target.target_id),
+                    }),
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                }
+            })
+            .collect();
+        let forbidden_files = Vec::new();
+        let context_snippet_refs = Vec::new();
+        let full_file_refs = Vec::new();
+        let command_output_refs = Vec::new();
+        let output_contract = LegionTaskOutputContract {
+            expected_result_kind: LegionWorkerResultKind::PatchProposal,
+            proposal_only: true,
+            direct_mutation_allowed: false,
+            required_evidence_kinds: vec![
+                LegionEvidenceKind::CommandRun,
+                LegionEvidenceKind::Review,
+            ],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let validation_plan = LegionTaskValidationPlan {
+            required_commands: vec!["legion.validate.proposal_only".to_string()],
+            success_criteria: vec!["legion.validate.proposal_ready".to_string()],
+            stop_conditions: vec!["legion.validate.stop_on_conflict".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let policy = LegionTaskPolicy {
+            locality_preference: match worker.model_backend {
+                LegionWorkflowModelBackend::Local => {
+                    LegionProviderLocalityPreference::LocalPreferred
+                }
+                LegionWorkflowModelBackend::ProviderBacked => {
+                    LegionProviderLocalityPreference::RemoteAllowed
+                }
+                LegionWorkflowModelBackend::Unavailable => {
+                    LegionProviderLocalityPreference::LocalPreferred
+                }
+            },
+            privacy_policy: LegionProviderPrivacyPolicy::MetadataOnly,
+            cost_budget_cents: Some(0),
+            latency_budget_ms: Some(1000),
+            allow_network: false,
+            allow_direct_workspace_mutation: false,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let packet = LegionTaskPacket {
+            packet_id: packet_id.clone(),
+            workspace_id,
+            objective_summary_hash,
+            allowed_files,
+            forbidden_files,
+            context_snippet_refs,
+            full_file_refs,
+            command_output_refs,
+            output_contract,
+            validation_plan,
+            policy,
+            correlation_id: worker.correlation_id,
+            causality_id: worker.causality_id,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_legion_task_packet(&packet).map_err(|e| {
+            OfflineAiError::InvalidLegionWorkflow(format!("task packet invalid: {e:?}"))
+        })?;
+        self.task_packets.push(packet.clone());
+        Ok(LegionWorkflowCoordinatorOutput::TaskPacketReady(Box::new(
+            packet,
+        )))
     }
 
     /// Records proposal-only worker output without applying it.
@@ -614,6 +855,51 @@ impl LegionWorkflowCoordinator {
             ));
         }
         self.proposal_outputs.push(output.clone());
+
+        let evidence = LegionEvidenceRecord {
+            evidence_id: format!("legion-evidence:{}", worker_id.0),
+            kind: LegionEvidenceKind::CommandRun,
+            source: LegionEvidenceSource::LocalCommand,
+            payload_hash: FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: format!("legion-evidence-hash:{}", worker_id.0),
+            },
+            redacted_payload_summary: format!("legion evidence for worker {}", worker_id.0),
+            command_label: Some("legion.proposal_record".to_string()),
+            exit_status: Some(0),
+            privacy_scope: LegionEvidencePrivacyScope::WorkspaceMetadata,
+            generated_at: output.created_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_legion_evidence_record(&evidence).map_err(|e| {
+            OfflineAiError::InvalidLegionWorkflow(format!("evidence record invalid: {e:?}"))
+        })?;
+        self.evidence_records.push(evidence.clone());
+
+        let packet_id = self.packet_id_for_worker(worker_id);
+        let result = LegionWorkerResult {
+            result_id: format!("legion-result:{}", worker_id.0),
+            packet_id,
+            result_kind: LegionWorkerResultKind::PatchProposal,
+            patch_proposal: Some(output.proposal_id),
+            documentation_proposal: None,
+            analysis_summary: None,
+            test_plan_summary: None,
+            blocked_reason: None,
+            invalid_reason: None,
+            evidence_records: vec![evidence],
+            provider_route: None,
+            correlation_id: output.correlation_id,
+            causality_id: output.causality_id,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_legion_worker_result(&result).map_err(|e| {
+            OfflineAiError::InvalidLegionWorkflow(format!("worker result invalid: {e:?}"))
+        })?;
+        self.worker_results.push(result);
+
         Ok(LegionWorkflowCoordinatorOutput::ProposalReady(Box::new(
             output,
         )))
@@ -751,11 +1037,37 @@ fn has_dependency_between(
     left: &LegionWorkflowWorkerId,
     right: &LegionWorkflowWorkerId,
 ) -> bool {
-    session.dependency_edges.iter().any(|dependency| {
-        (&dependency.predecessor_worker_id == left && &dependency.successor_worker_id == right)
-            || (&dependency.predecessor_worker_id == right
-                && &dependency.successor_worker_id == left)
-    })
+    has_dependency_path(session, left, right) || has_dependency_path(session, right, left)
+}
+
+fn has_dependency_path(
+    session: &LegionWorkflowSession,
+    start: &LegionWorkflowWorkerId,
+    end: &LegionWorkflowWorkerId,
+) -> bool {
+    if start == end {
+        return true;
+    }
+
+    let mut stack = vec![start.0.as_str()];
+    let mut visited = HashSet::new();
+    while let Some(worker_id) = stack.pop() {
+        if !visited.insert(worker_id) {
+            continue;
+        }
+
+        for dependency in &session.dependency_edges {
+            if dependency.predecessor_worker_id.0.as_str() != worker_id {
+                continue;
+            }
+            if dependency.successor_worker_id == *end {
+                return true;
+            }
+            stack.push(dependency.successor_worker_id.0.as_str());
+        }
+    }
+
+    false
 }
 
 fn provider_route_request_from_worker(
@@ -816,6 +1128,53 @@ fn provider_route_request_from_worker(
         correlation_id: worker.correlation_id,
         causality_id: worker.causality_id,
         event_sequence: EventSequence(13),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn legion_provider_route_metadata_from_worker(
+    worker: &LegionWorkflowWorkerAssignment,
+    route_request: &AssistedAiProviderRouteRequest,
+) -> LegionProviderRouteMetadata {
+    let locality_preference = match worker.model_backend {
+        LegionWorkflowModelBackend::ProviderBacked => {
+            LegionProviderLocalityPreference::RemoteAllowed
+        }
+        _ => LegionProviderLocalityPreference::LocalPreferred,
+    };
+    let cost_budget_cents = match worker.model_backend {
+        LegionWorkflowModelBackend::ProviderBacked => Some(100),
+        _ => Some(0),
+    };
+    let route_health = if route_request
+        .health_labels
+        .iter()
+        .any(|l| l.contains("unavailable"))
+    {
+        LegionProviderRouteHealth::Unavailable
+    } else if route_request
+        .health_labels
+        .iter()
+        .any(|l| l.contains("degraded"))
+    {
+        LegionProviderRouteHealth::Degraded
+    } else {
+        LegionProviderRouteHealth::Healthy
+    };
+    let mut labels = route_request.health_labels.clone();
+    labels.extend(route_request.cost_labels.clone());
+    labels.push("legion.provider_route.metadata".to_string());
+    LegionProviderRouteMetadata {
+        route_id: route_request.route_id.clone(),
+        locality_preference,
+        cost_budget_cents,
+        latency_budget_ms: Some(1000),
+        privacy_policy: LegionProviderPrivacyPolicy::MetadataOnly,
+        model_capability: LegionModelCapability::CodePatch,
+        provider_class: route_request.provider_class,
+        route_health,
+        labels,
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
@@ -912,7 +1271,7 @@ fn trust_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devil_protocol::AssistedAiTrustProjectionKind;
+    use devil_protocol::{AssistedAiTrustProjectionKind, WorkspaceId};
     use devil_security::DenyByDefaultBroker;
 
     fn route_request() -> AssistedAiProviderRouteRequest {
@@ -1002,5 +1361,83 @@ mod tests {
             runtime.transitions()[0].redaction_hints,
             vec![RedactionHint::MetadataOnly]
         );
+    }
+
+    #[test]
+    fn offline_task_packet_without_workspace_fails_closed() {
+        let mut session = minimal_session();
+        session.worker_assignments[0].affected_targets[0].workspace_id = None;
+
+        let mut coordinator = LegionWorkflowCoordinator::new(session).expect("valid workflow");
+        let worker_id = LegionWorkflowWorkerId("worker:offline".to_string());
+
+        let error = coordinator
+            .task_packet_for_worker(&worker_id)
+            .expect_err("must fail without workspace-scoped target");
+
+        assert_eq!(
+            error,
+            OfflineAiError::InvalidLegionWorkflow(
+                "task packet requires workspace-scoped target".to_string()
+            )
+        );
+        assert!(coordinator.task_packets().is_empty());
+    }
+
+    fn minimal_session() -> LegionWorkflowSession {
+        use devil_protocol::{
+            LegionWorkflowSessionId, LegionWorkflowState, LegionWorkflowWorkerId,
+            LegionWorkflowWorkerRole, LegionWorkflowWorkerState,
+        };
+        LegionWorkflowSession {
+            session_id: LegionWorkflowSessionId("session:offline".to_string()),
+            directive_artifact_id: None,
+            spec_artifact_id: None,
+            task_graph_artifact_id: None,
+            product_mode: devil_protocol::ProductMode::LegionWorkflows,
+            worker_assignments: vec![LegionWorkflowWorkerAssignment {
+                worker_id: LegionWorkflowWorkerId("worker:offline".to_string()),
+                role: LegionWorkflowWorkerRole::Implementer,
+                state: LegionWorkflowWorkerState::Ready,
+                model_backend: LegionWorkflowModelBackend::Local,
+                display_safe_model_label: "offline:metadata".to_string(),
+                allowed_command_classes: vec![],
+                linked_delegated_plan_id: None,
+                assisted_ai_route: None,
+                affected_targets: vec![devil_protocol::DelegatedTaskAffectedTargetSummary {
+                    target_id: "target:offline".to_string(),
+                    kind: devil_protocol::ProposalTargetKind::MetadataOnly,
+                    workspace_id: Some(WorkspaceId(1)),
+                    file_id: None,
+                    buffer_id: None,
+                    ranges: vec![],
+                    hashes: vec![],
+                    counts: vec![],
+                    labels: vec!["offline".to_string()],
+                    risk_label: devil_protocol::ProposalRiskLabel::Low,
+                    privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                }],
+                risk_labels: vec![],
+                privacy_labels: vec![],
+                correlation_id: CorrelationId(1),
+                causality_id: CausalityId(uuid::Uuid::from_u128(1)),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            dependency_edges: vec![],
+            conflict_summaries: vec![],
+            verification_gates: vec![],
+            sign_off_records: vec![],
+            proposal_ids: vec![],
+            merge_approval: None,
+            lifecycle_state: LegionWorkflowState::Executing,
+            generated_at: TimestampMillis(1),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+            correlation_id: CorrelationId(1),
+            causality_id: CausalityId(uuid::Uuid::from_u128(1)),
+        }
     }
 }

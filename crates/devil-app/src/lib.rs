@@ -12043,10 +12043,17 @@ impl AppComposition {
                     }
                 }
             }
+            let task_packet_output = coordinator
+                .task_packet_for_worker(&worker.worker_id)
+                .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+            outputs.push(task_packet_output);
             match worker.model_backend {
                 devil_protocol::LegionWorkflowModelBackend::ProviderBacked => {
                     let output = coordinator
                         .provider_route_for_worker(&worker.worker_id)
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    let metadata_output = coordinator
+                        .provider_route_metadata_for_worker(&worker.worker_id)
                         .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
                     self.set_legion_workflow_worker_state(
                         &mut session,
@@ -12054,6 +12061,7 @@ impl AppComposition {
                         LegionWorkflowWorkerState::ProviderRouteRequired,
                     );
                     outputs.push(output);
+                    outputs.push(metadata_output);
                 }
                 devil_protocol::LegionWorkflowModelBackend::Local => {
                     let Some(plan_id) = worker.linked_delegated_plan_id.clone() else {
@@ -12167,6 +12175,16 @@ impl AppComposition {
                         session.proposal_ids.push(proposal_output.proposal_id);
                     }
                     outputs.push(output);
+                    if let Some(result) = coordinator.worker_result_for_worker(&worker.worker_id) {
+                        outputs.push(LegionWorkflowCoordinatorOutput::WorkerResultReady(
+                            Box::new(result.clone()),
+                        ));
+                    }
+                    for evidence in coordinator.evidence_records_for_worker(&worker.worker_id) {
+                        outputs.push(LegionWorkflowCoordinatorOutput::EvidenceReady(Box::new(
+                            evidence.clone(),
+                        )));
+                    }
                 }
                 devil_protocol::LegionWorkflowModelBackend::Unavailable => {
                     let output = coordinator
