@@ -6,11 +6,10 @@ This directory contains the initial end-to-end planning package for pivoting `de
 
 Source inputs used:
 
-- Existing repo inspection of `9thLevelSoftware/devil-ide`, cloned at `/tmp/devil-ide-inspect`.
+- Existing repo inspection of `9thLevelSoftware/devil-ide` in a temporary inspection checkout.
 - Current Phase 12 delegated-task runtime context.
 - Current Phase 13 Legion workflow orchestration context.
-- Discord-sent artifact downloaded to:
-  `/Users/christopherwilloughby/Downloads/discord-legion-attachments/devils-den-bot-chat_1511102069061189735_compass_artifact_wf-0a626b05-1988-43e1-8592-3a91c5d2a31c_text_markdown.md`
+- Discord-sent artifact from a local download staging directory; original absolute path intentionally redacted.
 - Direct web/API checks for Hugging Face model metadata and cloud provider pricing pages.
 
 Plans in this package:

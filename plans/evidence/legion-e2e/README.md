@@ -12,3 +12,6 @@ Required final gates:
 - `cargo deny check`
 
 Record command, working directory, exit code, and raw output for every phase gate.
+
+Complete current final-gate capture: `20260602T091320_final_gates.txt`.
+The evidence redacts absolute workspace paths as `<workspace>` to keep committed logs machine-neutral.

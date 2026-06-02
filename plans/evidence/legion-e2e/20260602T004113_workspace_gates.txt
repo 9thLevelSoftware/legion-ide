@@ -8,15 +8,15 @@
 dependency policy checks passed
 
 ## cargo check --workspace --all-targets
-    Checking devil-project v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/devil-project)
-    Checking devil-app v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/devil-app)
-    Checking devil-desktop v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/devil-desktop)
+    Checking devil-project v0.1.0 (<workspace>/crates/devil-project)
+    Checking devil-app v0.1.0 (<workspace>/crates/devil-app)
+    Checking devil-desktop v0.1.0 (<workspace>/crates/devil-desktop)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.78s
 
 ## cargo test --workspace --all-targets
-   Compiling devil-project v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/devil-project)
-   Compiling devil-app v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/devil-app)
-   Compiling devil-desktop v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/devil-desktop)
+   Compiling devil-project v0.1.0 (<workspace>/crates/devil-project)
+   Compiling devil-app v0.1.0 (<workspace>/crates/devil-app)
+   Compiling devil-desktop v0.1.0 (<workspace>/crates/devil-desktop)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 6.85s
      Running unittests src/lib.rs (target/debug/deps/devil_agent-f15753b4c90838c4)
 

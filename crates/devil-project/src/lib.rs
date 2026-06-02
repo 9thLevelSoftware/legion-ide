@@ -1120,18 +1120,73 @@ fn git_conflicts<'a>(
 }
 
 fn relative_git_path(root: &Path, path: &Path) -> Option<String> {
-    let normalized_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        normalized_root.join(path)
+        root.join(path)
     };
-    let normalized_path = std::fs::canonicalize(&absolute).unwrap_or(absolute);
 
-    normalized_path
-        .strip_prefix(&normalized_root)
-        .ok()
-        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+    let mut roots = Vec::new();
+    push_git_path_candidate(&mut roots, root.to_path_buf());
+    if let Some(canonical_root) = canonicalize_path_or_existing_parent(root) {
+        push_git_path_candidate(&mut roots, canonical_root);
+    }
+
+    let mut absolutes = Vec::new();
+    push_git_path_candidate(&mut absolutes, absolute.clone());
+    if let Some(canonical_absolute) = canonicalize_path_or_existing_parent(&absolute) {
+        push_git_path_candidate(&mut absolutes, canonical_absolute);
+    }
+
+    for candidate in &absolutes {
+        for root_candidate in &roots {
+            if let Ok(relative) = candidate.strip_prefix(root_candidate) {
+                return Some(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    None
+}
+
+fn push_git_path_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    let path = strip_windows_verbatim_prefix(path);
+    if !candidates.iter().any(|candidate| candidate == &path) {
+        candidates.push(path);
+    }
+}
+
+fn canonicalize_path_or_existing_parent(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Some(canonical);
+    }
+
+    let mut missing_suffix = Vec::new();
+    let mut cursor = path;
+    loop {
+        missing_suffix.push(cursor.file_name()?.to_os_string());
+        cursor = cursor.parent()?;
+        if let Ok(mut canonical_parent) = std::fs::canonicalize(cursor) {
+            for component in missing_suffix.iter().rev() {
+                canonical_parent.push(component);
+            }
+            return Some(canonical_parent);
+        }
+    }
+}
+
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix("\\\\?\\UNC\\") {
+            return PathBuf::from(format!("\\\\{stripped}"));
+        }
+        if let Some(stripped) = text.strip_prefix("\\\\?\\") {
+            return PathBuf::from(stripped);
+        }
+    }
+
+    path
 }
 
 /// Metadata returned with a successful workspace text open.
@@ -5384,6 +5439,73 @@ mod tests {
 
     fn next_test_temp_suffix() -> u64 {
         TEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[test]
+    fn relative_git_path_handles_missing_file_under_existing_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "devil_project_relative_git_path_missing_{}",
+            next_test_temp_suffix()
+        ));
+        let parent = root.join("src");
+        let missing = parent.join("new.rs");
+        std::fs::create_dir_all(&parent).expect("create parent");
+
+        assert_eq!(
+            relative_git_path(&root, &missing),
+            Some("src/new.rs".to_string())
+        );
+        let relative = Path::new("src").join("new.rs");
+        assert_eq!(
+            relative_git_path(&root, &relative),
+            Some("src/new.rs".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_git_path_handles_canonicalized_file_under_symlinked_root() {
+        let root = std::env::temp_dir().join(format!(
+            "devil_project_relative_git_path_{}",
+            next_test_temp_suffix()
+        ));
+        let real_root = root.join("real");
+        let link_root = root.join("link");
+        let source = real_root.join("src").join("lib.rs");
+        std::fs::create_dir_all(source.parent().expect("source parent")).expect("create source");
+        std::fs::write(&source, "pub fn test() {}\n").expect("write source");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create symlink");
+
+        assert_eq!(
+            relative_git_path(&link_root, &source),
+            Some("src/lib.rs".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_git_path_handles_missing_file_under_symlinked_root() {
+        let root = std::env::temp_dir().join(format!(
+            "devil_project_relative_git_path_missing_symlink_{}",
+            next_test_temp_suffix()
+        ));
+        let real_root = root.join("real");
+        let link_root = root.join("link");
+        let parent = real_root.join("src");
+        let missing = parent.join("new.rs");
+        std::fs::create_dir_all(&parent).expect("create parent");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create symlink");
+
+        assert_eq!(
+            relative_git_path(&link_root, &missing),
+            Some("src/new.rs".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[derive(Debug)]
