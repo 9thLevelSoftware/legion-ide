@@ -86,6 +86,22 @@ fn fingerprint(value: &str) -> FileFingerprint {
     }
 }
 
+fn assert_legion_contract_error(
+    result: Result<(), AssistedAiContractError>,
+    expected_field: &str,
+    expected_reason: &str,
+) {
+    match result {
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { field, reason }) => {
+            assert_eq!(field, expected_field);
+            assert_eq!(reason, expected_reason);
+        }
+        other => panic!(
+            "expected NonMetadataOnlyAuditRecord({expected_field}, {expected_reason}), got {other:?}"
+        ),
+    }
+}
+
 fn chunk_hash(value: &str) -> FileFingerprint {
     FileFingerprint {
         algorithm: "blake3-devil-text-chunk".to_string(),
@@ -9700,4 +9716,322 @@ fn dto_contracts_legion_workflow_waits_for_approval_without_applying() {
             .labels
             .contains(&"legion_workflow.waiting_for_approval".to_string())
     );
+}
+
+fn legion_task_packet() -> LegionTaskPacket {
+    LegionTaskPacket {
+        packet_id: LegionTaskPacketId("task-packet:phase3:1".to_string()),
+        workspace_id: WorkspaceId(42),
+        objective_summary_hash: fingerprint("objective-summary"),
+        allowed_files: vec![LegionTaskFileScope {
+            scope_id: "allowed:src-lib".to_string(),
+            path: CanonicalPath("/repo/src/lib.rs".to_string()),
+            fingerprint: Some(fingerprint("allowed-src-lib")),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        forbidden_files: vec![LegionTaskFileScope {
+            scope_id: "forbidden:env".to_string(),
+            path: CanonicalPath("/repo/.env".to_string()),
+            fingerprint: Some(fingerprint("forbidden-env")),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        context_snippet_refs: vec![LegionTaskContextRef {
+            reference_id: "context:snippet:1".to_string(),
+            kind: LegionTaskContextRefKind::ContextSnippet,
+            payload_hash: fingerprint("snippet-payload"),
+            redacted_summary: "one redacted context snippet".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        full_file_refs: vec![LegionTaskContextRef {
+            reference_id: "context:file:1".to_string(),
+            kind: LegionTaskContextRefKind::FullFile,
+            payload_hash: fingerprint("full-file-payload"),
+            redacted_summary: "full file ref by hash".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        command_output_refs: vec![LegionTaskContextRef {
+            reference_id: "context:command:1".to_string(),
+            kind: LegionTaskContextRefKind::CommandOutput,
+            payload_hash: fingerprint("command-output-payload"),
+            redacted_summary: "cargo check output redacted".to_string(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        output_contract: LegionTaskOutputContract {
+            expected_result_kind: LegionWorkerResultKind::PatchProposal,
+            proposal_only: true,
+            direct_mutation_allowed: false,
+            required_evidence_kinds: vec![LegionEvidenceKind::CommandRun],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        validation_plan: LegionTaskValidationPlan {
+            required_commands: vec![
+                "cargo test -p devil-protocol --test dto_contracts legion_task_packet".to_string(),
+            ],
+            success_criteria: vec!["contract tests pass".to_string()],
+            stop_conditions: vec!["policy denied".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        policy: LegionTaskPolicy {
+            locality_preference: LegionProviderLocalityPreference::LocalPreferred,
+            privacy_policy: LegionProviderPrivacyPolicy::MetadataOnly,
+            cost_budget_cents: Some(50),
+            latency_budget_ms: Some(30_000),
+            allow_network: false,
+            allow_direct_workspace_mutation: false,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+#[test]
+fn dto_contracts_legion_task_packet_roundtrips_and_rejects_direct_mutation() {
+    let packet = legion_task_packet();
+    validate_legion_task_packet(&packet).expect("packet should be valid");
+
+    let serialized = serde_json::to_string(&packet).expect("serialize task packet");
+    assert!(serialized.contains("task-packet:phase3:1"));
+    assert!(!serialized.contains("raw_prompt"));
+    assert!(!serialized.contains("raw_source"));
+    assert!(!serialized.contains("provider_payload"));
+    assert!(!serialized.contains("SECRET="));
+
+    let roundtrip: LegionTaskPacket =
+        serde_json::from_str(&serialized).expect("deserialize task packet");
+    assert_eq!(roundtrip.packet_id, packet.packet_id);
+
+    let mut zero_correlation = packet.clone();
+    zero_correlation.correlation_id = CorrelationId(0);
+    assert_eq!(
+        validate_legion_task_packet(&zero_correlation),
+        Err(AssistedAiContractError::ZeroCorrelationId)
+    );
+
+    let mut nil_causality = packet.clone();
+    nil_causality.causality_id = CausalityId(Uuid::nil());
+    assert_eq!(
+        validate_legion_task_packet(&nil_causality),
+        Err(AssistedAiContractError::NilCausalityId)
+    );
+
+    let mut zero_workspace = packet.clone();
+    zero_workspace.workspace_id = WorkspaceId(0);
+    assert_legion_contract_error(
+        validate_legion_task_packet(&zero_workspace),
+        "legion.task_packet.workspace_id",
+        "workspace_id.zero",
+    );
+
+    let mut direct_mutation = packet.clone();
+    direct_mutation.output_contract.direct_mutation_allowed = true;
+    assert!(matches!(
+        validate_legion_task_packet(&direct_mutation),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { reason, .. })
+            if reason == "direct_mutation.allowed"
+    ));
+
+    let mut mismatched_snippet_kind = packet.clone();
+    mismatched_snippet_kind.context_snippet_refs[0].kind = LegionTaskContextRefKind::FullFile;
+    assert_legion_contract_error(
+        validate_legion_task_packet(&mismatched_snippet_kind),
+        "legion.task_packet.context_snippet_refs",
+        "kind.mismatch",
+    );
+
+    let mut mismatched_full_file_kind = packet.clone();
+    mismatched_full_file_kind.full_file_refs[0].kind = LegionTaskContextRefKind::CommandOutput;
+    assert_legion_contract_error(
+        validate_legion_task_packet(&mismatched_full_file_kind),
+        "legion.task_packet.full_file_refs",
+        "kind.mismatch",
+    );
+
+    let mut mismatched_command_output_kind = packet.clone();
+    mismatched_command_output_kind.command_output_refs[0].kind =
+        LegionTaskContextRefKind::ContextSnippet;
+    assert_legion_contract_error(
+        validate_legion_task_packet(&mismatched_command_output_kind),
+        "legion.task_packet.command_output_refs",
+        "kind.mismatch",
+    );
+
+    let mut empty_required_command = packet.clone();
+    empty_required_command.validation_plan.required_commands[0].clear();
+    assert_legion_contract_error(
+        validate_legion_task_packet(&empty_required_command),
+        "legion.validation_plan.required_commands",
+        "empty",
+    );
+
+    let mut empty_success_criterion = packet.clone();
+    empty_success_criterion.validation_plan.success_criteria[0].clear();
+    assert_legion_contract_error(
+        validate_legion_task_packet(&empty_success_criterion),
+        "legion.validation_plan.success_criteria",
+        "empty",
+    );
+
+    let mut empty_stop_condition = packet.clone();
+    empty_stop_condition.validation_plan.stop_conditions[0].clear();
+    assert_legion_contract_error(
+        validate_legion_task_packet(&empty_stop_condition),
+        "legion.validation_plan.stop_conditions",
+        "empty",
+    );
+}
+
+#[test]
+fn dto_contracts_legion_worker_result_evidence_and_route_metadata_are_metadata_only() {
+    let packet = legion_task_packet();
+    let route = LegionProviderRouteMetadata {
+        route_id: "route:local:qwen".to_string(),
+        locality_preference: LegionProviderLocalityPreference::LocalPreferred,
+        cost_budget_cents: Some(50),
+        latency_budget_ms: Some(30_000),
+        privacy_policy: LegionProviderPrivacyPolicy::MetadataOnly,
+        model_capability: LegionModelCapability::CodePatch,
+        provider_class: AssistedAiProviderClass::LocalLoopback,
+        route_health: LegionProviderRouteHealth::Healthy,
+        labels: vec!["loopback".to_string(), "metadata-only".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_legion_provider_route_metadata(&route).expect("route metadata should be valid");
+
+    let evidence = LegionEvidenceRecord {
+        evidence_id: "evidence:command:1".to_string(),
+        kind: LegionEvidenceKind::CommandRun,
+        source: LegionEvidenceSource::LocalCommand,
+        payload_hash: fingerprint("cargo-test-output"),
+        redacted_payload_summary: "cargo test passed, output stored by hash".to_string(),
+        command_label: Some("cargo test".to_string()),
+        exit_status: Some(0),
+        privacy_scope: LegionEvidencePrivacyScope::WorkspaceMetadata,
+        generated_at: TimestampMillis(1700),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_legion_evidence_record(&evidence).expect("evidence should be valid");
+
+    let result = LegionWorkerResult {
+        result_id: "worker-result:1".to_string(),
+        packet_id: packet.packet_id,
+        result_kind: LegionWorkerResultKind::PatchProposal,
+        patch_proposal: Some(ProposalId(44)),
+        documentation_proposal: None,
+        analysis_summary: Some("review-ready metadata only".to_string()),
+        test_plan_summary: Some("run protocol contract tests".to_string()),
+        blocked_reason: None,
+        invalid_reason: None,
+        evidence_records: vec![evidence],
+        provider_route: Some(route),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    validate_legion_worker_result(&result).expect("result should be valid");
+
+    let mut raw_analysis_summary = result.clone();
+    raw_analysis_summary.analysis_summary = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_analysis_summary),
+        "legion.worker_result.analysis_summary",
+        "raw_secret_marker",
+    );
+
+    let mut raw_test_plan_summary = result.clone();
+    raw_test_plan_summary.test_plan_summary = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_test_plan_summary),
+        "legion.worker_result.test_plan_summary",
+        "raw_secret_marker",
+    );
+
+    let mut raw_blocked_reason = result.clone();
+    raw_blocked_reason.blocked_reason = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_blocked_reason),
+        "legion.worker_result.blocked_reason",
+        "raw_secret_marker",
+    );
+
+    let mut raw_invalid_reason = result.clone();
+    raw_invalid_reason.invalid_reason = Some("raw_source=SECRET=abc".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&raw_invalid_reason),
+        "legion.worker_result.invalid_reason",
+        "raw_secret_marker",
+    );
+
+    let mut patch_with_blocked_reason = result.clone();
+    patch_with_blocked_reason.blocked_reason = Some("blocked by policy".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&patch_with_blocked_reason),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_patch_proposal",
+    );
+
+    let mut documentation_with_patch = result.clone();
+    documentation_with_patch.result_kind = LegionWorkerResultKind::DocumentationProposal;
+    documentation_with_patch.documentation_proposal = Some(ProposalId(45));
+    assert_legion_contract_error(
+        validate_legion_worker_result(&documentation_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_documentation_proposal",
+    );
+
+    let mut analysis_with_patch = result.clone();
+    analysis_with_patch.result_kind = LegionWorkerResultKind::AnalysisOnly;
+    assert_legion_contract_error(
+        validate_legion_worker_result(&analysis_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_analysis_only",
+    );
+
+    let mut blocked_with_patch = result.clone();
+    blocked_with_patch.result_kind = LegionWorkerResultKind::Blocked;
+    blocked_with_patch.blocked_reason = Some("blocked by policy".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&blocked_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_blocked",
+    );
+
+    let mut invalid_with_patch = result.clone();
+    invalid_with_patch.result_kind = LegionWorkerResultKind::Invalid;
+    invalid_with_patch.invalid_reason = Some("invalid packet contract".to_string());
+    assert_legion_contract_error(
+        validate_legion_worker_result(&invalid_with_patch),
+        "legion.worker_result.result_kind",
+        "invalid_fields_for_invalid",
+    );
+
+    let mut invalid = result.clone();
+    invalid.result_kind = LegionWorkerResultKind::Invalid;
+    invalid.invalid_reason = None;
+    assert!(matches!(
+        validate_legion_worker_result(&invalid),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { reason, .. })
+            if reason == "invalid.reason_missing"
+    ));
+
+    let mut raw_evidence = result.evidence_records[0].clone();
+    raw_evidence.redacted_payload_summary = "raw_source=SECRET=abc".to_string();
+    assert!(matches!(
+        validate_legion_evidence_record(&raw_evidence),
+        Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { reason, .. })
+            if reason == "raw_secret_marker"
+    ));
 }
