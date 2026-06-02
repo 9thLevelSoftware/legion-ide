@@ -50,13 +50,13 @@ use devil_observability::{
 use devil_platform::{NativeFileSystem, NativeWatcherService};
 use devil_plugin::PluginRuntimeHost;
 use devil_project::{
-    CargoDebugLocatorOptions, DebugLocatorError, GitDiffStrategy, GitHunkStage, GitInspectionError,
-    GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, WorkspaceActor,
+    CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitDiffStrategy, GitHunkStage,
+    GitInspectionError, GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, WorkspaceActor,
     WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
     WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
     WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
     WorkspaceSaveRequest, collect_git_snapshot, discover_cargo_debug_configurations,
-    stage_git_hunk, unstage_git_hunk,
+    git_repository_root, resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
 };
 use devil_protocol::{
     AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
@@ -6528,6 +6528,13 @@ pub enum AppCommandRequest {
         /// Projected hunk identifier.
         hunk_id: String,
     },
+    /// Resolve one conflicted file by keeping the chosen side.
+    ResolveGitConflict {
+        /// Repository-relative path.
+        path: String,
+        /// Which side to keep.
+        choice: GitConflictChoice,
+    },
     /// Request hover data through app-owned language tooling.
     RequestHover {
         /// Target buffer identifier.
@@ -7009,6 +7016,7 @@ impl CommandExecutionService {
             | AppCommandRequest::RefreshGit
             | AppCommandRequest::StageGitHunk { .. }
             | AppCommandRequest::UnstageGitHunk { .. }
+            | AppCommandRequest::ResolveGitConflict { .. }
             | AppCommandRequest::RefreshDebugConfigurations
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
@@ -7199,6 +7207,19 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::UnstageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::UnstageGitHunk { hunk_id })
+            }
+            CommandDispatchIntent::ResolveGitConflict { path, choice } => {
+                Ok(AppCommandRequest::ResolveGitConflict {
+                    path,
+                    choice: match choice {
+                        devil_ui::GitConflictChoiceProjection::AcceptCurrent => {
+                            GitConflictChoice::AcceptCurrent
+                        }
+                        devil_ui::GitConflictChoiceProjection::AcceptIncoming => {
+                            GitConflictChoice::AcceptIncoming
+                        }
+                    },
+                })
             }
             CommandDispatchIntent::RefreshDebugConfigurations => {
                 Ok(AppCommandRequest::RefreshDebugConfigurations)
@@ -10457,6 +10478,63 @@ impl AppComposition {
             AppCommandRequest::UnstageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Staged)?,
             )),
+            AppCommandRequest::ResolveGitConflict { path, choice } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                let workspace_id = self.active_documents.require_workspace_id()?;
+                let repo_root = git_repository_root(Path::new(root_path))
+                    .map_err(git_inspection_protocol_error)?;
+                let candidate_path = repo_root.join(&path);
+                let candidate_path_str = candidate_path.to_string_lossy().to_string();
+                let canonical_candidate = CanonicalPath(candidate_path_str.clone());
+                let buffer_id = self
+                    .open_buffer_for_equivalent_path(workspace_id, &canonical_candidate)
+                    .or_else(|| {
+                        self.editor
+                            .buffer_for_path(workspace_id, &path)
+                            .or_else(|| {
+                                self.editor
+                                    .buffer_for_path(workspace_id, &candidate_path_str)
+                            })
+                    });
+                let is_dirty = if let Some(buffer_id) = buffer_id {
+                    self.editor.is_dirty(buffer_id).unwrap_or(true)
+                } else {
+                    false
+                };
+                if is_dirty {
+                    return Err(AppCompositionError::Protocol(ProtocolError::validation(
+                        format!(
+                            "buffer for `{}` has unsaved changes; resolve conflict after saving or discarding edits",
+                            path
+                        ),
+                    )));
+                }
+                resolve_git_conflict(Path::new(root_path), &path, choice)
+                    .map_err(git_inspection_protocol_error)?;
+
+                // Synchronize open buffer if the conflicted file is open so that
+                // active_buffer_projection and subsequent edits use the resolved text.
+                if let Some(buffer_id) = buffer_id {
+                    let prior_active = self.active_documents.active_buffer_id;
+                    if self.editor.close_buffer(buffer_id).is_ok() {
+                        self.active_documents.remove_open_tab(buffer_id);
+                        self.assist_inline_prediction_state
+                            .clear_for_buffer(buffer_id);
+                        if prior_active == Some(buffer_id) {
+                            self.active_documents.activate_first_available_tab();
+                        }
+                        let reopened = self.open_file(&candidate_path_str).is_ok();
+                        let prior = prior_active.filter(|p| *p != buffer_id);
+                        if let (true, Some(prior)) = (reopened, prior) {
+                            let _ = self.switch_tab(prior);
+                        }
+                    }
+                }
+
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
             AppCommandRequest::RequestHover {
                 buffer_id,
                 position,
@@ -20565,5 +20643,28 @@ mod tests {
                 transition.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn paths_equivalent_matches_real_file_with_alternate_separators() {
+        let dir =
+            std::env::temp_dir().join(format!("devil_app_paths_equivalent_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let canonical = file_path.to_string_lossy();
+        let forward = canonical.replace('\\', "/");
+        let backward = canonical.replace('/', "\\");
+
+        // On the current platform, at least one alternate form should be
+        // equivalent to the canonical form via Path comparison or canonicalize.
+        assert!(
+            AppComposition::paths_equivalent(&canonical, &forward)
+                || AppComposition::paths_equivalent(&canonical, &backward),
+            "paths_equivalent should match a real file with alternate separators"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

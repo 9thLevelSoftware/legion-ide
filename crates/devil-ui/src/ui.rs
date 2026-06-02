@@ -1219,6 +1219,15 @@ pub struct GitConflictProjection {
     pub actions: Vec<String>,
 }
 
+/// Which side of a conflict to keep when resolving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitConflictChoiceProjection {
+    /// Keep the current (ours) side.
+    AcceptCurrent,
+    /// Keep the incoming (theirs) side.
+    AcceptIncoming,
+}
+
 /// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProjection {
@@ -1638,6 +1647,13 @@ pub enum CommandDispatchIntent {
     UnstageGitHunk {
         /// Projected hunk identifier.
         hunk_id: String,
+    },
+    /// Resolve one conflicted file by keeping the chosen side.
+    ResolveGitConflict {
+        /// Repository-relative path.
+        path: String,
+        /// Which side to keep.
+        choice: GitConflictChoiceProjection,
     },
     /// Refresh debug launch configurations and persisted breakpoints.
     RefreshDebugConfigurations,
@@ -3057,6 +3073,22 @@ impl Shell {
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::UnstageGitHunk {
                     hunk_id: hunk_id.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(path) = trimmed.strip_prefix(":git-accept-current-conflict ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::ResolveGitConflict {
+                    path: path.trim().to_string(),
+                    choice: GitConflictChoiceProjection::AcceptCurrent,
+                },
+            )));
+        }
+        if let Some(path) = trimmed.strip_prefix(":git-accept-incoming-conflict ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::ResolveGitConflict {
+                    path: path.trim().to_string(),
+                    choice: GitConflictChoiceProjection::AcceptIncoming,
                 },
             )));
         }
