@@ -3,9 +3,11 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use devil_ai::{
     ChatCompletionRequest, ChatCompletionResponse, ChatRole, EmbeddingRequest, EmbeddingResponse,
@@ -836,22 +838,44 @@ pub struct StreamableHttpMcpTransportConfig {
 }
 
 /// Process-backed MCP stdio transport.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StdioMcpTransport {
     config: StdioMcpTransportConfig,
+    session: Arc<Mutex<Option<StdioMcpSession>>>,
+}
+
+impl fmt::Debug for StdioMcpTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StdioMcpTransport")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+struct StdioMcpSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Drop for StdioMcpSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl StdioMcpTransport {
     /// Create a stdio transport from command metadata.
     pub fn new(config: StdioMcpTransportConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            session: Arc::new(Mutex::new(None)),
+        }
     }
-}
 
-impl McpTransport for StdioMcpTransport {
-    fn send(&self, envelope: &McpJsonRpcEnvelope) -> Result<Value, McpClientError> {
-        validate_mcp_json_rpc_envelope(envelope)
-            .map_err(|error| McpClientError::InvalidEnvelope(error.message))?;
+    fn spawn_session(&self) -> Result<StdioMcpSession, McpClientError> {
         if self.config.command.trim().is_empty() {
             return Err(McpClientError::Transport(
                 "stdio MCP command must not be empty".to_string(),
@@ -864,25 +888,80 @@ impl McpTransport for StdioMcpTransport {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| McpClientError::Transport(error.to_string()))?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            let mut payload = serde_json::to_vec(envelope)
-                .map_err(|error| McpClientError::Transport(error.to_string()))?;
-            payload.push(b'\n');
-            stdin
-                .write_all(&payload)
-                .map_err(|error| McpClientError::Transport(error.to_string()))?;
-        }
-        let output = child
-            .wait_with_output()
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpClientError::Transport("stdio MCP stdin unavailable".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| McpClientError::Transport("stdio MCP stdout unavailable".to_string()))?;
+        Ok(StdioMcpSession {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn send_on_session(
+        &self,
+        session: &mut StdioMcpSession,
+        envelope: &McpJsonRpcEnvelope,
+    ) -> Result<Value, McpClientError> {
+        let mut payload = serde_json::to_vec(envelope)
             .map_err(|error| McpClientError::Transport(error.to_string()))?;
-        if !output.status.success() {
-            return Err(McpClientError::Transport(format!(
-                "stdio MCP server exited with {}",
-                output.status
-            )));
+        payload.push(b'\n');
+        session
+            .stdin
+            .write_all(&payload)
+            .and_then(|()| session.stdin.flush())
+            .map_err(|error| McpClientError::Transport(error.to_string()))?;
+
+        let expected_id = envelope.id.as_deref();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let byte_count = session
+                .stdout
+                .read_line(&mut line)
+                .map_err(|error| McpClientError::Transport(error.to_string()))?;
+            if byte_count == 0 {
+                let status = session.child.try_wait().ok().flatten();
+                return Err(McpClientError::Transport(match status {
+                    Some(status) => format!("stdio MCP server exited with {status}"),
+                    None => "stdio MCP server closed stdout".to_string(),
+                }));
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let response: Value = serde_json::from_str(&line)
+                .map_err(|error| McpClientError::Transport(error.to_string()))?;
+            if response.get("id").and_then(Value::as_str) == expected_id {
+                return Ok(response);
+            }
         }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|error| McpClientError::Transport(error.to_string()))
+    }
+}
+
+impl McpTransport for StdioMcpTransport {
+    fn send(&self, envelope: &McpJsonRpcEnvelope) -> Result<Value, McpClientError> {
+        validate_mcp_json_rpc_envelope(envelope)
+            .map_err(|error| McpClientError::InvalidEnvelope(error.message))?;
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| McpClientError::Transport("stdio MCP session lock poisoned".into()))?;
+        if guard.is_none() {
+            *guard = Some(self.spawn_session()?);
+        }
+        match self.send_on_session(guard.as_mut().expect("stdio session present"), envelope) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                *guard = None;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -1097,7 +1176,10 @@ where
         arguments: Value,
         permission: &DelegatedTaskToolPermissionRequest,
     ) -> Result<Value, McpClientError> {
-        if !mcp_tool_permission_allows_runtime(permission) {
+        let tool = self.find_tool(server_id, tool_name)?;
+        if !mcp_tool_permission_allows_runtime(permission)
+            || !permission_matches_mcp_tool(permission, tool)
+        {
             return Err(McpClientError::PermissionRequired {
                 request_id: permission.request_id.clone(),
             });
@@ -1106,24 +1188,27 @@ where
         self.transport.send(&request)
     }
 
+    fn find_tool(
+        &self,
+        server_id: &McpServerId,
+        tool_name: &McpToolName,
+    ) -> Result<&McpToolDescriptor, McpClientError> {
+        self.registry
+            .tools
+            .iter()
+            .find(|tool| &tool.server_id == server_id && &tool.name == tool_name)
+            .ok_or_else(|| McpClientError::UnknownTool {
+                server_id: server_id.0.clone(),
+                tool_name: tool_name.0.clone(),
+            })
+    }
+
     fn ensure_tool(
         &self,
         server_id: &McpServerId,
         tool_name: &McpToolName,
     ) -> Result<(), McpClientError> {
-        if self
-            .registry
-            .tools
-            .iter()
-            .any(|tool| &tool.server_id == server_id && &tool.name == tool_name)
-        {
-            Ok(())
-        } else {
-            Err(McpClientError::UnknownTool {
-                server_id: server_id.0.clone(),
-                tool_name: tool_name.0.clone(),
-            })
-        }
+        self.find_tool(server_id, tool_name).map(|_| ())
     }
 
     fn ensure_resource(
@@ -1165,6 +1250,15 @@ where
             })
         }
     }
+}
+
+fn permission_matches_mcp_tool(
+    permission: &DelegatedTaskToolPermissionRequest,
+    tool: &McpToolDescriptor,
+) -> bool {
+    let expected_target_id = format!("mcp-tool:{}|{}", tool.server_id.0, tool.name.0);
+    permission.target_id.as_deref() == Some(expected_target_id.as_str())
+        && permission.capability.as_ref() == Some(&tool.capability)
 }
 
 fn parse_tools_list_response(
@@ -1358,7 +1452,6 @@ mod tests {
         RedactionHint, SnapshotId, TextCoordinate, TimestampMillis, WorkspaceGeneration,
         WorkspaceId, WorkspaceTrustState, delegated_task_tool_permission_request,
     };
-
     fn test_inline_prediction_request(
         max_prediction_bytes: u32,
         provider_id: &str,
@@ -1939,6 +2032,112 @@ mod tests {
             )
             .expect("approved tool call reaches transport");
         assert_eq!(response["result"]["method"], "tools/call");
+    }
+
+    #[test]
+    fn mcp_client_rejects_permission_for_different_mcp_tool_target() {
+        let registry = mcp_registry();
+        let server_id = registry.server.server_id.clone();
+        let tool_name = registry.tools[0].name.clone();
+        let client = McpClient::new(registry, MemoryMcpTransport).expect("valid registry");
+        let allow_for_other_tool =
+            delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+                request_id: "permission:mcp:other-tool".to_string(),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::InvokeLocalTool,
+                capability: Some(CapabilityId("mcp.tool.call".to_string())),
+                target_id: Some("mcp-tool:mcp:test|read_metadata".to_string()),
+                decision: DelegatedTaskToolPermissionDecision::Allow,
+                labels: vec!["mcp.permission".to_string()],
+                schema_version: 1,
+            });
+
+        assert!(matches!(
+            client.call_tool_with_permission(
+                "tool:call:wrong-target",
+                &server_id,
+                &tool_name,
+                json!({"path_hash": "abc"}),
+                &allow_for_other_tool,
+            ),
+            Err(McpClientError::PermissionRequired { request_id })
+                if request_id == "permission:mcp:other-tool"
+        ));
+    }
+
+    #[test]
+    fn mcp_client_rejects_permission_for_different_mcp_tool_capability() {
+        let registry = mcp_registry();
+        let server_id = registry.server.server_id.clone();
+        let tool_name = registry.tools[0].name.clone();
+        let client = McpClient::new(registry, MemoryMcpTransport).expect("valid registry");
+        let allow_for_other_capability =
+            delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+                request_id: "permission:mcp:other-capability".to_string(),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::InvokeLocalTool,
+                capability: Some(CapabilityId("mcp.resource.read".to_string())),
+                target_id: Some("mcp-tool:mcp:test|write_file".to_string()),
+                decision: DelegatedTaskToolPermissionDecision::Allow,
+                labels: vec!["mcp.permission".to_string()],
+                schema_version: 1,
+            });
+
+        assert!(matches!(
+            client.call_tool_with_permission(
+                "tool:call:wrong-capability",
+                &server_id,
+                &tool_name,
+                json!({"path_hash": "abc"}),
+                &allow_for_other_capability,
+            ),
+            Err(McpClientError::PermissionRequired { request_id })
+                if request_id == "permission:mcp:other-capability"
+        ));
+    }
+
+    #[test]
+    fn stdio_mcp_transport_reuses_one_process_across_requests() {
+        if !cfg!(windows) {
+            return;
+        }
+        let script = "$ErrorActionPreference='Stop';\
+            $pidValue=$PID;\
+            $count=0;\
+            while(($line=[Console]::In.ReadLine()) -ne $null){\
+                $req=$line|ConvertFrom-Json;\
+                $count++;\
+                $response=@{jsonrpc='2.0';id=$req.id;result=@{pid=$pidValue;count=$count;method=$req.method}}|ConvertTo-Json -Compress -Depth 8;\
+                [Console]::Out.WriteLine($response);\
+                [Console]::Out.Flush();\
+            }";
+        let transport = StdioMcpTransport::new(StdioMcpTransportConfig {
+            command: "powershell.exe".to_string(),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                script.to_string(),
+            ],
+        });
+
+        let first = transport
+            .send(&McpJsonRpcEnvelope::request(
+                "stdio:1",
+                "tools/list",
+                json!({}),
+            ))
+            .expect("first request succeeds");
+        let second = transport
+            .send(&McpJsonRpcEnvelope::request(
+                "stdio:2",
+                "resources/list",
+                json!({}),
+            ))
+            .expect("second request succeeds");
+
+        assert_eq!(first["result"]["pid"], second["result"]["pid"]);
+        assert_eq!(first["result"]["count"], 1);
+        assert_eq!(second["result"]["count"], 2);
     }
 
     #[test]

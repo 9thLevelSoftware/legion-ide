@@ -690,6 +690,7 @@ struct AutomateWorkflowState {
     kill_switches: HashMap<String, LegionWorkflowKillSwitch>,
     tool_permission_requests: HashMap<String, DelegatedTaskToolPermissionRequest>,
     high_risk_tool_count: HashMap<String, u32>,
+    counted_high_risk_tool_requests: HashSet<String>,
     denied_tool_count: HashMap<String, u32>,
     next_decision_sequence: u64,
     halt_threshold: u32,
@@ -718,6 +719,7 @@ impl Default for AutomateWorkflowState {
             kill_switches: HashMap::new(),
             tool_permission_requests: HashMap::new(),
             high_risk_tool_count: HashMap::new(),
+            counted_high_risk_tool_requests: HashSet::new(),
             denied_tool_count: HashMap::new(),
             next_decision_sequence: 0,
             halt_threshold: 3,
@@ -11591,7 +11593,13 @@ impl AppComposition {
                 ))
             })?;
         let risk = tool.risk_label;
-        if matches!(risk, ProposalRiskLabel::High | ProposalRiskLabel::Unknown) {
+        let request_id = automate_tool_permission_request_id(session_id, server_id, tool_name);
+        if matches!(risk, ProposalRiskLabel::High | ProposalRiskLabel::Unknown)
+            && self
+                .automate_workflow
+                .counted_high_risk_tool_requests
+                .insert(request_id.clone())
+        {
             *self
                 .automate_workflow
                 .high_risk_tool_count
@@ -11618,7 +11626,6 @@ impl AppComposition {
                 })?;
             return Ok(AppAutomateToolCallOutcome::Halted { monitor });
         }
-        let request_id = automate_tool_permission_request_id(session_id, server_id, tool_name);
         let request = self
             .automate_workflow
             .tool_permission(&request_id)

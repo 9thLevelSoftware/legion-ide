@@ -3911,11 +3911,7 @@ fn retrieval_chunk_in_scope(chunk: &RetrievalChunkRecord, request: &RetrievalQue
 /// other value is capped at `max`. Shared by retrieval and structural search so
 /// their pagination semantics cannot drift apart.
 fn clamp_result_limit(limit: usize, default: usize, max: usize) -> usize {
-    if limit == 0 {
-        default
-    } else {
-        limit.min(max)
-    }
+    if limit == 0 { default } else { limit.min(max) }
 }
 
 fn normalize_retrieval_result_limit(limit: usize) -> usize {

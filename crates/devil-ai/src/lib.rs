@@ -410,11 +410,11 @@ fn deterministic_inline_text(
 }
 
 fn bounded_ascii_prefix(value: &str, max_bytes: u32) -> String {
-    let max_bytes = max_bytes as usize;
-    // `get(..max_bytes)` returns `None` if `max_bytes` is past the end or lands
-    // inside a multi-byte UTF-8 char, so falling back to the full value keeps
-    // this panic-free even if a non-ASCII base string is ever introduced.
-    value.get(..max_bytes).unwrap_or(value).to_string()
+    let mut end = value.len().min(max_bytes as usize);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 /// A provider registry resolves provider implementations by identifier.
@@ -924,6 +924,11 @@ mod tests {
         assert!(ghost_text.byte_len <= 18);
         assert_eq!(ghost_text.byte_len, ghost_text.text.len() as u32);
         validate_inline_prediction_result(&response.result).expect("protocol result is valid");
+    }
+
+    #[test]
+    fn bounded_ascii_prefix_truncates_to_char_boundary_before_byte_limit() {
+        assert_eq!(bounded_ascii_prefix("abcédef", 4), "abc");
     }
 
     #[test]

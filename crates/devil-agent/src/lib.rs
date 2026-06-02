@@ -764,11 +764,37 @@ fn has_dependency_between(
     left: &LegionWorkflowWorkerId,
     right: &LegionWorkflowWorkerId,
 ) -> bool {
-    session.dependency_edges.iter().any(|dependency| {
-        (&dependency.predecessor_worker_id == left && &dependency.successor_worker_id == right)
-            || (&dependency.predecessor_worker_id == right
-                && &dependency.successor_worker_id == left)
-    })
+    has_dependency_path(session, left, right) || has_dependency_path(session, right, left)
+}
+
+fn has_dependency_path(
+    session: &LegionWorkflowSession,
+    start: &LegionWorkflowWorkerId,
+    end: &LegionWorkflowWorkerId,
+) -> bool {
+    if start == end {
+        return true;
+    }
+
+    let mut stack = vec![start.0.as_str()];
+    let mut visited = HashSet::new();
+    while let Some(worker_id) = stack.pop() {
+        if !visited.insert(worker_id) {
+            continue;
+        }
+
+        for dependency in &session.dependency_edges {
+            if dependency.predecessor_worker_id.0.as_str() != worker_id {
+                continue;
+            }
+            if dependency.successor_worker_id == *end {
+                return true;
+            }
+            stack.push(dependency.successor_worker_id.0.as_str());
+        }
+    }
+
+    false
 }
 
 fn provider_route_request_from_worker(
@@ -1410,6 +1436,51 @@ mod tests {
                 .blockers
                 .contains(&LegionWorkflowMergeReadinessBlocker::UnresolvedConflict)
         );
+    }
+
+    #[test]
+    fn legion_workflow_same_target_transitive_dependency_is_ordered() {
+        let mut session = workflow_session();
+        session.worker_assignments = vec![
+            workflow_worker(
+                "worker:root",
+                LegionWorkflowModelBackend::Local,
+                "crates/devil-agent/src/shared.rs",
+            ),
+            workflow_worker(
+                "worker:middle",
+                LegionWorkflowModelBackend::Local,
+                "crates/devil-agent/src/intermediate.rs",
+            ),
+            workflow_worker(
+                "worker:leaf",
+                LegionWorkflowModelBackend::Local,
+                "crates/devil-agent/src/shared.rs",
+            ),
+        ];
+        session.dependency_edges = vec![
+            LegionWorkflowDependency {
+                dependency_id: LegionWorkflowDependencyId("dependency:root-middle".to_string()),
+                predecessor_worker_id: LegionWorkflowWorkerId("worker:root".to_string()),
+                successor_worker_id: LegionWorkflowWorkerId("worker:middle".to_string()),
+                state: LegionWorkflowDependencyState::Pending,
+                label: "root before middle".to_string(),
+                schema_version: 1,
+            },
+            LegionWorkflowDependency {
+                dependency_id: LegionWorkflowDependencyId("dependency:middle-leaf".to_string()),
+                predecessor_worker_id: LegionWorkflowWorkerId("worker:middle".to_string()),
+                successor_worker_id: LegionWorkflowWorkerId("worker:leaf".to_string()),
+                state: LegionWorkflowDependencyState::Pending,
+                label: "middle before leaf".to_string(),
+                schema_version: 1,
+            },
+        ];
+
+        validate_legion_workflow_session(&session).expect("session shape valid");
+        let coordinator = LegionWorkflowCoordinator::new(session).expect("coordinator starts");
+
+        assert_eq!(coordinator.conflicts(), &[]);
     }
 
     #[test]

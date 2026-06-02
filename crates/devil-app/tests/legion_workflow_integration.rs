@@ -764,11 +764,22 @@ fn automate_mcp_tool_permissions_decision_feed_risk_halt_and_kill_switch_are_pro
     let session_id = session.session_id.clone();
     let server_id = McpServerId("mcp:test".to_string());
     let tool_name = McpToolName("write_file".to_string());
+    let delete_tool_name = McpToolName("delete_file".to_string());
+    let shell_tool_name = McpToolName("run_shell".to_string());
     app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed workflow");
+    let mut registry = test_mcp_registry(&server_id, &tool_name);
+    let mut delete_tool = registry.tools[0].clone();
+    delete_tool.name = delete_tool_name.clone();
+    delete_tool.description_label = "Second high risk test tool".to_string();
+    let mut shell_tool = registry.tools[0].clone();
+    shell_tool.name = shell_tool_name.clone();
+    shell_tool.description_label = "Third high risk test tool".to_string();
+    registry.tools.push(delete_tool);
+    registry.tools.push(shell_tool);
     let projection = app
-        .seed_legion_workflow_mcp_registry(test_mcp_registry(&server_id, &tool_name))
+        .seed_legion_workflow_mcp_registry(registry)
         .expect("seed mcp registry");
     assert_eq!(projection.mcp_registry_count, 1);
 
@@ -801,9 +812,22 @@ fn automate_mcp_tool_permissions_decision_feed_risk_halt_and_kill_switch_are_pro
         .expect("prepare allowed tool call");
     assert!(matches!(ready, AppAutomateToolCallOutcome::Ready { .. }));
 
-    let halted = app
+    let repeated = app
         .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &tool_name)
-        .expect("second high-risk call");
+        .expect("repeated allowed high-risk call");
+    assert!(matches!(repeated, AppAutomateToolCallOutcome::Ready { .. }));
+
+    let second_distinct = app
+        .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &delete_tool_name)
+        .expect("second distinct high-risk call");
+    assert!(matches!(
+        second_distinct,
+        AppAutomateToolCallOutcome::WaitingForToolPermission { .. }
+    ));
+
+    let halted = app
+        .prepare_legion_workflow_mcp_tool_call(&session_id, &server_id, &shell_tool_name)
+        .expect("third distinct high-risk call");
     assert!(matches!(halted, AppAutomateToolCallOutcome::Halted { .. }));
     let projection = app.legion_workflow_projection(TimestampMillis::now());
     assert!(projection.risk_monitors.iter().any(|monitor| {
