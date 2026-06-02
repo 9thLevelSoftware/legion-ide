@@ -1120,13 +1120,16 @@ fn git_conflicts<'a>(
 }
 
 fn relative_git_path(root: &Path, path: &Path) -> Option<String> {
+    let normalized_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        root.join(path)
+        normalized_root.join(path)
     };
-    absolute
-        .strip_prefix(root)
+    let normalized_path = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+
+    normalized_path
+        .strip_prefix(&normalized_root)
         .ok()
         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
 }

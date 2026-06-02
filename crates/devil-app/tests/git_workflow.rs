@@ -33,6 +33,7 @@ impl TempGitRepo {
         ));
         fs::create_dir(&root).expect("temp git repo should be created");
         run_git(&root, ["init"]);
+        run_git(&root, ["branch", "-M", "master"]);
         run_git(&root, ["config", "user.email", "devil@example.test"]);
         run_git(&root, ["config", "user.name", "Devil Test"]);
         Self { root }
