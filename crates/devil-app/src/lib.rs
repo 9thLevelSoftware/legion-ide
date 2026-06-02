@@ -11529,6 +11529,15 @@ impl AppComposition {
                 ))
             })?;
         let request_id = automate_tool_permission_request_id(session_id, server_id, tool_name);
+        if self
+            .automate_workflow
+            .tool_permission(&request_id)
+            .is_none()
+        {
+            return Err(AppCompositionError::LegionWorkflow(format!(
+                "MCP tool permission request {request_id} has not been projected"
+            )));
+        }
         let request = self
             .automate_workflow
             .record_tool_permission_decision(session_id, request_id, &tool, decision);

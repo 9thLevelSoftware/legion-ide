@@ -1125,10 +1125,23 @@ fn relative_git_path(root: &Path, path: &Path) -> Option<String> {
     } else {
         root.join(path)
     };
-    absolute
-        .strip_prefix(root)
-        .ok()
-        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+    let mut roots = vec![root.to_path_buf()];
+    if let Ok(canonical_root) = root.canonicalize() {
+        roots.push(canonical_root);
+    }
+    let mut absolutes = vec![absolute.clone()];
+    if let Ok(canonical_absolute) = absolute.canonicalize() {
+        absolutes.push(canonical_absolute);
+    }
+
+    for candidate in &absolutes {
+        for root_candidate in &roots {
+            if let Ok(relative) = candidate.strip_prefix(root_candidate) {
+                return Some(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    None
 }
 
 /// Metadata returned with a successful workspace text open.
@@ -5381,6 +5394,28 @@ mod tests {
 
     fn next_test_temp_suffix() -> u64 {
         TEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_git_path_handles_canonicalized_file_under_symlinked_root() {
+        let root = std::env::temp_dir().join(format!(
+            "devil_project_relative_git_path_{}",
+            next_test_temp_suffix()
+        ));
+        let real_root = root.join("real");
+        let link_root = root.join("link");
+        let source = real_root.join("src").join("lib.rs");
+        std::fs::create_dir_all(source.parent().expect("source parent")).expect("create source");
+        std::fs::write(&source, "pub fn test() {}\n").expect("write source");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create symlink");
+
+        assert_eq!(
+            relative_git_path(&link_root, &source),
+            Some("src/lib.rs".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[derive(Debug)]
