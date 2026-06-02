@@ -3,13 +3,18 @@
 use std::path::PathBuf;
 
 use devil_protocol::{
-    AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, DelegatedTaskPlanId,
-    FileId, ProposalCancellationReason, ProposalId, ProposalRejectionReason,
-    ProposalRollbackReason, ProtocolTextRange, RemoteWorkspaceSessionId, TerminalSessionId,
-    TextCoordinate, ViewportScroll,
+    AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, DebugConfigurationId,
+    DebugSessionId, DelegatedTaskPlanId, DelegatedTaskProposalHunkDisposition,
+    DelegatedTaskToolPermissionDecision, FileId, LegionWorkflowConflictId, LegionWorkflowSessionId,
+    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, ProposalCancellationReason,
+    ProposalId, ProposalRejectionReason, ProposalRollbackReason, ProtocolTextRange,
+    RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
 use devil_protocol::{PluginContribution, PluginId};
-use devil_ui::{CommandDispatchIntent, SearchScopeProjection, ShellProjectionSnapshot};
+use devil_ui::{
+    CommandDispatchIntent, DebugStepKindProjection, DockMode, SearchScopeProjection,
+    ShellProjectionSnapshot,
+};
 use thiserror::Error;
 
 /// Adapter-local renderer action before app routing.
@@ -21,6 +26,11 @@ pub enum DesktopAction {
     SaveActive,
     /// Save every open tab through app authority.
     SaveAll,
+    /// Switch the app-owned product mode through app authority.
+    SetProductMode {
+        /// Target product mode.
+        mode: DockMode,
+    },
     /// Switch to a projected tab.
     SwitchTab {
         /// Target buffer identifier.
@@ -54,6 +64,11 @@ pub enum DesktopAction {
         /// Search scope to preselect.
         scope: SearchScopeProjection,
     },
+    /// Ask the workflow layer to show a structural search prompt.
+    ShowStructuralSearchPrompt {
+        /// Search scope to preselect.
+        scope: SearchScopeProjection,
+    },
     /// Ask the workflow layer to open a workspace root.
     OpenWorkspace {
         /// Workspace root selected by the adapter.
@@ -61,6 +76,64 @@ pub enum DesktopAction {
     },
     /// Refresh the explorer projection through app authority.
     RefreshExplorer,
+    /// Refresh git status, syntactic diff, blame, graph, and conflict projections.
+    RefreshGit,
+    /// Refresh debug launch configurations and persisted breakpoints.
+    RefreshDebugConfigurations,
+    /// Toggle a breakpoint for the active projected buffer.
+    ToggleDebugBreakpoint {
+        /// Zero-based line.
+        line: u32,
+        /// Conditional expression label.
+        condition: Option<String>,
+        /// Hit condition label.
+        hit_condition: Option<String>,
+        /// Logpoint message label.
+        log_message: Option<String>,
+    },
+    /// Launch a debug session from a projected configuration.
+    LaunchDebugSession {
+        /// Projected debug configuration identifier.
+        configuration_id: DebugConfigurationId,
+    },
+    /// Step or continue a projected debug session.
+    DebugStep {
+        /// Projected debug session identifier.
+        session_id: DebugSessionId,
+        /// Step kind.
+        kind: DebugStepKindProjection,
+    },
+    /// Run the active debug session to a cursor position in the active buffer.
+    DebugRunToCursor {
+        /// Projected debug session identifier.
+        session_id: DebugSessionId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Evaluate a display-safe expression label in a projected debug session.
+    DebugEvaluateSelection {
+        /// Projected debug session identifier.
+        session_id: DebugSessionId,
+        /// Display-safe expression label.
+        expression_label: String,
+    },
+    /// Add a display-safe watch expression to a projected debug session.
+    DebugAddWatch {
+        /// Projected debug session identifier.
+        session_id: DebugSessionId,
+        /// Display-safe expression label.
+        expression_label: String,
+    },
+    /// Stage one projected git hunk.
+    StageGitHunk {
+        /// Projected hunk identifier.
+        hunk_id: String,
+    },
+    /// Unstage one projected git hunk.
+    UnstageGitHunk {
+        /// Projected hunk identifier.
+        hunk_id: String,
+    },
     /// Toggle adapter-local explorer expansion for a canonical path.
     ToggleExplorerPath {
         /// Canonical path represented by the explorer row.
@@ -197,6 +270,90 @@ pub enum DesktopAction {
         /// Proposal identifier linked from projected delegated task data.
         proposal_id: ProposalId,
     },
+    /// Send a Delegate chat turn through app-owned context retrieval.
+    SendDelegateChat {
+        /// Display-safe prompt label.
+        prompt_label: String,
+    },
+    /// Record a human review decision for a projected Delegate proposal hunk.
+    ReviewDelegateProposalHunk {
+        /// Proposal containing the hunk.
+        proposal_id: ProposalId,
+        /// Projected hunk identifier.
+        hunk_id: String,
+        /// Human disposition.
+        disposition: DelegatedTaskProposalHunkDisposition,
+    },
+    /// Record a human decision for a projected Delegate tool permission request.
+    RecordDelegateToolPermission {
+        /// Projected permission request identifier.
+        request_id: String,
+        /// Human decision.
+        decision: DelegatedTaskToolPermissionDecision,
+    },
+    /// Inspect a projected Legion workflow session.
+    InspectLegionWorkflowSession {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+    },
+    /// Open a proposal preview linked from Legion workflow metadata.
+    OpenLegionWorkflowProposalPreview {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal identifier linked from projected Legion workflow data.
+        proposal_id: ProposalId,
+    },
+    /// Open proposal details linked from Legion workflow metadata.
+    OpenLegionWorkflowProposalDetails {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal identifier linked from projected Legion workflow data.
+        proposal_id: ProposalId,
+    },
+    /// Request app-owned verification metadata for a Legion workflow.
+    RequestLegionWorkflowVerification {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Verification gate identifier selected from projection data.
+        gate_id: LegionWorkflowVerificationGateId,
+    },
+    /// Request app-owned sign-off metadata for a Legion workflow.
+    RequestLegionWorkflowSignOff {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Sign-off identifier selected from projection data.
+        sign_off_id: LegionWorkflowSignOffId,
+    },
+    /// Request app-owned conflict-resolution metadata for a Legion workflow.
+    ResolveLegionWorkflowConflict {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Conflict identifier selected from projection data.
+        conflict_id: LegionWorkflowConflictId,
+    },
+    /// Request app-owned merge-readiness evaluation for a Legion workflow.
+    RequestLegionWorkflowMergeReadiness {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+    },
+    /// Record a human decision for an Automate MCP tool permission request.
+    RecordLegionWorkflowToolPermission {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// MCP server identifier selected from projection data.
+        server_id: devil_protocol::McpServerId,
+        /// MCP tool name selected from projection data.
+        tool_name: devil_protocol::McpToolName,
+        /// Human decision.
+        decision: DelegatedTaskToolPermissionDecision,
+    },
+    /// Trigger the hard Automate kill switch for a workflow.
+    TriggerLegionWorkflowKillSwitch {
+        /// Workflow session identifier selected from projection data.
+        session_id: LegionWorkflowSessionId,
+        /// Display-safe reason label.
+        reason_label: String,
+    },
     /// Insert text at a projected coordinate.
     InsertText {
         /// Text to insert.
@@ -264,6 +421,17 @@ pub enum DesktopAction {
         /// Requested result limit; zero means app default.
         limit: usize,
     },
+    /// Run bounded structural search and rewrite preview through app authority.
+    RunStructuralSearch {
+        /// Search scope.
+        scope: SearchScopeProjection,
+        /// User-provided structural pattern.
+        pattern: String,
+        /// Optional rewrite template; empty prompt input is represented as None.
+        rewrite: Option<String>,
+        /// Requested result limit; zero means app default.
+        limit: usize,
+    },
     /// Cancel projected search by query id.
     CancelSearch {
         /// Query id to cancel.
@@ -279,6 +447,17 @@ pub enum DesktopAction {
         /// Projected cursor position.
         position: TextCoordinate,
     },
+    /// Request an Assist inline ghost prediction for the active buffer.
+    RequestAssistInlinePrediction {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Accept the current Assist ghost prediction.
+    AcceptCurrentAssistInlinePrediction,
+    /// Dismiss the current Assist ghost prediction.
+    DismissCurrentAssistInlinePrediction,
+    /// Cancel the current in-flight Assist ghost prediction.
+    CancelAssistInlinePrediction,
     /// Request definition locations for the active buffer.
     GoToDefinition {
         /// Projected cursor position.
@@ -357,6 +536,11 @@ pub enum DesktopAppRequest {
         /// Search scope to preselect.
         scope: SearchScopeProjection,
     },
+    /// Ask workflow code to display a structural search prompt.
+    ShowStructuralSearchPrompt {
+        /// Search scope to preselect.
+        scope: SearchScopeProjection,
+    },
     /// Toggle adapter-local explorer expansion.
     ToggleExplorerPath {
         /// Canonical path represented by the explorer row.
@@ -388,6 +572,69 @@ pub enum DesktopAppRequest {
     OpenDelegatedProposalDetails {
         /// Proposal identifier.
         proposal_id: ProposalId,
+    },
+    /// Inspect Legion workflow session metadata.
+    InspectLegionWorkflowSession {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+    },
+    /// Open proposal preview linked from Legion workflow metadata.
+    OpenLegionWorkflowProposalPreview {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal identifier.
+        proposal_id: ProposalId,
+    },
+    /// Open proposal details linked from Legion workflow metadata.
+    OpenLegionWorkflowProposalDetails {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal identifier.
+        proposal_id: ProposalId,
+    },
+    /// Request app-owned Legion workflow verification metadata.
+    RequestLegionWorkflowVerification {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Verification gate identifier.
+        gate_id: LegionWorkflowVerificationGateId,
+    },
+    /// Request app-owned Legion workflow sign-off metadata.
+    RequestLegionWorkflowSignOff {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Sign-off identifier.
+        sign_off_id: LegionWorkflowSignOffId,
+    },
+    /// Request app-owned Legion workflow conflict resolution metadata.
+    ResolveLegionWorkflowConflict {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Conflict identifier.
+        conflict_id: LegionWorkflowConflictId,
+    },
+    /// Request app-owned Legion workflow merge-readiness metadata.
+    RequestLegionWorkflowMergeReadiness {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+    },
+    /// Record app-owned Automate MCP tool permission metadata.
+    RecordLegionWorkflowToolPermission {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// MCP server identifier.
+        server_id: devil_protocol::McpServerId,
+        /// MCP tool name.
+        tool_name: devil_protocol::McpToolName,
+        /// Human decision.
+        decision: DelegatedTaskToolPermissionDecision,
+    },
+    /// Trigger app-owned Automate kill-switch metadata.
+    TriggerLegionWorkflowKillSwitch {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Display-safe reason label.
+        reason_label: String,
     },
 }
 
@@ -427,6 +674,18 @@ pub enum DesktopBridgeError {
     UnknownProposal {
         /// Unknown proposal id.
         proposal_id: ProposalId,
+    },
+    /// Target debug configuration was not present in current projections.
+    #[error("unknown debug configuration: {configuration_id:?}")]
+    UnknownDebugConfiguration {
+        /// Unknown debug configuration.
+        configuration_id: DebugConfigurationId,
+    },
+    /// Target debug session was not present in current projections.
+    #[error("unknown debug session: {session_id:?}")]
+    UnknownDebugSession {
+        /// Unknown debug session.
+        session_id: DebugSessionId,
     },
     /// Assisted-AI run id was empty or not present in current projections.
     #[error("unknown assisted-ai run: {run_id:?}")]
@@ -517,6 +776,81 @@ pub enum DesktopBridgeError {
         /// Unknown proposal id.
         proposal_id: ProposalId,
     },
+    /// Delegated proposal hunk request was invalid.
+    #[error("delegated proposal hunk request is invalid")]
+    InvalidDelegatedProposalHunk,
+    /// Delegated proposal hunk was not present in current projections.
+    #[error("unknown delegated proposal hunk: proposal {proposal_id:?} hunk {hunk_id}")]
+    UnknownDelegatedProposalHunk {
+        /// Unknown proposal id.
+        proposal_id: ProposalId,
+        /// Unknown hunk id.
+        hunk_id: String,
+    },
+    /// Delegated tool permission request id was empty.
+    #[error("delegated tool permission request id is empty")]
+    InvalidDelegatedToolPermissionRequest,
+    /// Delegated tool permission request was not present in current projections.
+    #[error("unknown delegated tool permission request: {request_id}")]
+    UnknownDelegatedToolPermissionRequest {
+        /// Unknown permission request id.
+        request_id: String,
+    },
+    /// Legion workflow session id was empty.
+    #[error("legion workflow session id is empty")]
+    InvalidLegionWorkflowSession,
+    /// Legion workflow session was not present in current projections.
+    #[error("unknown Legion workflow session: {session_id:?}")]
+    UnknownLegionWorkflowSession {
+        /// Unknown workflow session.
+        session_id: LegionWorkflowSessionId,
+    },
+    /// Legion workflow linked proposal was not present in current projections.
+    #[error("unknown Legion workflow proposal: session {session_id:?} proposal {proposal_id:?}")]
+    UnknownLegionWorkflowProposal {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Unknown proposal id.
+        proposal_id: ProposalId,
+    },
+    /// Legion workflow verification gate was not present in current projections.
+    #[error("unknown Legion workflow verification gate: session {session_id:?} gate {gate_id:?}")]
+    UnknownLegionWorkflowVerification {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Unknown verification gate id.
+        gate_id: LegionWorkflowVerificationGateId,
+    },
+    /// Legion workflow sign-off record was not present in current projections.
+    #[error("unknown Legion workflow sign-off: session {session_id:?} signoff {sign_off_id:?}")]
+    UnknownLegionWorkflowSignOff {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Unknown sign-off id.
+        sign_off_id: LegionWorkflowSignOffId,
+    },
+    /// Legion workflow conflict id was not present in current projections.
+    #[error("unknown Legion workflow conflict: session {session_id:?} conflict {conflict_id:?}")]
+    UnknownLegionWorkflowConflict {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Unknown conflict id.
+        conflict_id: LegionWorkflowConflictId,
+    },
+    /// MCP server was not present in current Automate projections.
+    #[error("unknown MCP server: {server_id:?}")]
+    UnknownLegionWorkflowMcpServer {
+        /// Unknown MCP server id.
+        server_id: devil_protocol::McpServerId,
+    },
+    /// MCP tool was not present in current Automate projections.
+    #[error("unknown MCP tool: server {server_id:?} tool {tool_name:?}")]
+    UnknownLegionWorkflowMcpTool {
+        /// MCP server id.
+        server_id: devil_protocol::McpServerId,
+        /// Unknown MCP tool name.
+        tool_name: devil_protocol::McpToolName,
+    },
     /// Target buffer does not own the active dirty-close prompt.
     #[error("dirty-close prompt is not active for buffer {buffer_id:?}")]
     DirtyClosePromptMissing {
@@ -558,6 +892,9 @@ impl DesktopCommandBridge {
     ) -> DesktopBridgeOutput {
         match action {
             DesktopAction::Quit => DesktopBridgeOutput::Intent(CommandDispatchIntent::Quit),
+            DesktopAction::SetProductMode { mode } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetProductMode { mode })
+            }
             DesktopAction::SaveActive => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::Save { buffer_id }
             }),
@@ -599,11 +936,81 @@ impl DesktopCommandBridge {
             DesktopAction::ShowSearchPrompt { scope } => {
                 DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowSearchPrompt { scope })
             }
+            DesktopAction::ShowStructuralSearchPrompt { scope } => {
+                DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowStructuralSearchPrompt {
+                    scope,
+                })
+            }
             DesktopAction::OpenWorkspace { root } => {
                 DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenWorkspace { root })
             }
             DesktopAction::RefreshExplorer => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshExplorer)
+            }
+            DesktopAction::RefreshGit => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshGit)
+            }
+            DesktopAction::RefreshDebugConfigurations => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshDebugConfigurations)
+            }
+            DesktopAction::ToggleDebugBreakpoint {
+                line,
+                condition,
+                hit_condition,
+                log_message,
+            } => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::ToggleDebugBreakpoint {
+                    buffer_id,
+                    line,
+                    condition,
+                    hit_condition,
+                    log_message,
+                }
+            }),
+            DesktopAction::LaunchDebugSession { configuration_id } => self
+                .with_known_debug_configuration(snapshot, configuration_id, |configuration_id| {
+                    CommandDispatchIntent::LaunchDebugSession { configuration_id }
+                }),
+            DesktopAction::DebugStep { session_id, kind } => {
+                self.with_known_debug_session(snapshot, session_id, |session_id| {
+                    CommandDispatchIntent::DebugStep { session_id, kind }
+                })
+            }
+            DesktopAction::DebugRunToCursor {
+                session_id,
+                position,
+            } => self.with_known_debug_session_and_active_buffer(
+                snapshot,
+                session_id,
+                |session_id, buffer_id| CommandDispatchIntent::DebugRunToCursor {
+                    session_id,
+                    buffer_id,
+                    position,
+                },
+            ),
+            DesktopAction::DebugEvaluateSelection {
+                session_id,
+                expression_label,
+            } => self.with_known_debug_session(snapshot, session_id, |session_id| {
+                CommandDispatchIntent::DebugEvaluateSelection {
+                    session_id,
+                    expression_label,
+                }
+            }),
+            DesktopAction::DebugAddWatch {
+                session_id,
+                expression_label,
+            } => self.with_known_debug_session(snapshot, session_id, |session_id| {
+                CommandDispatchIntent::DebugAddWatch {
+                    session_id,
+                    expression_label,
+                }
+            }),
+            DesktopAction::StageGitHunk { hunk_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::StageGitHunk { hunk_id })
+            }
+            DesktopAction::UnstageGitHunk { hunk_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::UnstageGitHunk { hunk_id })
             }
             DesktopAction::ToggleExplorerPath { path } => match normalized_path(path) {
                 Some(path) => {
@@ -749,6 +1156,137 @@ impl DesktopCommandBridge {
                 .with_known_delegated_proposal(snapshot, proposal_id, |proposal_id| {
                     DesktopAppRequest::OpenDelegatedProposalDetails { proposal_id }
                 }),
+            DesktopAction::SendDelegateChat { prompt_label } => {
+                match normalized_instruction(prompt_label) {
+                    Some(prompt_label) => {
+                        DesktopBridgeOutput::Intent(CommandDispatchIntent::SendDelegateChat {
+                            prompt_label,
+                        })
+                    }
+                    None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidInstructionLabel),
+                }
+            }
+            DesktopAction::ReviewDelegateProposalHunk {
+                proposal_id,
+                hunk_id,
+                disposition,
+            } => self.with_known_delegated_proposal_hunk(
+                snapshot,
+                proposal_id,
+                hunk_id,
+                |proposal_id, hunk_id| CommandDispatchIntent::ReviewDelegateProposalHunk {
+                    proposal_id,
+                    hunk_id,
+                    disposition,
+                },
+            ),
+            DesktopAction::RecordDelegateToolPermission {
+                request_id,
+                decision,
+            } => self.with_known_delegated_tool_permission(snapshot, request_id, |request_id| {
+                CommandDispatchIntent::RecordDelegateToolPermission {
+                    request_id,
+                    decision,
+                }
+            }),
+            DesktopAction::InspectLegionWorkflowSession { session_id } => self
+                .with_known_legion_workflow_session(snapshot, session_id, |session_id| {
+                    DesktopAppRequest::InspectLegionWorkflowSession { session_id }
+                }),
+            DesktopAction::OpenLegionWorkflowProposalPreview {
+                session_id,
+                proposal_id,
+            } => self.with_known_legion_workflow_proposal(
+                snapshot,
+                session_id,
+                proposal_id,
+                |session_id, proposal_id| DesktopAppRequest::OpenLegionWorkflowProposalPreview {
+                    session_id,
+                    proposal_id,
+                },
+            ),
+            DesktopAction::OpenLegionWorkflowProposalDetails {
+                session_id,
+                proposal_id,
+            } => self.with_known_legion_workflow_proposal(
+                snapshot,
+                session_id,
+                proposal_id,
+                |session_id, proposal_id| DesktopAppRequest::OpenLegionWorkflowProposalDetails {
+                    session_id,
+                    proposal_id,
+                },
+            ),
+            DesktopAction::RequestLegionWorkflowVerification {
+                session_id,
+                gate_id,
+            } => self.with_known_legion_workflow_verification(
+                snapshot,
+                session_id,
+                gate_id,
+                |session_id, gate_id| DesktopAppRequest::RequestLegionWorkflowVerification {
+                    session_id,
+                    gate_id,
+                },
+            ),
+            DesktopAction::RequestLegionWorkflowSignOff {
+                session_id,
+                sign_off_id,
+            } => self.with_known_legion_workflow_signoff(
+                snapshot,
+                session_id,
+                sign_off_id,
+                |session_id, sign_off_id| DesktopAppRequest::RequestLegionWorkflowSignOff {
+                    session_id,
+                    sign_off_id,
+                },
+            ),
+            DesktopAction::ResolveLegionWorkflowConflict {
+                session_id,
+                conflict_id,
+            } => self.with_known_legion_workflow_conflict(
+                snapshot,
+                session_id,
+                conflict_id,
+                |session_id, conflict_id| DesktopAppRequest::ResolveLegionWorkflowConflict {
+                    session_id,
+                    conflict_id,
+                },
+            ),
+            DesktopAction::RequestLegionWorkflowMergeReadiness { session_id } => self
+                .with_known_legion_workflow_session(snapshot, session_id, |session_id| {
+                    DesktopAppRequest::RequestLegionWorkflowMergeReadiness { session_id }
+                }),
+            DesktopAction::RecordLegionWorkflowToolPermission {
+                session_id,
+                server_id,
+                tool_name,
+                decision,
+            } => self.with_known_legion_workflow_mcp_tool(
+                snapshot,
+                session_id,
+                server_id,
+                tool_name,
+                |session_id, server_id, tool_name| {
+                    CommandDispatchIntent::RecordLegionWorkflowToolPermission {
+                        session_id,
+                        server_id,
+                        tool_name,
+                        decision,
+                    }
+                },
+            ),
+            DesktopAction::TriggerLegionWorkflowKillSwitch {
+                session_id,
+                reason_label,
+            } => {
+                self.with_known_legion_workflow_session_intent(snapshot, session_id, |session_id| {
+                    CommandDispatchIntent::TriggerLegionWorkflowKillSwitch {
+                        session_id,
+                        reason_label,
+                    }
+                })
+            }
             DesktopAction::InsertText { text, at }
             | DesktopAction::ClipboardPaste { text, at }
             | DesktopAction::ImeCommit { text, at } => {
@@ -801,6 +1339,17 @@ impl DesktopCommandBridge {
                 query,
                 limit,
             }),
+            DesktopAction::RunStructuralSearch {
+                scope,
+                pattern,
+                rewrite,
+                limit,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::RunStructuralSearch {
+                scope,
+                pattern,
+                rewrite,
+                limit,
+            }),
             DesktopAction::CancelSearch { query_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelSearch { query_id })
             }
@@ -815,6 +1364,38 @@ impl DesktopCommandBridge {
                     CommandDispatchIntent::RequestCompletion {
                         buffer_id,
                         position,
+                    }
+                })
+            }
+            DesktopAction::RequestAssistInlinePrediction { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::RequestAssistInlinePrediction {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::AcceptCurrentAssistInlinePrediction => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::AcceptAssistInlinePrediction {
+                        buffer_id,
+                        prediction_id: active_assist_prediction_id(snapshot),
+                    }
+                })
+            }
+            DesktopAction::DismissCurrentAssistInlinePrediction => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::DismissAssistInlinePrediction {
+                        buffer_id,
+                        prediction_id: active_assist_prediction_id(snapshot),
+                    }
+                })
+            }
+            DesktopAction::CancelAssistInlinePrediction => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::CancelAssistInlinePrediction {
+                        buffer_id,
+                        prediction_id: active_assist_prediction_id(snapshot),
                     }
                 })
             }
@@ -986,6 +1567,52 @@ impl DesktopCommandBridge {
             DesktopBridgeOutput::Intent(build(proposal_id))
         } else {
             DesktopBridgeOutput::Error(DesktopBridgeError::UnknownProposal { proposal_id })
+        }
+    }
+
+    fn with_known_debug_configuration(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        configuration_id: DebugConfigurationId,
+        build: impl FnOnce(DebugConfigurationId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if debug_configuration_is_known(snapshot, &configuration_id) {
+            DesktopBridgeOutput::Intent(build(configuration_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDebugConfiguration {
+                configuration_id,
+            })
+        }
+    }
+
+    fn with_known_debug_session(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: DebugSessionId,
+        build: impl FnOnce(DebugSessionId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if debug_session_is_known(snapshot, &session_id) {
+            DesktopBridgeOutput::Intent(build(session_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDebugSession { session_id })
+        }
+    }
+
+    fn with_known_debug_session_and_active_buffer(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: DebugSessionId,
+        build: impl FnOnce(DebugSessionId, BufferId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if !debug_session_is_known(snapshot, &session_id) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDebugSession {
+                session_id,
+            });
+        }
+
+        match snapshot.active_buffer_projection.buffer_id {
+            Some(buffer_id) => DesktopBridgeOutput::Intent(build(session_id, buffer_id)),
+            None => DesktopBridgeOutput::Error(DesktopBridgeError::MissingActiveBuffer),
         }
     }
 
@@ -1180,6 +1807,192 @@ impl DesktopCommandBridge {
             DesktopBridgeOutput::Error(DesktopBridgeError::UnknownProposal { proposal_id })
         }
     }
+
+    fn with_known_delegated_proposal_hunk(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        proposal_id: ProposalId,
+        hunk_id: String,
+        build: impl FnOnce(ProposalId, String) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if hunk_id.trim().is_empty() {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidDelegatedProposalHunk);
+        }
+        if delegated_proposal_hunk_is_known(snapshot, proposal_id, &hunk_id) {
+            DesktopBridgeOutput::Intent(build(proposal_id, hunk_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDelegatedProposalHunk {
+                proposal_id,
+                hunk_id,
+            })
+        }
+    }
+
+    fn with_known_delegated_tool_permission(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        request_id: String,
+        build: impl FnOnce(String) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        let request_id = request_id.trim().to_string();
+        if request_id.is_empty() {
+            return DesktopBridgeOutput::Error(
+                DesktopBridgeError::InvalidDelegatedToolPermissionRequest,
+            );
+        }
+        if delegated_tool_permission_is_known(snapshot, &request_id) {
+            DesktopBridgeOutput::Intent(build(request_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDelegatedToolPermissionRequest {
+                request_id,
+            })
+        }
+    }
+
+    fn with_known_legion_workflow_session(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: LegionWorkflowSessionId,
+        build: impl FnOnce(LegionWorkflowSessionId) -> DesktopAppRequest,
+    ) -> DesktopBridgeOutput {
+        if session_id.0.trim().is_empty() {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidLegionWorkflowSession);
+        }
+        if legion_workflow_session_is_known(snapshot, &session_id) {
+            DesktopBridgeOutput::AppRequest(build(session_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowSession {
+                session_id,
+            })
+        }
+    }
+
+    fn with_known_legion_workflow_session_intent(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: LegionWorkflowSessionId,
+        build: impl FnOnce(LegionWorkflowSessionId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if session_id.0.trim().is_empty() {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::InvalidLegionWorkflowSession);
+        }
+        if legion_workflow_session_is_known(snapshot, &session_id) {
+            DesktopBridgeOutput::Intent(build(session_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowSession {
+                session_id,
+            })
+        }
+    }
+
+    fn with_known_legion_workflow_mcp_tool(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: LegionWorkflowSessionId,
+        server_id: devil_protocol::McpServerId,
+        tool_name: devil_protocol::McpToolName,
+        build: impl FnOnce(
+            LegionWorkflowSessionId,
+            devil_protocol::McpServerId,
+            devil_protocol::McpToolName,
+        ) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        if !legion_workflow_session_is_known(snapshot, &session_id) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowSession {
+                session_id,
+            });
+        }
+        if !legion_workflow_mcp_server_is_known(snapshot, &server_id) {
+            return DesktopBridgeOutput::Error(
+                DesktopBridgeError::UnknownLegionWorkflowMcpServer { server_id },
+            );
+        }
+        if !legion_workflow_mcp_tool_is_known(snapshot, &server_id, &tool_name) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowMcpTool {
+                server_id,
+                tool_name,
+            });
+        }
+        DesktopBridgeOutput::Intent(build(session_id, server_id, tool_name))
+    }
+
+    fn with_known_legion_workflow_proposal(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: LegionWorkflowSessionId,
+        proposal_id: ProposalId,
+        build: impl FnOnce(LegionWorkflowSessionId, ProposalId) -> DesktopAppRequest,
+    ) -> DesktopBridgeOutput {
+        if !legion_workflow_session_is_known(snapshot, &session_id) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowSession {
+                session_id,
+            });
+        }
+        if !legion_workflow_proposal_is_known(snapshot, &session_id, proposal_id) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowProposal {
+                session_id,
+                proposal_id,
+            });
+        }
+        if proposal_is_known(snapshot, proposal_id) {
+            DesktopBridgeOutput::AppRequest(build(session_id, proposal_id))
+        } else {
+            DesktopBridgeOutput::Error(DesktopBridgeError::UnknownProposal { proposal_id })
+        }
+    }
+
+    fn with_known_legion_workflow_verification(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: LegionWorkflowSessionId,
+        gate_id: LegionWorkflowVerificationGateId,
+        build: impl FnOnce(
+            LegionWorkflowSessionId,
+            LegionWorkflowVerificationGateId,
+        ) -> DesktopAppRequest,
+    ) -> DesktopBridgeOutput {
+        if !legion_workflow_metadata_label_is_known(snapshot, &session_id, &gate_id.0) {
+            return DesktopBridgeOutput::Error(
+                DesktopBridgeError::UnknownLegionWorkflowVerification {
+                    session_id,
+                    gate_id,
+                },
+            );
+        }
+        DesktopBridgeOutput::AppRequest(build(session_id, gate_id))
+    }
+
+    fn with_known_legion_workflow_signoff(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: LegionWorkflowSessionId,
+        sign_off_id: LegionWorkflowSignOffId,
+        build: impl FnOnce(LegionWorkflowSessionId, LegionWorkflowSignOffId) -> DesktopAppRequest,
+    ) -> DesktopBridgeOutput {
+        if !legion_workflow_metadata_label_is_known(snapshot, &session_id, &sign_off_id.0) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowSignOff {
+                session_id,
+                sign_off_id,
+            });
+        }
+        DesktopBridgeOutput::AppRequest(build(session_id, sign_off_id))
+    }
+
+    fn with_known_legion_workflow_conflict(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        session_id: LegionWorkflowSessionId,
+        conflict_id: LegionWorkflowConflictId,
+        build: impl FnOnce(LegionWorkflowSessionId, LegionWorkflowConflictId) -> DesktopAppRequest,
+    ) -> DesktopBridgeOutput {
+        if !legion_workflow_metadata_label_is_known(snapshot, &session_id, &conflict_id.0) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownLegionWorkflowConflict {
+                session_id,
+                conflict_id,
+            });
+        }
+        DesktopBridgeOutput::AppRequest(build(session_id, conflict_id))
+    }
 }
 
 fn normalized_path(path: String) -> Option<String> {
@@ -1254,6 +2067,56 @@ fn proposal_is_known(snapshot: &ShellProjectionSnapshot, proposal_id: ProposalId
         .rows
         .iter()
         .any(|row| row.proposal_id == proposal_id)
+}
+
+fn debug_configuration_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    configuration_id: &DebugConfigurationId,
+) -> bool {
+    !configuration_id.0.trim().is_empty()
+        && snapshot
+            .debug_projection
+            .configurations
+            .iter()
+            .any(|configuration| &configuration.configuration_id == configuration_id)
+}
+
+fn debug_session_is_known(snapshot: &ShellProjectionSnapshot, session_id: &DebugSessionId) -> bool {
+    if session_id.0.trim().is_empty() {
+        return false;
+    }
+
+    snapshot.debug_projection.active_session_id.as_ref() == Some(session_id)
+        || snapshot
+            .debug_projection
+            .breakpoints
+            .iter()
+            .any(|breakpoint| breakpoint.session_id.as_ref() == Some(session_id))
+        || snapshot
+            .debug_projection
+            .stack_frames
+            .iter()
+            .any(|frame| &frame.session_id == session_id)
+        || snapshot
+            .debug_projection
+            .variables
+            .iter()
+            .any(|variable| &variable.session_id == session_id)
+        || snapshot
+            .debug_projection
+            .watches
+            .iter()
+            .any(|watch| &watch.session_id == session_id)
+        || snapshot
+            .debug_projection
+            .console
+            .iter()
+            .any(|entry| &entry.session_id == session_id)
+        || snapshot
+            .debug_projection
+            .inline_values
+            .iter()
+            .any(|inline_value| &inline_value.session_id == session_id)
 }
 
 fn assisted_ai_projection_references_run(
@@ -1345,8 +2208,119 @@ fn delegated_proposal_preview_is_known(
             .any(|step| step.proposal_id == Some(proposal_id))
 }
 
+fn delegated_proposal_hunk_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    proposal_id: ProposalId,
+    hunk_id: &str,
+) -> bool {
+    snapshot
+        .delegated_task_projection
+        .proposal_reviews
+        .iter()
+        .any(|review| {
+            review.proposal_id == proposal_id
+                && review.hunks.iter().any(|hunk| hunk.hunk_id == hunk_id)
+        })
+}
+
+fn delegated_tool_permission_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    request_id: &str,
+) -> bool {
+    snapshot
+        .delegated_task_projection
+        .tool_permission_requests
+        .iter()
+        .any(|request| request.request_id == request_id)
+}
+
+fn legion_workflow_session_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: &LegionWorkflowSessionId,
+) -> bool {
+    !session_id.0.trim().is_empty()
+        && snapshot
+            .legion_workflow_projection
+            .rows
+            .iter()
+            .any(|row| &row.session_id == session_id)
+}
+
+fn legion_workflow_proposal_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: &LegionWorkflowSessionId,
+    proposal_id: ProposalId,
+) -> bool {
+    snapshot
+        .legion_workflow_projection
+        .rows
+        .iter()
+        .any(|row| &row.session_id == session_id && row.linked_proposals.contains(&proposal_id))
+}
+
+fn legion_workflow_metadata_label_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: &LegionWorkflowSessionId,
+    metadata_id: &str,
+) -> bool {
+    if metadata_id.trim().is_empty() {
+        return false;
+    }
+    snapshot
+        .legion_workflow_projection
+        .rows
+        .iter()
+        .find(|row| &row.session_id == session_id)
+        .is_some_and(|row| {
+            row.display_safe_labels
+                .iter()
+                .any(|label| label == metadata_id)
+                || row
+                    .merge_readiness
+                    .labels
+                    .iter()
+                    .any(|label| label == metadata_id)
+        })
+}
+
+fn legion_workflow_mcp_server_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    server_id: &devil_protocol::McpServerId,
+) -> bool {
+    !server_id.0.trim().is_empty()
+        && snapshot
+            .legion_workflow_projection
+            .mcp_registries
+            .iter()
+            .any(|registry| registry.server.server_id == *server_id)
+}
+
+fn legion_workflow_mcp_tool_is_known(
+    snapshot: &ShellProjectionSnapshot,
+    server_id: &devil_protocol::McpServerId,
+    tool_name: &devil_protocol::McpToolName,
+) -> bool {
+    !tool_name.0.trim().is_empty()
+        && snapshot
+            .legion_workflow_projection
+            .mcp_registries
+            .iter()
+            .any(|registry| {
+                registry.server.server_id == *server_id
+                    && registry.tools.iter().any(|tool| tool.name == *tool_name)
+            })
+}
+
 fn projected_assisted_run_id(snapshot: &ShellProjectionSnapshot) -> Option<&str> {
     let projection_id = snapshot.assisted_ai_projection.projection_id.as_str();
     let run_index = projection_id.rfind("phase4-run-")?;
     Some(&projection_id[run_index..])
+}
+
+fn active_assist_prediction_id(snapshot: &ShellProjectionSnapshot) -> Option<String> {
+    snapshot
+        .assist_inline_prediction_projection
+        .active_prediction
+        .as_ref()
+        .map(|prediction| prediction.prediction_id.clone())
 }

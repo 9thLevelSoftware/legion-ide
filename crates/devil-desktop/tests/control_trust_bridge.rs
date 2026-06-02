@@ -12,7 +12,7 @@ use devil_protocol::{
     AgentRunId, ProposalCancellationReason, ProposalId, ProposalLifecycleState,
     ProposalRejectionReason, ProposalRollbackReason, WorkspaceTrustState,
 };
-use devil_ui::{CommandDispatchIntent, Shell};
+use devil_ui::{CommandDispatchIntent, DockMode, Shell};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -60,6 +60,16 @@ fn runtime_with_file(file_name: &str) -> (TempWorkspace, DesktopRuntime) {
 }
 
 fn start_proposal(runtime: &mut DesktopRuntime) -> (ProposalId, AgentRunId) {
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::SetProductMode {
+                mode: DockMode::Assist
+            })
+            .expect("switch to assist"),
+        DesktopWorkflowOutcome::ProductModeChanged {
+            mode: DockMode::Assist
+        }
+    );
     let outcome = runtime
         .handle_action(DesktopAction::StartAiProposal {
             instruction_label: "add bridge guard".to_string(),

@@ -22,6 +22,11 @@ const DEFAULT_GUI_PHASE7_EVIDENCE_PATH: &str =
     "plans/evidence/gui-productization/phase-7-local-ide-beta.md";
 const DEFAULT_GUI_PHASE8_EVIDENCE_PATH: &str =
     "plans/evidence/gui-productization/phase-8-advanced-platform-gui-ga.md";
+const DEFAULT_PHASE13_EVIDENCE_PATH: &str =
+    "plans/evidence/gui-productization/phase-13-legion-workflow-orchestration.md";
+const DEFAULT_PHASE13_FINAL_GATES_PATH: &str =
+    "plans/evidence/gui-productization/phase-13-final-gates.md";
+const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/phase-13-runbook.md";
 const DEFAULT_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/phase-6/collaboration-architecture-map.md";
 const DEFAULT_PHASE7_EVIDENCE_PATH: &str = "plans/evidence/phase-7/remote-architecture-map.md";
@@ -38,6 +43,7 @@ const PHASE7_STATUS_HEADING: &str = "## Acceptance Status";
 const PHASE7_FINAL_CHECKLIST_HEADING: &str = "## Final Validation Checklist";
 const PHASE8_STATUS_HEADING: &str = "## Acceptance Status";
 const PHASE8_FINAL_CHECKLIST_HEADING: &str = "## Final Validation Checklist";
+const PHASE13_FINAL_CHECKLIST_HEADING: &str = "## Final Validation Checklist";
 const PHASE3_PARTIAL_RUNTIME_MARKER: &str = "Runtime surface status: Partial `devil-index` indexing behavior is active; acceptance evidence is incomplete.";
 const PHASE3_NOT_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Not accepted.";
 const PHASE3_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Accepted.";
@@ -53,11 +59,35 @@ const PHASE7_NOT_ACCEPTED_MARKER: &str = "Phase 7 acceptance: Not accepted.";
 const PHASE7_ACCEPTED_MARKER: &str = "Phase 7 acceptance: Accepted.";
 const PHASE8_NOT_ACCEPTED_MARKER: &str = "Phase 8 acceptance: Not accepted.";
 const PHASE8_ACCEPTED_MARKER: &str = "Phase 8 acceptance: Accepted.";
+const PHASE13_ACCEPTED_MARKER: &str = "Phase 13 acceptance: Accepted";
 const PHASE8_ACCEPTED_REQUIRED_MARKERS: &[&str] = &[
     "Runtime surface status: Production GA runtime surfaces are active behind accepted policy gates.",
     "Platform matrix: Linux, Windows, and macOS validated.",
     "Release readiness: Security, privacy, operations, rollback, canary, incident, and supply-chain signoff complete.",
     "Final gate outputs archived from current commands.",
+];
+const PHASE13_REQUIRED_EVIDENCE_MARKERS: &[&str] = &[
+    PHASE13_ACCEPTED_MARKER,
+    "Legion workflow orchestration: approval-gated",
+    "Autonomous merge: unsupported until approval",
+    "Provider-backed workers: routed through assisted-AI consent",
+    "Final gate outputs archived from current commands",
+];
+const PHASE13_REQUIRED_RUNBOOK_MARKERS: &[&str] = &[
+    "Autonomous merge: unsupported until approval",
+    "Local workers: isolated delegated-task sandbox",
+    "Provider-backed workers: routed through assisted-AI consent",
+    "Merge readiness: proposal-mediated approval gate",
+    "Raw payload retention: disabled by default",
+];
+const PHASE13_STALE_ACCEPTANCE_MARKERS: &[&str] = &[
+    "TODO",
+    "Not accepted",
+    "not accepted",
+    "acceptance pending",
+    "final gates pending",
+    "pending final gates",
+    "still pending",
 ];
 const PHASE8_PLATFORM_MATRIX_ARTIFACT: &str = "platform-matrix-evidence.txt";
 const PHASE8_RELEASE_READINESS_ARTIFACT: &str = "release-readiness-review.md";
@@ -292,6 +322,26 @@ const GUI_PHASE8_STALE_UNSUPPORTED_MARKERS: &[&str] = &[
     "Collaboration GUI: unsupported",
     "Plugin management GUI: unsupported",
     "Cross-platform parity: unsupported",
+];
+const PHASE13_REQUIRED_ARTIFACTS: &[&str] = &[
+    "plans/adrs/ADR-0031-legion-workflow-orchestration.md",
+    "plans/evidence/gui-productization/phase-13-governance.md",
+    "plans/evidence/gui-productization/phase-13-final-gates.md",
+    "plans/evidence/gui-productization/phase-13-runbook.md",
+    ".planning/phases/13-legion-workflow-orchestration/13-01-RESULT.md",
+    ".planning/phases/13-legion-workflow-orchestration/13-02-RESULT.md",
+    ".planning/phases/13-legion-workflow-orchestration/13-03-RESULT.md",
+    ".planning/phases/13-legion-workflow-orchestration/13-04-RESULT.md",
+    ".planning/phases/13-legion-workflow-orchestration/13-05-RESULT.md",
+    ".planning/phases/13-legion-workflow-orchestration/13-06-RESULT.md",
+    ".planning/phases/13-legion-workflow-orchestration/13-07-RESULT.md",
+];
+const PHASE13_REQUIRED_COMMAND_MARKERS: &[&str] = &[
+    "cargo run -p xtask -- check-deps",
+    "cargo fmt --all --check",
+    "cargo check --workspace --all-targets",
+    "cargo test --workspace --all-targets",
+    "cargo clippy --workspace --all-targets -- -D warnings",
 ];
 const PHASE6_REQUIRED_ARTIFACTS: &[&str] = &[
     "collaboration-architecture-map.md",
@@ -537,6 +587,34 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
             workspace_root.join(artifact).is_file()
         });
 
+    let phase13_evidence_path = workspace_root.join(DEFAULT_PHASE13_EVIDENCE_PATH);
+    let phase13_evidence = fs::read_to_string(&phase13_evidence_path).map_err(|err| {
+        format!(
+            "unable to read Phase 13 evidence at `{}`: {err}",
+            phase13_evidence_path.display()
+        )
+    })?;
+    let phase13_final_gates_path = workspace_root.join(DEFAULT_PHASE13_FINAL_GATES_PATH);
+    let phase13_final_gates = fs::read_to_string(&phase13_final_gates_path).map_err(|err| {
+        format!(
+            "unable to read Phase 13 final gates at `{}`: {err}",
+            phase13_final_gates_path.display()
+        )
+    })?;
+    let phase13_runbook_path = workspace_root.join(DEFAULT_PHASE13_RUNBOOK_PATH);
+    let phase13_runbook = fs::read_to_string(&phase13_runbook_path).map_err(|err| {
+        format!(
+            "unable to read Phase 13 runbook at `{}`: {err}",
+            phase13_runbook_path.display()
+        )
+    })?;
+    let phase13_violations = validate_phase13_acceptance_evidence(
+        &phase13_evidence,
+        &phase13_final_gates,
+        &phase13_runbook,
+        |artifact| workspace_root.join(artifact).is_file(),
+    );
+
     let phase6_evidence_path = workspace_root.join(DEFAULT_PHASE6_EVIDENCE_PATH);
     let phase6_evidence = fs::read_to_string(&phase6_evidence_path).map_err(|err| {
         format!(
@@ -591,6 +669,7 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     all.extend(gui_phase6_violations);
     all.extend(gui_phase7_violations);
     all.extend(gui_phase8_violations);
+    all.extend(phase13_violations);
     all.extend(phase6_violations);
     all.extend(phase7_violations);
     all.extend(phase8_violations);
@@ -1470,6 +1549,94 @@ where
     issues
 }
 
+fn validate_phase13_acceptance_evidence<F>(
+    evidence: &str,
+    final_gates: &str,
+    runbook: &str,
+    artifact_exists: F,
+) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut issues = Vec::new();
+
+    for marker in PHASE13_REQUIRED_EVIDENCE_MARKERS {
+        if !evidence.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE13_EVIDENCE_PATH}` is missing required marker `{marker}`"
+            ));
+        }
+    }
+
+    if let Some(checklist) = markdown_section(evidence, PHASE13_FINAL_CHECKLIST_HEADING) {
+        if checklist
+            .lines()
+            .any(|line| line.trim_start().starts_with("- [ ]"))
+        {
+            issues.push(format!(
+                "`{DEFAULT_PHASE13_EVIDENCE_PATH}` claims acceptance while final validation checklist items remain unchecked"
+            ));
+        }
+    } else {
+        issues.push(format!(
+            "`{DEFAULT_PHASE13_EVIDENCE_PATH}` must include `{PHASE13_FINAL_CHECKLIST_HEADING}`"
+        ));
+    }
+
+    for artifact in PHASE13_REQUIRED_ARTIFACTS {
+        if !evidence.contains(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE13_EVIDENCE_PATH}` is missing required artifact listing `{artifact}`"
+            ));
+        }
+
+        if !artifact_exists(artifact) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE13_EVIDENCE_PATH}` references missing required artifact `{artifact}`"
+            ));
+        }
+    }
+
+    for command in PHASE13_REQUIRED_COMMAND_MARKERS {
+        if !evidence.contains(command) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE13_EVIDENCE_PATH}` is missing required command `{command}`"
+            ));
+        }
+
+        if !final_gates.contains(command) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE13_FINAL_GATES_PATH}` is missing required command `{command}`"
+            ));
+        }
+    }
+
+    if !final_gates.contains("Final gate outputs archived from current commands") {
+        issues.push(format!(
+            "`{DEFAULT_PHASE13_FINAL_GATES_PATH}` must state `Final gate outputs archived from current commands`"
+        ));
+    }
+
+    for marker in PHASE13_REQUIRED_RUNBOOK_MARKERS {
+        if !runbook.contains(marker) {
+            issues.push(format!(
+                "`{DEFAULT_PHASE13_RUNBOOK_PATH}` is missing required runbook marker `{marker}`"
+            ));
+        }
+    }
+
+    for marker in PHASE13_STALE_ACCEPTANCE_MARKERS {
+        if evidence.contains(marker) || final_gates.contains(marker) {
+            issues.push(format!(
+                "Phase 13 accepted evidence contains stale marker `{marker}`"
+            ));
+        }
+    }
+
+    issues.sort();
+    issues
+}
+
 fn validate_phase6_acceptance_governance<F>(evidence: &str, artifact_exists: F) -> Vec<String>
 where
     F: Fn(&str) -> bool,
@@ -2322,6 +2489,68 @@ mod tests {
         )
     }
 
+    fn accepted_phase13_evidence(checklist_checked: bool) -> String {
+        let artifacts = PHASE13_REQUIRED_ARTIFACTS
+            .iter()
+            .map(|artifact| format!("- `{artifact}`\n"))
+            .collect::<String>();
+        let commands = PHASE13_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`\n"))
+            .collect::<String>();
+        let markers = PHASE13_REQUIRED_EVIDENCE_MARKERS
+            .iter()
+            .map(|marker| format!("- {marker}\n"))
+            .collect::<String>();
+        let checklist_marker = if checklist_checked { "x" } else { " " };
+
+        format!(
+            r#"# Phase 13 Legion Workflow Orchestration evidence
+
+## Acceptance Status
+
+- {PHASE13_ACCEPTED_MARKER}
+
+## Required Artifacts
+
+{artifacts}
+## Required Commands
+
+{commands}
+## Required Markers
+
+{markers}
+## Final Validation Checklist
+
+- [{checklist_marker}] Required validation is complete.
+"#
+        )
+    }
+
+    fn accepted_phase13_final_gates() -> String {
+        let commands = PHASE13_REQUIRED_COMMAND_MARKERS
+            .iter()
+            .map(|command| format!("- `{command}`: passed\n"))
+            .collect::<String>();
+
+        format!(
+            r#"# Phase 13 final gates
+
+Final gate outputs archived from current commands
+
+## Required Commands
+
+{commands}"#
+        )
+    }
+
+    fn accepted_phase13_runbook() -> String {
+        PHASE13_REQUIRED_RUNBOOK_MARKERS
+            .iter()
+            .map(|marker| format!("- {marker}\n"))
+            .collect::<String>()
+    }
+
     fn accepted_phase6_evidence(scaffold_disclaimer: bool, checklist_checked: bool) -> String {
         let artifacts = PHASE6_REQUIRED_ARTIFACTS
             .iter()
@@ -2987,6 +3216,90 @@ Final gate outputs archived from current commands.
         let issues = validate_gui_phase8_acceptance_governance(&evidence, |_| true);
 
         assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase13_acceptance_claim_requires_artifacts_markers_commands_and_runbook() {
+        let evidence = accepted_phase13_evidence(false)
+            .replace("- Legion workflow orchestration: approval-gated\n", "")
+            .replace("- `cargo test --workspace --all-targets`\n", "");
+        let final_gates = accepted_phase13_final_gates()
+            .replace("- `cargo check --workspace --all-targets`: passed\n", "");
+        let runbook = accepted_phase13_runbook()
+            .replace("- Autonomous merge: unsupported until approval\n", "");
+        let issues =
+            validate_phase13_acceptance_evidence(&evidence, &final_gates, &runbook, |_| false);
+
+        assert!(issues.iter().any(|issue| issue.contains(
+            "claims acceptance while final validation checklist items remain unchecked"
+        )));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required artifact `.planning/phases/13-legion-workflow-orchestration/13-01-RESULT.md`")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required marker `Legion workflow orchestration: approval-gated`")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required command `cargo test --workspace --all-targets`")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("`plans/evidence/gui-productization/phase-13-final-gates.md` is missing required command `cargo check --workspace --all-targets`")
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.contains("required runbook marker `Autonomous merge: unsupported until approval`")
+        }));
+    }
+
+    #[test]
+    fn phase13_acceptance_claim_rejects_stale_pending_markers() {
+        let mut evidence = accepted_phase13_evidence(true);
+        evidence.push_str("\nacceptance pending final gates\n");
+
+        let issues = validate_phase13_acceptance_evidence(
+            &evidence,
+            &accepted_phase13_final_gates(),
+            &accepted_phase13_runbook(),
+            |_| true,
+        );
+
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("stale marker `acceptance pending`"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("stale marker `pending final gates`"))
+        );
+    }
+
+    #[test]
+    fn phase13_acceptance_claim_passes_with_required_evidence() {
+        let evidence = accepted_phase13_evidence(true);
+        let issues = validate_phase13_acceptance_evidence(
+            &evidence,
+            &accepted_phase13_final_gates(),
+            &accepted_phase13_runbook(),
+            |_| true,
+        );
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+    }
+
+    #[test]
+    fn phase13_evidence_declares_accepted_final_gate_artifacts() {
+        let source = read_workspace_file(DEFAULT_PHASE13_EVIDENCE_PATH);
+        let final_gates = read_workspace_file(DEFAULT_PHASE13_FINAL_GATES_PATH);
+        let runbook = read_workspace_file(DEFAULT_PHASE13_RUNBOOK_PATH);
+        let root = workspace_root();
+        let issues =
+            validate_phase13_acceptance_evidence(&source, &final_gates, &runbook, |artifact| {
+                root.join(artifact).is_file()
+            });
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+        assert!(source.contains(PHASE13_ACCEPTED_MARKER));
     }
 
     #[test]

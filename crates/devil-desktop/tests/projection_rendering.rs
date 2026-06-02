@@ -23,7 +23,8 @@ use devil_ui::ui::{
     EditorViewportStateProjection,
 };
 use devil_ui::{
-    ActiveBufferProjection, ExplorerNodeProjection, ExplorerProjection,
+    ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
+    AssistInlinePredictionStatusProjection, DockMode, ExplorerNodeProjection, ExplorerProjection,
     ExplorerSelectionProjection, Shell, StatusMessageProjection, StatusSeverity,
 };
 
@@ -140,6 +141,7 @@ fn context_item() -> ContextManifestItem {
 
 fn populated_snapshot() -> devil_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Foundation Mode").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
     snapshot.explorer_projection = ExplorerProjection {
         nodes: vec![
             ExplorerNodeProjection {
@@ -390,6 +392,54 @@ fn degraded_snapshot() -> devil_ui::ShellProjectionSnapshot {
     snapshot
 }
 
+fn assist_inline_prediction_snapshot() -> devil_ui::ShellProjectionSnapshot {
+    let mut snapshot = Shell::empty("Assist").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    snapshot.active_buffer_projection = ActiveBufferProjection {
+        workspace_id: Some(WorkspaceId(1)),
+        buffer_id: Some(BufferId(3)),
+        file_id: Some(FileId(2)),
+        file_path: Some(CanonicalPath("src/lib.rs".to_string())),
+        viewport: None,
+        degraded: false,
+        small_buffer_preview: Some("let future = call();".to_string()),
+        dirty: false,
+    };
+    snapshot.assist_inline_prediction_projection = AssistInlinePredictionProjection {
+        active_prediction: Some(AssistInlinePredictionRowProjection {
+            prediction_id: "assist:prediction:1".to_string(),
+            workspace_id: Some(WorkspaceId(1)),
+            buffer_id: Some(BufferId(3)),
+            file_id: Some(FileId(2)),
+            provider_label: "Local fixture".to_string(),
+            status: AssistInlinePredictionStatusProjection::Ready,
+            status_label: "ready".to_string(),
+            latency_ms: Some(38),
+            requested_at: TimestampMillis(100),
+            completed_at: Some(TimestampMillis(138)),
+            snapshot_id: Some(SnapshotId(5)),
+            buffer_version: Some(BufferVersion(12)),
+            file_fingerprint: Some(FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: "fingerprint-a".to_string(),
+            }),
+            stale: true,
+            stale_reason_label: Some("buffer advanced after prediction".to_string()),
+            ghost_text_label: ".await".to_string(),
+            replacement_preview_label: Some("future.await".to_string()),
+            apply_range: range(10, 10),
+            apply_range_label: "0:10..0:10".to_string(),
+            diagnostics: vec!["metadata-only display label".to_string()],
+        }),
+        rows: Vec::new(),
+        request_in_flight: false,
+        stale_prediction_count: 1,
+        generated_at: TimestampMillis(150),
+        schema_version: 1,
+    };
+    snapshot
+}
+
 #[test]
 fn projection_rendering_populates_required_phase2_surfaces() {
     let model = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
@@ -508,13 +558,46 @@ fn projection_rendering_populates_required_phase2_surfaces() {
 }
 
 #[test]
+fn projection_rendering_surfaces_assist_inline_prediction_rows() {
+    let model = DesktopProjectionViewModel::from_snapshot(&assist_inline_prediction_snapshot());
+
+    assert!(
+        model
+            .product_mode_rows
+            .iter()
+            .any(|row| { row.contains("active=Assist app-owned projection") })
+    );
+    assert!(model.main_canvas_rows.iter().any(|row| {
+        row.contains("ghost prediction")
+            && row.contains("provider=Local fixture")
+            && row.contains("status=Ready")
+            && row.contains("range=0:10..0:10")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("inline prediction assist:prediction:1")
+            && row.contains("provider=Local fixture")
+            && row.contains("latency=38ms")
+            && row.contains("stale=true")
+            && row.contains("fingerprint=sha256:fingerprint-a")
+            && row.contains("ghost=.await")
+            && row.contains("replacement=future.await")
+    }));
+    assert!(model.bottom_tab_rows.iter().any(|row| {
+        row.contains("mode=Assist")
+            && row.contains("id=sugg")
+            && row.contains("label=AI Suggestions")
+            && row.contains("count=1")
+    }));
+}
+
+#[test]
 fn projection_rendering_models_read_only_product_mode_shell() {
     let populated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
     assert!(
         populated
             .product_mode_rows
             .iter()
-            .any(|row| row.contains("active=Delegates read-only projection"))
+            .any(|row| row.contains("active=Delegates app-owned projection"))
     );
     assert!(populated.product_mode_rows.iter().any(|row| {
         row.contains("approval-gated") && row.contains("direct workspace apply unsupported")
@@ -532,7 +615,7 @@ fn projection_rendering_models_read_only_product_mode_shell() {
         empty
             .product_mode_rows
             .iter()
-            .any(|row| row.contains("active=Manual read-only projection"))
+            .any(|row| row.contains("active=Manual app-owned projection"))
     );
     assert!(
         empty
@@ -548,6 +631,133 @@ fn projection_rendering_models_read_only_product_mode_shell() {
     assert!(empty.manual_control_rows.iter().any(|row| {
         row.contains("save_all proposal-mediated") && row.contains("no direct apply")
     }));
+}
+
+#[test]
+fn projection_rendering_models_wireframe_chrome_contract() {
+    let manual =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
+    assert!(manual.autonomy_scale_rows.iter().any(|row| {
+        row.contains("label=Manual") && row.contains("active=true") && row.contains("key=M")
+    }));
+    assert!(manual.mode_confirmation_rows.iter().any(|row| {
+        row.contains("target=Delegate")
+            && row.contains("required=true")
+            && row.contains("require_approval=true")
+            && row.contains("allow_tests=true")
+            && row.contains("allow_terminal=false")
+            && row.contains("allow_dependency_install=false")
+            && row.contains("protected=[.env,secrets/,*.pem]")
+    }));
+    assert!(manual.mode_confirmation_rows.iter().any(|row| {
+        row.contains("target=Automate")
+            && row.contains("required=true")
+            && row.contains("allow_dependency_install=true")
+    }));
+    assert!(manual.command_palette_rows.iter().any(|row| {
+        row.contains("label=Switch to Delegate")
+            && row.contains("requires_ai=true")
+            && row.contains("requires_confirmation=true")
+            && row.contains("visible=false")
+    }));
+    assert!(manual.bottom_tab_rows.iter().any(|row| {
+        row.contains("mode=Manual")
+            && row.contains("id=term")
+            && row.contains("label=Terminal")
+            && row.contains("active=true")
+    }));
+    assert!(manual.bottom_tab_rows.iter().any(|row| {
+        row.contains("mode=Manual") && row.contains("id=test") && row.contains("label=Tests")
+    }));
+
+    let mut assisted = Shell::empty("Assist").projection_snapshot();
+    assisted.product_mode = DockMode::Assist;
+    assisted.assisted_ai_projection.request_count = 1;
+    let assisted_model = DesktopProjectionViewModel::from_snapshot(&assisted);
+    assert!(assisted_model.autonomy_scale_rows.iter().any(|row| {
+        row.contains("label=Assist") && row.contains("active=true") && row.contains("key=A")
+    }));
+    assert!(assisted_model.bottom_tab_rows.iter().any(|row| {
+        row.contains("mode=Assist")
+            && row.contains("id=sugg")
+            && row.contains("label=AI Suggestions")
+            && row.contains("count=1")
+    }));
+
+    let delegated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
+    assert!(delegated.autonomy_scale_rows.iter().any(|row| {
+        row.contains("label=Delegate")
+            && row.contains("active=true")
+            && row.contains("confirm=required")
+    }));
+    assert!(delegated.command_palette_rows.iter().any(|row| {
+        row.contains("group=Agents")
+            && row.contains("Delegate Team")
+            && row.contains("visible=true")
+    }));
+    assert!(delegated.bottom_tab_rows.iter().any(|row| {
+        row.contains("mode=Delegates")
+            && row.contains("id=test")
+            && row.contains("label=Test Runner")
+            && row.contains("active=true")
+    }));
+}
+
+#[test]
+fn projection_rendering_uses_mode_filtered_dock_registry() {
+    let empty =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
+    assert!(
+        empty
+            .dock_rows
+            .iter()
+            .any(|row| row.contains("mode=Manual"))
+    );
+    assert!(
+        empty
+            .dock_panel_rows
+            .iter()
+            .all(|row| row.contains("requires_ai=false")),
+        "manual dock rows must not include AI-backed panels: {:?}",
+        empty.dock_panel_rows
+    );
+    assert!(
+        empty
+            .dock_panel_rows
+            .iter()
+            .any(|row| row.contains("id=project_explorer"))
+    );
+
+    let delegated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
+    assert!(
+        delegated
+            .dock_rows
+            .iter()
+            .any(|row| row.contains("mode=Delegate"))
+    );
+    assert!(
+        delegated
+            .dock_panel_rows
+            .iter()
+            .any(|row| row.contains("id=delegation") && row.contains("requires_ai=true"))
+    );
+
+    let mut assisted = Shell::empty("Assist").projection_snapshot();
+    assisted.product_mode = DockMode::Assist;
+    assisted.assisted_ai_projection.request_count = 1;
+    let assisted_model = DesktopProjectionViewModel::from_snapshot(&assisted);
+    assert!(
+        assisted_model
+            .product_mode_rows
+            .iter()
+            .any(|row| row.contains("active=Assist app-owned projection"))
+    );
+    assert!(
+        assisted_model
+            .dock_panel_rows
+            .iter()
+            .any(|row| row.contains("id=assistant") && row.contains("requires_ai=true"))
+    );
 }
 
 #[test]
@@ -667,6 +877,7 @@ fn projection_rendering_marks_expanded_and_collapsed_explorer_rows() {
         &DesktopProjectionViewState {
             expanded_explorer_paths: expanded,
             selected_explorer_file: Some(FileId(8)),
+            ..DesktopProjectionViewState::default()
         },
     );
     assert!(

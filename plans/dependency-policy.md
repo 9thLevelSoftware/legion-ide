@@ -165,6 +165,8 @@ GUI Phase 7 activates only local-beta evidence, deterministic smoke workflows, o
 
 GUI Phase 8 activates only advanced GUI GA productization evidence for plugin management, collaboration, remote workspace, delegated task command-center, and GA operations workflows through existing app/protocol authority. It is distinct from the accepted legacy Phase 8 runtime substrate evidence under `plans/evidence/phase-8/` and does not reopen or replace that acceptance record. GUI Phase 8 advanced GUI GA work does not authorize `devil-ui` or `devil-desktop` ownership of plugin runtime authority, collaboration runtime authority, remote runtime authority, terminal authority, provider routing, storage authority, security policy, raw-source diagnostics, autonomous apply, or direct mutation outside proposal-mediated app/workspace/editor paths. Acceptance is gated by `plans/evidence/gui-productization/phase-8-advanced-platform-gui-ga.md`, the GUI Phase 8 checks in `xtask`, and `devil-cli evidence check --phase gui-phase8`.
 
+Phase 13 activates Legion Workflow orchestration over local and provider-backed workers using protocol DTOs and metadata-only tracking. `devil-agent` remains protocol/AI/tracker-bounded. `devil-tracker` and `devil-memory` remain metadata/storage/protocol bounded. `devil-app` composes orchestration and merge readiness routing. `devil-ui` projects data and `devil-desktop` renders and translates actions. This policy explicitly forbids `devil-agent -> devil-app`, `devil-agent -> devil-ui`, UI/desktop authority, direct main-workspace mutation, autonomous merge/apply, raw source/log/provider persistence by default, and unapproved egress/process execution.
+
 - `devil-cli` may depend on:
   - `devil-index`
   - `devil-protocol`

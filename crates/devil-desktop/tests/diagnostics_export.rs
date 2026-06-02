@@ -10,7 +10,7 @@ use devil_desktop::{
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use devil_protocol::TextCoordinate;
-use devil_ui::SearchScopeProjection;
+use devil_ui::{DockMode, SearchScopeProjection};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -122,6 +122,16 @@ fn diagnostics_export_writes_metadata_only_runtime_status() {
             command_label: "SECRET_PHASE7_TERMINAL_PAYLOAD".to_string(),
         })
         .expect("terminal launch should be routed through app authority");
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::SetProductMode {
+                mode: DockMode::Assist
+            })
+            .expect("assist mode should be routed through app authority"),
+        DesktopWorkflowOutcome::ProductModeChanged {
+            mode: DockMode::Assist
+        }
+    );
     runtime
         .handle_action(DesktopAction::StartAiProposal {
             instruction_label: "SECRET_PHASE7_PROMPT".to_string(),

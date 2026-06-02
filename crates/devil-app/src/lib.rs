@@ -3,22 +3,41 @@
 #![warn(missing_docs)]
 
 use std::cell::{Cell, RefCell};
+#[cfg(feature = "ai")]
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "ai")]
+use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use devil_agent::{AgentRuntime, DelegatedTaskProposalGenerator, DelegatedTaskSandboxOrchestrator};
-use devil_ai::ProviderRouter;
-use devil_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_stub_registry};
+#[cfg(feature = "ai")]
+use devil_agent::{
+    AgentRuntime, DelegatedTaskProposalGenerator, DelegatedTaskProposalInput,
+    DelegatedTaskSandboxOrchestrator, LegionWorkflowCoordinator, LegionWorkflowCoordinatorOutput,
+};
+#[cfg(feature = "ai")]
+use devil_ai::{InlinePredictionRequest, ProviderRegistry, ProviderRouter};
+#[cfg(feature = "ai")]
+use devil_ai_providers::{
+    DETERMINISTIC_LOCAL_PROVIDER_ID, McpClient, McpTransport, make_inline_prediction_registry,
+};
+#[cfg(not(feature = "ai"))]
+pub mod offline_ai;
 use devil_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use devil_editor::{
     BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
     TextEdit, TextPosition, TextRange as EditorTextRange,
 };
 use devil_index::{
-    DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, SemanticIndex, SourceDocument,
+    DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
+    RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
+    StructuralSearchQuery, build_structural_rewrite_preview_payload,
+    run_structural_search as index_run_structural_search,
 };
-use devil_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
+use devil_memory::{
+    LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryConsentState, MemoryService,
+};
 use devil_observability::{
     SharedEventSink, agent_replay_manifest_recorded_event, collaboration_audit_recorded_event,
     event_metadata_record, phase4_runtime_audit_recorded_event, plugin_event_envelope,
@@ -31,52 +50,84 @@ use devil_observability::{
 use devil_platform::{NativeFileSystem, NativeWatcherService};
 use devil_plugin::PluginRuntimeHost;
 use devil_project::{
-    OpenedFileText, WorkspaceActor, WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest,
-    WorkspaceError, WorkspaceMutationRollbackCheckpoint,
-    WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
-    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
+    CargoDebugLocatorOptions, DebugLocatorError, GitDiffStrategy, GitHunkStage, GitInspectionError,
+    GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, WorkspaceActor,
+    WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
+    WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
+    WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
+    WorkspaceSaveRequest, collect_git_snapshot, discover_cargo_debug_configurations,
+    stage_git_hunk, unstage_git_hunk,
 };
 use devil_protocol::{
-    AssistedAiEditProposalOutput, BatchProposalPayload, BufferId, ByteRange, CancellationTokenId,
-    CanonicalPath, CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityId,
-    CapabilityNamespace, CapabilityRequest, CapabilityRequestContext, CapabilityResponse,
-    CausalityId, CollaborationAcknowledgementStatus, CollaborationAuditRecord,
-    CollaborationDocumentBinding, CollaborationDocumentEpoch, CollaborationDocumentOperation,
-    CollaborationDocumentOperationKind, CollaborationGuiProjection, CollaborationParticipant,
-    CollaborationParticipantId, CollaborationParticipantRole, CollaborationPermission,
-    CollaborationPresenceProjection, CollaborationSessionDescriptor, CollaborationSessionGuiRow,
-    CollaborationSessionId, CollaborationSessionState, CollaborationSharedProposalApproval,
-    CollaborationSharedProposalDisposition, CollaborationSharedProposalGuiRow,
-    CollaborationTransportEnvelope, CollaborationTransportPayload, CorrelationId,
-    DelegatedTaskPlanContract, DelegatedTaskProjection, EditBatch, EditorApplyTransactionRequest,
+    AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
+    AssistedAiProviderInvocationState, BatchProposalPayload, BufferId, BufferVersion, ByteRange,
+    CancellationTokenId, CanonicalPath, CapabilityBrokerPort, CapabilityDecision,
+    CapabilityDecisionId, CapabilityId, CapabilityNamespace, CapabilityRequest,
+    CapabilityRequestContext, CapabilityResponse, CausalityId, CollaborationAcknowledgementStatus,
+    CollaborationAuditRecord, CollaborationDocumentBinding, CollaborationDocumentEpoch,
+    CollaborationDocumentOperation, CollaborationDocumentOperationKind, CollaborationGuiProjection,
+    CollaborationParticipant, CollaborationParticipantId, CollaborationParticipantRole,
+    CollaborationPermission, CollaborationPresenceProjection, CollaborationSessionDescriptor,
+    CollaborationSessionGuiRow, CollaborationSessionId, CollaborationSessionState,
+    CollaborationSharedProposalApproval, CollaborationSharedProposalDisposition,
+    CollaborationSharedProposalGuiRow, CollaborationTransportEnvelope,
+    CollaborationTransportPayload, CommandRiskLabel, CorrelationId, DebugAdapterAuditRecord,
+    DebugAdapterLaunchRequest, DebugBreakpointId, DebugBreakpointRecord, DebugConfigurationId,
+    DebugConsoleCategory, DebugConsoleEntry, DebugInlineValue, DebugLaunchConfiguration,
+    DebugSessionId, DebugSessionState, DebugStackFrame, DebugStepKind, DebugVariable, DebugWatchId,
+    DelegatedTaskChatMessage, DelegatedTaskChatRole, DelegatedTaskContextCitation,
+    DelegatedTaskPlanContract, DelegatedTaskPlanId, DelegatedTaskProjection,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalHunkReview,
+    DelegatedTaskProposalReview, DelegatedTaskToolPermissionDecision,
+    DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequest,
+    DelegatedTaskToolPermissionRequestInput, EditBatch, EditorApplyTransactionRequest,
     EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
     FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
-    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode, LanguageCompletionProjection,
-    LanguageHoverProjection, LanguageId, LanguageLocationProjection,
-    LanguageOutlineSymbolProjection, LanguageProblemProjection, LanguageToolingOperationKind,
-    LanguageToolingOperationProjection, LanguageToolingProjection, LanguageToolingStatusKind,
-    LspEditProposalConversionInput, LspRequestCorrelation, PluginContributionProjection,
-    PluginHostCallKind, PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest,
-    PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
+    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode,
+    INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES, InlinePredictionAcceptanceId,
+    InlinePredictionDismissalId, InlinePredictionFingerprintMetadata, InlinePredictionFreshness,
+    InlinePredictionFreshnessState, InlinePredictionLatencyMetadata,
+    InlinePredictionLifecycleAction, InlinePredictionLifecycleCommand, InlinePredictionProjection,
+    InlinePredictionProviderMetadata, InlinePredictionRequestId, InlinePredictionRequestMetadata,
+    InlinePredictionResult, InlinePredictionResultState, InlinePredictionRetention,
+    InlinePredictionStaleReason, InlinePredictionTriggerKind, LanguageBreadcrumbProjection,
+    LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
+    LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
+    LanguageProblemProjection, LanguageQuickFixProjection, LanguageStickyScopeProjection,
+    LanguageToolingOperationKind, LanguageToolingOperationProjection, LanguageToolingProjection,
+    LanguageToolingStatusKind, LegionWorkflowConflictId, LegionWorkflowConflictState,
+    LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId, LegionWorkflowDecisionKind,
+    LegionWorkflowDependencyState, LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId,
+    LegionWorkflowKillSwitchState, LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness,
+    LegionWorkflowMergeReadinessState, LegionWorkflowProjection, LegionWorkflowRiskHaltReason,
+    LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState,
+    LegionWorkflowSession, LegionWorkflowSessionId, LegionWorkflowSignOffId,
+    LegionWorkflowSignOffState, LegionWorkflowState, LegionWorkflowVerificationGateId,
+    LegionWorkflowVerificationGateState, LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId,
+    LegionWorkflowWorkerState, LspEditProposalConversionInput, LspRequestCorrelation,
+    McpListChangedKind, McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor,
+    McpToolName, PermissionBudgetActionClass, PluginContributionProjection, PluginHostCallKind,
+    PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary,
+    PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
     ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
-    ProposalFailureReason, ProposalId, ProposalLedgerProjection, ProposalLifecycleAction,
-    ProposalLifecycleCommand, ProposalLifecycleCommandReason, ProposalLifecycleState,
-    ProposalLifecycleTransition, ProposalPartialFailureDisposition, ProposalPartialFailureRecord,
-    ProposalPayload, ProposalPort, ProposalPreviewWarning, ProposalPreviewWarningKind,
-    ProposalRejectionReason, ProposalRequest, ProposalResponse, ProposalRollbackReason,
-    ProposalStaleReason, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
+    ProposalDiffChunkDescriptor, ProposalFailureReason, ProposalId, ProposalLedgerProjection,
+    ProposalLedgerRow, ProposalLifecycleAction, ProposalLifecycleCommand,
+    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalPartialFailureDisposition, ProposalPartialFailureRecord, ProposalPayload, ProposalPort,
+    ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
+    ProposalResponse, ProposalRiskLabel, ProposalRollbackReason, ProposalStaleReason,
+    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
     ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
-    ProtocolResult, ProtocolTextRange, RedactionHint, RemoteAgentDescriptor, RemoteAuditRecord,
-    RemoteAuthorityDescriptor, RemoteCapabilityKind, RemoteGuiProjection,
-    RemoteProposalReviewGuiRow, RemoteTransportEnvelope, RemoteTransportPayload,
-    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionGuiRow,
-    RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal, SaveIntent,
-    SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
+    ProtocolResult, ProtocolTextRange, RedactionHint, RemoteAuditRecord, RemoteCapabilityKind,
+    RemoteGuiProjection, RemoteProposalReviewGuiRow, RemoteTransportEnvelope,
+    RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor,
+    RemoteWorkspaceSessionGuiRow, RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal,
+    SaveIntent, SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
     SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup,
     StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
-    TerminalCloseRequest, TerminalInput, TerminalKillEscalation, TerminalKillRequest,
-    TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
+    SymbolFileMapRecord, TerminalCloseRequest, TerminalInput, TerminalKillEscalation,
+    TerminalKillRequest, TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
     TerminalPanelStatusKind, TerminalPolicyProjection, TerminalResize, TerminalRuntimeState,
     TerminalScrollbackProjection, TerminalSearchProjection, TerminalSessionId, TextCoordinate,
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
@@ -85,23 +136,51 @@ use devil_protocol::{
     WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
     WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
     WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
-    validate_terminal_close_request, validate_terminal_input, validate_terminal_kill_request,
-    validate_terminal_resize,
+    delegated_task_tool_permission_request, inline_prediction_projection_from_results,
+    validate_inline_prediction_lifecycle_command, validate_legion_workflow_decision_feed_entry,
+    validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
+    validate_mcp_registry_snapshot, validate_terminal_close_request, validate_terminal_input,
+    validate_terminal_kill_request, validate_terminal_resize,
 };
-use devil_remote::{RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig};
-use devil_security::{DenyByDefaultBroker, SecurityPolicy};
+use devil_remote::{
+    RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
+    default_remote_capabilities, plan_devcontainer_session_from_json, plan_ssh_session,
+};
+use devil_security::{DenyByDefaultBroker, SecurityPolicy, mcp_tool_permission_request};
 use devil_storage::InMemoryStorageRepositoryPort;
-use devil_terminal::{TerminalFixtureConfig, TerminalFixtureRuntime};
-use devil_tracker::{TrackerLedger, TrackerRunLedgerRecord};
+use devil_terminal::{
+    DapAdapterFixtureConfig, DapAdapterFixtureOutcome, DapAdapterFixtureRuntime,
+    TerminalFixtureConfig, TerminalFixtureRuntime,
+};
+use devil_tracker::{
+    LegionWorkflowTrackerLedger, LegionWorkflowTrackerRecord, TrackerLedger, TrackerRunLedgerRecord,
+};
 use devil_ui::ui::{
-    CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
-    EditorViewportStateProjection, SearchProjection, SearchResultProjection, SearchScopeProjection,
-    SearchStatusKindProjection, SearchStatusProjection, WorkspaceSessionRecordProjection,
+    AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
+    AssistInlinePredictionStatusProjection, CloseDirtyPromptProjection, DailyEditingProjection,
+    DebugBreakpointProjection, DebugConfigurationProjection, DebugConsoleProjection,
+    DebugInlineValueProjection, DebugProjection, DebugStackFrameProjection,
+    DebugStatusKindProjection, DebugStatusProjection, DebugStepKindProjection,
+    DebugVariableProjection, DebugWatchProjection, EditorTabProjection, EditorTabsProjection,
+    EditorViewportStateProjection, GitBlameLineProjection, GitCommitProjection,
+    GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
+    GitHunkStageProjection, GitProjection, SearchProjection, SearchResultProjection,
+    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection,
+    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
+    WorkspaceSessionRecordProjection,
 };
 use devil_ui::{
-    ActiveBufferProjection, CommandDispatchIntent, ExplorerNodeProjection, ExplorerProjection,
-    ExplorerSelectionProjection, ShellLayoutProjection, ShellProjectionSnapshot,
+    ActiveBufferProjection, CommandDispatchIntent, DockMode, ExplorerNodeProjection,
+    ExplorerProjection, ExplorerSelectionProjection, ShellLayoutProjection,
+    ShellProjectionSnapshot,
 };
+#[cfg(not(feature = "ai"))]
+use offline_ai::{
+    AgentRuntime, DETERMINISTIC_LOCAL_PROVIDER_ID, DelegatedTaskProposalGenerator,
+    DelegatedTaskProposalInput, DelegatedTaskSandboxOrchestrator, LegionWorkflowCoordinator,
+    LegionWorkflowCoordinatorOutput, ProviderRegistry, ProviderRouter, make_stub_registry,
+};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 const SEARCH_DEFAULT_RESULT_LIMIT: usize = 50;
@@ -179,6 +258,59 @@ pub enum AppCompositionError {
     /// Terminal workflow failed.
     #[error("terminal request failed: {0}")]
     Terminal(String),
+    /// Debug workflow failed.
+    #[error("debug request failed: {0}")]
+    Debug(String),
+    /// Legion workflow orchestration failed at the app authority boundary.
+    #[error("legion workflow request failed: {0}")]
+    LegionWorkflow(String),
+}
+
+/// Product-mode authority for app-owned AI dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppProductMode {
+    /// Deterministic local/manual mode; AI dispatch is rejected.
+    Manual,
+    /// Inline assist and assisted proposal/explain dispatch are enabled.
+    Assist,
+    /// Delegated task mode; includes Assist-level dispatch.
+    Delegate,
+    /// Automation mode; includes Assist-level dispatch.
+    Automate,
+}
+
+impl AppProductMode {
+    fn allows_assist(self) -> bool {
+        matches!(self, Self::Assist | Self::Delegate | Self::Automate)
+    }
+
+    fn allows_delegate(self) -> bool {
+        matches!(self, Self::Delegate | Self::Automate)
+    }
+
+    fn allows_automate(self) -> bool {
+        matches!(self, Self::Automate)
+    }
+
+    /// Convert a UI dock/product mode into the app authority enum.
+    pub fn from_dock_mode(mode: DockMode) -> Self {
+        match mode {
+            DockMode::Manual => Self::Manual,
+            DockMode::Assist => Self::Assist,
+            DockMode::Delegate => Self::Delegate,
+            DockMode::Automate => Self::Automate,
+        }
+    }
+
+    /// Convert the app authority enum into a UI dock/product mode.
+    pub fn to_dock_mode(self) -> DockMode {
+        match self {
+            Self::Manual => DockMode::Manual,
+            Self::Assist => DockMode::Assist,
+            Self::Delegate => DockMode::Delegate,
+            Self::Automate => DockMode::Automate,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +359,773 @@ pub enum OpenFileIntent {
     Existing,
     /// Open may create an empty editor buffer only under explicit safe-new-file preconditions.
     CreateNew,
+}
+
+/// Result of an app-owned Legion workflow execution pass.
+#[derive(Debug, Clone)]
+pub struct AppLegionWorkflowExecution {
+    /// Workflow session that was executed.
+    pub session_id: LegionWorkflowSessionId,
+    /// Coordinator outputs produced without applying proposals or invoking providers.
+    pub outputs: Vec<LegionWorkflowCoordinatorOutput>,
+    /// Current proposal-mediated merge readiness.
+    pub merge_readiness: LegionWorkflowMergeReadiness,
+    /// Current metadata-only workflow projection.
+    pub projection: LegionWorkflowProjection,
+    /// Number of tracker records after this execution pass.
+    pub tracker_record_count: usize,
+    /// Whether a metadata-only memory candidate was proposed without retention.
+    pub memory_candidate_proposed: bool,
+}
+
+/// App-owned outcome for a delegated task execution attempt.
+#[derive(Debug, Clone)]
+pub enum AppDelegatedTaskExecutionOutcome {
+    /// A matching plan contract was not found.
+    PlanMissing {
+        /// Missing plan identifier.
+        plan_id: DelegatedTaskPlanId,
+    },
+    /// Execution reached a tool boundary and is waiting on explicit human permission.
+    WaitingForToolPermission {
+        /// Permission row that must be approved or denied.
+        request: DelegatedTaskToolPermissionRequest,
+    },
+    /// Execution was denied by a fail-closed tool permission decision.
+    Denied {
+        /// Denying permission row.
+        request: DelegatedTaskToolPermissionRequest,
+    },
+    /// Proposal-only output is ready for proposal lifecycle review.
+    ProposalReady(Box<AssistedAiEditProposalOutput>),
+}
+
+/// App-owned outcome for a Delegate chat turn.
+#[derive(Debug, Clone)]
+pub struct AppDelegateChatOutcome {
+    /// Current delegated task projection after the chat turn.
+    pub projection: DelegatedTaskProjection,
+    /// User message id.
+    pub user_message_id: String,
+    /// Assistant message id.
+    pub assistant_message_id: String,
+    /// Number of retrieval citations attached to the assistant response.
+    pub citation_count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DelegateWorkflowState {
+    chat_messages: Vec<DelegatedTaskChatMessage>,
+    context_citations: Vec<DelegatedTaskContextCitation>,
+    hunk_decisions: HashMap<(ProposalId, String), DelegatedTaskProposalHunkDisposition>,
+    tool_permission_requests: HashMap<String, DelegatedTaskToolPermissionRequest>,
+    next_message_sequence: u64,
+}
+
+impl DelegateWorkflowState {
+    fn next_message_id(&mut self, role: DelegatedTaskChatRole) -> String {
+        self.next_message_sequence = self.next_message_sequence.saturating_add(1);
+        format!("delegate:{role:?}:{}", self.next_message_sequence)
+    }
+
+    fn record_tool_permission(&mut self, request: DelegatedTaskToolPermissionRequest) {
+        self.tool_permission_requests
+            .insert(request.request_id.clone(), request);
+    }
+
+    fn tool_permission(&self, request_id: &str) -> Option<&DelegatedTaskToolPermissionRequest> {
+        self.tool_permission_requests.get(request_id)
+    }
+
+    fn record_tool_permission_decision(
+        &mut self,
+        mut input: DelegatedTaskToolPermissionRequestInput,
+    ) -> DelegatedTaskToolPermissionRequest {
+        let effective_decision = if self
+            .tool_permission_requests
+            .get(&input.request_id)
+            .is_some_and(|request| request.deny_overrides)
+        {
+            DelegatedTaskToolPermissionDecision::Deny
+        } else {
+            input.decision
+        };
+        input.decision = effective_decision;
+        let request = delegated_task_tool_permission_request(input);
+        self.record_tool_permission(request.clone());
+        request
+    }
+
+    fn apply_to_projection(
+        &self,
+        projection: &mut DelegatedTaskProjection,
+        proposal_ledger: &ProposalLedgerProjection,
+    ) {
+        projection.chat_messages = self.chat_messages.clone();
+        projection.context_citations = self.context_citations.clone();
+        projection.proposal_reviews = proposal_ledger
+            .rows
+            .iter()
+            .filter(|row| row.diff_summary.hunk_count > 0 || !row.diff_summary.chunks.is_empty())
+            .map(|row| self.review_for_row(row))
+            .collect();
+        projection.tool_permission_requests = self
+            .tool_permission_requests
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        projection.tool_permission_requests.sort_by(|left, right| {
+            left.request_id
+                .cmp(&right.request_id)
+                .then_with(|| format!("{:?}", left.profile).cmp(&format!("{:?}", right.profile)))
+        });
+        projection.chat_message_count = projection.chat_messages.len() as u32;
+        projection.context_citation_count = projection.context_citations.len() as u32;
+        projection.proposal_review_count = projection.proposal_reviews.len() as u32;
+        projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
+    }
+
+    fn review_for_row(&self, row: &ProposalLedgerRow) -> DelegatedTaskProposalReview {
+        let chunks = proposal_review_chunks(row)
+            .into_iter()
+            .map(|chunk| {
+                let hunk_id = delegate_hunk_id(row.proposal_id, &chunk);
+                let disposition = self
+                    .hunk_decisions
+                    .get(&(row.proposal_id, hunk_id.clone()))
+                    .copied()
+                    .unwrap_or(DelegatedTaskProposalHunkDisposition::Pending);
+                DelegatedTaskProposalHunkReview {
+                    hunk_id,
+                    proposal_id: row.proposal_id,
+                    target_id: chunk.target_id.clone(),
+                    payload_kind: row.payload_kind,
+                    path: target_path_for_chunk(row, chunk.target_id.as_deref()),
+                    byte_range: chunk.byte_range,
+                    changed_line_count: chunk.changed_line_count,
+                    inserted_line_count: chunk.inserted_line_count,
+                    deleted_line_count: chunk.deleted_line_count,
+                    content_hash: chunk.content_hash.clone(),
+                    disposition,
+                    risk_label: row.risk_label,
+                    privacy_label: row.privacy_label,
+                    labels: vec!["delegate.proposal_hunk.human_review".to_string()],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                }
+            })
+            .collect::<Vec<_>>();
+        DelegatedTaskProposalReview::from_hunks(
+            format!("delegate:review:{}", row.proposal_id.0),
+            row.proposal_id,
+            chunks,
+            vec!["delegate.proposal_review.human_approval_queue".to_string()],
+            1,
+        )
+    }
+}
+
+/// App-owned outcome for an Automate MCP tool-call attempt.
+#[derive(Debug, Clone)]
+pub enum AppAutomateToolCallOutcome {
+    /// Tool call reached a permission boundary and must wait.
+    WaitingForToolPermission {
+        /// Permission row that must be approved or denied.
+        request: DelegatedTaskToolPermissionRequest,
+    },
+    /// Tool call was denied by a fail-closed permission decision.
+    Denied {
+        /// Denying permission row.
+        request: DelegatedTaskToolPermissionRequest,
+    },
+    /// Risk monitor or kill switch halted the fleet before the call.
+    Halted {
+        /// Current risk monitor snapshot.
+        monitor: LegionWorkflowRiskMonitorSnapshot,
+    },
+    /// Tool call is ready to be invoked by the MCP client.
+    Ready {
+        /// Permission row authorizing this call.
+        request: DelegatedTaskToolPermissionRequest,
+        /// Current risk monitor snapshot.
+        monitor: LegionWorkflowRiskMonitorSnapshot,
+    },
+}
+
+/// Metadata-safe Automate MCP tool invocation routed by app-owned workflow execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppAutomateMcpToolInvocation {
+    /// Workflow session that owns the worker.
+    pub session_id: LegionWorkflowSessionId,
+    /// Worker that requested the tool call.
+    pub worker_id: LegionWorkflowWorkerId,
+    /// MCP server selected from the app-owned registry.
+    pub server_id: McpServerId,
+    /// MCP tool selected from the app-owned registry.
+    pub tool_name: McpToolName,
+    /// Permission row that authorized this invocation.
+    pub permission: DelegatedTaskToolPermissionRequest,
+    /// Display-safe or empty call arguments. Raw source must not be persisted here.
+    pub arguments: Value,
+    /// Non-zero correlation id for this invocation.
+    pub correlation_id: CorrelationId,
+    /// Non-nil causality id for this invocation.
+    pub causality_id: CausalityId,
+    /// Event sequence assigned by app composition.
+    pub event_sequence: EventSequence,
+}
+
+/// Metadata-only receipt returned after an Automate MCP runtime call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppAutomateMcpToolInvocationReceipt {
+    /// Workflow session that owns the worker.
+    pub session_id: LegionWorkflowSessionId,
+    /// Worker that requested the tool call.
+    pub worker_id: LegionWorkflowWorkerId,
+    /// MCP server that handled the call.
+    pub server_id: McpServerId,
+    /// MCP tool that handled the call.
+    pub tool_name: McpToolName,
+    /// Permission request id used for runtime authorization.
+    pub permission_request_id: String,
+    /// Display-safe result label.
+    pub result_label: String,
+    /// Fingerprint of redacted result metadata.
+    pub result_fingerprint: FileFingerprint,
+}
+
+/// Error returned by an app-registered Automate MCP tool runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AppAutomateMcpToolRuntimeError {
+    /// Runtime transport, authorization, or protocol handling failed.
+    #[error("Automate MCP tool runtime failed: {reason_label}")]
+    Runtime {
+        /// Display-safe failure reason.
+        reason_label: String,
+    },
+}
+
+impl AppAutomateMcpToolRuntimeError {
+    #[cfg(feature = "ai")]
+    fn runtime(reason_label: impl Into<String>) -> Self {
+        Self::Runtime {
+            reason_label: reason_label.into(),
+        }
+    }
+}
+
+/// Runtime bridge used by app-owned Automate fleet execution to invoke MCP tools.
+pub trait AppAutomateMcpToolRuntime: Send + Sync {
+    /// Invoke one MCP tool after app-owned permission and risk checks pass.
+    fn call_tool(
+        &self,
+        invocation: &AppAutomateMcpToolInvocation,
+    ) -> Result<AppAutomateMcpToolInvocationReceipt, AppAutomateMcpToolRuntimeError>;
+}
+
+/// App adapter that invokes a `devil-ai-providers` MCP client from Automate workflows.
+#[cfg(feature = "ai")]
+pub struct AppMcpClientToolRuntime<T>
+where
+    T: McpTransport,
+{
+    client: McpClient<T>,
+}
+
+#[cfg(feature = "ai")]
+impl<T> AppMcpClientToolRuntime<T>
+where
+    T: McpTransport,
+{
+    /// Create an app runtime adapter over a validated MCP client.
+    pub fn new(client: McpClient<T>) -> Self {
+        Self { client }
+    }
+}
+
+#[cfg(feature = "ai")]
+impl<T> AppAutomateMcpToolRuntime for AppMcpClientToolRuntime<T>
+where
+    T: McpTransport + Send + Sync,
+{
+    fn call_tool(
+        &self,
+        invocation: &AppAutomateMcpToolInvocation,
+    ) -> Result<AppAutomateMcpToolInvocationReceipt, AppAutomateMcpToolRuntimeError> {
+        let result = self
+            .client
+            .call_tool_with_permission(
+                format!(
+                    "mcp-call:{}:{}:{}",
+                    invocation.session_id.0, invocation.worker_id.0, invocation.event_sequence.0
+                ),
+                &invocation.server_id,
+                &invocation.tool_name,
+                invocation.arguments.clone(),
+                &invocation.permission,
+            )
+            .map_err(|error| AppAutomateMcpToolRuntimeError::runtime(error.to_string()))?;
+        let result_label = result
+            .get("result_label")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp.tool.result.redacted")
+            .to_string();
+        Ok(AppAutomateMcpToolInvocationReceipt {
+            session_id: invocation.session_id.clone(),
+            worker_id: invocation.worker_id.clone(),
+            server_id: invocation.server_id.clone(),
+            tool_name: invocation.tool_name.clone(),
+            permission_request_id: invocation.permission.request_id.clone(),
+            result_label,
+            result_fingerprint: value_fingerprint("mcp-result", &result),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutomateWorkflowState {
+    mcp_registries: HashMap<String, McpRegistrySnapshot>,
+    decision_feed: Vec<LegionWorkflowDecisionFeedEntry>,
+    risk_monitors: HashMap<String, LegionWorkflowRiskMonitorSnapshot>,
+    kill_switches: HashMap<String, LegionWorkflowKillSwitch>,
+    tool_permission_requests: HashMap<String, DelegatedTaskToolPermissionRequest>,
+    high_risk_tool_count: HashMap<String, u32>,
+    counted_high_risk_tool_requests: HashSet<String>,
+    denied_tool_count: HashMap<String, u32>,
+    next_decision_sequence: u64,
+    halt_threshold: u32,
+}
+
+#[derive(Debug, Clone)]
+struct AutomateDecisionInput {
+    session_id: LegionWorkflowSessionId,
+    worker_id: Option<LegionWorkflowWorkerId>,
+    kind: LegionWorkflowDecisionKind,
+    summary_label: String,
+    risk_label: ProposalRiskLabel,
+    mcp_server_id: Option<McpServerId>,
+    mcp_primitive_kind: Option<McpPrimitiveKind>,
+    tool_permission_request_id: Option<String>,
+    event_context: EventContext,
+    event_sequence: EventSequence,
+}
+
+impl Default for AutomateWorkflowState {
+    fn default() -> Self {
+        Self {
+            mcp_registries: HashMap::new(),
+            decision_feed: Vec::new(),
+            risk_monitors: HashMap::new(),
+            kill_switches: HashMap::new(),
+            tool_permission_requests: HashMap::new(),
+            high_risk_tool_count: HashMap::new(),
+            counted_high_risk_tool_requests: HashSet::new(),
+            denied_tool_count: HashMap::new(),
+            next_decision_sequence: 0,
+            halt_threshold: 3,
+        }
+    }
+}
+
+impl AutomateWorkflowState {
+    fn apply_to_projection(&self, projection: &mut LegionWorkflowProjection) {
+        projection.mcp_registries = self.mcp_registries.values().cloned().collect();
+        projection
+            .mcp_registries
+            .sort_by(|left, right| left.registry_id.cmp(&right.registry_id));
+        projection.decision_feed = self.decision_feed.clone();
+        projection
+            .decision_feed
+            .sort_by_key(|entry| entry.event_sequence.0);
+        projection.risk_monitors = self.risk_monitors.values().cloned().collect();
+        projection
+            .risk_monitors
+            .sort_by(|left, right| left.monitor_id.0.cmp(&right.monitor_id.0));
+        projection.kill_switches = self.kill_switches.values().cloned().collect();
+        projection
+            .kill_switches
+            .sort_by(|left, right| left.kill_switch_id.0.cmp(&right.kill_switch_id.0));
+        projection.tool_permission_requests =
+            self.tool_permission_requests.values().cloned().collect();
+        projection
+            .tool_permission_requests
+            .sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        projection.mcp_registry_count = projection.mcp_registries.len() as u32;
+        projection.decision_feed_count = projection.decision_feed.len() as u32;
+        projection.risk_monitor_count = projection.risk_monitors.len() as u32;
+        projection.kill_switch_count = projection.kill_switches.len() as u32;
+        projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
+    }
+
+    fn seed_mcp_registry(&mut self, registry: McpRegistrySnapshot) {
+        self.mcp_registries
+            .insert(registry.server.server_id.0.clone(), registry);
+    }
+
+    fn apply_mcp_list_changed(
+        &mut self,
+        server_id: &McpServerId,
+        _kind: McpListChangedKind,
+        generated_at: TimestampMillis,
+    ) -> bool {
+        let Some(registry) = self.mcp_registries.get_mut(&server_id.0) else {
+            return false;
+        };
+        registry.last_notification_kind = None;
+        registry.list_version = registry.list_version.saturating_add(1);
+        registry.generated_at = generated_at;
+        true
+    }
+
+    fn mcp_tool(
+        &self,
+        server_id: &McpServerId,
+        tool_name: &McpToolName,
+    ) -> Option<&McpToolDescriptor> {
+        self.mcp_registries
+            .get(&server_id.0)
+            .and_then(|registry| registry.tools.iter().find(|tool| tool.name == *tool_name))
+    }
+
+    fn record_decision(
+        &mut self,
+        input: AutomateDecisionInput,
+    ) -> Result<LegionWorkflowDecisionFeedEntry, AppCompositionError> {
+        self.next_decision_sequence = self.next_decision_sequence.saturating_add(1);
+        let rationale_label = format!("legion_workflow.decision.{:?}", input.kind);
+        let entry = LegionWorkflowDecisionFeedEntry {
+            decision_id: LegionWorkflowDecisionId(format!(
+                "legion-decision:{}:{}",
+                input.session_id.0, self.next_decision_sequence
+            )),
+            session_id: input.session_id,
+            worker_id: input.worker_id,
+            kind: input.kind,
+            summary_label: input.summary_label,
+            rationale_labels: vec![rationale_label],
+            risk_label: input.risk_label,
+            mcp_server_id: input.mcp_server_id,
+            mcp_primitive_kind: input.mcp_primitive_kind,
+            tool_permission_request_id: input.tool_permission_request_id,
+            correlation_id: input.event_context.correlation_id,
+            causality_id: input.event_context.causality_id,
+            event_sequence: input.event_sequence,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_legion_workflow_decision_feed_entry(&entry)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.message))?;
+        self.decision_feed.push(entry.clone());
+        Ok(entry)
+    }
+
+    fn record_tool_permission_decision(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        request_id: impl Into<String>,
+        tool: &McpToolDescriptor,
+        decision: DelegatedTaskToolPermissionDecision,
+    ) -> DelegatedTaskToolPermissionRequest {
+        let request_id = request_id.into();
+        let effective_decision = if self
+            .tool_permission_requests
+            .get(&request_id)
+            .is_some_and(|request| request.deny_overrides)
+        {
+            DelegatedTaskToolPermissionDecision::Deny
+        } else {
+            decision
+        };
+        let request = mcp_tool_permission_request(
+            request_id,
+            tool,
+            effective_decision,
+            format!("legion.session:{}", session_id.0),
+            1,
+        );
+        self.tool_permission_requests
+            .insert(request.request_id.clone(), request.clone());
+        request
+    }
+
+    fn tool_permission(&self, request_id: &str) -> Option<&DelegatedTaskToolPermissionRequest> {
+        self.tool_permission_requests.get(request_id)
+    }
+
+    fn risk_monitor(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        reason: Option<LegionWorkflowRiskHaltReason>,
+    ) -> Result<LegionWorkflowRiskMonitorSnapshot, AppCompositionError> {
+        let high_risk = *self.high_risk_tool_count.get(&session_id.0).unwrap_or(&0);
+        let denied = *self.denied_tool_count.get(&session_id.0).unwrap_or(&0);
+        let stale_registry = self
+            .mcp_registries
+            .values()
+            .any(|registry| registry.last_notification_kind.is_some());
+        let computed_reason = reason
+            .or_else(|| {
+                (high_risk >= self.halt_threshold)
+                    .then_some(LegionWorkflowRiskHaltReason::HighRiskToolThreshold)
+            })
+            .or_else(|| {
+                (denied >= self.halt_threshold)
+                    .then_some(LegionWorkflowRiskHaltReason::DeniedToolThreshold)
+            })
+            .or_else(|| stale_registry.then_some(LegionWorkflowRiskHaltReason::StaleMcpRegistry));
+        let risk_score = high_risk
+            .saturating_mul(2)
+            .saturating_add(denied)
+            .saturating_add(if stale_registry { 1 } else { 0 });
+        let state = if computed_reason.is_some() {
+            LegionWorkflowRiskMonitorState::Halted
+        } else if risk_score >= self.halt_threshold.saturating_sub(1) {
+            LegionWorkflowRiskMonitorState::Warning
+        } else {
+            LegionWorkflowRiskMonitorState::Nominal
+        };
+        let mut labels = vec![format!("legion_workflow.risk.{state:?}")];
+        if stale_registry {
+            labels.push("legion_workflow.risk.stale_mcp_registry".to_string());
+        }
+        let snapshot = LegionWorkflowRiskMonitorSnapshot {
+            monitor_id: LegionWorkflowRiskMonitorId(format!("legion-risk:{}", session_id.0)),
+            session_id: session_id.clone(),
+            state,
+            risk_score,
+            halt_threshold: self.halt_threshold,
+            high_risk_action_count: high_risk,
+            denied_tool_count: denied,
+            stale_mcp_registry_detected: stale_registry,
+            halt_reason: computed_reason,
+            labels,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_legion_workflow_risk_monitor_snapshot(&snapshot)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.message))?;
+        self.risk_monitors
+            .insert(session_id.0.clone(), snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn armed_kill_switch(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> Result<LegionWorkflowKillSwitch, AppCompositionError> {
+        let switch = self
+            .kill_switches
+            .entry(session_id.0.clone())
+            .or_insert_with(|| LegionWorkflowKillSwitch {
+                kill_switch_id: LegionWorkflowKillSwitchId(format!("legion-kill:{}", session_id.0)),
+                session_id: session_id.clone(),
+                state: LegionWorkflowKillSwitchState::Armed,
+                triggered_by: None,
+                reason_label: None,
+                triggered_at: None,
+                correlation_id,
+                causality_id,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+            .clone();
+        validate_legion_workflow_kill_switch(&switch)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.message))?;
+        Ok(switch)
+    }
+
+    fn trigger_kill_switch(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        principal_id: PrincipalId,
+        reason_label: String,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> Result<LegionWorkflowKillSwitch, AppCompositionError> {
+        let switch = LegionWorkflowKillSwitch {
+            kill_switch_id: LegionWorkflowKillSwitchId(format!("legion-kill:{}", session_id.0)),
+            session_id: session_id.clone(),
+            state: LegionWorkflowKillSwitchState::Triggered,
+            triggered_by: Some(principal_id),
+            reason_label: Some(reason_label),
+            triggered_at: Some(TimestampMillis::now()),
+            correlation_id,
+            causality_id,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_legion_workflow_kill_switch(&switch)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.message))?;
+        self.kill_switches
+            .insert(session_id.0.clone(), switch.clone());
+        self.risk_monitor(session_id, Some(LegionWorkflowRiskHaltReason::KillSwitch))?;
+        Ok(switch)
+    }
+
+    fn kill_switch_triggered(&self, session_id: &LegionWorkflowSessionId) -> bool {
+        self.kill_switches
+            .get(&session_id.0)
+            .is_some_and(|switch| switch.state == LegionWorkflowKillSwitchState::Triggered)
+    }
+}
+
+fn proposal_review_chunks(row: &ProposalLedgerRow) -> Vec<ProposalDiffChunkDescriptor> {
+    if !row.diff_summary.chunks.is_empty()
+        && row.diff_summary.chunks.len() as u32 >= row.diff_summary.hunk_count
+    {
+        return row.diff_summary.chunks.clone();
+    }
+
+    let represented_hunks = row.diff_summary.hunk_count.max(1);
+    (0..represented_hunks)
+        .map(|index| {
+            let target = row
+                .target_coverage
+                .targets
+                .get(index as usize)
+                .or_else(|| row.target_coverage.targets.first());
+            ProposalDiffChunkDescriptor {
+                chunk_id: format!("delegate-hunk:{index}"),
+                target_id: target.map(|target| target.target_id.clone()),
+                byte_range: target.and_then(|target| target.byte_ranges.first().copied()),
+                changed_line_count: 0,
+                inserted_line_count: row.diff_summary.inserted_line_count,
+                deleted_line_count: row.diff_summary.deleted_line_count,
+                content_hash: row.diff_summary.diff_hash.clone(),
+            }
+        })
+        .collect()
+}
+
+fn delegate_hunk_id(proposal_id: ProposalId, chunk: &ProposalDiffChunkDescriptor) -> String {
+    format!("delegate:proposal:{}:{}", proposal_id.0, chunk.chunk_id)
+}
+
+fn target_path_for_chunk(
+    row: &ProposalLedgerRow,
+    target_id: Option<&str>,
+) -> Option<CanonicalPath> {
+    target_id
+        .and_then(|target_id| {
+            row.target_coverage
+                .targets
+                .iter()
+                .find(|target| target.target_id == target_id)
+        })
+        .or_else(|| row.target_coverage.targets.first())
+        .and_then(|target| target.path.clone())
+}
+
+fn delegated_context_permission_request_id(workspace_id: WorkspaceId) -> String {
+    format!("delegate:permission:{}:context", workspace_id.0)
+}
+
+fn delegated_runtime_permission_request_id(plan_id: &DelegatedTaskPlanId) -> String {
+    format!("delegate:permission:{}:runtime", plan_id.0)
+}
+
+fn delegated_context_permission_labels() -> Vec<String> {
+    vec![
+        "delegate.permission.ask.context_retrieval".to_string(),
+        "delegate.permission.metadata_only".to_string(),
+    ]
+}
+
+fn delegated_runtime_permission_labels(plan_id: &DelegatedTaskPlanId) -> Vec<String> {
+    vec![
+        "delegate.permission.write.runtime_allocation".to_string(),
+        format!("delegate.plan:{}", plan_id.0),
+    ]
+}
+
+fn delegated_task_proposal_relative_path(plan: &DelegatedTaskPlanContract) -> String {
+    let target_label = plan
+        .affected_targets
+        .first()
+        .map(|target| target.target_id.as_str())
+        .unwrap_or(plan.plan_id.0.as_str());
+    format!(
+        "delegated-task/{}.proposal.txt",
+        safe_path_component(target_label, "plan")
+    )
+}
+
+fn delegated_task_proposal_content(
+    plan: &DelegatedTaskPlanContract,
+    permission: &DelegatedTaskToolPermissionRequest,
+) -> String {
+    format!(
+        "delegated-task-proposal\nplan_id={}\nobjective_hash_algorithm={}\nobjective_hash={}\naffected_target_count={}\npermission_request_id={}\n",
+        plan.plan_id.0,
+        plan.objective_summary_hash.algorithm,
+        plan.objective_summary_hash.value,
+        plan.affected_targets.len(),
+        permission.request_id,
+    )
+}
+
+fn safe_path_component(value: &str, fallback: &str) -> String {
+    let mut component = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while component.contains("--") {
+        component = component.replace("--", "-");
+    }
+    component = component.trim_matches('-').to_string();
+    if component.is_empty() {
+        fallback.to_string()
+    } else {
+        component
+    }
+}
+
+fn automate_tool_permission_request_id(
+    session_id: &LegionWorkflowSessionId,
+    server_id: &McpServerId,
+    tool_name: &McpToolName,
+) -> String {
+    format!(
+        "automate:permission:{}:{}:{}",
+        session_id.0, server_id.0, tool_name.0
+    )
+}
+
+fn legion_workflow_worker_mcp_tool(
+    worker: &LegionWorkflowWorkerAssignment,
+) -> Option<(McpServerId, McpToolName)> {
+    worker
+        .affected_targets
+        .iter()
+        .find_map(|target| parse_mcp_tool_target(&target.target_id))
+        .or_else(|| {
+            worker
+                .affected_targets
+                .iter()
+                .flat_map(|target| target.labels.iter())
+                .find_map(|label| parse_mcp_tool_target(label))
+        })
+        .or_else(|| parse_mcp_tool_target(&worker.display_safe_model_label))
+}
+
+fn parse_mcp_tool_target(value: &str) -> Option<(McpServerId, McpToolName)> {
+    let rest = value.strip_prefix("mcp-tool:")?;
+    let (server_id, tool_name) = rest.split_once('|')?;
+    if server_id.trim().is_empty() || tool_name.trim().is_empty() {
+        return None;
+    }
+    Some((
+        McpServerId(server_id.to_string()),
+        McpToolName(tool_name.to_string()),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -3377,6 +4276,19 @@ impl LanguageToolingWorkflow {
         self.projection.clone()
     }
 
+    fn refresh_retrieval_document(&mut self, document: &SourceDocument) {
+        let file_index = LexicalIndexer::new().index_document(
+            document,
+            SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+            SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        );
+        self.semantic_index.upsert(file_index);
+    }
+
+    fn search_retrieval(&self, query: &RetrievalQuery) -> Vec<RetrievalSearchResult> {
+        self.semantic_index.search_retrieval(query).results
+    }
+
     fn cancel_operation(&mut self, operation_id: String, event_context: EventContext) {
         self.projection.status = LanguageToolingStatusKind::Cancelled;
         self.projection.status_message = format!("Language operation {operation_id} cancelled");
@@ -3488,6 +4400,7 @@ impl LanguageToolingWorkflow {
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
+        let quick_fixes = language_quick_fixes_for_problems(&problems);
         let locations = response
             .results
             .iter()
@@ -3523,12 +4436,16 @@ impl LanguageToolingWorkflow {
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
-        let outline = self
+        let symbols = self
             .semantic_index
             .symbols()
             .iter()
             .filter(|symbol| symbol.file_id == input.metadata.identity.file_id)
             .take(50)
+            .cloned()
+            .collect::<Vec<_>>();
+        let outline = symbols
+            .iter()
             .map(|symbol| LanguageOutlineSymbolProjection {
                 symbol_id: symbol.symbol_id.0.clone(),
                 label: bounded_label(
@@ -3545,6 +4462,10 @@ impl LanguageToolingWorkflow {
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
+        let breadcrumbs = language_breadcrumbs_for_outline(&outline, position);
+        let sticky_scopes = language_sticky_scopes_for_outline(&outline, position);
+        let inlay_hints = language_inlay_hints_for_symbols(&symbols);
+        let code_lenses = language_code_lenses_for_symbols(&symbols);
 
         let hover = response
             .results
@@ -3567,6 +4488,11 @@ impl LanguageToolingWorkflow {
             status: LanguageToolingStatusKind::Ready,
             status_message: format!("{operation_kind:?} ready"),
             problems,
+            quick_fixes,
+            breadcrumbs,
+            sticky_scopes,
+            inlay_hints,
+            code_lenses,
             hover: if matches!(kind, LanguageReadKind::Hover) {
                 hover
             } else {
@@ -3619,6 +4545,7 @@ impl LanguageToolingWorkflow {
         input: &LanguageRequestInput,
         kind: LanguageProposalKind,
         proposal_id: ProposalId,
+        action_id: Option<&str>,
         message: String,
     ) -> LanguageToolingProjection {
         let operation_kind = match kind {
@@ -3635,6 +4562,15 @@ impl LanguageToolingWorkflow {
         self.projection.status = LanguageToolingStatusKind::Ready;
         self.projection.status_message = message.clone();
         self.projection.generated_at = TimestampMillis::now();
+        if matches!(kind, LanguageProposalKind::CodeAction)
+            && let Some(action_id) = action_id
+        {
+            for quick_fix in &mut self.projection.quick_fixes {
+                if quick_fix.action_id == action_id {
+                    quick_fix.proposal_id = Some(proposal_id);
+                }
+            }
+        }
         let operation_id = self.next_operation_id(operation_kind);
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -4346,6 +5282,467 @@ impl TerminalWorkflow {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DebugWorkflow {
+    projection: DebugProjection,
+    fixture_enabled: bool,
+    fixture: DapAdapterFixtureRuntime,
+    configurations: Vec<DebugLaunchConfiguration>,
+    breakpoints: Vec<DebugBreakpointRecord>,
+    pending_breakpoint_deletes: Vec<(WorkspaceId, DebugBreakpointId)>,
+    last_audit: Option<DebugAdapterAuditRecord>,
+    next_sequence: u64,
+    next_watch: u64,
+}
+
+#[derive(Debug)]
+struct DebugBreakpointToggleInput {
+    context: ActiveWorkspaceContext,
+    metadata: ActiveFileMetadata,
+    line: u32,
+    condition: Option<String>,
+    hit_condition: Option<String>,
+    log_message: Option<String>,
+    event_context: EventContext,
+}
+
+impl Default for DebugWorkflow {
+    fn default() -> Self {
+        Self {
+            projection: DebugProjection::empty(),
+            fixture_enabled: false,
+            fixture: DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::default()),
+            configurations: Vec::new(),
+            breakpoints: Vec::new(),
+            pending_breakpoint_deletes: Vec::new(),
+            last_audit: None,
+            next_sequence: 0,
+            next_watch: 0,
+        }
+    }
+}
+
+impl DebugWorkflow {
+    fn projection(&self) -> DebugProjection {
+        self.projection.clone()
+    }
+
+    fn enable_fixture(&mut self) {
+        self.fixture_enabled = true;
+        self.fixture = DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::enabled());
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Idle,
+            message: "Debug fixture enabled".to_string(),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+    }
+
+    fn clear_workspace_state(&mut self) {
+        self.projection = DebugProjection::empty();
+        self.configurations.clear();
+        self.breakpoints.clear();
+        self.pending_breakpoint_deletes.clear();
+        self.last_audit = None;
+        self.next_sequence = 0;
+        self.next_watch = 0;
+        self.fixture = if self.fixture_enabled {
+            DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::enabled())
+        } else {
+            DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::default())
+        };
+    }
+
+    fn take_last_audit(&mut self) -> Option<DebugAdapterAuditRecord> {
+        self.last_audit.take()
+    }
+
+    fn take_pending_breakpoint_deletes(&mut self) -> Vec<(WorkspaceId, DebugBreakpointId)> {
+        std::mem::take(&mut self.pending_breakpoint_deletes)
+    }
+
+    fn restore_breakpoints(&mut self, records: Vec<DebugBreakpointRecord>) {
+        self.breakpoints = records
+            .into_iter()
+            .map(|mut record| {
+                record.session_id = None;
+                record
+            })
+            .collect();
+        self.sync_breakpoint_projection();
+    }
+
+    fn refresh_configurations(
+        &mut self,
+        context: ActiveWorkspaceContext,
+        root_path: &Path,
+    ) -> Result<DebugProjection, AppCompositionError> {
+        let mut configs =
+            discover_cargo_debug_configurations(root_path, CargoDebugLocatorOptions::default())
+                .map_err(debug_locator_error)?;
+        for config in &mut configs {
+            config.workspace_id = context.workspace_id;
+            config.cwd = CanonicalPath(root_path.to_string_lossy().replace('\\', "/"));
+        }
+        self.configurations = configs;
+        self.projection.configurations = self
+            .configurations
+            .iter()
+            .map(debug_configuration_projection)
+            .collect();
+        self.sync_breakpoint_projection();
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Idle,
+            message: format!(
+                "Debug configurations refreshed: {}",
+                self.projection.configurations.len()
+            ),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+        Ok(self.projection())
+    }
+
+    fn toggle_breakpoint(&mut self, input: DebugBreakpointToggleInput) -> DebugProjection {
+        let breakpoint_id = DebugBreakpointId(format!(
+            "bp:{}:{}:{}",
+            input.context.workspace_id.0, input.metadata.identity.file_id.0, input.line
+        ));
+        if let Some(existing) = self
+            .breakpoints
+            .iter()
+            .position(|breakpoint| breakpoint.breakpoint_id == breakpoint_id)
+        {
+            let removed = self.breakpoints.remove(existing);
+            self.pending_breakpoint_deletes
+                .push((removed.workspace_id, removed.breakpoint_id));
+            self.projection.status = DebugStatusProjection {
+                kind: DebugStatusKindProjection::Idle,
+                message: "Debug breakpoint removed".to_string(),
+            };
+        } else {
+            let sequence = self.next_event_sequence();
+            self.breakpoints.push(DebugBreakpointRecord {
+                breakpoint_id,
+                workspace_id: input.context.workspace_id,
+                session_id: None,
+                path: input.metadata.identity.canonical_path,
+                range: ProtocolTextRange {
+                    start: TextCoordinate {
+                        line: input.line,
+                        character: 0,
+                        byte_offset: None,
+                        utf16_offset: None,
+                    },
+                    end: TextCoordinate {
+                        line: input.line,
+                        character: 0,
+                        byte_offset: None,
+                        utf16_offset: None,
+                    },
+                },
+                enabled: true,
+                condition: input.condition,
+                hit_condition: input.hit_condition,
+                log_message: input.log_message,
+                verified: false,
+                message: Some("pending adapter verification".to_string()),
+                correlation_id: input.event_context.correlation_id,
+                causality_id: input.event_context.causality_id,
+                sequence,
+                schema_version: 1,
+            });
+            self.projection.status = DebugStatusProjection {
+                kind: DebugStatusKindProjection::Idle,
+                message: "Debug breakpoint added".to_string(),
+            };
+        }
+        self.sync_breakpoint_projection();
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
+    fn launch(
+        &mut self,
+        context: ActiveWorkspaceContext,
+        configuration_id: DebugConfigurationId,
+        event_context: EventContext,
+    ) -> DebugProjection {
+        if context.trust != WorkspaceTrustState::Trusted {
+            return self.deny("debug launch requires a trusted workspace".to_string());
+        }
+        if !self.fixture_enabled {
+            return self.deny("Debug fixture runtime is disabled".to_string());
+        }
+        let Some(config) = self
+            .configurations
+            .iter()
+            .find(|config| {
+                config.configuration_id == configuration_id
+                    && config.workspace_id == context.workspace_id
+            })
+            .cloned()
+        else {
+            return self.fail(format!(
+                "debug configuration {} was not found",
+                configuration_id.0
+            ));
+        };
+        let breakpoints = self
+            .breakpoints
+            .iter()
+            .filter(|breakpoint| breakpoint.workspace_id == context.workspace_id)
+            .cloned()
+            .map(|mut breakpoint| {
+                breakpoint.session_id = None;
+                breakpoint
+            })
+            .collect();
+        let request = DebugAdapterLaunchRequest {
+            workspace_id: context.workspace_id,
+            configuration_id,
+            adapter_type: config.adapter_type.clone(),
+            breakpoints,
+            schema_version: 1,
+        };
+        match self.fixture.launch(request) {
+            Ok(outcome) => {
+                self.apply_fixture_outcome(outcome);
+                self.projection.status = DebugStatusProjection {
+                    kind: DebugStatusKindProjection::Paused,
+                    message: "Debug fixture paused at breakpoint".to_string(),
+                };
+                self.projection.session_state = Some(DebugSessionState::Paused);
+                self.projection.generated_at = TimestampMillis::now();
+                self.record_audit(
+                    self.projection
+                        .active_session_id
+                        .clone()
+                        .unwrap_or_else(|| DebugSessionId("debug:missing".to_string())),
+                    DebugSessionState::Paused,
+                    config.adapter_type,
+                    event_context,
+                    "action=launch state=paused".to_string(),
+                );
+                self.projection()
+            }
+            Err(error) => self.fail(format!("debug launch denied: {error}")),
+        }
+    }
+
+    fn step(
+        &mut self,
+        session_id: DebugSessionId,
+        kind: DebugStepKindProjection,
+    ) -> DebugProjection {
+        if !self.session_is_active(&session_id) {
+            return self.deny(format!("debug session {} is not active", session_id.0));
+        }
+        let protocol_kind = debug_step_kind(kind);
+        match self.fixture.step(session_id, protocol_kind) {
+            Ok(outcome) => {
+                self.apply_fixture_outcome(outcome);
+                self.projection.status = DebugStatusProjection {
+                    kind: DebugStatusKindProjection::Paused,
+                    message: "Debug step completed".to_string(),
+                };
+                self.projection.session_state = Some(DebugSessionState::Paused);
+                self.projection.generated_at = TimestampMillis::now();
+                self.projection()
+            }
+            Err(error) => self.fail(format!("debug step failed: {error}")),
+        }
+    }
+
+    fn run_to_cursor(
+        &mut self,
+        session_id: DebugSessionId,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+    ) -> DebugProjection {
+        if !self.session_is_active(&session_id) {
+            return self.deny(format!("debug session {} is not active", session_id.0));
+        }
+        self.push_console(
+            session_id,
+            format!(
+                "run-to-cursor buffer={} line={} character={}",
+                buffer_id.0, position.line, position.character
+            ),
+            DebugConsoleCategory::Adapter,
+        );
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Paused,
+            message: "Debug run-to-cursor completed".to_string(),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
+    fn evaluate_selection(
+        &mut self,
+        session_id: DebugSessionId,
+        expression_label: String,
+    ) -> DebugProjection {
+        if !self.session_is_active(&session_id) {
+            return self.deny(format!("debug session {} is not active", session_id.0));
+        }
+        self.push_console(
+            session_id,
+            format!("evaluate expression_bytes={}", expression_label.len()),
+            DebugConsoleCategory::Evaluation,
+        );
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
+    fn add_watch(
+        &mut self,
+        session_id: DebugSessionId,
+        expression_label: String,
+    ) -> DebugProjection {
+        if !self.session_is_active(&session_id) {
+            return self.deny(format!("debug session {} is not active", session_id.0));
+        }
+        self.next_watch = self.next_watch.saturating_add(1).max(1);
+        self.projection.watches.push(DebugWatchProjection {
+            watch_id: DebugWatchId(format!("watch-{}", self.next_watch)),
+            session_id: session_id.clone(),
+            expression_label: bounded_label(expression_label, 80),
+            value_label: "metadata-only".to_string(),
+            type_label: Some("debug".to_string()),
+        });
+        self.push_console(
+            session_id,
+            "watch added value=metadata-only".to_string(),
+            DebugConsoleCategory::Evaluation,
+        );
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
+    fn apply_fixture_outcome(&mut self, outcome: DapAdapterFixtureOutcome) {
+        self.last_audit = Some(outcome.audit.clone());
+        self.projection.active_session_id = Some(outcome.audit.session_id.clone());
+        for verified in outcome.breakpoints {
+            if let Some(existing) = self
+                .breakpoints
+                .iter_mut()
+                .find(|breakpoint| breakpoint.breakpoint_id == verified.breakpoint_id)
+            {
+                existing.verified = verified.verified;
+                existing.message = verified.message;
+                existing.session_id = None;
+            }
+        }
+        self.sync_breakpoint_projection();
+        self.projection.stack_frames = outcome
+            .stack_frames
+            .into_iter()
+            .map(debug_stack_frame_projection)
+            .collect();
+        self.projection.variables = outcome
+            .variables
+            .into_iter()
+            .map(debug_variable_projection)
+            .collect();
+        self.projection.inline_values = outcome
+            .inline_values
+            .into_iter()
+            .map(debug_inline_value_projection)
+            .collect();
+        self.projection
+            .console
+            .extend(outcome.console.into_iter().map(debug_console_projection));
+    }
+
+    fn sync_breakpoint_projection(&mut self) {
+        self.breakpoints.sort_by(|left, right| {
+            (
+                left.path.0.as_str(),
+                left.range.start.line,
+                left.breakpoint_id.0.as_str(),
+            )
+                .cmp(&(
+                    right.path.0.as_str(),
+                    right.range.start.line,
+                    right.breakpoint_id.0.as_str(),
+                ))
+        });
+        self.projection.breakpoints = self
+            .breakpoints
+            .iter()
+            .map(debug_breakpoint_projection)
+            .collect();
+    }
+
+    fn deny(&mut self, reason: String) -> DebugProjection {
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Denied,
+            message: reason.clone(),
+        };
+        self.projection.diagnostics.push(bounded_label(reason, 120));
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
+    fn fail(&mut self, reason: String) -> DebugProjection {
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Failed,
+            message: reason.clone(),
+        };
+        self.projection.diagnostics.push(bounded_label(reason, 120));
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
+    fn push_console(
+        &mut self,
+        session_id: DebugSessionId,
+        message_label: String,
+        category: DebugConsoleCategory,
+    ) {
+        self.projection.console.push(DebugConsoleProjection {
+            session_id,
+            category_label: debug_console_category_label(category).to_string(),
+            message_label: bounded_label(message_label, 160),
+        });
+        if self.projection.console.len() > 100 {
+            let excess = self.projection.console.len() - 100;
+            self.projection.console.drain(0..excess);
+        }
+    }
+
+    fn session_is_active(&self, session_id: &DebugSessionId) -> bool {
+        self.projection.active_session_id.as_ref() == Some(session_id)
+            && self.projection.session_state.is_some()
+    }
+
+    fn record_audit(
+        &mut self,
+        session_id: DebugSessionId,
+        state: DebugSessionState,
+        adapter_type: String,
+        event_context: EventContext,
+        metadata_summary: String,
+    ) {
+        self.last_audit = Some(DebugAdapterAuditRecord {
+            session_id,
+            state,
+            adapter_type,
+            event_sequence: self.next_event_sequence(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            metadata_summary: bounded_label(metadata_summary, 160),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    }
+
+    fn next_event_sequence(&mut self) -> EventSequence {
+        self.next_sequence = self.next_sequence.saturating_add(1).max(1);
+        EventSequence(self.next_sequence)
+    }
+}
+
 fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
     let lower = path.0.to_ascii_lowercase();
     let language = if lower.ends_with(".rs") {
@@ -4366,6 +5763,382 @@ fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
 
 fn bounded_label(value: impl Into<String>, limit: usize) -> String {
     value.into().chars().take(limit).collect()
+}
+
+fn delegate_context_citation_from_retrieval(
+    result: RetrievalSearchResult,
+) -> DelegatedTaskContextCitation {
+    let citation = result.citation;
+    DelegatedTaskContextCitation {
+        citation_id: citation.citation_id,
+        workspace_id: Some(citation.workspace_id),
+        file_id: Some(citation.file_id),
+        path: Some(citation.path),
+        byte_range: Some(citation.byte_range),
+        line_range: Some(citation.line_range),
+        freshness_fingerprint: Some(citation.freshness.key.content_hash),
+        chunk_hash: Some(citation.chunk_fingerprint),
+        score_basis_points: u32::from(result.score_basis_points),
+        metadata_label: bounded_label(result.label, 96),
+        labels: vec![
+            "delegate.context.retrieval_citation".to_string(),
+            format!("freshness={:?}", citation.freshness.state),
+        ],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn inline_prediction_status(
+    result: &InlinePredictionResult,
+) -> AssistInlinePredictionStatusProjection {
+    if result.freshness.state == InlinePredictionFreshnessState::Stale {
+        return AssistInlinePredictionStatusProjection::Stale;
+    }
+    match result.state {
+        InlinePredictionResultState::Available => AssistInlinePredictionStatusProjection::Ready,
+        InlinePredictionResultState::Empty => AssistInlinePredictionStatusProjection::Idle,
+        InlinePredictionResultState::Stale => AssistInlinePredictionStatusProjection::Stale,
+        InlinePredictionResultState::Cancelled => AssistInlinePredictionStatusProjection::Cancelled,
+        InlinePredictionResultState::Dismissed => AssistInlinePredictionStatusProjection::Dismissed,
+        InlinePredictionResultState::Accepted => AssistInlinePredictionStatusProjection::Accepted,
+        InlinePredictionResultState::Refused | InlinePredictionResultState::Failed => {
+            AssistInlinePredictionStatusProjection::Failed
+        }
+    }
+}
+
+fn stale_reason_label(reasons: &[InlinePredictionStaleReason]) -> String {
+    if reasons.is_empty() {
+        "stale".to_string()
+    } else {
+        reasons
+            .iter()
+            .map(|reason| format!("{reason:?}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn inline_prediction_diagnostics(result: &InlinePredictionResult) -> Vec<String> {
+    let mut diagnostics = vec![format!(
+        "provider_invocation={:?}",
+        result.provider.invocation_state
+    )];
+    diagnostics.extend(
+        result
+            .provider
+            .health_labels
+            .iter()
+            .map(|label| format!("health={}", bounded_label(label.as_str(), 64))),
+    );
+    diagnostics.extend(
+        result
+            .provider
+            .cost_labels
+            .iter()
+            .map(|label| format!("cost={}", bounded_label(label.as_str(), 64))),
+    );
+    if result.freshness.state == InlinePredictionFreshnessState::Stale {
+        diagnostics.push(format!(
+            "stale={}",
+            stale_reason_label(&result.freshness.stale_reasons)
+        ));
+    }
+    if let Some(refusal) = &result.refusal {
+        diagnostics.push(format!(
+            "refusal={}",
+            bounded_label(refusal.reason_code.as_str(), 64)
+        ));
+    }
+    diagnostics
+}
+
+fn debug_locator_error(error: DebugLocatorError) -> AppCompositionError {
+    AppCompositionError::Debug(error.to_string())
+}
+
+fn debug_configuration_projection(
+    config: &DebugLaunchConfiguration,
+) -> DebugConfigurationProjection {
+    DebugConfigurationProjection {
+        configuration_id: config.configuration_id.clone(),
+        name: config.name.clone(),
+        adapter_type: config.adapter_type.clone(),
+        program_label: config.program_label.clone(),
+        cargo_package: config.cargo_package.clone(),
+        cargo_target: config.cargo_target.clone(),
+        deterministic: config.deterministic,
+    }
+}
+
+fn debug_breakpoint_projection(record: &DebugBreakpointRecord) -> DebugBreakpointProjection {
+    DebugBreakpointProjection {
+        breakpoint_id: record.breakpoint_id.clone(),
+        session_id: record.session_id.clone(),
+        path: record.path.clone(),
+        line: record.range.start.line.saturating_add(1),
+        enabled: record.enabled,
+        condition: record.condition.clone(),
+        hit_condition: record.hit_condition.clone(),
+        log_message: record.log_message.clone(),
+        verified: record.verified,
+        message: record.message.clone(),
+    }
+}
+
+fn debug_stack_frame_projection(frame: DebugStackFrame) -> DebugStackFrameProjection {
+    DebugStackFrameProjection {
+        session_id: frame.session_id,
+        frame_id: frame.frame_id,
+        name: frame.name,
+        path: frame.path,
+        line: frame.range.map(|range| range.start.line.saturating_add(1)),
+    }
+}
+
+fn debug_variable_projection(variable: DebugVariable) -> DebugVariableProjection {
+    DebugVariableProjection {
+        session_id: variable.session_id,
+        name: variable.name,
+        value_label: variable.value_label,
+        type_label: variable.type_label,
+        has_children: variable.has_children,
+    }
+}
+
+fn debug_inline_value_projection(value: DebugInlineValue) -> DebugInlineValueProjection {
+    DebugInlineValueProjection {
+        session_id: value.session_id,
+        path: value.path,
+        line: value.range.start.line.saturating_add(1),
+        expression_label: value.expression_label,
+        value_label: value.value_label,
+    }
+}
+
+fn debug_console_projection(entry: DebugConsoleEntry) -> DebugConsoleProjection {
+    DebugConsoleProjection {
+        session_id: entry.session_id,
+        category_label: debug_console_category_label(entry.category).to_string(),
+        message_label: entry.message_label,
+    }
+}
+
+fn debug_console_category_label(category: DebugConsoleCategory) -> &'static str {
+    match category {
+        DebugConsoleCategory::Adapter => "adapter",
+        DebugConsoleCategory::Stdout => "stdout",
+        DebugConsoleCategory::Stderr => "stderr",
+        DebugConsoleCategory::Evaluation => "evaluation",
+    }
+}
+
+fn debug_step_kind(kind: DebugStepKindProjection) -> DebugStepKind {
+    match kind {
+        DebugStepKindProjection::Continue => DebugStepKind::Continue,
+        DebugStepKindProjection::Over => DebugStepKind::Over,
+        DebugStepKindProjection::Into => DebugStepKind::Into,
+        DebugStepKindProjection::Out => DebugStepKind::Out,
+        DebugStepKindProjection::Back => DebugStepKind::Back,
+    }
+}
+
+fn language_quick_fixes_for_problems(
+    problems: &[LanguageProblemProjection],
+) -> Vec<LanguageQuickFixProjection> {
+    problems
+        .iter()
+        .take(50)
+        .enumerate()
+        .map(|(index, problem)| {
+            let code_label = problem
+                .code_label
+                .clone()
+                .unwrap_or_else(|| "diagnostic".to_string());
+            LanguageQuickFixProjection {
+                action_id: language_quick_fix_action_id(index, problem),
+                title: format!(
+                    "Prepare code action for {}",
+                    bounded_label(code_label.clone(), 64)
+                ),
+                kind_label: "quickfix.diagnostic".to_string(),
+                problem_code_label: problem.code_label.clone(),
+                problem_range: problem.range,
+                severity: problem.severity,
+                source_label: problem.source_label.clone(),
+                proposal_id: None,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }
+        })
+        .collect()
+}
+
+fn language_quick_fix_action_id(index: usize, problem: &LanguageProblemProjection) -> String {
+    let code = problem.code_label.as_deref().unwrap_or("diagnostic");
+    let safe_code = sanitized_action_component(code, 64);
+    let (line, character) = problem
+        .range
+        .map(|range| (range.start.line, range.start.character))
+        .unwrap_or((0, 0));
+    format!("quickfix:{safe_code}:{line}:{character}:{index}")
+}
+
+fn sanitized_action_component(value: &str, limit: usize) -> String {
+    let sanitized = value
+        .chars()
+        .filter_map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | ':') {
+                Some(character)
+            } else if character.is_ascii_whitespace() {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .take(limit)
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "diagnostic".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn language_breadcrumbs_for_outline(
+    outline: &[LanguageOutlineSymbolProjection],
+    position: TextCoordinate,
+) -> Vec<LanguageBreadcrumbProjection> {
+    language_scope_outline_rows(outline, position)
+        .into_iter()
+        .enumerate()
+        .map(|(index, symbol)| LanguageBreadcrumbProjection {
+            breadcrumb_id: format!("breadcrumb:{}", symbol.symbol_id),
+            label: symbol.label.clone(),
+            kind_label: symbol.kind_label.clone(),
+            range: symbol.range,
+            depth: index.min(u16::MAX as usize) as u16,
+            source_label: "devil-index".to_string(),
+            schema_version: 1,
+        })
+        .collect()
+}
+
+fn language_sticky_scopes_for_outline(
+    outline: &[LanguageOutlineSymbolProjection],
+    position: TextCoordinate,
+) -> Vec<LanguageStickyScopeProjection> {
+    let rows = language_scope_outline_rows(outline, position);
+    let active_index = rows.len().saturating_sub(1);
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, symbol)| LanguageStickyScopeProjection {
+            scope_id: format!("sticky:{}", symbol.symbol_id),
+            label: symbol.label.clone(),
+            kind_label: symbol.kind_label.clone(),
+            range: symbol.range,
+            depth: index.min(u16::MAX as usize) as u16,
+            active: index == active_index,
+            source_label: "devil-index".to_string(),
+            schema_version: 1,
+        })
+        .collect()
+}
+
+fn language_inlay_hints_for_symbols(
+    symbols: &[SymbolFileMapRecord],
+) -> Vec<LanguageInlayHintProjection> {
+    symbols
+        .iter()
+        .filter_map(|symbol| {
+            let range = symbol.declaration_range?;
+            Some(LanguageInlayHintProjection {
+                hint_id: format!("inlay:{}:kind", symbol.symbol_id.0),
+                label: format!(": {}", bounded_label(symbol.kind.clone(), 48)),
+                kind_label: "symbol-kind".to_string(),
+                position: range.end,
+                range: Some(range),
+                padding_left: true,
+                padding_right: false,
+                source_label: "devil-index".to_string(),
+                schema_version: 1,
+            })
+        })
+        .take(50)
+        .collect()
+}
+
+fn language_code_lenses_for_symbols(
+    symbols: &[SymbolFileMapRecord],
+) -> Vec<LanguageCodeLensProjection> {
+    symbols
+        .iter()
+        .take(50)
+        .map(|symbol| {
+            let reference_count = symbol.reference_ranges.len();
+            let reference_label = if reference_count == 1 {
+                "1 reference".to_string()
+            } else {
+                format!("{reference_count} references")
+            };
+            LanguageCodeLensProjection {
+                lens_id: format!("codelens:{}:references", symbol.symbol_id.0),
+                title: reference_label,
+                command_label: "Find references".to_string(),
+                kind_label: "references".to_string(),
+                range: symbol.declaration_range,
+                data_label: Some(format!("references={reference_count}")),
+                source_label: "devil-index".to_string(),
+                schema_version: 1,
+            }
+        })
+        .collect()
+}
+
+fn language_scope_outline_rows(
+    outline: &[LanguageOutlineSymbolProjection],
+    position: TextCoordinate,
+) -> Vec<&LanguageOutlineSymbolProjection> {
+    let mut rows = outline
+        .iter()
+        .filter(|symbol| {
+            symbol
+                .range
+                .is_some_and(|range| text_coordinate_at_or_before(range.start, position))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        outline_range_sort_key(left)
+            .cmp(&outline_range_sort_key(right))
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+    });
+    if rows.len() > 4 {
+        rows.drain(0..rows.len() - 4);
+    }
+    rows
+}
+
+fn outline_range_sort_key(symbol: &LanguageOutlineSymbolProjection) -> (u32, u32, u64) {
+    symbol
+        .range
+        .map(|range| text_coordinate_sort_key(range.start))
+        .unwrap_or((u32::MAX, u32::MAX, u64::MAX))
+}
+
+fn text_coordinate_at_or_before(left: TextCoordinate, right: TextCoordinate) -> bool {
+    match (left.byte_offset, right.byte_offset) {
+        (Some(left_byte), Some(right_byte)) => left_byte <= right_byte,
+        _ => (left.line, left.character) <= (right.line, right.character),
+    }
+}
+
+fn text_coordinate_sort_key(coordinate: TextCoordinate) -> (u32, u32, u64) {
+    (
+        coordinate.line,
+        coordinate.character,
+        coordinate.byte_offset.unwrap_or(u64::MAX),
+    )
 }
 
 fn identifier_byte_range_at(text: &str, requested_byte: u64) -> Option<ByteRange> {
@@ -4654,6 +6427,11 @@ pub enum AppCommandRequest {
     Noop,
     /// Command requested shell termination.
     Quit,
+    /// Set the app-owned product mode.
+    SetProductMode {
+        /// Target product mode.
+        mode: AppProductMode,
+    },
     /// Undo the active buffer through editor authority.
     Undo {
         /// Target buffer identifier.
@@ -4720,10 +6498,35 @@ pub enum AppCommandRequest {
         /// Requested result limit; zero means app default.
         limit: usize,
     },
+    /// Run deterministic structural search/rewrite preview through app authority.
+    RunStructuralSearch {
+        /// App-generated query id.
+        query_id: String,
+        /// Search scope.
+        scope: SearchScopeProjection,
+        /// Structural pattern.
+        pattern: String,
+        /// Optional rewrite template.
+        rewrite: Option<String>,
+        /// Requested result limit; zero means app default.
+        limit: usize,
+    },
     /// Cancel the projected search by query id.
     CancelSearch {
         /// Query id to cancel.
         query_id: String,
+    },
+    /// Refresh the app-owned git projection.
+    RefreshGit,
+    /// Stage one cached git hunk by projected hunk id.
+    StageGitHunk {
+        /// Projected hunk identifier.
+        hunk_id: String,
+    },
+    /// Unstage one cached git hunk by projected hunk id.
+    UnstageGitHunk {
+        /// Projected hunk identifier.
+        hunk_id: String,
     },
     /// Request hover data through app-owned language tooling.
     RequestHover {
@@ -4738,6 +6541,34 @@ pub enum AppCommandRequest {
         buffer_id: BufferId,
         /// Cursor position.
         position: TextCoordinate,
+    },
+    /// Request an Assist inline prediction through provider authority.
+    RequestAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Accept the currently projected Assist inline prediction.
+    AcceptAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Projected prediction/result identifier.
+        prediction_id: Option<String>,
+    },
+    /// Dismiss the currently projected Assist inline prediction.
+    DismissAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Projected prediction/result identifier.
+        prediction_id: Option<String>,
+    },
+    /// Cancel an in-flight Assist inline prediction.
+    CancelAssistInlinePrediction {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Projected prediction/result identifier.
+        prediction_id: Option<String>,
     },
     /// Request definition locations through app-owned language tooling.
     GoToDefinition {
@@ -4832,6 +6663,56 @@ pub enum AppCommandRequest {
         /// Query label.
         query: String,
     },
+    /// Refresh debug launch configurations and persisted breakpoints.
+    RefreshDebugConfigurations,
+    /// Toggle a source breakpoint.
+    ToggleDebugBreakpoint {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based line.
+        line: u32,
+        /// Conditional expression label.
+        condition: Option<String>,
+        /// Hit condition label.
+        hit_condition: Option<String>,
+        /// Logpoint message label.
+        log_message: Option<String>,
+    },
+    /// Launch a debug session.
+    LaunchDebugSession {
+        /// Configuration identifier.
+        configuration_id: DebugConfigurationId,
+    },
+    /// Step or continue a debug session.
+    DebugStep {
+        /// Session identifier.
+        session_id: DebugSessionId,
+        /// Step kind.
+        kind: DebugStepKindProjection,
+    },
+    /// Run to cursor.
+    DebugRunToCursor {
+        /// Session identifier.
+        session_id: DebugSessionId,
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Evaluate selected expression.
+    DebugEvaluateSelection {
+        /// Session identifier.
+        session_id: DebugSessionId,
+        /// Expression label.
+        expression_label: String,
+    },
+    /// Add watch expression.
+    DebugAddWatch {
+        /// Session identifier.
+        session_id: DebugSessionId,
+        /// Expression label.
+        expression_label: String,
+    },
     /// Open a workspace path through workspace authority.
     OpenPath {
         /// User-provided path text.
@@ -4858,6 +6739,45 @@ pub enum AppCommandRequest {
     StartAiProposal {
         /// Display-safe instruction label.
         instruction_label: String,
+    },
+    /// Send a Delegate chat turn with codebase context retrieval.
+    SendDelegateChat {
+        /// Display-safe prompt label.
+        prompt_label: String,
+    },
+    /// Record a human decision for one Delegate proposal hunk.
+    ReviewDelegateProposalHunk {
+        /// Proposal being reviewed.
+        proposal_id: ProposalId,
+        /// Stable Delegate hunk identifier.
+        hunk_id: String,
+        /// Human disposition.
+        disposition: DelegatedTaskProposalHunkDisposition,
+    },
+    /// Record a human decision for one Delegate tool permission request.
+    RecordDelegateToolPermission {
+        /// Permission request identifier.
+        request_id: String,
+        /// Human decision.
+        decision: DelegatedTaskToolPermissionDecision,
+    },
+    /// Record a human decision for one Automate MCP tool permission request.
+    RecordLegionWorkflowToolPermission {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// MCP server identifier.
+        server_id: McpServerId,
+        /// MCP tool name.
+        tool_name: McpToolName,
+        /// Human decision.
+        decision: DelegatedTaskToolPermissionDecision,
+    },
+    /// Trigger the hard Automate kill switch.
+    TriggerLegionWorkflowKillSwitch {
+        /// Workflow session identifier.
+        session_id: LegionWorkflowSessionId,
+        /// Display-safe reason label.
+        reason_label: String,
     },
     /// Cancel a Phase 4 AI run through app-owned composition.
     CancelAiRun {
@@ -5076,6 +6996,7 @@ impl CommandExecutionService {
                 )))
             }
             AppCommandRequest::Save { .. }
+            | AppCommandRequest::SetProductMode { .. }
             | AppCommandRequest::SwitchTab { .. }
             | AppCommandRequest::CloseTab { .. }
             | AppCommandRequest::SaveAll
@@ -5083,9 +7004,24 @@ impl CommandExecutionService {
             | AppCommandRequest::SetSelection { .. }
             | AppCommandRequest::SetViewportScroll { .. }
             | AppCommandRequest::RunSearch { .. }
+            | AppCommandRequest::RunStructuralSearch { .. }
             | AppCommandRequest::CancelSearch { .. }
+            | AppCommandRequest::RefreshGit
+            | AppCommandRequest::StageGitHunk { .. }
+            | AppCommandRequest::UnstageGitHunk { .. }
+            | AppCommandRequest::RefreshDebugConfigurations
+            | AppCommandRequest::ToggleDebugBreakpoint { .. }
+            | AppCommandRequest::LaunchDebugSession { .. }
+            | AppCommandRequest::DebugStep { .. }
+            | AppCommandRequest::DebugRunToCursor { .. }
+            | AppCommandRequest::DebugEvaluateSelection { .. }
+            | AppCommandRequest::DebugAddWatch { .. }
             | AppCommandRequest::RequestHover { .. }
             | AppCommandRequest::RequestCompletion { .. }
+            | AppCommandRequest::RequestAssistInlinePrediction { .. }
+            | AppCommandRequest::AcceptAssistInlinePrediction { .. }
+            | AppCommandRequest::DismissAssistInlinePrediction { .. }
+            | AppCommandRequest::CancelAssistInlinePrediction { .. }
             | AppCommandRequest::GoToDefinition { .. }
             | AppCommandRequest::FindReferences { .. }
             | AppCommandRequest::RefreshOutline { .. }
@@ -5105,6 +7041,11 @@ impl CommandExecutionService {
             | AppCommandRequest::StartAiRun { .. }
             | AppCommandRequest::StartAiExplain { .. }
             | AppCommandRequest::StartAiProposal { .. }
+            | AppCommandRequest::SendDelegateChat { .. }
+            | AppCommandRequest::ReviewDelegateProposalHunk { .. }
+            | AppCommandRequest::RecordDelegateToolPermission { .. }
+            | AppCommandRequest::RecordLegionWorkflowToolPermission { .. }
+            | AppCommandRequest::TriggerLegionWorkflowKillSwitch { .. }
             | AppCommandRequest::CancelAiRun { .. }
             | AppCommandRequest::ReplayAiRun { .. }
             | AppCommandRequest::InspectAiRun { .. }
@@ -5168,6 +7109,11 @@ impl CommandDispatcher {
         match intent {
             CommandDispatchIntent::Noop => Ok(AppCommandRequest::Noop),
             CommandDispatchIntent::Quit => Ok(AppCommandRequest::Quit),
+            CommandDispatchIntent::SetProductMode { mode } => {
+                Ok(AppCommandRequest::SetProductMode {
+                    mode: AppProductMode::from_dock_mode(mode),
+                })
+            }
             CommandDispatchIntent::Undo { buffer_id } => {
                 Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
                 Ok(AppCommandRequest::Undo { buffer_id })
@@ -5232,9 +7178,79 @@ impl CommandDispatcher {
                 query,
                 limit,
             }),
+            CommandDispatchIntent::RunStructuralSearch {
+                scope,
+                pattern,
+                rewrite,
+                limit,
+            } => Ok(AppCommandRequest::RunStructuralSearch {
+                query_id: format!("structural-search:{}", correlation_id.0),
+                scope,
+                pattern,
+                rewrite,
+                limit,
+            }),
             CommandDispatchIntent::CancelSearch { query_id } => {
                 Ok(AppCommandRequest::CancelSearch { query_id })
             }
+            CommandDispatchIntent::RefreshGit => Ok(AppCommandRequest::RefreshGit),
+            CommandDispatchIntent::StageGitHunk { hunk_id } => {
+                Ok(AppCommandRequest::StageGitHunk { hunk_id })
+            }
+            CommandDispatchIntent::UnstageGitHunk { hunk_id } => {
+                Ok(AppCommandRequest::UnstageGitHunk { hunk_id })
+            }
+            CommandDispatchIntent::RefreshDebugConfigurations => {
+                Ok(AppCommandRequest::RefreshDebugConfigurations)
+            }
+            CommandDispatchIntent::ToggleDebugBreakpoint {
+                buffer_id,
+                line,
+                condition,
+                hit_condition,
+                log_message,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ToggleDebugBreakpoint {
+                    buffer_id,
+                    line,
+                    condition,
+                    hit_condition,
+                    log_message,
+                })
+            }
+            CommandDispatchIntent::LaunchDebugSession { configuration_id } => {
+                Ok(AppCommandRequest::LaunchDebugSession { configuration_id })
+            }
+            CommandDispatchIntent::DebugStep { session_id, kind } => {
+                Ok(AppCommandRequest::DebugStep { session_id, kind })
+            }
+            CommandDispatchIntent::DebugRunToCursor {
+                session_id,
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::DebugRunToCursor {
+                    session_id,
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::DebugEvaluateSelection {
+                session_id,
+                expression_label,
+            } => Ok(AppCommandRequest::DebugEvaluateSelection {
+                session_id,
+                expression_label,
+            }),
+            CommandDispatchIntent::DebugAddWatch {
+                session_id,
+                expression_label,
+            } => Ok(AppCommandRequest::DebugAddWatch {
+                session_id,
+                expression_label,
+            }),
             CommandDispatchIntent::RequestHover {
                 buffer_id,
                 position,
@@ -5253,6 +7269,46 @@ impl CommandDispatcher {
                 Ok(AppCommandRequest::RequestCompletion {
                     buffer_id,
                     position,
+                })
+            }
+            CommandDispatchIntent::RequestAssistInlinePrediction {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestAssistInlinePrediction {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::AcceptAssistInlinePrediction {
+                buffer_id,
+                prediction_id,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::AcceptAssistInlinePrediction {
+                    buffer_id,
+                    prediction_id,
+                })
+            }
+            CommandDispatchIntent::DismissAssistInlinePrediction {
+                buffer_id,
+                prediction_id,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::DismissAssistInlinePrediction {
+                    buffer_id,
+                    prediction_id,
+                })
+            }
+            CommandDispatchIntent::CancelAssistInlinePrediction {
+                buffer_id,
+                prediction_id,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::CancelAssistInlinePrediction {
+                    buffer_id,
+                    prediction_id,
                 })
             }
             CommandDispatchIntent::GoToDefinition {
@@ -5357,6 +7413,43 @@ impl CommandDispatcher {
             CommandDispatchIntent::StartAiProposal { instruction_label } => {
                 Ok(AppCommandRequest::StartAiProposal { instruction_label })
             }
+            CommandDispatchIntent::SendDelegateChat { prompt_label } => {
+                Ok(AppCommandRequest::SendDelegateChat { prompt_label })
+            }
+            CommandDispatchIntent::ReviewDelegateProposalHunk {
+                proposal_id,
+                hunk_id,
+                disposition,
+            } => Ok(AppCommandRequest::ReviewDelegateProposalHunk {
+                proposal_id,
+                hunk_id,
+                disposition,
+            }),
+            CommandDispatchIntent::RecordDelegateToolPermission {
+                request_id,
+                decision,
+            } => Ok(AppCommandRequest::RecordDelegateToolPermission {
+                request_id,
+                decision,
+            }),
+            CommandDispatchIntent::RecordLegionWorkflowToolPermission {
+                session_id,
+                server_id,
+                tool_name,
+                decision,
+            } => Ok(AppCommandRequest::RecordLegionWorkflowToolPermission {
+                session_id,
+                server_id,
+                tool_name,
+                decision,
+            }),
+            CommandDispatchIntent::TriggerLegionWorkflowKillSwitch {
+                session_id,
+                reason_label,
+            } => Ok(AppCommandRequest::TriggerLegionWorkflowKillSwitch {
+                session_id,
+                reason_label,
+            }),
             CommandDispatchIntent::CancelAiRun { run_id } => {
                 Ok(AppCommandRequest::CancelAiRun { run_id })
             }
@@ -5394,7 +7487,16 @@ impl CommandDispatcher {
             | CommandDispatchIntent::ApplyProposal { .. }
             | CommandDispatchIntent::RollbackProposal { .. }
             | CommandDispatchIntent::CancelProposal { .. }
-            | CommandDispatchIntent::OpenProposalDetails { .. } => Ok(AppCommandRequest::Noop),
+            | CommandDispatchIntent::OpenProposalDetails { .. }
+            | CommandDispatchIntent::InspectLegionWorkflowSession { .. }
+            | CommandDispatchIntent::OpenLegionWorkflowProposalPreview { .. }
+            | CommandDispatchIntent::OpenLegionWorkflowProposalDetails { .. }
+            | CommandDispatchIntent::RequestLegionWorkflowVerification { .. }
+            | CommandDispatchIntent::RequestLegionWorkflowSignOff { .. }
+            | CommandDispatchIntent::ResolveLegionWorkflowConflict { .. }
+            | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
+                Ok(AppCommandRequest::Noop)
+            }
         }
     }
 
@@ -6550,6 +8652,13 @@ fn metadata_fingerprint(algorithm: &str, value: &str) -> FileFingerprint {
     }
 }
 
+#[cfg(feature = "ai")]
+fn value_fingerprint(algorithm: &str, value: &Value) -> FileFingerprint {
+    let mut hasher = DefaultHasher::new();
+    value.to_string().hash(&mut hasher);
+    metadata_fingerprint(algorithm, &format!("{:016x}", hasher.finish()))
+}
+
 fn trust_reference(
     reference_id: &str,
     kind: devil_protocol::AssistedAiTrustProjectionKind,
@@ -6745,6 +8854,8 @@ pub enum AppCommandOutcome {
     Noop,
     /// Command requested shell termination.
     Quit,
+    /// Product mode changed through app authority.
+    ProductModeChanged(AppProductMode),
     /// Editor transaction was applied.
     Edited(TextTransactionDescriptor),
     /// Buffer save completed through workspace authority.
@@ -6763,8 +8874,16 @@ pub enum AppCommandOutcome {
     ViewportScrollSet(BufferId),
     /// Search projection changed.
     SearchUpdated(SearchProjection),
+    /// Structural search projection changed.
+    StructuralSearchUpdated(StructuralSearchProjection),
+    /// Git projection changed.
+    GitUpdated(GitProjection),
+    /// Debug projection changed.
+    DebugProjectionUpdated(DebugProjection),
     /// Language tooling projection changed.
     LanguageToolingUpdated(LanguageToolingProjection),
+    /// Assist inline prediction projection changed.
+    AssistInlinePredictionUpdated(AssistInlinePredictionProjection),
     /// Terminal panel projection changed.
     TerminalPanelUpdated(TerminalPanelProjection),
     /// Explorer projection was refreshed from workspace tree state.
@@ -6793,6 +8912,14 @@ pub enum AppCommandOutcome {
     CollaborationPresencePublished(CollaborationSessionId),
     /// Collaboration transport operation was accepted and applied through editor authority.
     CollaborationOperationApplied(TextTransactionDescriptor),
+    /// Delegate chat turn completed with metadata-only context citations.
+    DelegateChatCompleted(Box<AppDelegateChatOutcome>),
+    /// Delegate proposal hunk review changed after human input.
+    DelegateProposalHunkReviewed(DelegatedTaskProjection),
+    /// Delegate tool permission row changed after human input.
+    DelegateToolPermissionRecorded(DelegatedTaskProjection),
+    /// Automate workflow projection changed after human input or kill switch.
+    LegionWorkflowUpdated(LegionWorkflowProjection),
 }
 
 /// Per-buffer save-all result.
@@ -6994,6 +9121,46 @@ struct Phase4ProjectionState {
     inspection_snapshots: HashMap<devil_protocol::AgentRunId, AppAiInspectionSnapshot>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct AssistInlinePredictionState {
+    active_request_id: Option<InlinePredictionRequestId>,
+    results: Vec<InlinePredictionResult>,
+    requests: HashMap<InlinePredictionRequestId, InlinePredictionRequestMetadata>,
+    request_in_flight: bool,
+}
+
+impl AssistInlinePredictionState {
+    fn clear_for_buffer(&mut self, buffer_id: BufferId) {
+        self.request_in_flight = false;
+        self.active_request_id = self.active_request_id.take().filter(|request_id| {
+            self.requests
+                .get(request_id)
+                .is_some_and(|request| request.buffer_id != buffer_id)
+        });
+        self.results.retain(|result| {
+            self.requests
+                .get(&result.request_id)
+                .is_some_and(|request| request.buffer_id != buffer_id)
+        });
+        self.requests
+            .retain(|_, request| request.buffer_id != buffer_id);
+    }
+
+    fn retain_bounded_history(&mut self) {
+        const MAX_INLINE_RESULTS: usize = 8;
+        if self.results.len() > MAX_INLINE_RESULTS {
+            let split_at = self.results.len() - MAX_INLINE_RESULTS;
+            let removed: HashSet<InlinePredictionRequestId> = self
+                .results
+                .drain(..split_at)
+                .map(|result| result.request_id)
+                .collect();
+            self.requests
+                .retain(|request_id, _| !removed.contains(request_id));
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct SearchBuildResult {
     results: Vec<SearchResultProjection>,
@@ -7001,6 +9168,21 @@ struct SearchBuildResult {
     omitted_file_count: usize,
     diagnostics: Vec<String>,
     degraded_limited: bool,
+}
+
+#[derive(Debug, Default)]
+struct StructuralBuildResult {
+    matches: Vec<StructuralSearchMatchProjection>,
+    reports: Vec<StructuralDocumentReport>,
+    omitted_match_count: usize,
+    omitted_file_count: usize,
+    diagnostics: Vec<String>,
+}
+
+#[derive(Debug)]
+struct StructuralDocumentReport {
+    document: SourceDocument,
+    matches: Vec<devil_index::StructuralSearchMatch>,
 }
 
 struct SearchTextInput<'a> {
@@ -7094,6 +9276,236 @@ fn build_search_projection(
         diagnostics: result.diagnostics,
         generated_at: TimestampMillis::now(),
         schema_version: 1,
+    }
+}
+
+fn structural_search_status_for_result(result: &StructuralBuildResult) -> SearchStatusProjection {
+    if result.matches.is_empty() {
+        SearchStatusProjection {
+            kind: SearchStatusKindProjection::NoResults,
+            message: "No structural search results".to_string(),
+        }
+    } else {
+        SearchStatusProjection {
+            kind: SearchStatusKindProjection::Completed,
+            message: format!("Found {} structural matches", result.matches.len()),
+        }
+    }
+}
+
+struct StructuralSearchProjectionInput<'a> {
+    query_id: Option<String>,
+    scope: SearchScopeProjection,
+    pattern_label: String,
+    rewrite_label: Option<String>,
+    result_limit: usize,
+    status: SearchStatusProjection,
+    result: &'a StructuralBuildResult,
+    proposal_id: Option<ProposalId>,
+}
+
+fn build_structural_search_projection(
+    input: StructuralSearchProjectionInput<'_>,
+) -> StructuralSearchProjection {
+    StructuralSearchProjection {
+        query_id: input.query_id,
+        scope: input.scope,
+        pattern_label: input.pattern_label,
+        rewrite_label: input.rewrite_label,
+        status: input.status,
+        matches: input.result.matches.clone(),
+        result_limit: input.result_limit,
+        omitted_match_count: input.result.omitted_match_count,
+        omitted_file_count: input.result.omitted_file_count,
+        diagnostics: input.result.diagnostics.clone(),
+        proposal_id: input.proposal_id,
+        generated_at: TimestampMillis::now(),
+        schema_version: 1,
+    }
+}
+
+fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
+    GitProjection {
+        root_label: Some(snapshot.root.0),
+        branch_label: snapshot.branch_label,
+        head_short: snapshot.head_short,
+        changed_files: snapshot
+            .changed_files
+            .into_iter()
+            .map(|file| GitFileProjection {
+                path: file.path,
+                status: file.status,
+                inserted_lines: file.inserted_lines,
+                deleted_lines: file.deleted_lines,
+                unstaged_hunk_count: file.unstaged_hunk_count,
+                staged_hunk_count: file.staged_hunk_count,
+                stageable: file.stageable,
+                diff_strategy: git_diff_strategy_projection(file.diff_strategy),
+                fallback_reason: file.fallback_reason,
+                conflict: file.conflict,
+            })
+            .collect(),
+        hunks: snapshot
+            .hunks
+            .into_iter()
+            .map(|hunk| GitHunkProjection {
+                hunk_id: hunk.hunk_id,
+                path: hunk.path,
+                stage: git_hunk_stage_projection(hunk.stage),
+                header: hunk.header,
+                added_lines: hunk.added_lines,
+                deleted_lines: hunk.deleted_lines,
+                context: hunk.context,
+            })
+            .collect(),
+        blame_lines: snapshot
+            .blame_lines
+            .into_iter()
+            .map(|line| GitBlameLineProjection {
+                path: line.path,
+                line_number: line.line_number,
+                commit_short: line.commit_short,
+                author: line.author,
+                summary: line.summary,
+                line_preview: line.line_preview,
+            })
+            .collect(),
+        commits: snapshot
+            .commits
+            .into_iter()
+            .map(|commit| GitCommitProjection {
+                hash: commit.hash,
+                short_hash: commit.short_hash,
+                author: commit.author,
+                date: commit.date,
+                summary: commit.summary,
+                parent_count: commit.parent_count,
+                refs: commit.refs,
+            })
+            .collect(),
+        conflicts: snapshot
+            .conflicts
+            .into_iter()
+            .map(|conflict| GitConflictProjection {
+                path: conflict.path,
+                marker_count: conflict.marker_count,
+                actions: conflict.actions,
+            })
+            .collect(),
+        diagnostics: snapshot.diagnostics,
+        generated_at: snapshot.generated_at,
+        schema_version: snapshot.schema_version,
+    }
+}
+
+fn git_diff_strategy_projection(strategy: GitDiffStrategy) -> GitDiffStrategyProjection {
+    match strategy {
+        GitDiffStrategy::Syntactic => GitDiffStrategyProjection::Syntactic,
+        GitDiffStrategy::LineFallback => GitDiffStrategyProjection::LineFallback,
+    }
+}
+
+fn git_hunk_stage_projection(stage: GitHunkStage) -> GitHunkStageProjection {
+    match stage {
+        GitHunkStage::Unstaged => GitHunkStageProjection::Unstaged,
+        GitHunkStage::Staged => GitHunkStageProjection::Staged,
+    }
+}
+
+fn git_protocol_error(code: impl Into<String>, message: impl Into<String>) -> AppCompositionError {
+    AppCompositionError::Protocol(ProtocolError {
+        code: code.into(),
+        message: message.into(),
+    })
+}
+
+fn git_inspection_protocol_error(error: GitInspectionError) -> AppCompositionError {
+    git_protocol_error("git_operation_failed", error.to_string())
+}
+
+fn structural_document_for_tree_node(
+    node: &FileTreeNode,
+    fallback_generation: WorkspaceGeneration,
+    text: String,
+) -> SourceDocument {
+    let metadata = node.metadata.as_ref();
+    let file_content_version = metadata
+        .and_then(|metadata| metadata.content_version)
+        .unwrap_or(node.identity.content_version);
+    let workspace_generation = metadata
+        .and_then(|metadata| metadata.workspace_generation)
+        .unwrap_or(fallback_generation);
+    let mut document = SourceDocument::with_versions(
+        node.identity.workspace_id,
+        node.identity.file_id,
+        node.identity.canonical_path.clone(),
+        language_id_for_path(&node.identity.canonical_path),
+        file_content_version,
+        workspace_generation,
+        None,
+        SemanticPrivacyScope::Workspace,
+        text,
+    );
+    if let Some(fingerprint) = metadata.and_then(|metadata| metadata.fingerprint.clone()) {
+        document.identity.content_hash = fingerprint.clone();
+        document.identity.disk_fingerprint = Some(fingerprint);
+    }
+    document.identity.byte_len = metadata.and_then(|metadata| metadata.size_bytes);
+    document.identity.modified_at = metadata.and_then(|metadata| metadata.modified_at);
+    document
+}
+
+fn collect_structural_document_result(
+    query_id: &str,
+    _scope: SearchScopeProjection,
+    query: &StructuralSearchQuery,
+    document: SourceDocument,
+    limit: usize,
+    result: &mut StructuralBuildResult,
+) {
+    let report = index_run_structural_search(&document, query);
+    result.omitted_match_count = result
+        .omitted_match_count
+        .saturating_add(report.omitted_match_count);
+    result.diagnostics.extend(
+        report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message)),
+    );
+
+    let mut selected = Vec::new();
+    for matched in report.matches {
+        if result.matches.len() < limit {
+            result.matches.push(StructuralSearchMatchProjection {
+                query_id: query_id.to_string(),
+                workspace_id: matched.workspace_id,
+                file_id: matched.file_id,
+                file_path: matched.path.clone(),
+                range: matched.range,
+                captures: matched
+                    .captures
+                    .iter()
+                    .map(|capture| StructuralSearchCaptureProjection {
+                        name: capture.name.clone(),
+                        value: capture.value.clone(),
+                        range: capture.range,
+                    })
+                    .collect(),
+                snippet: matched.snippet.clone(),
+                replacement_preview: matched.replacement_preview.clone(),
+            });
+            selected.push(matched);
+        } else {
+            result.omitted_match_count = result.omitted_match_count.saturating_add(1);
+        }
+    }
+
+    if !selected.is_empty() {
+        result.reports.push(StructuralDocumentReport {
+            document,
+            matches: selected,
+        });
     }
 }
 
@@ -7566,26 +9978,47 @@ fn remote_error(error: impl ToString) -> AppCompositionError {
     AppCompositionError::Remote(error.to_string())
 }
 
+#[cfg(feature = "ai")]
+fn default_ai_registry() -> ProviderRegistry {
+    make_inline_prediction_registry()
+}
+
+#[cfg(not(feature = "ai"))]
+fn default_ai_registry() -> ProviderRegistry {
+    make_stub_registry()
+}
+
 /// Root application composition.
 pub struct AppComposition {
     workspace: WorkspaceActor,
     editor: EditorEngine,
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
+    product_mode: AppProductMode,
     correlation_generator: CorrelationGenerator,
     event_sequence_generator: EventSequenceGenerator,
     storage: InMemoryStorageRepositoryPort,
     event_sink: SharedEventSink,
-    ai_registry: devil_ai::ProviderRegistry,
+    ai_registry: ProviderRegistry,
     tracker_ledger: TrackerLedger,
+    legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger,
     memory_service: MemoryService,
     phase4_projection_state: Phase4ProjectionState,
+    assist_inline_prediction_state: AssistInlinePredictionState,
     plugin_runtime: PluginRuntimeHost,
     plugin_contribution_projections: Vec<PluginContributionProjection>,
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
+    delegate_workflow: DelegateWorkflowState,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
+    legion_workflow_sessions: Vec<LegionWorkflowSession>,
+    automate_workflow: AutomateWorkflowState,
+    automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
     search_projection: SearchProjection,
+    structural_search_projection: StructuralSearchProjection,
+    git_projection: GitProjection,
+    git_hunk_cache: HashMap<String, devil_project::ProjectGitHunk>,
+    debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
 }
@@ -7615,20 +10048,31 @@ impl AppComposition {
             editor: EditorEngine::new(),
             proposal_coordinator: AppProposalCoordinator::new(event_sink.clone()),
             active_documents: ActiveDocumentController::new(),
+            product_mode: AppProductMode::Manual,
             correlation_generator: CorrelationGenerator::default(),
             event_sequence_generator: EventSequenceGenerator::default(),
             storage: InMemoryStorageRepositoryPort::with_event_sink(event_sink.clone()),
             event_sink,
-            ai_registry: make_stub_registry(),
+            ai_registry: default_ai_registry(),
             tracker_ledger: TrackerLedger::new(),
+            legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger::new(),
             memory_service: MemoryService::new(),
             phase4_projection_state: Phase4ProjectionState::default(),
+            assist_inline_prediction_state: AssistInlinePredictionState::default(),
             plugin_runtime: PluginRuntimeHost::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
+            delegate_workflow: DelegateWorkflowState::default(),
             delegated_task_plan_contracts: Vec::new(),
+            legion_workflow_sessions: Vec::new(),
+            automate_workflow: AutomateWorkflowState::default(),
+            automate_mcp_tool_runtimes: HashMap::new(),
             search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            git_hunk_cache: HashMap::new(),
+            debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
         }
@@ -7648,6 +10092,49 @@ impl AppComposition {
         self.emit_event(envelope);
     }
 
+    /// Set the app-owned product mode used to authorize AI dispatch.
+    pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        self.product_mode = mode;
+        if !mode.allows_assist() {
+            self.assist_inline_prediction_state = AssistInlinePredictionState::default();
+        }
+    }
+
+    /// Current app-owned product mode.
+    pub fn product_mode(&self) -> AppProductMode {
+        self.product_mode
+    }
+
+    fn require_assist_mode(&self) -> Result<(), AppCompositionError> {
+        if self.product_mode.allows_assist() {
+            Ok(())
+        } else {
+            Err(AppCompositionError::AiRuntime(
+                "AI dispatch requires Assist, Delegate, or Automate mode".to_string(),
+            ))
+        }
+    }
+
+    fn require_delegate_mode(&self) -> Result<(), AppCompositionError> {
+        if self.product_mode.allows_delegate() {
+            Ok(())
+        } else {
+            Err(AppCompositionError::AiRuntime(
+                "Delegate dispatch requires Delegate or Automate mode".to_string(),
+            ))
+        }
+    }
+
+    fn require_automate_mode(&self) -> Result<(), AppCompositionError> {
+        if self.product_mode.allows_automate() {
+            Ok(())
+        } else {
+            Err(AppCompositionError::AiRuntime(
+                "Automate workflow dispatch requires Automate mode".to_string(),
+            ))
+        }
+    }
+
     fn persist_latest_terminal_audit(&mut self) -> Result<(), AppCompositionError> {
         let Some(record) = self.terminal_workflow.take_last_audit() else {
             return Ok(());
@@ -7660,6 +10147,49 @@ impl AppComposition {
         let envelope = terminal_audit_recorded_event(&record)
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
         self.emit_event(envelope);
+        Ok(())
+    }
+
+    fn persist_latest_debug_audit(&mut self) -> Result<(), AppCompositionError> {
+        let Some(record) = self.debug_workflow.take_last_audit() else {
+            return Ok(());
+        };
+        self.storage
+            .handle(StorageRepositoryRequest::SaveDebugAdapterAuditRecord(
+                record,
+            ))
+            .map_err(AppCompositionError::Protocol)?;
+        Ok(())
+    }
+
+    fn persist_debug_breakpoints(&mut self) -> Result<(), AppCompositionError> {
+        for (workspace_id, breakpoint_id) in self.debug_workflow.take_pending_breakpoint_deletes() {
+            self.storage
+                .handle(StorageRepositoryRequest::DeleteDebugBreakpointRecord {
+                    workspace_id,
+                    breakpoint_id,
+                })
+                .map_err(AppCompositionError::Protocol)?;
+        }
+        for record in &self.debug_workflow.breakpoints {
+            self.storage
+                .handle(StorageRepositoryRequest::SaveDebugBreakpointRecord(
+                    record.clone(),
+                ))
+                .map_err(AppCompositionError::Protocol)?;
+        }
+        Ok(())
+    }
+
+    fn restore_debug_breakpoints_from_storage(&mut self) -> Result<(), AppCompositionError> {
+        let workspace_id = self.active_documents.require_workspace_id()?;
+        let response = self
+            .storage
+            .handle(StorageRepositoryRequest::ReadDebugBreakpointRecords { workspace_id })
+            .map_err(AppCompositionError::Protocol)?;
+        if let StorageRepositoryResponse::DebugBreakpointRecords(records) = response {
+            self.debug_workflow.restore_breakpoints(records);
+        }
         Ok(())
     }
 
@@ -7693,6 +10223,8 @@ impl AppComposition {
         };
         self.active_documents
             .bind_workspace(opened.clone(), root_path, principal, trust);
+        self.debug_workflow.clear_workspace_state();
+        self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         Ok(opened)
     }
 
@@ -7746,6 +10278,8 @@ impl AppComposition {
             )?;
 
         self.active_documents.bind_opened_file(&opened, buffer_id);
+        self.assist_inline_prediction_state
+            .clear_for_buffer(buffer_id);
         Ok(identity.file_id)
     }
 
@@ -7866,6 +10400,10 @@ impl AppComposition {
         }
 
         match request {
+            AppCommandRequest::SetProductMode { mode } => {
+                self.set_product_mode(mode);
+                Ok(AppCommandOutcome::ProductModeChanged(mode))
+            }
             AppCommandRequest::Save { buffer_id } => {
                 self.active_documents.ensure_active_buffer(buffer_id)?;
                 Ok(AppCommandOutcome::Save(self.save_active_buffer()?))
@@ -7898,8 +10436,26 @@ impl AppComposition {
             } => Ok(AppCommandOutcome::SearchUpdated(
                 self.run_search(query_id, scope, query, limit)?,
             )),
+            AppCommandRequest::RunStructuralSearch {
+                query_id,
+                scope,
+                pattern,
+                rewrite,
+                limit,
+            } => Ok(AppCommandOutcome::StructuralSearchUpdated(
+                self.run_structural_search(query_id, scope, pattern, rewrite, limit)?,
+            )),
             AppCommandRequest::CancelSearch { query_id } => Ok(AppCommandOutcome::SearchUpdated(
                 self.cancel_search(query_id),
+            )),
+            AppCommandRequest::RefreshGit => {
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::StageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
+                self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Unstaged)?,
+            )),
+            AppCommandRequest::UnstageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
+                self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Staged)?,
             )),
             AppCommandRequest::RequestHover {
                 buffer_id,
@@ -7912,6 +10468,30 @@ impl AppComposition {
                 position,
             } => Ok(AppCommandOutcome::LanguageToolingUpdated(
                 self.run_language_read(buffer_id, LanguageReadKind::Completion, position)?,
+            )),
+            AppCommandRequest::RequestAssistInlinePrediction {
+                buffer_id,
+                position,
+            } => Ok(AppCommandOutcome::AssistInlinePredictionUpdated(
+                self.request_assist_inline_prediction(buffer_id, position)?,
+            )),
+            AppCommandRequest::AcceptAssistInlinePrediction {
+                buffer_id,
+                prediction_id,
+            } => Ok(AppCommandOutcome::AssistInlinePredictionUpdated(
+                self.accept_assist_inline_prediction(buffer_id, prediction_id)?,
+            )),
+            AppCommandRequest::DismissAssistInlinePrediction {
+                buffer_id,
+                prediction_id,
+            } => Ok(AppCommandOutcome::AssistInlinePredictionUpdated(
+                self.dismiss_assist_inline_prediction(buffer_id, prediction_id)?,
+            )),
+            AppCommandRequest::CancelAssistInlinePrediction {
+                buffer_id,
+                prediction_id,
+            } => Ok(AppCommandOutcome::AssistInlinePredictionUpdated(
+                self.cancel_assist_inline_prediction(buffer_id, prediction_id)?,
             )),
             AppCommandRequest::GoToDefinition {
                 buffer_id,
@@ -7999,6 +10579,85 @@ impl AppComposition {
                     self.language_tooling.projection(),
                 ))
             }
+            AppCommandRequest::RefreshDebugConfigurations => {
+                self.restore_debug_breakpoints_from_storage()?;
+                let context = self.active_documents.require_workspace_context()?;
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                let projection = self
+                    .debug_workflow
+                    .refresh_configurations(context, Path::new(root_path))?;
+                Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
+            }
+            AppCommandRequest::ToggleDebugBreakpoint {
+                buffer_id,
+                line,
+                condition,
+                hit_condition,
+                log_message,
+            } => {
+                self.active_documents.ensure_active_buffer(buffer_id)?;
+                let context = self.active_documents.require_workspace_context()?;
+                let metadata = self
+                    .active_documents
+                    .active_file_metadata
+                    .clone()
+                    .ok_or(AppCompositionError::ActiveFileMissing)?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.debug_workflow
+                        .toggle_breakpoint(DebugBreakpointToggleInput {
+                            context,
+                            metadata,
+                            line,
+                            condition,
+                            hit_condition,
+                            log_message,
+                            event_context,
+                        });
+                self.persist_debug_breakpoints()?;
+                Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
+            }
+            AppCommandRequest::LaunchDebugSession { configuration_id } => {
+                let context = self.active_documents.require_workspace_context()?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.debug_workflow
+                        .launch(context, configuration_id, event_context);
+                self.persist_debug_breakpoints()?;
+                self.persist_latest_debug_audit()?;
+                Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
+            }
+            AppCommandRequest::DebugStep { session_id, kind } => {
+                let projection = self.debug_workflow.step(session_id, kind);
+                self.persist_latest_debug_audit()?;
+                Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
+            }
+            AppCommandRequest::DebugRunToCursor {
+                session_id,
+                buffer_id,
+                position,
+            } => {
+                self.active_documents.ensure_active_buffer(buffer_id)?;
+                Ok(AppCommandOutcome::DebugProjectionUpdated(
+                    self.debug_workflow
+                        .run_to_cursor(session_id, buffer_id, position),
+                ))
+            }
+            AppCommandRequest::DebugEvaluateSelection {
+                session_id,
+                expression_label,
+            } => Ok(AppCommandOutcome::DebugProjectionUpdated(
+                self.debug_workflow
+                    .evaluate_selection(session_id, expression_label),
+            )),
+            AppCommandRequest::DebugAddWatch {
+                session_id,
+                expression_label,
+            } => Ok(AppCommandOutcome::DebugProjectionUpdated(
+                self.debug_workflow.add_watch(session_id, expression_label),
+            )),
             AppCommandRequest::TerminalLaunch { command_label } => {
                 let context = self.active_documents.require_workspace_context()?;
                 let event_context = self.next_event_context();
@@ -8081,6 +10740,47 @@ impl AppComposition {
                     self.start_ai_proposal(instruction_label)?,
                 )))
             }
+            AppCommandRequest::SendDelegateChat { prompt_label } => {
+                Ok(AppCommandOutcome::DelegateChatCompleted(Box::new(
+                    self.send_delegate_chat(prompt_label)?,
+                )))
+            }
+            AppCommandRequest::ReviewDelegateProposalHunk {
+                proposal_id,
+                hunk_id,
+                disposition,
+            } => Ok(AppCommandOutcome::DelegateProposalHunkReviewed(
+                self.review_delegate_proposal_hunk(proposal_id, hunk_id, disposition)?,
+            )),
+            AppCommandRequest::RecordDelegateToolPermission {
+                request_id,
+                decision,
+            } => Ok(AppCommandOutcome::DelegateToolPermissionRecorded(
+                self.record_delegate_tool_permission_decision(request_id, decision)?,
+            )),
+            AppCommandRequest::RecordLegionWorkflowToolPermission {
+                session_id,
+                server_id,
+                tool_name,
+                decision,
+            } => Ok(AppCommandOutcome::LegionWorkflowUpdated(
+                self.record_legion_workflow_tool_permission_decision(
+                    &session_id,
+                    &server_id,
+                    &tool_name,
+                    decision,
+                )?,
+            )),
+            AppCommandRequest::TriggerLegionWorkflowKillSwitch {
+                session_id,
+                reason_label,
+            } => Ok(AppCommandOutcome::LegionWorkflowUpdated(
+                self.trigger_legion_workflow_kill_switch(
+                    &session_id,
+                    PrincipalId("user:local".to_string()),
+                    reason_label,
+                )?,
+            )),
             AppCommandRequest::CancelAiRun { run_id } => {
                 self.cancel_ai_run(run_id.clone())?;
                 Ok(AppCommandOutcome::AiRunCancelled(run_id))
@@ -8432,46 +11132,82 @@ impl AppComposition {
             ));
         }
 
-        let authority_id = devil_protocol::RemoteAuthorityId(session_id.0.saturating_add(100));
-        let descriptor = RemoteWorkspaceSessionDescriptor {
+        let spec = self.remote_connection_spec(
             session_id,
-            authority: RemoteAuthorityDescriptor {
-                authority_id,
-                authority_label: authority_label.into(),
-                workspace_id: context.workspace_id,
-                trust_state: context.trust,
-                principal_id: context.principal,
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
-            agent: RemoteAgentDescriptor {
-                agent_id: devil_protocol::RemoteAgentId(session_id.0.saturating_add(200)),
-                authority_id,
-                agent_version: "devil-remote-deterministic/1".to_string(),
-                runtime_enabled: true,
-                schema_version: 1,
-            },
-            state: RemoteWorkspaceLifecycleState::Active,
-            granted_capabilities: vec![
-                devil_protocol::RemoteCapabilityKind::Connect,
-                devil_protocol::RemoteCapabilityKind::FilesystemRead,
-                devil_protocol::RemoteCapabilityKind::FilesystemWrite,
-                devil_protocol::RemoteCapabilityKind::ProcessLaunch,
-                devil_protocol::RemoteCapabilityKind::PtyInput,
-                devil_protocol::RemoteCapabilityKind::LspLaunch,
-                devil_protocol::RemoteCapabilityKind::SemanticQuery,
-                devil_protocol::RemoteCapabilityKind::OfflineResume,
-                devil_protocol::RemoteCapabilityKind::AuditExport,
-            ],
-            created_at: TimestampMillis::now(),
-            last_heartbeat_at: Some(TimestampMillis::now()),
-            schema_version: 1,
-        };
+            authority_label.into(),
+            "devil-remote-ssh-agent/1".to_string(),
+        )?;
+        let plan = plan_ssh_session(spec).map_err(remote_error)?;
+        let descriptor = plan.descriptor;
         self.remote
             .runtime
             .create_session(descriptor.clone(), context.workspace_generation)
             .map_err(|error| AppCompositionError::Remote(error.to_string()))?;
         Ok(descriptor)
+    }
+
+    /// Connect a devcontainer remote workspace session through app-owned composition.
+    pub fn connect_devcontainer_workspace_session_from_json(
+        &mut self,
+        session_id: RemoteWorkspaceSessionId,
+        authority_label: impl Into<String>,
+        devcontainer_json: &str,
+    ) -> Result<RemoteWorkspaceSessionDescriptor, AppCompositionError> {
+        if !self.remote.runtime_sessions_enabled {
+            return Err(AppCompositionError::Remote(
+                "remote runtime sessions are disabled by policy".to_string(),
+            ));
+        }
+        let context = self.active_documents.require_workspace_context()?;
+        if context.trust != WorkspaceTrustState::Trusted {
+            return Err(AppCompositionError::Remote(
+                "untrusted workspaces cannot connect remote sessions".to_string(),
+            ));
+        }
+        let spec = self.remote_connection_spec(
+            session_id,
+            authority_label.into(),
+            "devil-remote-devcontainer-agent/1".to_string(),
+        )?;
+        let plan =
+            plan_devcontainer_session_from_json(spec, devcontainer_json).map_err(remote_error)?;
+        let descriptor = plan.descriptor;
+        self.remote
+            .runtime
+            .create_session(descriptor.clone(), context.workspace_generation)
+            .map_err(|error| AppCompositionError::Remote(error.to_string()))?;
+        Ok(descriptor)
+    }
+
+    fn remote_connection_spec(
+        &self,
+        session_id: RemoteWorkspaceSessionId,
+        authority_label: String,
+        agent_version: String,
+    ) -> Result<RemoteConnectionSpec, AppCompositionError> {
+        let context = self.active_documents.require_workspace_context()?;
+        let authority_id = devil_protocol::RemoteAuthorityId(session_id.0.saturating_add(100));
+        let credential_reference_label = format!(
+            "credential-ref:{}",
+            metadata_fingerprint("remote-authority", &authority_label).value
+        );
+        Ok(RemoteConnectionSpec {
+            session_id,
+            authority_id,
+            agent_id: devil_protocol::RemoteAgentId(session_id.0.saturating_add(200)),
+            workspace_id: context.workspace_id,
+            principal_id: context.principal,
+            authority_label,
+            workspace_root_label: self
+                .active_documents
+                .workspace_root_path
+                .clone()
+                .unwrap_or_else(|| "workspace".to_string()),
+            credential_reference_label,
+            agent_version,
+            trust_state: context.trust,
+            granted_capabilities: default_remote_capabilities(),
+        })
     }
 
     /// Return projection-safe remote session descriptors.
@@ -8492,24 +11228,63 @@ impl AppComposition {
     pub fn execute_delegated_task(
         &mut self,
         plan_id: &devil_protocol::DelegatedTaskPlanId,
-    ) -> Result<AssistedAiEditProposalOutput, String> {
-        // Find the contract
-        let _contract = self
+    ) -> Result<AppDelegatedTaskExecutionOutcome, AppCompositionError> {
+        self.require_delegate_mode()?;
+        let Some(contract) = self
             .delegated_task_plan_contracts
             .iter()
             .find(|plan| plan.plan_id == *plan_id)
-            .ok_or_else(|| format!("Plan contract {} not found", plan_id.0))?;
+            .cloned()
+        else {
+            return Ok(AppDelegatedTaskExecutionOutcome::PlanMissing {
+                plan_id: plan_id.clone(),
+            });
+        };
 
-        // Fail-closed checks: CorrelationId and CausalityId must be valid (non-zero/non-nil)
-        let correlation_id = self.correlation_generator.next();
-        let causality_id = CausalityId(uuid::Uuid::from_u128(1));
+        let request_id = delegated_runtime_permission_request_id(plan_id);
+        let permission = self
+            .delegate_workflow
+            .tool_permission(&request_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                self.delegate_workflow.record_tool_permission_decision(
+                    DelegatedTaskToolPermissionRequestInput {
+                        request_id,
+                        profile: DelegatedTaskToolPermissionProfile::Write,
+                        action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+                        capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                        target_id: Some(plan_id.0.clone()),
+                        decision: DelegatedTaskToolPermissionDecision::Confirm,
+                        labels: delegated_runtime_permission_labels(plan_id),
+                        schema_version: 1,
+                    },
+                )
+            });
+        if permission.deny_overrides {
+            return Ok(AppDelegatedTaskExecutionOutcome::Denied {
+                request: permission,
+            });
+        }
+        if !permission.runtime_allowed {
+            return Ok(AppDelegatedTaskExecutionOutcome::WaitingForToolPermission {
+                request: permission,
+            });
+        }
+
+        let event_context = self.next_event_context();
+        let correlation_id = event_context.correlation_id;
+        let causality_id = event_context.causality_id;
         let event_sequence = self.event_sequence_generator.next();
 
         if correlation_id.0 == 0 {
-            return Err("Assisted AI requires non-zero correlation id".to_string());
+            return Err(AppCompositionError::AiRuntime(
+                "Assisted AI requires non-zero correlation id".to_string(),
+            ));
         }
         if causality_id.0.is_nil() {
-            return Err("Assisted AI requires non-nil causality id".to_string());
+            return Err(AppCompositionError::AiRuntime(
+                "Assisted AI requires non-nil causality id".to_string(),
+            ));
         }
 
         // 1. Initialize Agent Runtime and transition state
@@ -8525,7 +11300,7 @@ impl AppComposition {
                 causality_id,
                 event_sequence,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AppCompositionError::AiRuntime(e.to_string()))?;
 
         // Planning -> Proposing
         agent_runtime
@@ -8536,31 +11311,69 @@ impl AppComposition {
                 causality_id,
                 self.event_sequence_generator.next(),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AppCompositionError::AiRuntime(e.to_string()))?;
 
         // 2. Setup isolated sandbox orchestrator
         let mut orchestrator = DelegatedTaskSandboxOrchestrator::new(&plan_id.0);
-        orchestrator
-            .initialize()
-            .map_err(|e| format!("Failed to initialize sandbox: {}", e))?;
+        orchestrator.initialize(&permission).map_err(|e| {
+            AppCompositionError::AiRuntime(format!("Failed to initialize sandbox: {e}"))
+        })?;
         let sandbox_path = orchestrator.sandbox_path().to_path_buf();
 
-        // 3. Perform path containment validation and proposal generation
         let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
-        let target_file = sandbox_path.join("src/lib.rs");
+        let target_file = sandbox_path.join(delegated_task_proposal_relative_path(&contract));
+        let proposal_content = delegated_task_proposal_content(&contract, &permission);
+        let proposal_id = self.proposal_coordinator.next_id();
+        let proposal_event_sequence = self.event_sequence_generator.next();
+        let principal = self
+            .active_documents
+            .active_principal_id
+            .clone()
+            .unwrap_or_else(|| PrincipalId(format!("delegate-plan:{}", contract.plan_id.0)));
+        let capability = permission
+            .capability
+            .clone()
+            .unwrap_or_else(|| CapabilityId("delegated.runtime.allocate".to_string()));
+        let context_manifest = contract.context_manifest.clone().unwrap_or_else(|| {
+            trust_reference(
+                &format!("delegate:plan-context:{}", contract.plan_id.0),
+                devil_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+            )
+        });
+        let approval_checklist = contract.approval_checklist.clone().unwrap_or_else(|| {
+            trust_reference(
+                &format!("delegate:plan-approval:{}", contract.plan_id.0),
+                devil_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+            )
+        });
 
-        let proposal_result = generator.generate_proposal(&target_file, "modified content");
+        let proposal_result = generator.generate_proposal(DelegatedTaskProposalInput {
+            target_path: &target_file,
+            modified_content: &proposal_content,
+            output_id: format!(
+                "delegate-output:{}:{}",
+                contract.plan_id.0, proposal_event_sequence.0
+            ),
+            request_id: permission.request_id.clone(),
+            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            proposal_id,
+            principal,
+            capability,
+            correlation_id,
+            causality_id,
+            created_at: TimestampMillis::now(),
+            context_manifest,
+            approval_checklist,
+        });
 
         // Cleanup orchestrator immediately (fail-closed resource safety)
-        let cleanup_res = orchestrator.cleanup();
+        let cleanup_res = orchestrator.cleanup(&permission);
 
-        let mut proposal =
-            proposal_result.map_err(|e| format!("Proposal generation failed: {}", e))?;
-        cleanup_res.map_err(|e| format!("Sandbox cleanup failed: {}", e))?;
-
-        // Set correlation and causality ids on proposal
-        proposal.correlation_id = correlation_id;
-        proposal.causality_id = causality_id;
+        let proposal = proposal_result.map_err(|e| {
+            AppCompositionError::AiRuntime(format!("Proposal generation failed: {e}"))
+        })?;
+        cleanup_res
+            .map_err(|e| AppCompositionError::AiRuntime(format!("Sandbox cleanup failed: {e}")))?;
 
         // Proposing -> WaitingForApproval
         agent_runtime
@@ -8571,18 +11384,1157 @@ impl AppComposition {
                 causality_id,
                 self.event_sequence_generator.next(),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AppCompositionError::AiRuntime(e.to_string()))?;
 
-        Ok(proposal)
+        Ok(AppDelegatedTaskExecutionOutcome::ProposalReady(Box::new(
+            proposal,
+        )))
     }
 
-    fn delegated_task_projection(&self, generated_at: TimestampMillis) -> DelegatedTaskProjection {
-        devil_protocol::delegated_task_projection_from_plan_contracts(
+    /// Replace app-owned Legion workflow session metadata for tests and smoke harnesses.
+    pub fn seed_legion_workflow_sessions(
+        &mut self,
+        sessions: Vec<LegionWorkflowSession>,
+    ) -> Result<(), AppCompositionError> {
+        let mut seen = HashSet::new();
+        let mut valid_sessions = Vec::new();
+        for session in sessions {
+            if session.session_id.0.trim().is_empty()
+                || session.schema_version == 0
+                || session.correlation_id.0 == 0
+                || session.causality_id.0.is_nil()
+                || devil_protocol::validate_legion_workflow_session(&session).is_err()
+            {
+                continue;
+            }
+            if !seen.insert(session.session_id.0.clone()) {
+                return Err(AppCompositionError::LegionWorkflow(format!(
+                    "duplicate workflow session {}",
+                    session.session_id.0
+                )));
+            }
+            valid_sessions.push(session);
+        }
+        self.legion_workflow_sessions = valid_sessions;
+        Ok(())
+    }
+
+    /// Returns a metadata-only Legion workflow projection owned by the app layer.
+    pub fn legion_workflow_projection(
+        &self,
+        generated_at: TimestampMillis,
+    ) -> LegionWorkflowProjection {
+        let mut projection = devil_protocol::legion_workflow_projection_from_sessions(
+            "legion-workflow:app-command-center",
+            &self.legion_workflow_sessions,
+            generated_at,
+            64,
+            1,
+        );
+        self.automate_workflow.apply_to_projection(&mut projection);
+        projection
+    }
+
+    /// Seed app-owned MCP registry metadata for Automate command centers and tool gating.
+    pub fn seed_legion_workflow_mcp_registry(
+        &mut self,
+        registry: McpRegistrySnapshot,
+    ) -> Result<LegionWorkflowProjection, AppCompositionError> {
+        self.require_automate_mode()?;
+        validate_mcp_registry_snapshot(&registry)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.message))?;
+        self.automate_workflow.seed_mcp_registry(registry);
+        Ok(self.legion_workflow_projection(TimestampMillis::now()))
+    }
+
+    /// Register an app-owned MCP runtime used by Automate fleet workers.
+    pub fn register_legion_workflow_mcp_tool_runtime(
+        &mut self,
+        server_id: McpServerId,
+        runtime: Arc<dyn AppAutomateMcpToolRuntime>,
+    ) -> Result<(), AppCompositionError> {
+        if server_id.0.trim().is_empty() {
+            return Err(AppCompositionError::LegionWorkflow(
+                "MCP server id must be non-empty".to_string(),
+            ));
+        }
+        self.automate_mcp_tool_runtimes.insert(server_id.0, runtime);
+        Ok(())
+    }
+
+    /// Apply an MCP list-changed notification and surface a decision-feed entry.
+    pub fn apply_legion_workflow_mcp_list_changed(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        server_id: &McpServerId,
+        kind: McpListChangedKind,
+    ) -> Result<LegionWorkflowProjection, AppCompositionError> {
+        self.require_automate_mode()?;
+        self.legion_workflow_session(session_id).ok_or_else(|| {
+            AppCompositionError::LegionWorkflow(format!(
+                "workflow session {} not found",
+                session_id.0
+            ))
+        })?;
+        if !self
+            .automate_workflow
+            .apply_mcp_list_changed(server_id, kind, TimestampMillis::now())
+        {
+            return Err(AppCompositionError::LegionWorkflow(format!(
+                "MCP server {} not found",
+                server_id.0
+            )));
+        }
+        let event_context = self.next_event_context();
+        self.automate_workflow
+            .record_decision(AutomateDecisionInput {
+                session_id: session_id.clone(),
+                worker_id: None,
+                kind: LegionWorkflowDecisionKind::McpRegistryReloaded,
+                summary_label: format!("MCP registry list changed: {}", kind.method()),
+                risk_label: ProposalRiskLabel::Medium,
+                mcp_server_id: Some(server_id.clone()),
+                mcp_primitive_kind: None,
+                tool_permission_request_id: None,
+                event_context,
+                event_sequence: self.event_sequence_generator.next(),
+            })?;
+        self.automate_workflow.risk_monitor(session_id, None)?;
+        Ok(self.legion_workflow_projection(TimestampMillis::now()))
+    }
+
+    /// Record an Automate MCP tool permission decision.
+    pub fn record_legion_workflow_tool_permission_decision(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        server_id: &McpServerId,
+        tool_name: &McpToolName,
+        decision: DelegatedTaskToolPermissionDecision,
+    ) -> Result<LegionWorkflowProjection, AppCompositionError> {
+        self.require_automate_mode()?;
+        self.legion_workflow_session(session_id).ok_or_else(|| {
+            AppCompositionError::LegionWorkflow(format!(
+                "workflow session {} not found",
+                session_id.0
+            ))
+        })?;
+        let tool = self
+            .automate_workflow
+            .mcp_tool(server_id, tool_name)
+            .cloned()
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "MCP tool {} not found on server {}",
+                    tool_name.0, server_id.0
+                ))
+            })?;
+        let request_id = automate_tool_permission_request_id(session_id, server_id, tool_name);
+        let request = self
+            .automate_workflow
+            .record_tool_permission_decision(session_id, request_id, &tool, decision);
+        if request.deny_overrides {
+            *self
+                .automate_workflow
+                .denied_tool_count
+                .entry(session_id.0.clone())
+                .or_insert(0) += 1;
+        }
+        let event_context = self.next_event_context();
+        self.automate_workflow
+            .record_decision(AutomateDecisionInput {
+                session_id: session_id.clone(),
+                worker_id: None,
+                kind: if request.deny_overrides {
+                    LegionWorkflowDecisionKind::ToolCallDenied
+                } else {
+                    LegionWorkflowDecisionKind::ToolApprovalRequested
+                },
+                summary_label: format!(
+                    "MCP tool permission {:?}: {}",
+                    request.decision, request.request_id
+                ),
+                risk_label: if request.deny_overrides {
+                    ProposalRiskLabel::High
+                } else {
+                    ProposalRiskLabel::Medium
+                },
+                mcp_server_id: Some(server_id.clone()),
+                mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                tool_permission_request_id: Some(request.request_id.clone()),
+                event_context,
+                event_sequence: self.event_sequence_generator.next(),
+            })?;
+        self.automate_workflow.risk_monitor(session_id, None)?;
+        Ok(self.legion_workflow_projection(TimestampMillis::now()))
+    }
+
+    /// Prepare an Automate MCP tool call without invoking it until permission and risk checks pass.
+    pub fn prepare_legion_workflow_mcp_tool_call(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        server_id: &McpServerId,
+        tool_name: &McpToolName,
+    ) -> Result<AppAutomateToolCallOutcome, AppCompositionError> {
+        self.require_automate_mode()?;
+        self.legion_workflow_session(session_id).ok_or_else(|| {
+            AppCompositionError::LegionWorkflow(format!(
+                "workflow session {} not found",
+                session_id.0
+            ))
+        })?;
+        let tool = self
+            .automate_workflow
+            .mcp_tool(server_id, tool_name)
+            .cloned()
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "MCP tool {} not found on server {}",
+                    tool_name.0, server_id.0
+                ))
+            })?;
+        let risk = tool.risk_label;
+        let request_id = automate_tool_permission_request_id(session_id, server_id, tool_name);
+        if matches!(risk, ProposalRiskLabel::High | ProposalRiskLabel::Unknown)
+            && self
+                .automate_workflow
+                .counted_high_risk_tool_requests
+                .insert(request_id.clone())
+        {
+            *self
+                .automate_workflow
+                .high_risk_tool_count
+                .entry(session_id.0.clone())
+                .or_insert(0) += 1;
+        }
+        let monitor = self.automate_workflow.risk_monitor(session_id, None)?;
+        if monitor.state == LegionWorkflowRiskMonitorState::Halted
+            || self.automate_workflow.kill_switch_triggered(session_id)
+        {
+            let event_context = self.next_event_context();
+            self.automate_workflow
+                .record_decision(AutomateDecisionInput {
+                    session_id: session_id.clone(),
+                    worker_id: None,
+                    kind: LegionWorkflowDecisionKind::RiskMonitorHalted,
+                    summary_label: "MCP tool call halted by Automate risk monitor".to_string(),
+                    risk_label: ProposalRiskLabel::High,
+                    mcp_server_id: Some(server_id.clone()),
+                    mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                    tool_permission_request_id: None,
+                    event_context,
+                    event_sequence: self.event_sequence_generator.next(),
+                })?;
+            return Ok(AppAutomateToolCallOutcome::Halted { monitor });
+        }
+        let request = self
+            .automate_workflow
+            .tool_permission(&request_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                self.automate_workflow.record_tool_permission_decision(
+                    session_id,
+                    request_id,
+                    &tool,
+                    DelegatedTaskToolPermissionDecision::Confirm,
+                )
+            });
+        let event_context = self.next_event_context();
+        if request.deny_overrides {
+            self.automate_workflow
+                .record_decision(AutomateDecisionInput {
+                    session_id: session_id.clone(),
+                    worker_id: None,
+                    kind: LegionWorkflowDecisionKind::ToolCallDenied,
+                    summary_label: format!("MCP tool call denied: {}", request.request_id),
+                    risk_label: ProposalRiskLabel::High,
+                    mcp_server_id: Some(server_id.clone()),
+                    mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                    tool_permission_request_id: Some(request.request_id.clone()),
+                    event_context,
+                    event_sequence: self.event_sequence_generator.next(),
+                })?;
+            return Ok(AppAutomateToolCallOutcome::Denied { request });
+        }
+        if !request.runtime_allowed {
+            self.automate_workflow
+                .record_decision(AutomateDecisionInput {
+                    session_id: session_id.clone(),
+                    worker_id: None,
+                    kind: LegionWorkflowDecisionKind::ToolApprovalRequested,
+                    summary_label: format!(
+                        "MCP tool call waiting for permission: {}",
+                        request.request_id
+                    ),
+                    risk_label: risk,
+                    mcp_server_id: Some(server_id.clone()),
+                    mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                    tool_permission_request_id: Some(request.request_id.clone()),
+                    event_context,
+                    event_sequence: self.event_sequence_generator.next(),
+                })?;
+            return Ok(AppAutomateToolCallOutcome::WaitingForToolPermission { request });
+        }
+        self.automate_workflow
+            .record_decision(AutomateDecisionInput {
+                session_id: session_id.clone(),
+                worker_id: None,
+                kind: LegionWorkflowDecisionKind::ToolCallReady,
+                summary_label: format!("MCP tool call ready: {}", request.request_id),
+                risk_label: risk,
+                mcp_server_id: Some(server_id.clone()),
+                mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                tool_permission_request_id: Some(request.request_id.clone()),
+                event_context,
+                event_sequence: self.event_sequence_generator.next(),
+            })?;
+        let monitor = self.automate_workflow.risk_monitor(session_id, None)?;
+        Ok(AppAutomateToolCallOutcome::Ready { request, monitor })
+    }
+
+    fn invoke_legion_workflow_mcp_tool(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        worker_id: &LegionWorkflowWorkerId,
+        server_id: &McpServerId,
+        tool_name: &McpToolName,
+        request: &DelegatedTaskToolPermissionRequest,
+    ) -> Result<AppAutomateMcpToolInvocationReceipt, AppCompositionError> {
+        let runtime = self
+            .automate_mcp_tool_runtimes
+            .get(&server_id.0)
+            .cloned()
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "MCP runtime {} is not registered",
+                    server_id.0
+                ))
+            })?;
+        let event_context = self.next_event_context();
+        let event_sequence = self.event_sequence_generator.next();
+        let invocation = AppAutomateMcpToolInvocation {
+            session_id: session_id.clone(),
+            worker_id: worker_id.clone(),
+            server_id: server_id.clone(),
+            tool_name: tool_name.clone(),
+            permission: request.clone(),
+            arguments: json!({}),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence,
+        };
+        let receipt = runtime
+            .call_tool(&invocation)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        if receipt.session_id != *session_id
+            || receipt.worker_id != *worker_id
+            || receipt.server_id != *server_id
+            || receipt.tool_name != *tool_name
+            || receipt.permission_request_id != request.request_id
+        {
+            return Err(AppCompositionError::LegionWorkflow(
+                "MCP runtime returned mismatched invocation receipt".to_string(),
+            ));
+        }
+        self.automate_workflow
+            .record_decision(AutomateDecisionInput {
+                session_id: session_id.clone(),
+                worker_id: Some(worker_id.clone()),
+                kind: LegionWorkflowDecisionKind::ToolCallExecuted,
+                summary_label: format!("MCP tool call executed: {}", receipt.result_label),
+                risk_label: ProposalRiskLabel::Medium,
+                mcp_server_id: Some(server_id.clone()),
+                mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                tool_permission_request_id: Some(request.request_id.clone()),
+                event_context,
+                event_sequence: self.event_sequence_generator.next(),
+            })?;
+        Ok(receipt)
+    }
+
+    /// Trigger the Automate hard kill switch for a workflow session.
+    pub fn trigger_legion_workflow_kill_switch(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        principal_id: PrincipalId,
+        reason_label: String,
+    ) -> Result<LegionWorkflowProjection, AppCompositionError> {
+        self.require_automate_mode()?;
+        {
+            let session = self.legion_workflow_session_mut(session_id)?;
+            session.lifecycle_state = LegionWorkflowState::Cancelled;
+        }
+        let event_context = self.next_event_context();
+        self.automate_workflow.trigger_kill_switch(
+            session_id,
+            principal_id,
+            reason_label,
+            event_context.correlation_id,
+            event_context.causality_id,
+        )?;
+        self.automate_workflow
+            .record_decision(AutomateDecisionInput {
+                session_id: session_id.clone(),
+                worker_id: None,
+                kind: LegionWorkflowDecisionKind::KillSwitchTriggered,
+                summary_label: "Automate kill switch triggered".to_string(),
+                risk_label: ProposalRiskLabel::High,
+                mcp_server_id: None,
+                mcp_primitive_kind: None,
+                tool_permission_request_id: None,
+                event_context,
+                event_sequence: self.event_sequence_generator.next(),
+            })?;
+        Ok(self.legion_workflow_projection(TimestampMillis::now()))
+    }
+
+    /// Returns app-owned tracker metadata records for Legion workflows.
+    pub fn legion_workflow_tracker_records(&self) -> &[LegionWorkflowTrackerRecord] {
+        self.legion_workflow_tracker_ledger.records()
+    }
+
+    /// Returns one app-owned Legion workflow session by id.
+    pub fn legion_workflow_session(
+        &self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Option<&LegionWorkflowSession> {
+        self.legion_workflow_sessions
+            .iter()
+            .find(|session| &session.session_id == session_id)
+    }
+
+    /// Executes one metadata-only Legion workflow coordination pass.
+    pub fn execute_legion_workflow(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Result<AppLegionWorkflowExecution, AppCompositionError> {
+        self.require_automate_mode()?;
+        let session_index = self
+            .legion_workflow_sessions
+            .iter()
+            .position(|session| &session.session_id == session_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow session {} not found",
+                    session_id.0
+                ))
+            })?;
+        let mut session = self.legion_workflow_sessions[session_index].clone();
+        let event_context = self.next_event_context();
+        self.automate_workflow.armed_kill_switch(
+            &session.session_id,
+            event_context.correlation_id,
+            event_context.causality_id,
+        )?;
+        let risk_monitor = self.automate_workflow.risk_monitor(
+            &session.session_id,
+            self.automate_workflow
+                .kill_switch_triggered(&session.session_id)
+                .then_some(LegionWorkflowRiskHaltReason::KillSwitch),
+        )?;
+        if risk_monitor.state == LegionWorkflowRiskMonitorState::Halted {
+            session.lifecycle_state = LegionWorkflowState::Blocked;
+            self.automate_workflow
+                .record_decision(AutomateDecisionInput {
+                    session_id: session.session_id.clone(),
+                    worker_id: None,
+                    kind: LegionWorkflowDecisionKind::RiskMonitorHalted,
+                    summary_label: "Legion workflow halted before worker scheduling".to_string(),
+                    risk_label: ProposalRiskLabel::High,
+                    mcp_server_id: None,
+                    mcp_primitive_kind: None,
+                    tool_permission_request_id: None,
+                    event_context,
+                    event_sequence: self.event_sequence_generator.next(),
+                })?;
+            let merge_readiness =
+                devil_protocol::evaluate_legion_workflow_merge_readiness(&session);
+            self.append_legion_workflow_tracker_record(&session, &merge_readiness, event_context)?;
+            self.legion_workflow_sessions[session_index] = session.clone();
+            return Ok(AppLegionWorkflowExecution {
+                session_id: session.session_id.clone(),
+                outputs: vec![LegionWorkflowCoordinatorOutput::MergeReadiness(
+                    merge_readiness.clone(),
+                )],
+                merge_readiness,
+                projection: self.legion_workflow_projection(TimestampMillis::now()),
+                tracker_record_count: self.legion_workflow_tracker_ledger.records().len(),
+                memory_candidate_proposed: false,
+            });
+        }
+        let mut coordinator = LegionWorkflowCoordinator::new(session.clone())
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        let mut outputs = Vec::new();
+        for conflict in coordinator.conflicts() {
+            if !session
+                .conflict_summaries
+                .iter()
+                .any(|existing| existing.conflict_id == conflict.conflict_id)
+            {
+                session.conflict_summaries.push(conflict.clone());
+            }
+            outputs.push(LegionWorkflowCoordinatorOutput::Conflict(Box::new(
+                conflict.clone(),
+            )));
+        }
+
+        for worker in coordinator.next_ready_workers() {
+            self.automate_workflow
+                .record_decision(AutomateDecisionInput {
+                    session_id: session.session_id.clone(),
+                    worker_id: Some(worker.worker_id.clone()),
+                    kind: LegionWorkflowDecisionKind::WorkerScheduled,
+                    summary_label: format!(
+                        "Legion workflow worker scheduled: {}",
+                        worker.worker_id.0
+                    ),
+                    risk_label: if worker.risk_labels.iter().any(|risk| {
+                        matches!(
+                            risk,
+                            CommandRiskLabel::Privileged | CommandRiskLabel::Destructive
+                        )
+                    }) {
+                        ProposalRiskLabel::High
+                    } else {
+                        ProposalRiskLabel::Medium
+                    },
+                    mcp_server_id: None,
+                    mcp_primitive_kind: None,
+                    tool_permission_request_id: None,
+                    event_context,
+                    event_sequence: self.event_sequence_generator.next(),
+                })?;
+            if let Some((server_id, tool_name)) = legion_workflow_worker_mcp_tool(&worker) {
+                match self.prepare_legion_workflow_mcp_tool_call(
+                    &session.session_id,
+                    &server_id,
+                    &tool_name,
+                )? {
+                    AppAutomateToolCallOutcome::WaitingForToolPermission { request } => {
+                        let output = coordinator
+                            .mark_worker_blocked(
+                                &worker.worker_id,
+                                vec![format!(
+                                    "legion_workflow.mcp_worker_waiting_for_tool_permission:{}",
+                                    request.request_id
+                                )],
+                            )
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
+                            &worker.worker_id,
+                            LegionWorkflowWorkerState::ProviderRouteRequired,
+                        );
+                        outputs.push(output);
+                        continue;
+                    }
+                    AppAutomateToolCallOutcome::Denied { request } => {
+                        let output = coordinator
+                            .mark_worker_blocked(
+                                &worker.worker_id,
+                                vec![format!(
+                                    "legion_workflow.mcp_worker_tool_permission_denied:{}",
+                                    request.request_id
+                                )],
+                            )
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
+                            &worker.worker_id,
+                            LegionWorkflowWorkerState::Blocked,
+                        );
+                        outputs.push(output);
+                        continue;
+                    }
+                    AppAutomateToolCallOutcome::Halted { monitor } => {
+                        let output = coordinator
+                            .mark_worker_blocked(
+                                &worker.worker_id,
+                                vec![format!(
+                                    "legion_workflow.mcp_worker_halted:{:?}",
+                                    monitor.halt_reason
+                                )],
+                            )
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
+                            &worker.worker_id,
+                            LegionWorkflowWorkerState::Blocked,
+                        );
+                        outputs.push(output);
+                        continue;
+                    }
+                    AppAutomateToolCallOutcome::Ready { request, .. } => {
+                        match self.invoke_legion_workflow_mcp_tool(
+                            &session.session_id,
+                            &worker.worker_id,
+                            &server_id,
+                            &tool_name,
+                            &request,
+                        ) {
+                            Ok(_receipt) => {
+                                coordinator
+                                    .mark_worker_completed(&worker.worker_id)
+                                    .map_err(|error| {
+                                        AppCompositionError::LegionWorkflow(error.to_string())
+                                    })?;
+                                self.set_legion_workflow_worker_state(
+                                    &mut session,
+                                    &worker.worker_id,
+                                    LegionWorkflowWorkerState::Completed,
+                                );
+                                self.satisfy_legion_workflow_dependencies(
+                                    &mut session,
+                                    &worker.worker_id,
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                let reason = error.to_string();
+                                let event_context = self.next_event_context();
+                                self.automate_workflow
+                                    .record_decision(AutomateDecisionInput {
+                                        session_id: session.session_id.clone(),
+                                        worker_id: Some(worker.worker_id.clone()),
+                                        kind: LegionWorkflowDecisionKind::ToolCallFailed,
+                                        summary_label: format!("MCP tool call failed: {reason}"),
+                                        risk_label: ProposalRiskLabel::High,
+                                        mcp_server_id: Some(server_id.clone()),
+                                        mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                                        tool_permission_request_id: Some(
+                                            request.request_id.clone(),
+                                        ),
+                                        event_context,
+                                        event_sequence: self.event_sequence_generator.next(),
+                                    })?;
+                                let output = coordinator
+                                    .mark_worker_blocked(
+                                        &worker.worker_id,
+                                        vec![format!(
+                                            "legion_workflow.mcp_worker_tool_call_failed:{reason}"
+                                        )],
+                                    )
+                                    .map_err(|error| {
+                                        AppCompositionError::LegionWorkflow(error.to_string())
+                                    })?;
+                                self.set_legion_workflow_worker_state(
+                                    &mut session,
+                                    &worker.worker_id,
+                                    LegionWorkflowWorkerState::Blocked,
+                                );
+                                outputs.push(output);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            match worker.model_backend {
+                devil_protocol::LegionWorkflowModelBackend::ProviderBacked => {
+                    let output = coordinator
+                        .provider_route_for_worker(&worker.worker_id)
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    self.set_legion_workflow_worker_state(
+                        &mut session,
+                        &worker.worker_id,
+                        LegionWorkflowWorkerState::ProviderRouteRequired,
+                    );
+                    outputs.push(output);
+                }
+                devil_protocol::LegionWorkflowModelBackend::Local => {
+                    let Some(plan_id) = worker.linked_delegated_plan_id.clone() else {
+                        let output = coordinator
+                            .mark_worker_blocked(
+                                &worker.worker_id,
+                                vec!["legion_workflow.local_worker_missing_plan".to_string()],
+                            )
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
+                            &worker.worker_id,
+                            LegionWorkflowWorkerState::Blocked,
+                        );
+                        outputs.push(output);
+                        continue;
+                    };
+                    let mut proposal_output = match self.execute_delegated_task(&plan_id)? {
+                        AppDelegatedTaskExecutionOutcome::ProposalReady(proposal_output) => {
+                            *proposal_output
+                        }
+                        AppDelegatedTaskExecutionOutcome::PlanMissing { plan_id } => {
+                            let output = coordinator
+                                .mark_worker_blocked(
+                                    &worker.worker_id,
+                                    vec![format!(
+                                        "legion_workflow.local_worker_plan_missing:{}",
+                                        plan_id.0
+                                    )],
+                                )
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            self.set_legion_workflow_worker_state(
+                                &mut session,
+                                &worker.worker_id,
+                                LegionWorkflowWorkerState::Blocked,
+                            );
+                            outputs.push(output);
+                            continue;
+                        }
+                        AppDelegatedTaskExecutionOutcome::WaitingForToolPermission { request } => {
+                            let output = coordinator
+                                .mark_worker_blocked(
+                                    &worker.worker_id,
+                                    vec![format!(
+                                        "legion_workflow.local_worker_waiting_for_delegate_permission:{}",
+                                        request.request_id
+                                    )],
+                                )
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            self.set_legion_workflow_worker_state(
+                                &mut session,
+                                &worker.worker_id,
+                                LegionWorkflowWorkerState::Blocked,
+                            );
+                            outputs.push(output);
+                            continue;
+                        }
+                        AppDelegatedTaskExecutionOutcome::Denied { request } => {
+                            let output = coordinator
+                                .mark_worker_blocked(
+                                    &worker.worker_id,
+                                    vec![format!(
+                                        "legion_workflow.local_worker_delegate_permission_denied:{}",
+                                        request.request_id
+                                    )],
+                                )
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            self.set_legion_workflow_worker_state(
+                                &mut session,
+                                &worker.worker_id,
+                                LegionWorkflowWorkerState::Blocked,
+                            );
+                            outputs.push(output);
+                            continue;
+                        }
+                    };
+                    proposal_output.proposal_id = self.proposal_coordinator.next_id();
+                    proposal_output.output_id = format!(
+                        "legion-output:{}:{}",
+                        session.session_id.0, worker.worker_id.0
+                    );
+                    proposal_output.request_id = format!(
+                        "legion-request:{}:{}",
+                        session.session_id.0, worker.worker_id.0
+                    );
+                    proposal_output.provider_id = worker.display_safe_model_label.clone();
+                    proposal_output.correlation_id = worker.correlation_id;
+                    proposal_output.causality_id = worker.causality_id;
+                    proposal_output.created_at = TimestampMillis::now();
+                    let output = coordinator
+                        .record_proposal_output(&worker.worker_id, proposal_output.clone())
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    coordinator
+                        .mark_worker_completed(&worker.worker_id)
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    self.set_legion_workflow_worker_state(
+                        &mut session,
+                        &worker.worker_id,
+                        LegionWorkflowWorkerState::Completed,
+                    );
+                    self.satisfy_legion_workflow_dependencies(&mut session, &worker.worker_id);
+                    if !session.proposal_ids.contains(&proposal_output.proposal_id) {
+                        session.proposal_ids.push(proposal_output.proposal_id);
+                    }
+                    outputs.push(output);
+                }
+                devil_protocol::LegionWorkflowModelBackend::Unavailable => {
+                    let output = coordinator
+                        .mark_worker_blocked(
+                            &worker.worker_id,
+                            vec!["legion_workflow.worker_backend_unavailable".to_string()],
+                        )
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    self.set_legion_workflow_worker_state(
+                        &mut session,
+                        &worker.worker_id,
+                        LegionWorkflowWorkerState::Blocked,
+                    );
+                    outputs.push(output);
+                }
+            }
+        }
+
+        self.apply_legion_workflow_dirty_workspace_gate(&mut session);
+        let merge_readiness = devil_protocol::evaluate_legion_workflow_merge_readiness(&session);
+        session.lifecycle_state = match merge_readiness.state {
+            LegionWorkflowMergeReadinessState::Ready => LegionWorkflowState::Completed,
+            LegionWorkflowMergeReadinessState::WaitingForApproval => {
+                LegionWorkflowState::WaitingForApproval
+            }
+            LegionWorkflowMergeReadinessState::Blocked => LegionWorkflowState::Blocked,
+        };
+        self.append_legion_workflow_tracker_record(&session, &merge_readiness, event_context)?;
+        let memory_candidate_proposed = self
+            .propose_legion_workflow_memory_candidate(&session, MemoryConsentState::NotGranted)?;
+        self.automate_workflow
+            .record_decision(AutomateDecisionInput {
+                session_id: session.session_id.clone(),
+                worker_id: None,
+                kind: LegionWorkflowDecisionKind::MergeReadinessEvaluated,
+                summary_label: format!(
+                    "Legion workflow merge readiness evaluated: {:?}",
+                    merge_readiness.state
+                ),
+                risk_label: if merge_readiness.state == LegionWorkflowMergeReadinessState::Ready {
+                    ProposalRiskLabel::Medium
+                } else {
+                    ProposalRiskLabel::High
+                },
+                mcp_server_id: None,
+                mcp_primitive_kind: None,
+                tool_permission_request_id: None,
+                event_context,
+                event_sequence: self.event_sequence_generator.next(),
+            })?;
+        self.legion_workflow_sessions[session_index] = session.clone();
+        outputs.push(LegionWorkflowCoordinatorOutput::MergeReadiness(
+            merge_readiness.clone(),
+        ));
+        Ok(AppLegionWorkflowExecution {
+            session_id: session.session_id.clone(),
+            outputs,
+            merge_readiness,
+            projection: self.legion_workflow_projection(TimestampMillis::now()),
+            tracker_record_count: self.legion_workflow_tracker_ledger.records().len(),
+            memory_candidate_proposed,
+        })
+    }
+
+    /// Records app-owned verification evidence metadata for a Legion workflow gate.
+    pub fn record_legion_workflow_verification(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        gate_id: &LegionWorkflowVerificationGateId,
+        state: LegionWorkflowVerificationGateState,
+        evidence_artifact_id: Option<String>,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let session = self.legion_workflow_session_mut(session_id)?;
+        let gate = session
+            .verification_gates
+            .iter_mut()
+            .find(|gate| &gate.gate_id == gate_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "verification gate {} not found",
+                    gate_id.0
+                ))
+            })?;
+        gate.state = state;
+        gate.evidence_artifact_id = evidence_artifact_id;
+        session.lifecycle_state = LegionWorkflowState::Verifying;
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    /// Records reviewer sign-off metadata for a Legion workflow.
+    pub fn record_legion_workflow_sign_off(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        sign_off_id: &LegionWorkflowSignOffId,
+        state: LegionWorkflowSignOffState,
+        reviewer_principal_id: Option<PrincipalId>,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let session = self.legion_workflow_session_mut(session_id)?;
+        let signoff = session
+            .sign_off_records
+            .iter_mut()
+            .find(|signoff| &signoff.sign_off_id == sign_off_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!("sign-off {} not found", sign_off_id.0))
+            })?;
+        signoff.state = if reviewer_principal_id
+            .as_ref()
+            .is_some_and(|principal| principal.0.trim().is_empty())
+        {
+            LegionWorkflowSignOffState::Rejected
+        } else {
+            state
+        };
+        signoff.reviewer_principal_id = reviewer_principal_id;
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    /// Records merge approval metadata without applying or merging the workflow proposal.
+    pub fn record_legion_workflow_merge_approval(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        approval_granted: bool,
+        rollback_available: bool,
+        audit_persisted_before_success: bool,
+        proposal_preconditions_stale: bool,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let dirty = self.has_dirty_open_buffers();
+        let session = self.legion_workflow_session_mut(session_id)?;
+        session.merge_approval = Some(LegionWorkflowMergeApproval {
+            approval_artifact_id: Some(format!("legion-approval:{}", session.session_id.0)),
+            approval_granted,
+            rollback_available,
+            audit_persisted_before_success,
+            main_workspace_dirty_conflict: dirty,
+            proposal_preconditions_stale,
+            labels: vec!["legion_workflow.app_merge_approval".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    /// Resolves a Legion workflow conflict by metadata id.
+    pub fn resolve_legion_workflow_conflict(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        conflict_id: &LegionWorkflowConflictId,
+    ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
+        let session = self.legion_workflow_session_mut(session_id)?;
+        let conflict = session
+            .conflict_summaries
+            .iter_mut()
+            .find(|conflict| &conflict.conflict_id == conflict_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!("conflict {} not found", conflict_id.0))
+            })?;
+        conflict.state = LegionWorkflowConflictState::Resolved;
+        Ok(devil_protocol::evaluate_legion_workflow_merge_readiness(
+            session,
+        ))
+    }
+
+    fn legion_workflow_session_mut(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Result<&mut LegionWorkflowSession, AppCompositionError> {
+        self.legion_workflow_sessions
+            .iter_mut()
+            .find(|session| &session.session_id == session_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow session {} not found",
+                    session_id.0
+                ))
+            })
+    }
+
+    fn set_legion_workflow_worker_state(
+        &self,
+        session: &mut LegionWorkflowSession,
+        worker_id: &LegionWorkflowWorkerId,
+        state: LegionWorkflowWorkerState,
+    ) {
+        if let Some(worker) = session
+            .worker_assignments
+            .iter_mut()
+            .find(|worker| &worker.worker_id == worker_id)
+        {
+            worker.state = state;
+        }
+    }
+
+    fn satisfy_legion_workflow_dependencies(
+        &self,
+        session: &mut LegionWorkflowSession,
+        worker_id: &LegionWorkflowWorkerId,
+    ) {
+        for dependency in session
+            .dependency_edges
+            .iter_mut()
+            .filter(|dependency| &dependency.predecessor_worker_id == worker_id)
+        {
+            dependency.state = LegionWorkflowDependencyState::Satisfied;
+        }
+    }
+
+    fn has_dirty_open_buffers(&self) -> bool {
+        self.active_documents
+            .open_tabs
+            .iter()
+            .any(|buffer_id| self.editor.is_dirty(*buffer_id).unwrap_or(true))
+    }
+
+    fn apply_legion_workflow_dirty_workspace_gate(&self, session: &mut LegionWorkflowSession) {
+        if !self.has_dirty_open_buffers() {
+            return;
+        }
+        if let Some(approval) = session.merge_approval.as_mut() {
+            approval.main_workspace_dirty_conflict = true;
+            if !approval
+                .labels
+                .iter()
+                .any(|label| label == "legion_workflow.dirty_workspace")
+            {
+                approval
+                    .labels
+                    .push("legion_workflow.dirty_workspace".to_string());
+            }
+            return;
+        }
+        session.merge_approval = Some(LegionWorkflowMergeApproval {
+            approval_artifact_id: None,
+            approval_granted: false,
+            rollback_available: true,
+            audit_persisted_before_success: true,
+            main_workspace_dirty_conflict: true,
+            proposal_preconditions_stale: false,
+            labels: vec!["legion_workflow.dirty_workspace".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    }
+
+    fn append_legion_workflow_tracker_record(
+        &mut self,
+        session: &LegionWorkflowSession,
+        readiness: &LegionWorkflowMergeReadiness,
+        event_context: EventContext,
+    ) -> Result<(), AppCompositionError> {
+        let unresolved_conflict_count = session
+            .conflict_summaries
+            .iter()
+            .filter(|conflict| conflict.state == LegionWorkflowConflictState::Unresolved)
+            .count() as u32;
+        let failed_verification_count = session
+            .verification_gates
+            .iter()
+            .filter(|gate| {
+                gate.state == LegionWorkflowVerificationGateState::Failed
+                    || gate.state == LegionWorkflowVerificationGateState::Blocked
+            })
+            .count() as u32;
+        let signed_off_count = session
+            .sign_off_records
+            .iter()
+            .filter(|signoff| signoff.state == LegionWorkflowSignOffState::SignedOff)
+            .count() as u32;
+        self.legion_workflow_tracker_ledger
+            .append(LegionWorkflowTrackerRecord {
+                record_id: format!(
+                    "legion-tracker:{}:{}",
+                    session.session_id.0, event_context.correlation_id.0
+                ),
+                workflow_session_id: session.session_id.clone(),
+                worker_id: None,
+                linked_proposal_ids: session.proposal_ids.clone(),
+                verification_gate_ids: session
+                    .verification_gates
+                    .iter()
+                    .map(|gate| gate.gate_id.clone())
+                    .collect(),
+                conflict_ids: session
+                    .conflict_summaries
+                    .iter()
+                    .map(|conflict| conflict.conflict_id.clone())
+                    .collect(),
+                unresolved_conflict_count,
+                failed_verification_count,
+                required_sign_off_count: session.sign_off_records.len() as u32,
+                signed_off_count,
+                merge_readiness_state: readiness.state,
+                risk_labels: session
+                    .worker_assignments
+                    .iter()
+                    .flat_map(|worker| {
+                        worker
+                            .risk_labels
+                            .iter()
+                            .map(|risk| format!("worker_risk:{risk:?}"))
+                    })
+                    .collect(),
+                privacy_labels: vec![devil_protocol::PrivacyClassification::Metadata],
+                summary_hash: metadata_fingerprint(
+                    "legion-workflow-session",
+                    &format!(
+                        "{}:{}:{}:{}",
+                        session.session_id.0,
+                        session.worker_assignments.len(),
+                        session.proposal_ids.len(),
+                        readiness.labels.join("|")
+                    ),
+                ),
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                labels: readiness.labels.clone(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: session.schema_version.max(1),
+            })
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))
+    }
+
+    fn propose_legion_workflow_memory_candidate(
+        &mut self,
+        session: &LegionWorkflowSession,
+        consent: MemoryConsentState,
+    ) -> Result<bool, AppCompositionError> {
+        let candidate = LegionWorkflowOutcomeCandidate::from_session_metadata(
+            session,
+            consent,
+            metadata_fingerprint(
+                "legion-workflow-outcome",
+                &format!(
+                    "{}:{}:{}",
+                    session.session_id.0,
+                    session.proposal_ids.len(),
+                    session.conflict_summaries.len()
+                ),
+            ),
+        )
+        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        self.memory_service
+            .propose_legion_workflow_candidate(candidate)
+            .map(|_| true)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))
+    }
+
+    fn current_delegated_task_projection(
+        &self,
+        generated_at: TimestampMillis,
+    ) -> DelegatedTaskProjection {
+        let proposal_ledger = self
+            .proposal_coordinator
+            .proposal_ledger_projection(generated_at);
+        self.delegated_task_projection(generated_at, &proposal_ledger)
+    }
+
+    fn delegated_task_projection(
+        &self,
+        generated_at: TimestampMillis,
+        proposal_ledger_projection: &ProposalLedgerProjection,
+    ) -> DelegatedTaskProjection {
+        let mut projection = devil_protocol::delegated_task_projection_from_plan_contracts(
             "delegated-task:app-command-center",
             self.delegated_task_plan_contracts.clone(),
             generated_at,
             1,
-        )
+        );
+        self.delegate_workflow
+            .apply_to_projection(&mut projection, proposal_ledger_projection);
+        projection
     }
 
     fn command_registry_projection(
@@ -8966,6 +12918,7 @@ impl AppComposition {
         instruction_label: impl Into<String>,
         provider_class: devil_protocol::AssistedAiProviderClass,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
+        self.require_assist_mode()?;
         let instruction_label = instruction_label.into();
         let context = self.active_documents.require_active_save_context()?;
         let event_context = self.next_event_context();
@@ -9730,6 +13683,8 @@ impl AppComposition {
 
         self.editor.close_buffer(buffer_id)?;
         self.active_documents.remove_open_tab(buffer_id);
+        self.assist_inline_prediction_state
+            .clear_for_buffer(buffer_id);
         self.active_documents.activate_first_available_tab();
         Ok(AppCloseTabOutcome::Closed { buffer_id })
     }
@@ -9821,6 +13776,74 @@ impl AppComposition {
         Ok(self.search_projection.clone())
     }
 
+    /// Run deterministic structural search and optionally create a rewrite proposal preview.
+    pub fn run_structural_search(
+        &mut self,
+        query_id: String,
+        scope: SearchScopeProjection,
+        pattern: String,
+        rewrite: Option<String>,
+        limit: usize,
+    ) -> Result<StructuralSearchProjection, AppCompositionError> {
+        let result_limit = normalize_search_limit(limit);
+        let pattern_label = pattern.trim().to_string();
+        let rewrite_label = rewrite
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if pattern_label.is_empty() {
+            let result = StructuralBuildResult::default();
+            self.structural_search_projection =
+                build_structural_search_projection(StructuralSearchProjectionInput {
+                    query_id: Some(query_id),
+                    scope,
+                    pattern_label,
+                    rewrite_label,
+                    result_limit,
+                    status: SearchStatusProjection {
+                        kind: SearchStatusKindProjection::ValidationError,
+                        message: "Structural search pattern is empty".to_string(),
+                    },
+                    result: &result,
+                    proposal_id: None,
+                });
+            return Ok(self.structural_search_projection.clone());
+        }
+
+        let query = StructuralSearchQuery {
+            pattern: pattern_label.clone(),
+            rewrite: rewrite_label.clone(),
+            result_limit,
+        };
+        let mut result = match scope {
+            SearchScopeProjection::ActiveFile => {
+                self.run_active_file_structural_search(&query_id, &query, result_limit)?
+            }
+            SearchScopeProjection::Workspace => {
+                self.run_workspace_structural_search(&query_id, &query, result_limit)?
+            }
+        };
+
+        let proposal_id = if rewrite_label.is_some() && !result.matches.is_empty() {
+            self.create_structural_rewrite_proposal(&pattern_label, &mut result)?
+        } else {
+            None
+        };
+        let status = structural_search_status_for_result(&result);
+        self.structural_search_projection =
+            build_structural_search_projection(StructuralSearchProjectionInput {
+                query_id: Some(query_id),
+                scope,
+                pattern_label,
+                rewrite_label,
+                result_limit,
+                status,
+                result: &result,
+                proposal_id,
+            });
+        Ok(self.structural_search_projection.clone())
+    }
+
     /// Cancel the projected search by query id.
     pub fn cancel_search(&mut self, query_id: String) -> SearchProjection {
         if self.search_projection.query_id.as_deref() == Some(query_id.as_str()) {
@@ -9833,9 +13856,88 @@ impl AppComposition {
         self.search_projection.clone()
     }
 
+    /// Refresh app-owned git projection data for the active workspace.
+    pub fn refresh_git_projection(&mut self) -> GitProjection {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            self.git_hunk_cache.clear();
+            self.git_projection = GitProjection {
+                diagnostics: vec!["git.workspace_not_open".to_string()],
+                generated_at: TimestampMillis::now(),
+                ..GitProjection::idle()
+            };
+            return self.git_projection.clone();
+        };
+        let active_file = self
+            .active_documents
+            .active_file_path
+            .as_deref()
+            .map(PathBuf::from);
+        match collect_git_snapshot(
+            Path::new(root_path),
+            active_file.as_deref(),
+            GitSnapshotOptions::default(),
+        ) {
+            Ok(snapshot) => {
+                self.git_hunk_cache = snapshot
+                    .hunks
+                    .iter()
+                    .map(|hunk| (hunk.hunk_id.clone(), hunk.clone()))
+                    .collect();
+                self.git_projection = git_projection_from_project(snapshot);
+            }
+            Err(error) => {
+                self.git_hunk_cache.clear();
+                self.git_projection = GitProjection {
+                    root_label: Some(root_path.to_string()),
+                    diagnostics: vec![format!("git.refresh_failed: {error}")],
+                    generated_at: TimestampMillis::now(),
+                    ..GitProjection::idle()
+                };
+            }
+        }
+        self.git_projection.clone()
+    }
+
+    fn stage_or_unstage_git_hunk(
+        &mut self,
+        hunk_id: &str,
+        expected_stage: GitHunkStage,
+    ) -> Result<GitProjection, AppCompositionError> {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        let hunk = self.git_hunk_cache.get(hunk_id).cloned().ok_or_else(|| {
+            git_protocol_error(
+                "git_hunk_missing",
+                format!("git hunk `{hunk_id}` is not present in the current projection"),
+            )
+        })?;
+        if hunk.stage != expected_stage {
+            return Err(git_protocol_error(
+                "git_hunk_stage_mismatch",
+                format!(
+                    "git hunk `{hunk_id}` stage is {:?}, expected {:?}",
+                    hunk.stage, expected_stage
+                ),
+            ));
+        }
+        match expected_stage {
+            GitHunkStage::Unstaged => stage_git_hunk(Path::new(root_path), &hunk)
+                .map_err(git_inspection_protocol_error)?,
+            GitHunkStage::Staged => unstage_git_hunk(Path::new(root_path), &hunk)
+                .map_err(git_inspection_protocol_error)?,
+        }
+        Ok(self.refresh_git_projection())
+    }
+
     /// Enable the deterministic terminal fixture for app integration tests.
     pub fn enable_terminal_fixture_for_tests(&mut self) {
         self.terminal_workflow.enable_fixture();
+    }
+
+    /// Enable the deterministic DAP debug fixture for app integration tests.
+    pub fn enable_debug_fixture_for_tests(&mut self) {
+        self.debug_workflow.enable_fixture();
     }
 
     /// Return the current app-owned language tooling projection.
@@ -9843,9 +13945,309 @@ impl AppComposition {
         self.language_tooling.projection()
     }
 
+    /// Return the current app-owned debug projection.
+    pub fn debug_projection(&self) -> DebugProjection {
+        self.debug_workflow.projection()
+    }
+
     /// Return the current app-owned terminal panel projection.
     pub fn terminal_panel_projection(&self) -> TerminalPanelProjection {
         self.terminal_workflow.projection()
+    }
+
+    /// Send a Delegate chat turn using local, metadata-only codebase retrieval citations.
+    pub fn send_delegate_chat(
+        &mut self,
+        prompt_label: impl Into<String>,
+    ) -> Result<AppDelegateChatOutcome, AppCompositionError> {
+        self.require_delegate_mode()?;
+        let prompt_label = bounded_label(prompt_label.into(), 240);
+        let buffer_id = self.active_documents.require_active_buffer()?;
+        let context = self.active_documents.save_context_for_buffer(buffer_id)?;
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
+        let document = SourceDocument::with_versions(
+            input.workspace_id,
+            input.metadata.identity.file_id,
+            input.metadata.identity.canonical_path.clone(),
+            language_id.clone(),
+            input.metadata.file_content_version,
+            input.metadata.workspace_generation,
+            Some(input.snapshot_id),
+            SemanticPrivacyScope::Workspace,
+            input.text,
+        );
+        self.language_tooling.refresh_retrieval_document(&document);
+        let citations = self
+            .language_tooling
+            .search_retrieval(&RetrievalQuery {
+                workspace_id: input.workspace_id,
+                query_text: prompt_label.clone(),
+                file_ids: vec![input.metadata.identity.file_id],
+                paths: vec![input.metadata.identity.canonical_path.clone()],
+                language_ids: vec![language_id],
+                privacy_scope: SemanticPrivacyScope::Workspace,
+                freshness_policy: SemanticQueryFreshnessPolicy::RequireFresh,
+                limit: 5,
+                schema_version: 1,
+            })
+            .into_iter()
+            .map(delegate_context_citation_from_retrieval)
+            .collect::<Vec<_>>();
+        let citation_ids = citations
+            .iter()
+            .map(|citation| citation.citation_id.clone())
+            .collect::<Vec<_>>();
+        self.delegate_workflow.context_citations.extend(citations);
+
+        let permission_request_id = delegated_context_permission_request_id(input.workspace_id);
+        let permission = self.delegate_workflow.record_tool_permission_decision(
+            DelegatedTaskToolPermissionRequestInput {
+                request_id: permission_request_id,
+                profile: DelegatedTaskToolPermissionProfile::Ask,
+                action_class: PermissionBudgetActionClass::ReadSemanticMetadata,
+                capability: Some(CapabilityId("delegated.context.retrieve".to_string())),
+                target_id: Some(input.metadata.identity.file_id.0.to_string()),
+                decision: DelegatedTaskToolPermissionDecision::Confirm,
+                labels: delegated_context_permission_labels(),
+                schema_version: 1,
+            },
+        );
+        let context_reference = trust_reference(
+            &format!("delegate:context:{}", input.metadata.identity.file_id.0),
+            devil_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+        );
+        let privacy_reference = trust_reference(
+            &format!("delegate:privacy:{}", input.metadata.identity.file_id.0),
+            devil_protocol::AssistedAiTrustProjectionKind::PrivacyInspector,
+        );
+        let permission_reference = trust_reference(
+            &format!("delegate:permission-budget:{}", permission.request_id),
+            devil_protocol::AssistedAiTrustProjectionKind::PermissionBudget,
+        );
+        let prompt_fingerprint = metadata_fingerprint("delegate-prompt", &prompt_label);
+        let citation_fingerprint =
+            metadata_fingerprint("delegate-citations", &citation_ids.join("|"));
+        let provider_route_request = devil_protocol::AssistedAiProviderRouteRequest {
+            route_id: format!(
+                "delegate-chat-route:{}:{}",
+                input.workspace_id.0,
+                self.event_sequence_generator.next().0
+            ),
+            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            model_label: "deterministic-local-delegate".to_string(),
+            provider_class: AssistedAiProviderClass::Local,
+            operation_class: AssistedAiOperationClass::Explain,
+            context_manifest: context_reference,
+            privacy_inspector: privacy_reference,
+            permission_budget: permission_reference,
+            proposal_intent: devil_protocol::AssistedAiProposalTargetIntent {
+                payload_kind: devil_protocol::ProposalPayloadKind::CodeAction,
+                target_coverage: ProposalTargetCoverage {
+                    coverage_kind: ProposalTargetCoverageKind::Complete,
+                    targets: vec![ProposalAffectedTarget {
+                        target_id: format!("delegate-chat:{}", input.metadata.identity.file_id.0),
+                        kind: ProposalTargetKind::MetadataOnly,
+                        workspace_id: Some(input.workspace_id),
+                        file_id: Some(input.metadata.identity.file_id),
+                        buffer_id: Some(buffer_id),
+                        path: Some(input.metadata.identity.canonical_path.clone()),
+                        terminal_session_id: None,
+                        plugin_id: None,
+                        remote_authority: None,
+                        collaboration_session_id: None,
+                        byte_ranges: vec![ByteRange::new(0, 0)],
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                    }],
+                    omitted_target_count: 0,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                },
+                required_capability: CapabilityId("ai.provider.invoke".to_string()),
+                risk_label: ProposalRiskLabel::Low,
+                privacy_label: devil_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                labels: vec![
+                    "delegate.chat.provider_route".to_string(),
+                    format!("delegate.prompt:{}", prompt_fingerprint.value),
+                    format!("delegate.citations:{}", citation_fingerprint.value),
+                    format!("delegate.citation_count:{}", citation_ids.len()),
+                ],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            policy_decision_id: None,
+            required_capability: CapabilityId("ai.provider.invoke".to_string()),
+            network_target: Some(devil_protocol::NetworkTarget {
+                scheme: "http".to_string(),
+                host: "localhost".to_string(),
+                port: Some(11434),
+            }),
+            cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
+            health_labels: vec!["delegate.local.deterministic".to_string()],
+            cost_labels: vec!["local.free".to_string()],
+            principal_id: input.principal.clone(),
+            workspace_trust_state: context.trust.clone(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let broker = DenyByDefaultBroker::new(
+            SecurityPolicy::default(),
+            CapabilityNamespace("app.delegate".to_string()),
+        );
+        let provider_route_response = ProviderRouter::new(&self.ai_registry, &broker)
+            .route_completion(provider_route_request)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        let assistant_content_label = if provider_route_response.invocation_state
+            == AssistedAiProviderInvocationState::Completed
+        {
+            format!(
+                "Delegate provider answer ready via {} citation(s); route={} labels={}",
+                citation_ids.len(),
+                provider_route_response.route_id,
+                provider_route_response.output_labels.join(",")
+            )
+        } else {
+            format!(
+                "Delegate provider refused; citation(s)={} route={} reason={}",
+                citation_ids.len(),
+                provider_route_response.route_id,
+                provider_route_response
+                    .refusal
+                    .as_ref()
+                    .map(|refusal| refusal.reason_code.as_str())
+                    .unwrap_or("unknown")
+            )
+        };
+
+        let user_message_id = self
+            .delegate_workflow
+            .next_message_id(DelegatedTaskChatRole::User);
+        let assistant_message_id = self
+            .delegate_workflow
+            .next_message_id(DelegatedTaskChatRole::Assistant);
+        let created_at = TimestampMillis::now();
+        self.delegate_workflow
+            .chat_messages
+            .push(DelegatedTaskChatMessage {
+                message_id: user_message_id.clone(),
+                role: DelegatedTaskChatRole::User,
+                content_label: prompt_label,
+                plan_id: None,
+                proposal_id: None,
+                citation_ids: Vec::new(),
+                tool_permission_request_ids: vec![permission.request_id.clone()],
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                created_at,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        self.delegate_workflow
+            .chat_messages
+            .push(DelegatedTaskChatMessage {
+                message_id: assistant_message_id.clone(),
+                role: DelegatedTaskChatRole::Assistant,
+                content_label: assistant_content_label,
+                plan_id: None,
+                proposal_id: None,
+                citation_ids: citation_ids.clone(),
+                tool_permission_request_ids: vec![permission.request_id],
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                created_at,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        let projection = self.current_delegated_task_projection(TimestampMillis::now());
+        Ok(AppDelegateChatOutcome {
+            projection,
+            user_message_id,
+            assistant_message_id,
+            citation_count: citation_ids.len(),
+        })
+    }
+
+    /// Record a human disposition for one projected Delegate proposal hunk.
+    pub fn review_delegate_proposal_hunk(
+        &mut self,
+        proposal_id: ProposalId,
+        hunk_id: impl Into<String>,
+        disposition: DelegatedTaskProposalHunkDisposition,
+    ) -> Result<DelegatedTaskProjection, AppCompositionError> {
+        self.require_delegate_mode()?;
+        let hunk_id = hunk_id.into();
+        let generated_at = TimestampMillis::now();
+        let proposal_ledger = self
+            .proposal_coordinator
+            .proposal_ledger_projection(generated_at);
+        let row = proposal_ledger
+            .rows
+            .iter()
+            .find(|row| row.proposal_id == proposal_id)
+            .ok_or_else(|| {
+                AppCompositionError::AiRuntime(format!(
+                    "Delegate proposal {} is not present in the proposal ledger",
+                    proposal_id.0
+                ))
+            })?;
+        let known_hunk = proposal_review_chunks(row)
+            .iter()
+            .any(|chunk| delegate_hunk_id(proposal_id, chunk) == hunk_id);
+        if !known_hunk {
+            return Err(AppCompositionError::AiRuntime(format!(
+                "Delegate proposal hunk `{hunk_id}` is not present in proposal {}",
+                proposal_id.0
+            )));
+        }
+        self.delegate_workflow
+            .hunk_decisions
+            .insert((proposal_id, hunk_id), disposition);
+        Ok(self.delegated_task_projection(generated_at, &proposal_ledger))
+    }
+
+    /// Record a human decision for one Delegate tool permission request.
+    pub fn record_delegate_tool_permission_decision(
+        &mut self,
+        request_id: impl Into<String>,
+        decision: DelegatedTaskToolPermissionDecision,
+    ) -> Result<DelegatedTaskProjection, AppCompositionError> {
+        self.require_delegate_mode()?;
+        let request_id = request_id.into();
+        let existing = self.delegate_workflow.tool_permission(&request_id).cloned();
+        let (profile, action_class, capability, target_id, labels) =
+            if let Some(existing) = existing {
+                (
+                    existing.profile,
+                    existing.action_class,
+                    existing.capability,
+                    existing.target_id,
+                    existing.labels,
+                )
+            } else {
+                (
+                    DelegatedTaskToolPermissionProfile::Write,
+                    PermissionBudgetActionClass::AccessWorkspaceFiles,
+                    Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                    None,
+                    vec!["delegate.permission.write.runtime_allocation".to_string()],
+                )
+            };
+        self.delegate_workflow.record_tool_permission_decision(
+            DelegatedTaskToolPermissionRequestInput {
+                request_id,
+                profile,
+                action_class,
+                capability,
+                target_id,
+                decision,
+                labels,
+                schema_version: 1,
+            },
+        );
+        Ok(self.current_delegated_task_projection(TimestampMillis::now()))
     }
 
     fn language_request_input(
@@ -9888,6 +14290,587 @@ impl AppComposition {
         let event_context = self.next_event_context();
         let input = self.language_request_input(buffer_id, event_context)?;
         Ok(self.language_tooling.run_read(input, kind, position))
+    }
+
+    fn request_assist_inline_prediction(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+    ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
+        self.require_assist_mode()?;
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let context = self.active_documents.save_context_for_buffer(buffer_id)?;
+        let snapshot = self.editor.current_snapshot(buffer_id)?.clone();
+        let event_context = self.next_event_context();
+        let metadata = self.inline_prediction_request_metadata(
+            &context,
+            snapshot.snapshot_id,
+            snapshot.buffer_version,
+            snapshot.content_hash.as_str(),
+            position,
+            event_context,
+        );
+        metadata
+            .validate()
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+
+        self.assist_inline_prediction_state.request_in_flight = true;
+        self.assist_inline_prediction_state.active_request_id = Some(metadata.request_id.clone());
+        self.assist_inline_prediction_state
+            .requests
+            .insert(metadata.request_id.clone(), metadata.clone());
+
+        let result = match self.invoke_inline_prediction_provider(metadata) {
+            Ok(result) => result,
+            Err(error) => {
+                self.assist_inline_prediction_state.request_in_flight = false;
+                self.assist_inline_prediction_state.active_request_id = None;
+                return Err(error);
+            }
+        };
+        self.assist_inline_prediction_state.results.push(result);
+        self.assist_inline_prediction_state.request_in_flight = false;
+        self.assist_inline_prediction_state.retain_bounded_history();
+        Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
+    }
+
+    fn accept_assist_inline_prediction(
+        &mut self,
+        buffer_id: BufferId,
+        prediction_id: Option<String>,
+    ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
+        self.require_assist_mode()?;
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
+        else {
+            return Err(AppCompositionError::AiRuntime(
+                "no active Assist inline prediction is available".to_string(),
+            ));
+        };
+        self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Accept)?;
+
+        let observed = self.inline_prediction_observed_fingerprint(buffer_id)?;
+        let freshness = InlinePredictionFreshness::from_fingerprints(
+            &self.assist_inline_prediction_state.results[index].fingerprint,
+            &observed,
+            1,
+        );
+        if freshness.state == InlinePredictionFreshnessState::Stale {
+            self.mark_inline_prediction_stale(index, freshness)?;
+            return Ok(self.assist_inline_prediction_projection(TimestampMillis::now()));
+        }
+
+        let context = self.active_documents.save_context_for_buffer(buffer_id)?;
+        let result = self.assist_inline_prediction_state.results[index].clone();
+        let ghost_text = result.ghost_text.ok_or_else(|| {
+            AppCompositionError::AiRuntime(
+                "Assist inline prediction has no ghost text to accept".to_string(),
+            )
+        })?;
+        let range = Self::inline_prediction_edit_range(result.insert_range)?;
+        let event_context = self.next_event_context();
+        let record = self
+            .editor
+            .apply_protocol_edits(EditorApplyTransactionRequest {
+                workspace_id: context.workspace_id,
+                buffer_id,
+                file_id: context.metadata.identity.file_id,
+                edits: EditBatch {
+                    edits: vec![devil_protocol::TextEdit {
+                        range,
+                        replacement: ghost_text.text,
+                    }],
+                },
+                source: TransactionSource::User,
+                undo_group_id: Some(uuid::Uuid::now_v7()),
+                correlation_id: event_context.correlation_id,
+            })?;
+        let descriptor = record.to_protocol_descriptor();
+        self.emit_transaction_event(&descriptor);
+        self.mark_inline_prediction_lifecycle(index, InlinePredictionResultState::Accepted)?;
+        Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
+    }
+
+    fn dismiss_assist_inline_prediction(
+        &mut self,
+        buffer_id: BufferId,
+        prediction_id: Option<String>,
+    ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
+        self.require_assist_mode()?;
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
+        else {
+            return Ok(self.assist_inline_prediction_projection(TimestampMillis::now()));
+        };
+        self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Dismiss)?;
+        self.mark_inline_prediction_lifecycle(index, InlinePredictionResultState::Dismissed)?;
+        Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
+    }
+
+    fn cancel_assist_inline_prediction(
+        &mut self,
+        buffer_id: BufferId,
+        prediction_id: Option<String>,
+    ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
+        self.require_assist_mode()?;
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
+        else {
+            self.assist_inline_prediction_state.request_in_flight = false;
+            self.assist_inline_prediction_state.active_request_id = None;
+            return Ok(self.assist_inline_prediction_projection(TimestampMillis::now()));
+        };
+        self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Cancel)?;
+        self.mark_inline_prediction_lifecycle(index, InlinePredictionResultState::Cancelled)?;
+        Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
+    }
+
+    fn inline_prediction_request_metadata(
+        &mut self,
+        context: &ActiveSaveContext,
+        snapshot_id: devil_protocol::SnapshotId,
+        buffer_version: BufferVersion,
+        content_hash: &str,
+        cursor: TextCoordinate,
+        event_context: EventContext,
+    ) -> InlinePredictionRequestMetadata {
+        let language_id = language_id_for_path(&context.metadata.identity.canonical_path);
+        let requested_at = TimestampMillis::now();
+        InlinePredictionRequestMetadata {
+            request_id: InlinePredictionRequestId(format!(
+                "assist-inline:req:{}:{}",
+                event_context.correlation_id.0, snapshot_id.0
+            )),
+            workspace_id: context.workspace_id,
+            buffer_id: context.buffer_id,
+            file_id: Some(context.metadata.identity.file_id),
+            language_id,
+            cursor,
+            selection: None,
+            visible_range: None,
+            trigger: InlinePredictionTriggerKind::Explicit,
+            fingerprint: self.inline_prediction_fingerprint(
+                context,
+                snapshot_id,
+                buffer_version,
+                content_hash,
+            ),
+            provider: InlinePredictionProviderMetadata {
+                provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+                model_label: "zeta2-style-deterministic".to_string(),
+                provider_class: AssistedAiProviderClass::Local,
+                operation_class: AssistedAiOperationClass::InlinePrediction,
+                invocation_state: AssistedAiProviderInvocationState::Planned,
+                latency: InlinePredictionLatencyMetadata {
+                    queued_ms: 0,
+                    inference_ms: 0,
+                    total_ms: 0,
+                    timed_out: false,
+                },
+                health_labels: vec!["local".to_string(), "deterministic".to_string()],
+                cost_labels: vec!["offline".to_string()],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            max_prediction_bytes: INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES.min(256),
+            timeout_ms: 250,
+            requested_at,
+            cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
+            required_capability: CapabilityId("ai.inline_prediction.invoke".to_string()),
+            principal_id: context.principal.clone(),
+            workspace_trust_state: context.trust.clone(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn inline_prediction_fingerprint(
+        &self,
+        context: &ActiveSaveContext,
+        snapshot_id: devil_protocol::SnapshotId,
+        buffer_version: BufferVersion,
+        content_hash: &str,
+    ) -> InlinePredictionFingerprintMetadata {
+        InlinePredictionFingerprintMetadata {
+            snapshot_id,
+            buffer_version,
+            file_content_version: Some(context.metadata.file_content_version),
+            workspace_generation: context.metadata.workspace_generation,
+            content_fingerprint: Some(FileFingerprint {
+                algorithm: "devil-text-snapshot".to_string(),
+                value: content_hash.to_string(),
+            }),
+            context_fingerprint: metadata_fingerprint(
+                "assist-inline-context",
+                &format!(
+                    "{}:{}:{}:{}",
+                    context.workspace_id.0,
+                    context.metadata.identity.file_id.0,
+                    context.metadata.workspace_generation.0,
+                    context.metadata.fingerprint.value
+                ),
+            ),
+            schema_version: 1,
+        }
+    }
+
+    fn inline_prediction_observed_fingerprint(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<InlinePredictionFingerprintMetadata, AppCompositionError> {
+        let context = self.active_documents.save_context_for_buffer(buffer_id)?;
+        let snapshot = self.editor.current_snapshot(buffer_id)?.clone();
+        Ok(self.inline_prediction_fingerprint(
+            &context,
+            snapshot.snapshot_id,
+            snapshot.buffer_version,
+            snapshot.content_hash.as_str(),
+        ))
+    }
+
+    #[cfg(feature = "ai")]
+    fn invoke_inline_prediction_provider(
+        &self,
+        metadata: InlinePredictionRequestMetadata,
+    ) -> Result<InlinePredictionResult, AppCompositionError> {
+        let request = InlinePredictionRequest {
+            provider: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            model: "zeta2-style-deterministic".to_string(),
+            metadata,
+        };
+        let provider = self
+            .ai_registry
+            .get(DETERMINISTIC_LOCAL_PROVIDER_ID)
+            .ok_or_else(|| {
+                AppCompositionError::AiRuntime(
+                    "deterministic inline prediction provider is not registered".to_string(),
+                )
+            })?;
+        let response = provider
+            .predict_inline(request)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        Ok(response.result)
+    }
+
+    #[cfg(not(feature = "ai"))]
+    fn invoke_inline_prediction_provider(
+        &self,
+        _metadata: InlinePredictionRequestMetadata,
+    ) -> Result<InlinePredictionResult, AppCompositionError> {
+        Err(AppCompositionError::AiRuntime(
+            "AI feature is disabled; inline prediction provider is unavailable".to_string(),
+        ))
+    }
+
+    fn resolve_inline_prediction_index(
+        &self,
+        buffer_id: BufferId,
+        prediction_id: Option<&str>,
+    ) -> Option<usize> {
+        self.assist_inline_prediction_state
+            .results
+            .iter()
+            .enumerate()
+            .find_map(|(index, result)| {
+                let request = self
+                    .assist_inline_prediction_state
+                    .requests
+                    .get(&result.request_id)?;
+                if request.buffer_id != buffer_id {
+                    return None;
+                }
+                let id_matches = prediction_id.map_or_else(
+                    || {
+                        self.assist_inline_prediction_state
+                            .active_request_id
+                            .as_ref()
+                            .is_some_and(|active| active == &result.request_id)
+                    },
+                    |prediction_id| {
+                        prediction_id == result.result_id.0 || prediction_id == result.request_id.0
+                    },
+                );
+                id_matches.then_some(index)
+            })
+    }
+
+    fn validate_inline_prediction_lifecycle(
+        &mut self,
+        result_index: usize,
+        action: InlinePredictionLifecycleAction,
+    ) -> Result<(), AppCompositionError> {
+        let result = &self.assist_inline_prediction_state.results[result_index];
+        if result.state != InlinePredictionResultState::Available {
+            return Err(AppCompositionError::AiRuntime(format!(
+                "Assist inline prediction must be available for {action:?}; current state is {:?}",
+                result.state
+            )));
+        }
+        if action == InlinePredictionLifecycleAction::Cancel
+            && (!self.assist_inline_prediction_state.request_in_flight
+                || self
+                    .assist_inline_prediction_state
+                    .active_request_id
+                    .as_ref()
+                    != Some(&result.request_id))
+        {
+            return Err(AppCompositionError::AiRuntime(
+                "Assist inline prediction cancel requires an in-flight active request".to_string(),
+            ));
+        }
+        let request_id = result.request_id.clone();
+        let result_id = result.result_id.clone();
+        let request = self
+            .assist_inline_prediction_state
+            .requests
+            .get(&request_id)
+            .ok_or_else(|| {
+                AppCompositionError::AiRuntime(
+                    "Assist inline prediction request metadata is missing".to_string(),
+                )
+            })?;
+        let cancellation_token = request.cancellation_token;
+        let event_context = self.next_event_context();
+        let command = InlinePredictionLifecycleCommand {
+            request_id,
+            result_id: match action {
+                InlinePredictionLifecycleAction::Cancel => None,
+                InlinePredictionLifecycleAction::Dismiss
+                | InlinePredictionLifecycleAction::Accept => Some(result_id),
+            },
+            action,
+            cancellation_token: (action == InlinePredictionLifecycleAction::Cancel)
+                .then_some(cancellation_token),
+            dismissal_id: (action == InlinePredictionLifecycleAction::Dismiss)
+                .then_some(InlinePredictionDismissalId(uuid::Uuid::now_v7())),
+            acceptance_id: (action == InlinePredictionLifecycleAction::Accept)
+                .then_some(InlinePredictionAcceptanceId(uuid::Uuid::now_v7())),
+            reason_labels: vec![format!("assist-inline.{action:?}")],
+            requested_at: TimestampMillis::now(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        validate_inline_prediction_lifecycle_command(&command)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))
+    }
+
+    fn mark_inline_prediction_lifecycle(
+        &mut self,
+        result_index: usize,
+        state: InlinePredictionResultState,
+    ) -> Result<(), AppCompositionError> {
+        let result = &mut self.assist_inline_prediction_state.results[result_index];
+        result.state = state;
+        result.retention = InlinePredictionRetention::MetadataOnlyAudit;
+        result.ghost_text = None;
+        result.provider.invocation_state = match state {
+            InlinePredictionResultState::Cancelled => AssistedAiProviderInvocationState::Cancelled,
+            InlinePredictionResultState::Failed => AssistedAiProviderInvocationState::Failed,
+            InlinePredictionResultState::Refused => AssistedAiProviderInvocationState::Refused,
+            _ => AssistedAiProviderInvocationState::Completed,
+        };
+        result.generated_at = TimestampMillis::now();
+        result
+            .validate()
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        self.assist_inline_prediction_state.active_request_id = None;
+        self.assist_inline_prediction_state.request_in_flight = false;
+        Ok(())
+    }
+
+    fn mark_inline_prediction_stale(
+        &mut self,
+        result_index: usize,
+        freshness: InlinePredictionFreshness,
+    ) -> Result<(), AppCompositionError> {
+        let result = &mut self.assist_inline_prediction_state.results[result_index];
+        result.state = InlinePredictionResultState::Stale;
+        result.freshness = freshness;
+        result.retention = InlinePredictionRetention::MetadataOnlyAudit;
+        result.ghost_text = None;
+        result.generated_at = TimestampMillis::now();
+        result
+            .validate()
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        self.assist_inline_prediction_state.active_request_id = None;
+        self.assist_inline_prediction_state.request_in_flight = false;
+        Ok(())
+    }
+
+    fn inline_prediction_edit_range(
+        range: ProtocolTextRange,
+    ) -> Result<ProtocolEditTextRange, AppCompositionError> {
+        let start = range.start.byte_offset.ok_or_else(|| {
+            AppCompositionError::AiRuntime(
+                "Assist inline prediction accept requires byte-coordinate start".to_string(),
+            )
+        })?;
+        let end = range.end.byte_offset.ok_or_else(|| {
+            AppCompositionError::AiRuntime(
+                "Assist inline prediction accept requires byte-coordinate end".to_string(),
+            )
+        })?;
+        Ok(ProtocolEditTextRange::byte(start, end))
+    }
+
+    fn assist_inline_prediction_projection(
+        &self,
+        generated_at: TimestampMillis,
+    ) -> AssistInlinePredictionProjection {
+        if !self.product_mode.allows_assist() {
+            return AssistInlinePredictionProjection::empty();
+        }
+        let Some(buffer_id) = self.active_documents.active_buffer_id else {
+            return AssistInlinePredictionProjection::empty();
+        };
+        let Some(workspace_id) = self.active_documents.workspace_id() else {
+            return AssistInlinePredictionProjection::empty();
+        };
+        let observed = self.inline_prediction_observed_fingerprint(buffer_id).ok();
+        let mut results = Vec::new();
+        for result in &self.assist_inline_prediction_state.results {
+            let Some(request) = self
+                .assist_inline_prediction_state
+                .requests
+                .get(&result.request_id)
+            else {
+                continue;
+            };
+            if request.buffer_id != buffer_id {
+                continue;
+            }
+            let mut projected = result.clone();
+            if projected.state == InlinePredictionResultState::Available
+                && let Some(observed) = &observed
+            {
+                let freshness = InlinePredictionFreshness::from_fingerprints(
+                    &projected.fingerprint,
+                    observed,
+                    1,
+                );
+                if freshness.state == InlinePredictionFreshnessState::Stale {
+                    projected.state = InlinePredictionResultState::Stale;
+                    projected.freshness = freshness;
+                    projected.retention = InlinePredictionRetention::MetadataOnlyAudit;
+                    projected.ghost_text = None;
+                }
+            }
+            results.push(projected);
+        }
+        let active_request_id = self
+            .assist_inline_prediction_state
+            .active_request_id
+            .clone()
+            .filter(|request_id| {
+                results.iter().any(|result| {
+                    &result.request_id == request_id
+                        && result.state == InlinePredictionResultState::Available
+                        && result.freshness.state != InlinePredictionFreshnessState::Stale
+                })
+            });
+        let protocol = inline_prediction_projection_from_results(
+            format!("assist-inline:{}:{}", workspace_id.0, buffer_id.0),
+            workspace_id,
+            buffer_id,
+            active_request_id,
+            results,
+            generated_at,
+            1,
+        );
+        match protocol {
+            Ok(protocol) => self.assist_inline_prediction_projection_from_protocol(
+                protocol,
+                self.assist_inline_prediction_state.request_in_flight,
+            ),
+            Err(_) => AssistInlinePredictionProjection::empty(),
+        }
+    }
+
+    fn assist_inline_prediction_projection_from_protocol(
+        &self,
+        projection: InlinePredictionProjection,
+        request_in_flight: bool,
+    ) -> AssistInlinePredictionProjection {
+        let rows: Vec<_> = projection
+            .results
+            .iter()
+            .map(|result| self.inline_prediction_row(result))
+            .collect();
+        let active_prediction = projection
+            .active_request_id
+            .as_ref()
+            .and_then(|request_id| {
+                rows.iter()
+                    .find(|row| {
+                        projection.results.iter().any(|result| {
+                            &result.request_id == request_id
+                                && result.result_id.0 == row.prediction_id
+                                && result.state == InlinePredictionResultState::Available
+                        })
+                    })
+                    .cloned()
+            });
+        AssistInlinePredictionProjection {
+            active_prediction,
+            stale_prediction_count: projection.stale_count as usize,
+            rows,
+            request_in_flight,
+            generated_at: projection.generated_at,
+            schema_version: projection.schema_version,
+        }
+    }
+
+    fn inline_prediction_row(
+        &self,
+        result: &InlinePredictionResult,
+    ) -> AssistInlinePredictionRowProjection {
+        let request = self
+            .assist_inline_prediction_state
+            .requests
+            .get(&result.request_id);
+        let stale = result.state == InlinePredictionResultState::Stale
+            || result.freshness.state == InlinePredictionFreshnessState::Stale;
+        AssistInlinePredictionRowProjection {
+            prediction_id: result.result_id.0.clone(),
+            workspace_id: request.map(|request| request.workspace_id),
+            buffer_id: request.map(|request| request.buffer_id),
+            file_id: request.and_then(|request| request.file_id),
+            provider_label: format!(
+                "{} ({})",
+                result.provider.provider_id, result.provider.model_label
+            ),
+            status: inline_prediction_status(result),
+            status_label: format!("{:?}", inline_prediction_status(result)),
+            latency_ms: Some(result.provider.latency.total_ms as u64),
+            requested_at: request.map_or(result.generated_at, |request| request.requested_at),
+            completed_at: Some(result.generated_at),
+            snapshot_id: Some(result.fingerprint.snapshot_id),
+            buffer_version: Some(result.fingerprint.buffer_version),
+            file_fingerprint: result.fingerprint.content_fingerprint.clone(),
+            stale,
+            stale_reason_label: stale.then(|| stale_reason_label(&result.freshness.stale_reasons)),
+            ghost_text_label: result
+                .ghost_text
+                .as_ref()
+                .map(|ghost| bounded_label(ghost.text.as_str(), 120))
+                .unwrap_or_default(),
+            replacement_preview_label: None,
+            apply_range: result.insert_range,
+            apply_range_label: format!(
+                "{}:{}-{}:{}",
+                result.insert_range.start.line,
+                result.insert_range.start.character,
+                result.insert_range.end.line,
+                result.insert_range.end.character
+            ),
+            diagnostics: inline_prediction_diagnostics(result),
+        }
     }
 
     fn run_language_proposal(
@@ -10083,6 +15066,11 @@ impl AppComposition {
             &input,
             kind,
             proposal.proposal_id,
+            if matches!(kind, LanguageProposalKind::CodeAction) {
+                Some(label.as_str())
+            } else {
+                None
+            },
             format!("{} proposal preview created", title),
         ))
     }
@@ -10237,6 +15225,313 @@ impl AppComposition {
         }
 
         Ok(result)
+    }
+
+    fn run_active_file_structural_search(
+        &self,
+        query_id: &str,
+        query: &StructuralSearchQuery,
+        limit: usize,
+    ) -> Result<StructuralBuildResult, AppCompositionError> {
+        let buffer_id = self.active_documents.require_active_buffer()?;
+        let metadata = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+            .ok_or(AppCompositionError::ActiveFileMissing)?;
+        let text = self.editor.text(buffer_id)?.to_string();
+        let document = self.structural_document_for_open_buffer(buffer_id, &metadata, text)?;
+        let mut result = StructuralBuildResult::default();
+        collect_structural_document_result(
+            query_id,
+            SearchScopeProjection::ActiveFile,
+            query,
+            document,
+            limit,
+            &mut result,
+        );
+        Ok(result)
+    }
+
+    fn run_workspace_structural_search(
+        &self,
+        query_id: &str,
+        query: &StructuralSearchQuery,
+        limit: usize,
+    ) -> Result<StructuralBuildResult, AppCompositionError> {
+        let workspace = self.active_documents.require_workspace_context()?;
+        let tree = self.workspace.tree_snapshot()?;
+        let mut result = StructuralBuildResult::default();
+
+        for node in tree {
+            if !workspace_node_is_regular_file(&node) {
+                continue;
+            }
+            let Some(size_bytes) = node
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.size_bytes)
+            else {
+                result.omitted_file_count += 1;
+                result.diagnostics.push(format!(
+                    "Skipped {} because file size metadata is unavailable",
+                    node.identity.canonical_path.0
+                ));
+                continue;
+            };
+            if size_bytes > WORKSPACE_SEARCH_MAX_FILE_BYTES {
+                result.omitted_file_count += 1;
+                result.diagnostics.push(format!(
+                    "Skipped {} because {} bytes exceeds the workspace structural-search bound",
+                    node.identity.canonical_path.0, size_bytes
+                ));
+                continue;
+            }
+
+            let document = if let Some(buffer_id) = self
+                .editor
+                .buffer_for_file(workspace.workspace_id, node.identity.file_id)
+                .or_else(|| {
+                    self.editor
+                        .buffer_for_path(workspace.workspace_id, &node.identity.canonical_path.0)
+                })
+                .or_else(|| {
+                    self.open_buffer_for_equivalent_path(
+                        workspace.workspace_id,
+                        &node.identity.canonical_path,
+                    )
+                }) {
+                let metadata = self
+                    .active_documents
+                    .metadata_for_buffer(buffer_id)
+                    .cloned()
+                    .ok_or(AppCompositionError::ActiveFileMissing)?;
+                let text = self.editor.text(buffer_id)?.to_string();
+                self.structural_document_for_open_buffer(buffer_id, &metadata, text)?
+            } else {
+                let text = match self
+                    .workspace
+                    .read_file_text(workspace.workspace_id, &node.identity.canonical_path.0)
+                {
+                    Ok(text) => text,
+                    Err(error) => {
+                        result.omitted_file_count += 1;
+                        result.diagnostics.push(format!(
+                            "Skipped {}: {error}",
+                            node.identity.canonical_path.0
+                        ));
+                        continue;
+                    }
+                };
+                structural_document_for_tree_node(&node, workspace.workspace_generation, text)
+            };
+
+            collect_structural_document_result(
+                query_id,
+                SearchScopeProjection::Workspace,
+                query,
+                document,
+                limit,
+                &mut result,
+            );
+        }
+
+        Ok(result)
+    }
+
+    fn structural_document_for_open_buffer(
+        &self,
+        buffer_id: BufferId,
+        metadata: &ActiveFileMetadata,
+        text: String,
+    ) -> Result<SourceDocument, AppCompositionError> {
+        let snapshot_id = self.editor.current_snapshot(buffer_id)?.snapshot_id;
+        let mut document = SourceDocument::with_versions(
+            metadata.identity.workspace_id,
+            metadata.identity.file_id,
+            metadata.identity.canonical_path.clone(),
+            language_id_for_path(&metadata.identity.canonical_path),
+            metadata.file_content_version,
+            metadata.workspace_generation,
+            Some(snapshot_id),
+            SemanticPrivacyScope::Workspace,
+            text,
+        );
+        document.identity.content_hash = metadata.fingerprint.clone();
+        document.identity.disk_fingerprint = Some(metadata.fingerprint.clone());
+        document.identity.byte_len = metadata.file_length;
+        document.identity.modified_at = metadata.modified_at;
+        Ok(document)
+    }
+
+    fn create_structural_rewrite_proposal(
+        &mut self,
+        pattern_label: &str,
+        result: &mut StructuralBuildResult,
+    ) -> Result<Option<ProposalId>, AppCompositionError> {
+        let workspace_id = self.active_documents.require_workspace_id()?;
+        let title = format!("Structural replace `{}`", bounded_label(pattern_label, 64));
+        let inputs = result
+            .reports
+            .iter()
+            .map(|report| StructuralRewriteFileInput {
+                document: &report.document,
+                matches: &report.matches,
+            })
+            .collect::<Vec<_>>();
+        let mut payload =
+            build_structural_rewrite_preview_payload(workspace_id, title.clone(), &inputs);
+        self.enrich_structural_payload_for_open_buffers(&mut payload)?;
+        if payload.file_edits.is_empty() {
+            result.diagnostics.push(
+                "Structural rewrite preview did not produce editable file changes".to_string(),
+            );
+            return Ok(None);
+        }
+
+        let event_context = self.next_event_context();
+        let proposal_id = self.proposal_coordinator.next_id();
+        let principal = self
+            .active_documents
+            .active_principal_id
+            .clone()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+        let capability = payload.required_capability.clone();
+        let preconditions = payload
+            .file_edits
+            .first()
+            .map(|edit| edit.preconditions.clone())
+            .unwrap_or(ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: Some(
+                    self.active_documents
+                        .require_workspace_context()?
+                        .workspace_generation,
+                ),
+                file_content_version: None,
+                workspace_generation: Some(
+                    self.active_documents
+                        .require_workspace_context()?
+                        .workspace_generation,
+                ),
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
+            });
+        let proposal = WorkspaceProposal {
+            proposal_id,
+            principal,
+            capability,
+            correlation_id: event_context.correlation_id,
+            payload: ProposalPayload::WorkspaceEdit(payload),
+            preconditions,
+            preview: PreviewSummary {
+                summary: title.clone(),
+                details: vec![
+                    "structural_search.rewrite_preview".to_string(),
+                    format!("matches={}", result.matches.len()),
+                ],
+            },
+            expires_at: None,
+            created_at: TimestampMillis::now(),
+        };
+
+        self.proposal_coordinator
+            .register_lifecycle_context(proposal.proposal_id, event_context);
+        let created = self.proposal_coordinator.created_response(&proposal);
+        if !matches!(created, ProposalResponse::Created(_)) {
+            result.diagnostics.push(format!(
+                "Structural rewrite proposal creation failed: {created:?}"
+            ));
+            return Ok(None);
+        }
+        let validated = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Validate(proposal.clone()));
+        if !matches!(validated, Ok(ProposalResponse::Validated(_))) {
+            result.diagnostics.push(format!(
+                "Structural rewrite proposal validation failed: {validated:?}"
+            ));
+            return Ok(None);
+        }
+        let previewed = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Preview(proposal));
+        if !matches!(previewed, Ok(ProposalResponse::Previewed { .. })) {
+            result.diagnostics.push(format!(
+                "Structural rewrite proposal preview failed: {previewed:?}"
+            ));
+            return Ok(None);
+        }
+
+        Ok(Some(proposal_id))
+    }
+
+    fn enrich_structural_payload_for_open_buffers(
+        &self,
+        payload: &mut WorkspaceEditProposalPayload,
+    ) -> Result<(), AppCompositionError> {
+        for edit in &mut payload.file_edits {
+            let Some(buffer_id) = self
+                .editor
+                .buffer_for_file(edit.file.workspace_id, edit.file.file_id)
+                .or_else(|| {
+                    self.editor
+                        .buffer_for_path(edit.file.workspace_id, &edit.file.canonical_path.0)
+                })
+                .or_else(|| {
+                    self.open_buffer_for_equivalent_path(
+                        edit.file.workspace_id,
+                        &edit.file.canonical_path,
+                    )
+                })
+            else {
+                continue;
+            };
+            let actual = self.active_file_version_context(buffer_id)?;
+            edit.buffer_id = Some(buffer_id);
+            edit.preconditions.buffer_version = Some(actual.buffer_version);
+            edit.preconditions.snapshot_id = Some(actual.snapshot_id);
+            edit.preconditions.file_version = Some(actual.file_version);
+            edit.preconditions.file_content_version = Some(actual.file_content_version);
+            edit.preconditions.generation = Some(actual.generation);
+            edit.preconditions.workspace_generation = Some(actual.workspace_generation);
+            edit.preconditions.expected_fingerprint = actual.fingerprint.clone();
+            edit.preconditions.expected_file_length = actual.file_length;
+            edit.preconditions.expected_modified_at = actual.modified_at;
+
+            if let Some(target) = payload
+                .target_coverage
+                .targets
+                .iter_mut()
+                .find(|target| target.file_id == Some(edit.file.file_id))
+            {
+                target.kind = ProposalTargetKind::OpenBuffer;
+                target.buffer_id = Some(buffer_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn open_buffer_for_equivalent_path(
+        &self,
+        workspace_id: WorkspaceId,
+        path: &CanonicalPath,
+    ) -> Option<BufferId> {
+        self.active_documents
+            .open_tabs
+            .iter()
+            .copied()
+            .find(|buffer_id| {
+                self.active_documents
+                    .metadata_for_buffer(*buffer_id)
+                    .is_some_and(|metadata| {
+                        metadata.identity.workspace_id == workspace_id
+                            && Self::paths_equivalent(&metadata.identity.canonical_path.0, &path.0)
+                    })
+            })
     }
 
     /// Capture a metadata-only workspace session record.
@@ -10489,7 +15784,8 @@ impl AppComposition {
             .proposal_coordinator
             .proposal_ledger_projection(generated_at);
         let remote_gui_projection = self.remote.gui_projection(&proposal_ledger_projection);
-        let delegated_task_projection = self.delegated_task_projection(generated_at);
+        let delegated_task_projection =
+            self.delegated_task_projection(generated_at, &proposal_ledger_projection);
         let command_registry_projection = self.command_registry_projection(
             &proposal_ledger_projection,
             &delegated_task_projection,
@@ -10511,6 +15807,7 @@ impl AppComposition {
             self.selected_proposal_trust_projections(&proposal_ledger_projection, generated_at);
         Ok(ShellProjectionSnapshot {
             active_buffer_projection: self.active_buffer_projection(&layout_projection)?,
+            product_mode: self.product_mode.to_dock_mode(),
             layout_projection,
             explorer_projection: self.explorer_projection()?,
             status_messages: Vec::new(),
@@ -10569,7 +15866,10 @@ impl AppComposition {
                 .assisted_ai_projection
                 .clone()
                 .unwrap_or_else(empty_assisted_ai_projection),
+            assist_inline_prediction_projection: self
+                .assist_inline_prediction_projection(generated_at),
             delegated_task_projection,
+            legion_workflow_projection: self.legion_workflow_projection(generated_at),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),
@@ -10579,6 +15879,9 @@ impl AppComposition {
                 &self.editor,
             ),
             search_projection: self.search_projection.clone(),
+            structural_search_projection: self.structural_search_projection.clone(),
+            git_projection: self.git_projection.clone(),
+            debug_projection: self.debug_workflow.projection(),
             language_tooling_projection: self.language_tooling.projection(),
             terminal_panel_projection: self.terminal_workflow.projection(),
         })

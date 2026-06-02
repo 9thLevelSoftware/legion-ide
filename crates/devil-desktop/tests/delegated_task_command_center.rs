@@ -17,20 +17,25 @@ use devil_desktop::{
     },
 };
 use devil_protocol::{
-    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, CapabilityId, CausalityId,
-    ContextManifestItemCount, CorrelationId, DelegatedTaskAffectedTargetSummary,
-    DelegatedTaskOperationClass, DelegatedTaskPlanContract, DelegatedTaskPlanId,
-    DelegatedTaskPlanStep, DelegatedTaskPlanningBoundaryInput, DelegatedTaskProposalPreviewLink,
+    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, ByteRange, CanonicalPath,
+    CapabilityId, CausalityId, ContextManifestItemCount, CorrelationId,
+    DelegatedTaskAffectedTargetSummary, DelegatedTaskChatMessage, DelegatedTaskChatRole,
+    DelegatedTaskContextCitation, DelegatedTaskOperationClass, DelegatedTaskPlanContract,
+    DelegatedTaskPlanId, DelegatedTaskPlanStep, DelegatedTaskPlanningBoundaryInput,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalHunkReview,
+    DelegatedTaskProposalPreviewLink, DelegatedTaskProposalReview,
     DelegatedTaskRuntimeActivationState, DelegatedTaskStepId, DelegatedTaskStepState,
-    FileFingerprint, PrincipalId, ProposalAffectedTarget, ProposalContextManifestSummary,
-    ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
-    ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
-    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProposalTargetKind, RedactionHint, TimestampMillis, WorkspaceId,
-    WorkspaceTrustState, delegated_task_plan_from_boundary_input,
-    delegated_task_projection_from_plan_contracts,
+    DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile, FileFingerprint,
+    LineIndexRange, PermissionBudgetActionClass, PrincipalId, ProposalAffectedTarget,
+    ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
+    ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
+    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
+    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
+    ProposalTargetKind, RedactionHint, TimestampMillis, WorkspaceId, WorkspaceTrustState,
+    delegated_task_plan_from_boundary_input, delegated_task_projection_from_plan_contracts,
+    delegated_task_tool_permission_request,
 };
-use devil_ui::Shell;
+use devil_ui::{CommandDispatchIntent, DockMode, Shell};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -327,6 +332,7 @@ fn proposal_row(proposal_id: ProposalId) -> ProposalLedgerRow {
 
 fn delegated_snapshot() -> devil_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Delegated").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
     snapshot.delegated_task_projection = delegated_task_projection_from_plan_contracts(
         "delegated-task:test-command-center",
         vec![
@@ -349,6 +355,100 @@ fn delegated_snapshot() -> devil_ui::ShellProjectionSnapshot {
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     };
+    snapshot
+}
+
+fn delegated_snapshot_with_delegate_controls() -> devil_ui::ShellProjectionSnapshot {
+    let mut snapshot = delegated_snapshot();
+    snapshot
+        .delegated_task_projection
+        .chat_messages
+        .push(DelegatedTaskChatMessage {
+            message_id: "delegate:chat:1".to_string(),
+            role: DelegatedTaskChatRole::Assistant,
+            content_label: "Delegate cited the proposal hunk".to_string(),
+            plan_id: None,
+            proposal_id: Some(ProposalId(701)),
+            citation_ids: vec!["delegate:citation:1".to_string()],
+            tool_permission_request_ids: vec!["delegate:permission:1".to_string()],
+            correlation_id: CorrelationId(902),
+            causality_id: causality_id(),
+            created_at: TimestampMillis(12),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    snapshot
+        .delegated_task_projection
+        .context_citations
+        .push(DelegatedTaskContextCitation {
+            citation_id: "delegate:citation:1".to_string(),
+            workspace_id: Some(WorkspaceId(1)),
+            file_id: None,
+            path: Some(CanonicalPath("src/lib.rs".to_string())),
+            byte_range: Some(ByteRange::new(0, 12)),
+            line_range: Some(LineIndexRange { start: 0, end: 1 }),
+            freshness_fingerprint: Some(fingerprint("fresh")),
+            chunk_hash: Some(fingerprint("chunk")),
+            score_basis_points: 9000,
+            metadata_label: "src/lib.rs chunk".to_string(),
+            labels: vec!["delegate.context.retrieval_citation".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    let hunk = DelegatedTaskProposalHunkReview {
+        hunk_id: "delegate:proposal:701:metadata-chunk:0".to_string(),
+        proposal_id: ProposalId(701),
+        target_id: Some("delegated:proposal".to_string()),
+        payload_kind: ProposalPayloadKind::WorkspaceEdit,
+        path: Some(CanonicalPath("src/lib.rs".to_string())),
+        byte_range: Some(ByteRange::new(0, 12)),
+        changed_line_count: 1,
+        inserted_line_count: 1,
+        deleted_line_count: 0,
+        content_hash: Some(fingerprint("hunk")),
+        disposition: DelegatedTaskProposalHunkDisposition::Pending,
+        risk_label: ProposalRiskLabel::Low,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        labels: vec!["delegate.proposal_hunk.human_review".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    snapshot.delegated_task_projection.proposal_reviews.push(
+        DelegatedTaskProposalReview::from_hunks(
+            "delegate:review:701",
+            ProposalId(701),
+            vec![hunk],
+            vec!["delegate.proposal_review.human_approval_queue".to_string()],
+            1,
+        ),
+    );
+    snapshot
+        .delegated_task_projection
+        .tool_permission_requests
+        .push(delegated_task_tool_permission_request(
+            devil_protocol::DelegatedTaskToolPermissionRequestInput {
+                request_id: "delegate:permission:1".to_string(),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+                capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                target_id: Some("plan:approval".to_string()),
+                decision: DelegatedTaskToolPermissionDecision::Confirm,
+                labels: vec!["delegate.permission.write.runtime_allocation".to_string()],
+                schema_version: 1,
+            },
+        ));
+    snapshot.delegated_task_projection.chat_message_count =
+        snapshot.delegated_task_projection.chat_messages.len() as u32;
+    snapshot.delegated_task_projection.context_citation_count =
+        snapshot.delegated_task_projection.context_citations.len() as u32;
+    snapshot.delegated_task_projection.proposal_review_count =
+        snapshot.delegated_task_projection.proposal_reviews.len() as u32;
+    snapshot
+        .delegated_task_projection
+        .tool_permission_request_count = snapshot
+        .delegated_task_projection
+        .tool_permission_requests
+        .len() as u32;
     snapshot
 }
 
@@ -479,6 +579,139 @@ fn delegated_task_command_center_bridge_routes_review_actions_and_denies_unknown
             proposal_id: ProposalId(701),
         })
     );
+}
+
+#[test]
+fn delegated_task_command_center_bridge_routes_hunks_permissions_and_denies_unknown_rows() {
+    let snapshot = delegated_snapshot_with_delegate_controls();
+    let bridge = DesktopCommandBridge::new();
+    let hunk_id = "delegate:proposal:701:metadata-chunk:0".to_string();
+
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::SendDelegateChat {
+                prompt_label: "review context".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SendDelegateChat {
+            prompt_label: "review context".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::ReviewDelegateProposalHunk {
+                proposal_id: ProposalId(701),
+                hunk_id: hunk_id.clone(),
+                disposition: DelegatedTaskProposalHunkDisposition::Accepted,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ReviewDelegateProposalHunk {
+            proposal_id: ProposalId(701),
+            hunk_id: hunk_id.clone(),
+            disposition: DelegatedTaskProposalHunkDisposition::Accepted,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::RecordDelegateToolPermission {
+                request_id: "delegate:permission:1".to_string(),
+                decision: DelegatedTaskToolPermissionDecision::Allow,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::RecordDelegateToolPermission {
+            request_id: "delegate:permission:1".to_string(),
+            decision: DelegatedTaskToolPermissionDecision::Allow,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::ReviewDelegateProposalHunk {
+                proposal_id: ProposalId(701),
+                hunk_id: String::new(),
+                disposition: DelegatedTaskProposalHunkDisposition::Accepted,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Error(DesktopBridgeError::InvalidDelegatedProposalHunk)
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::ReviewDelegateProposalHunk {
+                proposal_id: ProposalId(701),
+                hunk_id: "missing".to_string(),
+                disposition: DelegatedTaskProposalHunkDisposition::Accepted,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDelegatedProposalHunk {
+            proposal_id: ProposalId(701),
+            hunk_id: "missing".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::RecordDelegateToolPermission {
+                request_id: String::new(),
+                decision: DelegatedTaskToolPermissionDecision::Allow,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Error(DesktopBridgeError::InvalidDelegatedToolPermissionRequest)
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::RecordDelegateToolPermission {
+                request_id: "missing".to_string(),
+                decision: DelegatedTaskToolPermissionDecision::Allow,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Error(DesktopBridgeError::UnknownDelegatedToolPermissionRequest {
+            request_id: "missing".to_string(),
+        })
+    );
+}
+
+#[test]
+fn delegated_task_command_center_rows_show_chat_citations_hunks_and_permissions() {
+    let model =
+        DesktopProjectionViewModel::from_snapshot(&delegated_snapshot_with_delegate_controls());
+
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("delegated task command center")
+            && row.contains("chat=1")
+            && row.contains("citations=1")
+            && row.contains("reviews=1")
+            && row.contains("permissions=1")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("delegate chat delegate:chat:1")
+            && row.contains("citations=1")
+            && row.contains("permissions=1")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("delegate citation delegate:citation:1")
+            && row.contains("src/lib.rs")
+            && row.contains("score=9000")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("delegate proposal review delegate:review:701")
+            && row.contains("pending=1")
+            && row.contains("ready=false")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("delegate proposal hunk")
+            && row.contains("proposal=701")
+            && row.contains("disposition=Pending")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("delegate tool permission delegate:permission:1")
+            && row.contains("decision=Confirm")
+            && row.contains("runtime_allowed=false")
+    }));
 }
 
 #[test]

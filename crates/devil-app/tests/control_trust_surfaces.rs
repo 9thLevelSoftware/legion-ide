@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use devil_app::{AppCommandOutcome, AppComposition};
+use devil_app::{AppCommandOutcome, AppComposition, AppCompositionError, AppProductMode};
 use devil_editor::{TextEdit, TextPosition};
 use devil_protocol::{
     BufferId, BufferVersion, CapabilityId, CorrelationId, EditBatch, FileId, FileIdentity,
@@ -223,6 +223,37 @@ fn ai_outcome(outcome: AppCommandOutcome) -> devil_app::AppAiRunOutcome {
         AppCommandOutcome::AiRunStarted(outcome) => *outcome,
         other => panic!("expected assisted AI outcome, got {other:?}"),
     }
+}
+
+#[test]
+fn manual_mode_rejects_assisted_ai_dispatch() {
+    let root = create_root();
+    let target = root.join("manual.rs");
+    std::fs::write(&target, "fn main() {}\n").expect("seed file");
+
+    let mut app = AppComposition::new();
+    assert_eq!(app.product_mode(), AppProductMode::Manual);
+    let (_opened, _file_id, _buffer_id, _node, _preconditions) =
+        opened_text_file(&mut app, &root, "manual.rs");
+
+    let error = app
+        .dispatch_ui_intent(CommandDispatchIntent::StartAiExplain {
+            instruction_label: "manual mode should refuse".to_string(),
+        })
+        .expect_err("manual mode rejects AI dispatch");
+    assert!(matches!(
+        error,
+        AppCompositionError::AiRuntime(message)
+            if message.contains("requires Assist, Delegate, or Automate")
+    ));
+
+    let shell = app
+        .shell_projection_snapshot("manual mode AI gate")
+        .expect("shell projection");
+    assert_eq!(shell.assisted_ai_projection.request_count, 0);
+    assert_eq!(shell.assisted_ai_projection.preview_ready_count, 0);
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 fn opened_text_file(
@@ -825,6 +856,7 @@ fn assisted_ai_explain_routes_metadata_only_without_proposal() {
     std::fs::write(&target, "fn main() {}\n").expect("seed file");
 
     let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Assist);
     let (_opened, _file_id, _buffer_id, _node, _preconditions) =
         opened_text_file(&mut app, &root, "explain.rs");
 
@@ -864,6 +896,7 @@ fn assisted_ai_propose_is_proposal_only() {
     std::fs::write(&target, "fn main() {}\n").expect("seed file");
 
     let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Assist);
     let (_opened, _file_id, buffer_id, _node, _preconditions) =
         opened_text_file(&mut app, &root, "propose.rs");
     let before_editor = app
@@ -921,6 +954,7 @@ fn assisted_ai_refusals_visible_for_untrusted_workspace() {
     std::fs::write(&target, "fn main() {}\n").expect("seed file");
 
     let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Assist);
     app.open_workspace(
         &root,
         WorkspaceTrustState::Untrusted,

@@ -55,6 +55,12 @@ pub struct DesktopOperationalHealthSnapshot {
     pub assisted_refusal_count: u32,
     /// Count of reviewable assisted-AI proposal previews.
     pub assisted_preview_ready_count: u32,
+    /// Count of projected Legion workflow sessions.
+    pub legion_workflow_session_count: u32,
+    /// Count of unresolved Legion workflow conflicts.
+    pub legion_workflow_unresolved_conflict_count: u32,
+    /// Count of Legion workflow sessions waiting for approval.
+    pub legion_workflow_waiting_for_approval_count: u32,
     /// Whether a metadata-only session state path is configured.
     pub session_state_configured: bool,
     /// Whether a metadata-only diagnostics export path is configured.
@@ -107,6 +113,7 @@ impl DesktopOperationalHealthSnapshot {
         let terminal = &snapshot.terminal_panel_projection;
         let ledger = &snapshot.proposal_ledger_projection;
         let assisted = &snapshot.assisted_ai_projection;
+        let legion = &snapshot.legion_workflow_projection;
 
         Self {
             workspace_label,
@@ -139,6 +146,20 @@ impl DesktopOperationalHealthSnapshot {
             assisted_request_count: assisted.request_count,
             assisted_refusal_count: assisted.refusal_count,
             assisted_preview_ready_count: assisted.preview_ready_count,
+            legion_workflow_session_count: legion.total_session_count,
+            legion_workflow_unresolved_conflict_count: legion
+                .rows
+                .iter()
+                .map(|row| row.unresolved_conflict_count)
+                .sum(),
+            legion_workflow_waiting_for_approval_count: legion
+                .rows
+                .iter()
+                .filter(|row| {
+                    row.merge_readiness.state
+                        == devil_protocol::LegionWorkflowMergeReadinessState::WaitingForApproval
+                })
+                .count() as u32,
             session_state_configured,
             diagnostics_export_configured,
             unsupported_surfaces: phase7_unsupported_surfaces(),
@@ -187,6 +208,12 @@ impl DesktopOperationalHealthSnapshot {
                 self.assisted_request_count,
                 self.assisted_refusal_count,
                 self.assisted_preview_ready_count
+            ),
+            format!(
+                "legion_workflows: sessions={} unresolved_conflicts={} waiting_for_approval={}",
+                self.legion_workflow_session_count,
+                self.legion_workflow_unresolved_conflict_count,
+                self.legion_workflow_waiting_for_approval_count
             ),
             format!(
                 "session_state_configured: {}",
@@ -255,6 +282,18 @@ impl DesktopOperationalHealthSnapshot {
                 self.assisted_preview_ready_count
             ),
             format!(
+                "legion_workflow_session_count: {}",
+                self.legion_workflow_session_count
+            ),
+            format!(
+                "legion_workflow_unresolved_conflict_count: {}",
+                self.legion_workflow_unresolved_conflict_count
+            ),
+            format!(
+                "legion_workflow_waiting_for_approval_count: {}",
+                self.legion_workflow_waiting_for_approval_count
+            ),
+            format!(
                 "session_state_configured: {}",
                 self.session_state_configured
             ),
@@ -285,5 +324,6 @@ pub fn phase7_unsupported_surfaces() -> Vec<String> {
         "Signed installer: unsupported".to_string(),
         "Cross-platform parity: unsupported".to_string(),
         "Autonomous apply: unsupported (autonomous execution unavailable)".to_string(),
+        "Autonomous merge: unsupported until approval".to_string(),
     ]
 }

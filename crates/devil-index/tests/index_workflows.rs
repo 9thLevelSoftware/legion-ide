@@ -1,10 +1,12 @@
 use devil_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, INDEX_SCHEMA_VERSION, IndexError,
-    IndexWorkItem, IndexWorkKind, IndexingActor, LexicalFallbackParser, LexicalIndexer,
-    ParserWorker, RepositoryDiscoveryImporter, SemanticFabricScheduler,
+    IndexWorkItem, IndexWorkKind, IndexingActor, LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS,
+    LexicalFallbackParser, LexicalIndexer, ParserWorker, RETRIEVAL_CHUNK_SHA256_ALGORITHM,
+    RepositoryDiscoveryImporter, RetrievalQuery, SemanticFabricScheduler,
     SemanticFabricSchedulingPolicy, SemanticIndex, SemanticSourceInputKind, SemanticUpsertOutcome,
-    SourceDocument, SyntaxCacheEventKind, SyntaxTreeCache, WorkCompletionState, WorkPriority,
-    build_rename_preview_payload, semantic_cancellation_token,
+    SourceDocument, StructuralRewriteFileInput, StructuralSearchQuery, SyntaxCacheEventKind,
+    SyntaxTreeCache, WorkCompletionState, WorkPriority, build_rename_preview_payload,
+    build_structural_rewrite_preview_payload, run_structural_search, semantic_cancellation_token,
 };
 use devil_protocol::{
     BufferId, BufferVersion, ByteRange, CancellationTokenId, CanonicalPath, CapabilityDecisionId,
@@ -2149,6 +2151,194 @@ fn semantic_queries_are_bounded_and_return_pure_dto_results() {
 }
 
 #[test]
+fn retrieval_chunks_two_files_and_returns_metadata_only_citations() {
+    let auth = document_with(
+        "/workspace/src/auth.rs",
+        FileId(41),
+        LanguageId("rust".to_string()),
+        1,
+        1,
+        SemanticPrivacyScope::Workspace,
+        "pub fn issue_token() {\n    let super_secret_body_marker = \"token-session\";\n    validate_session(super_secret_body_marker);\n}\n",
+    );
+    let reports = document_with(
+        "/workspace/src/reports.rs",
+        FileId(42),
+        LanguageId("rust".to_string()),
+        1,
+        1,
+        SemanticPrivacyScope::Workspace,
+        "pub fn render_report() {\n    let chart_title = \"quarterly summary\";\n    export_pdf(chart_title);\n}\n",
+    );
+    let indexer = LexicalIndexer::new();
+    let mut index = SemanticIndex::new();
+    assert_eq!(
+        index.upsert(indexer.index_document(
+            &auth,
+            SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+            SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        )),
+        SemanticUpsertOutcome::Applied
+    );
+    assert_eq!(
+        index.upsert(indexer.index_document(
+            &reports,
+            SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+            SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        )),
+        SemanticUpsertOutcome::Applied
+    );
+
+    let chunks = index.retrieval_chunks();
+    assert_eq!(chunks.len(), 2);
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.citation.path == auth.identity.canonical_path)
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.citation.path == reports.identity.canonical_path)
+    );
+    assert!(chunks.iter().all(|chunk| {
+        chunk.citation.chunk_fingerprint.algorithm == RETRIEVAL_CHUNK_SHA256_ALGORITHM
+            && chunk.citation.chunk_fingerprint.value.len() == 64
+            && chunk.citation.freshness.key.content_hash == chunk.citation.chunk_fingerprint
+            && chunk.embedding.dimensions == LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS as u16
+            && chunk.embedding.values.len() == LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS
+    }));
+
+    let response = index.search_retrieval(&RetrievalQuery {
+        workspace_id: WorkspaceId(7),
+        query_text: "session token validation".to_string(),
+        file_ids: Vec::new(),
+        paths: Vec::new(),
+        language_ids: Vec::new(),
+        privacy_scope: SemanticPrivacyScope::Workspace,
+        freshness_policy: SemanticQueryFreshnessPolicy::RequireFresh,
+        limit: 4,
+        schema_version: INDEX_SCHEMA_VERSION,
+    });
+
+    assert_eq!(response.results.len(), 2);
+    let first = response.results.first().unwrap();
+    assert_eq!(first.citation.path, auth.identity.canonical_path);
+    assert_eq!(first.citation.file_id, FileId(41));
+    assert_eq!(first.citation.range.start.line, 0);
+    assert!(first.citation.range.end.line >= first.citation.range.start.line);
+    assert!(first.citation.byte_range.end > first.citation.byte_range.start);
+    assert_eq!(
+        first.citation.freshness.key.content_hash,
+        first.citation.chunk_fingerprint
+    );
+    assert_eq!(
+        first.freshness.key.content_hash,
+        first.citation.chunk_fingerprint
+    );
+
+    let rendered = format!("{:?}", first);
+    assert!(!rendered.contains("super_secret_body_marker"));
+    assert!(!rendered.contains("validate_session(super_secret_body_marker)"));
+}
+
+#[test]
+fn retrieval_reindex_preserves_unchanged_embeddings_and_updates_changed_sha() {
+    let auth_v1 = document_with(
+        "/workspace/src/auth.rs",
+        FileId(51),
+        LanguageId("rust".to_string()),
+        1,
+        1,
+        SemanticPrivacyScope::Workspace,
+        "pub fn issue_token() {\n    sign_token(\"alpha\");\n}\n\npub fn audit_login() {\n    record_audit_event(\"stable\");\n}\n",
+    );
+    let reports_v1 = document_with(
+        "/workspace/src/reports.rs",
+        FileId(52),
+        LanguageId("rust".to_string()),
+        1,
+        1,
+        SemanticPrivacyScope::Workspace,
+        "pub fn render_report() {\n    export_pdf(\"stable report\");\n}\n",
+    );
+    let auth_v2 = document_with(
+        "/workspace/src/auth.rs",
+        FileId(51),
+        LanguageId("rust".to_string()),
+        2,
+        1,
+        SemanticPrivacyScope::Workspace,
+        "pub fn issue_token() {\n    sign_token(\"beta\");\n}\n\npub fn audit_login() {\n    record_audit_event(\"stable\");\n}\n",
+    );
+
+    let indexer = LexicalIndexer::new();
+    let mut index = SemanticIndex::new();
+    index.upsert(indexer.index_document(
+        &auth_v1,
+        SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+        SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+    ));
+    index.upsert(indexer.index_document(
+        &reports_v1,
+        SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+        SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+    ));
+    let initial_issue = retrieval_chunk(&index, FileId(51), "issue_token");
+    let initial_audit = retrieval_chunk(&index, FileId(51), "audit_login");
+    let initial_report = retrieval_chunk(&index, FileId(52), "render_report");
+
+    assert_eq!(
+        index.upsert(indexer.index_document(
+            &auth_v2,
+            SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+            SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        )),
+        SemanticUpsertOutcome::Replaced
+    );
+
+    let updated_issue = retrieval_chunk(&index, FileId(51), "issue_token");
+    let updated_audit = retrieval_chunk(&index, FileId(51), "audit_login");
+    let updated_report = retrieval_chunk(&index, FileId(52), "render_report");
+
+    assert_ne!(
+        updated_issue.citation.chunk_fingerprint,
+        initial_issue.citation.chunk_fingerprint
+    );
+    assert_ne!(
+        updated_issue.citation.freshness.key.content_hash,
+        initial_issue.citation.freshness.key.content_hash
+    );
+    assert_eq!(
+        updated_audit.citation.chunk_fingerprint,
+        initial_audit.citation.chunk_fingerprint
+    );
+    assert_eq!(updated_audit.embedding, initial_audit.embedding);
+    assert_eq!(
+        updated_report.citation.chunk_fingerprint,
+        initial_report.citation.chunk_fingerprint
+    );
+    assert_eq!(updated_report.embedding, initial_report.embedding);
+    assert_eq!(
+        updated_report.citation.freshness.key.content_hash,
+        initial_report.citation.freshness.key.content_hash
+    );
+}
+
+fn retrieval_chunk(
+    index: &SemanticIndex,
+    file_id: FileId,
+    label: &str,
+) -> devil_index::RetrievalChunkRecord {
+    index
+        .retrieval_chunks()
+        .iter()
+        .find(|chunk| chunk.citation.file_id == file_id && chunk.label.contains(label))
+        .cloned()
+        .expect("retrieval chunk should be indexed")
+}
+
+#[test]
 fn stale_upserts_are_ignored_and_newer_generations_replace_records() {
     let mut index = SemanticIndex::new();
     let parser = LexicalFallbackParser::new();
@@ -2276,4 +2466,114 @@ fn rename_preview_payload_is_proposal_only_and_preserves_preconditions() {
         payload.file_edits[0].preconditions.expected_fingerprint,
         Some(symbol.invalidation_key.content_hash.clone())
     );
+}
+
+#[test]
+fn structural_search_matches_metavariables_and_suppression_comments() {
+    let document = document(
+        "/workspace/src/structural.rs",
+        12,
+        13,
+        "pub fn alpha() {}\n// ast-grep-ignore\npub fn ignored() {}\npub fn beta() {}\n",
+    );
+    let query = StructuralSearchQuery {
+        pattern: "fn $NAME ( )".to_string(),
+        rewrite: Some("fn renamed_$NAME ( )".to_string()),
+        result_limit: 10,
+    };
+
+    let report = run_structural_search(&document, &query);
+
+    assert_eq!(report.matches.len(), 2);
+    assert_eq!(report.omitted_match_count, 0);
+    assert_eq!(report.matches[0].capture_value("NAME"), Some("alpha"));
+    assert_eq!(
+        report.matches[0].replacement_preview.as_deref(),
+        Some("fn renamed_alpha ( )")
+    );
+    assert_eq!(report.matches[1].capture_value("NAME"), Some("beta"));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "structural_search.suppressed")
+    );
+}
+
+#[test]
+fn structural_rewrite_payload_is_cross_file_proposal_only() {
+    let first = document_with(
+        "/workspace/src/one.rs",
+        FileId(11),
+        LanguageId("rust".to_string()),
+        21,
+        22,
+        SemanticPrivacyScope::Workspace,
+        "pub fn alpha() {}\n",
+    );
+    let second = document_with(
+        "/workspace/src/two.rs",
+        FileId(12),
+        LanguageId("rust".to_string()),
+        23,
+        22,
+        SemanticPrivacyScope::Workspace,
+        "pub fn beta() {}\n",
+    );
+    let query = StructuralSearchQuery {
+        pattern: "fn $NAME ( )".to_string(),
+        rewrite: Some("fn renamed_$NAME ( )".to_string()),
+        result_limit: 10,
+    };
+    let first_report = run_structural_search(&first, &query);
+    let second_report = run_structural_search(&second, &query);
+
+    let payload = build_structural_rewrite_preview_payload(
+        WorkspaceId(7),
+        "structural replace fn names",
+        &[
+            StructuralRewriteFileInput {
+                document: &first,
+                matches: &first_report.matches,
+            },
+            StructuralRewriteFileInput {
+                document: &second,
+                matches: &second_report.matches,
+            },
+        ],
+    );
+
+    assert_eq!(payload.workspace_id, WorkspaceId(7));
+    assert_eq!(
+        payload.source,
+        WorkspaceEditSourceKind::StructuralSearchReplace
+    );
+    assert_eq!(payload.required_capability.0, "editor.write");
+    assert_eq!(
+        payload.target_coverage.coverage_kind,
+        ProposalTargetCoverageKind::Complete
+    );
+    assert_eq!(payload.target_coverage.targets.len(), 2);
+    assert_eq!(payload.file_edits.len(), 2);
+    assert_eq!(
+        payload.file_edits[0].edits.edits[0].replacement,
+        "fn renamed_alpha ( )"
+    );
+    assert_eq!(
+        payload.file_edits[1].edits.edits[0].replacement,
+        "fn renamed_beta ( )"
+    );
+    assert_eq!(
+        payload.file_edits[0].preconditions.file_content_version,
+        Some(FileContentVersion(21))
+    );
+    assert_eq!(
+        payload.file_edits[1].preconditions.file_content_version,
+        Some(FileContentVersion(23))
+    );
+    assert_eq!(
+        payload.file_edits[0].preconditions.expected_fingerprint,
+        Some(first.identity.content_hash.clone())
+    );
+    assert!(payload.diagnostics.is_empty());
 }

@@ -9,4 +9,6 @@ publish.workspace = true
 devil-ai = { workspace = true }
 devil-protocol = { workspace = true }
 devil-security = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }

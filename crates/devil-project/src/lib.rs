@@ -3,7 +3,9 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +19,8 @@ use devil_platform::{
 };
 use devil_protocol::{
     BufferVersion, CanonicalPath, CapabilityId, CapabilityRequestContext, CausalityId,
-    CorrelationId, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
+    CorrelationId, DebugConfigurationId, DebugLaunchConfiguration, DebugLaunchRequestKind,
+    EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
     FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
     FileFingerprint as ProtocolFileFingerprint, FileId, FileIdentity, FileKind, FileMetadata,
     FileTreeDelta, FileTreeDeltaOp, FileTreeNode, LanguageId, PrincipalId, ProjectId,
@@ -122,6 +125,1011 @@ pub enum WorkspaceError {
 }
 
 type WorkspaceResult<T> = Result<T, WorkspaceError>;
+
+/// Errors emitted while inspecting or mutating git metadata.
+#[derive(Debug, Error)]
+pub enum GitInspectionError {
+    /// Git executable could not be launched.
+    #[error("git command `{command}` could not be launched: {source}")]
+    Launch {
+        /// Display-safe git subcommand label.
+        command: String,
+        /// Underlying IO error.
+        source: std::io::Error,
+    },
+    /// Git exited unsuccessfully.
+    #[error("git command `{command}` failed: {stderr}")]
+    CommandFailed {
+        /// Display-safe git subcommand label.
+        command: String,
+        /// Redacted stderr text.
+        stderr: String,
+    },
+    /// Git output could not be interpreted.
+    #[error("git output parse error: {0}")]
+    Parse(String),
+}
+
+/// Configurable bounds for git projection collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitSnapshotOptions {
+    /// File-size threshold for syntactic diff metadata before line-diff fallback is reported.
+    pub max_file_bytes_for_syntactic_diff: u64,
+    /// Maximum number of hunks projected per snapshot.
+    pub max_hunks: usize,
+    /// Maximum active-file blame lines projected.
+    pub max_blame_lines: usize,
+    /// Maximum commit graph rows projected.
+    pub max_commits: usize,
+}
+
+/// Errors emitted while discovering debug configurations from project metadata.
+#[derive(Debug, Error)]
+pub enum DebugLocatorError {
+    /// Cargo manifest could not be read.
+    #[error("cargo manifest could not be read at `{path}`: {source}")]
+    ManifestRead {
+        /// Manifest path.
+        path: String,
+        /// Underlying IO error.
+        source: std::io::Error,
+    },
+    /// Cargo manifest did not contain enough metadata.
+    #[error("cargo manifest parse error: {0}")]
+    ManifestParse(String),
+}
+
+/// Options for deterministic Cargo debug configuration discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoDebugLocatorOptions {
+    /// Debug adapter type to place in launch configurations.
+    pub adapter_type: String,
+    /// Display-safe Cargo target directory label.
+    pub target_dir_label: String,
+}
+
+impl Default for CargoDebugLocatorOptions {
+    fn default() -> Self {
+        Self {
+            adapter_type: "lldb-dap".to_string(),
+            target_dir_label: "target/debug".to_string(),
+        }
+    }
+}
+
+impl Default for GitSnapshotOptions {
+    fn default() -> Self {
+        Self {
+            max_file_bytes_for_syntactic_diff: 512 * 1024,
+            max_hunks: 128,
+            max_blame_lines: 256,
+            max_commits: 64,
+        }
+    }
+}
+
+/// Discover deterministic Cargo launch configurations for binary targets.
+pub fn discover_cargo_debug_configurations(
+    root: &Path,
+    options: CargoDebugLocatorOptions,
+) -> Result<Vec<DebugLaunchConfiguration>, DebugLocatorError> {
+    let manifest_path = root.join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).map_err(|source| {
+        DebugLocatorError::ManifestRead {
+            path: manifest_path.to_string_lossy().into_owned(),
+            source,
+        }
+    })?;
+    let package_name = cargo_manifest_package_name(&manifest).ok_or_else(|| {
+        DebugLocatorError::ManifestParse("Cargo.toml missing [package] name".to_string())
+    })?;
+    let mut bins = Vec::new();
+    if root.join("src/main.rs").is_file() {
+        bins.push(package_name.clone());
+    }
+    for bin in cargo_manifest_bin_names(&manifest) {
+        if !bins.contains(&bin) {
+            bins.push(bin);
+        }
+    }
+    bins.sort();
+
+    let workspace_id = WorkspaceId(stable_hash(&root.to_string_lossy()));
+    let cwd = CanonicalPath(path_label(root));
+    Ok(bins
+        .into_iter()
+        .map(|bin| DebugLaunchConfiguration {
+            configuration_id: DebugConfigurationId(format!("cargo:{package_name}:bin:{bin}")),
+            workspace_id,
+            name: format!("Debug {bin}"),
+            adapter_type: options.adapter_type.clone(),
+            request: DebugLaunchRequestKind::Launch,
+            program_label: format!("{}/{}", options.target_dir_label.trim_end_matches('/'), bin),
+            cwd: cwd.clone(),
+            cargo_package: Some(package_name.clone()),
+            cargo_target: Some(bin.clone()),
+            cargo_args: vec![
+                "build".to_string(),
+                "--package".to_string(),
+                package_name.clone(),
+                "--bin".to_string(),
+                bin,
+            ],
+            stop_on_entry: false,
+            deterministic: true,
+            schema_version: 1,
+        })
+        .collect())
+}
+
+fn cargo_manifest_package_name(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if in_package && let Some(name) = parse_toml_string_assignment(trimmed, "name") {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn cargo_manifest_bin_names(manifest: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_bin = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_bin = trimmed == "[[bin]]";
+            continue;
+        }
+        if in_bin && let Some(name) = parse_toml_string_assignment(trimmed, "name") {
+            names.push(name);
+        }
+    }
+    names
+}
+
+fn parse_toml_string_assignment(line: &str, key: &str) -> Option<String> {
+    let without_comment = line.split_once('#').map_or(line, |(value, _)| value).trim();
+    let (left, right) = without_comment.split_once('=')?;
+    if left.trim() != key {
+        return None;
+    }
+    let value = right.trim();
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    Some(value.to_string())
+}
+
+fn path_label(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Diff strategy projected for a changed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitDiffStrategy {
+    /// Deterministic syntax-aware metadata is available for this file.
+    Syntactic,
+    /// The projection fell back to line-diff metadata.
+    LineFallback,
+}
+
+/// Stage where a git hunk currently lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHunkStage {
+    /// Hunk exists only in the working tree.
+    Unstaged,
+    /// Hunk exists in the git index.
+    Staged,
+}
+
+/// One changed file in a git projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGitChangedFile {
+    /// Repository-relative path.
+    pub path: String,
+    /// Two-column porcelain status.
+    pub status: String,
+    /// Number of inserted lines from numstat metadata.
+    pub inserted_lines: u32,
+    /// Number of deleted lines from numstat metadata.
+    pub deleted_lines: u32,
+    /// Number of unstaged hunks projected for this file.
+    pub unstaged_hunk_count: usize,
+    /// Number of staged hunks projected for this file.
+    pub staged_hunk_count: usize,
+    /// Whether the projected hunks expose stage/unstage actions.
+    pub stageable: bool,
+    /// Diff strategy selected for this file.
+    pub diff_strategy: GitDiffStrategy,
+    /// Fallback reason when syntactic metadata is unavailable.
+    pub fallback_reason: Option<String>,
+    /// Whether merge conflict markers were detected in the file.
+    pub conflict: bool,
+}
+
+/// One hunk projected from git diff output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGitHunk {
+    /// Stable hunk identifier derived from path, stage, and hunk header.
+    pub hunk_id: String,
+    /// Repository-relative path.
+    pub path: String,
+    /// Current stage of the hunk.
+    pub stage: GitHunkStage,
+    /// Unified diff hunk header.
+    pub header: String,
+    /// Old-file start line.
+    pub old_start: u32,
+    /// Old-file line count.
+    pub old_lines: u32,
+    /// New-file start line.
+    pub new_start: u32,
+    /// New-file line count.
+    pub new_lines: u32,
+    /// Added line count in this hunk.
+    pub added_lines: u32,
+    /// Deleted line count in this hunk.
+    pub deleted_lines: u32,
+    /// Optional function or scope context from the hunk header.
+    pub context: Option<String>,
+    /// Patch payload scoped to this single hunk for git-apply hunk staging.
+    pub patch: String,
+}
+
+/// One inline blame row for the active file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGitBlameLine {
+    /// Repository-relative path.
+    pub path: String,
+    /// One-based line number in the current file.
+    pub line_number: u32,
+    /// Short commit hash or all-zero worktree marker.
+    pub commit_short: String,
+    /// Commit author label.
+    pub author: String,
+    /// Commit summary label.
+    pub summary: String,
+    /// Bounded source preview for the line.
+    pub line_preview: String,
+}
+
+/// One commit in the projected git graph/history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGitCommit {
+    /// Full commit hash.
+    pub hash: String,
+    /// Short commit hash.
+    pub short_hash: String,
+    /// Author label.
+    pub author: String,
+    /// Commit date label from git.
+    pub date: String,
+    /// Commit summary.
+    pub summary: String,
+    /// Number of parents.
+    pub parent_count: usize,
+    /// Decorated refs reported by git.
+    pub refs: Vec<String>,
+}
+
+/// Merge-conflict marker projection for a changed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGitConflict {
+    /// Repository-relative path.
+    pub path: String,
+    /// Number of conflict marker lines.
+    pub marker_count: usize,
+    /// Deterministic local resolution actions exposed by the UI.
+    pub actions: Vec<String>,
+}
+
+/// Full git projection collected for a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGitSnapshot {
+    /// Repository root.
+    pub root: CanonicalPath,
+    /// Current branch label when available.
+    pub branch_label: Option<String>,
+    /// Current short HEAD hash when available.
+    pub head_short: Option<String>,
+    /// Changed files.
+    pub changed_files: Vec<ProjectGitChangedFile>,
+    /// Staged and unstaged hunks.
+    pub hunks: Vec<ProjectGitHunk>,
+    /// Inline blame lines for the active file.
+    pub blame_lines: Vec<ProjectGitBlameLine>,
+    /// Commit graph/history rows.
+    pub commits: Vec<ProjectGitCommit>,
+    /// Conflict marker projections.
+    pub conflicts: Vec<ProjectGitConflict>,
+    /// Display-safe diagnostics.
+    pub diagnostics: Vec<String>,
+    /// Snapshot timestamp.
+    pub generated_at: TimestampMillis,
+    /// Projection schema version.
+    pub schema_version: u32,
+}
+
+/// Collect deterministic git status, diff, blame, history, and conflict metadata for a workspace.
+pub fn collect_git_snapshot(
+    root: impl AsRef<Path>,
+    active_file: Option<&Path>,
+    options: GitSnapshotOptions,
+) -> Result<ProjectGitSnapshot, GitInspectionError> {
+    let root = root.as_ref();
+    let repository_root = git_stdout(root, &["rev-parse", "--show-toplevel"], None)?;
+    let repository_root = PathBuf::from(repository_root.trim());
+    let branch_label = git_stdout(
+        &repository_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        None,
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+    let head_short = git_stdout(&repository_root, &["rev-parse", "--short", "HEAD"], None)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let status_entries = git_status_entries(&repository_root)?;
+    let unstaged_numstat = git_numstat(&repository_root, false)?;
+    let staged_numstat = git_numstat(&repository_root, true)?;
+    let mut hunks = Vec::new();
+    hunks.extend(git_diff_hunks(
+        &repository_root,
+        GitHunkStage::Unstaged,
+        options.max_hunks,
+    )?);
+    if hunks.len() < options.max_hunks {
+        hunks.extend(git_diff_hunks(
+            &repository_root,
+            GitHunkStage::Staged,
+            options.max_hunks - hunks.len(),
+        )?);
+    }
+
+    let conflicts = git_conflicts(&repository_root, status_entries.keys())?;
+    let changed_files = git_changed_files(
+        &repository_root,
+        status_entries,
+        &unstaged_numstat,
+        &staged_numstat,
+        &hunks,
+        &conflicts,
+        options.max_file_bytes_for_syntactic_diff,
+    );
+    let active_relative = active_file.and_then(|path| relative_git_path(&repository_root, path));
+    let blame_lines = match active_relative.as_deref() {
+        Some(path) => git_blame_lines(&repository_root, path, options.max_blame_lines)?,
+        None => Vec::new(),
+    };
+    let commits = git_commits(&repository_root, options.max_commits)?;
+
+    Ok(ProjectGitSnapshot {
+        root: CanonicalPath(repository_root.to_string_lossy().into_owned()),
+        branch_label,
+        head_short,
+        changed_files,
+        hunks,
+        blame_lines,
+        commits,
+        conflicts,
+        diagnostics: Vec::new(),
+        generated_at: TimestampMillis(now_millis()),
+        schema_version: 1,
+    })
+}
+
+/// Stage one projected unstaged git hunk.
+pub fn stage_git_hunk(
+    root: impl AsRef<Path>,
+    hunk: &ProjectGitHunk,
+) -> Result<(), GitInspectionError> {
+    if hunk.stage != GitHunkStage::Unstaged {
+        return Err(GitInspectionError::Parse(
+            "only unstaged hunks can be staged".to_string(),
+        ));
+    }
+    git_stdout(
+        root.as_ref(),
+        &["apply", "--cached", "--unidiff-zero", "-"],
+        Some(hunk.patch.as_bytes()),
+    )
+    .map(|_| ())
+}
+
+/// Unstage one projected staged git hunk.
+pub fn unstage_git_hunk(
+    root: impl AsRef<Path>,
+    hunk: &ProjectGitHunk,
+) -> Result<(), GitInspectionError> {
+    if hunk.stage != GitHunkStage::Staged {
+        return Err(GitInspectionError::Parse(
+            "only staged hunks can be unstaged".to_string(),
+        ));
+    }
+    git_stdout(
+        root.as_ref(),
+        &["apply", "--reverse", "--cached", "--unidiff-zero", "-"],
+        Some(hunk.patch.as_bytes()),
+    )
+    .map(|_| ())
+}
+
+fn git_stdout(
+    root: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<String, GitInspectionError> {
+    let command_label = args.join(" ");
+    let mut command = Command::new("git");
+    command.current_dir(root).args(args);
+    let output = if let Some(input) = input {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|source| GitInspectionError::Launch {
+                command: command_label.clone(),
+                source,
+            })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            GitInspectionError::Parse("git stdin pipe was not available".to_string())
+        })?;
+        stdin
+            .write_all(input)
+            .map_err(|source| GitInspectionError::Launch {
+                command: command_label.clone(),
+                source,
+            })?;
+        drop(stdin);
+        child
+            .wait_with_output()
+            .map_err(|source| GitInspectionError::Launch {
+                command: command_label.clone(),
+                source,
+            })?
+    } else {
+        command
+            .output()
+            .map_err(|source| GitInspectionError::Launch {
+                command: command_label.clone(),
+                source,
+            })?
+    };
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(GitInspectionError::CommandFailed {
+            command: command_label,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+}
+
+fn git_status_entries(root: &Path) -> Result<HashMap<String, String>, GitInspectionError> {
+    let output = git_stdout(root, &["status", "--porcelain=v1", "-z"], None)?;
+    let entries = output
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    let mut status = HashMap::new();
+    while index < entries.len() {
+        let entry = entries[index];
+        if entry.len() >= 4 {
+            let code = entry[0..2].to_string();
+            let mut path = entry[3..].to_string();
+            if matches!(code.as_bytes().first(), Some(b'R' | b'C')) && index + 1 < entries.len() {
+                index += 1;
+                path = entries[index].to_string();
+            }
+            status.insert(path, code);
+        }
+        index += 1;
+    }
+    Ok(status)
+}
+
+fn git_numstat(
+    root: &Path,
+    staged: bool,
+) -> Result<HashMap<String, (u32, u32)>, GitInspectionError> {
+    let output = if staged {
+        git_stdout(root, &["diff", "--cached", "--numstat", "--"], None)?
+    } else {
+        git_stdout(root, &["diff", "--numstat", "--"], None)?
+    };
+    let mut stats = HashMap::new();
+    for line in output.lines() {
+        let mut parts = line.split('\t');
+        let inserted = parts.next().and_then(parse_numstat_count).unwrap_or(0);
+        let deleted = parts.next().and_then(parse_numstat_count).unwrap_or(0);
+        if let Some(path) = parts.next() {
+            stats.insert(path.to_string(), (inserted, deleted));
+        }
+    }
+    Ok(stats)
+}
+
+fn parse_numstat_count(value: &str) -> Option<u32> {
+    if value == "-" {
+        Some(0)
+    } else {
+        value.parse().ok()
+    }
+}
+
+fn git_diff_hunks(
+    root: &Path,
+    stage: GitHunkStage,
+    limit: usize,
+) -> Result<Vec<ProjectGitHunk>, GitInspectionError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let output = match stage {
+        GitHunkStage::Unstaged => {
+            git_stdout(root, &["diff", "--unified=0", "--no-ext-diff", "--"], None)?
+        }
+        GitHunkStage::Staged => git_stdout(
+            root,
+            &["diff", "--cached", "--unified=0", "--no-ext-diff", "--"],
+            None,
+        )?,
+    };
+    parse_diff_hunks(&output, stage, limit)
+}
+
+fn parse_diff_hunks(
+    patch: &str,
+    stage: GitHunkStage,
+    limit: usize,
+) -> Result<Vec<ProjectGitHunk>, GitInspectionError> {
+    let mut hunks = Vec::new();
+    let mut file_header = Vec::<String>::new();
+    let mut current_path = String::new();
+    let mut hunk_lines = Vec::<String>::new();
+
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            flush_git_hunk(
+                &mut hunks,
+                stage,
+                &current_path,
+                &file_header,
+                &mut hunk_lines,
+                limit,
+            )?;
+            file_header.clear();
+            file_header.push(line.to_string());
+            current_path = parse_diff_git_path(line).unwrap_or_default();
+        } else if line.starts_with("@@ ") {
+            flush_git_hunk(
+                &mut hunks,
+                stage,
+                &current_path,
+                &file_header,
+                &mut hunk_lines,
+                limit,
+            )?;
+            hunk_lines.push(line.to_string());
+        } else if hunk_lines.is_empty() {
+            if let Some(path) = parse_diff_plus_path(line) {
+                current_path = path;
+            }
+            if !file_header.is_empty() {
+                file_header.push(line.to_string());
+            }
+        } else {
+            hunk_lines.push(line.to_string());
+        }
+        if hunks.len() >= limit {
+            return Ok(hunks);
+        }
+    }
+
+    flush_git_hunk(
+        &mut hunks,
+        stage,
+        &current_path,
+        &file_header,
+        &mut hunk_lines,
+        limit,
+    )?;
+    Ok(hunks)
+}
+
+fn flush_git_hunk(
+    hunks: &mut Vec<ProjectGitHunk>,
+    stage: GitHunkStage,
+    path: &str,
+    file_header: &[String],
+    hunk_lines: &mut Vec<String>,
+    limit: usize,
+) -> Result<(), GitInspectionError> {
+    if hunk_lines.is_empty() || hunks.len() >= limit {
+        hunk_lines.clear();
+        return Ok(());
+    }
+    let header = hunk_lines[0].clone();
+    let (old_start, old_lines, new_start, new_lines, context) = parse_hunk_header(&header)?;
+    let added_lines = hunk_lines
+        .iter()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .count() as u32;
+    let deleted_lines = hunk_lines
+        .iter()
+        .filter(|line| line.starts_with('-') && !line.starts_with("---"))
+        .count() as u32;
+    let mut patch = String::new();
+    for line in file_header {
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    for line in hunk_lines.iter() {
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    let hunk_id = format!(
+        "git-hunk:{:032x}",
+        stable_hash(&format!("{stage:?}:{path}:{header}:{}", hunks.len()))
+    );
+    hunks.push(ProjectGitHunk {
+        hunk_id,
+        path: path.to_string(),
+        stage,
+        header,
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        added_lines,
+        deleted_lines,
+        context,
+        patch,
+    });
+    hunk_lines.clear();
+    Ok(())
+}
+
+fn parse_diff_git_path(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .nth(3)
+        .map(strip_git_side_prefix)
+        .filter(|path| path != "/dev/null")
+}
+
+fn parse_diff_plus_path(line: &str) -> Option<String> {
+    line.strip_prefix("+++ ")
+        .map(strip_git_side_prefix)
+        .filter(|path| path != "/dev/null")
+}
+
+fn strip_git_side_prefix(path: &str) -> String {
+    path.strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn parse_hunk_header(
+    header: &str,
+) -> Result<(u32, u32, u32, u32, Option<String>), GitInspectionError> {
+    let mut sections = header.split("@@");
+    sections.next();
+    let ranges = sections
+        .next()
+        .ok_or_else(|| GitInspectionError::Parse(format!("invalid hunk header `{header}`")))?
+        .trim();
+    let context = sections
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let mut tokens = ranges.split_whitespace();
+    let old = tokens
+        .next()
+        .ok_or_else(|| GitInspectionError::Parse(format!("missing old range `{header}`")))?;
+    let new = tokens
+        .next()
+        .ok_or_else(|| GitInspectionError::Parse(format!("missing new range `{header}`")))?;
+    let (old_start, old_lines) = parse_hunk_range(old, '-')?;
+    let (new_start, new_lines) = parse_hunk_range(new, '+')?;
+    Ok((old_start, old_lines, new_start, new_lines, context))
+}
+
+fn parse_hunk_range(token: &str, prefix: char) -> Result<(u32, u32), GitInspectionError> {
+    let token = token
+        .strip_prefix(prefix)
+        .ok_or_else(|| GitInspectionError::Parse(format!("invalid hunk range `{token}`")))?;
+    let mut parts = token.split(',');
+    let start = parts
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| GitInspectionError::Parse(format!("invalid hunk start `{token}`")))?;
+    let lines = parts
+        .next()
+        .map_or(Some(1), |value| value.parse::<u32>().ok())
+        .ok_or_else(|| GitInspectionError::Parse(format!("invalid hunk length `{token}`")))?;
+    Ok((start, lines))
+}
+
+fn git_changed_files(
+    root: &Path,
+    status_entries: HashMap<String, String>,
+    unstaged_numstat: &HashMap<String, (u32, u32)>,
+    staged_numstat: &HashMap<String, (u32, u32)>,
+    hunks: &[ProjectGitHunk],
+    conflicts: &[ProjectGitConflict],
+    max_file_bytes_for_syntactic_diff: u64,
+) -> Vec<ProjectGitChangedFile> {
+    let mut paths = status_entries.keys().cloned().collect::<HashSet<_>>();
+    paths.extend(unstaged_numstat.keys().cloned());
+    paths.extend(staged_numstat.keys().cloned());
+    paths.extend(hunks.iter().map(|hunk| hunk.path.clone()));
+    paths.extend(conflicts.iter().map(|conflict| conflict.path.clone()));
+    let conflict_paths = conflicts
+        .iter()
+        .map(|conflict| conflict.path.as_str())
+        .collect::<HashSet<_>>();
+    let mut files = paths
+        .into_iter()
+        .map(|path| {
+            let (unstaged_inserted, unstaged_deleted) =
+                unstaged_numstat.get(&path).copied().unwrap_or_default();
+            let (staged_inserted, staged_deleted) =
+                staged_numstat.get(&path).copied().unwrap_or_default();
+            let unstaged_hunk_count = hunks
+                .iter()
+                .filter(|hunk| hunk.path == path && hunk.stage == GitHunkStage::Unstaged)
+                .count();
+            let staged_hunk_count = hunks
+                .iter()
+                .filter(|hunk| hunk.path == path && hunk.stage == GitHunkStage::Staged)
+                .count();
+            let (diff_strategy, fallback_reason) =
+                git_diff_strategy(root, &path, max_file_bytes_for_syntactic_diff);
+            ProjectGitChangedFile {
+                status: status_entries
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or_else(|| "??".to_string()),
+                inserted_lines: unstaged_inserted.saturating_add(staged_inserted),
+                deleted_lines: unstaged_deleted.saturating_add(staged_deleted),
+                unstaged_hunk_count,
+                staged_hunk_count,
+                stageable: unstaged_hunk_count + staged_hunk_count > 0,
+                diff_strategy,
+                fallback_reason,
+                conflict: conflict_paths.contains(path.as_str()),
+                path,
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+fn git_diff_strategy(
+    root: &Path,
+    path: &str,
+    max_file_bytes_for_syntactic_diff: u64,
+) -> (GitDiffStrategy, Option<String>) {
+    let file_path = root.join(path);
+    let byte_len = fs_metadata_len(&file_path);
+    if byte_len > max_file_bytes_for_syntactic_diff {
+        return (
+            GitDiffStrategy::LineFallback,
+            Some(format!(
+                "file_size_exceeds_syntactic_threshold:{byte_len}>{max_file_bytes_for_syntactic_diff}"
+            )),
+        );
+    }
+    if syntax_diff_supported(path) {
+        (GitDiffStrategy::Syntactic, None)
+    } else {
+        (
+            GitDiffStrategy::LineFallback,
+            Some("unsupported_syntax_for_syntactic_diff".to_string()),
+        )
+    }
+}
+
+fn fs_metadata_len(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn syntax_diff_supported(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some(
+            "rs" | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "py"
+                | "go"
+                | "java"
+                | "c"
+                | "cc"
+                | "cpp"
+                | "h"
+                | "hpp"
+                | "cs"
+                | "kt"
+                | "swift"
+                | "toml"
+                | "json"
+                | "yaml"
+                | "yml"
+        )
+    )
+}
+
+fn git_blame_lines(
+    root: &Path,
+    path: &str,
+    limit: usize,
+) -> Result<Vec<ProjectGitBlameLine>, GitInspectionError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let output = match git_stdout(root, &["blame", "--line-porcelain", "--", path], None) {
+        Ok(output) => output,
+        Err(GitInspectionError::CommandFailed { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut rows = Vec::new();
+    let mut commit_short = String::new();
+    let mut line_number = 0;
+    let mut author = String::new();
+    let mut summary = String::new();
+    for line in output.lines() {
+        if rows.len() >= limit {
+            break;
+        }
+        if let Some(preview) = line.strip_prefix('\t') {
+            rows.push(ProjectGitBlameLine {
+                path: path.to_string(),
+                line_number,
+                commit_short: commit_short.clone(),
+                author: author.clone(),
+                summary: summary.clone(),
+                line_preview: preview.chars().take(160).collect(),
+            });
+        } else if is_blame_header(line) {
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            commit_short = parts[0].chars().take(12).collect();
+            line_number = parts
+                .get(2)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            author.clear();
+            summary.clear();
+        } else if let Some(value) = line.strip_prefix("author ") {
+            author = value.to_string();
+        } else if let Some(value) = line.strip_prefix("summary ") {
+            summary = value.to_string();
+        }
+    }
+    Ok(rows)
+}
+
+fn is_blame_header(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(hash) = parts.next() else {
+        return false;
+    };
+    hash.len() >= 8
+        && hash.chars().all(|ch| ch.is_ascii_hexdigit())
+        && parts.next().is_some()
+        && parts.next().is_some()
+}
+
+fn git_commits(root: &Path, limit: usize) -> Result<Vec<ProjectGitCommit>, GitInspectionError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit_arg = format!("-n{limit}");
+    let output = match git_stdout(
+        root,
+        &[
+            "log",
+            "--date=short",
+            "--decorate=short",
+            "--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%P%x1f%D",
+            &limit_arg,
+        ],
+        None,
+    ) {
+        Ok(output) => output,
+        Err(GitInspectionError::CommandFailed { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut commits = output
+        .lines()
+        .filter_map(|line| {
+            let parts = line.split('\x1f').collect::<Vec<_>>();
+            if parts.len() < 7 {
+                return None;
+            }
+            Some(ProjectGitCommit {
+                hash: parts[0].to_string(),
+                short_hash: parts[1].to_string(),
+                author: parts[2].to_string(),
+                date: parts[3].to_string(),
+                summary: parts[4].to_string(),
+                parent_count: parts[5].split_whitespace().count(),
+                refs: parts[6]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            })
+        })
+        .collect::<Vec<_>>();
+    commits.truncate(limit);
+    Ok(commits)
+}
+
+fn git_conflicts<'a>(
+    root: &Path,
+    paths: impl Iterator<Item = &'a String>,
+) -> Result<Vec<ProjectGitConflict>, GitInspectionError> {
+    let mut conflicts = Vec::new();
+    for path in paths {
+        let file_path = root.join(path);
+        let Ok(text) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let marker_count = text
+            .lines()
+            .filter(|line| {
+                line.as_bytes().starts_with(&[b'<'; 7])
+                    || line.as_bytes().starts_with(&[b'='; 7])
+                    || line.as_bytes().starts_with(&[b'>'; 7])
+            })
+            .count();
+        if marker_count > 0 {
+            conflicts.push(ProjectGitConflict {
+                path: path.clone(),
+                marker_count,
+                actions: vec![
+                    "open_conflict_resolution".to_string(),
+                    "accept_current".to_string(),
+                    "accept_incoming".to_string(),
+                ],
+            });
+        }
+    }
+    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(conflicts)
+}
+
+fn relative_git_path(root: &Path, path: &Path) -> Option<String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    absolute
+        .strip_prefix(root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+}
 
 /// Metadata returned with a successful workspace text open.
 #[derive(Debug, Clone)]

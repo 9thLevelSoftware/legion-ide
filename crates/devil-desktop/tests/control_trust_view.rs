@@ -7,7 +7,7 @@ use std::{
 use devil_app::{AppCommandOutcome, AppComposition};
 use devil_desktop::view::DesktopProjectionViewModel;
 use devil_protocol::{PrincipalId, WorkspaceTrustState};
-use devil_ui::CommandDispatchIntent;
+use devil_ui::{CommandDispatchIntent, DockMode};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -61,6 +61,15 @@ fn app_with_open_file(
 }
 
 fn start_proposal(app: &mut AppComposition) {
+    let mode = app
+        .dispatch_ui_intent(CommandDispatchIntent::SetProductMode {
+            mode: DockMode::Assist,
+        })
+        .expect("switch to assist");
+    assert!(matches!(
+        mode,
+        AppCommandOutcome::ProductModeChanged(devil_app::AppProductMode::Assist)
+    ));
     let outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "add control trust guard".to_string(),
@@ -203,6 +212,11 @@ fn assisted_ai_details_render_provider_request_refusal_preview_rows() {
 
     let (_untrusted_workspace, mut untrusted) =
         app_with_open_file(WorkspaceTrustState::Untrusted, "refused.rs");
+    untrusted
+        .dispatch_ui_intent(CommandDispatchIntent::SetProductMode {
+            mode: DockMode::Assist,
+        })
+        .expect("switch untrusted workspace to assist");
     let outcome = untrusted
         .dispatch_ui_intent(CommandDispatchIntent::StartAiExplain {
             instruction_label: "explain refused route".to_string(),

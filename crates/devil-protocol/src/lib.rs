@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -3929,6 +3930,8 @@ pub enum WorkspaceEditSourceKind {
     LspFormatting,
     /// LSP code action operation.
     LspCodeAction,
+    /// Deterministic structural search and replace operation.
+    StructuralSearchReplace,
     /// Semantic refactoring preview.
     SemanticRefactor,
     /// Plugin-produced proposal.
@@ -5966,6 +5969,8 @@ pub enum AssistedAiOperationClass {
     Explain,
     /// Produce a reviewable edit proposal payload.
     ProposeEdit,
+    /// Produce bounded inline next-edit or ghost-text predictions.
+    InlinePrediction,
     /// Produce structured metadata output without provider-specific payloads.
     StructuredMetadata,
     /// Produce embedding metadata labels only; no vector generation is activated by this DTO.
@@ -6049,6 +6054,400 @@ pub enum AssistedAiProviderInvocationState {
     Failed,
     /// Provider invocation was refused by policy, consent, privacy, budget, or availability.
     Refused,
+}
+
+/// Maximum ghost-text bytes accepted by protocol validators.
+pub const INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES: u32 = 4096;
+
+/// Stable inline prediction request identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InlinePredictionRequestId(pub String);
+
+/// Stable inline prediction result identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InlinePredictionResultId(pub String);
+
+/// Stable inline prediction dismissal identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InlinePredictionDismissalId(pub Uuid);
+
+/// Stable inline prediction acceptance identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InlinePredictionAcceptanceId(pub Uuid);
+
+/// Trigger that caused an inline prediction request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InlinePredictionTriggerKind {
+    /// Automatic idle or typing-triggered prediction.
+    Automatic,
+    /// User explicitly requested a prediction.
+    Explicit,
+    /// Prediction follows an editor transaction.
+    AfterEdit,
+    /// Prediction follows a cursor move.
+    CursorMove,
+    /// Prediction follows line-end typing.
+    LineEnd,
+}
+
+/// Retention posture for inline prediction output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InlinePredictionRetention {
+    /// Ghost text may be shown in an ephemeral editor projection.
+    EphemeralDisplay,
+    /// Durable or audit metadata only; ghost text must be absent.
+    MetadataOnlyAudit,
+}
+
+/// Inline prediction result state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InlinePredictionResultState {
+    /// A bounded ghost-text prediction is available.
+    Available,
+    /// Provider returned no usable prediction.
+    Empty,
+    /// Prediction is stale against the current buffer/file fingerprint.
+    Stale,
+    /// Prediction was cancelled before completion.
+    Cancelled,
+    /// Prediction was dismissed by the user or editor.
+    Dismissed,
+    /// Prediction was accepted by the user.
+    Accepted,
+    /// Prediction was refused by provider, policy, or validation.
+    Refused,
+    /// Prediction failed with redacted metadata.
+    Failed,
+}
+
+/// Freshness state for inline prediction metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InlinePredictionFreshnessState {
+    /// Fingerprints and versions still match the observed editor state.
+    Fresh,
+    /// One or more fingerprints or versions changed.
+    Stale,
+    /// Freshness could not be proven from available metadata.
+    Unknown,
+}
+
+/// Reason an inline prediction became stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InlinePredictionStaleReason {
+    /// Snapshot id changed.
+    SnapshotChanged,
+    /// Buffer version changed.
+    BufferVersionChanged,
+    /// File content version changed.
+    FileContentVersionChanged,
+    /// Workspace generation changed.
+    WorkspaceGenerationChanged,
+    /// File or buffer content fingerprint changed.
+    ContentFingerprintChanged,
+    /// Context fingerprint changed.
+    ContextFingerprintChanged,
+}
+
+/// Latency metadata for inline prediction providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionLatencyMetadata {
+    /// Time spent queued before inference.
+    pub queued_ms: u32,
+    /// Time spent producing the prediction.
+    pub inference_ms: u32,
+    /// Total observed latency.
+    pub total_ms: u32,
+    /// Whether the provider timed out.
+    pub timed_out: bool,
+}
+
+/// Provider metadata for an inline prediction request or result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionProviderMetadata {
+    /// Provider identifier.
+    pub provider_id: String,
+    /// Display-safe model label.
+    pub model_label: String,
+    /// Provider execution class.
+    pub provider_class: AssistedAiProviderClass,
+    /// Operation class; valid inline prediction metadata uses `InlinePrediction`.
+    pub operation_class: AssistedAiOperationClass,
+    /// Provider invocation state represented as metadata.
+    pub invocation_state: AssistedAiProviderInvocationState,
+    /// Latency metadata.
+    pub latency: InlinePredictionLatencyMetadata,
+    /// Health labels without provider payloads.
+    pub health_labels: Vec<String>,
+    /// Cost labels without billing payloads.
+    pub cost_labels: Vec<String>,
+    /// Redaction hints for provider metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Provider metadata schema version.
+    pub schema_version: u16,
+}
+
+/// Fingerprint and version metadata used to detect stale inline predictions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionFingerprintMetadata {
+    /// Snapshot used to create the prediction.
+    pub snapshot_id: SnapshotId,
+    /// Buffer version used to create the prediction.
+    pub buffer_version: BufferVersion,
+    /// File content version when the buffer is file-backed.
+    pub file_content_version: Option<FileContentVersion>,
+    /// Workspace generation used to create the prediction.
+    pub workspace_generation: WorkspaceGeneration,
+    /// Optional file or buffer content fingerprint.
+    pub content_fingerprint: Option<FileFingerprint>,
+    /// Context fingerprint assembled without raw source bodies.
+    pub context_fingerprint: FileFingerprint,
+    /// Fingerprint metadata schema version.
+    pub schema_version: u16,
+}
+
+impl InlinePredictionFingerprintMetadata {
+    /// Returns true when any comparable fingerprint or version differs.
+    pub fn is_stale_against(&self, observed: &Self) -> bool {
+        self.snapshot_id != observed.snapshot_id
+            || self.buffer_version != observed.buffer_version
+            || self.file_content_version != observed.file_content_version
+            || self.workspace_generation != observed.workspace_generation
+            || self.content_fingerprint != observed.content_fingerprint
+            || self.context_fingerprint != observed.context_fingerprint
+    }
+}
+
+/// Freshness metadata for inline prediction results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionFreshness {
+    /// Freshness state.
+    pub state: InlinePredictionFreshnessState,
+    /// Stale reasons represented without source.
+    pub stale_reasons: Vec<InlinePredictionStaleReason>,
+    /// Freshness schema version.
+    pub schema_version: u16,
+}
+
+impl InlinePredictionFreshness {
+    /// Builds fresh metadata.
+    pub fn fresh(schema_version: u16) -> Self {
+        Self {
+            state: InlinePredictionFreshnessState::Fresh,
+            stale_reasons: Vec::new(),
+            schema_version,
+        }
+    }
+
+    /// Builds freshness metadata by comparing expected and observed fingerprints.
+    pub fn from_fingerprints(
+        expected: &InlinePredictionFingerprintMetadata,
+        observed: &InlinePredictionFingerprintMetadata,
+        schema_version: u16,
+    ) -> Self {
+        let mut stale_reasons = Vec::new();
+        if expected.snapshot_id != observed.snapshot_id {
+            stale_reasons.push(InlinePredictionStaleReason::SnapshotChanged);
+        }
+        if expected.buffer_version != observed.buffer_version {
+            stale_reasons.push(InlinePredictionStaleReason::BufferVersionChanged);
+        }
+        if expected.file_content_version != observed.file_content_version {
+            stale_reasons.push(InlinePredictionStaleReason::FileContentVersionChanged);
+        }
+        if expected.workspace_generation != observed.workspace_generation {
+            stale_reasons.push(InlinePredictionStaleReason::WorkspaceGenerationChanged);
+        }
+        if expected.content_fingerprint != observed.content_fingerprint {
+            stale_reasons.push(InlinePredictionStaleReason::ContentFingerprintChanged);
+        }
+        if expected.context_fingerprint != observed.context_fingerprint {
+            stale_reasons.push(InlinePredictionStaleReason::ContextFingerprintChanged);
+        }
+        let state = if stale_reasons.is_empty() {
+            InlinePredictionFreshnessState::Fresh
+        } else {
+            InlinePredictionFreshnessState::Stale
+        };
+        Self {
+            state,
+            stale_reasons,
+            schema_version,
+        }
+    }
+}
+
+/// Metadata-only inline prediction request DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionRequestMetadata {
+    /// Stable request identifier.
+    pub request_id: InlinePredictionRequestId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// Optional file identifier.
+    pub file_id: Option<FileId>,
+    /// Language identifier.
+    pub language_id: LanguageId,
+    /// Cursor coordinate where ghost text would be inserted.
+    pub cursor: TextCoordinate,
+    /// Optional selection range represented without source text.
+    pub selection: Option<ProtocolTextRange>,
+    /// Optional visible range represented without source text.
+    pub visible_range: Option<ProtocolTextRange>,
+    /// Trigger kind.
+    pub trigger: InlinePredictionTriggerKind,
+    /// Version and fingerprint metadata.
+    pub fingerprint: InlinePredictionFingerprintMetadata,
+    /// Provider metadata.
+    pub provider: InlinePredictionProviderMetadata,
+    /// Maximum prediction size accepted by the requester.
+    pub max_prediction_bytes: u32,
+    /// Request timeout in milliseconds.
+    pub timeout_ms: u32,
+    /// Request creation time.
+    pub requested_at: TimestampMillis,
+    /// Cancellation token for the request.
+    pub cancellation_token: CancellationTokenId,
+    /// Required capability for provider invocation.
+    pub required_capability: CapabilityId,
+    /// Principal requesting the prediction.
+    pub principal_id: PrincipalId,
+    /// Workspace trust state observed for the request.
+    pub workspace_trust_state: WorkspaceTrustState,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Redaction hints for request metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Request metadata schema version.
+    pub schema_version: u16,
+}
+
+/// Bounded ghost text for ephemeral inline display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionGhostText {
+    /// Bounded predicted text for editor display.
+    pub text: String,
+    /// UTF-8 byte length of `text`.
+    pub byte_len: u32,
+    /// Number of display lines represented by `text`.
+    pub line_count: u32,
+    /// Fingerprint of the ghost text.
+    pub text_fingerprint: FileFingerprint,
+}
+
+/// Inline prediction result DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionResult {
+    /// Stable result identifier.
+    pub result_id: InlinePredictionResultId,
+    /// Request that produced this result.
+    pub request_id: InlinePredictionRequestId,
+    /// Result state.
+    pub state: InlinePredictionResultState,
+    /// Retention posture for the result.
+    pub retention: InlinePredictionRetention,
+    /// Range where the ghost text would be inserted or replace text.
+    pub insert_range: ProtocolTextRange,
+    /// Optional bounded ghost text; absent for durable/audit metadata.
+    pub ghost_text: Option<InlinePredictionGhostText>,
+    /// Version and fingerprint metadata used to create the result.
+    pub fingerprint: InlinePredictionFingerprintMetadata,
+    /// Freshness metadata.
+    pub freshness: InlinePredictionFreshness,
+    /// Provider metadata.
+    pub provider: InlinePredictionProviderMetadata,
+    /// Optional refusal metadata.
+    pub refusal: Option<AssistedAiRefusalMetadata>,
+    /// Result generation time.
+    pub generated_at: TimestampMillis,
+    /// Optional expiration time.
+    pub expires_at: Option<TimestampMillis>,
+    /// Redaction hints for result metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Result schema version.
+    pub schema_version: u16,
+}
+
+/// Inline prediction projection for editor ghost-text surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionProjection {
+    /// Stable projection identifier.
+    pub projection_id: String,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Buffer identifier.
+    pub buffer_id: BufferId,
+    /// Active request identifier when a prediction is in flight or visible.
+    pub active_request_id: Option<InlinePredictionRequestId>,
+    /// Visible or recently lifecycle-managed results.
+    pub results: Vec<InlinePredictionResult>,
+    /// Number of results represented.
+    pub result_count: u32,
+    /// Number of available results.
+    pub available_count: u32,
+    /// Number of stale results.
+    pub stale_count: u32,
+    /// Number of refused results.
+    pub refusal_count: u32,
+    /// Provider invocation state summarized from represented results.
+    pub provider_invocation: AssistedAiProviderInvocationState,
+    /// Projection generation time.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for projection metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+/// Lifecycle action applied to an inline prediction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InlinePredictionLifecycleAction {
+    /// Cancel an in-flight prediction request.
+    Cancel,
+    /// Dismiss a visible prediction without applying it.
+    Dismiss,
+    /// Accept a visible prediction.
+    Accept,
+}
+
+/// Inline prediction lifecycle command metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlinePredictionLifecycleCommand {
+    /// Request identifier associated with the lifecycle command.
+    pub request_id: InlinePredictionRequestId,
+    /// Result identifier associated with dismiss or accept actions.
+    pub result_id: Option<InlinePredictionResultId>,
+    /// Lifecycle action.
+    pub action: InlinePredictionLifecycleAction,
+    /// Cancellation token for cancel actions.
+    pub cancellation_token: Option<CancellationTokenId>,
+    /// Dismissal identifier for dismiss actions.
+    pub dismissal_id: Option<InlinePredictionDismissalId>,
+    /// Acceptance identifier for accept actions.
+    pub acceptance_id: Option<InlinePredictionAcceptanceId>,
+    /// Display-safe reason labels.
+    pub reason_labels: Vec<String>,
+    /// Request time.
+    pub requested_at: TimestampMillis,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Redaction hints for lifecycle metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Lifecycle command schema version.
+    pub schema_version: u16,
 }
 
 /// Stable agent run identifier.
@@ -7497,12 +7896,348 @@ pub struct DelegatedTaskProjection {
     pub refused_plan_count: u32,
     /// Runtime activation state.
     pub runtime_activation: DelegatedTaskRuntimeActivationState,
+    /// Delegate chat messages represented without provider prompts or raw source payloads.
+    pub chat_messages: Vec<DelegatedTaskChatMessage>,
+    /// Codebase context citations selected for Delegate chat turns.
+    pub context_citations: Vec<DelegatedTaskContextCitation>,
+    /// Per-hunk proposal review queues owned by human approval state.
+    pub proposal_reviews: Vec<DelegatedTaskProposalReview>,
+    /// Tool permission rows for Ask/Write Delegate profiles.
+    pub tool_permission_requests: Vec<DelegatedTaskToolPermissionRequest>,
+    /// Number of chat messages represented.
+    pub chat_message_count: u32,
+    /// Number of context citations represented.
+    pub context_citation_count: u32,
+    /// Number of proposal reviews represented.
+    pub proposal_review_count: u32,
+    /// Number of tool permission requests represented.
+    pub tool_permission_request_count: u32,
     /// Projection generation timestamp.
     pub generated_at: TimestampMillis,
     /// Redaction hints that apply to this projection.
     pub redaction_hints: Vec<RedactionHint>,
     /// Projection schema version.
     pub schema_version: u16,
+}
+
+/// Delegate chat message role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DelegatedTaskChatRole {
+    /// Human/user-authored Delegate message.
+    User,
+    /// Assistant-authored Delegate response.
+    Assistant,
+    /// System or policy-authored Delegate note.
+    System,
+}
+
+/// Codebase context citation used by Delegate chat and planning surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskContextCitation {
+    /// Stable citation identifier.
+    pub citation_id: String,
+    /// Workspace represented by this citation, when known.
+    pub workspace_id: Option<WorkspaceId>,
+    /// File represented by this citation, when known.
+    pub file_id: Option<FileId>,
+    /// Projection-safe path label.
+    pub path: Option<CanonicalPath>,
+    /// Byte range cited without embedding raw source text.
+    pub byte_range: Option<ByteRange>,
+    /// Logical line range cited without embedding raw source text.
+    pub line_range: Option<LineIndexRange>,
+    /// Snapshot or file fingerprint used for freshness checks.
+    pub freshness_fingerprint: Option<FileFingerprint>,
+    /// Chunk fingerprint used by semantic/RAG selection.
+    pub chunk_hash: Option<FileFingerprint>,
+    /// Similarity or rank score in basis points.
+    pub score_basis_points: u32,
+    /// Display-safe citation label.
+    pub metadata_label: String,
+    /// Display-safe reason labels.
+    pub labels: Vec<String>,
+    /// Redaction hints for this citation.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Citation DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only Delegate chat message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskChatMessage {
+    /// Stable message identifier.
+    pub message_id: String,
+    /// Message author role.
+    pub role: DelegatedTaskChatRole,
+    /// Bounded, display-safe message label.
+    pub content_label: String,
+    /// Optional plan represented by this message.
+    pub plan_id: Option<DelegatedTaskPlanId>,
+    /// Optional proposal represented by this message.
+    pub proposal_id: Option<ProposalId>,
+    /// Citation identifiers referenced by this message.
+    pub citation_ids: Vec<String>,
+    /// Tool permission request identifiers referenced by this message.
+    pub tool_permission_request_ids: Vec<String>,
+    /// Correlation identifier for audit continuity.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier for audit continuity.
+    pub causality_id: CausalityId,
+    /// Message creation timestamp.
+    pub created_at: TimestampMillis,
+    /// Redaction hints for this message.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Message DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Human review disposition for one Delegate proposal hunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DelegatedTaskProposalHunkDisposition {
+    /// Hunk is waiting on a human decision.
+    Pending,
+    /// Hunk was accepted by a human decision.
+    Accepted,
+    /// Hunk was rejected by a human decision.
+    Rejected,
+}
+
+/// Metadata-only per-hunk Delegate proposal review row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskProposalHunkReview {
+    /// Stable hunk identifier.
+    pub hunk_id: String,
+    /// Owning proposal.
+    pub proposal_id: ProposalId,
+    /// Optional target id from proposal target coverage.
+    pub target_id: Option<String>,
+    /// Payload kind represented by this hunk.
+    pub payload_kind: ProposalPayloadKind,
+    /// Projection-safe path label, when known.
+    pub path: Option<CanonicalPath>,
+    /// Affected byte range when safely discloseable.
+    pub byte_range: Option<ByteRange>,
+    /// Changed line count represented without raw source.
+    pub changed_line_count: u32,
+    /// Inserted line count represented without raw source.
+    pub inserted_line_count: u32,
+    /// Deleted line count represented without raw source.
+    pub deleted_line_count: u32,
+    /// Optional metadata hash of the hunk instead of raw text.
+    pub content_hash: Option<FileFingerprint>,
+    /// Human review disposition.
+    pub disposition: DelegatedTaskProposalHunkDisposition,
+    /// Risk label for this hunk.
+    pub risk_label: ProposalRiskLabel,
+    /// Privacy label for this hunk.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Redaction hints for this hunk.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Hunk DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only Delegate proposal review queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskProposalReview {
+    /// Stable review identifier.
+    pub review_id: String,
+    /// Owning proposal.
+    pub proposal_id: ProposalId,
+    /// Hunk rows in deterministic order.
+    pub hunks: Vec<DelegatedTaskProposalHunkReview>,
+    /// Number of accepted hunks.
+    pub accepted_hunk_count: u32,
+    /// Number of rejected hunks.
+    pub rejected_hunk_count: u32,
+    /// Number of pending hunks.
+    pub pending_hunk_count: u32,
+    /// True when every hunk has a human decision and at least one hunk is accepted.
+    pub ready_for_apply: bool,
+    /// True when any rejected hunk means apply must use a filtered proposal payload.
+    pub filtered_apply_required: bool,
+    /// True when human approval must precede mutation.
+    pub human_approval_required: bool,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Redaction hints for this review.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Review DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Delegate tool permission profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DelegatedTaskToolPermissionProfile {
+    /// Ask profile: read/context actions are prompted before use.
+    Ask,
+    /// Write profile: filesystem, terminal, network, and mutation actions require human approval.
+    Write,
+}
+
+/// Human decision for a Delegate tool permission row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DelegatedTaskToolPermissionDecision {
+    /// User confirmation is still required.
+    Confirm,
+    /// Allow this specific action once.
+    Allow,
+    /// Deny this action. Denial wins over all broader grants.
+    Deny,
+    /// Always allow matching actions within the current permission budget.
+    Always,
+}
+
+/// Effective disposition for a Delegate tool permission row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DelegatedTaskToolPermissionDisposition {
+    /// Permission is waiting on user confirmation.
+    WaitingForConfirmation,
+    /// Permission was allowed for one action.
+    AllowedOnce,
+    /// Permission was granted as an always-allow budget.
+    AlwaysAllowed,
+    /// Permission was denied and must fail closed.
+    Denied,
+}
+
+/// Metadata-only Delegate tool permission request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskToolPermissionRequest {
+    /// Stable request identifier.
+    pub request_id: String,
+    /// Ask or Write profile.
+    pub profile: DelegatedTaskToolPermissionProfile,
+    /// Requested action class.
+    pub action_class: PermissionBudgetActionClass,
+    /// Capability requested by the tool action, when known.
+    pub capability: Option<CapabilityId>,
+    /// Optional target label or hash.
+    pub target_id: Option<String>,
+    /// Human decision currently recorded for the request.
+    pub decision: DelegatedTaskToolPermissionDecision,
+    /// Effective disposition after applying fail-closed rules.
+    pub disposition: DelegatedTaskToolPermissionDisposition,
+    /// Whether a recorded human decision is required before runtime use.
+    pub human_approval_required: bool,
+    /// Whether a sufficient human decision has been recorded.
+    pub human_approval_recorded: bool,
+    /// Whether the current decision permits a runtime/tool invocation.
+    pub runtime_allowed: bool,
+    /// True when a denial was observed and overrides broader grants.
+    pub deny_overrides: bool,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Redaction hints for this request.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Permission request DTO schema version.
+    pub schema_version: u16,
+}
+
+impl DelegatedTaskProposalReview {
+    /// Builds a review queue and derives aggregate human-decision counts.
+    pub fn from_hunks(
+        review_id: impl Into<String>,
+        proposal_id: ProposalId,
+        hunks: Vec<DelegatedTaskProposalHunkReview>,
+        labels: Vec<String>,
+        schema_version: u16,
+    ) -> Self {
+        let accepted_hunk_count = hunks
+            .iter()
+            .filter(|hunk| hunk.disposition == DelegatedTaskProposalHunkDisposition::Accepted)
+            .count() as u32;
+        let rejected_hunk_count = hunks
+            .iter()
+            .filter(|hunk| hunk.disposition == DelegatedTaskProposalHunkDisposition::Rejected)
+            .count() as u32;
+        let pending_hunk_count = hunks
+            .iter()
+            .filter(|hunk| hunk.disposition == DelegatedTaskProposalHunkDisposition::Pending)
+            .count() as u32;
+        let ready_for_apply = pending_hunk_count == 0 && accepted_hunk_count > 0;
+        let filtered_apply_required = ready_for_apply && rejected_hunk_count > 0;
+        Self {
+            review_id: review_id.into(),
+            proposal_id,
+            hunks,
+            accepted_hunk_count,
+            rejected_hunk_count,
+            pending_hunk_count,
+            ready_for_apply,
+            filtered_apply_required,
+            human_approval_required: true,
+            labels,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version,
+        }
+    }
+}
+
+/// Input for constructing a Delegate or Automate tool permission request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedTaskToolPermissionRequestInput {
+    /// Stable request identifier.
+    pub request_id: String,
+    /// Ask or Write profile.
+    pub profile: DelegatedTaskToolPermissionProfile,
+    /// Requested action class.
+    pub action_class: PermissionBudgetActionClass,
+    /// Capability requested by the tool action, when known.
+    pub capability: Option<CapabilityId>,
+    /// Optional target label or hash.
+    pub target_id: Option<String>,
+    /// Human decision currently recorded for the request.
+    pub decision: DelegatedTaskToolPermissionDecision,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Permission request DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Builds a Delegate tool permission request and applies fail-closed decision semantics.
+pub fn delegated_task_tool_permission_request(
+    input: DelegatedTaskToolPermissionRequestInput,
+) -> DelegatedTaskToolPermissionRequest {
+    let disposition = match input.decision {
+        DelegatedTaskToolPermissionDecision::Confirm => {
+            DelegatedTaskToolPermissionDisposition::WaitingForConfirmation
+        }
+        DelegatedTaskToolPermissionDecision::Allow => {
+            DelegatedTaskToolPermissionDisposition::AllowedOnce
+        }
+        DelegatedTaskToolPermissionDecision::Deny => DelegatedTaskToolPermissionDisposition::Denied,
+        DelegatedTaskToolPermissionDecision::Always => {
+            DelegatedTaskToolPermissionDisposition::AlwaysAllowed
+        }
+    };
+    let deny_overrides = input.decision == DelegatedTaskToolPermissionDecision::Deny;
+    let runtime_allowed = matches!(
+        disposition,
+        DelegatedTaskToolPermissionDisposition::AllowedOnce
+            | DelegatedTaskToolPermissionDisposition::AlwaysAllowed
+    ) && !deny_overrides;
+    let human_approval_required = true;
+    let human_approval_recorded =
+        runtime_allowed || input.decision == DelegatedTaskToolPermissionDecision::Deny;
+    DelegatedTaskToolPermissionRequest {
+        request_id: input.request_id,
+        profile: input.profile,
+        action_class: input.action_class,
+        capability: input.capability,
+        target_id: input.target_id,
+        decision: input.decision,
+        disposition,
+        human_approval_required,
+        human_approval_recorded,
+        runtime_allowed,
+        deny_overrides,
+        labels: input.labels,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: input.schema_version,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -7514,854 +8249,14 @@ pub struct DelegatedTaskProjection {
 pub enum ProductMode {
     /// Full manual IDE workflows with AI disabled.
     Manual,
+    /// Inline assisted editing mode.
+    Assist,
     /// User delegates work to an LLM, which may coordinate bounded subagents.
     Delegates,
+    /// Automate-level fleet orchestration mode.
+    Automate,
     /// Legion runs a full workflow through planning, execution, verification, and sign-off.
     LegionWorkflows,
-}
-
-/// Stable Legion workflow session identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LegionWorkflowSessionId(pub String);
-
-/// Stable Legion workflow worker identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LegionWorkflowWorkerId(pub String);
-
-/// Lifecycle state for a metadata-only Legion workflow session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowState {
-    /// Session metadata has been planned but no runtime is active.
-    Planned,
-    /// Session is assigning bounded workers.
-    Assigning,
-    /// Workers are producing proposal-preview metadata.
-    Running,
-    /// Session is blocked on verification, conflicts, sign-off, or approval.
-    Blocked,
-    /// Session is waiting for explicit human approval.
-    WaitingForApproval,
-    /// Session completed after required proposal/approval gates were satisfied.
-    Completed,
-    /// Session failed closed.
-    Failed,
-    /// Session was cancelled.
-    Cancelled,
-}
-
-/// Lifecycle state for a Legion workflow worker assignment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowWorkerState {
-    /// Worker is assigned but not started.
-    Assigned,
-    /// Worker is running through a bounded delegated-task primitive.
-    Running,
-    /// Worker is waiting on dependency, approval, or provider route metadata.
-    Waiting,
-    /// Worker produced proposal-preview metadata.
-    ProposalReady,
-    /// Worker is blocked.
-    Blocked,
-    /// Worker is complete.
-    Complete,
-    /// Worker failed closed.
-    Failed,
-}
-
-/// Role assigned to a Legion workflow worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowWorkerRole {
-    /// Coordinates plan slicing and dependency ordering.
-    Coordinator,
-    /// Implements a bounded proposal-producing task.
-    Implementer,
-    /// Reviews proposal metadata and conflicts.
-    Reviewer,
-    /// Runs or evaluates verification metadata.
-    Verifier,
-    /// Performs security, privacy, or policy review.
-    Auditor,
-}
-
-/// Metadata-only model backend selected for a Legion workflow worker.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowModelBackend {
-    /// Local model or deterministic local tool; no provider payload is stored.
-    Local {
-        /// Display-safe backend label.
-        model_label: String,
-    },
-    /// Provider-backed model routed through assisted-AI consent/provider metadata.
-    ProviderBacked {
-        /// Display-safe provider identifier.
-        provider_id: String,
-        /// Display-safe provider route reference.
-        route_id: String,
-        /// Display-safe model label.
-        model_label: String,
-    },
-    /// Backend is unavailable and must fail closed.
-    Unavailable {
-        /// Display-safe unavailable reason.
-        reason: String,
-    },
-}
-
-/// Dependency state between Legion workflow workers or task slices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowDependencyState {
-    /// Dependency is declared but not complete.
-    Pending,
-    /// Dependency is complete.
-    Satisfied,
-    /// Dependency is blocked.
-    Blocked,
-    /// Dependency became stale.
-    Stale,
-}
-
-/// Kind of metadata-only Legion workflow conflict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowConflictKind {
-    /// Multiple workers target overlapping files, symbols, or proposals.
-    WorkerOverlap,
-    /// Main workspace is dirty or changed outside the workflow.
-    DirtyWorkspace,
-    /// Proposal preconditions are stale.
-    StaleProposal,
-    /// Verification evidence conflicts with proposed readiness.
-    VerificationMismatch,
-    /// Required sign-off or approval evidence is missing.
-    MissingApproval,
-}
-
-/// State of a metadata-only Legion workflow conflict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowConflictState {
-    /// Conflict is open and blocks readiness.
-    Open,
-    /// Conflict is being reviewed.
-    Reviewing,
-    /// Conflict has been resolved by proposal/approval metadata.
-    Resolved,
-    /// Conflict was waived by explicit approval metadata.
-    Waived,
-}
-
-/// Verification gate state for Legion workflow merge readiness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowVerificationGateState {
-    /// Verification has not run.
-    Pending,
-    /// Verification passed.
-    Passed,
-    /// Verification failed.
-    Failed,
-    /// Verification is blocked by policy or environment.
-    Blocked,
-    /// Verification evidence is stale.
-    Stale,
-}
-
-/// Human or automated review sign-off state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowSignoffState {
-    /// Sign-off is required but absent.
-    Missing,
-    /// Sign-off is waiting for a reviewer.
-    Pending,
-    /// Sign-off has been granted.
-    Approved,
-    /// Sign-off has been rejected.
-    Rejected,
-}
-
-/// Approval-gated merge readiness state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LegionWorkflowMergeReadinessState {
-    /// Merge is blocked and must not be applied.
-    Blocked,
-    /// Merge is waiting for explicit approval.
-    WaitingForApproval,
-    /// Metadata indicates readiness after all gates are satisfied.
-    Ready,
-}
-
-/// Metadata-only worker assignment for Legion workflow orchestration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowWorkerAssignment {
-    /// Stable worker identifier.
-    pub worker_id: LegionWorkflowWorkerId,
-    /// Worker role.
-    pub role: LegionWorkflowWorkerRole,
-    /// Worker lifecycle state.
-    pub state: LegionWorkflowWorkerState,
-    /// Metadata-only backend selection.
-    pub model_backend: LegionWorkflowModelBackend,
-    /// Display-safe model label.
-    pub model_label: String,
-    /// Display-safe command classes allowed for this worker.
-    pub allowed_command_classes: Vec<String>,
-    /// Linked delegated-task plan, if any.
-    pub linked_delegated_plan_id: Option<DelegatedTaskPlanId>,
-    /// Risk label for this worker assignment.
-    pub risk_label: ProposalRiskLabel,
-    /// Privacy label for this worker assignment.
-    pub privacy_label: ProposalPrivacyLabel,
-    /// Correlation identifier for audit continuity.
-    pub correlation_id: CorrelationId,
-    /// Causality identifier for audit continuity.
-    pub causality_id: CausalityId,
-    /// Redaction hints for this assignment.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Assignment schema version.
-    pub schema_version: u16,
-}
-
-/// Metadata-only dependency edge between workflow workers or task slices.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowDependencyEdge {
-    /// Stable dependency identifier.
-    pub dependency_id: String,
-    /// Upstream worker identifier.
-    pub from_worker_id: LegionWorkflowWorkerId,
-    /// Downstream worker identifier.
-    pub to_worker_id: LegionWorkflowWorkerId,
-    /// Dependency state.
-    pub state: LegionWorkflowDependencyState,
-    /// Display-safe dependency label.
-    pub label: String,
-    /// Edge schema version.
-    pub schema_version: u16,
-}
-
-/// Metadata-only Legion workflow conflict summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowConflictSummary {
-    /// Stable conflict identifier.
-    pub conflict_id: String,
-    /// Conflict kind.
-    pub kind: LegionWorkflowConflictKind,
-    /// Conflict state.
-    pub state: LegionWorkflowConflictState,
-    /// Display-safe conflict label.
-    pub label: String,
-    /// Related proposal identifier when known.
-    pub proposal_id: Option<ProposalId>,
-    /// Risk label.
-    pub risk_label: ProposalRiskLabel,
-    /// Privacy label.
-    pub privacy_label: ProposalPrivacyLabel,
-    /// Redaction hints for the conflict.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Conflict schema version.
-    pub schema_version: u16,
-}
-
-/// Metadata-only verification gate for Legion workflow readiness.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowVerificationGate {
-    /// Stable verification gate identifier.
-    pub gate_id: String,
-    /// Display-safe gate label.
-    pub label: String,
-    /// Gate state.
-    pub state: LegionWorkflowVerificationGateState,
-    /// Whether this gate is required for merge readiness.
-    pub required: bool,
-    /// Linked verification run identifier when known.
-    pub verification_run_id: Option<String>,
-    /// Linked evidence artifact identifier when known.
-    pub evidence_artifact_id: Option<String>,
-    /// Redaction hints for this gate.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Gate schema version.
-    pub schema_version: u16,
-}
-
-/// Metadata-only sign-off record for Legion workflow readiness.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowSignoffRecord {
-    /// Stable sign-off identifier.
-    pub signoff_id: String,
-    /// Display-safe reviewer label.
-    pub reviewer_label: String,
-    /// Sign-off state.
-    pub state: LegionWorkflowSignoffState,
-    /// Whether this sign-off is required for readiness.
-    pub required: bool,
-    /// Linked approval artifact identifier when known.
-    pub approval_artifact_id: Option<String>,
-    /// Correlation identifier for audit continuity.
-    pub correlation_id: CorrelationId,
-    /// Causality identifier for audit continuity.
-    pub causality_id: CausalityId,
-    /// Redaction hints for this sign-off.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Sign-off schema version.
-    pub schema_version: u16,
-}
-
-/// Metadata-only merge approval record for a Legion workflow session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowMergeApproval {
-    /// Stable approval identifier.
-    pub approval_id: String,
-    /// Whether explicit human approval has been granted.
-    pub approved: bool,
-    /// Whether rollback metadata is available before apply.
-    pub rollback_available: bool,
-    /// Linked approval artifact identifier.
-    pub approval_artifact_id: Option<String>,
-    /// Linked checkpoint or rollback artifact identifier.
-    pub rollback_artifact_id: Option<String>,
-    /// Approval schema version.
-    pub schema_version: u16,
-}
-
-/// Metadata-only Legion workflow session contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowSession {
-    /// Stable session identifier.
-    pub session_id: LegionWorkflowSessionId,
-    /// Directive artifact identifier; raw directive text is not stored here.
-    pub directive_artifact_id: String,
-    /// Specification artifact identifier; raw specification text is not stored here.
-    pub spec_artifact_id: String,
-    /// Task graph artifact identifier; raw task graph text is not stored here.
-    pub task_graph_artifact_id: String,
-    /// Product mode. Valid sessions must use `ProductMode::LegionWorkflows`.
-    pub product_mode: ProductMode,
-    /// Worker assignments.
-    pub worker_assignments: Vec<LegionWorkflowWorkerAssignment>,
-    /// Dependency edges.
-    pub dependency_edges: Vec<LegionWorkflowDependencyEdge>,
-    /// Conflict summaries.
-    pub conflicts: Vec<LegionWorkflowConflictSummary>,
-    /// Verification gates.
-    pub verification_gates: Vec<LegionWorkflowVerificationGate>,
-    /// Sign-off records.
-    pub signoffs: Vec<LegionWorkflowSignoffRecord>,
-    /// Linked proposal identifiers.
-    pub proposal_ids: Vec<ProposalId>,
-    /// Merge approval metadata.
-    pub merge_approval: Option<LegionWorkflowMergeApproval>,
-    /// Session lifecycle state.
-    pub state: LegionWorkflowState,
-    /// Whether the main workspace is dirty and therefore blocks readiness.
-    pub dirty_main_workspace: bool,
-    /// Whether proposal preconditions are stale and therefore block readiness.
-    pub stale_proposal_preconditions: bool,
-    /// Whether audit-before-success evidence has been recorded.
-    pub audit_before_success_recorded: bool,
-    /// Projection or session generation timestamp.
-    pub generated_at: TimestampMillis,
-    /// Redaction hints for the session.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Session schema version.
-    pub schema_version: u16,
-}
-
-/// Merge-readiness evaluation result for a Legion workflow session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowMergeReadiness {
-    /// Evaluated readiness state.
-    pub state: LegionWorkflowMergeReadinessState,
-    /// Display-safe blocker labels.
-    pub blockers: Vec<String>,
-    /// Display-safe satisfied-gate labels.
-    pub satisfied: Vec<String>,
-    /// Redaction hints for the readiness result.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Readiness schema version.
-    pub schema_version: u16,
-}
-
-/// Display-safe row for a Legion workflow projection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowProjectionRow {
-    /// Linked workflow session identifier.
-    pub session_id: LegionWorkflowSessionId,
-    /// Display-safe row label.
-    pub label: String,
-    /// Worker count.
-    pub worker_count: u32,
-    /// Open or unresolved conflict count.
-    pub conflict_count: u32,
-    /// Linked proposal identifiers.
-    pub proposal_ids: Vec<ProposalId>,
-    /// Merge-readiness state.
-    pub merge_readiness: LegionWorkflowMergeReadinessState,
-    /// Redaction hints for this row.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Row schema version.
-    pub schema_version: u16,
-}
-
-/// Metadata-only Legion workflow projection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegionWorkflowProjection {
-    /// Stable projection identifier.
-    pub projection_id: String,
-    /// Projected workflow rows.
-    pub rows: Vec<LegionWorkflowProjectionRow>,
-    /// Total worker count.
-    pub worker_count: u32,
-    /// Total conflict count.
-    pub conflict_count: u32,
-    /// Number of rows omitted by bounds.
-    pub omitted_row_count: u32,
-    /// Projection generation timestamp.
-    pub generated_at: TimestampMillis,
-    /// Redaction hints for the projection.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Projection schema version.
-    pub schema_version: u16,
-}
-
-/// Error raised by Legion workflow metadata validators.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum LegionWorkflowValidationError {
-    /// Required identifier or label was empty.
-    #[error("legion workflow metadata has empty field: {field}")]
-    EmptyField {
-        /// Field name.
-        field: String,
-    },
-    /// Schema version was zero.
-    #[error("legion workflow metadata has zero schema version: {field}")]
-    ZeroSchemaVersion {
-        /// Field name.
-        field: String,
-    },
-    /// Correlation id was zero.
-    #[error("legion workflow metadata requires non-zero correlation id")]
-    ZeroCorrelationId,
-    /// Causality id was nil.
-    #[error("legion workflow metadata requires non-nil causality id")]
-    NilCausalityId,
-    /// Redaction hints were missing or included `None`.
-    #[error("legion workflow metadata has unsafe redaction hints: {field}")]
-    UnsafeRedactionHints {
-        /// Field name.
-        field: String,
-    },
-    /// Product mode was not Legion Workflows.
-    #[error("legion workflow session must use ProductMode::LegionWorkflows")]
-    InvalidProductMode,
-    /// Provider-backed worker did not include provider route metadata.
-    #[error("provider-backed legion worker is missing route metadata")]
-    MissingProviderRoute,
-    /// Metadata attempted to retain raw or payload-like material.
-    #[error("legion workflow metadata is not metadata-only: {field}: {reason}")]
-    NonMetadataOnly {
-        /// Field name.
-        field: String,
-        /// Stable reason code.
-        reason: String,
-    },
-}
-
-impl LegionWorkflowSession {
-    /// Validates the metadata-only Legion workflow session contract.
-    pub fn validate(&self) -> Result<(), LegionWorkflowValidationError> {
-        validate_legion_workflow_session(self)
-    }
-
-    /// Evaluates approval-gated merge readiness for this session.
-    pub fn merge_readiness(&self) -> LegionWorkflowMergeReadiness {
-        evaluate_legion_workflow_merge_readiness(self)
-    }
-}
-
-/// Validates a Legion workflow session and all nested metadata records.
-pub fn validate_legion_workflow_session(
-    session: &LegionWorkflowSession,
-) -> Result<(), LegionWorkflowValidationError> {
-    validate_legion_schema("session.schema_version", session.schema_version)?;
-    validate_legion_id("session_id", &session.session_id.0)?;
-    validate_legion_metadata("directive_artifact_id", &session.directive_artifact_id)?;
-    validate_legion_metadata("spec_artifact_id", &session.spec_artifact_id)?;
-    validate_legion_metadata("task_graph_artifact_id", &session.task_graph_artifact_id)?;
-    validate_legion_redaction("session.redaction_hints", &session.redaction_hints)?;
-    if session.product_mode != ProductMode::LegionWorkflows {
-        return Err(LegionWorkflowValidationError::InvalidProductMode);
-    }
-    if session.worker_assignments.is_empty() {
-        return Err(LegionWorkflowValidationError::EmptyField {
-            field: "worker_assignments".to_string(),
-        });
-    }
-    for worker in &session.worker_assignments {
-        validate_legion_workflow_worker_assignment(worker)?;
-    }
-    for edge in &session.dependency_edges {
-        validate_legion_schema("dependency.schema_version", edge.schema_version)?;
-        validate_legion_metadata("dependency_id", &edge.dependency_id)?;
-        validate_legion_id("dependency.from_worker_id", &edge.from_worker_id.0)?;
-        validate_legion_id("dependency.to_worker_id", &edge.to_worker_id.0)?;
-        validate_legion_metadata("dependency.label", &edge.label)?;
-    }
-    for conflict in &session.conflicts {
-        validate_legion_workflow_conflict(conflict)?;
-    }
-    for gate in &session.verification_gates {
-        validate_legion_workflow_verification_gate(gate)?;
-    }
-    for signoff in &session.signoffs {
-        validate_legion_workflow_signoff(signoff)?;
-    }
-    for proposal_id in &session.proposal_ids {
-        if proposal_id.0 == 0 {
-            return Err(LegionWorkflowValidationError::EmptyField {
-                field: "proposal_ids".to_string(),
-            });
-        }
-    }
-    if let Some(approval) = &session.merge_approval {
-        validate_legion_schema("merge_approval.schema_version", approval.schema_version)?;
-        validate_legion_metadata("merge_approval.approval_id", &approval.approval_id)?;
-        if let Some(artifact_id) = &approval.approval_artifact_id {
-            validate_legion_metadata("merge_approval.approval_artifact_id", artifact_id)?;
-        }
-        if let Some(artifact_id) = &approval.rollback_artifact_id {
-            validate_legion_metadata("merge_approval.rollback_artifact_id", artifact_id)?;
-        }
-    }
-    Ok(())
-}
-
-/// Validates a Legion workflow worker assignment.
-pub fn validate_legion_workflow_worker_assignment(
-    worker: &LegionWorkflowWorkerAssignment,
-) -> Result<(), LegionWorkflowValidationError> {
-    validate_legion_schema("worker.schema_version", worker.schema_version)?;
-    validate_legion_id("worker_id", &worker.worker_id.0)?;
-    validate_legion_metadata("worker.model_label", &worker.model_label)?;
-    validate_legion_correlation(worker.correlation_id, worker.causality_id)?;
-    validate_legion_redaction("worker.redaction_hints", &worker.redaction_hints)?;
-    for command_class in &worker.allowed_command_classes {
-        validate_legion_metadata("worker.allowed_command_classes", command_class)?;
-    }
-    if let Some(plan_id) = &worker.linked_delegated_plan_id {
-        validate_legion_metadata("worker.linked_delegated_plan_id", &plan_id.0)?;
-    }
-    match &worker.model_backend {
-        LegionWorkflowModelBackend::Local { model_label } => {
-            validate_legion_metadata("worker.backend.local.model_label", model_label)?;
-        }
-        LegionWorkflowModelBackend::ProviderBacked {
-            provider_id,
-            route_id,
-            model_label,
-        } => {
-            validate_legion_metadata("worker.backend.provider_id", provider_id)?;
-            validate_legion_metadata("worker.backend.route_id", route_id)?;
-            validate_legion_metadata("worker.backend.model_label", model_label)?;
-            if provider_id.trim().is_empty() || route_id.trim().is_empty() {
-                return Err(LegionWorkflowValidationError::MissingProviderRoute);
-            }
-        }
-        LegionWorkflowModelBackend::Unavailable { reason } => {
-            validate_legion_metadata("worker.backend.unavailable.reason", reason)?;
-        }
-    }
-    Ok(())
-}
-
-/// Validates a Legion workflow conflict summary.
-pub fn validate_legion_workflow_conflict(
-    conflict: &LegionWorkflowConflictSummary,
-) -> Result<(), LegionWorkflowValidationError> {
-    validate_legion_schema("conflict.schema_version", conflict.schema_version)?;
-    validate_legion_metadata("conflict_id", &conflict.conflict_id)?;
-    validate_legion_metadata("conflict.label", &conflict.label)?;
-    validate_legion_redaction("conflict.redaction_hints", &conflict.redaction_hints)
-}
-
-/// Validates a Legion workflow verification gate.
-pub fn validate_legion_workflow_verification_gate(
-    gate: &LegionWorkflowVerificationGate,
-) -> Result<(), LegionWorkflowValidationError> {
-    validate_legion_schema("verification.schema_version", gate.schema_version)?;
-    validate_legion_metadata("verification.gate_id", &gate.gate_id)?;
-    validate_legion_metadata("verification.label", &gate.label)?;
-    if let Some(run_id) = &gate.verification_run_id {
-        validate_legion_metadata("verification.run_id", run_id)?;
-    }
-    if let Some(artifact_id) = &gate.evidence_artifact_id {
-        validate_legion_metadata("verification.evidence_artifact_id", artifact_id)?;
-    }
-    validate_legion_redaction("verification.redaction_hints", &gate.redaction_hints)
-}
-
-/// Validates a Legion workflow sign-off record.
-pub fn validate_legion_workflow_signoff(
-    signoff: &LegionWorkflowSignoffRecord,
-) -> Result<(), LegionWorkflowValidationError> {
-    validate_legion_schema("signoff.schema_version", signoff.schema_version)?;
-    validate_legion_metadata("signoff.signoff_id", &signoff.signoff_id)?;
-    validate_legion_metadata("signoff.reviewer_label", &signoff.reviewer_label)?;
-    validate_legion_correlation(signoff.correlation_id, signoff.causality_id)?;
-    if let Some(artifact_id) = &signoff.approval_artifact_id {
-        validate_legion_metadata("signoff.approval_artifact_id", artifact_id)?;
-    }
-    validate_legion_redaction("signoff.redaction_hints", &signoff.redaction_hints)
-}
-
-/// Evaluates approval-gated merge readiness for a Legion workflow session.
-pub fn evaluate_legion_workflow_merge_readiness(
-    session: &LegionWorkflowSession,
-) -> LegionWorkflowMergeReadiness {
-    let mut blockers = Vec::new();
-    let mut satisfied = Vec::new();
-    if let Err(error) = validate_legion_workflow_session(session) {
-        blockers.push(format!("invalid metadata: {error}"));
-    }
-    if session.worker_assignments.is_empty() {
-        blockers.push("no workers assigned".to_string());
-    }
-    for worker in &session.worker_assignments {
-        if matches!(
-            worker.model_backend,
-            LegionWorkflowModelBackend::Unavailable { .. }
-        ) {
-            blockers.push(format!("worker {} backend unavailable", worker.worker_id.0));
-        }
-        if matches!(
-            worker.state,
-            LegionWorkflowWorkerState::Blocked | LegionWorkflowWorkerState::Failed
-        ) {
-            blockers.push(format!(
-                "worker {} is {:?}",
-                worker.worker_id.0, worker.state
-            ));
-        }
-    }
-    for edge in &session.dependency_edges {
-        if edge.state != LegionWorkflowDependencyState::Satisfied {
-            blockers.push(format!(
-                "dependency {} is {:?}",
-                edge.dependency_id, edge.state
-            ));
-        }
-    }
-    for conflict in &session.conflicts {
-        if !matches!(
-            conflict.state,
-            LegionWorkflowConflictState::Resolved | LegionWorkflowConflictState::Waived
-        ) {
-            blockers.push(format!(
-                "conflict {} is {:?}",
-                conflict.conflict_id, conflict.state
-            ));
-        }
-    }
-    if session.verification_gates.is_empty() {
-        blockers.push("missing verification evidence".to_string());
-    }
-    for gate in &session.verification_gates {
-        if gate.required && gate.state != LegionWorkflowVerificationGateState::Passed {
-            blockers.push(format!("verification {} is {:?}", gate.gate_id, gate.state));
-        } else if gate.required {
-            satisfied.push(format!("verification {} passed", gate.gate_id));
-        }
-    }
-    if session
-        .signoffs
-        .iter()
-        .filter(|signoff| signoff.required)
-        .count()
-        == 0
-    {
-        blockers.push("missing required sign-off".to_string());
-    }
-    for signoff in &session.signoffs {
-        if signoff.required && signoff.state != LegionWorkflowSignoffState::Approved {
-            blockers.push(format!(
-                "signoff {} is {:?}",
-                signoff.signoff_id, signoff.state
-            ));
-        } else if signoff.required {
-            satisfied.push(format!("signoff {} approved", signoff.signoff_id));
-        }
-    }
-    if session.proposal_ids.is_empty() {
-        blockers.push("missing proposal id".to_string());
-    }
-    if session.dirty_main_workspace {
-        blockers.push("dirty main workspace conflict".to_string());
-    }
-    if session.stale_proposal_preconditions {
-        blockers.push("stale proposal preconditions".to_string());
-    }
-    if !session.audit_before_success_recorded {
-        blockers.push("missing audit-before-success evidence".to_string());
-    }
-
-    let approval_ready = session.merge_approval.as_ref().is_some_and(|approval| {
-        approval.approved
-            && approval.rollback_available
-            && approval.approval_artifact_id.is_some()
-            && approval.rollback_artifact_id.is_some()
-    });
-    if !approval_ready {
-        blockers.push("missing merge approval or rollback metadata".to_string());
-    }
-
-    let state = if blockers.is_empty() {
-        LegionWorkflowMergeReadinessState::Ready
-    } else if session
-        .merge_approval
-        .as_ref()
-        .is_some_and(|approval| approval.approved)
-    {
-        LegionWorkflowMergeReadinessState::Blocked
-    } else {
-        LegionWorkflowMergeReadinessState::WaitingForApproval
-    };
-    LegionWorkflowMergeReadiness {
-        state,
-        blockers,
-        satisfied,
-        redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
-    }
-}
-
-/// Builds a metadata-only Legion workflow projection from sessions.
-pub fn legion_workflow_projection_from_sessions(
-    projection_id: impl Into<String>,
-    sessions: &[LegionWorkflowSession],
-    generated_at: TimestampMillis,
-    row_limit: usize,
-) -> LegionWorkflowProjection {
-    let projection_id = projection_id.into();
-    let take_count = sessions.len().min(row_limit);
-    let rows = sessions
-        .iter()
-        .take(take_count)
-        .map(|session| {
-            let readiness = evaluate_legion_workflow_merge_readiness(session);
-            let conflict_count = session
-                .conflicts
-                .iter()
-                .filter(|conflict| {
-                    !matches!(
-                        conflict.state,
-                        LegionWorkflowConflictState::Resolved | LegionWorkflowConflictState::Waived
-                    )
-                })
-                .count() as u32;
-            LegionWorkflowProjectionRow {
-                session_id: session.session_id.clone(),
-                label: format!(
-                    "Legion Workflow {}: {:?}, workers={}, proposals={}",
-                    session.session_id.0,
-                    session.state,
-                    session.worker_assignments.len(),
-                    session.proposal_ids.len()
-                ),
-                worker_count: session.worker_assignments.len() as u32,
-                conflict_count,
-                proposal_ids: session.proposal_ids.clone(),
-                merge_readiness: readiness.state,
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            }
-        })
-        .collect::<Vec<_>>();
-    LegionWorkflowProjection {
-        projection_id,
-        worker_count: sessions
-            .iter()
-            .map(|session| session.worker_assignments.len() as u32)
-            .sum(),
-        conflict_count: sessions
-            .iter()
-            .map(|session| session.conflicts.len() as u32)
-            .sum(),
-        omitted_row_count: sessions.len().saturating_sub(take_count) as u32,
-        rows,
-        generated_at,
-        redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
-    }
-}
-
-fn validate_legion_schema(
-    field: &str,
-    schema_version: u16,
-) -> Result<(), LegionWorkflowValidationError> {
-    if schema_version == 0 {
-        return Err(LegionWorkflowValidationError::ZeroSchemaVersion {
-            field: field.to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_legion_correlation(
-    correlation_id: CorrelationId,
-    causality_id: CausalityId,
-) -> Result<(), LegionWorkflowValidationError> {
-    if correlation_id.0 == 0 {
-        return Err(LegionWorkflowValidationError::ZeroCorrelationId);
-    }
-    if causality_id.0 == Uuid::nil() {
-        return Err(LegionWorkflowValidationError::NilCausalityId);
-    }
-    Ok(())
-}
-
-fn validate_legion_id(field: &str, value: &str) -> Result<(), LegionWorkflowValidationError> {
-    if value.trim().is_empty() {
-        return Err(LegionWorkflowValidationError::EmptyField {
-            field: field.to_string(),
-        });
-    }
-    validate_legion_metadata(field, value)
-}
-
-fn validate_legion_metadata(field: &str, value: &str) -> Result<(), LegionWorkflowValidationError> {
-    if value.trim().is_empty() {
-        return Err(LegionWorkflowValidationError::EmptyField {
-            field: field.to_string(),
-        });
-    }
-    let lower = value.to_ascii_lowercase();
-    for marker in [
-        "raw prompt",
-        "source_body",
-        "raw source",
-        "provider payload",
-        "terminal output body",
-        "raw worker log",
-        "secret=",
-        "api_key",
-    ] {
-        if lower.contains(marker) {
-            return Err(LegionWorkflowValidationError::NonMetadataOnly {
-                field: field.to_string(),
-                reason: "forbidden.raw_or_payload_marker".to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_legion_redaction(
-    field: &str,
-    hints: &[RedactionHint],
-) -> Result<(), LegionWorkflowValidationError> {
-    if hints.is_empty() || hints.contains(&RedactionHint::None) {
-        return Err(LegionWorkflowValidationError::UnsafeRedactionHints {
-            field: field.to_string(),
-        });
-    }
-    Ok(())
 }
 
 /// Risk label for command-registry entries.
@@ -9594,6 +9489,34 @@ pub enum AssistedAiContractError {
     },
 }
 
+impl InlinePredictionRequestMetadata {
+    /// Validates this request metadata.
+    pub fn validate(&self) -> Result<(), AssistedAiContractError> {
+        validate_inline_prediction_request_metadata(self)
+    }
+}
+
+impl InlinePredictionResult {
+    /// Validates this inline prediction result.
+    pub fn validate(&self) -> Result<(), AssistedAiContractError> {
+        validate_inline_prediction_result(self)
+    }
+}
+
+impl InlinePredictionProjection {
+    /// Validates this inline prediction projection.
+    pub fn validate(&self) -> Result<(), AssistedAiContractError> {
+        validate_inline_prediction_projection(self)
+    }
+}
+
+impl InlinePredictionLifecycleCommand {
+    /// Validates this lifecycle command.
+    pub fn validate(&self) -> Result<(), AssistedAiContractError> {
+        validate_inline_prediction_lifecycle_command(self)
+    }
+}
+
 impl AssistedAiProviderCapability {
     /// Returns true when the provider class implies remote or external egress.
     pub fn is_remote_class(&self) -> bool {
@@ -10234,6 +10157,387 @@ pub fn validate_assisted_ai_provider_route_request(
     Ok(())
 }
 
+/// Validates inline prediction request metadata without allowing raw source payloads.
+pub fn validate_inline_prediction_request_metadata(
+    request: &InlinePredictionRequestMetadata,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(request.correlation_id, request.causality_id)?;
+    if request.event_sequence.0 == 0 {
+        return Err(AssistedAiContractError::ZeroEventSequence);
+    }
+    validate_inline_prediction_schema(
+        "inline_prediction.request.schema_version",
+        request.schema_version,
+    )?;
+    validate_inline_prediction_redaction(
+        "inline_prediction.request.redaction_hints",
+        &request.redaction_hints,
+    )?;
+    if request.cancellation_token.0 == Uuid::nil() {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.request.cancellation_token",
+            "cancellation.nil",
+        ));
+    }
+    if request.max_prediction_bytes == 0 {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.request.max_prediction_bytes",
+            "prediction.max_bytes.zero",
+        ));
+    }
+    if request.max_prediction_bytes > INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.request.max_prediction_bytes",
+            "prediction.max_bytes.exceeds_protocol_bound",
+        ));
+    }
+    if request.timeout_ms == 0 {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.request.timeout_ms",
+            "timeout.zero",
+        ));
+    }
+    validate_assisted_ai_audit_string(
+        "inline_prediction.request.request_id",
+        &request.request_id.0,
+    )?;
+    validate_assisted_ai_audit_string(
+        "inline_prediction.request.language_id",
+        &request.language_id.0,
+    )?;
+    validate_assisted_ai_audit_string(
+        "inline_prediction.request.required_capability",
+        &request.required_capability.0,
+    )?;
+    validate_assisted_ai_audit_string(
+        "inline_prediction.request.principal_id",
+        &request.principal_id.0,
+    )?;
+    validate_inline_prediction_fingerprint_metadata(&request.fingerprint)?;
+    validate_inline_prediction_provider_metadata(&request.provider)
+}
+
+/// Validates inline prediction provider metadata.
+pub fn validate_inline_prediction_provider_metadata(
+    provider: &InlinePredictionProviderMetadata,
+) -> Result<(), AssistedAiContractError> {
+    validate_inline_prediction_schema(
+        "inline_prediction.provider.schema_version",
+        provider.schema_version,
+    )?;
+    validate_inline_prediction_redaction(
+        "inline_prediction.provider.redaction_hints",
+        &provider.redaction_hints,
+    )?;
+    if provider.operation_class != AssistedAiOperationClass::InlinePrediction {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.provider.operation_class",
+            "operation.not_inline_prediction",
+        ));
+    }
+    if provider.latency.total_ms < provider.latency.queued_ms
+        || provider.latency.total_ms < provider.latency.inference_ms
+    {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.provider.latency",
+            "latency.total_less_than_component",
+        ));
+    }
+    validate_assisted_ai_audit_string(
+        "inline_prediction.provider.provider_id",
+        &provider.provider_id,
+    )?;
+    validate_assisted_ai_audit_string(
+        "inline_prediction.provider.model_label",
+        &provider.model_label,
+    )?;
+    for label in &provider.health_labels {
+        validate_assisted_ai_audit_string("inline_prediction.provider.health_labels", label)?;
+    }
+    for label in &provider.cost_labels {
+        validate_assisted_ai_audit_string("inline_prediction.provider.cost_labels", label)?;
+    }
+    Ok(())
+}
+
+/// Validates inline prediction fingerprint metadata.
+pub fn validate_inline_prediction_fingerprint_metadata(
+    fingerprint: &InlinePredictionFingerprintMetadata,
+) -> Result<(), AssistedAiContractError> {
+    validate_inline_prediction_schema(
+        "inline_prediction.fingerprint.schema_version",
+        fingerprint.schema_version,
+    )?;
+    validate_assisted_ai_audit_fingerprint(
+        "inline_prediction.fingerprint.context_fingerprint",
+        &fingerprint.context_fingerprint,
+    )?;
+    if let Some(content_fingerprint) = &fingerprint.content_fingerprint {
+        validate_assisted_ai_audit_fingerprint(
+            "inline_prediction.fingerprint.content_fingerprint",
+            content_fingerprint,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validates an inline prediction result.
+pub fn validate_inline_prediction_result(
+    result: &InlinePredictionResult,
+) -> Result<(), AssistedAiContractError> {
+    validate_inline_prediction_schema(
+        "inline_prediction.result.schema_version",
+        result.schema_version,
+    )?;
+    validate_inline_prediction_redaction(
+        "inline_prediction.result.redaction_hints",
+        &result.redaction_hints,
+    )?;
+    validate_assisted_ai_audit_string("inline_prediction.result.result_id", &result.result_id.0)?;
+    validate_assisted_ai_audit_string("inline_prediction.result.request_id", &result.request_id.0)?;
+    validate_inline_prediction_fingerprint_metadata(&result.fingerprint)?;
+    validate_inline_prediction_provider_metadata(&result.provider)?;
+    validate_inline_prediction_freshness(&result.freshness)?;
+    if result.retention == InlinePredictionRetention::MetadataOnlyAudit
+        && result.ghost_text.is_some()
+    {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.result.ghost_text",
+            "ghost_text.not_allowed_for_metadata_only_audit",
+        ));
+    }
+    if result.state == InlinePredictionResultState::Available {
+        if result.freshness.state == InlinePredictionFreshnessState::Stale {
+            return Err(inline_prediction_invalid(
+                "inline_prediction.result.freshness",
+                "available_result.is_stale",
+            ));
+        }
+        if result.ghost_text.is_none()
+            && result.retention == InlinePredictionRetention::EphemeralDisplay
+        {
+            return Err(inline_prediction_invalid(
+                "inline_prediction.result.ghost_text",
+                "available_result.missing_ghost_text",
+            ));
+        }
+    }
+    if result.state == InlinePredictionResultState::Stale
+        && result.freshness.state != InlinePredictionFreshnessState::Stale
+    {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.result.freshness",
+            "stale_result.missing_stale_freshness",
+        ));
+    }
+    if let Some(ghost_text) = &result.ghost_text {
+        validate_inline_prediction_ghost_text(ghost_text)?;
+    }
+    if let Some(refusal) = &result.refusal {
+        validate_assisted_ai_audit_string(
+            "inline_prediction.result.refusal.reason_code",
+            &refusal.reason_code,
+        )?;
+        validate_assisted_ai_audit_string(
+            "inline_prediction.result.refusal.label",
+            &refusal.label,
+        )?;
+        for reason in &refusal.reasons {
+            validate_assisted_ai_audit_string("inline_prediction.result.refusal.reasons", reason)?;
+        }
+    }
+    Ok(())
+}
+
+/// Builds and validates an inline prediction projection from result metadata.
+pub fn inline_prediction_projection_from_results(
+    projection_id: impl Into<String>,
+    workspace_id: WorkspaceId,
+    buffer_id: BufferId,
+    active_request_id: Option<InlinePredictionRequestId>,
+    results: Vec<InlinePredictionResult>,
+    generated_at: TimestampMillis,
+    schema_version: u16,
+) -> Result<InlinePredictionProjection, AssistedAiContractError> {
+    let result_count = results.len() as u32;
+    let available_count = results
+        .iter()
+        .filter(|result| result.state == InlinePredictionResultState::Available)
+        .count() as u32;
+    let stale_count = results
+        .iter()
+        .filter(|result| {
+            result.state == InlinePredictionResultState::Stale
+                || result.freshness.state == InlinePredictionFreshnessState::Stale
+        })
+        .count() as u32;
+    let refusal_count = results
+        .iter()
+        .filter(|result| {
+            result.state == InlinePredictionResultState::Refused || result.refusal.is_some()
+        })
+        .count() as u32;
+    let provider_invocation = results
+        .iter()
+        .map(|result| result.provider.invocation_state)
+        .find(|state| *state != AssistedAiProviderInvocationState::NotEncoded)
+        .unwrap_or(AssistedAiProviderInvocationState::NotEncoded);
+    let projection = InlinePredictionProjection {
+        projection_id: projection_id.into(),
+        workspace_id,
+        buffer_id,
+        active_request_id,
+        results,
+        result_count,
+        available_count,
+        stale_count,
+        refusal_count,
+        provider_invocation,
+        generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version,
+    };
+    validate_inline_prediction_projection(&projection)?;
+    Ok(projection)
+}
+
+/// Validates an inline prediction projection.
+pub fn validate_inline_prediction_projection(
+    projection: &InlinePredictionProjection,
+) -> Result<(), AssistedAiContractError> {
+    validate_inline_prediction_schema(
+        "inline_prediction.projection.schema_version",
+        projection.schema_version,
+    )?;
+    validate_inline_prediction_redaction(
+        "inline_prediction.projection.redaction_hints",
+        &projection.redaction_hints,
+    )?;
+    validate_assisted_ai_audit_string(
+        "inline_prediction.projection.projection_id",
+        &projection.projection_id,
+    )?;
+    if let Some(request_id) = &projection.active_request_id {
+        validate_assisted_ai_audit_string(
+            "inline_prediction.projection.active_request_id",
+            &request_id.0,
+        )?;
+    }
+    for result in &projection.results {
+        validate_inline_prediction_result(result)?;
+    }
+    let available_count = projection
+        .results
+        .iter()
+        .filter(|result| result.state == InlinePredictionResultState::Available)
+        .count() as u32;
+    let stale_count = projection
+        .results
+        .iter()
+        .filter(|result| {
+            result.state == InlinePredictionResultState::Stale
+                || result.freshness.state == InlinePredictionFreshnessState::Stale
+        })
+        .count() as u32;
+    let refusal_count = projection
+        .results
+        .iter()
+        .filter(|result| {
+            result.state == InlinePredictionResultState::Refused || result.refusal.is_some()
+        })
+        .count() as u32;
+    if projection.result_count != projection.results.len() as u32
+        || projection.available_count != available_count
+        || projection.stale_count != stale_count
+        || projection.refusal_count != refusal_count
+    {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.projection.counts",
+            "projection.count_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates an inline prediction lifecycle command.
+pub fn validate_inline_prediction_lifecycle_command(
+    command: &InlinePredictionLifecycleCommand,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(command.correlation_id, command.causality_id)?;
+    if command.event_sequence.0 == 0 {
+        return Err(AssistedAiContractError::ZeroEventSequence);
+    }
+    validate_inline_prediction_schema(
+        "inline_prediction.lifecycle.schema_version",
+        command.schema_version,
+    )?;
+    validate_inline_prediction_redaction(
+        "inline_prediction.lifecycle.redaction_hints",
+        &command.redaction_hints,
+    )?;
+    validate_assisted_ai_audit_string(
+        "inline_prediction.lifecycle.request_id",
+        &command.request_id.0,
+    )?;
+    if let Some(result_id) = &command.result_id {
+        validate_assisted_ai_audit_string("inline_prediction.lifecycle.result_id", &result_id.0)?;
+    }
+    for label in &command.reason_labels {
+        validate_assisted_ai_audit_string("inline_prediction.lifecycle.reason_labels", label)?;
+    }
+    match command.action {
+        InlinePredictionLifecycleAction::Cancel => {
+            let Some(token) = command.cancellation_token else {
+                return Err(inline_prediction_invalid(
+                    "inline_prediction.lifecycle.cancellation_token",
+                    "cancel.missing_cancellation_token",
+                ));
+            };
+            validate_inline_prediction_uuid(
+                "inline_prediction.lifecycle.cancellation_token",
+                token.0,
+            )?;
+        }
+        InlinePredictionLifecycleAction::Dismiss => {
+            if command.result_id.is_none() {
+                return Err(inline_prediction_invalid(
+                    "inline_prediction.lifecycle.result_id",
+                    "dismiss.missing_result_id",
+                ));
+            }
+            let Some(dismissal_id) = command.dismissal_id else {
+                return Err(inline_prediction_invalid(
+                    "inline_prediction.lifecycle.dismissal_id",
+                    "dismiss.missing_dismissal_id",
+                ));
+            };
+            validate_inline_prediction_uuid(
+                "inline_prediction.lifecycle.dismissal_id",
+                dismissal_id.0,
+            )?;
+        }
+        InlinePredictionLifecycleAction::Accept => {
+            if command.result_id.is_none() {
+                return Err(inline_prediction_invalid(
+                    "inline_prediction.lifecycle.result_id",
+                    "accept.missing_result_id",
+                ));
+            }
+            let Some(acceptance_id) = command.acceptance_id else {
+                return Err(inline_prediction_invalid(
+                    "inline_prediction.lifecycle.acceptance_id",
+                    "accept.missing_acceptance_id",
+                ));
+            };
+            validate_inline_prediction_uuid(
+                "inline_prediction.lifecycle.acceptance_id",
+                acceptance_id.0,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Validates delegated-task readiness/audit linkage metadata without allowing runtime activation.
 pub fn validate_delegated_task_audit_linkage_record(
     record: &DelegatedTaskAuditLinkageRecord,
@@ -10634,6 +10938,108 @@ fn assisted_ai_forbidden_audit_marker(value: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+}
+
+fn validate_inline_prediction_schema(
+    field: &str,
+    schema_version: u16,
+) -> Result<(), AssistedAiContractError> {
+    if schema_version == 0 {
+        return Err(inline_prediction_invalid(field, "schema.zero"));
+    }
+    Ok(())
+}
+
+fn validate_inline_prediction_redaction(
+    field: &str,
+    redaction_hints: &[RedactionHint],
+) -> Result<(), AssistedAiContractError> {
+    if redaction_hints.is_empty() || redaction_hints.contains(&RedactionHint::None) {
+        return Err(inline_prediction_invalid(
+            field,
+            "redaction.not_metadata_only",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_inline_prediction_freshness(
+    freshness: &InlinePredictionFreshness,
+) -> Result<(), AssistedAiContractError> {
+    validate_inline_prediction_schema(
+        "inline_prediction.freshness.schema_version",
+        freshness.schema_version,
+    )?;
+    if freshness.state == InlinePredictionFreshnessState::Fresh
+        && !freshness.stale_reasons.is_empty()
+    {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.freshness.stale_reasons",
+            "freshness.fresh_has_stale_reasons",
+        ));
+    }
+    if freshness.state == InlinePredictionFreshnessState::Stale
+        && freshness.stale_reasons.is_empty()
+    {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.freshness.stale_reasons",
+            "freshness.stale_missing_reasons",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_inline_prediction_ghost_text(
+    ghost_text: &InlinePredictionGhostText,
+) -> Result<(), AssistedAiContractError> {
+    if ghost_text.text.is_empty() {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.ghost_text.text",
+            "ghost_text.empty",
+        ));
+    }
+    if ghost_text.byte_len != ghost_text.text.len() as u32 {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.ghost_text.byte_len",
+            "ghost_text.byte_len_mismatch",
+        ));
+    }
+    if ghost_text.byte_len > INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.ghost_text.byte_len",
+            "ghost_text.exceeds_protocol_bound",
+        ));
+    }
+    let line_count = ghost_text
+        .text
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count() as u32
+        + 1;
+    if ghost_text.line_count != line_count {
+        return Err(inline_prediction_invalid(
+            "inline_prediction.ghost_text.line_count",
+            "ghost_text.line_count_mismatch",
+        ));
+    }
+    validate_assisted_ai_audit_fingerprint(
+        "inline_prediction.ghost_text.text_fingerprint",
+        &ghost_text.text_fingerprint,
+    )
+}
+
+fn validate_inline_prediction_uuid(field: &str, uuid: Uuid) -> Result<(), AssistedAiContractError> {
+    if uuid == Uuid::nil() {
+        return Err(inline_prediction_invalid(field, "uuid.nil"));
+    }
+    Ok(())
+}
+
+fn inline_prediction_invalid(field: &str, reason: &str) -> AssistedAiContractError {
+    AssistedAiContractError::NonMetadataOnlyAuditRecord {
+        field: field.to_string(),
+        reason: reason.to_string(),
+    }
 }
 
 fn validate_delegated_task_preview_link(
@@ -11396,6 +11802,10 @@ pub fn delegated_task_projection_from_plan_contracts(
         .iter()
         .filter(|row| row.readiness == DelegatedTaskPlanReadinessStatus::Refused)
         .count() as u32;
+    let chat_messages = Vec::new();
+    let context_citations = Vec::new();
+    let proposal_reviews = Vec::new();
+    let tool_permission_requests = Vec::new();
 
     DelegatedTaskProjection {
         projection_id: projection_id.into(),
@@ -11415,6 +11825,14 @@ pub fn delegated_task_projection_from_plan_contracts(
             "outputs.must_be_proposals_only".to_string(),
         ],
         runtime_activation: DelegatedTaskRuntimeActivationState::NotEncoded,
+        chat_message_count: chat_messages.len() as u32,
+        context_citation_count: context_citations.len() as u32,
+        proposal_review_count: proposal_reviews.len() as u32,
+        tool_permission_request_count: tool_permission_requests.len() as u32,
+        chat_messages,
+        context_citations,
+        proposal_reviews,
+        tool_permission_requests,
         generated_at,
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version,
@@ -14907,6 +15325,115 @@ pub struct LanguageProblemProjection {
     pub schema_version: u16,
 }
 
+/// Metadata-only quick-fix row derived from a projected diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageQuickFixProjection {
+    /// Stable action identifier selected by UI command dispatch.
+    pub action_id: String,
+    /// Bounded display title.
+    pub title: String,
+    /// Quick-fix kind label, such as `quickfix.diagnostic`.
+    pub kind_label: String,
+    /// Diagnostic code associated with this quick fix when known.
+    pub problem_code_label: Option<String>,
+    /// Diagnostic range associated with this quick fix when disclosure is allowed.
+    pub problem_range: Option<ProtocolTextRange>,
+    /// Diagnostic severity associated with this quick fix.
+    pub severity: ProtocolDiagnosticSeverity,
+    /// Optional source label, such as an LSP server or lexical indexer.
+    pub source_label: Option<String>,
+    /// Proposal identifier after a preview has been created for this quick fix.
+    pub proposal_id: Option<ProposalId>,
+    /// Redaction hints for the row.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Quick-fix row schema version.
+    pub schema_version: u16,
+}
+
+/// Breadcrumb row for the active document path and enclosing symbol chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageBreadcrumbProjection {
+    /// Stable breadcrumb identifier.
+    pub breadcrumb_id: String,
+    /// Bounded display label.
+    pub label: String,
+    /// Symbol or path kind label.
+    pub kind_label: String,
+    /// Range associated with the breadcrumb when known.
+    pub range: Option<ProtocolTextRange>,
+    /// Display depth in the breadcrumb chain.
+    pub depth: u16,
+    /// Source used to derive the breadcrumb, such as an LSP server or lexical indexer.
+    pub source_label: String,
+    /// Breadcrumb row schema version.
+    pub schema_version: u16,
+}
+
+/// Sticky scope header row for the active editor viewport/cursor position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageStickyScopeProjection {
+    /// Stable sticky scope identifier.
+    pub scope_id: String,
+    /// Bounded display label.
+    pub label: String,
+    /// Symbol kind label.
+    pub kind_label: String,
+    /// Range associated with the scope when known.
+    pub range: Option<ProtocolTextRange>,
+    /// Display depth in the sticky scope stack.
+    pub depth: u16,
+    /// Whether this is the innermost active scope.
+    pub active: bool,
+    /// Source used to derive the scope, such as an LSP server or lexical indexer.
+    pub source_label: String,
+    /// Sticky scope row schema version.
+    pub schema_version: u16,
+}
+
+/// Inlay hint row for projection-only editor decoration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageInlayHintProjection {
+    /// Stable inlay hint identifier.
+    pub hint_id: String,
+    /// Bounded display label.
+    pub label: String,
+    /// Inlay hint kind label, such as `symbol-kind`.
+    pub kind_label: String,
+    /// Position where the hint should be displayed.
+    pub position: TextCoordinate,
+    /// Related symbol range when known.
+    pub range: Option<ProtocolTextRange>,
+    /// Whether a leading visual spacer should be rendered.
+    pub padding_left: bool,
+    /// Whether a trailing visual spacer should be rendered.
+    pub padding_right: bool,
+    /// Source used to derive the hint, such as an LSP server or lexical indexer.
+    pub source_label: String,
+    /// Inlay hint row schema version.
+    pub schema_version: u16,
+}
+
+/// Code lens row for projection-only editor actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageCodeLensProjection {
+    /// Stable code lens identifier.
+    pub lens_id: String,
+    /// Bounded display title.
+    pub title: String,
+    /// Command label shown for the lens.
+    pub command_label: String,
+    /// Code lens kind label, such as `references`.
+    pub kind_label: String,
+    /// Range associated with the lens when known.
+    pub range: Option<ProtocolTextRange>,
+    /// Optional metadata-only data label.
+    pub data_label: Option<String>,
+    /// Source used to derive the lens, such as an LSP server or lexical indexer.
+    pub source_label: String,
+    /// Code lens row schema version.
+    pub schema_version: u16,
+}
+
 /// Bounded hover projection for the active symbol or cursor position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageHoverProjection {
@@ -15000,6 +15527,16 @@ pub struct LanguageToolingProjection {
     pub status_message: String,
     /// Diagnostic/problem rows.
     pub problems: Vec<LanguageProblemProjection>,
+    /// Quick-fix rows derived from diagnostic/problem rows.
+    pub quick_fixes: Vec<LanguageQuickFixProjection>,
+    /// Breadcrumb rows for the active cursor position.
+    pub breadcrumbs: Vec<LanguageBreadcrumbProjection>,
+    /// Sticky scope rows for the active cursor position.
+    pub sticky_scopes: Vec<LanguageStickyScopeProjection>,
+    /// Inlay hint rows for the active buffer.
+    pub inlay_hints: Vec<LanguageInlayHintProjection>,
+    /// Code lens rows for the active buffer.
+    pub code_lenses: Vec<LanguageCodeLensProjection>,
     /// Current hover result.
     pub hover: Option<LanguageHoverProjection>,
     /// Current completion rows.
@@ -15034,6 +15571,11 @@ impl LanguageToolingProjection {
             status: LanguageToolingStatusKind::Idle,
             status_message: "Language tooling idle".to_string(),
             problems: Vec::new(),
+            quick_fixes: Vec::new(),
+            breadcrumbs: Vec::new(),
+            sticky_scopes: Vec::new(),
+            inlay_hints: Vec::new(),
+            code_lenses: Vec::new(),
             hover: None,
             completions: Vec::new(),
             definitions: Vec::new(),
@@ -17353,6 +17895,300 @@ pub struct DebugSessionId(pub String);
 #[serde(transparent)]
 pub struct DebugBreakpointId(pub String);
 
+/// Debug launch configuration identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DebugConfigurationId(pub String);
+
+/// Debug watch expression identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DebugWatchId(pub String);
+
+/// DAP message type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DapMessageType {
+    /// Request message.
+    Request,
+    /// Response message.
+    Response,
+    /// Event message.
+    Event,
+}
+
+/// Debug Adapter Protocol message with JSON body retained as protocol metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DapProtocolMessage {
+    /// Sequence number from the sender.
+    pub seq: u64,
+    /// Message type.
+    #[serde(rename = "type")]
+    pub message_type: DapMessageType,
+    /// Request or response command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Event name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// Sequence number of the request answered by a response.
+    #[serde(rename = "request_seq", skip_serializing_if = "Option::is_none")]
+    pub request_seq: Option<u64>,
+    /// Response success flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+    /// Optional adapter message label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Request arguments or event payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    /// Response body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+}
+
+impl DapProtocolMessage {
+    /// Build a DAP request message.
+    pub fn request(seq: u64, command: impl Into<String>, arguments: serde_json::Value) -> Self {
+        Self {
+            seq,
+            message_type: DapMessageType::Request,
+            command: Some(command.into()),
+            event: None,
+            request_seq: None,
+            success: None,
+            message: None,
+            arguments: Some(arguments),
+            body: None,
+        }
+    }
+
+    /// Build a DAP response message.
+    pub fn response(
+        seq: u64,
+        request_seq: u64,
+        command: impl Into<String>,
+        success: bool,
+        body: serde_json::Value,
+    ) -> Self {
+        Self {
+            seq,
+            message_type: DapMessageType::Response,
+            command: Some(command.into()),
+            event: None,
+            request_seq: Some(request_seq),
+            success: Some(success),
+            message: None,
+            arguments: None,
+            body: Some(body),
+        }
+    }
+
+    /// Build a DAP event message.
+    pub fn event(seq: u64, event: impl Into<String>, body: serde_json::Value) -> Self {
+        Self {
+            seq,
+            message_type: DapMessageType::Event,
+            command: None,
+            event: Some(event.into()),
+            request_seq: None,
+            success: None,
+            message: None,
+            arguments: Some(body),
+            body: None,
+        }
+    }
+}
+
+/// Matched DAP response metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DapMatchedResponse {
+    /// Request sequence matched by this response.
+    pub request_seq: u64,
+    /// Matched command.
+    pub command: String,
+    /// Response success flag.
+    pub success: bool,
+}
+
+/// Minimal deterministic DAP client state for sequence tracking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DapClientState {
+    session_id: DebugSessionId,
+    next_seq: u64,
+    pending: HashMap<u64, String>,
+}
+
+impl DapClientState {
+    /// Construct a DAP client state for one debug session.
+    pub fn new(session_id: DebugSessionId) -> Self {
+        Self {
+            session_id,
+            next_seq: 1,
+            pending: HashMap::new(),
+        }
+    }
+
+    /// Return the session identifier associated with this DAP client.
+    pub fn session_id(&self) -> &DebugSessionId {
+        &self.session_id
+    }
+
+    /// Number of pending requests awaiting responses.
+    pub fn pending_request_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Prepare a sequenced request and record it as pending.
+    pub fn prepare_request(
+        &mut self,
+        command: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> ProtocolResult<DapProtocolMessage> {
+        let command = command.into();
+        if command.trim().is_empty() {
+            return Err(ProtocolError {
+                code: "dap_request_invalid".to_string(),
+                message: "DAP request command must be non-empty".to_string(),
+            });
+        }
+        let seq = self.next_seq.max(1);
+        self.next_seq = self.next_seq.saturating_add(1).max(1);
+        self.pending.insert(seq, command.clone());
+        Ok(DapProtocolMessage::request(seq, command, arguments))
+    }
+
+    /// Match a DAP response to a previously prepared request.
+    pub fn match_response(
+        &mut self,
+        response: DapProtocolMessage,
+    ) -> ProtocolResult<DapMatchedResponse> {
+        if response.message_type != DapMessageType::Response {
+            return Err(ProtocolError {
+                code: "dap_response_invalid".to_string(),
+                message: "DAP message is not a response".to_string(),
+            });
+        }
+        let request_seq = response.request_seq.ok_or_else(|| ProtocolError {
+            code: "dap_response_invalid".to_string(),
+            message: "DAP response is missing request_seq".to_string(),
+        })?;
+        let expected = self
+            .pending
+            .remove(&request_seq)
+            .ok_or_else(|| ProtocolError {
+                code: "dap_response_unmatched".to_string(),
+                message: format!("DAP response has no pending request for seq {request_seq}"),
+            })?;
+        let actual = response.command.unwrap_or_default();
+        if actual != expected {
+            return Err(ProtocolError {
+                code: "dap_response_command_mismatch".to_string(),
+                message: format!(
+                    "DAP response command `{actual}` did not match pending `{expected}`"
+                ),
+            });
+        }
+        Ok(DapMatchedResponse {
+            request_seq,
+            command: expected,
+            success: response.success.unwrap_or(false),
+        })
+    }
+}
+
+/// Encode a DAP message using the required `Content-Length` framing.
+pub fn encode_dap_message(message: &DapProtocolMessage) -> ProtocolResult<Vec<u8>> {
+    validate_dap_protocol_message(message)?;
+    let body = serde_json::to_vec(message).map_err(|err| ProtocolError {
+        code: "dap_encode_failed".to_string(),
+        message: format!("encode DAP JSON failed: {err}"),
+    })?;
+    let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    frame.extend(body);
+    Ok(frame)
+}
+
+/// Decode one complete DAP frame.
+pub fn decode_dap_message(frame: &[u8]) -> ProtocolResult<DapProtocolMessage> {
+    let delimiter = b"\r\n\r\n";
+    let Some(header_end) = frame
+        .windows(delimiter.len())
+        .position(|window| window == delimiter)
+    else {
+        return Err(ProtocolError {
+            code: "dap_decode_failed".to_string(),
+            message: "DAP frame is missing header delimiter".to_string(),
+        });
+    };
+    let header = std::str::from_utf8(&frame[..header_end]).map_err(|err| ProtocolError {
+        code: "dap_decode_failed".to_string(),
+        message: format!("DAP header is not ASCII/UTF-8: {err}"),
+    })?;
+    let length = header
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .ok_or_else(|| ProtocolError {
+            code: "dap_decode_failed".to_string(),
+            message: "DAP frame is missing Content-Length".to_string(),
+        })?;
+    let body_start = header_end + delimiter.len();
+    let body_end = body_start
+        .checked_add(length)
+        .ok_or_else(|| ProtocolError {
+            code: "dap_decode_failed".to_string(),
+            message: "DAP content length overflow".to_string(),
+        })?;
+    if frame.len() < body_end {
+        return Err(ProtocolError {
+            code: "dap_decode_failed".to_string(),
+            message: "DAP frame body is shorter than Content-Length".to_string(),
+        });
+    }
+    let message: DapProtocolMessage = serde_json::from_slice(&frame[body_start..body_end])
+        .map_err(|err| ProtocolError {
+            code: "dap_decode_failed".to_string(),
+            message: format!("decode DAP JSON failed: {err}"),
+        })?;
+    validate_dap_protocol_message(&message)?;
+    Ok(message)
+}
+
+fn validate_dap_protocol_message(message: &DapProtocolMessage) -> ProtocolResult<()> {
+    if message.seq == 0 {
+        return Err(ProtocolError {
+            code: "dap_message_invalid".to_string(),
+            message: "DAP message seq must be non-zero".to_string(),
+        });
+    }
+    match message.message_type {
+        DapMessageType::Request if message.command.as_deref().unwrap_or("").trim().is_empty() => {
+            Err(ProtocolError {
+                code: "dap_message_invalid".to_string(),
+                message: "DAP request command must be non-empty".to_string(),
+            })
+        }
+        DapMessageType::Response
+            if message.request_seq.unwrap_or(0) == 0
+                || message.command.as_deref().unwrap_or("").trim().is_empty() =>
+        {
+            Err(ProtocolError {
+                code: "dap_message_invalid".to_string(),
+                message: "DAP response must include request_seq and command".to_string(),
+            })
+        }
+        DapMessageType::Event if message.event.as_deref().unwrap_or("").trim().is_empty() => {
+            Err(ProtocolError {
+                code: "dap_message_invalid".to_string(),
+                message: "DAP event name must be non-empty".to_string(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Test-controller identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -17686,6 +18522,209 @@ pub enum DebugSessionState {
     Exited,
     /// Session failed.
     Failed,
+}
+
+/// Launch request kind for a debug configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DebugLaunchRequestKind {
+    /// Launch a program under the adapter.
+    Launch,
+    /// Attach to an existing program.
+    Attach,
+}
+
+/// Debug stepping operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DebugStepKind {
+    /// Continue execution.
+    Continue,
+    /// Step over the current statement.
+    Over,
+    /// Step into the current statement.
+    Into,
+    /// Step out of the current frame.
+    Out,
+    /// Step backward when the adapter supports reverse execution.
+    Back,
+}
+
+/// Debug console entry category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DebugConsoleCategory {
+    /// Adapter lifecycle or protocol metadata.
+    Adapter,
+    /// Program stdout metadata.
+    Stdout,
+    /// Program stderr metadata.
+    Stderr,
+    /// Evaluation output metadata.
+    Evaluation,
+}
+
+/// Persisted breakpoint record independent from any live debug session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugBreakpointRecord {
+    /// Stable breakpoint identifier.
+    pub breakpoint_id: DebugBreakpointId,
+    /// Owning workspace.
+    pub workspace_id: WorkspaceId,
+    /// Live session that last verified this breakpoint, if any.
+    pub session_id: Option<DebugSessionId>,
+    /// Source path.
+    pub path: CanonicalPath,
+    /// Source range.
+    pub range: ProtocolTextRange,
+    /// Whether the breakpoint is enabled.
+    pub enabled: bool,
+    /// Conditional breakpoint expression label.
+    pub condition: Option<String>,
+    /// Hit-count condition label.
+    pub hit_condition: Option<String>,
+    /// Logpoint message label.
+    pub log_message: Option<String>,
+    /// Whether the adapter verified the breakpoint.
+    pub verified: bool,
+    /// Verification/failure message.
+    pub message: Option<String>,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+impl DebugBreakpointRecord {
+    /// Redaction hints implied by persisted debug breakpoint metadata.
+    pub fn redaction_hints(&self) -> Vec<RedactionHint> {
+        vec![RedactionHint::MetadataOnly]
+    }
+}
+
+/// Debug launch configuration discovered from project metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugLaunchConfiguration {
+    /// Stable configuration identifier.
+    pub configuration_id: DebugConfigurationId,
+    /// Owning workspace.
+    pub workspace_id: WorkspaceId,
+    /// Display name.
+    pub name: String,
+    /// Adapter type such as `lldb-dap`.
+    pub adapter_type: String,
+    /// Launch or attach request kind.
+    pub request: DebugLaunchRequestKind,
+    /// Display-safe program label.
+    pub program_label: String,
+    /// Working directory.
+    pub cwd: CanonicalPath,
+    /// Cargo package name, when discovered from Cargo metadata.
+    pub cargo_package: Option<String>,
+    /// Cargo target name, when discovered from Cargo metadata.
+    pub cargo_target: Option<String>,
+    /// Cargo command arguments required before launch.
+    pub cargo_args: Vec<String>,
+    /// Whether the launch should stop on entry.
+    pub stop_on_entry: bool,
+    /// Whether this configuration is deterministic/manual eligible.
+    pub deterministic: bool,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Request passed to a debug adapter fixture or host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugAdapterLaunchRequest {
+    /// Owning workspace.
+    pub workspace_id: WorkspaceId,
+    /// Configuration selected by the user.
+    pub configuration_id: DebugConfigurationId,
+    /// Adapter type.
+    pub adapter_type: String,
+    /// Breakpoints to register before launch.
+    pub breakpoints: Vec<DebugBreakpointRecord>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only debug adapter audit record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugAdapterAuditRecord {
+    /// Debug session identifier.
+    pub session_id: DebugSessionId,
+    /// Debug session state.
+    pub state: DebugSessionState,
+    /// Adapter type.
+    pub adapter_type: String,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    pub causality_id: CausalityId,
+    /// Metadata-only summary.
+    pub metadata_summary: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Debug watch expression projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugWatchExpression {
+    /// Watch identifier.
+    pub watch_id: DebugWatchId,
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Display-safe expression label.
+    pub expression_label: String,
+    /// Redacted value label.
+    pub value_label: String,
+    /// Optional type label.
+    pub type_label: Option<String>,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Debug inline value projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugInlineValue {
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Source path.
+    pub path: CanonicalPath,
+    /// Source range.
+    pub range: ProtocolTextRange,
+    /// Display-safe expression label.
+    pub expression_label: String,
+    /// Redacted value label.
+    pub value_label: String,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Debug console projection row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugConsoleEntry {
+    /// Owning session.
+    pub session_id: DebugSessionId,
+    /// Console category.
+    pub category: DebugConsoleCategory,
+    /// Display-safe message label.
+    pub message_label: String,
+    /// Event sequence.
+    pub sequence: EventSequence,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// DTO schema version.
+    pub schema_version: u16,
 }
 
 /// Debug breakpoint projection.
@@ -18780,6 +19819,14 @@ impl ProtocolError {
             message: message.into(),
         }
     }
+
+    /// Creates a protocol validation error with the provided human-readable message.
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self {
+            code: "validation".to_string(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Shared protocol result.
@@ -19477,6 +20524,17 @@ pub enum StorageRepositoryRequest {
     SaveRemoteTransportAuditSummary(RemoteTransportAuditSummary),
     /// Save metadata-only Phase 8 terminal audit record.
     SaveTerminalAuditRecord(TerminalAuditRecord),
+    /// Save persisted debug breakpoint metadata.
+    SaveDebugBreakpointRecord(DebugBreakpointRecord),
+    /// Delete a persisted debug breakpoint by workspace and breakpoint id.
+    DeleteDebugBreakpointRecord {
+        /// Workspace identifier.
+        workspace_id: WorkspaceId,
+        /// Breakpoint identifier.
+        breakpoint_id: DebugBreakpointId,
+    },
+    /// Save metadata-only debug adapter audit record.
+    SaveDebugAdapterAuditRecord(DebugAdapterAuditRecord),
     /// Save metadata-only hosted telemetry spool record.
     SaveHostedTelemetrySpoolRecord(HostedTelemetrySpoolRecord),
     /// Save metadata-only raw-source retention access audit.
@@ -19543,6 +20601,18 @@ pub enum StorageRepositoryRequest {
         /// Event sequence for the audit record.
         event_sequence: EventSequence,
     },
+    /// Read persisted debug breakpoint records for a workspace.
+    ReadDebugBreakpointRecords {
+        /// Workspace identifier.
+        workspace_id: WorkspaceId,
+    },
+    /// Read metadata-only debug adapter audit record.
+    ReadDebugAdapterAuditRecord {
+        /// Debug session identifier.
+        session_id: DebugSessionId,
+        /// Event sequence for the audit record.
+        event_sequence: EventSequence,
+    },
     /// Read metadata-only hosted telemetry spool record by id.
     ReadHostedTelemetrySpoolRecord(String),
     /// Read metadata-only raw-source retention access audit.
@@ -19599,6 +20669,10 @@ pub enum StorageRepositoryResponse {
     RemoteTransportAuditSummary(Box<Option<RemoteTransportAuditSummary>>),
     /// Metadata-only Phase 8 terminal audit record.
     TerminalAuditRecord(Box<Option<TerminalAuditRecord>>),
+    /// Persisted debug breakpoint records.
+    DebugBreakpointRecords(Vec<DebugBreakpointRecord>),
+    /// Metadata-only debug adapter audit record.
+    DebugAdapterAuditRecord(Box<Option<DebugAdapterAuditRecord>>),
     /// Metadata-only hosted telemetry spool record.
     HostedTelemetrySpoolRecord(Box<Option<HostedTelemetrySpoolRecord>>),
     /// Metadata-only raw-source retention access audit.
@@ -20142,6 +21216,115 @@ pub fn validate_terminal_audit_record(record: &TerminalAuditRecord) -> ProtocolR
         return Err(ProtocolError {
             code: "terminal_audit_invalid".to_string(),
             message: "terminal audit metadata contains forbidden raw output marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate the persisted debug breakpoint storage identity.
+pub fn validate_debug_breakpoint_identity(
+    workspace_id: WorkspaceId,
+    breakpoint_id: &DebugBreakpointId,
+) -> ProtocolResult<()> {
+    if workspace_id.0 == 0 || breakpoint_id.0.trim().is_empty() {
+        return Err(ProtocolError {
+            code: "debug_breakpoint_invalid".to_string(),
+            message: "debug breakpoint requires non-empty workspace and breakpoint identity"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate persisted debug breakpoint metadata.
+pub fn validate_debug_breakpoint_record(record: &DebugBreakpointRecord) -> ProtocolResult<()> {
+    validate_debug_breakpoint_identity(record.workspace_id, &record.breakpoint_id)?;
+    if record.path.0.trim().is_empty()
+        || record.correlation_id.0 == 0
+        || record.causality_id.0 == Uuid::nil()
+        || record.sequence.0 == 0
+        || record.schema_version == 0
+    {
+        return Err(ProtocolError {
+            code: "debug_breakpoint_invalid".to_string(),
+            message: "debug breakpoint requires non-empty identity and event metadata".to_string(),
+        });
+    }
+    for label in [
+        record.condition.as_deref(),
+        record.hit_condition.as_deref(),
+        record.log_message.as_deref(),
+        record.message.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if contains_forbidden_phase8_payload(label) {
+            return Err(ProtocolError {
+                code: "debug_breakpoint_invalid".to_string(),
+                message: "debug breakpoint metadata contains forbidden raw payload marker"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a debug launch configuration.
+pub fn validate_debug_launch_configuration(
+    config: &DebugLaunchConfiguration,
+) -> ProtocolResult<()> {
+    if config.configuration_id.0.trim().is_empty()
+        || config.workspace_id.0 == 0
+        || config.name.trim().is_empty()
+        || config.adapter_type.trim().is_empty()
+        || config.program_label.trim().is_empty()
+        || config.cwd.0.trim().is_empty()
+        || config.schema_version == 0
+    {
+        return Err(ProtocolError {
+            code: "debug_launch_config_invalid".to_string(),
+            message: "debug launch configuration is missing required metadata".to_string(),
+        });
+    }
+    if contains_forbidden_phase8_payload(&config.program_label)
+        || config
+            .cargo_args
+            .iter()
+            .any(|arg| contains_forbidden_phase8_payload(arg))
+    {
+        return Err(ProtocolError {
+            code: "debug_launch_config_invalid".to_string(),
+            message: "debug launch configuration contains forbidden raw payload marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate metadata-only debug adapter audit records.
+pub fn validate_debug_adapter_audit_record(record: &DebugAdapterAuditRecord) -> ProtocolResult<()> {
+    if record.session_id.0.trim().is_empty()
+        || record.adapter_type.trim().is_empty()
+        || record.event_sequence.0 == 0
+        || record.correlation_id.0 == 0
+        || record.causality_id.0 == Uuid::nil()
+        || record.schema_version == 0
+        || !record
+            .redaction_hints
+            .contains(&RedactionHint::MetadataOnly)
+        || record.redaction_hints.contains(&RedactionHint::None)
+    {
+        return Err(ProtocolError {
+            code: "debug_adapter_audit_invalid".to_string(),
+            message: "debug adapter audit must be metadata-only with valid event identity"
+                .to_string(),
+        });
+    }
+    if contains_forbidden_phase8_payload(&record.metadata_summary) {
+        return Err(ProtocolError {
+            code: "debug_adapter_audit_invalid".to_string(),
+            message: "debug adapter audit metadata contains forbidden raw payload marker"
+                .to_string(),
         });
     }
     Ok(())
@@ -21075,6 +22258,1521 @@ pub trait ProjectInfoPort {
         &self,
         event: EditorTransactionEvent,
     ) -> Result<(), ProjectServiceError>;
+}
+
+// -----------------------------------------------------------------------------
+// Automate / MCP Contracts
+// -----------------------------------------------------------------------------
+
+/// Stable MCP server identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpServerId(pub String);
+
+/// Stable MCP tool name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpToolName(pub String);
+
+/// Stable MCP resource URI.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpResourceUri(pub String);
+
+/// Stable MCP prompt name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpPromptName(pub String);
+
+/// Stable Automate decision identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowDecisionId(pub String);
+
+/// Stable Automate risk monitor identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowRiskMonitorId(pub String);
+
+/// Stable Automate kill-switch identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowKillSwitchId(pub String);
+
+/// MCP transport families supported by the Automate client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum McpTransportKind {
+    /// Local process connected through newline-delimited JSON-RPC over stdio.
+    Stdio,
+    /// Remote or loopback MCP endpoint using Streamable HTTP JSON-RPC.
+    StreamableHttp,
+}
+
+/// MCP primitive family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum McpPrimitiveKind {
+    /// Tool primitive.
+    Tool,
+    /// Resource primitive.
+    Resource,
+    /// Prompt primitive.
+    Prompt,
+}
+
+/// MCP list-change notification family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum McpListChangedKind {
+    /// `notifications/tools/list_changed`.
+    Tools,
+    /// `notifications/resources/list_changed`.
+    Resources,
+    /// `notifications/prompts/list_changed`.
+    Prompts,
+}
+
+impl McpListChangedKind {
+    /// JSON-RPC method emitted by MCP servers for this list-change notification.
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::Tools => "notifications/tools/list_changed",
+            Self::Resources => "notifications/resources/list_changed",
+            Self::Prompts => "notifications/prompts/list_changed",
+        }
+    }
+}
+
+/// Metadata-safe JSON-RPC 2.0 MCP request or notification envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpJsonRpcEnvelope {
+    /// JSON-RPC protocol version. Must be `2.0`.
+    pub jsonrpc: String,
+    /// Request identifier. `None` means this envelope is a notification.
+    pub id: Option<String>,
+    /// JSON-RPC method.
+    pub method: String,
+    /// JSON-RPC params. Callers must keep raw source data out of persisted projections.
+    pub params: Value,
+    /// Envelope schema version.
+    pub schema_version: u16,
+}
+
+impl McpJsonRpcEnvelope {
+    /// Build a JSON-RPC 2.0 request envelope.
+    pub fn request(id: impl Into<String>, method: impl Into<String>, params: Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id: Some(id.into()),
+            method: method.into(),
+            params,
+            schema_version: 1,
+        }
+    }
+
+    /// Build a JSON-RPC 2.0 notification envelope.
+    pub fn notification(method: impl Into<String>, params: Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: method.into(),
+            params,
+            schema_version: 1,
+        }
+    }
+}
+
+/// MCP server descriptor projected to Automate surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerDescriptor {
+    /// Stable MCP server id.
+    pub server_id: McpServerId,
+    /// Transport family.
+    pub transport_kind: McpTransportKind,
+    /// Display-safe server label.
+    pub display_label: String,
+    /// Display-safe endpoint or command label.
+    pub endpoint_label: String,
+    /// Whether tool-list change notifications are supported.
+    pub tools_list_changed: bool,
+    /// Whether resource-list change notifications are supported.
+    pub resources_list_changed: bool,
+    /// Whether prompt-list change notifications are supported.
+    pub prompts_list_changed: bool,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// MCP tool descriptor projected to Automate surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpToolDescriptor {
+    /// Owning server id.
+    pub server_id: McpServerId,
+    /// Tool name.
+    pub name: McpToolName,
+    /// Display-safe description label.
+    pub description_label: String,
+    /// Hash of the input schema metadata.
+    pub input_schema_hash: FileFingerprint,
+    /// Tool risk label.
+    pub risk_label: ProposalRiskLabel,
+    /// Required permission profile.
+    pub required_permission_profile: DelegatedTaskToolPermissionProfile,
+    /// Permission action class.
+    pub action_class: PermissionBudgetActionClass,
+    /// Required capability.
+    pub capability: CapabilityId,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// MCP resource descriptor projected to Automate surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpResourceDescriptor {
+    /// Owning server id.
+    pub server_id: McpServerId,
+    /// Resource URI.
+    pub uri: McpResourceUri,
+    /// Display-safe resource name.
+    pub name_label: String,
+    /// Display-safe MIME type.
+    pub mime_type_label: String,
+    /// Whether resource-update subscriptions are supported.
+    pub subscribable: bool,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// MCP prompt descriptor projected to Automate surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpPromptDescriptor {
+    /// Owning server id.
+    pub server_id: McpServerId,
+    /// Prompt name.
+    pub name: McpPromptName,
+    /// Display-safe description label.
+    pub description_label: String,
+    /// Display-safe argument labels.
+    pub argument_labels: Vec<String>,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Descriptor schema version.
+    pub schema_version: u16,
+}
+
+/// MCP registry snapshot after Tools/Resources/Prompts discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpRegistrySnapshot {
+    /// Stable registry snapshot id.
+    pub registry_id: String,
+    /// MCP server descriptor.
+    pub server: McpServerDescriptor,
+    /// Tool descriptors.
+    pub tools: Vec<McpToolDescriptor>,
+    /// Resource descriptors.
+    pub resources: Vec<McpResourceDescriptor>,
+    /// Prompt descriptors.
+    pub prompts: Vec<McpPromptDescriptor>,
+    /// Last list-change notification applied to this registry.
+    pub last_notification_kind: Option<McpListChangedKind>,
+    /// Monotonic registry version.
+    pub list_version: u64,
+    /// Snapshot generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Snapshot schema version.
+    pub schema_version: u16,
+}
+
+/// Automate decision-feed entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowDecisionFeedEntry {
+    /// Stable decision id.
+    pub decision_id: LegionWorkflowDecisionId,
+    /// Workflow session id.
+    pub session_id: LegionWorkflowSessionId,
+    /// Optional worker id.
+    pub worker_id: Option<LegionWorkflowWorkerId>,
+    /// Decision kind.
+    pub kind: LegionWorkflowDecisionKind,
+    /// Display-safe summary label.
+    pub summary_label: String,
+    /// Display-safe rationale labels.
+    pub rationale_labels: Vec<String>,
+    /// Risk label.
+    pub risk_label: ProposalRiskLabel,
+    /// Optional linked MCP server.
+    pub mcp_server_id: Option<McpServerId>,
+    /// Optional linked MCP primitive kind.
+    pub mcp_primitive_kind: Option<McpPrimitiveKind>,
+    /// Optional linked permission request id.
+    pub tool_permission_request_id: Option<String>,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+    /// Audit event sequence.
+    pub event_sequence: EventSequence,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Entry schema version.
+    pub schema_version: u16,
+}
+
+/// Automate decision kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LegionWorkflowDecisionKind {
+    /// Supervisor accepted a master directive.
+    SupervisorDirectiveAccepted,
+    /// Worker was scheduled.
+    WorkerScheduled,
+    /// MCP registry changed and was reloaded.
+    McpRegistryReloaded,
+    /// Tool approval was requested.
+    ToolApprovalRequested,
+    /// Tool call was ready after approval.
+    ToolCallReady,
+    /// Tool call executed through an app-owned MCP runtime.
+    ToolCallExecuted,
+    /// Tool call failed after app-owned MCP runtime dispatch.
+    ToolCallFailed,
+    /// Tool call was denied.
+    ToolCallDenied,
+    /// Verification evidence was requested.
+    VerificationRequested,
+    /// Merge readiness was evaluated.
+    MergeReadinessEvaluated,
+    /// Risk monitor halted the fleet.
+    RiskMonitorHalted,
+    /// Hard kill switch was triggered.
+    KillSwitchTriggered,
+}
+
+/// Automate risk monitor state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LegionWorkflowRiskMonitorState {
+    /// Fleet is below configured thresholds.
+    Nominal,
+    /// Fleet is close to one or more configured thresholds.
+    Warning,
+    /// Fleet is halted by a threshold, kill switch, or explicit safety condition.
+    Halted,
+}
+
+/// Automate risk halt reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LegionWorkflowRiskHaltReason {
+    /// High-risk action count reached the halt threshold.
+    HighRiskToolThreshold,
+    /// Denied tool count reached the halt threshold.
+    DeniedToolThreshold,
+    /// MCP registry changed while a tool call was pending.
+    StaleMcpRegistry,
+    /// User-triggered hard kill switch.
+    KillSwitch,
+    /// Prompt-injection risk was detected.
+    PromptInjectionSuspected,
+    /// Tool-poisoning risk was detected.
+    ToolPoisoningSuspected,
+    /// Worker activity matched runaway loop thresholds.
+    RunawayAgentLoop,
+}
+
+/// Automate risk monitor snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowRiskMonitorSnapshot {
+    /// Stable monitor id.
+    pub monitor_id: LegionWorkflowRiskMonitorId,
+    /// Workflow session id.
+    pub session_id: LegionWorkflowSessionId,
+    /// Monitor state.
+    pub state: LegionWorkflowRiskMonitorState,
+    /// Evaluated score.
+    pub risk_score: u32,
+    /// Score threshold that halts the fleet.
+    pub halt_threshold: u32,
+    /// High-risk tool/action count.
+    pub high_risk_action_count: u32,
+    /// Denied tool count.
+    pub denied_tool_count: u32,
+    /// Whether the MCP registry changed while risky work was pending.
+    pub stale_mcp_registry_detected: bool,
+    /// Optional halt reason.
+    pub halt_reason: Option<LegionWorkflowRiskHaltReason>,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Snapshot schema version.
+    pub schema_version: u16,
+}
+
+/// Automate kill-switch state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LegionWorkflowKillSwitchState {
+    /// Kill switch is available but not triggered.
+    Armed,
+    /// Kill switch was triggered and the fleet must remain halted.
+    Triggered,
+}
+
+/// Automate kill-switch projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowKillSwitch {
+    /// Stable kill-switch id.
+    pub kill_switch_id: LegionWorkflowKillSwitchId,
+    /// Workflow session id.
+    pub session_id: LegionWorkflowSessionId,
+    /// Kill-switch state.
+    pub state: LegionWorkflowKillSwitchState,
+    /// Principal that triggered the kill switch.
+    pub triggered_by: Option<PrincipalId>,
+    /// Display-safe reason label.
+    pub reason_label: Option<String>,
+    /// Trigger timestamp.
+    pub triggered_at: Option<TimestampMillis>,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Switch schema version.
+    pub schema_version: u16,
+}
+
+// -----------------------------------------------------------------------------
+// Legion Workflow Contracts
+// -----------------------------------------------------------------------------
+
+/// Stable Legion workflow session identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowSessionId(pub String);
+
+/// Stable Legion workflow worker identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowWorkerId(pub String);
+
+/// Stable Legion workflow dependency-edge identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowDependencyId(pub String);
+
+/// Stable Legion workflow conflict identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowConflictId(pub String);
+
+/// Stable Legion workflow verification gate identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowVerificationGateId(pub String);
+
+/// Stable Legion workflow sign-off identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionWorkflowSignOffId(pub String);
+
+/// Workflow lifecycle state for Legion orchestration metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowState {
+    /// Session has been drafted but not started.
+    Draft,
+    /// Session is planning worker assignments.
+    Planning,
+    /// At least one worker is eligible to run or running.
+    Executing,
+    /// Worker output is being verified.
+    Verifying,
+    /// Session is waiting on explicit approval metadata.
+    WaitingForApproval,
+    /// Session is blocked by a fail-closed gate.
+    Blocked,
+    /// Session has completed with required verification and sign-off metadata.
+    Completed,
+    /// Session failed.
+    Failed,
+    /// Session was cancelled.
+    Cancelled,
+}
+
+/// Worker lifecycle state in Legion orchestration metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowWorkerState {
+    /// Worker is not started.
+    Pending,
+    /// Worker can start after dependency checks.
+    Ready,
+    /// Worker is waiting for a predecessor or explicit route metadata.
+    WaitingForDependency,
+    /// Worker requires provider route approval metadata before it can run.
+    ProviderRouteRequired,
+    /// Worker is running outside this DTO boundary.
+    Running,
+    /// Worker completed and emitted metadata.
+    Completed,
+    /// Worker is blocked.
+    Blocked,
+    /// Worker failed.
+    Failed,
+    /// Worker was cancelled.
+    Cancelled,
+}
+
+/// Role of a worker in Legion orchestration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowWorkerRole {
+    /// Coordinates the workflow.
+    Coordinator,
+    /// Implements a planned slice.
+    Implementer,
+    /// Reviews architecture, security, or product quality.
+    Reviewer,
+    /// Runs or records verification evidence.
+    Verifier,
+    /// Records final sign-off metadata.
+    SignOffOwner,
+    /// Display-safe custom role.
+    Other(String),
+}
+
+/// Model backend represented by a worker assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowModelBackend {
+    /// Local deterministic or local model-backed worker.
+    Local,
+    /// Provider-backed worker routed through assisted-AI consent metadata.
+    ProviderBacked,
+    /// Worker backend is unavailable.
+    Unavailable,
+}
+
+/// Dependency state between workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowDependencyState {
+    /// Dependency is waiting for predecessor output.
+    Pending,
+    /// Dependency was satisfied.
+    Satisfied,
+    /// Dependency was skipped because the predecessor was blocked.
+    SkippedBlocked,
+    /// Dependency failed and blocks successors.
+    Failed,
+}
+
+/// Kind of conflict encountered during workflow execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowConflictKind {
+    /// Two workers report the same metadata target label.
+    SameTarget,
+    /// Main workspace is dirty in a conflicting way.
+    DirtyWorkspace,
+    /// Proposal preconditions are stale.
+    StaleProposal,
+    /// Verification evidence conflicts with expected state.
+    VerificationMismatch,
+}
+
+/// State of a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowConflictState {
+    /// Conflict has not been resolved by app-owned metadata.
+    Unresolved,
+    /// Conflict has been resolved by app-owned metadata.
+    Resolved,
+}
+
+/// State of a verification gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowVerificationGateState {
+    /// Verification evidence has not been supplied.
+    Pending,
+    /// Verification evidence passed.
+    Passed,
+    /// Verification evidence failed.
+    Failed,
+    /// Verification is blocked by environment, policy, or missing data.
+    Blocked,
+}
+
+/// State of a sign-off requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowSignOffState {
+    /// Sign-off has not been supplied.
+    Pending,
+    /// Required reviewer approved.
+    SignedOff,
+    /// Required reviewer rejected.
+    Rejected,
+}
+
+/// Readiness state for an approval-gated merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionWorkflowMergeReadinessState {
+    /// All non-approval gates passed and the workflow is waiting on explicit approval.
+    WaitingForApproval,
+    /// All gates including approval metadata passed; app may present proposal-ready state.
+    Ready,
+    /// One or more fail-closed blockers prevent merge readiness.
+    Blocked,
+}
+
+/// Fail-closed blocker emitted by merge-readiness evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LegionWorkflowMergeReadinessBlocker {
+    /// Session-level validation failed.
+    InvalidSession,
+    /// At least one worker has not reached a terminal completed state.
+    IncompleteWorker,
+    /// No proposal id links the workflow to proposal-mediated mutation.
+    MissingProposal,
+    /// Merge approval metadata is absent.
+    MissingApproval,
+    /// Approval metadata exists but approval has not been granted.
+    ApprovalRequired,
+    /// Main workspace dirty conflict is present.
+    DirtyMainWorkspaceConflict,
+    /// Proposal preconditions are stale.
+    StaleProposalPreconditions,
+    /// Unresolved worker conflict is present.
+    UnresolvedConflict,
+    /// Dependency is pending, skipped, or failed.
+    UnsatisfiedDependency,
+    /// Verification evidence is missing.
+    MissingVerificationEvidence,
+    /// Verification failed or is blocked.
+    FailedVerification,
+    /// Required sign-off metadata is missing.
+    MissingSignOff,
+    /// Required sign-off was rejected.
+    RejectedSignOff,
+    /// Audit metadata was not persisted before success.
+    MissingAuditBeforeSuccess,
+    /// Rollback or checkpoint metadata required for approval is unavailable.
+    MissingRollbackMetadata,
+}
+
+/// Assignment details for a workflow worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowWorkerAssignment {
+    /// Stable worker id.
+    pub worker_id: LegionWorkflowWorkerId,
+    /// Worker role.
+    pub role: LegionWorkflowWorkerRole,
+    /// Worker lifecycle state.
+    pub state: LegionWorkflowWorkerState,
+    /// Model backend class.
+    pub model_backend: LegionWorkflowModelBackend,
+    /// Display-safe model label.
+    pub display_safe_model_label: String,
+    /// Plan-only operation classes allowed for this worker.
+    pub allowed_command_classes: Vec<DelegatedTaskOperationClass>,
+    /// Linked delegated-task plan id, when this worker is backed by a local plan.
+    pub linked_delegated_plan_id: Option<DelegatedTaskPlanId>,
+    /// Assisted-AI route metadata required for provider-backed workers.
+    pub assisted_ai_route: Option<AssistedAiTrustProjectionReference>,
+    /// Metadata-only target summaries this worker may affect.
+    pub affected_targets: Vec<DelegatedTaskAffectedTargetSummary>,
+    /// Risk labels for command-surface display.
+    pub risk_labels: Vec<CommandRiskLabel>,
+    /// Privacy labels for display and retention decisions.
+    pub privacy_labels: Vec<PrivacyClassification>,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Worker assignment schema version.
+    pub schema_version: u16,
+}
+
+/// Dependency edge between workflow workers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowDependency {
+    /// Stable dependency edge id.
+    pub dependency_id: LegionWorkflowDependencyId,
+    /// Predecessor worker id.
+    pub predecessor_worker_id: LegionWorkflowWorkerId,
+    /// Successor worker id.
+    pub successor_worker_id: LegionWorkflowWorkerId,
+    /// Dependency state.
+    pub state: LegionWorkflowDependencyState,
+    /// Display-safe dependency label.
+    pub label: String,
+    /// Dependency schema version.
+    pub schema_version: u16,
+}
+
+/// Summary of a conflict within a Legion workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowConflict {
+    /// Stable conflict id.
+    pub conflict_id: LegionWorkflowConflictId,
+    /// Conflict kind.
+    pub kind: LegionWorkflowConflictKind,
+    /// Conflict state.
+    pub state: LegionWorkflowConflictState,
+    /// Workers related to this conflict.
+    pub worker_ids: Vec<LegionWorkflowWorkerId>,
+    /// Display-safe target label.
+    pub target_label: String,
+    /// Metadata hash for the conflicted target.
+    pub target_hash: Option<FileFingerprint>,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Redaction hints for this conflict.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Conflict schema version.
+    pub schema_version: u16,
+}
+
+/// Verification gate within a Legion workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowVerificationGate {
+    /// Stable verification gate id.
+    pub gate_id: LegionWorkflowVerificationGateId,
+    /// Verification gate state.
+    pub state: LegionWorkflowVerificationGateState,
+    /// Display-safe label.
+    pub label: String,
+    /// Evidence artifact id that proves this gate, when present.
+    pub evidence_artifact_id: Option<String>,
+    /// Display-safe command class label; raw command text is not stored.
+    pub command_class_label: String,
+    /// Redaction hints for this gate.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Gate schema version.
+    pub schema_version: u16,
+}
+
+/// Sign-off record within a Legion workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowSignOff {
+    /// Stable sign-off id.
+    pub sign_off_id: LegionWorkflowSignOffId,
+    /// Sign-off state.
+    pub state: LegionWorkflowSignOffState,
+    /// Required worker role or reviewer role.
+    pub required_role: LegionWorkflowWorkerRole,
+    /// Principal that signed or rejected, when present.
+    pub reviewer_principal_id: Option<PrincipalId>,
+    /// Display-safe label.
+    pub label: String,
+    /// Redaction hints for this sign-off.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Sign-off schema version.
+    pub schema_version: u16,
+}
+
+/// Merge approval metadata. It is not an apply command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowMergeApproval {
+    /// Linked approval artifact id, if one exists.
+    pub approval_artifact_id: Option<String>,
+    /// Whether an app/proposal approval gate granted the merge-ready state.
+    pub approval_granted: bool,
+    /// Whether rollback/checkpoint metadata is available.
+    pub rollback_available: bool,
+    /// Whether audit metadata was persisted before success.
+    pub audit_persisted_before_success: bool,
+    /// Whether the main workspace is dirty in a conflicting way.
+    pub main_workspace_dirty_conflict: bool,
+    /// Whether proposal preconditions are stale.
+    pub proposal_preconditions_stale: bool,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Redaction hints for this approval metadata.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Merge approval schema version.
+    pub schema_version: u16,
+}
+
+/// The main metadata-first session struct for a Legion workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowSession {
+    /// Stable session id.
+    pub session_id: LegionWorkflowSessionId,
+    /// Linked directive artifact id.
+    pub directive_artifact_id: Option<String>,
+    /// Linked spec artifact id.
+    pub spec_artifact_id: Option<String>,
+    /// Linked task-graph artifact id.
+    pub task_graph_artifact_id: Option<String>,
+    /// Product mode. Must be `ProductMode::LegionWorkflows` or `ProductMode::Automate`.
+    pub product_mode: ProductMode,
+    /// Worker assignments.
+    pub worker_assignments: Vec<LegionWorkflowWorkerAssignment>,
+    /// Dependency edges.
+    pub dependency_edges: Vec<LegionWorkflowDependency>,
+    /// Conflict summaries.
+    pub conflict_summaries: Vec<LegionWorkflowConflict>,
+    /// Verification gates.
+    pub verification_gates: Vec<LegionWorkflowVerificationGate>,
+    /// Sign-off records.
+    pub sign_off_records: Vec<LegionWorkflowSignOff>,
+    /// Linked proposal identifiers. Mutation remains proposal-mediated.
+    pub proposal_ids: Vec<ProposalId>,
+    /// Merge approval metadata.
+    pub merge_approval: Option<LegionWorkflowMergeApproval>,
+    /// Workflow lifecycle state.
+    pub lifecycle_state: LegionWorkflowState,
+    /// Generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Session schema version.
+    pub schema_version: u16,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+}
+
+/// Readiness decision produced from workflow metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowMergeReadiness {
+    /// Readiness state.
+    pub state: LegionWorkflowMergeReadinessState,
+    /// Fail-closed blockers.
+    pub blockers: Vec<LegionWorkflowMergeReadinessBlocker>,
+    /// Display-safe labels.
+    pub labels: Vec<String>,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Decision schema version.
+    pub schema_version: u16,
+}
+
+/// Projection row for a Legion workflow session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowProjectionRow {
+    /// Stable session id.
+    pub session_id: LegionWorkflowSessionId,
+    /// Lifecycle state.
+    pub lifecycle_state: LegionWorkflowState,
+    /// Number of workers in the session.
+    pub worker_count: u32,
+    /// Number of provider-backed workers waiting for route metadata.
+    pub provider_route_required_count: u32,
+    /// Number of dependency edges.
+    pub dependency_count: u32,
+    /// Number of unresolved conflicts.
+    pub unresolved_conflict_count: u32,
+    /// Number of verification gates.
+    pub verification_gate_count: u32,
+    /// Number of passed verification gates.
+    pub passed_verification_count: u32,
+    /// Number of required sign-off records.
+    pub sign_off_count: u32,
+    /// Number of signed-off records.
+    pub signed_off_count: u32,
+    /// Linked proposal identifiers.
+    pub linked_proposals: Vec<ProposalId>,
+    /// Merge readiness decision.
+    pub merge_readiness: LegionWorkflowMergeReadiness,
+    /// Display-safe labels.
+    pub display_safe_labels: Vec<String>,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Row schema version.
+    pub schema_version: u16,
+}
+
+/// Projection helper DTO for Legion workflow command centers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowProjection {
+    /// Stable projection id.
+    pub projection_id: String,
+    /// Session rows.
+    pub rows: Vec<LegionWorkflowProjectionRow>,
+    /// MCP registry snapshots visible to Automate.
+    pub mcp_registries: Vec<McpRegistrySnapshot>,
+    /// Automate decision-feed entries.
+    pub decision_feed: Vec<LegionWorkflowDecisionFeedEntry>,
+    /// Risk monitor snapshots.
+    pub risk_monitors: Vec<LegionWorkflowRiskMonitorSnapshot>,
+    /// Kill-switch states.
+    pub kill_switches: Vec<LegionWorkflowKillSwitch>,
+    /// Automate tool permission requests.
+    pub tool_permission_requests: Vec<DelegatedTaskToolPermissionRequest>,
+    /// Total session count before bounding.
+    pub total_session_count: u32,
+    /// Total MCP registry count.
+    pub mcp_registry_count: u32,
+    /// Total decision-feed entry count.
+    pub decision_feed_count: u32,
+    /// Total risk monitor count.
+    pub risk_monitor_count: u32,
+    /// Total kill-switch count.
+    pub kill_switch_count: u32,
+    /// Total Automate tool permission request count.
+    pub tool_permission_request_count: u32,
+    /// Omitted row count.
+    pub omitted_row_count: u32,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints for the projection.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl LegionWorkflowProjection {
+    /// Creates an empty metadata-only Legion workflow projection.
+    pub fn empty(
+        projection_id: impl Into<String>,
+        generated_at: TimestampMillis,
+        schema_version: u16,
+    ) -> Self {
+        Self {
+            projection_id: projection_id.into(),
+            rows: Vec::new(),
+            mcp_registries: Vec::new(),
+            decision_feed: Vec::new(),
+            risk_monitors: Vec::new(),
+            kill_switches: Vec::new(),
+            tool_permission_requests: Vec::new(),
+            total_session_count: 0,
+            mcp_registry_count: 0,
+            decision_feed_count: 0,
+            risk_monitor_count: 0,
+            kill_switch_count: 0,
+            tool_permission_request_count: 0,
+            omitted_row_count: 0,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version,
+        }
+    }
+}
+
+fn validate_legion_redaction(
+    redaction_hints: &[RedactionHint],
+    field: &str,
+) -> Result<(), ProtocolError> {
+    if redaction_hints.is_empty() || redaction_hints.contains(&RedactionHint::None) {
+        return Err(ProtocolError::validation(format!(
+            "{field} must use metadata-only redaction"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_legion_non_empty(value: &str, field: &str) -> Result<(), ProtocolError> {
+    if value.trim().is_empty() {
+        return Err(ProtocolError::validation(format!(
+            "{field} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a JSON-RPC 2.0 MCP envelope.
+pub fn validate_mcp_json_rpc_envelope(envelope: &McpJsonRpcEnvelope) -> Result<(), ProtocolError> {
+    if envelope.jsonrpc != "2.0" {
+        return Err(ProtocolError::validation(
+            "MCP JSON-RPC version must be 2.0",
+        ));
+    }
+    validate_legion_non_empty(&envelope.method, "mcp json-rpc method")?;
+    if envelope.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "MCP JSON-RPC envelope schema version must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an MCP registry snapshot.
+pub fn validate_mcp_registry_snapshot(snapshot: &McpRegistrySnapshot) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&snapshot.registry_id, "mcp registry_id")?;
+    validate_legion_non_empty(&snapshot.server.server_id.0, "mcp server_id")?;
+    validate_legion_non_empty(&snapshot.server.display_label, "mcp server display_label")?;
+    validate_legion_non_empty(&snapshot.server.endpoint_label, "mcp server endpoint_label")?;
+    if snapshot.schema_version == 0 || snapshot.server.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "MCP registry schema versions must be non-zero",
+        ));
+    }
+    validate_legion_redaction(&snapshot.redaction_hints, "mcp registry redaction_hints")?;
+    validate_legion_redaction(
+        &snapshot.server.redaction_hints,
+        "mcp server redaction_hints",
+    )?;
+    for tool in &snapshot.tools {
+        validate_legion_non_empty(&tool.server_id.0, "mcp tool server_id")?;
+        validate_legion_non_empty(&tool.name.0, "mcp tool name")?;
+        validate_legion_non_empty(&tool.description_label, "mcp tool description_label")?;
+        validate_legion_non_empty(
+            &tool.input_schema_hash.algorithm,
+            "mcp tool schema algorithm",
+        )?;
+        validate_legion_non_empty(&tool.input_schema_hash.value, "mcp tool schema hash")?;
+        validate_legion_non_empty(&tool.capability.0, "mcp tool capability")?;
+        if tool.server_id != snapshot.server.server_id || tool.schema_version == 0 {
+            return Err(ProtocolError::validation(
+                "MCP tool descriptor must match registry server and use non-zero schema",
+            ));
+        }
+        validate_legion_redaction(&tool.redaction_hints, "mcp tool redaction_hints")?;
+    }
+    for resource in &snapshot.resources {
+        validate_legion_non_empty(&resource.server_id.0, "mcp resource server_id")?;
+        validate_legion_non_empty(&resource.uri.0, "mcp resource uri")?;
+        validate_legion_non_empty(&resource.name_label, "mcp resource name_label")?;
+        if resource.server_id != snapshot.server.server_id || resource.schema_version == 0 {
+            return Err(ProtocolError::validation(
+                "MCP resource descriptor must match registry server and use non-zero schema",
+            ));
+        }
+        validate_legion_redaction(&resource.redaction_hints, "mcp resource redaction_hints")?;
+    }
+    for prompt in &snapshot.prompts {
+        validate_legion_non_empty(&prompt.server_id.0, "mcp prompt server_id")?;
+        validate_legion_non_empty(&prompt.name.0, "mcp prompt name")?;
+        validate_legion_non_empty(&prompt.description_label, "mcp prompt description_label")?;
+        if prompt.server_id != snapshot.server.server_id || prompt.schema_version == 0 {
+            return Err(ProtocolError::validation(
+                "MCP prompt descriptor must match registry server and use non-zero schema",
+            ));
+        }
+        validate_legion_redaction(&prompt.redaction_hints, "mcp prompt redaction_hints")?;
+    }
+    Ok(())
+}
+
+/// Validate an Automate decision-feed entry.
+pub fn validate_legion_workflow_decision_feed_entry(
+    entry: &LegionWorkflowDecisionFeedEntry,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&entry.decision_id.0, "decision_id")?;
+    validate_legion_non_empty(&entry.session_id.0, "decision session_id")?;
+    validate_legion_non_empty(&entry.summary_label, "decision summary_label")?;
+    if entry.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "decision-feed schema version must be non-zero",
+        ));
+    }
+    if entry.correlation_id.0 == 0 {
+        return Err(ProtocolError::validation(
+            "decision-feed correlation id must be non-zero",
+        ));
+    }
+    if entry.causality_id.0.is_nil() {
+        return Err(ProtocolError::validation(
+            "decision-feed causality id must be non-nil",
+        ));
+    }
+    if entry.event_sequence.0 == 0 {
+        return Err(ProtocolError::validation(
+            "decision-feed event sequence must be non-zero",
+        ));
+    }
+    validate_legion_redaction(&entry.redaction_hints, "decision-feed redaction_hints")?;
+    Ok(())
+}
+
+/// Validate an Automate risk monitor snapshot.
+pub fn validate_legion_workflow_risk_monitor_snapshot(
+    snapshot: &LegionWorkflowRiskMonitorSnapshot,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&snapshot.monitor_id.0, "risk monitor_id")?;
+    validate_legion_non_empty(&snapshot.session_id.0, "risk session_id")?;
+    if snapshot.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "risk monitor schema version must be non-zero",
+        ));
+    }
+    if snapshot.halt_threshold == 0 {
+        return Err(ProtocolError::validation(
+            "risk monitor halt threshold must be non-zero",
+        ));
+    }
+    if snapshot.state == LegionWorkflowRiskMonitorState::Halted && snapshot.halt_reason.is_none() {
+        return Err(ProtocolError::validation(
+            "halted risk monitor requires a halt reason",
+        ));
+    }
+    validate_legion_redaction(&snapshot.redaction_hints, "risk monitor redaction_hints")?;
+    Ok(())
+}
+
+/// Validate an Automate kill-switch record.
+pub fn validate_legion_workflow_kill_switch(
+    kill_switch: &LegionWorkflowKillSwitch,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&kill_switch.kill_switch_id.0, "kill_switch_id")?;
+    validate_legion_non_empty(&kill_switch.session_id.0, "kill_switch session_id")?;
+    if kill_switch.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "kill-switch schema version must be non-zero",
+        ));
+    }
+    if kill_switch.correlation_id.0 == 0 {
+        return Err(ProtocolError::validation(
+            "kill-switch correlation id must be non-zero",
+        ));
+    }
+    if kill_switch.causality_id.0.is_nil() {
+        return Err(ProtocolError::validation(
+            "kill-switch causality id must be non-nil",
+        ));
+    }
+    if kill_switch.state == LegionWorkflowKillSwitchState::Triggered
+        && (kill_switch.triggered_by.is_none()
+            || kill_switch
+                .reason_label
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            || kill_switch.triggered_at.is_none())
+    {
+        return Err(ProtocolError::validation(
+            "triggered kill-switch requires principal, reason, and timestamp",
+        ));
+    }
+    validate_legion_redaction(&kill_switch.redaction_hints, "kill-switch redaction_hints")?;
+    Ok(())
+}
+
+/// Validates a Legion workflow worker assignment.
+pub fn validate_legion_workflow_worker_assignment(
+    assignment: &LegionWorkflowWorkerAssignment,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&assignment.worker_id.0, "worker_id")?;
+    validate_legion_non_empty(
+        &assignment.display_safe_model_label,
+        "display_safe_model_label",
+    )?;
+    if assignment.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "worker schema version must be non-zero",
+        ));
+    }
+    if assignment.correlation_id.0 == 0 {
+        return Err(ProtocolError::validation(
+            "worker correlation id must be non-zero",
+        ));
+    }
+    if assignment.causality_id.0.is_nil() {
+        return Err(ProtocolError::validation(
+            "worker causality id must be non-nil",
+        ));
+    }
+    validate_legion_redaction(&assignment.redaction_hints, "worker redaction_hints")?;
+    if assignment.model_backend == LegionWorkflowModelBackend::ProviderBacked
+        && assignment.assisted_ai_route.is_none()
+    {
+        return Err(ProtocolError::validation(
+            "provider-backed worker requires assisted-AI route metadata",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a Legion workflow dependency edge.
+pub fn validate_legion_workflow_dependency(
+    dependency: &LegionWorkflowDependency,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&dependency.dependency_id.0, "dependency_id")?;
+    validate_legion_non_empty(&dependency.predecessor_worker_id.0, "predecessor_worker_id")?;
+    validate_legion_non_empty(&dependency.successor_worker_id.0, "successor_worker_id")?;
+    validate_legion_non_empty(&dependency.label, "dependency label")?;
+    if dependency.predecessor_worker_id == dependency.successor_worker_id {
+        return Err(ProtocolError::validation(
+            "dependency cannot point from a worker to itself",
+        ));
+    }
+    if dependency.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "dependency schema version must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a Legion workflow conflict.
+pub fn validate_legion_workflow_conflict(
+    conflict: &LegionWorkflowConflict,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&conflict.conflict_id.0, "conflict_id")?;
+    validate_legion_non_empty(&conflict.target_label, "conflict target_label")?;
+    if conflict.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "conflict schema version must be non-zero",
+        ));
+    }
+    validate_legion_redaction(&conflict.redaction_hints, "conflict redaction_hints")?;
+    Ok(())
+}
+
+/// Validates a Legion workflow verification gate.
+pub fn validate_legion_workflow_verification_gate(
+    gate: &LegionWorkflowVerificationGate,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&gate.gate_id.0, "verification gate_id")?;
+    validate_legion_non_empty(&gate.label, "verification label")?;
+    validate_legion_non_empty(
+        &gate.command_class_label,
+        "verification command_class_label",
+    )?;
+    if gate.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "verification schema version must be non-zero",
+        ));
+    }
+    validate_legion_redaction(&gate.redaction_hints, "verification redaction_hints")?;
+    if gate.state == LegionWorkflowVerificationGateState::Passed
+        && gate
+            .evidence_artifact_id
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+    {
+        return Err(ProtocolError::validation(
+            "passed verification requires evidence artifact metadata",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a Legion workflow sign-off record.
+pub fn validate_legion_workflow_signoff(
+    signoff: &LegionWorkflowSignOff,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&signoff.sign_off_id.0, "sign_off_id")?;
+    validate_legion_non_empty(&signoff.label, "sign-off label")?;
+    if signoff.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "sign-off schema version must be non-zero",
+        ));
+    }
+    validate_legion_redaction(&signoff.redaction_hints, "sign-off redaction_hints")?;
+    if signoff.state == LegionWorkflowSignOffState::SignedOff
+        && signoff.reviewer_principal_id.is_none()
+    {
+        return Err(ProtocolError::validation(
+            "signed-off record requires reviewer principal metadata",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a Legion workflow session.
+pub fn validate_legion_workflow_session(
+    session: &LegionWorkflowSession,
+) -> Result<(), ProtocolError> {
+    validate_legion_non_empty(&session.session_id.0, "session_id")?;
+    if !matches!(
+        session.product_mode,
+        ProductMode::LegionWorkflows | ProductMode::Automate
+    ) {
+        return Err(ProtocolError::validation(
+            "product_mode must be ProductMode::LegionWorkflows or ProductMode::Automate",
+        ));
+    }
+    if session.schema_version == 0 {
+        return Err(ProtocolError::validation(
+            "session schema version must be non-zero",
+        ));
+    }
+    if session.correlation_id.0 == 0 {
+        return Err(ProtocolError::validation(
+            "session correlation id must be non-zero",
+        ));
+    }
+    if session.causality_id.0.is_nil() {
+        return Err(ProtocolError::validation(
+            "session causality id must be non-nil",
+        ));
+    }
+    validate_legion_redaction(&session.redaction_hints, "session redaction_hints")?;
+    if session.worker_assignments.is_empty() {
+        return Err(ProtocolError::validation(
+            "session must have at least one worker assignment",
+        ));
+    }
+
+    let mut worker_ids = std::collections::HashSet::new();
+    for assignment in &session.worker_assignments {
+        validate_legion_workflow_worker_assignment(assignment)?;
+        if !worker_ids.insert(assignment.worker_id.0.as_str()) {
+            return Err(ProtocolError::validation("duplicate worker id in session"));
+        }
+    }
+    for dependency in &session.dependency_edges {
+        validate_legion_workflow_dependency(dependency)?;
+        if !worker_ids.contains(dependency.predecessor_worker_id.0.as_str())
+            || !worker_ids.contains(dependency.successor_worker_id.0.as_str())
+        {
+            return Err(ProtocolError::validation(
+                "dependency references an unknown worker id",
+            ));
+        }
+    }
+    for conflict in &session.conflict_summaries {
+        validate_legion_workflow_conflict(conflict)?;
+    }
+    for gate in &session.verification_gates {
+        validate_legion_workflow_verification_gate(gate)?;
+    }
+    for signoff in &session.sign_off_records {
+        validate_legion_workflow_signoff(signoff)?;
+    }
+
+    if session.lifecycle_state == LegionWorkflowState::Completed {
+        if session
+            .worker_assignments
+            .iter()
+            .any(|worker| worker.state != LegionWorkflowWorkerState::Completed)
+        {
+            return Err(ProtocolError::validation(
+                "completed session requires all workers to be completed",
+            ));
+        }
+        if session.verification_gates.is_empty() {
+            return Err(ProtocolError::validation(
+                "completed session requires verification evidence metadata",
+            ));
+        }
+        if session.sign_off_records.is_empty() {
+            return Err(ProtocolError::validation(
+                "completed session requires sign-off metadata",
+            ));
+        }
+    }
+    if let Some(approval) = &session.merge_approval {
+        if approval.schema_version == 0 {
+            return Err(ProtocolError::validation(
+                "merge approval schema version must be non-zero",
+            ));
+        }
+        validate_legion_redaction(&approval.redaction_hints, "merge approval redaction_hints")?;
+    }
+    Ok(())
+}
+
+/// Evaluates merge readiness of a Legion workflow session.
+pub fn evaluate_legion_workflow_merge_readiness(
+    session: &LegionWorkflowSession,
+) -> LegionWorkflowMergeReadiness {
+    let mut blockers = Vec::new();
+
+    if validate_legion_workflow_session(session).is_err() {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::InvalidSession);
+    }
+    if session.proposal_ids.is_empty() {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingProposal);
+    }
+    if session
+        .worker_assignments
+        .iter()
+        .any(|worker| worker.state != LegionWorkflowWorkerState::Completed)
+    {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::IncompleteWorker);
+    }
+    if session.verification_gates.is_empty() {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
+    }
+    if session.sign_off_records.is_empty() {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingSignOff);
+    }
+
+    match &session.merge_approval {
+        Some(approval) => {
+            if approval.main_workspace_dirty_conflict {
+                blockers.push(LegionWorkflowMergeReadinessBlocker::DirtyMainWorkspaceConflict);
+            }
+            if approval.proposal_preconditions_stale {
+                blockers.push(LegionWorkflowMergeReadinessBlocker::StaleProposalPreconditions);
+            }
+            if !approval.audit_persisted_before_success {
+                blockers.push(LegionWorkflowMergeReadinessBlocker::MissingAuditBeforeSuccess);
+            }
+            if !approval.rollback_available {
+                blockers.push(LegionWorkflowMergeReadinessBlocker::MissingRollbackMetadata);
+            }
+            if !approval.approval_granted {
+                blockers.push(LegionWorkflowMergeReadinessBlocker::ApprovalRequired);
+            }
+        }
+        None => blockers.push(LegionWorkflowMergeReadinessBlocker::MissingApproval),
+    }
+
+    if session
+        .conflict_summaries
+        .iter()
+        .any(|conflict| conflict.state == LegionWorkflowConflictState::Unresolved)
+    {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::UnresolvedConflict);
+    }
+    if session
+        .dependency_edges
+        .iter()
+        .any(|dependency| dependency.state != LegionWorkflowDependencyState::Satisfied)
+    {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::UnsatisfiedDependency);
+    }
+    if session.verification_gates.iter().any(|gate| {
+        gate.state == LegionWorkflowVerificationGateState::Failed
+            || gate.state == LegionWorkflowVerificationGateState::Blocked
+    }) {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::FailedVerification);
+    }
+    if session
+        .verification_gates
+        .iter()
+        .any(|gate| gate.state == LegionWorkflowVerificationGateState::Pending)
+    {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
+    }
+    if session
+        .sign_off_records
+        .iter()
+        .any(|signoff| signoff.state == LegionWorkflowSignOffState::Rejected)
+    {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::RejectedSignOff);
+    }
+    if session
+        .sign_off_records
+        .iter()
+        .any(|signoff| signoff.state == LegionWorkflowSignOffState::Pending)
+    {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingSignOff);
+    }
+
+    blockers.sort_by_key(|blocker| format!("{blocker:?}"));
+    blockers.dedup();
+
+    let approval_required_only =
+        blockers.len() == 1 && blockers[0] == LegionWorkflowMergeReadinessBlocker::ApprovalRequired;
+    let state = if blockers.is_empty() {
+        LegionWorkflowMergeReadinessState::Ready
+    } else if approval_required_only {
+        LegionWorkflowMergeReadinessState::WaitingForApproval
+    } else {
+        LegionWorkflowMergeReadinessState::Blocked
+    };
+
+    LegionWorkflowMergeReadiness {
+        state,
+        blockers,
+        labels: match state {
+            LegionWorkflowMergeReadinessState::Ready => {
+                vec!["legion_workflow.merge_ready".to_string()]
+            }
+            LegionWorkflowMergeReadinessState::WaitingForApproval => {
+                vec!["legion_workflow.waiting_for_approval".to_string()]
+            }
+            LegionWorkflowMergeReadinessState::Blocked => {
+                vec!["legion_workflow.merge_blocked".to_string()]
+            }
+        },
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: session.schema_version.max(1),
+    }
+}
+
+/// Builds a metadata-only projection from Legion workflow sessions.
+pub fn legion_workflow_projection_from_sessions(
+    projection_id: impl Into<String>,
+    sessions: &[LegionWorkflowSession],
+    generated_at: TimestampMillis,
+    max_rows: usize,
+    schema_version: u16,
+) -> LegionWorkflowProjection {
+    let rows = sessions
+        .iter()
+        .take(max_rows)
+        .map(|session| {
+            let provider_route_required_count = session
+                .worker_assignments
+                .iter()
+                .filter(|worker| worker.state == LegionWorkflowWorkerState::ProviderRouteRequired)
+                .count() as u32;
+            let unresolved_conflict_count = session
+                .conflict_summaries
+                .iter()
+                .filter(|conflict| conflict.state == LegionWorkflowConflictState::Unresolved)
+                .count() as u32;
+            let passed_verification_count = session
+                .verification_gates
+                .iter()
+                .filter(|gate| gate.state == LegionWorkflowVerificationGateState::Passed)
+                .count() as u32;
+            let signed_off_count = session
+                .sign_off_records
+                .iter()
+                .filter(|signoff| signoff.state == LegionWorkflowSignOffState::SignedOff)
+                .count() as u32;
+            let mut display_safe_labels = session
+                .worker_assignments
+                .iter()
+                .map(|worker| worker.display_safe_model_label.clone())
+                .collect::<Vec<_>>();
+            display_safe_labels.extend(
+                session
+                    .conflict_summaries
+                    .iter()
+                    .flat_map(|conflict| conflict.labels.clone()),
+            );
+            display_safe_labels.extend(
+                session
+                    .verification_gates
+                    .iter()
+                    .map(|gate| gate.label.clone()),
+            );
+
+            LegionWorkflowProjectionRow {
+                session_id: session.session_id.clone(),
+                lifecycle_state: session.lifecycle_state,
+                worker_count: session.worker_assignments.len() as u32,
+                provider_route_required_count,
+                dependency_count: session.dependency_edges.len() as u32,
+                unresolved_conflict_count,
+                verification_gate_count: session.verification_gates.len() as u32,
+                passed_verification_count,
+                sign_off_count: session.sign_off_records.len() as u32,
+                signed_off_count,
+                linked_proposals: session.proposal_ids.clone(),
+                merge_readiness: evaluate_legion_workflow_merge_readiness(session),
+                display_safe_labels,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: session.schema_version.max(1),
+            }
+        })
+        .collect::<Vec<_>>();
+    let total_session_count = sessions.len() as u32;
+    let omitted_row_count = total_session_count.saturating_sub(rows.len() as u32);
+
+    LegionWorkflowProjection {
+        projection_id: projection_id.into(),
+        rows,
+        mcp_registries: Vec::new(),
+        decision_feed: Vec::new(),
+        risk_monitors: Vec::new(),
+        kill_switches: Vec::new(),
+        tool_permission_requests: Vec::new(),
+        total_session_count,
+        mcp_registry_count: 0,
+        decision_feed_count: 0,
+        risk_monitor_count: 0,
+        kill_switch_count: 0,
+        tool_permission_request_count: 0,
+        omitted_row_count,
+        generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version,
+    }
 }
 
 #[cfg(test)]

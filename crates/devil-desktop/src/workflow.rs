@@ -8,19 +8,20 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use devil_app::{
-    AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppSaveAllItemOutcome,
-    AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus, AppSaveOutcome,
-    AppSessionRestoreOutcome,
+    AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppProductMode,
+    AppSaveAllItemOutcome, AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus,
+    AppSaveOutcome, AppSessionRestoreOutcome,
 };
 use devil_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, DelegatedTaskPlanContract,
-    DelegatedTaskPlanId, PluginDenialReason, PluginHostCallResponse, PluginId, PluginManifest,
-    PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse,
-    ProtocolTextRange, RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
+    DelegatedTaskPlanId, LegionWorkflowMergeReadinessState, LegionWorkflowSessionId,
+    PluginDenialReason, PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
+    RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
     WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
-    CommandDispatchIntent, SearchScopeProjection, Shell, ShellProjectionSnapshot,
+    CommandDispatchIntent, DockMode, SearchScopeProjection, Shell, ShellProjectionSnapshot,
     StatusMessageProjection, StatusSeverity,
 };
 
@@ -223,6 +224,11 @@ impl DesktopLaunchConfig {
 pub enum DesktopWorkflowOutcome {
     /// Command had no effect.
     Noop,
+    /// Product mode changed through app authority.
+    ProductModeChanged {
+        /// Active app-owned product mode.
+        mode: DockMode,
+    },
     /// App authority opened a file.
     Opened,
     /// App authority applied an editor transaction.
@@ -254,8 +260,25 @@ pub enum DesktopWorkflowOutcome {
     ViewportScrollSet(BufferId),
     /// Search projection changed through app authority.
     SearchUpdated,
+    /// Structural search projection changed through app authority.
+    StructuralSearchUpdated,
+    /// Git projection changed through app authority.
+    GitUpdated,
+    /// Debug projection changed through app authority.
+    DebugProjectionUpdated,
     /// Language tooling projection changed through app authority.
     LanguageToolingUpdated,
+    /// Assist inline prediction projection changed through app authority.
+    AssistInlinePredictionUpdated {
+        /// Whether an active ghost prediction is projected.
+        active: bool,
+        /// Number of projected inline prediction rows.
+        row_count: usize,
+        /// Number of stale projected predictions.
+        stale_count: usize,
+        /// User-visible status summary.
+        status: String,
+    },
     /// Terminal panel projection changed through app authority.
     TerminalPanelUpdated,
     /// Proposal lifecycle state changed through app authority.
@@ -318,6 +341,17 @@ pub enum DesktopWorkflowOutcome {
         /// User-visible status summary.
         message: String,
     },
+    /// Legion workflow command-center request changed through app-owned workflow authority.
+    LegionWorkflowReviewed {
+        /// Workflow session represented by the outcome.
+        session_id: LegionWorkflowSessionId,
+        /// Proposal represented by the outcome, if proposal-scoped.
+        proposal_id: Option<ProposalId>,
+        /// Normalized desktop Legion workflow status.
+        status: DesktopLegionWorkflowStatus,
+        /// User-visible status summary.
+        message: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -374,6 +408,39 @@ pub enum DesktopDelegatedTaskStatus {
     ProposalPreviewOpened,
     /// Linked proposal details were opened through proposal authority.
     ProposalDetailsOpened,
+    /// Delegate chat turn completed through app authority.
+    ChatSent,
+    /// Delegate proposal hunk review was recorded.
+    ProposalHunkReviewed,
+    /// Delegate tool permission decision was recorded.
+    ToolPermissionRecorded,
+}
+
+/// Desktop-facing status for Legion workflow command-center requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopLegionWorkflowStatus {
+    /// Session metadata was inspected without execution.
+    SessionInspected,
+    /// Linked proposal preview was requested through proposal authority.
+    ProposalPreviewOpened,
+    /// Linked proposal details were requested through proposal authority.
+    ProposalDetailsOpened,
+    /// Verification metadata recording was requested.
+    VerificationRequested,
+    /// Sign-off metadata recording was requested.
+    SignOffRequested,
+    /// Conflict-resolution metadata was requested.
+    ConflictResolutionRequested,
+    /// Merge readiness was requested and remains blocked.
+    MergeReadinessBlocked,
+    /// Merge readiness was requested and waits for approval.
+    MergeReadinessWaitingForApproval,
+    /// Merge readiness was requested and is proposal-mediated ready.
+    MergeReadinessReady,
+    /// Automate MCP tool permission changed.
+    ToolPermissionRecorded,
+    /// Automate kill switch was triggered.
+    KillSwitchTriggered,
 }
 
 /// Renderer-backed desktop runtime.
@@ -389,6 +456,10 @@ pub struct DesktopRuntime {
     search_prompt: bool,
     search_query_text: String,
     search_scope: SearchScopeProjection,
+    structural_search_prompt: bool,
+    structural_search_pattern_text: String,
+    structural_search_rewrite_text: String,
+    structural_search_scope: SearchScopeProjection,
     explorer_expansion: BTreeSet<String>,
     panel_state: SessionPanelState,
     session_state_path: Option<PathBuf>,
@@ -464,6 +535,10 @@ impl DesktopRuntime {
             search_prompt: false,
             search_query_text: String::new(),
             search_scope: SearchScopeProjection::ActiveFile,
+            structural_search_prompt: false,
+            structural_search_pattern_text: String::new(),
+            structural_search_rewrite_text: String::new(),
+            structural_search_scope: SearchScopeProjection::ActiveFile,
             explorer_expansion,
             panel_state,
             session_state_path: config.session_state,
@@ -518,6 +593,16 @@ impl DesktopRuntime {
         &self.last_outcome
     }
 
+    /// Set the app-owned product mode used by AI dispatch authority.
+    pub fn set_product_mode(&mut self, mode: AppProductMode) -> Result<()> {
+        self.app.set_product_mode(mode);
+        self.set_status(
+            StatusSeverity::Info,
+            format!("Product mode changed to {}", mode.to_dock_mode().label()),
+        );
+        self.refresh_projection()
+    }
+
     /// Load a plugin manifest through app-owned plugin authority and refresh projections.
     pub fn load_plugin_manifest(&mut self, manifest: PluginManifest) -> Result<PluginId> {
         let plugin_id = self.app.load_plugin_manifest(manifest)?;
@@ -547,6 +632,14 @@ impl DesktopRuntime {
             "Remote workspace runtime enabled by app policy",
         );
         self.refresh_projection()
+    }
+
+    /// Enable the app-owned deterministic debug fixture for test harnesses.
+    pub fn enable_debug_fixture_for_tests(&mut self) {
+        self.app.enable_debug_fixture_for_tests();
+        self.set_status(StatusSeverity::Info, "Debug fixture enabled by app policy");
+        self.refresh_projection()
+            .expect("debug fixture projection refresh should succeed");
     }
 
     /// Seed delegated task plan contracts for projection-only command-center harnesses.
@@ -637,11 +730,15 @@ impl DesktopRuntime {
         DesktopProjectionViewState {
             expanded_explorer_paths: self.explorer_expansion.clone(),
             selected_explorer_file: None,
+            dock_layouts: devil_ui::DockLayout::standard_all_modes(),
         }
     }
 
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
-        !self.open_path_prompt && !self.search_prompt && !close_dirty_prompt_active(snapshot)
+        !self.open_path_prompt
+            && !self.search_prompt
+            && !self.structural_search_prompt
+            && !close_dirty_prompt_active(snapshot)
     }
 
     fn dispatch_intent(&mut self, intent: CommandDispatchIntent) -> Result<DesktopWorkflowOutcome> {
@@ -680,6 +777,12 @@ impl DesktopRuntime {
                 self.search_prompt = true;
                 self.search_scope = scope;
                 self.set_status(StatusSeverity::Info, "Search requested");
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAppRequest::ShowStructuralSearchPrompt { scope } => {
+                self.structural_search_prompt = true;
+                self.structural_search_scope = scope;
+                self.set_status(StatusSeverity::Info, "Structural search requested");
                 Ok(DesktopWorkflowOutcome::Noop)
             }
             DesktopAppRequest::ToggleExplorerPath { path } => {
@@ -808,6 +911,184 @@ impl DesktopRuntime {
                     }
                 }
             }
+            DesktopAppRequest::InspectLegionWorkflowSession { session_id } => {
+                let message = format!(
+                    "Legion workflow session inspected {}: app-owned, proposal-mediated, autonomous merge unsupported",
+                    session_id.0
+                );
+                self.set_status(StatusSeverity::Info, message.clone());
+                Ok(DesktopWorkflowOutcome::LegionWorkflowReviewed {
+                    session_id,
+                    proposal_id: None,
+                    status: DesktopLegionWorkflowStatus::SessionInspected,
+                    message,
+                })
+            }
+            DesktopAppRequest::OpenLegionWorkflowProposalPreview {
+                session_id,
+                proposal_id,
+            } => match self
+                .app
+                .dispatch_ui_intent(CommandDispatchIntent::PreviewProposal { proposal_id })
+            {
+                Ok(_) => {
+                    let message = format!(
+                        "Legion workflow proposal preview opened {} for {}: proposal-mediated",
+                        proposal_id.0, session_id.0
+                    );
+                    self.set_status(StatusSeverity::Info, message.clone());
+                    Ok(DesktopWorkflowOutcome::LegionWorkflowReviewed {
+                        session_id,
+                        proposal_id: Some(proposal_id),
+                        status: DesktopLegionWorkflowStatus::ProposalPreviewOpened,
+                        message,
+                    })
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.set_status(StatusSeverity::Error, message.clone());
+                    Ok(DesktopWorkflowOutcome::Error(message))
+                }
+            },
+            DesktopAppRequest::OpenLegionWorkflowProposalDetails {
+                session_id,
+                proposal_id,
+            } => match self
+                .app
+                .dispatch_ui_intent(CommandDispatchIntent::OpenProposalDetails { proposal_id })
+            {
+                Ok(_) => {
+                    let message = format!(
+                        "Legion workflow proposal details opened {} for {}: proposal-mediated",
+                        proposal_id.0, session_id.0
+                    );
+                    self.set_status(StatusSeverity::Info, message.clone());
+                    Ok(DesktopWorkflowOutcome::LegionWorkflowReviewed {
+                        session_id,
+                        proposal_id: Some(proposal_id),
+                        status: DesktopLegionWorkflowStatus::ProposalDetailsOpened,
+                        message,
+                    })
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.set_status(StatusSeverity::Error, message.clone());
+                    Ok(DesktopWorkflowOutcome::Error(message))
+                }
+            },
+            DesktopAppRequest::RequestLegionWorkflowVerification {
+                session_id,
+                gate_id,
+            } => {
+                let message = format!(
+                    "Legion workflow verification requested {} gate={}: app-owned metadata request",
+                    session_id.0, gate_id.0
+                );
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    DesktopLegionWorkflowStatus::VerificationRequested,
+                    message,
+                ))
+            }
+            DesktopAppRequest::RequestLegionWorkflowSignOff {
+                session_id,
+                sign_off_id,
+            } => {
+                let message = format!(
+                    "Legion workflow sign-off requested {} signoff={}: app-owned metadata request",
+                    session_id.0, sign_off_id.0
+                );
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    DesktopLegionWorkflowStatus::SignOffRequested,
+                    message,
+                ))
+            }
+            DesktopAppRequest::ResolveLegionWorkflowConflict {
+                session_id,
+                conflict_id,
+            } => {
+                let message = format!(
+                    "Legion workflow conflict resolution requested {} conflict={}: app-owned metadata request",
+                    session_id.0, conflict_id.0
+                );
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    DesktopLegionWorkflowStatus::ConflictResolutionRequested,
+                    message,
+                ))
+            }
+            DesktopAppRequest::RequestLegionWorkflowMergeReadiness { session_id } => {
+                let readiness_state = self
+                    .projection_snapshot()
+                    .legion_workflow_projection
+                    .rows
+                    .iter()
+                    .find(|row| row.session_id == session_id)
+                    .map(|row| row.merge_readiness.state)
+                    .unwrap_or(LegionWorkflowMergeReadinessState::Blocked);
+                let status = match readiness_state {
+                    LegionWorkflowMergeReadinessState::Ready => {
+                        DesktopLegionWorkflowStatus::MergeReadinessReady
+                    }
+                    LegionWorkflowMergeReadinessState::WaitingForApproval => {
+                        DesktopLegionWorkflowStatus::MergeReadinessWaitingForApproval
+                    }
+                    LegionWorkflowMergeReadinessState::Blocked => {
+                        DesktopLegionWorkflowStatus::MergeReadinessBlocked
+                    }
+                };
+                Ok(self.legion_workflow_request_outcome(
+                    session_id,
+                    None,
+                    status,
+                    format!(
+                        "Legion workflow merge readiness requested: {readiness_state:?}; Autonomous merge unsupported until approval"
+                    ),
+                ))
+            }
+            DesktopAppRequest::RecordLegionWorkflowToolPermission {
+                session_id,
+                server_id,
+                tool_name,
+                decision,
+            } => Ok(self.legion_workflow_request_outcome(
+                session_id,
+                None,
+                DesktopLegionWorkflowStatus::ToolPermissionRecorded,
+                format!(
+                    "Legion workflow tool permission requested server={} tool={} decision={decision:?}",
+                    server_id.0, tool_name.0
+                ),
+            )),
+            DesktopAppRequest::TriggerLegionWorkflowKillSwitch {
+                session_id,
+                reason_label,
+            } => Ok(self.legion_workflow_request_outcome(
+                session_id,
+                None,
+                DesktopLegionWorkflowStatus::KillSwitchTriggered,
+                format!("Legion workflow kill switch requested: {reason_label}"),
+            )),
+        }
+    }
+
+    fn legion_workflow_request_outcome(
+        &mut self,
+        session_id: LegionWorkflowSessionId,
+        proposal_id: Option<ProposalId>,
+        status: DesktopLegionWorkflowStatus,
+        message: String,
+    ) -> DesktopWorkflowOutcome {
+        self.set_status(StatusSeverity::Info, message.clone());
+        DesktopWorkflowOutcome::LegionWorkflowReviewed {
+            session_id,
+            proposal_id,
+            status,
+            message,
         }
     }
 
@@ -831,6 +1112,14 @@ impl DesktopRuntime {
                 self.quit_requested = true;
                 self.set_status(StatusSeverity::Info, "Quit requested");
                 DesktopWorkflowOutcome::QuitRequested
+            }
+            AppCommandOutcome::ProductModeChanged(mode) => {
+                let dock_mode = mode.to_dock_mode();
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Product mode changed to {}", dock_mode.label()),
+                );
+                DesktopWorkflowOutcome::ProductModeChanged { mode: dock_mode }
             }
             AppCommandOutcome::Edited(_) => {
                 self.set_status(StatusSeverity::Info, "Edited");
@@ -897,12 +1186,59 @@ impl DesktopRuntime {
                 );
                 DesktopWorkflowOutcome::SearchUpdated
             }
+            AppCommandOutcome::StructuralSearchUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!(
+                        "Structural search: {:?} matches={} proposal={:?}",
+                        projection.status.kind,
+                        projection.matches.len(),
+                        projection.proposal_id.map(|proposal| proposal.0)
+                    ),
+                );
+                DesktopWorkflowOutcome::StructuralSearchUpdated
+            }
+            AppCommandOutcome::GitUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!(
+                        "Git: changes={} hunks={} conflicts={}",
+                        projection.changed_files.len(),
+                        projection.hunks.len(),
+                        projection.conflicts.len()
+                    ),
+                );
+                DesktopWorkflowOutcome::GitUpdated
+            }
+            AppCommandOutcome::DebugProjectionUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Debug: {}", projection.status.message),
+                );
+                DesktopWorkflowOutcome::DebugProjectionUpdated
+            }
             AppCommandOutcome::LanguageToolingUpdated(projection) => {
                 self.set_status(
                     StatusSeverity::Info,
                     format!("Language: {}", projection.status_message),
                 );
                 DesktopWorkflowOutcome::LanguageToolingUpdated
+            }
+            AppCommandOutcome::AssistInlinePredictionUpdated(projection) => {
+                let active = projection.active_prediction.is_some();
+                let status = format!(
+                    "Assist inline prediction: active={} rows={} stale={}",
+                    active,
+                    projection.rows.len(),
+                    projection.stale_prediction_count
+                );
+                self.set_status(StatusSeverity::Info, status.clone());
+                DesktopWorkflowOutcome::AssistInlinePredictionUpdated {
+                    active,
+                    row_count: projection.rows.len(),
+                    stale_count: projection.stale_prediction_count,
+                    status,
+                }
             }
             AppCommandOutcome::TerminalPanelUpdated(projection) => {
                 self.set_status(
@@ -981,6 +1317,86 @@ impl DesktopRuntime {
                         .first()
                         .map(|preview| preview.proposal_id),
                     status,
+                }
+            }
+            AppCommandOutcome::DelegateChatCompleted(outcome) => {
+                let message = format!("Delegate chat sent citations={}", outcome.citation_count);
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                    plan_id: None,
+                    proposal_id: None,
+                    status: DesktopDelegatedTaskStatus::ChatSent,
+                    message,
+                }
+            }
+            AppCommandOutcome::DelegateProposalHunkReviewed(projection) => {
+                let message = format!(
+                    "Delegate proposal hunk review recorded reviews={}",
+                    projection.proposal_review_count
+                );
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                    plan_id: None,
+                    proposal_id: projection
+                        .proposal_reviews
+                        .first()
+                        .map(|review| review.proposal_id),
+                    status: DesktopDelegatedTaskStatus::ProposalHunkReviewed,
+                    message,
+                }
+            }
+            AppCommandOutcome::DelegateToolPermissionRecorded(projection) => {
+                let message = format!(
+                    "Delegate tool permission recorded requests={}",
+                    projection.tool_permission_request_count
+                );
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                    plan_id: None,
+                    proposal_id: None,
+                    status: DesktopDelegatedTaskStatus::ToolPermissionRecorded,
+                    message,
+                }
+            }
+            AppCommandOutcome::LegionWorkflowUpdated(projection) => {
+                let killed = projection.kill_switches.iter().any(|switch| {
+                    switch.state == devil_protocol::LegionWorkflowKillSwitchState::Triggered
+                });
+                let session_id = projection
+                    .rows
+                    .first()
+                    .map(|row| row.session_id.clone())
+                    .or_else(|| {
+                        projection
+                            .kill_switches
+                            .first()
+                            .map(|switch| switch.session_id.clone())
+                    })
+                    .unwrap_or_else(|| LegionWorkflowSessionId("session:unknown".to_string()));
+                let message = format!(
+                    "Legion workflow updated decisions={} permissions={} risk_monitors={} kill_switches={}",
+                    projection.decision_feed_count,
+                    projection.tool_permission_request_count,
+                    projection.risk_monitor_count,
+                    projection.kill_switch_count
+                );
+                self.set_status(
+                    if killed {
+                        StatusSeverity::Warning
+                    } else {
+                        StatusSeverity::Info
+                    },
+                    message.clone(),
+                );
+                DesktopWorkflowOutcome::LegionWorkflowReviewed {
+                    session_id,
+                    proposal_id: None,
+                    status: if killed {
+                        DesktopLegionWorkflowStatus::KillSwitchTriggered
+                    } else {
+                        DesktopLegionWorkflowStatus::ToolPermissionRecorded
+                    },
+                    message,
                 }
             }
             AppCommandOutcome::PluginCommandInvoked(response) => {
@@ -1377,7 +1793,15 @@ impl DesktopEframeApp {
             if command && input.key_pressed(egui::Key::O) {
                 actions.push(DesktopAction::ShowOpenPathPrompt);
             }
-            if command && input.key_pressed(egui::Key::F) {
+            if command && input.modifiers.alt && input.key_pressed(egui::Key::F) {
+                actions.push(DesktopAction::ShowStructuralSearchPrompt {
+                    scope: if input.modifiers.shift {
+                        SearchScopeProjection::Workspace
+                    } else {
+                        SearchScopeProjection::ActiveFile
+                    },
+                });
+            } else if command && input.key_pressed(egui::Key::F) {
                 actions.push(DesktopAction::ShowSearchPrompt {
                     scope: if input.modifiers.shift {
                         SearchScopeProjection::Workspace
@@ -1498,6 +1922,57 @@ impl DesktopEframeApp {
             self.runtime.search_prompt = false;
         }
     }
+
+    fn show_structural_search_prompt(&mut self, ctx: &egui::Context) {
+        if !self.runtime.structural_search_prompt {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("Structural Search")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.radio_value(
+                        &mut self.runtime.structural_search_scope,
+                        SearchScopeProjection::ActiveFile,
+                        "File",
+                    );
+                    ui.radio_value(
+                        &mut self.runtime.structural_search_scope,
+                        SearchScopeProjection::Workspace,
+                        "Workspace",
+                    );
+                });
+                ui.label("Pattern");
+                ui.text_edit_singleline(&mut self.runtime.structural_search_pattern_text);
+                ui.label("Rewrite");
+                ui.text_edit_singleline(&mut self.runtime.structural_search_rewrite_text);
+                ui.horizontal(|ui| {
+                    if ui.button("Preview").clicked() {
+                        let pattern = self.runtime.structural_search_pattern_text.clone();
+                        let rewrite =
+                            trimmed_optional_text(&self.runtime.structural_search_rewrite_text);
+                        self.runtime.structural_search_prompt = false;
+                        let _ = self
+                            .runtime
+                            .handle_action(DesktopAction::RunStructuralSearch {
+                                scope: self.runtime.structural_search_scope,
+                                pattern,
+                                rewrite,
+                                limit: 0,
+                            });
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.runtime.structural_search_prompt = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.runtime.structural_search_prompt = false;
+        }
+    }
 }
 
 impl eframe::App for DesktopEframeApp {
@@ -1517,9 +1992,19 @@ impl eframe::App for DesktopEframeApp {
         }
         self.show_open_path_prompt(ui.ctx());
         self.show_search_prompt(ui.ctx());
+        self.show_structural_search_prompt(ui.ctx());
         if self.runtime.quit_requested() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+}
+
+fn trimmed_optional_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1694,6 +2179,32 @@ fn editor_keyboard_control_actions(
     };
 
     let mut actions = Vec::new();
+    if input.key_pressed(egui::Key::Tab)
+        && snapshot
+            .assist_inline_prediction_projection
+            .active_prediction
+            .is_some()
+    {
+        actions.push(DesktopAction::AcceptCurrentAssistInlinePrediction);
+        return actions;
+    }
+    if input.key_pressed(egui::Key::Escape) {
+        if snapshot
+            .assist_inline_prediction_projection
+            .request_in_flight
+        {
+            actions.push(DesktopAction::CancelAssistInlinePrediction);
+            return actions;
+        }
+        if snapshot
+            .assist_inline_prediction_projection
+            .active_prediction
+            .is_some()
+        {
+            actions.push(DesktopAction::DismissCurrentAssistInlinePrediction);
+            return actions;
+        }
+    }
     if input.key_pressed(egui::Key::ArrowLeft) {
         actions.push(cursor_or_selection_action(
             buffer_id,

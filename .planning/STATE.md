@@ -1,13 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: 13 of 13 (planned)
-- **Status**: Phase 13 planned -- 7 plans across 7 sequential waves
-- **Last Activity**: Phase 13 planning (2026-05-28)
+- **Phase**: 13 of 13 (completed)
+- **Status**: Phase 13 complete -- review passed after remediation and final gates
+- **Last Activity**: Phase 13 review passed (2026-05-28)
 
 ## Progress
 ```
-[####################] 100% - 51/51 GUI GA plans complete
+[####################] 100% - 64/64 planned roadmap and post-GA plans complete
 ```
 
 ## Phase 1 Results
@@ -89,17 +89,17 @@
 - Phase 10: Metadata-First Artifact Model -- complete for public protocol DTOs.
 - Phase 11: Safe Runtime Activation Contracts -- complete for runtime states, security contracts, and readiness stop gates.
 - Phase 12: Delegated Task Runtime -- complete; isolated sandbox and gated proposal runtime fully implemented.
-- Phase 13: Legion Workflow Orchestration -- planned as seven sequential waves; no multi-session runtime merge/apply authority is enabled until the phase is executed, verified, signed off, and approval-gated.
+- Phase 13: Legion Workflow Orchestration -- complete; no multi-session runtime merge/apply authority is enabled outside proposal-mediated approval gates.
 
 ## Phase 13 Plan
 
-- Plan 13-01 (Wave 1): Governance And Activation Gate -- planned
-- Plan 13-02 (Wave 2): Protocol Workflow Contracts -- planned
-- Plan 13-03 (Wave 3): Agent Workflow Coordinator -- planned
-- Plan 13-04 (Wave 4): Tracker Memory Evidence Ledger -- planned
-- Plan 13-05 (Wave 5): App Workflow Composition -- planned
-- Plan 13-06 (Wave 6): Desktop Workflow Command Center -- planned
-- Plan 13-07 (Wave 7): Evidence Final Gate And Readiness -- planned
+- Plan 13-01 (Wave 1): Governance And Activation Gate -- complete
+- Plan 13-02 (Wave 2): Protocol Workflow Contracts -- complete
+- Plan 13-03 (Wave 3): Agent Workflow Coordinator -- complete
+- Plan 13-04 (Wave 4): Tracker Memory Evidence Ledger -- complete
+- Plan 13-05 (Wave 5): App Workflow Composition -- complete
+- Plan 13-06 (Wave 6): Desktop Workflow Command Center -- complete
+- Plan 13-07 (Wave 7): Evidence Final Gate And Readiness -- complete
 
 ## Recent Decisions
 - Use exploration design `.planning/explorations/2026-05-26-gui-ide-roadmap-design.md` as the start source.
@@ -155,6 +155,8 @@
 - Phase 13 planning derives requirements from the roadmap goal and Phase 12 runtime evidence because `.planning/REQUIREMENTS.md` is absent.
 - Phase 13 uses seven sequential waves because governance, protocol, agent coordination, tracker/memory, app authority, desktop projections, and final evidence share high-risk workflow/merge boundaries.
 - Phase 13 merge semantics are approval-gated proposal readiness, not autonomous git merge or direct workspace mutation.
+- Phase 13 is accepted with metadata-first Legion workflow DTOs, bounded agent coordination, tracker/memory evidence, app-owned execution and readiness, projection-only UI/desktop command-center surfaces, final evidence, and full repository gates passing.
+- Phase 13 review found and fixed incomplete-worker merge readiness and resumed dependency-chain scheduling before rerunning targeted and full repository gates.
 
 ## Next Action
-Run `/legion:build` to execute Phase 13: Legion Workflow Orchestration.
+Commit the Phase 13 build and review artifacts.

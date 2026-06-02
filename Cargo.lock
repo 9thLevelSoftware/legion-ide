@@ -998,6 +998,8 @@ dependencies = [
  "devil-ai",
  "devil-protocol",
  "devil-security",
+ "reqwest",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -1024,6 +1026,7 @@ dependencies = [
  "devil-terminal",
  "devil-tracker",
  "devil-ui",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -1155,6 +1158,7 @@ name = "devil-remote"
 version = "0.1.0"
 dependencies = [
  "devil-protocol",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -1207,6 +1211,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -1259,6 +1264,8 @@ name = "devil-ui"
 version = "0.1.0"
 dependencies = [
  "devil-protocol",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid",
 ]
