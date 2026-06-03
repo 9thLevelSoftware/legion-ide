@@ -13,7 +13,7 @@ The product is a local-first, proposal-gated, evidence-driven AI IDE. It is not 
 
 ## Naming strategy
 
-Use `Legion` for user-facing product language immediately:
+Use `Legion` for product language and internal package names:
 
 - Legion IDE
 - Legion Board
@@ -21,8 +21,9 @@ Use `Legion` for user-facing product language immediately:
 - Legion Workflows
 - Legion Cloud Lane
 - Legion specialists
+- `legion-*` Cargo packages and `legion_*` Rust crate imports
 
-Keep internal `devil-*` crate names until a dedicated rename phase can update workspace manifests, dependency-policy checks, tests, CI, imports, package metadata, and migration docs in one controlled PR.
+The repository has moved to the canonical Legion namespace. See `docs/LEGION_RENAME.md` for the crate mapping, command changes, and compatibility policy.
 
 ## Product promise
 

@@ -1,0 +1,16 @@
+[package]
+name = "legion-remote-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+legion-protocol = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
+tokio-rustls = { workspace = true }
+uuid = { workspace = true }

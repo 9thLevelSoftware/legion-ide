@@ -969,318 +969,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "devil-agent"
-version = "0.1.0"
-dependencies = [
- "devil-ai",
- "devil-protocol",
- "devil-tracker",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-ai"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "devil-security",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-ai-providers"
-version = "0.1.0"
-dependencies = [
- "devil-ai",
- "devil-protocol",
- "devil-security",
- "reqwest",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "devil-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "devil-agent",
- "devil-ai",
- "devil-ai-providers",
- "devil-collaboration",
- "devil-editor",
- "devil-index",
- "devil-memory",
- "devil-observability",
- "devil-platform",
- "devil-plugin",
- "devil-project",
- "devil-protocol",
- "devil-remote",
- "devil-security",
- "devil-storage",
- "devil-terminal",
- "devil-tracker",
- "devil-ui",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "devil-index",
- "devil-protocol",
- "devil-storage",
- "serde_json",
-]
-
-[[package]]
-name = "devil-collaboration"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-desktop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "devil-app",
- "devil-protocol",
- "devil-ui",
- "eframe",
- "egui",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "devil-editor"
-version = "0.1.0"
-dependencies = [
- "devil-observability",
- "devil-protocol",
- "devil-text",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-index"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "devil-text",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-memory"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "devil-storage",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-observability"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-platform"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "nix",
- "thiserror 2.0.18",
- "windows",
-]
-
-[[package]]
-name = "devil-plugin"
-version = "0.1.0"
-dependencies = [
- "devil-observability",
- "devil-platform",
- "devil-protocol",
- "devil-security",
- "devil-storage",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-project"
-version = "0.1.0"
-dependencies = [
- "devil-observability",
- "devil-platform",
- "devil-protocol",
- "devil-security",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-remote"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-remote-transport"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "rustls",
- "rustls-pki-types",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "uuid",
-]
-
-[[package]]
-name = "devil-retention"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "devil-protocol",
- "keyring",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "devil-security"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "devil-storage"
-version = "0.1.0"
-dependencies = [
- "devil-observability",
- "devil-protocol",
- "devil-security",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-telemetry"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-terminal"
-version = "0.1.0"
-dependencies = [
- "devil-platform",
- "devil-protocol",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-text"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "hex",
- "quickcheck",
- "ropey",
- "sha2",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "devil-tracker"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "devil-storage",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-ui"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "devil-vscode-compat"
-version = "0.1.0"
-dependencies = [
- "devil-protocol",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2430,6 +2118,318 @@ name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
+name = "legion-agent"
+version = "0.1.0"
+dependencies = [
+ "legion-ai",
+ "legion-protocol",
+ "legion-tracker",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-ai"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "legion-security",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-ai-providers"
+version = "0.1.0"
+dependencies = [
+ "legion-ai",
+ "legion-protocol",
+ "legion-security",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "legion-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "legion-agent",
+ "legion-ai",
+ "legion-ai-providers",
+ "legion-collaboration",
+ "legion-editor",
+ "legion-index",
+ "legion-memory",
+ "legion-observability",
+ "legion-platform",
+ "legion-plugin",
+ "legion-project",
+ "legion-protocol",
+ "legion-remote",
+ "legion-security",
+ "legion-storage",
+ "legion-terminal",
+ "legion-tracker",
+ "legion-ui",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "legion-index",
+ "legion-protocol",
+ "legion-storage",
+ "serde_json",
+]
+
+[[package]]
+name = "legion-collaboration"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui",
+ "legion-app",
+ "legion-protocol",
+ "legion-ui",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "legion-editor"
+version = "0.1.0"
+dependencies = [
+ "legion-observability",
+ "legion-protocol",
+ "legion-text",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-index"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "legion-text",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-memory"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "legion-storage",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-observability"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-platform"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "nix",
+ "thiserror 2.0.18",
+ "windows",
+]
+
+[[package]]
+name = "legion-plugin"
+version = "0.1.0"
+dependencies = [
+ "legion-observability",
+ "legion-platform",
+ "legion-protocol",
+ "legion-security",
+ "legion-storage",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-project"
+version = "0.1.0"
+dependencies = [
+ "legion-observability",
+ "legion-platform",
+ "legion-protocol",
+ "legion-security",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-remote"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-remote-transport"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "rustls",
+ "rustls-pki-types",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "uuid",
+]
+
+[[package]]
+name = "legion-retention"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "keyring",
+ "legion-protocol",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "legion-security"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "legion-storage"
+version = "0.1.0"
+dependencies = [
+ "legion-observability",
+ "legion-protocol",
+ "legion-security",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-telemetry"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-terminal"
+version = "0.1.0"
+dependencies = [
+ "legion-platform",
+ "legion-protocol",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-text"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "legion-protocol",
+ "quickcheck",
+ "ropey",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "legion-tracker"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "legion-storage",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-ui"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "legion-vscode-compat"
+version = "0.1.0"
+dependencies = [
+ "legion-protocol",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
 
 [[package]]
 name = "libc"

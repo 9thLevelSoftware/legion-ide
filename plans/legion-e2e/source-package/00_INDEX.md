@@ -2,11 +2,11 @@
 
 Generated: 2026-06-01 16:24:53 EDT
 
-This directory contains the initial end-to-end planning package for pivoting `devil-ide` into `Legion IDE`.
+This directory contains the initial end-to-end planning package for pivoting `legion-ide` into `Legion IDE`.
 
 Source inputs used:
 
-- Existing repo inspection of `9thLevelSoftware/devil-ide` in a temporary inspection checkout.
+- Existing repo inspection of `9thLevelSoftware/legion-ide` in a temporary inspection checkout.
 - Current Phase 12 delegated-task runtime context.
 - Current Phase 13 Legion workflow orchestration context.
 - Discord-sent artifact from a local download staging directory; original absolute path intentionally redacted.

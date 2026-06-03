@@ -12,7 +12,7 @@ Phase 6 targets real-time multiplayer collaboration while preserving editor owne
 
 Use an operation-log collaboration model for the accepted Phase 6 slice. Operations carry deterministic identifiers, participant-local sequence numbers, base version vectors, document epochs, snapshot and buffer preconditions, author principal metadata, capability decisions, correlation IDs, causality IDs, and redaction hints.
 
-The active runtime implementation is `devil-collaboration`. It remains isolated from app, UI, editor, project, remote, terminal, and process internals. Runtime application is default-off by configuration and becomes active only when constructed with an enabled `CollaborationRuntimeConfig` by an app-owned composition root. Durable workspace writes remain outside this runtime and continue through proposal/workspace save preconditions.
+The active runtime implementation is `legion-collaboration`. It remains isolated from app, UI, editor, project, remote, terminal, and process internals. Runtime application is default-off by configuration and becomes active only when constructed with an enabled `CollaborationRuntimeConfig` by an app-owned composition root. Durable workspace writes remain outside this runtime and continue through proposal/workspace save preconditions.
 
 ## Rejected Alternatives
 

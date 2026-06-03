@@ -6,7 +6,7 @@ Generated: 2026-06-01 16:24:53 EDT
 
 Legion should be built in this order:
 
-1. Rename user-facing product from Devil to Legion without destabilizing internal crates.
+1. Rename user-facing product from Legion to Legion without destabilizing internal crates.
 2. Build the panel-host dock refactor first.
 3. Ship deterministic Manual-mode IDE value.
 4. Add structural search/rewrite as a differentiator.
@@ -25,16 +25,16 @@ From repo inspection and the Discord artifact:
 
 - Rust workspace exists.
 - Existing crates include:
-  - `devil-agent`.
-  - `devil-ai`.
-  - `devil-ai-providers`.
-  - `devil-app`.
-  - `devil-ui`.
-  - `devil-desktop`.
-  - `devil-protocol`.
+  - `legion-agent`.
+  - `legion-ai`.
+  - `legion-ai-providers`.
+  - `legion-app`.
+  - `legion-ui`.
+  - `legion-desktop`.
+  - `legion-protocol`.
   - likely supporting crates for index/project/storage/etc.
 - Phase 12 delegated task runtime exists/planned.
-- `devil-agent` has concepts such as:
+- `legion-agent` has concepts such as:
   - `AgentRuntime`.
   - `DelegatedTaskSandboxOrchestrator`.
   - `DelegatedTaskProposalGenerator`.
@@ -42,13 +42,13 @@ From repo inspection and the Discord artifact:
 - Delegated task runtime uses git worktree isolation where possible.
 - Copy-based isolation fallback exists/planned.
 - Phase 13 Legion workflow orchestration exists/planned.
-- `devil-ai-providers` has stub provider registry/deterministic local provider.
-- `devil-ui`/`devil-desktop` are supposed to be projection-only.
-- `devil-app` owns proposal-mediated saves and approval gates.
+- `legion-ai-providers` has stub provider registry/deterministic local provider.
+- `legion-ui`/`legion-desktop` are supposed to be projection-only.
+- `legion-app` owns proposal-mediated saves and approval gates.
 - Current UI likely uses whole-pane `RightConsole` swapping by mode.
 - Dock/panel registry refactor is identified as gating.
 
-## 2. Product pivot: Devil → Legion
+## 2. Product pivot: Legion → Legion
 
 ### 2.1 Why Legion is a better name
 
@@ -61,7 +61,7 @@ Legion fits:
 - cloud worker lanes.
 - local specialist army.
 
-It is also less edgy than Devil and easier to sell to professional/enterprise users.
+It is also less edgy than Legion and easier to sell to professional/enterprise users.
 
 ### 2.2 Rename strategy
 
@@ -112,7 +112,7 @@ Use:
 
 Avoid:
 
-- Devil in user-facing copy.
+- Legion in user-facing copy.
 - “autonomous agent” as primary UX term.
 - “swarm” as the only metaphor.
 
@@ -222,7 +222,7 @@ Value:
 
 - App still builds.
 - User-facing UI says Legion.
-- Internal crate names can still be `devil-*`.
+- Internal crate names can still be `legion-*`.
 
 ## Phase 1 — Panel-host dock refactor
 

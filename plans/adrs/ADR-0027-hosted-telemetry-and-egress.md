@@ -8,7 +8,7 @@ Current observability is metadata-only by default and air-gap policy denies host
 
 ## Decision
 
-Implement durable telemetry spooling and hosted telemetry export behind explicit consent, endpoint policy, and feature activation. Keep the deterministic metadata-only `devil-telemetry` fixture spool and fake acknowledgement harness for conformance tests.
+Implement durable telemetry spooling and hosted telemetry export behind explicit consent, endpoint policy, and feature activation. Keep the deterministic metadata-only `legion-telemetry` fixture spool and fake acknowledgement harness for conformance tests.
 
 Production hosted telemetry must require explicit scoped consent, endpoint allowlisting, air-gap denial, structured privacy classification, bounded durable metadata-only spooling, revocation/purge behavior, retry/drop summaries, non-blocking export, and operations diagnostics.
 

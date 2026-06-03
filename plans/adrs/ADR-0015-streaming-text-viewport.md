@@ -5,11 +5,11 @@ Accepted for Phase 1 Workstream 0.
 
 ## Context
 
-Phase 1 of [`plans/implementation-plan.md`](plans/implementation-plan.md:76) removes full-buffer materialization from the editor and text substrate. The current scalability risk is that [`ActiveBufferProjection`](crates/devil-ui/src/ui.rs:86) can carry full text, [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/devil-text/src/lib.rs:22) bounds full-cache behavior, and [`LineIndex`](crates/devil-text/src/lib.rs:457) is still treated as full-buffer infrastructure. The Phase 1 acceptance gate in [`plans/implementation-plan.md`](plans/implementation-plan.md:98) requires very large files to open without sending full source text to UI projections and requires UI full-source access only in explicitly bounded small-buffer mode.
+Phase 1 of [`plans/implementation-plan.md`](plans/implementation-plan.md:76) removes full-buffer materialization from the editor and text substrate. The current scalability risk is that [`ActiveBufferProjection`](crates/legion-ui/src/ui.rs:86) can carry full text, [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/legion-text/src/lib.rs:22) bounds full-cache behavior, and [`LineIndex`](crates/legion-text/src/lib.rs:457) is still treated as full-buffer infrastructure. The Phase 1 acceptance gate in [`plans/implementation-plan.md`](plans/implementation-plan.md:98) requires very large files to open without sending full source text to UI projections and requires UI full-source access only in explicitly bounded small-buffer mode.
 
-This ADR extends the text ownership direction accepted in [`plans/adrs/ADR-0003-editor-core-text-model.md`](plans/adrs/ADR-0003-editor-core-text-model.md:1): the editor/text layer owns text buffers, snapshots, transactions, and line metrics; UI remains projection-only. The UI shell represented by [`Shell`](crates/devil-ui/src/ui.rs:228) must not regain editor buffer, workspace actor, or persistence ownership.
+This ADR extends the text ownership direction accepted in [`plans/adrs/ADR-0003-editor-core-text-model.md`](plans/adrs/ADR-0003-editor-core-text-model.md:1): the editor/text layer owns text buffers, snapshots, transactions, and line metrics; UI remains projection-only. The UI shell represented by [`Shell`](crates/legion-ui/src/ui.rs:228) must not regain editor buffer, workspace actor, or persistence ownership.
 
-The existing proposal-mediated save path remains authoritative for Phase 1. Saves must continue through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) and [`WorkspaceActor::save_file_with_proposal()`](crates/devil-project/src/lib.rs:1620), preserving the conflict behavior covered by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](crates/devil-app/tests/workspace_vfs_integration.rs:280). Future placeholder subsystems in [`crates/devil-index/src/lib.rs`](crates/devil-index/src/lib.rs:1), [`crates/devil-agent/src/lib.rs`](crates/devil-agent/src/lib.rs:1), [`crates/devil-tracker/src/lib.rs`](crates/devil-tracker/src/lib.rs:1), and [`crates/devil-memory/src/lib.rs`](crates/devil-memory/src/lib.rs:1) remain inert in this workstream.
+The existing proposal-mediated save path remains authoritative for Phase 1. Saves must continue through [`SaveWorkflowService::save_active_buffer()`](crates/legion-app/src/lib.rs:938) and [`WorkspaceActor::save_file_with_proposal()`](crates/legion-project/src/lib.rs:1620), preserving the conflict behavior covered by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](crates/legion-app/tests/workspace_vfs_integration.rs:280). Future placeholder subsystems in [`crates/legion-index/src/lib.rs`](crates/legion-index/src/lib.rs:1), [`crates/legion-agent/src/lib.rs`](crates/legion-agent/src/lib.rs:1), [`crates/legion-tracker/src/lib.rs`](crates/legion-tracker/src/lib.rs:1), and [`crates/legion-memory/src/lib.rs`](crates/legion-memory/src/lib.rs:1) remain inert in this workstream.
 
 ## Decision
 
@@ -17,9 +17,9 @@ Phase 1 adopts a streaming editor substrate with two explicit operating modes, v
 
 ### 1. Small-buffer full-source mode versus large-file degraded mode
 
-- **Small-buffer full-source mode** is allowed only when the buffer is within the existing full-cache budget represented by [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/devil-text/src/lib.rs:22), the buffer has not been promoted to degraded mode for memory or encoding reasons, and the projection request explicitly asks for bounded full-source compatibility.
+- **Small-buffer full-source mode** is allowed only when the buffer is within the existing full-cache budget represented by [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/legion-text/src/lib.rs:22), the buffer has not been promoted to degraded mode for memory or encoding reasons, and the projection request explicitly asks for bounded full-source compatibility.
 - In small-buffer full-source mode, UI may receive full source text as a compatibility projection, but the projection must be explicitly tagged as bounded and must carry the snapshot identifier and buffer version that produced it.
-- **Large-file degraded mode** is required for buffers above [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/devil-text/src/lib.rs:22) and may also be selected for files that exceed configured memory budgets, line metric budgets, or semantic overlay budgets.
+- **Large-file degraded mode** is required for buffers above [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/legion-text/src/lib.rs:22) and may also be selected for files that exceed configured memory budgets, line metric budgets, or semantic overlay budgets.
 - In large-file degraded mode, UI receives viewport slices only. Whole-file source text, all-line materialization, unbounded search results, full semantic overlays, and eager full line metrics are forbidden.
 - Degraded mode must surface user-visible status: viewport-only rendering, bounded search, disabled or stale expensive overlays, and any save limitation caused by current Phase 1 compatibility constraints.
 - The accepted Phase 1 guard is absolute: UI never receives full source except in explicitly bounded small-buffer mode.
@@ -37,7 +37,7 @@ The editor/app boundary provides a viewport projection rather than a full active
 - lazy line metrics with explicit freshness state so stale or background-computed metrics never block rendering;
 - degraded-mode status and omissions so UI can explain disabled features without owning policy or text.
 
-Projection consumers may request a new viewport, scroll anchor, or command dispatch intent, but projection consumers do not mutate text, own editor sessions, own workspace actors, or persist files. [`Shell`](crates/devil-ui/src/ui.rs:228) remains a projection renderer and command-intent surface.
+Projection consumers may request a new viewport, scroll anchor, or command dispatch intent, but projection consumers do not mutate text, own editor sessions, own workspace actors, or persist files. [`Shell`](crates/legion-ui/src/ui.rs:228) remains a projection renderer and command-intent surface.
 
 ### 3. Chunk size and chunk hash policy
 
@@ -74,7 +74,7 @@ Projection consumers may request a new viewport, scroll anchor, or command dispa
 
 ### 6. Non-blocking transaction event stream semantics
 
-- [`EditorEngine`](crates/devil-editor/src/lib.rs:312) emits transaction events only after an edit transaction commits to editor-owned state and a post-transaction snapshot descriptor exists.
+- [`EditorEngine`](crates/legion-editor/src/lib.rs:312) emits transaction events only after an edit transaction commits to editor-owned state and a post-transaction snapshot descriptor exists.
 - Events carry metadata: transaction identifier, source kind, workspace identifier, file identifier, buffer identifier, pre-snapshot identifier, post-snapshot identifier, buffer version, changed byte ranges, changed UTF-16 ranges when available, affected chunk ordinals and hashes, undo group, causality identifier, and freshness flags.
 - Events must not carry full source text. They may reference chunk descriptors and bounded changed slices only when a consumer holds an appropriate lease and the slice remains within projection or small-buffer limits.
 - Event ordering is total per buffer. Cross-buffer ordering is expressed by causality metadata and must not require editor input to wait for background consumers.
@@ -86,11 +86,11 @@ Projection consumers may request a new viewport, scroll anchor, or command dispa
 ### 7. Save-path compatibility limits for Phase 1
 
 - Phase 1 does not replace the existing proposal-mediated save path and does not introduce generalized proposals. That belongs to later workstreams.
-- Save remains routed through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) and [`WorkspaceActor::save_file_with_proposal()`](crates/devil-project/src/lib.rs:1620).
+- Save remains routed through [`SaveWorkflowService::save_active_buffer()`](crates/legion-app/src/lib.rs:938) and [`WorkspaceActor::save_file_with_proposal()`](crates/legion-project/src/lib.rs:1620).
 - The editor/app save assembly may materialize a complete save payload only inside the save workflow boundary, never inside UI projection and never as a background consumer convenience.
 - Existing save preconditions remain mandatory: expected fingerprint, expected file content version, expected workspace generation, buffer version, snapshot identifier, non-zero correlation identifier, and causality identifier.
 - If a degraded large-file buffer cannot be saved through the current Phase 1 full-payload compatibility path within configured budgets, the save must fail closed with a typed rejection or degraded status while preserving dirty editor text.
-- External overwrite, stale fingerprint, stale content version, trust denial, or write-policy denial must continue to reject rather than clobber disk, preserving the behavior verified by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](crates/devil-app/tests/workspace_vfs_integration.rs:280).
+- External overwrite, stale fingerprint, stale content version, trust denial, or write-policy denial must continue to reject rather than clobber disk, preserving the behavior verified by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](crates/legion-app/tests/workspace_vfs_integration.rs:280).
 - Chunk hashes are not substitutes for workspace fingerprints or file content versions in Phase 1.
 
 ## Phase 1 guardrails and non-goals
@@ -99,7 +99,7 @@ Projection consumers may request a new viewport, scroll anchor, or command dispa
 - UI remains projection-only and never owns editor buffers, workspace actors, save orchestration, or persistence.
 - No Rust source, tests, dependency policy, or placeholder crate behavior is changed by this ADR.
 - No new dependencies are required by this ADR.
-- [`crates/devil-index/src/lib.rs`](crates/devil-index/src/lib.rs:1), [`crates/devil-agent/src/lib.rs`](crates/devil-agent/src/lib.rs:1), [`crates/devil-tracker/src/lib.rs`](crates/devil-tracker/src/lib.rs:1), and [`crates/devil-memory/src/lib.rs`](crates/devil-memory/src/lib.rs:1) remain inert.
+- [`crates/legion-index/src/lib.rs`](crates/legion-index/src/lib.rs:1), [`crates/legion-agent/src/lib.rs`](crates/legion-agent/src/lib.rs:1), [`crates/legion-tracker/src/lib.rs`](crates/legion-tracker/src/lib.rs:1), and [`crates/legion-memory/src/lib.rs`](crates/legion-memory/src/lib.rs:1) remain inert.
 - Phase 1 does not design multi-file atomic proposals, generalized mutation approval, plugin mutation paths, LSP mutation paths, AI-generated edit application, collaboration protocols, or durable event replay storage.
 - Phase 1 does not weaken existing save conflict semantics or fail-closed persistence behavior.
 

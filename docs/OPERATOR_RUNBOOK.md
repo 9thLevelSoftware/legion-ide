@@ -23,7 +23,7 @@ Use this pattern:
 
 - `phase-0-check-deps.txt`
 - `phase-0-fmt.txt`
-- `phase-1-devil-ui-tests.txt`
+- `phase-1-legion-ui-tests.txt`
 - `phase-4-assist-inline-prediction.txt`
 - `phase-8-model-download-dry-run.txt`
 - `final-workspace-test.txt`
@@ -70,8 +70,8 @@ bash scripts/models/download-models.sh --dry-run
 bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml
 python3 evals/run_eval.py --dry-run
 python3 -m compileall training evals scripts/models
-cargo test -p devil-memory --all-targets trace
-cargo test -p devil-security --all-targets redaction
+cargo test -p legion-memory --all-targets trace
+cargo test -p legion-security --all-targets redaction
 ```
 
 Real model download, serving, training, conversion, hosted export, or dataset construction requires explicit consented trace export plus redaction/secret-scan evidence.

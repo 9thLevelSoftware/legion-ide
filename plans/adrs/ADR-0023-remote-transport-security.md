@@ -12,7 +12,7 @@ Remote development requires transport envelopes, identity, authorization, egress
 
 Remote transport uses `RemoteTransportEnvelope` with non-zero correlation IDs, non-nil causality IDs, non-zero event sequences, principal metadata, redaction hints, and schema versions. Invalid envelopes fail closed.
 
-Remote capability policy is added to `devil-security` as `RemoteDevelopmentPolicy`. Remote capabilities are denied by default, require trusted workspaces by default, and are independently gated for session connection, filesystem, execution, LSP, semantic query, audit export, and offline resume. Non-loopback egress is denied by the existing air-gap/local-provider-only policy unless a future accepted policy profile changes it.
+Remote capability policy is added to `legion-security` as `RemoteDevelopmentPolicy`. Remote capabilities are denied by default, require trusted workspaces by default, and are independently gated for session connection, filesystem, execution, LSP, semantic query, audit export, and offline resume. Non-loopback egress is denied by the existing air-gap/local-provider-only policy unless a future accepted policy profile changes it.
 
 Remote audit records use `RemoteAuditRecord`, `validate_remote_audit_record`, `remote_audit_recorded_event`, and `StorageRepositoryRequest::SaveRemoteAuditRecord`. Durable storage is metadata-only and rejects raw source, raw transcripts, process output, transport payload bodies, and secrets.
 

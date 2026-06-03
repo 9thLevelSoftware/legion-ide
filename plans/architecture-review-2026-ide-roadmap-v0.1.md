@@ -10,7 +10,7 @@ Current correction date: 2026-06-02
 
 ## 1. Executive verdict
 
-The repository has moved beyond a spike-only baseline in several critical foundations. The most important current strength is that durable local saves are now proposal-mediated, conflict-aware, fingerprint-checked, and fail-closed through [`SaveWorkflowService`](crates/devil-app/src/lib.rs:935), [`WorkspaceSaveRequest`](crates/devil-project/src/lib.rs:133), and [`WorkspaceActor::save_file_with_proposal()`](crates/devil-project/src/lib.rs:1620). The UI shell is also projection-oriented through [`ActiveBufferProjection`](crates/devil-ui/src/ui.rs:86) and command intents rather than editor ownership.
+The repository has moved beyond a spike-only baseline in several critical foundations. The most important current strength is that durable local saves are now proposal-mediated, conflict-aware, fingerprint-checked, and fail-closed through [`SaveWorkflowService`](crates/legion-app/src/lib.rs:935), [`WorkspaceSaveRequest`](crates/legion-project/src/lib.rs:133), and [`WorkspaceActor::save_file_with_proposal()`](crates/legion-project/src/lib.rs:1620). The UI shell is also projection-oriented through [`ActiveBufferProjection`](crates/legion-ui/src/ui.rs:86) and command intents rather than editor ownership.
 
 That said, the product is still far from the requested 2026 IDE target. The original 2026-05-14 baseline was best described as a deterministic local core with partial proposal safety and metadata-oriented observability, not yet a modern AI-native, predictive, extensible, remote, and collaborative IDE platform. As of 2026-06-02, several slices have since been implemented behind ADR, dependency-policy, contract-test, and evidence gates; the remaining gap is production completeness, external-service activation, and end-to-end product hardening rather than empty placeholder crates.
 
@@ -37,19 +37,19 @@ Primary repository evidence reviewed:
 - Foundational implementation plan constraints from [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:32).
 - AI-native founding vision from [`plans/architecture-charter-v0.1.md`](plans/architecture-charter-v0.1.md:10).
 - Current dependency-policy gate from [`xtask/src/main.rs`](xtask/src/main.rs:117) and [`plans/dependency-policy.md`](plans/dependency-policy.md:9).
-- Save and conflict integration tests from [`crates/devil-app/tests/workspace_vfs_integration.rs`](crates/devil-app/tests/workspace_vfs_integration.rs:73).
-- Protocol golden tests from [`crates/devil-protocol/tests/dto_contracts.rs`](crates/devil-protocol/tests/dto_contracts.rs:244).
+- Save and conflict integration tests from [`crates/legion-app/tests/workspace_vfs_integration.rs`](crates/legion-app/tests/workspace_vfs_integration.rs:73).
+- Protocol golden tests from [`crates/legion-protocol/tests/dto_contracts.rs`](crates/legion-protocol/tests/dto_contracts.rs:244).
 - Text and index stress baseline from [`plans/evidence/phase-0/text-index-stress-baseline.md`](plans/evidence/phase-0/text-index-stress-baseline.md:31).
 
 Important correction: older review documents such as [`plans/architecture-review-full-codebase-v0.1.md`](plans/architecture-review-full-codebase-v0.1.md:61) and [`plans/architecture-review-phases-5-6-v0.1.md`](plans/architecture-review-phases-5-6-v0.1.md:25) report issues that have since been partially resolved. In the current implementation, saves no longer bypass proposal mediation. The correct current baseline is:
 
-- Save orchestration starts in [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938).
-- Save proposals are built by [`SaveProposalCoordinator::build_save_proposal()`](crates/devil-app/src/lib.rs:151).
-- Workspace writes require fingerprint, file version, workspace generation, buffer version, snapshot id, payload length, correlation id, and causality id through [`WorkspaceSaveRequest`](crates/devil-project/src/lib.rs:133).
-- Atomic write fallback is fail-closed through [`NonAtomicSaveFallbackPolicy`](crates/devil-project/src/lib.rs:172).
-- Untrusted writes, stale saves, and external overwrites are asserted by [`workspace_vfs_integration_untrusted_save_is_denied_without_disk_mutation`](crates/devil-app/tests/workspace_vfs_integration.rs:73) and [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict`](crates/devil-app/tests/workspace_vfs_integration.rs:280).
+- Save orchestration starts in [`SaveWorkflowService::save_active_buffer()`](crates/legion-app/src/lib.rs:938).
+- Save proposals are built by [`SaveProposalCoordinator::build_save_proposal()`](crates/legion-app/src/lib.rs:151).
+- Workspace writes require fingerprint, file version, workspace generation, buffer version, snapshot id, payload length, correlation id, and causality id through [`WorkspaceSaveRequest`](crates/legion-project/src/lib.rs:133).
+- Atomic write fallback is fail-closed through [`NonAtomicSaveFallbackPolicy`](crates/legion-project/src/lib.rs:172).
+- Untrusted writes, stale saves, and external overwrites are asserted by [`workspace_vfs_integration_untrusted_save_is_denied_without_disk_mutation`](crates/legion-app/tests/workspace_vfs_integration.rs:73) and [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict`](crates/legion-app/tests/workspace_vfs_integration.rs:280).
 
-Current 2026-06-02 correction: this review also predates later accepted slices. `devil-index` now has the Phase 3 semantic-fabric implementation and tests; `devil-agent`, `devil-tracker`, and `devil-memory` have Phase 4 and Phase 13 metadata-only agent/workflow records; `devil-plugin` has the Phase 5 isolated plugin boundary; `devil-collaboration` has the Phase 6 deterministic collaboration runtime; `devil-remote` has the Phase 7 deterministic edge-workspace harness; and `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` have Phase 8 default-deny implementation slices. These are accepted bounded surfaces, not unrestricted production activation. Hosted providers, production cloud lanes, full autonomous execution, vector indexing, standalone production LSP, arbitrary VSIX execution, hosted telemetry export, raw-source vault operation, and autonomous merge/apply remain gated by the dependency policy and evidence requirements.
+Current 2026-06-02 correction: this review also predates later accepted slices. `legion-index` now has the Phase 3 semantic-fabric implementation and tests; `legion-agent`, `legion-tracker`, and `legion-memory` have Phase 4 and Phase 13 metadata-only agent/workflow records; `legion-plugin` has the Phase 5 isolated plugin boundary; `legion-collaboration` has the Phase 6 deterministic collaboration runtime; `legion-remote` has the Phase 7 deterministic edge-workspace harness; and `legion-remote-transport`, `legion-terminal`, `legion-telemetry`, and `legion-retention` have Phase 8 default-deny implementation slices. These are accepted bounded surfaces, not unrestricted production activation. Hosted providers, production cloud lanes, full autonomous execution, vector indexing, standalone production LSP, arbitrary VSIX execution, hosted telemetry export, raw-source vault operation, and autonomous merge/apply remain gated by the dependency policy and evidence requirements.
 
 The roadmap below therefore treats proposal-mediated save and the accepted metadata-first runtime slices as current strengths, while identifying remaining production-completeness gaps.
 
@@ -59,23 +59,23 @@ The roadmap below therefore treats proposal-mediated save and the accepted metad
 
 | Subsystem | Current state | 2026 readiness assessment |
 |---|---|---|
-| Workspace and VFS | Local workspace actor owns root, shallow tree, file identity, watcher state, trust, fingerprint checks, and proposal-safe save through [`WorkspaceActor`](crates/devil-project/src/lib.rs:410). | Strong foundation for local durable mutation, but not yet multi-root, remote-capable, collaborative, content-addressed, or edge-replicated. |
-| Save and mutation safety | Save path uses [`WorkspaceProposal`](crates/devil-protocol/src/lib.rs:397), proposal lifecycle responses in tests, and [`WorkspaceActor::save_file_with_proposal()`](crates/devil-project/src/lib.rs:1620). | Strong for manual file save, incomplete for generalized workspace edits, multi-file atomicity, rollback, AI patches, LSP code actions, plugin changes, and collaborative operations. |
-| UI shell | Projection-only shell uses [`ActiveBufferProjection`](crates/devil-ui/src/ui.rs:86) and [`CommandDispatchIntent`](crates/devil-ui/src/ui.rs:143). | Correct ownership direction, but still primitive. It projects full buffer text and lacks production renderer, tabs, panels, semantic overlays, presence, agent activity, remote status, or collaborative proposal UX. |
-| Editor engine | [`EditorEngine`](crates/devil-editor/src/lib.rs:312) owns buffers, transactions, snapshots, undo, redo, dirty state, and conflict acknowledgements through [`EditorEngine::acknowledge_save_outcome()`](crates/devil-editor/src/lib.rs:1250). | Good deterministic editor core, but not yet optimized for zero-latency semantic workloads, collaborative operation transforms, large-file viewport rendering, or multi-consumer snapshot leases. |
-| Text model | [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/devil-text/src/lib.rs:22) caps full-cache materialization; [`LineIndex`](crates/devil-text/src/lib.rs:457) supports coordinate conversion. | Major bottleneck. Full text cache and full line index refresh remain incompatible with very large files, remote latency hiding, and predictive semantic analysis under continuous edits. |
-| Protocol boundary | [`devil-protocol`](crates/devil-protocol/src/lib.rs) contains IDs, editor DTOs, proposal DTOs, terminal DTOs, LSP DTOs, plugin DTOs, storage DTOs, and ports. | Good central boundary, but it lacks first-class remote workspace, collaboration, agent-run, semantic-index, WASM ABI, operation-log, and distributed identity contracts. |
-| Security and policy | [`DenyByDefaultBroker`](crates/devil-security/src/lib.rs:668) gates capability requests and trust-sensitive actions. | Useful scaffold, but request context is not yet fully enforced in all decisions, and the model is not sufficient for untrusted WASM, autonomous agents, provider egress, remote edge execution, or multiplayer permissions. |
-| Observability | [`InMemoryEventSink`](crates/devil-observability/src/lib.rs:71), [`RedactingEventSink`](crates/devil-observability/src/lib.rs:130), [`event_metadata_record()`](crates/devil-observability/src/lib.rs:376), and [`proposal_audit_record()`](crates/devil-observability/src/lib.rs:394) provide metadata-only event and audit foundations. | Good privacy direction, but production event storage, replay drills, metrics, tracing spans, distributed correlation, and privacy-inspector surfaces are incomplete. |
-| Storage | [`InMemoryStorageRepositoryPort`](crates/devil-storage/src/lib.rs) supports protocol-oriented metadata, trust, sessions, proposal audit, and event records. | Not yet a durable SQLite or multi-store production boundary for sessions, tracker, semantic index, memory, collaboration logs, remote sync metadata, or migration governance. |
-| AI | [`ModelProvider`](crates/devil-ai/src/lib.rs:216) defines provider abstraction; [`OllamaStub`](crates/devil-ai-providers/src/lib.rs:75) and [`OpenAiStub`](crates/devil-ai-providers/src/lib.rs:83) reject real calls. | Provider inversion is correct, but the AI layer is not an orchestrator. No context graph, provider router, streaming, tool policy, context manifest, privacy inspector, patch synthesis, agent state machine, or proposal integration exists. |
-| Indexing | Phase 3 activates `devil-index` for actor-owned semantic fabric, lexical maps, tree-sitter syntax caches, normalized graph records, semantic query APIs, structural search, and LSP-fusion contracts. | Strong metadata-first foundation; vector indexing, hosted embeddings, production-scale parser/runtime supervision, and full language-server execution remain separately gated. |
-| Agent workflows | Phase 4 and Phase 13 activate `devil-agent` for metadata-only local/provider route planning, delegated sandbox checks, Legion workflow coordination, proposal-only worker outputs, and merge-readiness metadata. | Correct authority boundary; full autonomous execution, unrestricted tool use, provider-backed production workers, and autonomous merge/apply remain forbidden until later gates. |
-| Tracker and memory | `devil-tracker` and `devil-memory` now persist metadata-only run/workflow records, memory candidates, consent-gated retention, and Legion workflow outcome candidates. | Useful audit/memory substrate; raw prompt/source/provider payload retention, hosted upload, and training trace export require explicit consent/redaction/export gates. |
-| Plugins | `devil-plugin` now implements the accepted Phase 5 isolated plugin boundary with manifest/capability validation, quota metadata, plugin-scoped storage, metadata-only observability, and proposal-mediated mutation outputs. | Runtime boundary exists; arbitrary VSIX execution, webviews, notebooks, marketplace install, direct process/network/filesystem access, and broad extension host parity remain deferred. |
-| Terminal and LSP | `devil-terminal` is active for default-deny terminal/runtime and DAP fixture behavior; language tooling is projected through semantic/index and proposal-mediated edit previews. | Useful local IDE loop; standalone production LSP runtime, unrestricted native PTY launch, and production terminal hardening remain evidence gated. |
-| Remote development | `devil-remote` and `devil-remote-transport` now provide deterministic edge-workspace and transport slices with proposal IDs, write preconditions, reconnect/offline metadata, and policy gates. | Edge harness exists; production network transport, identity federation, broad remote process/LSP/index execution, and hosted workspace service readiness remain gated. |
-| Multiplayer collaboration | `devil-collaboration` now provides deterministic collaboration operation, presence, replay, convergence, and fail-closed conflict behavior. | Local collaboration substrate exists; production multi-user service, transport, retention policy, enterprise identity, and hosted/shared proposal operations remain future hardening work. |
+| Workspace and VFS | Local workspace actor owns root, shallow tree, file identity, watcher state, trust, fingerprint checks, and proposal-safe save through [`WorkspaceActor`](crates/legion-project/src/lib.rs:410). | Strong foundation for local durable mutation, but not yet multi-root, remote-capable, collaborative, content-addressed, or edge-replicated. |
+| Save and mutation safety | Save path uses [`WorkspaceProposal`](crates/legion-protocol/src/lib.rs:397), proposal lifecycle responses in tests, and [`WorkspaceActor::save_file_with_proposal()`](crates/legion-project/src/lib.rs:1620). | Strong for manual file save, incomplete for generalized workspace edits, multi-file atomicity, rollback, AI patches, LSP code actions, plugin changes, and collaborative operations. |
+| UI shell | Projection-only shell uses [`ActiveBufferProjection`](crates/legion-ui/src/ui.rs:86) and [`CommandDispatchIntent`](crates/legion-ui/src/ui.rs:143). | Correct ownership direction, but still primitive. It projects full buffer text and lacks production renderer, tabs, panels, semantic overlays, presence, agent activity, remote status, or collaborative proposal UX. |
+| Editor engine | [`EditorEngine`](crates/legion-editor/src/lib.rs:312) owns buffers, transactions, snapshots, undo, redo, dirty state, and conflict acknowledgements through [`EditorEngine::acknowledge_save_outcome()`](crates/legion-editor/src/lib.rs:1250). | Good deterministic editor core, but not yet optimized for zero-latency semantic workloads, collaborative operation transforms, large-file viewport rendering, or multi-consumer snapshot leases. |
+| Text model | [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/legion-text/src/lib.rs:22) caps full-cache materialization; [`LineIndex`](crates/legion-text/src/lib.rs:457) supports coordinate conversion. | Major bottleneck. Full text cache and full line index refresh remain incompatible with very large files, remote latency hiding, and predictive semantic analysis under continuous edits. |
+| Protocol boundary | [`legion-protocol`](crates/legion-protocol/src/lib.rs) contains IDs, editor DTOs, proposal DTOs, terminal DTOs, LSP DTOs, plugin DTOs, storage DTOs, and ports. | Good central boundary, but it lacks first-class remote workspace, collaboration, agent-run, semantic-index, WASM ABI, operation-log, and distributed identity contracts. |
+| Security and policy | [`DenyByDefaultBroker`](crates/legion-security/src/lib.rs:668) gates capability requests and trust-sensitive actions. | Useful scaffold, but request context is not yet fully enforced in all decisions, and the model is not sufficient for untrusted WASM, autonomous agents, provider egress, remote edge execution, or multiplayer permissions. |
+| Observability | [`InMemoryEventSink`](crates/legion-observability/src/lib.rs:71), [`RedactingEventSink`](crates/legion-observability/src/lib.rs:130), [`event_metadata_record()`](crates/legion-observability/src/lib.rs:376), and [`proposal_audit_record()`](crates/legion-observability/src/lib.rs:394) provide metadata-only event and audit foundations. | Good privacy direction, but production event storage, replay drills, metrics, tracing spans, distributed correlation, and privacy-inspector surfaces are incomplete. |
+| Storage | [`InMemoryStorageRepositoryPort`](crates/legion-storage/src/lib.rs) supports protocol-oriented metadata, trust, sessions, proposal audit, and event records. | Not yet a durable SQLite or multi-store production boundary for sessions, tracker, semantic index, memory, collaboration logs, remote sync metadata, or migration governance. |
+| AI | [`ModelProvider`](crates/legion-ai/src/lib.rs:216) defines provider abstraction; [`OllamaStub`](crates/legion-ai-providers/src/lib.rs:75) and [`OpenAiStub`](crates/legion-ai-providers/src/lib.rs:83) reject real calls. | Provider inversion is correct, but the AI layer is not an orchestrator. No context graph, provider router, streaming, tool policy, context manifest, privacy inspector, patch synthesis, agent state machine, or proposal integration exists. |
+| Indexing | Phase 3 activates `legion-index` for actor-owned semantic fabric, lexical maps, tree-sitter syntax caches, normalized graph records, semantic query APIs, structural search, and LSP-fusion contracts. | Strong metadata-first foundation; vector indexing, hosted embeddings, production-scale parser/runtime supervision, and full language-server execution remain separately gated. |
+| Agent workflows | Phase 4 and Phase 13 activate `legion-agent` for metadata-only local/provider route planning, delegated sandbox checks, Legion workflow coordination, proposal-only worker outputs, and merge-readiness metadata. | Correct authority boundary; full autonomous execution, unrestricted tool use, provider-backed production workers, and autonomous merge/apply remain forbidden until later gates. |
+| Tracker and memory | `legion-tracker` and `legion-memory` now persist metadata-only run/workflow records, memory candidates, consent-gated retention, and Legion workflow outcome candidates. | Useful audit/memory substrate; raw prompt/source/provider payload retention, hosted upload, and training trace export require explicit consent/redaction/export gates. |
+| Plugins | `legion-plugin` now implements the accepted Phase 5 isolated plugin boundary with manifest/capability validation, quota metadata, plugin-scoped storage, metadata-only observability, and proposal-mediated mutation outputs. | Runtime boundary exists; arbitrary VSIX execution, webviews, notebooks, marketplace install, direct process/network/filesystem access, and broad extension host parity remain deferred. |
+| Terminal and LSP | `legion-terminal` is active for default-deny terminal/runtime and DAP fixture behavior; language tooling is projected through semantic/index and proposal-mediated edit previews. | Useful local IDE loop; standalone production LSP runtime, unrestricted native PTY launch, and production terminal hardening remain evidence gated. |
+| Remote development | `legion-remote` and `legion-remote-transport` now provide deterministic edge-workspace and transport slices with proposal IDs, write preconditions, reconnect/offline metadata, and policy gates. | Edge harness exists; production network transport, identity federation, broad remote process/LSP/index execution, and hosted workspace service readiness remain gated. |
+| Multiplayer collaboration | `legion-collaboration` now provides deterministic collaboration operation, presence, replay, convergence, and fail-closed conflict behavior. | Local collaboration substrate exists; production multi-user service, transport, retention policy, enterprise identity, and hosted/shared proposal operations remain future hardening work. |
 
 ---
 
@@ -120,7 +120,7 @@ Core target principles:
 
 ### 5.1 Full-buffer materialization blocks zero-latency scale
 
-Evidence: [`ActiveBufferProjection`](crates/devil-ui/src/ui.rs:86) contains full `text`, and the app constructs projections from full editor text. The text layer still has full-cache budget behavior through [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/devil-text/src/lib.rs:22) and line-index materialization through [`LineIndex`](crates/devil-text/src/lib.rs:457).
+Evidence: [`ActiveBufferProjection`](crates/legion-ui/src/ui.rs:86) contains full `text`, and the app constructs projections from full editor text. The text layer still has full-cache budget behavior through [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/legion-text/src/lib.rs:22) and line-index materialization through [`LineIndex`](crates/legion-text/src/lib.rs:457).
 
 Remedy:
 
@@ -132,19 +132,19 @@ Remedy:
 
 ### 5.2 Proposal mediation is save-focused rather than platform-wide
 
-Evidence: saves flow through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938), but generalized payload handling still panics in save-only assumptions through [`proposal_file_identity()`](crates/devil-app/src/lib.rs:1332).
+Evidence: saves flow through [`SaveWorkflowService::save_active_buffer()`](crates/legion-app/src/lib.rs:938), but generalized payload handling still panics in save-only assumptions through [`proposal_file_identity()`](crates/legion-app/src/lib.rs:1332).
 
 Remedy:
 
 - Promote save proposal logic into a generalized proposal service crate or app-domain service.
 - Support text edit, create, delete, rename, format, code action, terminal command, AI patch, plugin command, and collaborative operation proposals.
 - Add multi-file preview, apply, rollback, cancellation, stale detection, and partial failure semantics.
-- Require every proposal to emit audit records through [`proposal_audit_record()`](crates/devil-observability/src/lib.rs:394) and event metadata through [`event_metadata_record()`](crates/devil-observability/src/lib.rs:376).
+- Require every proposal to emit audit records through [`proposal_audit_record()`](crates/legion-observability/src/lib.rs:394) and event metadata through [`event_metadata_record()`](crates/legion-observability/src/lib.rs:376).
 - Add golden tests for all proposal payloads and lifecycle transitions.
 
 ### 5.3 Semantic fabric production hardening remains required
 
-Evidence: the Phase 3 semantic-fabric slice is now active and evidenced by `plans/evidence/phase-3/semantic-fabric-architecture-map.md`, `plans/evidence/phase-3/devil-index-tests.txt`, and the `devil-index` workflow tests. The remaining production gap is not placeholder activation; it is scale, parser/runtime breadth, live LSP supervision, vector/embedding governance, and end-to-end product integration.
+Evidence: the Phase 3 semantic-fabric slice is now active and evidenced by `plans/evidence/phase-3/semantic-fabric-architecture-map.md`, `plans/evidence/phase-3/legion-index-tests.txt`, and the `legion-index` workflow tests. The remaining production gap is not placeholder activation; it is scale, parser/runtime breadth, live LSP supervision, vector/embedding governance, and end-to-end product integration.
 
 Remedy:
 
@@ -156,7 +156,7 @@ Remedy:
 
 ### 5.4 AI execution plane is metadata-first but not fully productized
 
-Evidence: `devil-ai` now includes provider routing with policy decisions, `devil-ai-providers` includes deterministic/local and configured adapter tests, and `devil-agent` includes agent state-machine and Legion workflow coordination slices. Hosted/cloud providers, production worker lanes, and autonomous apply remain policy-gated.
+Evidence: `legion-ai` now includes provider routing with policy decisions, `legion-ai-providers` includes deterministic/local and configured adapter tests, and `legion-agent` includes agent state-machine and Legion workflow coordination slices. Hosted/cloud providers, production worker lanes, and autonomous apply remain policy-gated.
 
 Remedy:
 
@@ -173,7 +173,7 @@ Evidence: the target plugin architecture is specified in [`plans/ide-core-archit
 Remedy:
 
 - Add a phase-gated WASM plugin runtime with deterministic host calls and no direct filesystem, process, network, editor, or workspace access.
-- Define a stable plugin ABI in [`devil-protocol`](crates/devil-protocol/src/lib.rs), with manifest schema, activation events, contribution descriptors, context providers, quotas, and compatibility ranges.
+- Define a stable plugin ABI in [`legion-protocol`](crates/legion-protocol/src/lib.rs), with manifest schema, activation events, contribution descriptors, context providers, quotas, and compatibility ranges.
 - Route all extension reads through scoped context providers and all extension writes through proposals.
 - Add per-plugin state namespaces, storage quotas, CPU and memory budgets, cancellation, crash isolation, and redacted plugin events.
 - Make VS Code extension compatibility remain out of scope unless a future ADR explicitly reverses the clean-slate constraint in [`plans/architecture-charter-v0.1.md`](plans/architecture-charter-v0.1.md:66).
@@ -230,11 +230,11 @@ Priority: highest technical enabler for every 2026 feature.
 
 Technical steps:
 
-1. Replace full text projection in [`ActiveBufferProjection`](crates/devil-ui/src/ui.rs:86) with viewport projections, visible line slices, cursor/selection projections, overlays, and lazy metadata.
-2. Refactor [`LineIndex`](crates/devil-text/src/lib.rs:457) into an incremental or chunked line-metric index.
+1. Replace full text projection in [`ActiveBufferProjection`](crates/legion-ui/src/ui.rs:86) with viewport projections, visible line slices, cursor/selection projections, overlays, and lazy metadata.
+2. Refactor [`LineIndex`](crates/legion-text/src/lib.rs:457) into an incremental or chunked line-metric index.
 3. Replace full-cache refresh behavior with chunked snapshots, content-addressed chunk hashes, and snapshot leases for LSP, index, plugins, AI, and collaboration.
-4. Add degraded mode for files above [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/devil-text/src/lib.rs:22), including viewport-only rendering and disabled expensive semantic overlays.
-5. Add transaction event streams from [`EditorEngine`](crates/devil-editor/src/lib.rs:312) to semantic, LSP, collaboration, storage, and observability consumers without blocking input.
+4. Add degraded mode for files above [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`](crates/legion-text/src/lib.rs:22), including viewport-only rendering and disabled expensive semantic overlays.
+5. Add transaction event streams from [`EditorEngine`](crates/legion-editor/src/lib.rs:312) to semantic, LSP, collaboration, storage, and observability consumers without blocking input.
 
 Validation gate:
 
@@ -249,12 +249,12 @@ Priority: required before active LSP edits, plugins, agents, collaboration, or r
 
 Technical steps:
 
-1. Extract save-specific proposal coordination from [`SaveProposalCoordinator`](crates/devil-app/src/lib.rs:120) into a generalized proposal service.
+1. Extract save-specific proposal coordination from [`SaveProposalCoordinator`](crates/legion-app/src/lib.rs:120) into a generalized proposal service.
 2. Implement proposal validation, preview, approval, apply, rollback, stale, denied, conflict, failed, and cancelled transitions for all payload kinds.
-3. Replace save-only assumptions in [`proposal_file_identity()`](crates/devil-app/src/lib.rs:1332) with typed payload visitors that support multi-file and non-file proposals.
+3. Replace save-only assumptions in [`proposal_file_identity()`](crates/legion-app/src/lib.rs:1332) with typed payload visitors that support multi-file and non-file proposals.
 4. Add proposal preview models for text edits, file creates, deletes, renames, format edits, code actions, terminal commands, AI patches, plugin commands, and collaboration operations.
 5. Ensure open-buffer edits go through editor transactions and closed-file edits go through workspace VFS, with shared rollback semantics.
-6. Persist proposal audit metadata using [`proposal_audit_record()`](crates/devil-observability/src/lib.rs:394) and event metadata using [`event_metadata_record()`](crates/devil-observability/src/lib.rs:376).
+6. Persist proposal audit metadata using [`proposal_audit_record()`](crates/legion-observability/src/lib.rs:394) and event metadata using [`event_metadata_record()`](crates/legion-observability/src/lib.rs:376).
 
 Validation gate:
 
@@ -269,7 +269,7 @@ Priority: required for zero-latency semantic analysis and useful AI context.
 
 Technical steps:
 
-1. Implement [`crates/devil-index/src/lib.rs`](crates/devil-index/src/lib.rs:1) as an actor-owned indexing engine with bounded queues and cancellation.
+1. Implement [`crates/legion-index/src/lib.rs`](crates/legion-index/src/lib.rs:1) as an actor-owned indexing engine with bounded queues and cancellation.
 2. Add repository discovery, ignore handling, file fingerprints, shallow lexical index, and symbol file map.
 3. Add tree-sitter parsing workers and syntax tree caches keyed by content hash and grammar version.
 4. Extract symbols, references, imports, exports, call edges, type relations, test links, diagnostics links, and ownership metadata into a normalized graph.
@@ -290,9 +290,9 @@ Priority: high after semantic fabric and generalized proposals.
 
 Technical steps:
 
-1. Expand [`ModelProvider`](crates/devil-ai/src/lib.rs:216) into a router-facing provider capability model with streaming, structured output, embeddings, reranking, tool planning, context window metadata, cost metadata, cancellation, and provider health.
-2. Replace stubs in [`crates/devil-ai-providers/src/lib.rs`](crates/devil-ai-providers/src/lib.rs:23) with gated local-provider adapters first, then cloud adapters behind explicit policy and redacted events.
-3. Implement [`crates/devil-agent/src/lib.rs`](crates/devil-agent/src/lib.rs:1) as a state-machine runtime for observe, plan, propose, approve, apply, verify, recover, and blocked states.
+1. Expand [`ModelProvider`](crates/legion-ai/src/lib.rs:216) into a router-facing provider capability model with streaming, structured output, embeddings, reranking, tool planning, context window metadata, cost metadata, cancellation, and provider health.
+2. Replace stubs in [`crates/legion-ai-providers/src/lib.rs`](crates/legion-ai-providers/src/lib.rs:23) with gated local-provider adapters first, then cloud adapters behind explicit policy and redacted events.
+3. Implement [`crates/legion-agent/src/lib.rs`](crates/legion-agent/src/lib.rs:1) as a state-machine runtime for observe, plan, propose, approve, apply, verify, recover, and blocked states.
 4. Add context manifests that cite editor snapshots, semantic symbols, retrieved chunks, tracker tasks, memory records, diagnostics, terminal output summaries, and user selections.
 5. Implement a Privacy Inspector backed by tracker and event metadata showing provider, model, files, ranges, symbols, memory items, prompt categories, proposal outputs, and policy decisions.
 6. Route all generated edits through generalized proposals and all command execution through capability policy.
@@ -314,7 +314,7 @@ Priority: required before untrusted extensibility.
 Technical steps:
 
 1. Add a phase-gated plugin runtime crate only after updating [`plans/dependency-policy.md`](plans/dependency-policy.md:9).
-2. Define a WASM ABI in [`devil-protocol`](crates/devil-protocol/src/lib.rs) for commands, menus, panels, status items, editor decorations, snippets, language providers, formatters, LSP registrations, workspace scanners, and passive AI context providers.
+2. Define a WASM ABI in [`legion-protocol`](crates/legion-protocol/src/lib.rs) for commands, menus, panels, status items, editor decorations, snippets, language providers, formatters, LSP registrations, workspace scanners, and passive AI context providers.
 3. Implement manifest parsing, signature or trust metadata, capability declaration, activation events, compatibility range checks, and contribution registration.
 4. Run extensions in WASI with no ambient filesystem, process, network, editor, workspace, storage, or AI access.
 5. Expose host calls only through capability-checked protocol requests.
@@ -335,7 +335,7 @@ Priority: required before team-native workflows and shared AI operations.
 Technical steps:
 
 1. Add collaboration ADRs for CRDT or operation-log strategy, identity, permissions, conflict policy, offline behavior, and retention.
-2. Extend [`devil-protocol`](crates/devil-protocol/src/lib.rs) with collaborator identity, workspace session, document operation, presence, cursor, selection, version vector, operation acknowledgement, and shared proposal DTOs.
+2. Extend [`legion-protocol`](crates/legion-protocol/src/lib.rs) with collaborator identity, workspace session, document operation, presence, cursor, selection, version vector, operation acknowledgement, and shared proposal DTOs.
 3. Insert a collaboration operation layer between editor transactions and downstream consumers.
 4. Convert local editor transactions into collaborative operations and merge remote operations into editor transactions without blocking input.
 5. Add shared proposal flows for multi-user AI actions, LSP refactors, plugin commands, and file operations.
@@ -380,7 +380,7 @@ Priority: required before broad external usage.
 Technical steps:
 
 1. Move storage from in-memory scaffolding to durable, migrated stores for sessions, trust, file metadata, proposal audit, event metadata, tracker, memory, semantic indexes, plugin state, collaboration logs, and remote session metadata.
-2. Add CLI diagnostics beyond [`crates/devil-cli/src/main.rs`](crates/devil-cli/src/main.rs:5): dependency graph, protocol schema, event summaries, proposal audit, storage health, index health, plugin sandbox state, AI run manifests, collaboration replay, and remote session traces.
+2. Add CLI diagnostics beyond [`crates/legion-cli/src/main.rs`](crates/legion-cli/src/main.rs:5): dependency graph, protocol schema, event summaries, proposal audit, storage health, index health, plugin sandbox state, AI run manifests, collaboration replay, and remote session traces.
 3. Add privacy-preserving metrics with subsystem budgets for edit, render, index, LSP, AI, plugin, collaboration, and remote operations.
 4. Add enterprise policy profiles for air-gap, local-only AI, approved provider list, plugin allowlist, remote workspace restrictions, collaboration data retention, and audit export.
 5. Add corruption recovery drills, replay drills, downgrade and migration tests, provider egress tests, sandbox escape tests, collaboration convergence tests, and remote reconnect tests.

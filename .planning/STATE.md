@@ -115,10 +115,10 @@
 - Phase 3 search is intentionally bounded lexical search through app/workspace authority, not semantic/LSP/provider activation.
 - Phase 3 save-all refreshes app-owned workspace generation metadata after successful saves so later buffers keep valid global save preconditions without weakening file-specific checks.
 - Dirty-close prompt exposes app-owned save/cancel behavior only; discard remains unavailable until a verified app contract exists.
-- Desktop session persistence uses metadata-only `WorkspaceSessionRecord` JSON through `serde_json`; no `devil-storage` dependency was added.
+- Desktop session persistence uses metadata-only `WorkspaceSessionRecord` JSON through `serde_json`; no `legion-storage` dependency was added.
 - Phase 3 large-file evidence proves bounded degraded desktop rendering/search but does not promote the ignored 100MB performance workload.
 - Phase 3 is accepted with all final gates green after the broad `cargo test --workspace --all-targets` gate passed on rerun with restored disk space.
-- Phase 4 planning treats the legacy Phase 4 agentic AI evidence path as a governance collision that must be handled in Plan 04-01 before app dependency edges to `devil-index` and `devil-terminal` are added.
+- Phase 4 planning treats the legacy Phase 4 agentic AI evidence path as a governance collision that must be handled in Plan 04-01 before app dependency edges to `legion-index` and `legion-terminal` are added.
 - Phase 4 uses six sequential waves because dependency policy, protocol/UI projection contracts, app composition, terminal security, desktop routing, and final evidence share high-risk ownership boundaries.
 - Phase 4 language edit actions must become proposal previews before mutation; terminal workflows must remain policy-gated, bounded, metadata-audited, and unable to mutate editor buffers or disk directly.
 - Phase 4 is accepted with GUI Phase 4 dependency policy rebaseline, language/terminal projection DTOs, app-owned language proposal routing, default-deny terminal workflow, desktop panel routing, and full final gates passing.
@@ -146,7 +146,7 @@
 - Phase 7 review found and fixed beta smoke failed-status exit semantics, stale release-readiness status, and empty crate-local target cleanup before rerunning repository gates and passing review.
 - Phase 8 planning treats accepted legacy `plans/evidence/phase-8/` runtime substrate evidence as distinct from GUI productization GA evidence under `plans/evidence/gui-productization/`.
 - Phase 8 uses seven sequential waves because governance, plugin GUI, collaboration GUI, remote GUI, delegated task GUI, GA operations evidence, and final acceptance have separate authority boundaries and evidence gates.
-- Phase 8 implementation must keep plugin, collaboration, remote, delegated task, proposal, terminal, storage, provider, and security authority out of `devil-ui` and `devil-desktop`.
+- Phase 8 implementation must keep plugin, collaboration, remote, delegated task, proposal, terminal, storage, provider, and security authority out of `legion-ui` and `legion-desktop`.
 - Phase 8 operations evidence is complete with smoke scripts, CI `gui-phase8` wiring, release/update/rollback/incident runbooks, advanced-surface smoke evidence, and cross-platform parity proof from GitHub Actions run `26590800830`.
 - Phase 8 is accepted with final gates passing on 2026-05-28.
 - Post-GA autonomy-native work added command registry, artifact ledger, verification run, and system graph projections while preserving projection-only UI and renderer boundaries.

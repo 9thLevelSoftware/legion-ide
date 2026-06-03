@@ -7,7 +7,7 @@ Accepted with reservations — SQLite/Tantivy metadata baseline accepted; vector
 The IDE must store tracker state, search indexes, embedding vectors, and parse artifacts locally. The storage choices affect query latency, incremental update performance, and memory footprint on large repositories.
 
 ## Decision
-- Metadata and tracker: SQLite via `devil-storage` wrapper with migrations.
+- Metadata and tracker: SQLite via `legion-storage` wrapper with migrations.
 - Lexical search: Tantivy or equivalent Rust-native inverted index.
 - Vector search: Evaluate LanceDB, Qdrant embedded mode, sqlite-vec, and internal HNSW through Spike 3.
 - Parse artifacts: Content-addressed blob cache on filesystem.

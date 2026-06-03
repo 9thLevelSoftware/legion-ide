@@ -1,0 +1,13 @@
+[package]
+name = "legion-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+legion-observability = { workspace = true }
+legion-protocol = { workspace = true }
+legion-text = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

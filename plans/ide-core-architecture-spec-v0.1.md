@@ -17,10 +17,10 @@ This specification is derived from the existing project architecture artifacts a
 - Freeze prerequisites in [`plans/architecture-freeze-v0.1.md`](plans/architecture-freeze-v0.1.md:11).
 - Milestone feasibility tracks in [`plans/milestone-0-feasibility-proofs.md`](plans/milestone-0-feasibility-proofs.md:17).
 - Native shell proof requirements in [`plans/SPIKE-001A-native-shell-proof.md`](plans/SPIKE-001A-native-shell-proof.md:17).
-- Existing protocol boundary primitives in [`crates/devil-protocol/src/lib.rs`](crates/devil-protocol/src/lib.rs:9).
-- Current minimal editor session and transaction event emission in [`crates/devil-editor/src/lib.rs`](crates/devil-editor/src/lib.rs:28).
-- Current spike text buffer implementation in [`crates/devil-text/src/lib.rs`](crates/devil-text/src/lib.rs:169).
-- Current platform file helpers in [`crates/devil-platform/src/lib.rs`](crates/devil-platform/src/lib.rs:28).
+- Existing protocol boundary primitives in [`crates/legion-protocol/src/lib.rs`](crates/legion-protocol/src/lib.rs:9).
+- Current minimal editor session and transaction event emission in [`crates/legion-editor/src/lib.rs`](crates/legion-editor/src/lib.rs:28).
+- Current spike text buffer implementation in [`crates/legion-text/src/lib.rs`](crates/legion-text/src/lib.rs:169).
+- Current platform file helpers in [`crates/legion-platform/src/lib.rs`](crates/legion-platform/src/lib.rs:28).
 
 ---
 
@@ -149,17 +149,17 @@ flowchart TD
 
 | Crate | Role in this specification |
 |---|---|
-| `devil-app` | Thin composition root for all core services. |
-| `devil-ui` | Native UI shell and view projection layer. |
-| `devil-editor` | Editor command and transaction authority. |
-| `devil-text` | Rope, text positions, snapshots, edits, spans, and line index primitives. |
-| `devil-project` | Workspace management, file tree, watcher orchestration, workspace configuration. |
-| `devil-platform` | OS-level file, watcher, keychain, process, shell, and path services. |
-| `devil-protocol` | Versioned DTOs, identifiers, events, ports, action schemas. |
-| `devil-storage` | Local persistence wrappers, migrations, cache directories. |
-| `devil-security` | Capability policy, trust state, path restrictions, outbound/network policy. |
-| `devil-observability` | Structured tracing, metrics, event log, replay metadata. |
-| `devil-index` | Shallow file and symbol indexing after core workspace/editor paths are stable. |
+| `legion-app` | Thin composition root for all core services. |
+| `legion-ui` | Native UI shell and view projection layer. |
+| `legion-editor` | Editor command and transaction authority. |
+| `legion-text` | Rope, text positions, snapshots, edits, spans, and line index primitives. |
+| `legion-project` | Workspace management, file tree, watcher orchestration, workspace configuration. |
+| `legion-platform` | OS-level file, watcher, keychain, process, shell, and path services. |
+| `legion-protocol` | Versioned DTOs, identifiers, events, ports, action schemas. |
+| `legion-storage` | Local persistence wrappers, migrations, cache directories. |
+| `legion-security` | Capability policy, trust state, path restrictions, outbound/network policy. |
+| `legion-observability` | Structured tracing, metrics, event log, replay metadata. |
+| `legion-index` | Shallow file and symbol indexing after core workspace/editor paths are stable. |
 
 ### 5.2 Proposed Post-Freeze Crates
 
@@ -167,8 +167,8 @@ The following should be added only after current freeze gates are satisfied and 
 
 | Proposed crate | Purpose | Required ADR |
 |---|---|---|
-| `devil-lsp` | LSP server lifecycle, JSON-RPC transport, document synchronization, language feature normalization. | ADR-0011 |
-| `devil-plugin` | Plugin registry, manifests, activation events, contribution points, sandboxed runtime adapters. | ADR-0012 |
+| `legion-lsp` | LSP server lifecycle, JSON-RPC transport, document synchronization, language feature normalization. | ADR-0011 |
+| `legion-plugin` | Plugin registry, manifests, activation events, contribution points, sandboxed runtime adapters. | ADR-0012 |
 
 Until then, LSP and plugin concepts should remain design-level protocol contracts or narrow spike modules. This avoids premature crate proliferation while preserving the target architecture.
 
@@ -176,28 +176,28 @@ Until then, LSP and plugin concepts should remain design-level protocol contract
 
 ```mermaid
 flowchart TD
-    App[devil app] --> UI[devil ui]
-    App --> Project[devil project]
-    App --> Editor[devil editor]
-    App --> Lsp[devil lsp]
-    App --> Plugin[devil plugin]
+    App[legion app] --> UI[legion ui]
+    App --> Project[legion project]
+    App --> Editor[legion editor]
+    App --> Lsp[legion lsp]
+    App --> Plugin[legion plugin]
 
-    UI --> Protocol[devil protocol]
+    UI --> Protocol[legion protocol]
     UI --> Editor
     UI --> Project
 
     Editor --> Protocol
-    Editor --> Text[devil text]
+    Editor --> Text[legion text]
 
     Project --> Protocol
-    Project --> Platform[devil platform]
-    Project --> Storage[devil storage]
-    Project --> Security[devil security]
+    Project --> Platform[legion platform]
+    Project --> Storage[legion storage]
+    Project --> Security[legion security]
 
     Lsp --> Protocol
     Lsp --> Platform
     Lsp --> Security
-    Lsp --> Observability[devil observability]
+    Lsp --> Observability[legion observability]
 
     Plugin --> Protocol
     Plugin --> Security

@@ -1,14 +1,14 @@
-# Devil IDE GUI Productization
+# Legion IDE GUI Productization
 
 ## What This Is
-Productize the existing Devil IDE Rust workspace into a renderer-backed desktop IDE GUI. The current codebase already has substantial editor, workspace, protocol, proposal, policy, storage, semantic, AI, plugin, collaboration, remote, terminal, telemetry, and retention substrate, but the runnable app is still a CLI shell proof and `devil-ui` is projection-only.
+Productize the existing Legion IDE Rust workspace into a renderer-backed desktop IDE GUI. The current codebase already has substantial editor, workspace, protocol, proposal, policy, storage, semantic, AI, plugin, collaboration, remote, terminal, telemetry, and retention substrate, but the runnable app is still a CLI shell proof and `legion-ui` is projection-only.
 
 ## Core Value
 A local-first, control-first desktop IDE where ordinary development workflows are fast and visible, while mutation-capable AI, LSP, terminal, plugin, collaboration, and remote actions remain proposal-mediated, auditable, policy-gated, and privacy-aware.
 
 ## Who It's For
 - Developers who want a serious local IDE with strong safety around generated edits, terminal execution, saves, plugins, collaboration, remote work, and AI assistance.
-- Internal Devil IDE users validating the product on real repositories.
+- Internal Legion IDE users validating the product on real repositories.
 - Later external users who need a daily-driver desktop IDE rather than a CLI proof or architecture substrate.
 
 ## Requirements
@@ -20,7 +20,7 @@ A local-first, control-first desktop IDE where ordinary development workflows ar
 - **R-001 Baseline reconciliation**: Reconcile current planning truth before treating the GUI track as authoritative, especially the Phase 8 ledger/evidence conflict noted in the exploration.
 - **R-002 Renderer decision gate**: Accept a renderer integration ADR before adding a GUI framework dependency. The ADR must compare Rust-native GPU, egui/eframe, Slint, and Tauri/WRY against Windows-first IDE requirements and fallback criteria.
 - **R-003 Dependency policy update**: Update `plans/dependency-policy.md` and `xtask` checks before introducing renderer dependencies or a desktop crate.
-- **R-004 Desktop adapter boundary**: Add a renderer-backed desktop adapter crate or binary, likely `devil-desktop`, that consumes projections and emits intents without owning editor, workspace, proposal, storage, terminal, AI, plugin, collaboration, or remote authority.
+- **R-004 Desktop adapter boundary**: Add a renderer-backed desktop adapter crate or binary, likely `legion-desktop`, that consumes projections and emits intents without owning editor, workspace, proposal, storage, terminal, AI, plugin, collaboration, or remote authority.
 - **R-005 Projection rendering**: Render layout, explorer, active buffer viewport, status, proposal summary, trust/privacy summaries, and degraded/dirty states from `ShellProjectionSnapshot` and related projection DTOs.
 - **R-006 Intent bridge**: Route window, menu, keyboard, mouse, command palette, and file-dialog actions into `CommandDispatchIntent` or explicit app-level requests handled by `AppComposition`.
 - **R-007 Open/edit/save GUI loop**: Let users launch the GUI, open a workspace, browse files, open/edit files, undo/redo, save, quit, and see saved/rejected/conflict outcomes without CLI fallback.
@@ -41,7 +41,7 @@ A local-first, control-first desktop IDE where ordinary development workflows ar
 - Autonomous AI mutation before proposal ledger, context manifest, approval, rollback, and audit surfaces are usable.
 
 ## Constraints
-- Preserve the repository invariant from `AGENTS.md`: `devil-ui` emits `CommandDispatchIntent` and accepts snapshots; it must remain projection-only.
+- Preserve the repository invariant from `AGENTS.md`: `legion-ui` emits `CommandDispatchIntent` and accepts snapshots; it must remain projection-only.
 - Preserve proposal-mediated save flow: `AppComposition::save_active_buffer` -> `SaveWorkflowService` -> `WorkspaceActor::save_file_with_proposal`.
 - Workspace saves must retain expected fingerprint, file content version, workspace generation, buffer version, snapshot id, non-zero correlation id, and causality id.
 - Observability and storage default to metadata-only redaction and must reject invalid zero/nil event identifiers.
@@ -64,9 +64,9 @@ A local-first, control-first desktop IDE where ordinary development workflows ar
 
 ## Architecture Influences
 - Fresh map metadata: schema `2.0`, commit `b521ab5e64696b9017f02595183de9ed1614f8eb`, 141 mapped source/config/doc files, fingerprint `aa7e4fc1bdc9885f51b8fdf7ea44544239706d2dff6f02791f40c05d30e013d7`.
-- `devil-app` is the composition root and current CLI shell proof. It should remain the authority layer for editor/workspace/proposal/security/storage/runtime behavior.
-- `devil-ui` is a projection and intent crate, not a renderer or state owner.
-- `devil-protocol` and `devil-app` are high fan-in monoliths; GUI work should avoid broad edits and prefer adapter seams.
+- `legion-app` is the composition root and current CLI shell proof. It should remain the authority layer for editor/workspace/proposal/security/storage/runtime behavior.
+- `legion-ui` is a projection and intent crate, not a renderer or state owner.
+- `legion-protocol` and `legion-app` are high fan-in monoliths; GUI work should avoid broad edits and prefer adapter seams.
 - `xtask` and `plans/dependency-policy.md` are part of the architecture contract. GUI dependencies and crate edges need policy coverage before implementation.
 - Renderer integration must reconcile `plans/adrs/ADR-0002-ui-editor-rendering.md`, `plans/spikes/SPIKE-001A-result.md`, and current source facts.
 

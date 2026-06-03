@@ -48,12 +48,12 @@ Expected high-value matches:
 
 | Rank | Chunk | Path | Lines | Kind | Why it matched |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `map:protocol-trust-ai:001` | `crates/devil-protocol/src/lib.rs` | 5112-6660 | module | Exact trust, assisted AI, permission, approval, checkpoint, proposal preview terms |
-| 2 | `map:app-composition:001` | `crates/devil-app/src/lib.rs` | 7090-7630 | module | App composition owns projection and workflow wiring |
-| 3 | `map:desktop-view:001` | `crates/devil-desktop/src/view.rs` | 1-330 | component | Desktop view displays trust and assistant rows |
+| 1 | `map:protocol-trust-ai:001` | `crates/legion-protocol/src/lib.rs` | 5112-6660 | module | Exact trust, assisted AI, permission, approval, checkpoint, proposal preview terms |
+| 2 | `map:app-composition:001` | `crates/legion-app/src/lib.rs` | 7090-7630 | module | App composition owns projection and workflow wiring |
+| 3 | `map:desktop-view:001` | `crates/legion-desktop/src/view.rs` | 1-330 | component | Desktop view displays trust and assistant rows |
 
 Read next:
 
-- `crates/devil-protocol/src/lib.rs` around trust/assisted-AI projection DTOs
-- `crates/devil-app/src/lib.rs` around projection helpers and app workflow methods
-- `crates/devil-desktop/src/view.rs` around trust and assistant rendering rows
+- `crates/legion-protocol/src/lib.rs` around trust/assisted-AI projection DTOs
+- `crates/legion-app/src/lib.rs` around projection helpers and app workflow methods
+- `crates/legion-desktop/src/view.rs` around trust and assistant rendering rows

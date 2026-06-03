@@ -23,20 +23,20 @@ Legion’s back end should be a local-first Rust runtime that separates five thi
 
 The current repo already points in the right direction:
 
-- `devil-agent` has delegated task runtime concepts.
+- `legion-agent` has delegated task runtime concepts.
 - Phase 12 specifies git worktree/copy-based task sandboxes.
 - Phase 13 specifies Legion workflow orchestration.
-- `devil-ai-providers` has provider registry scaffolding but currently uses stubs/deterministic providers.
-- `devil-app` owns proposal-mediated application and should keep that authority.
-- `devil-ui` and `devil-desktop` remain projection-only.
+- `legion-ai-providers` has provider registry scaffolding but currently uses stubs/deterministic providers.
+- `legion-app` owns proposal-mediated application and should keep that authority.
+- `legion-ui` and `legion-desktop` remain projection-only.
 
 The core architectural rule:
 
-`devil-agent` / future `legion-agent` may schedule workers and generate proposals, but it must never directly mutate the main workspace.
+`legion-agent` / future `legion-agent` may schedule workers and generate proposals, but it must never directly mutate the main workspace.
 
 ## 1. Existing crate responsibilities and target responsibilities
 
-### 1.1 `devil-app` / future `legion-app`
+### 1.1 `legion-app` / future `legion-app`
 
 Current/target responsibility:
 
@@ -62,7 +62,7 @@ Must not delegate to UI:
 - trust policy.
 - workspace mutation.
 
-### 1.2 `devil-ui` / future `legion-ui`
+### 1.2 `legion-ui` / future `legion-ui`
 
 Target responsibility:
 
@@ -80,7 +80,7 @@ Must not:
 - run shell commands directly.
 - mutate workspace state directly.
 
-### 1.3 `devil-desktop` / future `legion-desktop`
+### 1.3 `legion-desktop` / future `legion-desktop`
 
 Target responsibility:
 
@@ -95,7 +95,7 @@ Must not:
 - own AI provider calls.
 - own agent orchestration.
 
-### 1.4 `devil-protocol` / future `legion-protocol`
+### 1.4 `legion-protocol` / future `legion-protocol`
 
 Target responsibility:
 
@@ -121,7 +121,7 @@ Add:
 - `ProviderRouteRequest`.
 - `CloudLaneRequest`.
 
-### 1.5 `devil-agent` / future `legion-agent`
+### 1.5 `legion-agent` / future `legion-agent`
 
 Target responsibility:
 
@@ -137,14 +137,14 @@ Target responsibility:
 
 Must not:
 
-- depend on `devil-app`.
-- depend on `devil-ui`.
-- depend on `devil-desktop`.
+- depend on `legion-app`.
+- depend on `legion-ui`.
+- depend on `legion-desktop`.
 - mutate main workspace.
 - bypass approval gates.
 - directly own app authority.
 
-### 1.6 `devil-ai` / future `legion-ai`
+### 1.6 `legion-ai` / future `legion-ai`
 
 Target responsibility:
 
@@ -155,7 +155,7 @@ Target responsibility:
 - RAG query logic.
 - Assist/Delegate/Automate model calls through provider interface.
 
-### 1.7 `devil-ai-providers` / future `legion-ai-providers`
+### 1.7 `legion-ai-providers` / future `legion-ai-providers`
 
 Current state:
 
@@ -175,7 +175,7 @@ Target responsibility:
 
 Provider implementations should return route metadata and typed responses, never app-level mutation.
 
-### 1.8 `devil-index` / future `legion-index`
+### 1.8 `legion-index` / future `legion-index`
 
 Target responsibility:
 
@@ -188,7 +188,7 @@ Target responsibility:
 - test discovery.
 - semantic/syntactic diff support.
 
-### 1.9 `devil-terminal` / future `legion-terminal`
+### 1.9 `legion-terminal` / future `legion-terminal`
 
 Target responsibility:
 
@@ -205,7 +205,7 @@ Important:
 - Validation commands are policy-defined and controlled.
 - Tool execution must be permissioned.
 
-### 1.10 `devil-security` / future `legion-security`
+### 1.10 `legion-security` / future `legion-security`
 
 Target responsibility:
 
@@ -218,7 +218,7 @@ Target responsibility:
 - tool invocation approval.
 - risk scoring.
 
-### 1.11 `devil-memory` / future `legion-memory`
+### 1.11 `legion-memory` / future `legion-memory`
 
 Target responsibility:
 
@@ -235,7 +235,7 @@ Must separate:
 - training trace store.
 - privacy-sensitive data.
 
-### 1.12 `devil-tracker` / future `legion-tracker`
+### 1.12 `legion-tracker` / future `legion-tracker`
 
 Target responsibility:
 
@@ -924,7 +924,7 @@ Exit criteria:
 
 1. Keep internal crate names temporarily.
 2. Add Legion-branded protocol DTOs where possible.
-3. Harden `devil-agent` sandbox isolation.
+3. Harden `legion-agent` sandbox isolation.
 4. Implement provider adapters beyond stubs.
 5. Implement validation runner as separate from model worker.
 6. Implement workflow coordinator behind tests.

@@ -2,11 +2,11 @@
 
 > For Hermes: execute this with `subagent-driven-development`; dispatch fresh implementation subagents per task, then run spec-compliance and quality reviewers. Kimi 2.6 implementer prompts must include the exact task text, exact files, exact commands, and exact pass criteria from this document.
 
-Goal: turn the current `devil-ide` repository into the Legion IDE product described by the five planning documents in `plans/legion-e2e/source-package/`, with complete local-first deterministic IDE foundations, Assist, Delegate, Automate, Cloud Lane, and model-training/data-flywheel features.
+Goal: turn the current `legion-ide` repository into the Legion IDE product described by the five planning documents in `plans/legion-e2e/source-package/`, with complete local-first deterministic IDE foundations, Assist, Delegate, Automate, Cloud Lane, and model-training/data-flywheel features.
 
 Architecture: Legion remains local-first and proposal-gated. UI crates are projection-only; app/runtime crates own workflow execution; workspace/file mutation remains proposal-mediated; AI and worker lanes produce evidence and proposals only; cloud and training lanes are opt-in, consent-gated, and policy-enforced.
 
-Branding rule: use Legion in all user-facing docs, panels, modes, product strings, and plans. Keep internal `devil-*` crate names until the rename phase has full dependency-policy, CI, and migration coverage.
+Branding rule: use Legion in all user-facing docs, panels, modes, product strings, and plans. Keep internal `legion-*` crate names until the rename phase has full dependency-policy, CI, and migration coverage.
 
 Non-negotiable constraints:
 - No stub features may be marked complete. A feature is complete only when its code path is implemented, tests cover it, docs describe it, and the gate command passes.
@@ -66,18 +66,18 @@ Source package traceability:
 - # 02 — Legion IDE Back-End / Local Runtime Architecture Plan
 - ## 0. Executive summary
 - ## 1. Existing crate responsibilities and target responsibilities
-- ### 1.1 `devil-app` / future `legion-app`
-- ### 1.2 `devil-ui` / future `legion-ui`
-- ### 1.3 `devil-desktop` / future `legion-desktop`
-- ### 1.4 `devil-protocol` / future `legion-protocol`
-- ### 1.5 `devil-agent` / future `legion-agent`
-- ### 1.6 `devil-ai` / future `legion-ai`
-- ### 1.7 `devil-ai-providers` / future `legion-ai-providers`
-- ### 1.8 `devil-index` / future `legion-index`
-- ### 1.9 `devil-terminal` / future `legion-terminal`
-- ### 1.10 `devil-security` / future `legion-security`
-- ### 1.11 `devil-memory` / future `legion-memory`
-- ### 1.12 `devil-tracker` / future `legion-tracker`
+- ### 1.1 `legion-app` / future `legion-app`
+- ### 1.2 `legion-ui` / future `legion-ui`
+- ### 1.3 `legion-desktop` / future `legion-desktop`
+- ### 1.4 `legion-protocol` / future `legion-protocol`
+- ### 1.5 `legion-agent` / future `legion-agent`
+- ### 1.6 `legion-ai` / future `legion-ai`
+- ### 1.7 `legion-ai-providers` / future `legion-ai-providers`
+- ### 1.8 `legion-index` / future `legion-index`
+- ### 1.9 `legion-terminal` / future `legion-terminal`
+- ### 1.10 `legion-security` / future `legion-security`
+- ### 1.11 `legion-memory` / future `legion-memory`
+- ### 1.12 `legion-tracker` / future `legion-tracker`
 - ## 2. Core back-end data model
 - ### 2.1 Workflow
 - ### 2.2 Task graph
@@ -203,7 +203,7 @@ Source package traceability:
 - # 04 — Legion Product Design, Development, and Implementation Roadmap
 - ## 0. Executive summary
 - ## 1. What has already been built / found
-- ## 2. Product pivot: Devil → Legion
+- ## 2. Product pivot: Legion → Legion
 - ### 2.1 Why Legion is a better name
 - ### 2.2 Rename strategy
 - ### 2.3 Product vocabulary
@@ -400,14 +400,14 @@ Features:
 - Right console with severity, retry/configure/dismiss actions.
 
 Granular tasks:
-1.1 In `crates/devil-ui/src/ui.rs`, audit `PanelId`, `PanelRegistry`, `PanelCapability`, `DockMode`, and dock layout tests. Add missing Assist/Delegate/Automate panel IDs only if absent.
+1.1 In `crates/legion-ui/src/ui.rs`, audit `PanelId`, `PanelRegistry`, `PanelCapability`, `DockMode`, and dock layout tests. Add missing Assist/Delegate/Automate panel IDs only if absent.
 1.2 Add/extend tests proving Manual never shows panels requiring AI, network, cloud, workers, or hosted telemetry.
-1.3 In `crates/devil-desktop/src/view.rs`, implement top chrome/status/right-console rendering as projection-only state. Do not own editor/session text.
+1.3 In `crates/legion-desktop/src/view.rs`, implement top chrome/status/right-console rendering as projection-only state. Do not own editor/session text.
 1.4 Add desktop projection tests for all mode layouts and chrome actions.
 
 Gate commands:
-- `cargo test -p devil-ui --all-targets`
-- `cargo test -p devil-desktop --all-targets`
+- `cargo test -p legion-ui --all-targets`
+- `cargo test -p legion-desktop --all-targets`
 - `cargo check --workspace --all-targets`
 
 Exit criteria:
@@ -430,12 +430,12 @@ Granular tasks:
 2.4 Add performance/regression tests for save and viewport not blocking on semantic/LSP/AI/plugin/remote/collab consumers.
 
 Gate commands:
-- `cargo test -p devil-app --test daily_editing_contracts --all-targets`
-- `cargo test -p devil-app --test workspace_vfs_integration --all-targets`
-- `cargo test -p devil-app --test structural_search_workflow --all-targets`
-- `cargo test -p devil-app --test git_workflow --all-targets`
-- `cargo test -p devil-app --test terminal_workflow --all-targets`
-- `cargo test -p devil-app --test debug_workflow --all-targets`
+- `cargo test -p legion-app --test daily_editing_contracts --all-targets`
+- `cargo test -p legion-app --test workspace_vfs_integration --all-targets`
+- `cargo test -p legion-app --test structural_search_workflow --all-targets`
+- `cargo test -p legion-app --test git_workflow --all-targets`
+- `cargo test -p legion-app --test terminal_workflow --all-targets`
+- `cargo test -p legion-app --test debug_workflow --all-targets`
 
 Exit criteria:
 - A user can perform daily editing, save, search, git, terminal, test/debug, and navigation workflows without any AI provider.
@@ -452,15 +452,15 @@ Features:
 - Contract validators rejecting zero correlation, nil causality, raw secret markers, missing policy, and direct mutation intent.
 
 Granular tasks:
-3.1 Add DTOs in `crates/devil-protocol/src/lib.rs` near existing assisted-AI route and Legion workflow DTOs.
+3.1 Add DTOs in `crates/legion-protocol/src/lib.rs` near existing assisted-AI route and Legion workflow DTOs.
 3.2 Add validators beside existing `validate_assisted_ai_*` helpers.
-3.3 Add serde roundtrip and negative contract tests in `crates/devil-protocol/tests/dto_contracts.rs`.
+3.3 Add serde roundtrip and negative contract tests in `crates/legion-protocol/tests/dto_contracts.rs`.
 3.4 Update dependent app/agent/provider code to use richer route metadata only where required; do not break existing route constructors.
 
 Gate commands:
-- `cargo test -p devil-protocol --test dto_contracts legion -- --nocapture`
-- `cargo test -p devil-agent --all-targets`
-- `cargo test -p devil-app --test legion_workflow_integration --all-targets`
+- `cargo test -p legion-protocol --test dto_contracts legion -- --nocapture`
+- `cargo test -p legion-agent --all-targets`
+- `cargo test -p legion-app --test legion_workflow_integration --all-targets`
 
 Exit criteria:
 - DTOs from backend/cloud/model plans exist, serialize/deserialize, validate, and are used at app/agent boundaries.
@@ -483,10 +483,10 @@ Granular tasks:
 4.5 Test provider refusals, cancellation, privacy policy denial, proposal-only output, and Manual mode exclusion.
 
 Gate commands:
-- `cargo test -p devil-app --test assist_inline_prediction_workflow --all-targets`
-- `cargo test -p devil-ai --all-targets`
-- `cargo test -p devil-ai-providers --all-targets`
-- `cargo test -p devil-desktop --all-targets assist`
+- `cargo test -p legion-app --test assist_inline_prediction_workflow --all-targets`
+- `cargo test -p legion-ai --all-targets`
+- `cargo test -p legion-ai-providers --all-targets`
+- `cargo test -p legion-desktop --all-targets assist`
 
 Exit criteria:
 - Assist can produce preview/proposal/evidence flows through configured providers without direct mutation.
@@ -503,15 +503,15 @@ Features:
 - Tool permission requests routed through policy broker and explicit user approvals.
 
 Granular tasks:
-5.1 Extend/verify `devil-agent` sandbox orchestration, containment validation, and proposal generator.
-5.2 Add `devil-app` delegate session APIs for task packet submission, status polling, cancellation, and proposal review.
+5.1 Extend/verify `legion-agent` sandbox orchestration, containment validation, and proposal generator.
+5.2 Add `legion-app` delegate session APIs for task packet submission, status polling, cancellation, and proposal review.
 5.3 Add UI panels and desktop rendering for Fleet Console, Task Bar, Delegate Chat, Proposal Queue, Risk Monitor, Decision Feed.
 5.4 Add tests for allowed/forbidden file boundaries, stale proposal rejection, approval denial, permission request denial, and evidence display.
 
 Gate commands:
-- `cargo test -p devil-agent --all-targets delegated legion`
-- `cargo test -p devil-app --test delegated_task_integration --all-targets`
-- `cargo test -p devil-desktop --all-targets delegate`
+- `cargo test -p legion-agent --all-targets delegated legion`
+- `cargo test -p legion-app --test delegated_task_integration --all-targets`
+- `cargo test -p legion-desktop --all-targets delegate`
 
 Exit criteria:
 - Delegate mode can run a bounded task to a reviewed proposal with full evidence and no direct mutation.
@@ -534,11 +534,11 @@ Granular tasks:
 6.5 Add integration tests for successful run, blocked run, failed validation, conflict, cancellation, signoff, and merge approval.
 
 Gate commands:
-- `cargo test -p devil-app --test legion_workflow_integration --all-targets`
-- `cargo test -p devil-desktop --test legion_workflow_command_center --all-targets`
-- `cargo test -p devil-protocol --test dto_contracts legion_workflow --all-targets`
-- `cargo test -p devil-tracker --all-targets legion_workflow`
-- `cargo test -p devil-memory --all-targets legion_workflow`
+- `cargo test -p legion-app --test legion_workflow_integration --all-targets`
+- `cargo test -p legion-desktop --test legion_workflow_command_center --all-targets`
+- `cargo test -p legion-protocol --test dto_contracts legion_workflow --all-targets`
+- `cargo test -p legion-tracker --all-targets legion_workflow`
+- `cargo test -p legion-memory --all-targets legion_workflow`
 
 Exit criteria:
 - Automate mode can run an end-to-end local workflow to review-ready proposals with validation evidence and final human gate.
@@ -561,9 +561,9 @@ Granular tasks:
 7.5 Add deployment docs/runbooks and local mock server test fixture.
 
 Gate commands:
-- `cargo test -p devil-remote --all-targets`
-- `cargo test -p devil-app --all-targets cloud`
-- `cargo test -p devil-security --all-targets cloud`
+- `cargo test -p legion-remote --all-targets`
+- `cargo test -p legion-app --all-targets cloud`
+- `cargo test -p legion-security --all-targets cloud`
 
 Exit criteria:
 - Local app can submit to a mock cloud lane, enforce policy/budget, stream status, cancel, and fetch proposal/evidence without uploading forbidden data.
@@ -584,8 +584,8 @@ Granular tasks:
 8.1 Add `scripts/models/download-models.sh` with `--dry-run` and exact model IDs.
 8.2 Add `scripts/models/start-local-workers.sh` and `config/workers.example.yaml`.
 8.3 Add `training/` Python project files, QLoRA scripts, eval scripts, and conversion scripts.
-8.4 Add `crates/devil-memory` or dedicated crate trace schemas with consent and redaction validators.
-8.5 Add `crates/devil-security` secret scanner tests for traces/diffs/logs.
+8.4 Add `crates/legion-memory` or dedicated crate trace schemas with consent and redaction validators.
+8.5 Add `crates/legion-security` secret scanner tests for traces/diffs/logs.
 8.6 Add docs for dataset construction and eval gates.
 
 Gate commands:
@@ -593,8 +593,8 @@ Gate commands:
 - `bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml`
 - `python3 evals/run_eval.py --dry-run`
 - `python3 -m compileall training evals scripts/models`
-- `cargo test -p devil-memory --all-targets trace`
-- `cargo test -p devil-security --all-targets redaction`
+- `cargo test -p legion-memory --all-targets trace`
+- `cargo test -p legion-security --all-targets redaction`
 
 Exit criteria:
 - The repo can reproduce acquisition/training/eval/serving workflows in dry-run mode in CI and real mode on an appropriately provisioned machine.

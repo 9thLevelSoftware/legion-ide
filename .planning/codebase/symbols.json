@@ -11,22 +11,22 @@
   },
   "entry_points": [
     {
-      "name": "devil-app",
-      "path": "crates/devil-app/src/main.rs",
+      "name": "legion-app",
+      "path": "crates/legion-app/src/main.rs",
       "kind": "cli",
       "summary": "CLI shell proof entrypoint",
       "related_chunks": ["map:app-composition:001"]
     },
     {
-      "name": "devil-desktop",
-      "path": "crates/devil-desktop/src/main.rs",
+      "name": "legion-desktop",
+      "path": "crates/legion-desktop/src/main.rs",
       "kind": "desktop",
       "summary": "Renderer-backed desktop entrypoint",
       "related_chunks": ["map:desktop-workflow:001"]
     },
     {
-      "name": "devil-cli",
-      "path": "crates/devil-cli/src/main.rs",
+      "name": "legion-cli",
+      "path": "crates/legion-cli/src/main.rs",
       "kind": "cli",
       "summary": "Developer diagnostics CLI",
       "related_chunks": ["map:cli-diagnostics:001"]
@@ -43,49 +43,49 @@
   "apis": [
     {
       "name": "WorkspacePort",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "trait",
       "summary": "Workspace request port",
       "related_chunks": ["map:protocol-ports:001"]
     },
     {
       "name": "EditorPort",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "trait",
       "summary": "Editor request port",
       "related_chunks": ["map:protocol-ports:001"]
     },
     {
       "name": "ProposalPort",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "trait",
       "summary": "Proposal lifecycle port",
       "related_chunks": ["map:protocol-ports:001"]
     },
     {
       "name": "TerminalPort",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "trait",
       "summary": "Terminal runtime port",
       "related_chunks": ["map:protocol-ports:001"]
     },
     {
       "name": "LspPort",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "trait",
       "summary": "Language server port",
       "related_chunks": ["map:protocol-ports:001"]
     },
     {
       "name": "SemanticPort",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "trait",
       "summary": "Semantic query port",
       "related_chunks": ["map:protocol-ports:001"]
     },
     {
       "name": "StorageRepositoryPort",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "trait",
       "summary": "Storage repository port",
       "related_chunks": ["map:protocol-ports:001"]
@@ -93,120 +93,120 @@
   ],
   "modules": [
     {
-      "name": "devil-protocol",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "name": "legion-protocol",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "crate",
       "summary": "Shared DTOs, validators, and ports",
       "related_chunks": ["map:protocol-core:001", "map:protocol-trust-ai:001", "map:protocol-language-terminal:001", "map:protocol-ports:001"]
     },
     {
-      "name": "devil-app",
-      "path": "crates/devil-app/src/lib.rs",
+      "name": "legion-app",
+      "path": "crates/legion-app/src/lib.rs",
       "kind": "crate",
       "summary": "Composition root and app authority",
       "related_chunks": ["map:app-composition:001", "map:save-workflow:001", "map:language-workflow:001", "map:terminal-workflow:001"]
     },
     {
-      "name": "devil-desktop",
-      "path": "crates/devil-desktop/src/lib.rs",
+      "name": "legion-desktop",
+      "path": "crates/legion-desktop/src/lib.rs",
       "kind": "crate",
       "summary": "Renderer-backed desktop adapter",
       "related_chunks": ["map:desktop-lib:001", "map:desktop-bridge:001", "map:desktop-workflow:001", "map:desktop-view:001"]
     },
     {
-      "name": "devil-ui",
-      "path": "crates/devil-ui/src/ui.rs",
+      "name": "legion-ui",
+      "path": "crates/legion-ui/src/ui.rs",
       "kind": "crate",
       "summary": "Projection-only shell and command intents",
       "related_chunks": ["map:ui-projection:001"]
     },
     {
-      "name": "devil-project",
-      "path": "crates/devil-project/src/lib.rs",
+      "name": "legion-project",
+      "path": "crates/legion-project/src/lib.rs",
       "kind": "crate",
       "summary": "Workspace file authority",
       "related_chunks": ["map:workspace-authority:001"]
     },
     {
-      "name": "devil-editor",
-      "path": "crates/devil-editor/src/lib.rs",
+      "name": "legion-editor",
+      "path": "crates/legion-editor/src/lib.rs",
       "kind": "crate",
       "summary": "Editor transaction and buffer authority",
       "related_chunks": ["map:editor-engine:001"]
     },
     {
-      "name": "devil-text",
-      "path": "crates/devil-text/src/lib.rs",
+      "name": "legion-text",
+      "path": "crates/legion-text/src/lib.rs",
       "kind": "crate",
       "summary": "Text snapshots and line index",
       "related_chunks": ["map:text-model:001"]
     },
     {
-      "name": "devil-index",
-      "path": "crates/devil-index/src/lib.rs",
+      "name": "legion-index",
+      "path": "crates/legion-index/src/lib.rs",
       "kind": "crate",
       "summary": "Semantic and lexical indexing",
       "related_chunks": ["map:index-semantic:001", "map:index-lexical:001"]
     },
     {
-      "name": "devil-security",
-      "path": "crates/devil-security/src/lib.rs",
+      "name": "legion-security",
+      "path": "crates/legion-security/src/lib.rs",
       "kind": "crate",
       "summary": "Deny-by-default policy broker",
       "related_chunks": ["map:security-policy:001"]
     },
     {
-      "name": "devil-platform",
-      "path": "crates/devil-platform/src/lib.rs",
+      "name": "legion-platform",
+      "path": "crates/legion-platform/src/lib.rs",
       "kind": "crate",
       "summary": "Native filesystem/process/PTY abstractions",
       "related_chunks": ["map:platform-native:001"]
     },
     {
-      "name": "devil-terminal",
-      "path": "crates/devil-terminal/src/lib.rs",
+      "name": "legion-terminal",
+      "path": "crates/legion-terminal/src/lib.rs",
       "kind": "crate",
       "summary": "Terminal fixture/runtime contracts",
       "related_chunks": ["map:terminal-runtime:001"]
     },
     {
-      "name": "devil-storage",
-      "path": "crates/devil-storage/src/lib.rs",
+      "name": "legion-storage",
+      "path": "crates/legion-storage/src/lib.rs",
       "kind": "crate",
       "summary": "Metadata storage repository",
       "related_chunks": ["map:storage-observability:001"]
     },
     {
-      "name": "devil-observability",
-      "path": "crates/devil-observability/src/lib.rs",
+      "name": "legion-observability",
+      "path": "crates/legion-observability/src/lib.rs",
       "kind": "crate",
       "summary": "Event sink and metadata audit",
       "related_chunks": ["map:observability:001"]
     },
     {
-      "name": "devil-ai",
-      "path": "crates/devil-ai/src/lib.rs",
+      "name": "legion-ai",
+      "path": "crates/legion-ai/src/lib.rs",
       "kind": "crate",
       "summary": "Provider route contracts",
       "related_chunks": ["map:ai-provider:001"]
     },
     {
-      "name": "devil-plugin",
-      "path": "crates/devil-plugin/src/lib.rs",
+      "name": "legion-plugin",
+      "path": "crates/legion-plugin/src/lib.rs",
       "kind": "crate",
       "summary": "Plugin host capability surface",
       "related_chunks": ["map:plugins-collab-remote:001"]
     },
     {
-      "name": "devil-remote-transport",
-      "path": "crates/devil-remote-transport/src/lib.rs",
+      "name": "legion-remote-transport",
+      "path": "crates/legion-remote-transport/src/lib.rs",
       "kind": "crate",
       "summary": "Remote transport security and replay surface",
       "related_chunks": ["map:remote-transport:001"]
     },
     {
-      "name": "devil-retention",
-      "path": "crates/devil-retention/src/lib.rs",
+      "name": "legion-retention",
+      "path": "crates/legion-retention/src/lib.rs",
       "kind": "crate",
       "summary": "Raw-source retention surface",
       "related_chunks": ["map:retention-telemetry:001"]
@@ -215,42 +215,42 @@
   "tests": [
     {
       "name": "dto_contracts",
-      "path": "crates/devil-protocol/tests/dto_contracts.rs",
+      "path": "crates/legion-protocol/tests/dto_contracts.rs",
       "kind": "integration",
       "summary": "Protocol DTO and validator contract coverage",
       "related_chunks": ["map:protocol-core:001", "map:protocol-trust-ai:001", "map:protocol-language-terminal:001"]
     },
     {
       "name": "workspace_vfs_integration",
-      "path": "crates/devil-app/tests/workspace_vfs_integration.rs",
+      "path": "crates/legion-app/tests/workspace_vfs_integration.rs",
       "kind": "integration",
       "summary": "Workspace VFS and save-conflict integration coverage",
       "related_chunks": ["map:save-workflow:001", "map:workspace-authority:001"]
     },
     {
       "name": "language_tooling_workflow",
-      "path": "crates/devil-app/tests/language_tooling_workflow.rs",
+      "path": "crates/legion-app/tests/language_tooling_workflow.rs",
       "kind": "integration",
       "summary": "Language tooling app workflow coverage",
       "related_chunks": ["map:language-workflow:001"]
     },
     {
       "name": "terminal_workflow",
-      "path": "crates/devil-app/tests/terminal_workflow.rs",
+      "path": "crates/legion-app/tests/terminal_workflow.rs",
       "kind": "integration",
       "summary": "Terminal policy/audit workflow coverage",
       "related_chunks": ["map:terminal-workflow:001"]
     },
     {
       "name": "desktop tests",
-      "path": "crates/devil-desktop/tests",
+      "path": "crates/legion-desktop/tests",
       "kind": "integration",
       "summary": "Desktop projection, bridge, workflow, session, search, smoke, language, and terminal tests",
       "related_chunks": ["map:desktop-bridge:001", "map:desktop-workflow:001", "map:desktop-view:001"]
     },
     {
       "name": "editor performance and retention",
-      "path": "crates/devil-editor/tests",
+      "path": "crates/legion-editor/tests",
       "kind": "integration",
       "summary": "Editor atomicity, retention, and performance guardrails",
       "related_chunks": ["map:editor-engine:001"]
@@ -291,7 +291,7 @@
       "name": "eframe/egui",
       "path": "Cargo.toml",
       "kind": "external",
-      "summary": "Desktop renderer dependencies isolated to devil-desktop",
+      "summary": "Desktop renderer dependencies isolated to legion-desktop",
       "related_chunks": ["map:root-workspace:001", "map:desktop-lib:001"]
     },
     {
@@ -312,28 +312,28 @@
   "ownership": [
     {
       "name": "Renderer boundary",
-      "path": "crates/devil-desktop/src/lib.rs",
+      "path": "crates/legion-desktop/src/lib.rs",
       "kind": "ownership",
       "summary": "Desktop owns renderer/presentation only",
       "related_chunks": ["map:desktop-lib:001"]
     },
     {
       "name": "Projection boundary",
-      "path": "crates/devil-ui/src/ui.rs",
+      "path": "crates/legion-ui/src/ui.rs",
       "kind": "ownership",
       "summary": "UI owns projections and intents only",
       "related_chunks": ["map:ui-projection:001"]
     },
     {
       "name": "App authority",
-      "path": "crates/devil-app/src/lib.rs",
+      "path": "crates/legion-app/src/lib.rs",
       "kind": "ownership",
       "summary": "App owns composition and workflow routing",
       "related_chunks": ["map:app-composition:001"]
     },
     {
       "name": "Protocol authority",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "ownership",
       "summary": "Protocol owns DTO and port contracts",
       "related_chunks": ["map:protocol-ports:001"]
@@ -342,21 +342,21 @@
   "risk_areas": [
     {
       "name": "Large protocol/app files",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "complexity",
       "summary": "Protocol/app files are high-blast-radius monoliths",
       "related_chunks": ["map:protocol-core:001", "map:app-composition:001"]
     },
     {
       "name": "Trust/AI Phase 5 wiring",
-      "path": "crates/devil-protocol/src/lib.rs",
+      "path": "crates/legion-protocol/src/lib.rs",
       "kind": "phase-risk",
       "summary": "Rich DTOs exist but Phase 5 must wire usable control surfaces without autonomous apply",
       "related_chunks": ["map:protocol-trust-ai:001"]
     },
     {
       "name": "Terminal policy/audit",
-      "path": "crates/devil-app/src/lib.rs",
+      "path": "crates/legion-app/src/lib.rs",
       "kind": "security",
       "summary": "Terminal must remain default-deny and metadata-audited",
       "related_chunks": ["map:terminal-workflow:001"]

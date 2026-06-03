@@ -9,11 +9,11 @@ Phase 5 activates a WASM isolated extension ecosystem. Existing protocol placeho
 
 ## Decision
 
-Plugins are loaded only through `devil-plugin`, which exposes protocol DTOs and never depends on app, UI, editor, project, AI, tracker, memory, terminal, collaboration, remote, or LSP internals. The initial accepted ABI version is `1`.
+Plugins are loaded only through `legion-plugin`, which exposes protocol DTOs and never depends on app, UI, editor, project, AI, tracker, memory, terminal, collaboration, remote, or LSP internals. The initial accepted ABI version is `1`.
 
 Plugin manifests must declare plugin identity, semver, ABI range, module hash, manifest id, trust/signature metadata, activation events, declarative contributions, requested capabilities, storage namespace, quota limits, and schema version. Manifest validation fails closed for missing identity, invalid ABI, namespace mismatch, forbidden raw payload markers, untrusted decision, or ABI mismatch.
 
-The runtime has no ambient filesystem preopens, inherited environment, process launch, network authority, terminal authority, editor/workspace ownership, or direct storage authority. Host interactions are data-only `PluginHostCallRequest` envelopes checked by `devil-security` against manifest context and declared capabilities.
+The runtime has no ambient filesystem preopens, inherited environment, process launch, network authority, terminal authority, editor/workspace ownership, or direct storage authority. Host interactions are data-only `PluginHostCallRequest` envelopes checked by `legion-security` against manifest context and declared capabilities.
 
 Plugin outputs that can mutate workspace state must be represented as proposal creation host calls and routed through existing generalized proposal authorities. UI receives only `PluginContributionProjection` data and emits `InvokePluginCommand` intents.
 

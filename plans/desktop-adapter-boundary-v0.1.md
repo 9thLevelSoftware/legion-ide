@@ -2,9 +2,9 @@
 
 ## Scope
 
-`devil-desktop` is the planned renderer-backed desktop adapter for Phase 2. It renders current app/UI projections in a native desktop window and translates native UI events into app-owned commands. It is not an editor engine, workspace actor, proposal service, storage repository, provider runtime, terminal runtime, plugin host, collaboration runtime, remote runtime, telemetry spool, or retention vault.
+`legion-desktop` is the planned renderer-backed desktop adapter for Phase 2. It renders current app/UI projections in a native desktop window and translates native UI events into app-owned commands. It is not an editor engine, workspace actor, proposal service, storage repository, provider runtime, terminal runtime, plugin host, collaboration runtime, remote runtime, telemetry spool, or retention vault.
 
-The adapter may depend on `devil-app`, `devil-ui`, `devil-protocol`, and policy-approved renderer crates. It must not make `devil-ui` depend on renderer crates or move app/editor/workspace authority into UI.
+The adapter may depend on `legion-app`, `legion-ui`, `legion-protocol`, and policy-approved renderer crates. It must not make `legion-ui` depend on renderer crates or move app/editor/workspace authority into UI.
 
 ## Startup Flow
 
@@ -57,7 +57,7 @@ The adapter must not apply these intents itself. It must route them to `AppCompo
 - Direct telemetry spool mutation, retention vault mutation, remote workspace mutation, plugin host mutation, collaboration mutation, or terminal/process mutation.
 - Bypassing proposal-mediated saves or conflict/stale/denial handling.
 
-In short, `devil-desktop` is projection-only on input and intent-only on output for product state. It must not own editor state and must not own workspace state.
+In short, `legion-desktop` is projection-only on input and intent-only on output for product state. It must not own editor state and must not own workspace state.
 
 ## Error And Recovery Semantics
 
@@ -83,7 +83,7 @@ Phase 2 must include:
 ## Phase 2 Entry Criteria
 
 - ADR-0002 accepts the `eframe`/`egui` Phase 2 foundation path and fallback triggers.
-- ADR-0030 accepts the `devil-desktop` ownership boundary.
-- `plans/dependency-policy.md` allows renderer crates only in `devil-desktop`.
-- `xtask` fails closed if renderer/windowing dependencies appear in any workspace package other than `devil-desktop`.
+- ADR-0030 accepts the `legion-desktop` ownership boundary.
+- `plans/dependency-policy.md` allows renderer crates only in `legion-desktop`.
+- `xtask` fails closed if renderer/windowing dependencies appear in any workspace package other than `legion-desktop`.
 - `cargo run -p xtask -- check-deps` and targeted `xtask` renderer-gate tests pass.

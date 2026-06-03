@@ -9,8 +9,8 @@ use cargo_metadata::{Metadata, MetadataCommand};
 use clap::{Parser, Subcommand};
 
 const DEFAULT_POLICY_PATH: &str = "plans/dependency-policy.md";
-const DEFAULT_PROTOCOL_PATH: &str = "crates/devil-protocol/src/lib.rs";
-const DEFAULT_UI_MANIFEST_PATH: &str = "crates/devil-ui/Cargo.toml";
+const DEFAULT_PROTOCOL_PATH: &str = "crates/legion-protocol/src/lib.rs";
+const DEFAULT_UI_MANIFEST_PATH: &str = "crates/legion-ui/Cargo.toml";
 const DEFAULT_PHASE3_EVIDENCE_PATH: &str = "plans/evidence/phase-3/predictive-semantic-fabric.md";
 const DEFAULT_PHASE4_EVIDENCE_PATH: &str = "plans/evidence/phase-4/agentic-ai-architecture-map.md";
 const DEFAULT_PHASE5_EVIDENCE_PATH: &str = "plans/evidence/phase-5/plugin-architecture-map.md";
@@ -44,7 +44,7 @@ const PHASE7_FINAL_CHECKLIST_HEADING: &str = "## Final Validation Checklist";
 const PHASE8_STATUS_HEADING: &str = "## Acceptance Status";
 const PHASE8_FINAL_CHECKLIST_HEADING: &str = "## Final Validation Checklist";
 const PHASE13_FINAL_CHECKLIST_HEADING: &str = "## Final Validation Checklist";
-const PHASE3_PARTIAL_RUNTIME_MARKER: &str = "Runtime surface status: Partial `devil-index` indexing behavior is active; acceptance evidence is incomplete.";
+const PHASE3_PARTIAL_RUNTIME_MARKER: &str = "Runtime surface status: Partial `legion-index` indexing behavior is active; acceptance evidence is incomplete.";
 const PHASE3_NOT_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Not accepted.";
 const PHASE3_ACCEPTED_MARKER: &str = "Phase 3 acceptance: Accepted.";
 const LSP_NOT_ACCEPTED_MARKER: &str = "LSP supervision acceptance: Not accepted.";
@@ -102,7 +102,7 @@ const PHASE8_PLATFORM_MATRIX_REQUIRED_MARKERS: &[&str] = &[
     "cargo test --workspace --all-targets: passed",
     "cargo clippy --workspace --all-targets -- -D warnings: passed",
     "cargo deny check: passed",
-    "cargo run -p devil-cli -- evidence check --phase phase8: passed",
+    "cargo run -p legion-cli -- evidence check --phase phase8: passed",
     "cargo run -p xtask -- check-deps: passed",
 ];
 const PHASE8_RELEASE_SIGNOFF_REQUIRED_MARKERS: &[&str] = &[
@@ -217,16 +217,16 @@ const GUI_PHASE6_REQUIRED_COMMAND_MARKERS: &[&str] = &[
     "cargo test --workspace --all-targets",
     "cargo clippy --workspace --all-targets -- -D warnings",
     "cargo deny check",
-    "cargo test -p devil-desktop --test packaging -- --nocapture",
-    "cargo test -p devil-desktop --test platform_integration -- --nocapture",
-    "cargo test -p devil-desktop --test platform_smoke -- --nocapture",
-    "cargo test -p devil-desktop --test session_restore -- --nocapture",
-    "cargo test -p devil-desktop --test diagnostics_export -- --nocapture",
-    "cargo test -p devil-cli gui_phase6 -- --nocapture",
+    "cargo test -p legion-desktop --test packaging -- --nocapture",
+    "cargo test -p legion-desktop --test platform_integration -- --nocapture",
+    "cargo test -p legion-desktop --test platform_smoke -- --nocapture",
+    "cargo test -p legion-desktop --test session_restore -- --nocapture",
+    "cargo test -p legion-desktop --test diagnostics_export -- --nocapture",
+    "cargo test -p legion-cli gui_phase6 -- --nocapture",
     "scripts/package-windows.ps1 -DryRun",
     "scripts/gui-smoke.ps1 -DryRun",
     "scripts/gui-smoke.sh --dry-run",
-    "cargo run -p devil-cli -- evidence check --phase gui-phase6",
+    "cargo run -p legion-cli -- evidence check --phase gui-phase6",
 ];
 const GUI_PHASE7_REQUIRED_ARTIFACTS: &[&str] = &[
     "plans/evidence/gui-productization/phase-7-local-workflow-smoke.md",
@@ -251,12 +251,12 @@ const GUI_PHASE7_REQUIRED_COMMAND_MARKERS: &[&str] = &[
     "cargo test --workspace --all-targets",
     "cargo clippy --workspace --all-targets -- -D warnings",
     "cargo deny check",
-    "cargo test -p devil-desktop --test beta_workflow -- --nocapture",
-    "cargo test -p devil-desktop --test operational_health -- --nocapture",
-    "cargo test -p devil-desktop --test diagnostics_export -- --nocapture",
+    "cargo test -p legion-desktop --test beta_workflow -- --nocapture",
+    "cargo test -p legion-desktop --test operational_health -- --nocapture",
+    "cargo test -p legion-desktop --test diagnostics_export -- --nocapture",
     "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun",
     "bash scripts/gui-smoke.sh --beta --dry-run",
-    "cargo run -p devil-cli -- evidence check --phase gui-phase7",
+    "cargo run -p legion-cli -- evidence check --phase gui-phase7",
 ];
 const GUI_PHASE7_REQUIRED_LIMITATION_MARKERS: &[&str] = &[
     "Remote production GUI: unsupported",
@@ -294,12 +294,12 @@ const GUI_PHASE8_REQUIRED_COMMAND_MARKERS: &[&str] = &[
     "cargo test --workspace --all-targets",
     "cargo clippy --workspace --all-targets -- -D warnings",
     "cargo deny check",
-    "cargo test -p devil-desktop --test plugin_management -- --nocapture",
-    "cargo test -p devil-desktop --test collaboration_gui -- --nocapture",
-    "cargo test -p devil-desktop --test remote_workspace_gui -- --nocapture",
-    "cargo test -p devil-desktop --test delegated_task_command_center -- --nocapture",
-    "cargo run -p devil-cli -- evidence check --phase gui-phase8",
-    "cargo run -p devil-cli -- evidence check --phase phase8",
+    "cargo test -p legion-desktop --test plugin_management -- --nocapture",
+    "cargo test -p legion-desktop --test collaboration_gui -- --nocapture",
+    "cargo test -p legion-desktop --test remote_workspace_gui -- --nocapture",
+    "cargo test -p legion-desktop --test delegated_task_command_center -- --nocapture",
+    "cargo run -p legion-cli -- evidence check --phase gui-phase8",
+    "cargo run -p legion-cli -- evidence check --phase phase8",
     "powershell -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Help",
     "bash scripts/gui-smoke.sh --help",
 ];
@@ -417,14 +417,14 @@ const PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
     "xtask-check-deps.txt",
 ];
 const RENDERER_BOUNDARY_POLICY_MARKERS: &[&str] = &[
-    "`devil-desktop` may depend on:",
+    "`legion-desktop` may depend on:",
     "`eframe`",
     "`egui`",
     "renderer dependencies",
     "adapter-only",
     "any core substrate crate",
 ];
-const RENDERER_DEPENDENCY_ALLOWED_PACKAGES: &[&str] = &["devil-desktop"];
+const RENDERER_DEPENDENCY_ALLOWED_PACKAGES: &[&str] = &["legion-desktop"];
 const FORBIDDEN_RENDERER_DEPS: &[&str] = &[
     "eframe",
     "egui",
@@ -843,13 +843,13 @@ fn validate_renderer_dependency_gate(
         forbidden_declared.sort();
 
         if !forbidden_declared.is_empty() {
-            let package_label = if package == "devil-ui" {
+            let package_label = if package == "legion-ui" {
                 format!("`{DEFAULT_UI_MANIFEST_PATH}`")
             } else {
                 format!("workspace package `{package}`")
             };
             issues.push(format!(
-                "{package_label} must not declare renderer/windowing dependencies outside `devil-desktop`: {}",
+                "{package_label} must not declare renderer/windowing dependencies outside `legion-desktop`: {}",
                 forbidden_declared.join(", ")
             ));
         }
@@ -873,7 +873,7 @@ fn validate_protocol_contracts(
     let missing = expected_symbols
         .iter()
         .filter(|symbol| !protocol_contains_symbol(&protocol_text, symbol))
-        .map(|symbol| format!("protocol contract symbol `{symbol}` missing from `crates/devil-protocol/src/lib.rs`"))
+        .map(|symbol| format!("protocol contract symbol `{symbol}` missing from `crates/legion-protocol/src/lib.rs`"))
         .collect();
 
     Ok(missing)
@@ -1249,7 +1249,7 @@ where
     }
 
     for command in GUI_PHASE5_REQUIRED_COMMAND_MARKERS {
-        if !evidence.contains(command) {
+        if !contains_current_or_historical_marker(evidence, command) {
             issues.push(format!(
                 "`{DEFAULT_GUI_PHASE5_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
             ));
@@ -1331,7 +1331,7 @@ where
     }
 
     for command in GUI_PHASE6_REQUIRED_COMMAND_MARKERS {
-        if !evidence.contains(command) {
+        if !contains_current_or_historical_marker(evidence, command) {
             issues.push(format!(
                 "`{DEFAULT_GUI_PHASE6_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
             ));
@@ -1419,7 +1419,7 @@ where
     }
 
     for command in GUI_PHASE7_REQUIRED_COMMAND_MARKERS {
-        if !evidence.contains(command) {
+        if !contains_current_or_historical_marker(evidence, command) {
             issues.push(format!(
                 "`{DEFAULT_GUI_PHASE7_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
             ));
@@ -1515,7 +1515,7 @@ where
     }
 
     for command in GUI_PHASE8_REQUIRED_COMMAND_MARKERS {
-        if !evidence.contains(command) {
+        if !contains_current_or_historical_marker(evidence, command) {
             issues.push(format!(
                 "`{DEFAULT_GUI_PHASE8_EVIDENCE_PATH}` claims acceptance but required command `{command}` is not listed"
             ));
@@ -1598,13 +1598,13 @@ where
     }
 
     for command in PHASE13_REQUIRED_COMMAND_MARKERS {
-        if !evidence.contains(command) {
+        if !contains_current_or_historical_marker(evidence, command) {
             issues.push(format!(
                 "`{DEFAULT_PHASE13_EVIDENCE_PATH}` is missing required command `{command}`"
             ));
         }
 
-        if !final_gates.contains(command) {
+        if !contains_current_or_historical_marker(final_gates, command) {
             issues.push(format!(
                 "`{DEFAULT_PHASE13_FINAL_GATES_PATH}` is missing required command `{command}`"
             ));
@@ -1917,7 +1917,7 @@ where
     match artifact_text(PHASE8_PLATFORM_MATRIX_ARTIFACT) {
         Some(matrix) => {
             for marker in PHASE8_PLATFORM_MATRIX_REQUIRED_MARKERS {
-                if !matrix.contains(marker) {
+                if !contains_current_or_historical_marker(&matrix, marker) {
                     issues.push(format!(
                         "`{PHASE8_PLATFORM_MATRIX_ARTIFACT}` is required for accepted Phase 8 but marker `{marker}` is missing"
                     ));
@@ -1939,7 +1939,7 @@ where
     match artifact_text(PHASE8_RELEASE_READINESS_ARTIFACT) {
         Some(release) => {
             for marker in PHASE8_RELEASE_SIGNOFF_REQUIRED_MARKERS {
-                if !release.contains(marker) {
+                if !contains_current_or_historical_marker(&release, marker) {
                     issues.push(format!(
                         "`{PHASE8_RELEASE_READINESS_ARTIFACT}` is required for accepted Phase 8 but signoff marker `{marker}` is missing"
                     ));
@@ -1967,6 +1967,17 @@ fn contains_phase8_accepted_artifact_stale_marker(source: &str, marker: &str) ->
         "TODO" => contains_ascii_token(source, "TODO"),
         _ => source.contains(marker),
     }
+}
+
+fn contains_current_or_historical_marker(source: &str, marker: &str) -> bool {
+    if source.contains(marker) {
+        return true;
+    }
+
+    let historical = marker
+        .replace("legion-", "devil-")
+        .replace("legion_", "devil_");
+    historical != marker && source.contains(&historical)
 }
 
 fn contains_ascii_token_case_insensitive(source: &str, token: &str) -> bool {
@@ -2081,7 +2092,7 @@ impl Policy {
                         && let Some(source) = active_crate.clone()
                     {
                         for dep in items {
-                            if dep.starts_with("devil-") {
+                            if dep.starts_with("legion-") {
                                 match active_list {
                                     DirectionalList::Allowed => {
                                         policy
@@ -2158,22 +2169,22 @@ fn renderer_dependency_gate_preserves_projection_boundary() {
         .expect("policy should be readable");
     let package_dependencies = HashMap::from([
         (
-            "devil-ui".to_string(),
+            "legion-ui".to_string(),
             HashSet::from([
-                "devil-protocol".to_string(),
+                "legion-protocol".to_string(),
                 "thiserror".to_string(),
                 "uuid".to_string(),
             ]),
         ),
         (
-            "devil-app".to_string(),
-            HashSet::from(["devil-editor".to_string(), "devil-ui".to_string()]),
+            "legion-app".to_string(),
+            HashSet::from(["legion-editor".to_string(), "legion-ui".to_string()]),
         ),
         (
-            "devil-desktop".to_string(),
+            "legion-desktop".to_string(),
             HashSet::from([
-                "devil-app".to_string(),
-                "devil-ui".to_string(),
+                "legion-app".to_string(),
+                "legion-ui".to_string(),
                 "egui".to_string(),
                 "eframe".to_string(),
             ]),
@@ -2185,28 +2196,28 @@ fn renderer_dependency_gate_preserves_projection_boundary() {
 
     let mut violating_dependencies = package_dependencies.clone();
     violating_dependencies
-        .get_mut("devil-app")
-        .expect("devil-app fixture must exist")
+        .get_mut("legion-app")
+        .expect("legion-app fixture must exist")
         .insert("eframe".to_string());
     let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
     assert!(
         issues
             .iter()
-            .any(|issue| issue.contains("devil-app") && issue.contains("eframe")),
+            .any(|issue| issue.contains("legion-app") && issue.contains("eframe")),
         "core crate renderer dependency violation should be reported, got: {issues:?}"
     );
 
     let mut violating_dependencies = package_dependencies;
     violating_dependencies
-        .get_mut("devil-ui")
-        .expect("devil-ui fixture must exist")
+        .get_mut("legion-ui")
+        .expect("legion-ui fixture must exist")
         .insert("egui".to_string());
     let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
     assert!(
         issues
             .iter()
             .any(|issue| issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("egui")),
-        "devil-ui renderer dependency violation should be reported, got: {issues:?}"
+        "legion-ui renderer dependency violation should be reported, got: {issues:?}"
     );
 }
 
@@ -2242,7 +2253,7 @@ mod tests {
         let source = read_workspace_file(relative_path);
 
         assert!(
-            source.contains("devil_protocol"),
+            source.contains("legion_protocol"),
             "Phase 4 runtime crate `{relative_path}` must use protocol DTOs as its boundary"
         );
         assert!(
@@ -2250,7 +2261,7 @@ mod tests {
             "Phase 4 runtime crate `{relative_path}` must keep runtime records metadata-oriented"
         );
         assert!(
-            !source.contains("devil_app") && !source.contains("devil_ui"),
+            !source.contains("legion_app") && !source.contains("legion_ui"),
             "Phase 4 runtime crate `{relative_path}` must not depend on app or UI ownership"
         );
         assert!(
@@ -2654,7 +2665,7 @@ Final gate outputs archived from current commands.
             PHASE8_PLATFORM_MATRIX_ARTIFACT => Some(
                 [
                     "Workflow: .github/workflows/ci.yml",
-                    "Run URL: https://github.example/devil-ide/actions/runs/1",
+                    "Run URL: https://github.example/legion-ide/actions/runs/1",
                     "ubuntu-latest: passed",
                     "windows-latest: passed",
                     "macos-latest: passed",
@@ -2663,7 +2674,7 @@ Final gate outputs archived from current commands.
                     "cargo test --workspace --all-targets: passed",
                     "cargo clippy --workspace --all-targets -- -D warnings: passed",
                     "cargo deny check: passed",
-                    "cargo run -p devil-cli -- evidence check --phase phase8: passed",
+                    "cargo run -p legion-cli -- evidence check --phase phase8: passed",
                     "cargo run -p xtask -- check-deps: passed",
                 ]
                 .join("\n"),
@@ -2688,15 +2699,15 @@ Final gate outputs archived from current commands.
     #[test]
     fn missing_workspace_crate_policy_is_reported() {
         let packages = HashMap::from([(
-            "devil-ui".to_string(),
-            HashSet::from(["devil-protocol".to_string()]),
+            "legion-ui".to_string(),
+            HashSet::from(["legion-protocol".to_string()]),
         )]);
 
         let issues = validate_dependency_policy(&packages, &Policy::default());
 
         assert!(issues.iter().any(|issue| {
             issue.contains(
-                "`devil-ui` lacks dependency policy coverage in `plans/dependency-policy.md`",
+                "`legion-ui` lacks dependency policy coverage in `plans/dependency-policy.md`",
             )
         }));
     }
@@ -2705,12 +2716,12 @@ Final gate outputs archived from current commands.
     fn policy_parses_required_dependencies_from_markdown() {
         let markdown = r#"
 ### 1. Directional Intent
-- `devil-ui` may depend on:
-  - `devil-protocol`
-- `devil-ui` MUST directly depend on:
-  - `devil-protocol`
-- `devil-ui` MUST NOT depend on `devil-editor`.
-- `devil-ui` MUST NOT depend on `devil-project`.
+- `legion-ui` may depend on:
+  - `legion-protocol`
+- `legion-ui` MUST directly depend on:
+  - `legion-protocol`
+- `legion-ui` MUST NOT depend on `legion-editor`.
+- `legion-ui` MUST NOT depend on `legion-project`.
 
 ### 2. Shared Contracts Boundary
   - `WorkspaceId`
@@ -2719,22 +2730,22 @@ Final gate outputs archived from current commands.
         let policy = Policy::from_markdown(markdown).expect("policy should parse");
 
         assert_eq!(
-            policy.allowed_internal("devil-ui"),
-            Some(&HashSet::from(["devil-protocol".to_string()]))
+            policy.allowed_internal("legion-ui"),
+            Some(&HashSet::from(["legion-protocol".to_string()]))
         );
         assert_eq!(
-            policy.required_dependencies().get("devil-ui"),
-            Some(&HashSet::from(["devil-protocol".to_string()]))
+            policy.required_dependencies().get("legion-ui"),
+            Some(&HashSet::from(["legion-protocol".to_string()]))
         );
         assert!(
             policy
                 .forbidden_pairs()
-                .contains(&("devil-ui".to_string(), "devil-editor".to_string()))
+                .contains(&("legion-ui".to_string(), "legion-editor".to_string()))
         );
         assert!(
             policy
                 .forbidden_pairs()
-                .contains(&("devil-ui".to_string(), "devil-project".to_string()))
+                .contains(&("legion-ui".to_string(), "legion-project".to_string()))
         );
         assert!(policy.protocol_symbols().contains("WorkspaceId"));
     }
@@ -3028,7 +3039,7 @@ Final gate outputs archived from current commands.
     #[test]
     fn gui_phase6_acceptance_claim_requires_artifacts_commands_and_checked_checklist() {
         let evidence = accepted_gui_phase6_evidence(false).replace(
-            "- `cargo run -p devil-cli -- evidence check --phase gui-phase6`\n",
+            "- `cargo run -p legion-cli -- evidence check --phase gui-phase6`\n",
             "",
         );
         let issues = validate_gui_phase6_acceptance_governance(&evidence, |_| false);
@@ -3040,7 +3051,7 @@ Final gate outputs archived from current commands.
             "required artifact `plans/evidence/gui-productization/phase-6-package-runbook.md` is missing"
         )));
         assert!(issues.iter().any(|issue| issue.contains(
-            "required command `cargo run -p devil-cli -- evidence check --phase gui-phase6` is not listed"
+            "required command `cargo run -p legion-cli -- evidence check --phase gui-phase6` is not listed"
         )));
     }
 
@@ -3097,7 +3108,7 @@ Final gate outputs archived from current commands.
     fn gui_phase7_acceptance_claim_requires_artifacts_commands_limits_and_checked_checklist() {
         let evidence = accepted_gui_phase7_evidence(false)
             .replace(
-                "- `cargo run -p devil-cli -- evidence check --phase gui-phase7`\n",
+                "- `cargo run -p legion-cli -- evidence check --phase gui-phase7`\n",
                 "",
             )
             .replace("- Autonomous apply: unsupported\n", "");
@@ -3110,7 +3121,7 @@ Final gate outputs archived from current commands.
             "required artifact `plans/evidence/gui-productization/phase-7-local-workflow-smoke.md` is missing"
         )));
         assert!(issues.iter().any(|issue| issue.contains(
-            "required command `cargo run -p devil-cli -- evidence check --phase gui-phase7` is not listed"
+            "required command `cargo run -p legion-cli -- evidence check --phase gui-phase7` is not listed"
         )));
         assert!(issues.iter().any(|issue| {
             issue.contains(
@@ -3172,7 +3183,7 @@ Final gate outputs archived from current commands.
     fn gui_phase8_acceptance_claim_requires_artifacts_commands_markers_and_checked_checklist() {
         let evidence = accepted_gui_phase8_evidence(false)
             .replace(
-                "- `cargo run -p devil-cli -- evidence check --phase gui-phase8`\n",
+                "- `cargo run -p legion-cli -- evidence check --phase gui-phase8`\n",
                 "",
             )
             .replace("- Plugin management GUI: supported\n", "")
@@ -3186,7 +3197,7 @@ Final gate outputs archived from current commands.
             "required artifact `plans/evidence/gui-productization/phase-8-plugin-management.md` is missing"
         )));
         assert!(issues.iter().any(|issue| issue.contains(
-            "required command `cargo run -p devil-cli -- evidence check --phase gui-phase8` is not listed"
+            "required command `cargo run -p legion-cli -- evidence check --phase gui-phase8` is not listed"
         )));
         assert!(issues.iter().any(|issue| {
             issue.contains(
@@ -3662,8 +3673,8 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
 
     #[test]
     fn ui_shell_remains_projection_only() {
-        let source = read_workspace_file("crates/devil-ui/src/ui.rs");
-        let manifest = read_workspace_file("crates/devil-ui/Cargo.toml");
+        let source = read_workspace_file("crates/legion-ui/src/ui.rs");
+        let manifest = read_workspace_file("crates/legion-ui/Cargo.toml");
 
         assert!(source.contains("pub struct Shell"));
         assert!(source.contains("CommandDispatchIntent"));
@@ -3672,15 +3683,15 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
         assert!(!source.contains("WorkspaceActor"));
         assert!(!source.contains("EditorEngine"));
         assert!(!source.contains("SaveWorkflowService"));
-        assert!(!manifest.contains("devil-editor"));
-        assert!(!manifest.contains("devil-project"));
-        assert!(!manifest.contains("devil-storage"));
-        assert!(!manifest.contains("devil-app"));
+        assert!(!manifest.contains("legion-editor"));
+        assert!(!manifest.contains("legion-project"));
+        assert!(!manifest.contains("legion-storage"));
+        assert!(!manifest.contains("legion-app"));
     }
 
     #[test]
     fn save_active_buffer_remains_proposal_mediated() {
-        let source = read_workspace_file("crates/devil-app/src/lib.rs");
+        let source = read_workspace_file("crates/legion-app/src/lib.rs");
 
         assert!(source.contains("struct SaveWorkflowService;"));
         assert!(source.contains("SaveWorkflowService::save_active_buffer("));
@@ -3690,7 +3701,7 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
 
     #[test]
     fn source_snapshots_are_not_persisted_by_default() {
-        let source = read_workspace_file("crates/devil-storage/src/lib.rs");
+        let source = read_workspace_file("crates/legion-storage/src/lib.rs");
         let session_record = source_block(&source, "pub struct SessionRecord");
         let persisted_state = source_block(&source, "struct PersistedState");
 
@@ -3703,9 +3714,9 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     #[test]
     fn phase4_runtime_surfaces_remain_protocol_mediated() {
         for path in [
-            "crates/devil-agent/src/lib.rs",
-            "crates/devil-tracker/src/lib.rs",
-            "crates/devil-memory/src/lib.rs",
+            "crates/legion-agent/src/lib.rs",
+            "crates/legion-tracker/src/lib.rs",
+            "crates/legion-memory/src/lib.rs",
         ] {
             assert_phase4_runtime_surface_preserves_boundaries(path);
         }

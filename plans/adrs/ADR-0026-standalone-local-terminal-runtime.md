@@ -8,9 +8,9 @@ Phase 7 validates remote process and PTY descriptors only. Phase 8 must add stan
 
 ## Decision
 
-Implement a production terminal runtime behind explicit policy and feature activation. Keep the deterministic metadata-only `devil-terminal` fixture backend for conformance tests.
+Implement a production terminal runtime behind explicit policy and feature activation. Keep the deterministic metadata-only `legion-terminal` fixture backend for conformance tests.
 
-Production terminal runtime must be app-composed, trusted-workspace and capability-gated, bounded, redacted, metadata-audited, cleanup-safe, and unable to mutate workspace/editor/disk directly. Terminal-originated mutation candidates must become proposals. `devil-ui` may render terminal projections and emit terminal intents only.
+Production terminal runtime must be app-composed, trusted-workspace and capability-gated, bounded, redacted, metadata-audited, cleanup-safe, and unable to mutate workspace/editor/disk directly. Terminal-originated mutation candidates must become proposals. `legion-ui` may render terminal projections and emit terminal intents only.
 
 ## Required Implementation Gates
 

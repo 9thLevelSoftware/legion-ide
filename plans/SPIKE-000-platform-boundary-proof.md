@@ -8,7 +8,7 @@ Accepted at: 2026-05-14T02:07:05Z
 
 ## Objective
 
-Validate that `devil-platform` is constrained to OS service abstractions and does not absorb editor logic, window ownership, model ownership, or high-level request routing.
+Validate that `legion-platform` is constrained to OS service abstractions and does not absorb editor logic, window ownership, model ownership, or high-level request routing.
 
 ## Scope
 
@@ -62,4 +62,4 @@ Validate that `devil-platform` is constrained to OS service abstractions and doe
 
 ## Boundary decision
 
-The platform boundary is accepted. `devil-platform` owns only OS-adjacent primitives. Editor state, window state, domain models, and request routing are explicitly not platform-owned.
+The platform boundary is accepted. `legion-platform` owns only OS-adjacent primitives. Editor state, window state, domain models, and request routing are explicitly not platform-owned.

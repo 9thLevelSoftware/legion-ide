@@ -8,7 +8,7 @@ The accepted storage and observability posture is metadata-only by default. Phas
 
 ## Decision
 
-Implement an encrypted raw-source vault behind explicit consent, purpose, scope, TTL, policy, and feature activation. Keep the deterministic descriptor-only `devil-retention` fixture vault for policy and lifecycle conformance tests.
+Implement an encrypted raw-source vault behind explicit consent, purpose, scope, TTL, policy, and feature activation. Keep the deterministic descriptor-only `legion-retention` fixture vault for policy and lifecycle conformance tests.
 
 Production raw-source retention must be default-deny, explicit-consent, purpose-bound, TTL-bound, encrypted, integrity-checked, key-reference-bound, access-audited, deletable, recoverable, isolated from normal audit/telemetry/storage records, and referenced by descriptor rather than inlined content.
 
