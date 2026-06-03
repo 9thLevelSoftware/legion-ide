@@ -95,34 +95,36 @@ use devil_protocol::{
     LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
     LanguageProblemProjection, LanguageQuickFixProjection, LanguageStickyScopeProjection,
     LanguageToolingOperationKind, LanguageToolingOperationProjection, LanguageToolingProjection,
-    LanguageToolingStatusKind, LegionWorkflowConflictId, LegionWorkflowConflictState,
-    LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId, LegionWorkflowDecisionKind,
-    LegionWorkflowDependencyState, LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId,
-    LegionWorkflowKillSwitchState, LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness,
-    LegionWorkflowMergeReadinessState, LegionWorkflowProjection, LegionWorkflowRiskHaltReason,
-    LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState,
-    LegionWorkflowSession, LegionWorkflowSessionId, LegionWorkflowSignOffId,
-    LegionWorkflowSignOffState, LegionWorkflowState, LegionWorkflowVerificationGateId,
-    LegionWorkflowVerificationGateState, LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId,
-    LegionWorkflowWorkerState, LspEditProposalConversionInput, LspRequestCorrelation,
-    McpListChangedKind, McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor,
-    McpToolName, PermissionBudgetActionClass, PluginContributionProjection, PluginHostCallKind,
-    PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary,
-    PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
-    ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
-    ProposalDiffChunkDescriptor, ProposalFailureReason, ProposalId, ProposalLedgerProjection,
-    ProposalLedgerRow, ProposalLifecycleAction, ProposalLifecycleCommand,
-    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalLifecycleTransition,
-    ProposalPartialFailureDisposition, ProposalPartialFailureRecord, ProposalPayload, ProposalPort,
-    ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
-    ProposalResponse, ProposalRiskLabel, ProposalRollbackReason, ProposalStaleReason,
-    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
-    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
-    ProtocolResult, ProtocolTextRange, RedactionHint, RemoteAuditRecord, RemoteCapabilityKind,
-    RemoteGuiProjection, RemoteProposalReviewGuiRow, RemoteTransportEnvelope,
-    RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor,
-    RemoteWorkspaceSessionGuiRow, RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal,
-    SaveIntent, SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
+    LanguageToolingStatusKind, LegionCloudLaneProjection, LegionCloudLaneProjectionRow,
+    LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneTaskStatus,
+    LegionWorkflowConflictId, LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry,
+    LegionWorkflowDecisionId, LegionWorkflowDecisionKind, LegionWorkflowDependencyState,
+    LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState,
+    LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState,
+    LegionWorkflowProjection, LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId,
+    LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
+    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
+    LegionWorkflowState, LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
+    LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
+    LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind, McpPrimitiveKind,
+    McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName, PermissionBudgetActionClass,
+    PluginContributionProjection, PluginHostCallKind, PluginHostCallRequest,
+    PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary, PrincipalId,
+    ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem, ProposalBatchRollbackPolicy,
+    ProposalCancellationReason, ProposalDenialReason, ProposalDiffChunkDescriptor,
+    ProposalFailureReason, ProposalId, ProposalLedgerProjection, ProposalLedgerRow,
+    ProposalLifecycleAction, ProposalLifecycleCommand, ProposalLifecycleCommandReason,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPartialFailureDisposition,
+    ProposalPartialFailureRecord, ProposalPayload, ProposalPort, ProposalPreviewWarning,
+    ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest, ProposalResponse,
+    ProposalRiskLabel, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
+    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
+    ProtocolTextRange, RedactionHint, RemoteAuditRecord, RemoteCapabilityKind, RemoteGuiProjection,
+    RemoteProposalReviewGuiRow, RemoteTransportEnvelope, RemoteTransportPayload,
+    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionGuiRow,
+    RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal, SaveIntent,
+    SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
     SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup,
     StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
@@ -137,7 +139,8 @@ use devil_protocol::{
     WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
     WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
     delegated_task_tool_permission_request, inline_prediction_projection_from_results,
-    validate_inline_prediction_lifecycle_command, validate_legion_workflow_decision_feed_entry,
+    validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
+    validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
     validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
     validate_mcp_registry_snapshot, validate_terminal_close_request, validate_terminal_input,
     validate_terminal_kill_request, validate_terminal_resize,
@@ -146,7 +149,10 @@ use devil_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
     default_remote_capabilities, plan_devcontainer_session_from_json, plan_ssh_session,
 };
-use devil_security::{DenyByDefaultBroker, SecurityPolicy, mcp_tool_permission_request};
+use devil_security::{
+    CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy, SecurityPolicy,
+    mcp_tool_permission_request,
+};
 use devil_storage::InMemoryStorageRepositoryPort;
 use devil_terminal::{
     DapAdapterFixtureConfig, DapAdapterFixtureOutcome, DapAdapterFixtureRuntime,
@@ -281,15 +287,28 @@ pub enum AppProductMode {
 
 impl AppProductMode {
     fn allows_assist(self) -> bool {
-        matches!(self, Self::Assist | Self::Delegate | Self::Automate)
+        self.to_product_mode()
+            .allows_runtime_surface(devil_protocol::ProductRuntimeSurface::AssistedAi)
     }
 
     fn allows_delegate(self) -> bool {
-        matches!(self, Self::Delegate | Self::Automate)
+        self.to_product_mode()
+            .allows_runtime_surface(devil_protocol::ProductRuntimeSurface::DelegatedTask)
     }
 
     fn allows_automate(self) -> bool {
-        matches!(self, Self::Automate)
+        self.to_product_mode()
+            .allows_runtime_surface(devil_protocol::ProductRuntimeSurface::Automation)
+    }
+
+    /// Convert the app authority enum into the shared protocol product mode.
+    pub fn to_product_mode(self) -> devil_protocol::ProductMode {
+        match self {
+            Self::Manual => devil_protocol::ProductMode::Manual,
+            Self::Assist => devil_protocol::ProductMode::Assist,
+            Self::Delegate => devil_protocol::ProductMode::Delegates,
+            Self::Automate => devil_protocol::ProductMode::Automate,
+        }
     }
 
     /// Convert a UI dock/product mode into the app authority enum.
@@ -7915,6 +7934,7 @@ fn capture_workspace_session_record(
             bottom_height_px: None,
             side_width_px: None,
         },
+        dock_layouts: Vec::new(),
         dirty_indicators,
         saved_at: TimestampMillis::now(),
         schema_version: 1,
@@ -9999,6 +10019,223 @@ fn remote_error(error: impl ToString) -> AppCompositionError {
     AppCompositionError::Remote(error.to_string())
 }
 
+#[derive(Debug, Clone, Default)]
+struct LegionCloudLaneComposition {
+    runtime_enabled: bool,
+    network_target: Option<devil_protocol::NetworkTarget>,
+    security_broker: DenyByDefaultBroker,
+    rows: Vec<LegionCloudLaneProjectionRow>,
+}
+
+impl LegionCloudLaneComposition {
+    fn enable(
+        &mut self,
+        endpoint: &str,
+        max_cost_cents: u32,
+        max_upload_bytes: u64,
+    ) -> Result<(), AppCompositionError> {
+        if max_cost_cents == 0 {
+            return Err(AppCompositionError::Remote(
+                "cloud lane cost cap must be non-zero".to_string(),
+            ));
+        }
+        if max_upload_bytes == 0 {
+            return Err(AppCompositionError::Remote(
+                "cloud lane upload cap must be non-zero".to_string(),
+            ));
+        }
+
+        let network_target = parse_cloud_lane_endpoint(endpoint)?;
+        self.security_broker = DenyByDefaultBroker::new(
+            SecurityPolicy {
+                cloud_lane_policy: CloudLaneSecurityPolicy {
+                    task_submission_enabled: true,
+                    event_stream_enabled: true,
+                    cancellation_enabled: true,
+                    artifact_fetch_enabled: true,
+                    max_upload_bytes,
+                    max_cost_cents,
+                    ..CloudLaneSecurityPolicy::default()
+                },
+                network_policy: NetworkPolicy {
+                    air_gap: false,
+                    local_provider_only: false,
+                    allowlist: vec![network_target.host.clone()],
+                    ..NetworkPolicy::default()
+                },
+                ..SecurityPolicy::default()
+            },
+            CapabilityNamespace("app.cloud_lane".to_string()),
+        );
+        self.runtime_enabled = true;
+        self.network_target = Some(network_target);
+        Ok(())
+    }
+
+    fn submit_task(
+        &mut self,
+        request: LegionCloudLaneTaskRequest,
+        context: &ActiveWorkspaceContext,
+        event_sequence: EventSequence,
+    ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
+        if !self.runtime_enabled {
+            return Err(AppCompositionError::Remote(
+                "cloud lane runtime disabled by app policy".to_string(),
+            ));
+        }
+        if self.rows.iter().any(|row| row.task_id == request.task_id) {
+            return Err(AppCompositionError::Remote(format!(
+                "cloud lane task {} already exists",
+                request.task_id.0
+            )));
+        }
+        validate_legion_cloud_lane_task_request(&request).map_err(app_cloud_contract_error)?;
+        let decision = self.cloud_lane_submit_decision(&request, context)?;
+        if !decision.granted {
+            return Err(AppCompositionError::Remote(decision.reason.unwrap_or_else(
+                || "cloud lane submit denied by policy".to_string(),
+            )));
+        }
+
+        let status = LegionCloudLaneTaskStatus {
+            task_id: request.task_id.clone(),
+            state: LegionCloudLaneTaskState::Submitted,
+            status_label: "submitted".to_string(),
+            estimated_cost_cents: request.budget.estimated_cost_cents,
+            billed_cost_cents: 0,
+            queue_position: Some(request.budget.current_queue_depth.saturating_add(1)),
+            event_sequence,
+            generated_at: TimestampMillis::now(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        self.rows.push(LegionCloudLaneProjectionRow {
+            task_id: request.task_id,
+            lane_id: request.lane_id,
+            state: status.state,
+            status_label: status.status_label.clone(),
+            estimated_cost_cents: status.estimated_cost_cents,
+            billed_cost_cents: status.billed_cost_cents,
+            upload_bytes: request.upload_manifest.total_upload_bytes,
+            scope_visible_to_user: request.upload_manifest.scope_visible_to_user,
+            proposal_id: None,
+            evidence_count: 0,
+        });
+        Ok(status)
+    }
+
+    fn projection(&self, generated_at: TimestampMillis) -> LegionCloudLaneProjection {
+        let mut rows = self.rows.clone();
+        rows.sort_by_key(|row| row.task_id.0.clone());
+        let status_label = if !self.runtime_enabled {
+            "Legion Cloud Lane runtime disabled by policy".to_string()
+        } else if rows.is_empty() {
+            "Legion Cloud Lane runtime enabled with no submitted tasks".to_string()
+        } else {
+            format!("Legion Cloud Lane submitted tasks: {}", rows.len())
+        };
+        LegionCloudLaneProjection {
+            projection_id: "legion-cloud-lane:app-command-center".to_string(),
+            runtime_enabled: self.runtime_enabled,
+            rows,
+            status_label,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn cloud_lane_submit_decision(
+        &mut self,
+        request: &LegionCloudLaneTaskRequest,
+        context: &ActiveWorkspaceContext,
+    ) -> Result<CapabilityDecision, AppCompositionError> {
+        let response = self.security_broker.handle(CapabilityRequest::Request {
+            principal_id: context.principal.clone(),
+            capability_id: CapabilityId("cloud.lane.submit".to_string()),
+            workspace_trust_state: context.trust.clone(),
+            target_path: None,
+            decision_id: Some(request.capability_decision.decision_id),
+            context: CapabilityRequestContext {
+                network_target: self.network_target.clone(),
+                cloud_lane_estimated_cost_cents: Some(request.budget.estimated_cost_cents),
+                cloud_lane_upload_bytes: Some(request.upload_manifest.total_upload_bytes),
+                cloud_lane_scope_visible_to_user: request.upload_manifest.scope_visible_to_user,
+                cloud_lane_forbidden_upload_count: u32::from(
+                    request.upload_manifest.contains_forbidden_material,
+                ),
+                cloud_lane_task_packet_validated: true,
+                cloud_lane_hard_cap_enforced: request.budget.hard_cap_enforced,
+                ..CapabilityRequestContext::default()
+            },
+            correlation_id: request.correlation_id,
+        });
+        match response {
+            Ok(CapabilityResponse::Decision(decision)) => Ok(decision),
+            Ok(other) => Err(AppCompositionError::Remote(format!(
+                "cloud lane policy returned unexpected response: {other:?}"
+            ))),
+            Err(error) => Err(AppCompositionError::Remote(format!(
+                "cloud lane policy request failed: {error:?}"
+            ))),
+        }
+    }
+}
+
+fn parse_cloud_lane_endpoint(
+    endpoint: &str,
+) -> Result<devil_protocol::NetworkTarget, AppCompositionError> {
+    let trimmed = endpoint.trim();
+    let Some(rest) = trimmed.strip_prefix("https://") else {
+        return Err(AppCompositionError::Remote(
+            "cloud lane endpoint requires HTTPS".to_string(),
+        ));
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.trim().is_empty() {
+        return Err(AppCompositionError::Remote(
+            "cloud lane endpoint host must be non-empty".to_string(),
+        ));
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port_label)) if !host.is_empty() && !port_label.is_empty() => {
+            let port = port_label.parse::<u16>().map_err(|_| {
+                AppCompositionError::Remote(
+                    "cloud lane endpoint port must be a valid u16".to_string(),
+                )
+            })?;
+            (host.to_string(), Some(port))
+        }
+        _ => (authority.to_string(), Some(443)),
+    };
+    if host.trim().is_empty() {
+        return Err(AppCompositionError::Remote(
+            "cloud lane endpoint host must be non-empty".to_string(),
+        ));
+    }
+    Ok(devil_protocol::NetworkTarget {
+        scheme: "https".to_string(),
+        host,
+        port,
+    })
+}
+
+fn app_cloud_contract_error(error: devil_protocol::AssistedAiContractError) -> AppCompositionError {
+    AppCompositionError::Remote(app_cloud_contract_reason(&error))
+}
+
+fn app_cloud_contract_reason(error: &devil_protocol::AssistedAiContractError) -> String {
+    match error {
+        devil_protocol::AssistedAiContractError::NonMetadataOnlyAuditRecord { field, reason }
+            if field == "legion.cloud.upload_manifest.contains_forbidden_material"
+                && reason == "forbidden_material" =>
+        {
+            "cloud upload manifest contains forbidden material".to_string()
+        }
+        _ => format!("invalid Legion Cloud Lane metadata: {error}"),
+    }
+}
+
 #[cfg(feature = "ai")]
 fn default_ai_registry() -> ProviderRegistry {
     make_inline_prediction_registry()
@@ -10030,6 +10267,7 @@ pub struct AppComposition {
     plugin_contribution_projections: Vec<PluginContributionProjection>,
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
+    legion_cloud_lane: LegionCloudLaneComposition,
     delegate_workflow: DelegateWorkflowState,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
@@ -10084,6 +10322,7 @@ impl AppComposition {
             plugin_contribution_projections: Vec::new(),
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
+            legion_cloud_lane: LegionCloudLaneComposition::default(),
             delegate_workflow: DelegateWorkflowState::default(),
             delegated_task_plan_contracts: Vec::new(),
             legion_workflow_sessions: Vec::new(),
@@ -11291,6 +11530,43 @@ impl AppComposition {
     /// Return projection-safe remote session descriptors.
     pub fn remote_session_projections(&self) -> Vec<RemoteWorkspaceSessionDescriptor> {
         self.remote.session_descriptors()
+    }
+
+    /// Enable the app-owned deterministic Legion Cloud Lane runtime envelope.
+    pub fn enable_legion_cloud_lane_runtime(
+        &mut self,
+        endpoint: &str,
+        max_cost_cents: u32,
+        max_upload_bytes: u64,
+    ) -> Result<(), AppCompositionError> {
+        self.require_automate_mode()?;
+        self.legion_cloud_lane
+            .enable(endpoint, max_cost_cents, max_upload_bytes)
+    }
+
+    /// Submit a metadata-only Legion Cloud Lane task and project its status.
+    pub fn submit_legion_cloud_lane_task(
+        &mut self,
+        request: LegionCloudLaneTaskRequest,
+    ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
+        self.require_automate_mode()?;
+        let context = self.active_documents.require_workspace_context()?;
+        if request.task_packet.workspace_id != context.workspace_id {
+            return Err(AppCompositionError::Remote(
+                "cloud lane task workspace does not match active workspace".to_string(),
+            ));
+        }
+        let event_sequence = self.event_sequence_generator.next();
+        self.legion_cloud_lane
+            .submit_task(request, &context, event_sequence)
+    }
+
+    /// Return the current metadata-only Legion Cloud Lane projection.
+    pub fn legion_cloud_lane_projection(&self) -> LegionCloudLaneProjection {
+        let projection = self.legion_cloud_lane.projection(TimestampMillis::now());
+        let validation = validate_legion_cloud_lane_projection(&projection);
+        debug_assert!(validation.is_ok());
+        projection
     }
 
     /// Replace delegated-task plan contracts used for projection-only command-center surfaces.

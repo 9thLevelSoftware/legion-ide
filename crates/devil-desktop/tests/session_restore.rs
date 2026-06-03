@@ -11,6 +11,7 @@ use devil_desktop::{
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use devil_protocol::{CanonicalPath, SessionPanelState, TimestampMillis, WorkspaceSessionRecord};
+use devil_ui::{DockLayout, DockMode, DockSide, DockSideLayout, PanelId};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -126,6 +127,18 @@ fn session_restore_saves_metadata_and_restores_tabs_focus_layout_explorer() {
         DesktopWorkflowOutcome::ExplorerPathToggled(explorer_path.clone())
     );
     runtime.set_panel_state(panel_state());
+    let mut dock_layouts = DockLayout::standard_all_modes();
+    let delegate_layout = dock_layouts
+        .iter_mut()
+        .find(|layout| layout.mode == DockMode::Delegate)
+        .expect("delegate layout exists");
+    delegate_layout.right = DockSideLayout::new(
+        PanelId::ApprovalQueue,
+        vec![PanelId::Delegation, PanelId::Context],
+        0.75,
+        true,
+    );
+    runtime.set_dock_layouts(dock_layouts);
     runtime
         .save_session_state()
         .expect("explicit session save after panel change");
@@ -136,6 +149,8 @@ fn session_restore_saves_metadata_and_restores_tabs_focus_layout_explorer() {
     assert!(json.contains("\"dirty\": true"));
     assert!(json.contains("\"explorer_expansion\""));
     assert!(json.contains("\"panel_state\""));
+    assert!(json.contains("\"dock_layouts\""));
+    assert!(json.contains("\"approval_queue\""));
     assert!(!json.contains("SECRET_DIRTY_BODY"));
     assert!(!json.contains("small_buffer_preview"));
     assert!(!json.contains("source_body"));
@@ -157,6 +172,26 @@ fn session_restore_saves_metadata_and_restores_tabs_focus_layout_explorer() {
         Some("search")
     );
     assert_eq!(restored.panel_state().bottom_height_px, Some(240));
+    let restored_delegate_layout = restored
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == DockMode::Delegate)
+        .expect("delegate layout restored");
+    assert_eq!(
+        restored_delegate_layout.right.pinned_default,
+        PanelId::ApprovalQueue
+    );
+    assert_eq!(
+        restored_delegate_layout.right.custom_toolkit,
+        vec![PanelId::Delegation, PanelId::Context]
+    );
+    assert!(restored_delegate_layout.right.collapsed);
+    assert_eq!(
+        restored_delegate_layout
+            .visible_panel_ids(DockSide::Right, &devil_ui::PanelRegistry::standard())
+            .first(),
+        Some(&PanelId::ApprovalQueue)
+    );
     assert!(snapshot.status_messages.iter().any(|status| {
         status
             .message
@@ -269,6 +304,7 @@ fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
             bottom_height_px: None,
             side_width_px: None,
         },
+        dock_layouts: Vec::new(),
         dirty_indicators: Vec::new(),
         saved_at: TimestampMillis::now(),
         schema_version: 1,

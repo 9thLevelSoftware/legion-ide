@@ -8,21 +8,22 @@ use std::sync::Mutex;
 use devil_observability::{NoopEventSink, transaction_event};
 use devil_protocol::{
     BufferId, BufferOpened, BufferVersion, ByteRange, CanonicalPath, CausalityId, ChangedTextRange,
-    CorrelationId, EditorApplyTransactionRequest, EditorBufferMetadata, EditorOpenBufferRequest,
-    EditorPort, EditorRequest, EditorResponse, EditorSaveAcknowledgement, EditorSaveOutcome,
-    EditorSaveRequest, EditorViewportRequest, EventSequence, EventSinkPort, EventSinkRequest,
-    FileConflictLifecycleState, FileConflictState, FileFingerprint, FileId, LargeFileStatus,
-    LineIndexRange, ProtocolDiagnostic, ProtocolError, ProtocolResult, ProtocolTextRange,
-    SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId, SnapshotLeaseChunk,
-    SnapshotLeaseDescriptor, TextCoordinate, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, Utf16Position as ProtocolUtf16Position, Utf16Range as ProtocolUtf16Range,
+    CompletionItem, CompletionRequest, CorrelationId, EditorApplyTransactionRequest,
+    EditorBufferMetadata, EditorOpenBufferRequest, EditorPort, EditorRequest, EditorResponse,
+    EditorSaveAcknowledgement, EditorSaveOutcome, EditorSaveRequest, EditorViewportRequest,
+    EventSequence, EventSinkPort, EventSinkRequest, FileConflictLifecycleState, FileConflictState,
+    FileFingerprint, FileId, LargeFileStatus, LineIndexRange, LspCompletionResponse,
+    ProtocolDiagnostic, ProtocolError, ProtocolResult, ProtocolTextRange, SnapshotChunkDescriptor,
+    SnapshotConsumerKind, SnapshotId, SnapshotLeaseChunk, SnapshotLeaseDescriptor, TextCoordinate,
+    TextOffset, TextTransactionDescriptor, TimestampMillis, TransactionSource,
+    Utf16Position as ProtocolUtf16Position, Utf16Range as ProtocolUtf16Range,
     ViewportDecorationSpan, ViewportFoldRange, ViewportLineMetric, ViewportLineSlice,
     ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
     ViewportSemanticTokenOverlay, WorkspaceId,
 };
 use devil_text::{
     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
-    TextSnapshotDescriptor, Utf16Range,
+    TextSnapshotDescriptor, Utf16Position, Utf16Range,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -35,6 +36,25 @@ pub enum EditorError {
     /// Buffer not found.
     #[error("buffer {0:?} does not exist")]
     BufferNotFound(BufferId),
+    /// Open buffer for a workspace file was not found.
+    #[error("workspace {workspace_id:?} file {file_id:?} is not open in the editor")]
+    CompletionBufferNotFound {
+        /// Workspace identifier.
+        workspace_id: WorkspaceId,
+        /// File identifier.
+        file_id: FileId,
+    },
+    /// Completion request targeted an older snapshot.
+    #[error("completion snapshot {requested:?} is stale; current snapshot is {current:?}")]
+    StaleCompletionSnapshot {
+        /// Requested snapshot identifier.
+        requested: SnapshotId,
+        /// Current snapshot identifier.
+        current: SnapshotId,
+    },
+    /// Completion request used an offset that could not be resolved safely.
+    #[error("invalid completion position: {0}")]
+    InvalidCompletionPosition(&'static str),
     /// File is already open in another buffer.
     #[error("file {0:?} is already open")]
     FileAlreadyOpen(FileId),
@@ -857,6 +877,47 @@ impl EditorEngine {
             undo_len: state.undo_stack.len(),
             redo_len: state.redo_stack.len(),
             schema_version: 1,
+        })
+    }
+
+    /// Build deterministic lexical completions for the current editor snapshot.
+    pub fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<LspCompletionResponse, EditorError> {
+        let buffer_id = self
+            .buffer_for_file(request.workspace_id, request.file_id)
+            .ok_or(EditorError::CompletionBufferNotFound {
+                workspace_id: request.workspace_id,
+                file_id: request.file_id,
+            })?;
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        let current_snapshot_id = state.current_snapshot.snapshot_id();
+        if current_snapshot_id != request.snapshot_id {
+            return Err(EditorError::StaleCompletionSnapshot {
+                requested: request.snapshot_id,
+                current: current_snapshot_id,
+            });
+        }
+
+        let byte_offset = Self::completion_byte_offset(state, request.position)?;
+        let text = match state.buffer.try_full_text() {
+            Ok(text) => text,
+            Err(TextError::FullCacheBudgetExceeded { .. }) => {
+                return Ok(LspCompletionResponse {
+                    correlation_id: request.correlation_id,
+                    items: Vec::new(),
+                });
+            }
+            Err(error) => return Err(EditorError::Text(error)),
+        };
+
+        Ok(LspCompletionResponse {
+            correlation_id: request.correlation_id,
+            items: lexical_completion_items(text, byte_offset),
         })
     }
 
@@ -1906,6 +1967,57 @@ impl EditorEngine {
         Ok(total)
     }
 
+    fn completion_byte_offset(
+        state: &EditorBufferState,
+        position: TextOffset,
+    ) -> Result<usize, EditorError> {
+        if let Some(byte_offset) = position.as_byte() {
+            let offset = usize::try_from(byte_offset.value)
+                .map_err(|_| EditorError::InvalidCompletionPosition("byte offset overflow"))?;
+            state.buffer.try_position(offset)?;
+            return Ok(offset);
+        }
+
+        let utf16_offset = position
+            .as_utf16()
+            .ok_or(EditorError::InvalidCompletionPosition(
+                "unsupported text offset encoding",
+            ))?
+            .value;
+        let requested = usize::try_from(utf16_offset)
+            .map_err(|_| EditorError::InvalidCompletionPosition("utf16 offset overflow"))?;
+        Self::byte_offset_from_absolute_utf16(&state.buffer, requested)
+    }
+
+    fn byte_offset_from_absolute_utf16(
+        buffer: &TextBuffer,
+        requested: usize,
+    ) -> Result<usize, EditorError> {
+        let line_index = buffer.line_index();
+        let mut remaining = requested;
+        for line in 0..line_index.line_count() {
+            let line_utf16_len = line_index.line_utf16_len(line)?;
+            if remaining <= line_utf16_len {
+                return buffer
+                    .byte_offset_from_utf16(Utf16Position::new(line, remaining))
+                    .map_err(EditorError::from);
+            }
+            remaining -= line_utf16_len;
+
+            let line_ending_len = line_index.line_ending_bytes(line)?;
+            if remaining <= line_ending_len {
+                return buffer
+                    .byte_offset_from_utf16(Utf16Position::new(line, line_utf16_len))
+                    .map_err(EditorError::from);
+            }
+            remaining -= line_ending_len;
+        }
+
+        Err(EditorError::InvalidCompletionPosition(
+            "utf16 offset outside buffer",
+        ))
+    }
+
     fn enqueue_transaction_event(&mut self, record: &TransactionRecord) {
         if self.transaction_events.len() >= self.transaction_event_queue_capacity {
             self.transaction_events.pop_front();
@@ -1942,6 +2054,77 @@ impl EditorEngine {
                         .any(|entry| entry.snapshot.snapshot_id() == snapshot_id)
             })
     }
+}
+
+fn lexical_completion_items(text: &str, byte_offset: usize) -> Vec<CompletionItem> {
+    const MAX_COMPLETION_ITEMS: usize = 32;
+
+    let prefix_start = identifier_start_before(text, byte_offset);
+    let prefix = &text[prefix_start..byte_offset];
+    let mut labels = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (start, end) in identifier_ranges(text) {
+        let label = &text[start..end];
+        if label.is_empty() || (!prefix.is_empty() && !label.starts_with(prefix)) {
+            continue;
+        }
+        if seen.insert(label.to_string()) {
+            labels.push(label.to_string());
+        }
+    }
+
+    labels.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
+    labels.truncate(MAX_COMPLETION_ITEMS);
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| CompletionItem {
+            label: label.clone(),
+            detail: Some("editor lexical completion".to_string()),
+            insert_text: label,
+            kind: "Text".to_string(),
+            score: Some((MAX_COMPLETION_ITEMS.saturating_sub(index)) as u32),
+            documentation: None,
+        })
+        .collect()
+}
+
+fn identifier_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+
+    for (offset, character) in text.char_indices() {
+        if is_identifier_character(character) {
+            start.get_or_insert(offset);
+        } else if let Some(start_offset) = start.take() {
+            ranges.push((start_offset, offset));
+        }
+    }
+
+    if let Some(start_offset) = start {
+        ranges.push((start_offset, text.len()));
+    }
+
+    ranges
+}
+
+fn identifier_start_before(text: &str, byte_offset: usize) -> usize {
+    let mut start = byte_offset.min(text.len());
+    while start > 0 {
+        let Some(previous) = text[..start].chars().next_back() else {
+            break;
+        };
+        if !is_identifier_character(previous) {
+            break;
+        }
+        start -= previous.len_utf8();
+    }
+    start
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character == '_' || character.is_ascii_alphanumeric()
 }
 
 impl From<SaveRequestDto> for EditorSaveRequest {
@@ -2167,9 +2350,10 @@ impl EditorPort for EditorEnginePort {
                 .buffer_metadata(buffer_id)
                 .map(EditorResponse::BufferState)
                 .map_err(Self::protocol_error),
-            EditorRequest::Completion(_) => Err(ProtocolError::unsupported(
-                "completion is not implemented by the editor port in Track 4",
-            )),
+            EditorRequest::Completion(request) => engine
+                .completion(request)
+                .map(EditorResponse::Completion)
+                .map_err(Self::protocol_error),
             EditorRequest::Snapshot(snapshot) => Ok(EditorResponse::Snapshot(snapshot)),
             EditorRequest::Overlay(overlay) => {
                 Ok(EditorResponse::OverlayApplied(overlay.overlay_id))
@@ -2595,6 +2779,129 @@ mod tests {
         assert_ne!(event.correlation_id.0, 0);
         assert_ne!(event.causality_id.0, Uuid::nil());
         assert_ne!(event.sequence.0, 0);
+    }
+
+    #[test]
+    fn editor_port_completion_returns_bounded_lexical_items_without_mutation() {
+        let source = "fn print_value() {}\nfn main() {\n    pri\n}\n";
+        let port = EditorEnginePort::new(EditorEngine::new());
+        let opened = port
+            .handle(EditorRequest::OpenBufferText(EditorOpenBufferRequest {
+                workspace_id: WorkspaceId(1),
+                file_id: FileId(2),
+                path: CanonicalPath("src/lib.rs".to_string()),
+                initial_text: source.to_string(),
+                correlation_id: CorrelationId(7),
+            }))
+            .expect("open buffer through editor port");
+        let buffer_id = match opened {
+            EditorResponse::BufferOpened(opened) => opened.buffer_id,
+            other => panic!("expected buffer opened, got {other:?}"),
+        };
+        let metadata = match port
+            .handle(EditorRequest::BufferMetadata(buffer_id))
+            .expect("buffer metadata")
+        {
+            EditorResponse::BufferMetadata(metadata) => metadata,
+            other => panic!("expected buffer metadata, got {other:?}"),
+        };
+        let completion_offset = source.rfind("pri").expect("completion prefix") + 3;
+
+        let completion = port
+            .handle(EditorRequest::Completion(CompletionRequest {
+                workspace_id: WorkspaceId(1),
+                file_id: FileId(2),
+                snapshot_id: metadata.snapshot_id,
+                position: TextOffset::byte(completion_offset as u64),
+                correlation_id: CorrelationId(42),
+            }))
+            .expect("completion through editor port");
+        let completion = match completion {
+            EditorResponse::Completion(completion) => completion,
+            other => panic!("expected completion response, got {other:?}"),
+        };
+
+        assert_eq!(completion.correlation_id, CorrelationId(42));
+        assert!(completion.items.len() <= 32);
+        assert!(
+            completion
+                .items
+                .iter()
+                .any(|item| item.label == "print_value"
+                    && item.insert_text == "print_value"
+                    && item.detail.as_deref() == Some("editor lexical completion"))
+        );
+        let editor = port.into_inner().expect("editor engine");
+        assert_eq!(editor.text(buffer_id).expect("editor text"), source);
+    }
+
+    #[test]
+    fn editor_port_completion_rejects_stale_snapshot() {
+        let source = "fn print_value() {}\nfn main() {\n    pri\n}\n";
+        let port = EditorEnginePort::new(EditorEngine::new());
+        let opened = port
+            .handle(EditorRequest::OpenBufferText(EditorOpenBufferRequest {
+                workspace_id: WorkspaceId(1),
+                file_id: FileId(2),
+                path: CanonicalPath("src/lib.rs".to_string()),
+                initial_text: source.to_string(),
+                correlation_id: CorrelationId(7),
+            }))
+            .expect("open buffer through editor port");
+        let buffer_id = match opened {
+            EditorResponse::BufferOpened(opened) => opened.buffer_id,
+            other => panic!("expected buffer opened, got {other:?}"),
+        };
+        let metadata = match port
+            .handle(EditorRequest::BufferMetadata(buffer_id))
+            .expect("buffer metadata")
+        {
+            EditorResponse::BufferMetadata(metadata) => metadata,
+            other => panic!("expected buffer metadata, got {other:?}"),
+        };
+
+        let error = port
+            .handle(EditorRequest::Completion(CompletionRequest {
+                workspace_id: WorkspaceId(1),
+                file_id: FileId(2),
+                snapshot_id: SnapshotId(metadata.snapshot_id.0 + 1),
+                position: TextOffset::byte(3),
+                correlation_id: CorrelationId(42),
+            }))
+            .expect_err("stale snapshot is rejected");
+
+        assert_eq!(error.code, "editor_error");
+        assert!(error.message.contains("completion snapshot"));
+        assert!(error.message.contains("stale"));
+    }
+
+    #[test]
+    fn degraded_completion_returns_empty_without_full_text_materialization() {
+        let mut engine = EditorEngine::with_thresholds(EditorThresholds {
+            large_file_threshold_bytes: 32,
+            retention_budget_snapshots: 8,
+        });
+        let text = format!("fn print_value() {{}}\n{}\n", "x".repeat(128));
+        let buffer = engine
+            .open_buffer(WorkspaceId(1), FileId(2), "big.rs", text)
+            .expect("open degraded buffer");
+        let metadata = engine.buffer_metadata(buffer).expect("buffer metadata");
+
+        let completion = engine
+            .completion(CompletionRequest {
+                workspace_id: WorkspaceId(1),
+                file_id: FileId(2),
+                snapshot_id: metadata.snapshot_id,
+                position: TextOffset::byte(3),
+                correlation_id: CorrelationId(42),
+            })
+            .expect("degraded completion fails closed to empty");
+
+        assert!(completion.items.is_empty());
+        assert!(matches!(
+            engine.text(buffer),
+            Err(EditorError::Text(TextError::FullCacheBudgetExceeded { .. }))
+        ));
     }
 
     #[test]

@@ -1,9 +1,10 @@
-//! Devil CLI: diagnostics, index commands, repair tools, headless tests.
+//! Legion CLI: diagnostics, index commands, repair tools, headless tests.
 
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use devil_protocol::{PRODUCT_NAME, PRODUCT_SHORT_NAME};
 use devil_storage::FileBackedStorage;
 use serde_json::Value;
 
@@ -272,7 +273,7 @@ const STORAGE_FORBIDDEN_MARKERS: &[&str] = &[
 ];
 
 #[derive(Debug, Parser)]
-#[command(author, version, about = "Devil IDE diagnostics and setup helper")]
+#[command(author, version, about = "Legion IDE diagnostics and setup helper")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -418,7 +419,7 @@ fn main() -> Result<()> {
 }
 
 fn print_phase_gates(shell: ShellSyntax) -> Result<()> {
-    println!("# Devil IDE phase gates");
+    println!("# {PRODUCT_NAME} phase gates");
     println!("# Plan Phase 0: governance and CI truth lock");
     for command in PHASE_GATE_COMMANDS {
         match shell {
@@ -535,13 +536,16 @@ fn run_doctor(workspace: PathBuf) -> Result<()> {
     require_phase4_runtime_boundaries(&workspace, "crates/devil-memory", &mut issues);
 
     if issues.is_empty() {
-        println!("Devil CLI doctor: OK");
+        println!("{PRODUCT_SHORT_NAME} CLI doctor: OK");
         println!("Workspace: {}", workspace.display());
         println!("Next setup command: cargo run -p devil-cli -- phase-gates");
         return Ok(());
     }
 
-    eprintln!("Devil CLI doctor found {} issue(s):", issues.len());
+    eprintln!(
+        "{PRODUCT_SHORT_NAME} CLI doctor found {} issue(s):",
+        issues.len()
+    );
     for issue in issues {
         eprintln!("- {issue}");
     }
@@ -648,7 +652,7 @@ fn run_setup_status(workspace: PathBuf) -> Result<()> {
     require_file(&workspace, "scripts/run-phase-gates.ps1", &mut issues);
     require_file(&workspace, "scripts/run-phase-gates.sh", &mut issues);
 
-    println!("Devil IDE setup status");
+    println!("{PRODUCT_NAME} setup status");
     println!("Workspace: {}", workspace.display());
     if let Some(ledger) = read_optional(&workspace, "plans/phase-status-ledger.md", &mut issues) {
         for marker in [

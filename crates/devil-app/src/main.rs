@@ -1,4 +1,4 @@
-//! Devil IDE desktop application entry point.
+//! Legion IDE desktop application entry point.
 
 use std::env;
 use std::io::{self, Write};

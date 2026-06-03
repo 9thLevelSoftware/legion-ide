@@ -1,7 +1,8 @@
-# Devil IDE Remaining Implementation Tasks Plan v0.1
+# Legion IDE Remaining Implementation Tasks Plan v0.1
 
 Status: Planning handoff  
 Created: 2026-05-16  
+Current correction date: 2026-06-02  
 Scope: Finish the remaining work in [`plans/implementation-plan.md`](plans/implementation-plan.md:1) after reviewing the documentation and evidence under [`plans/`](plans/).
 
 ---
@@ -12,9 +13,11 @@ The current documentation set establishes three different layers of truth that m
 
 1. Strategic target: [`plans/implementation-plan.md`](plans/implementation-plan.md:1) and [`plans/architecture-review-2026-ide-roadmap-v0.1.md`](plans/architecture-review-2026-ide-roadmap-v0.1.md:10) define the 2026-class IDE roadmap.
 2. Foundational history: [`plans/foundational-core-ide-platform-roadmap-v0.1.md`](plans/foundational-core-ide-platform-roadmap-v0.1.md:56), [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:48), and [`plans/milestone-0-feasibility-proofs.md`](plans/milestone-0-feasibility-proofs.md:1) capture the local IDE core build-out and accepted feasibility gates.
-3. Current state evidence: [`plans/evidence/phase-0/native-shell-proof-summary.md`](plans/evidence/phase-0/native-shell-proof-summary.md:1), [`plans/evidence/phase-1/editor-text-substrate.md`](plans/evidence/phase-1/editor-text-substrate.md:1), [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1), and [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:1) show what has actually been accepted or remains incomplete.
+3. Current state evidence: [`plans/evidence/phase-0/native-shell-proof-summary.md`](plans/evidence/phase-0/native-shell-proof-summary.md:1), [`plans/evidence/phase-1/editor-text-substrate.md`](plans/evidence/phase-1/editor-text-substrate.md:1), [`plans/evidence/phase-2/proposal-mutation-substrate.md`](plans/evidence/phase-2/proposal-mutation-substrate.md:1), [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:1), [`plans/evidence/phase-4/agentic-ai-architecture-map.md`](plans/evidence/phase-4/agentic-ai-architecture-map.md:1), [`plans/evidence/phase-5/plugin-architecture-map.md`](plans/evidence/phase-5/plugin-architecture-map.md:1), [`plans/evidence/phase-6/collaboration-architecture-map.md`](plans/evidence/phase-6/collaboration-architecture-map.md:1), [`plans/evidence/phase-7/remote-architecture-map.md`](plans/evidence/phase-7/remote-architecture-map.md:1), [`plans/evidence/phase-8/phase-8-architecture-map.md`](plans/evidence/phase-8/phase-8-architecture-map.md:1), [`plans/evidence/gui-productization/phase-8-final-gates.md`](plans/evidence/gui-productization/phase-8-final-gates.md:1), and [`plans/evidence/gui-productization/phase-13-legion-workflow-orchestration.md`](plans/evidence/gui-productization/phase-13-legion-workflow-orchestration.md:1) show what has actually been accepted or remains incomplete.
 
 Older review findings in [`plans/architecture-review-full-codebase-v0.1.md`](plans/architecture-review-full-codebase-v0.1.md:22) and [`plans/architecture-review-phases-5-6-v0.1.md`](plans/architecture-review-phases-5-6-v0.1.md:25) contain historical save/UI concerns that are now corrected for manual save and projection-only UI. Treat those historical findings as traceability, not current blockers, unless they describe broader non-save proposal generalization.
+
+2026-06-02 rebaseline: this handoff predates later accepted bounded slices for Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, GUI productization, and Phase 13 Legion workflow orchestration. Those accepted slices are real implementation surfaces with ADRs, dependency-policy entries, tests, and evidence. They do not authorize unrestricted production activation, hosted providers, autonomous merge/apply, arbitrary VSIX execution, raw-source retention, hosted telemetry export, production cloud lanes, or model-flywheel training without the matching later gates.
 
 ---
 
@@ -28,7 +31,7 @@ Older review findings in [`plans/architecture-review-full-codebase-v0.1.md`](pla
 | Proposal execution handoff | [`plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md`](plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md:145) gives the concrete remaining checklist for proposal execution and LSP gating. | Treat this as the first actionable task list. |
 | Semantic fabric | Phase 3 is accepted in [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:1). `devil-index` is active for actor-owned bounded scheduling, workspace-authored discovery import, descriptor/lease indexing, syntax-cache freshness, normalized graph records, metadata-only persistence, semantic query APIs, and LSP supervision/proposal-routing DTOs. | Vector indexing, embeddings, model-backed retrieval, and later runtime surfaces remain gated beyond Phase 3. |
 | Semantic boundary remediation | [`plans/semantic-index-boundary-remediation-plan-v0.1.md`](plans/semantic-index-boundary-remediation-plan-v0.1.md:1) identifies current boundary problems: live filesystem discovery, full-source copies, cache freshness/privacy risk, and missing metadata persistence contracts. | This is the first Phase 3 implementation package after Phase 2B. |
-| Agentic AI, plugins, collaboration, remote, hardening | Phases 4-8 in [`plans/implementation-plan.md`](plans/implementation-plan.md:280) remain future platform work. | Keep placeholder crates inert until their ADR, dependency-policy, protocol, test, and evidence gates are complete. |
+| Agentic AI, plugins, collaboration, remote, hardening, Legion workflow orchestration | Legacy Phases 4-8 now have bounded accepted implementation slices: Phase 4 metadata-only AI/agent/tracker/memory, Phase 5 isolated plugin boundary, Phase 6 deterministic local collaboration runtime, Phase 7 deterministic remote edge-workspace harness, and Phase 8 default-deny terminal/remote-transport/telemetry/retention hardening. Phase 13 Legion workflow orchestration has accepted metadata-first workflow evidence. | Treat these as accepted bounded surfaces. Production expansion still requires the matching ADR, dependency-policy, protocol, security, test, evidence, consent, and operator gates. |
 
 ---
 
@@ -38,7 +41,7 @@ Older review findings in [`plans/architecture-review-full-codebase-v0.1.md`](pla
 2. Keep UI projection-only. [`Shell`](crates/devil-ui/src/ui.rs:228) may render projection state and emit intents, but it must not own editor sessions, workspace state, or mutation authority.
 3. Preserve editor ownership. [`EditorEngine`](crates/devil-editor/src/lib.rs:312) remains the editor transaction authority.
 4. Preserve fail-closed workspace saves. [`WorkspaceSaveRequest`](crates/devil-project/src/lib.rs:133) requires fingerprint, file content version, workspace generation, buffer version, snapshot identity, correlation, and causality context.
-5. Keep placeholder runtime crates inert until activation gates are met. [`plans/dependency-policy.md`](plans/dependency-policy.md:113) explicitly says planned runtime surfaces are placeholders only.
+5. Do not expand runtime crates beyond their accepted activation gates. [`plans/dependency-policy.md`](plans/dependency-policy.md:769) now distinguishes accepted bounded surfaces from still-gated production activation.
 6. Keep semantic and LSP work non-blocking. Phase 3 must not block editor input, viewport projection, proposal validation, or save workflows as stated in [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:136).
 7. Keep vector indexing deferred. [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:139) keeps embeddings, vector storage, and model-backed retrieval inactive.
 8. Run the phase gates after every execution package: `cargo run -p xtask -- check-deps`, `cargo fmt --all --check`, `cargo check --workspace --all-targets`, `cargo test --workspace --all-targets`, and `cargo clippy --workspace --all-targets -- -D warnings`.
@@ -62,7 +65,7 @@ Tasks:
 
 Exit criteria:
 
-- The status ledger explicitly says Phase 0, Phase 1, Phase 2, and Phase 3 are accepted, and Phases 4-8 are future-gated.
+- The status ledger explicitly says which parts of Phase 0 through Phase 8, GUI productization, and Phase 13 are accepted, and which production expansions remain gated.
 - ADR status ambiguity is removed or tracked as an explicit blocker.
 - `cargo run -p xtask -- check-deps` still passes.
 
@@ -131,9 +134,11 @@ Stop condition:
 
 ---
 
-### R2 — Complete Phase 3A: semantic-index boundary remediation
+### R2 — Historical Phase 3A: semantic-index boundary remediation
 
 Goal: make [`crates/devil-index`](crates/devil-index/src/lib.rs:1) consume workspace/text/protocol authority instead of acting as an independent filesystem/text owner.
+
+Status note, 2026-06-02: the Phase 3 boundary remediation slice has accepted evidence. Keep this checklist as regression criteria and as the baseline for future production semantic-index expansion, not as an unstarted placeholder task.
 
 Source checklist: [`plans/semantic-index-boundary-remediation-plan-v0.1.md`](plans/semantic-index-boundary-remediation-plan-v0.1.md:46).
 
@@ -176,9 +181,11 @@ Stop condition:
 
 ---
 
-### R3 — Complete Phase 3B: predictive semantic fabric and LSP supervision
+### R3 — Historical Phase 3B: predictive semantic fabric and LSP supervision
 
 Goal: satisfy the full Phase 3 acceptance checklist in [`plans/evidence/phase-3/predictive-semantic-fabric.md`](plans/evidence/phase-3/predictive-semantic-fabric.md:118).
+
+Status note, 2026-06-02: the accepted Phase 3 slice provides semantic-fabric and LSP-supervision contracts. Future work should extend production language/runtime breadth without reopening Phase 3 unless the non-blocking, privacy, proposal-only, or freshness invariants regress.
 
 Work packages:
 
@@ -218,6 +225,8 @@ Stop condition:
 
 Goal: implement a policy-bound AI control plane after generalized proposals and semantic fabric are accepted.
 
+Status note, 2026-06-02: Phase 4 has an accepted metadata-only AI/agent/tracker/memory slice. The remaining work in this section is production expansion: hosted/cloud provider activation, richer model capability surfaces, UI product completeness, and operator-grade replay/inspection without weakening the accepted proposal-only and metadata-only boundaries.
+
 Gate requirements:
 
 - R1, R2, and R3 complete.
@@ -246,6 +255,8 @@ Acceptance evidence:
 ### R5 — Phase 5: WASM isolated extension ecosystem
 
 Goal: introduce untrusted extensibility without ambient access.
+
+Status note, 2026-06-02: Phase 5 has an accepted isolated plugin-boundary slice. The remaining work in this section is production ecosystem expansion, not arbitrary VSIX execution or ambient extension authority.
 
 Gate requirements:
 
@@ -276,6 +287,8 @@ Acceptance evidence:
 
 Goal: add collaboration as a platform substrate without bypassing editor or workspace ownership.
 
+Status note, 2026-06-02: Phase 6 has an accepted deterministic local operation-log collaboration slice. The remaining work is production service, identity, retention, transport, and multi-user hardening while preserving editor authority and proposal-mediated durable writes.
+
 Gate requirements:
 
 - Scalable text substrate accepted.
@@ -305,6 +318,8 @@ Acceptance evidence:
 
 Goal: add remote development as capability-scoped remote ports, not raw network helpers.
 
+Status note, 2026-06-02: Phase 7 has an accepted deterministic remote edge-workspace harness. The remaining work is production transport, identity, isolation, remote process/LSP breadth, and reconnect/offline hardening without granting direct local filesystem or editor authority.
+
 Gate requirements:
 
 - Local proposal and conflict semantics generalized and tested.
@@ -333,6 +348,8 @@ Acceptance evidence:
 ### R8 — Phase 8: product hardening, governance, and ecosystem readiness
 
 Goal: convert platform capability into production readiness.
+
+Status note, 2026-06-02: legacy Phase 8 default-deny runtime substrate evidence and GUI productization evidence exist. GA release promotion, signed distribution, production cloud/provider/telemetry activation, raw-source vault operation, and operator runbooks remain governed by their explicit release gates.
 
 Gate requirements:
 
@@ -364,13 +381,13 @@ Acceptance evidence:
 | --- | --- | --- | --- |
 | 0 | R0 rebaseline and ADR reconciliation | Test/evidence cleanup only | Runtime activation work that depends on unresolved ADRs |
 | 1 | R1 generalized proposal execution | UI projection design for proposal views | LSP apply, AI edits, plugin writes, collaboration writes, remote writes |
-| 2 | R2 semantic-index boundary remediation | Complete and accepted | AI control plane activation |
-| 3 | R3 semantic fabric and LSP supervision | Complete and accepted for Phase 3 scope | AI control plane activation |
-| 4 | R4 agentic AI | Privacy Inspector UI design and tracker schema work | Plugin, collaboration, or remote mutation shortcuts |
+| 2 | R2 semantic-index boundary remediation | Accepted; use as regression baseline | Reopening accepted Phase 3 without evidence of invariant regression |
+| 3 | R3 semantic fabric and LSP supervision | Accepted for Phase 3 scope | Production LSP mutation paths that bypass proposals |
+| 4 | R4 agentic AI | Privacy Inspector UI design and tracker schema work | Hosted-provider or autonomous-apply expansion without policy/evidence gates |
 | 5 | R5 plugins | R8 diagnostics scaffolding for plugin health | Untrusted extension execution without sandbox quotas |
 | 6 | R6 collaboration | Presence projection UI prototypes | Remote writes or collaborative AI approvals before convergence tests |
 | 7 | R7 remote development | Enterprise policy profile design | Remote mutation before local and collaborative conflict semantics are accepted |
-| 8 | R8 hardening | Non-invasive diagnostics throughout earlier phases | Treating hardening as a substitute for missing phase evidence |
+| 8 | R8 hardening and GUI productization | Non-invasive diagnostics throughout earlier phases | Treating hardening evidence as permission for ungated production activation |
 
 ---
 
@@ -398,6 +415,6 @@ Focused checks to preserve during proposal and semantic work:
 
 ## 7. Immediate next handoff
 
-Start with R0 and R1 only.
+Start from the current accepted baseline, not from this document's 2026-05-16 snapshot. Re-run the repository gates after pulling `origin/main`, confirm the latest task-packet, workflow-output, and git-conflict action contracts are present, and then drive the Legion end-to-end implementation gaps from the current evidence ledger.
 
-The first implementation handoff should not begin Phase 3 acceptance work until generalized proposal execution is complete enough to handle save-equivalent generic apply, open-buffer apply, closed-file apply, batch planning, rollback, deny-by-default validation, and audit-before-success. This matches the sequencing constraint in [`plans/implementation-plan.md`](plans/implementation-plan.md:550): the safety substrate must be stable before semantic prediction, AI, WASM plugins, collaboration, or remote development proceed.
+Do not reopen Phase 3 or early proposal acceptance work unless a current test, evidence artifact, or code path shows an invariant regression. New work should focus on the remaining Legion product surface, production hardening, external adapter activation behind policy, cloud/workflow/model-flywheel gates, and evidence under [`plans/evidence/legion-e2e/`](plans/evidence/legion-e2e/).

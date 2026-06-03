@@ -1,4 +1,4 @@
-# Devil IDE — Full Codebase Architectural Review v0.1
+# Legion IDE - Full Codebase Architectural Review v0.1
 
 Status: **REVIEW COMPLETE — REQUIRED REFACTORING IDENTIFIED**
 
@@ -11,7 +11,7 @@ This review evaluates the current repository against the intended architecture d
 The review covers:
 
 - crate layout and dependency direction from [`Cargo.toml`](Cargo.toml:1), [`dependency-policy.md`](plans/dependency-policy.md:9), and [`xtask::validate_dependency_policy()`](xtask/src/main.rs:117);
-- application, UI, editor, workspace, platform, storage, security, observability, protocol, AI, provider, and placeholder crate boundaries;
+- application, UI, editor, workspace, platform, storage, security, observability, protocol, AI, provider, and bounded runtime crate boundaries;
 - architectural test and evidence coverage from [`cargo-test-workspace-all-targets.txt`](plans/evidence/phase-0/cargo-test-workspace-all-targets.txt:1), [`text-index-stress-baseline.md`](plans/evidence/phase-0/text-index-stress-baseline.md:1), and [`editor-performance-suite.txt`](plans/evidence/phase-0/editor-performance-suite.txt:1);
 - specification drift from the deterministic mutation, strict dependency direction, central save pipeline, and event-log requirements in [`ide-core-architecture-spec-v0.1.md`](plans/ide-core-architecture-spec-v0.1.md:61).
 
@@ -20,6 +20,8 @@ The review covers:
 The repository has successfully moved beyond the earliest spike hazards: the UI is now projection-only through [`Shell`](crates/devil-ui/src/ui.rs:228), editor and project do not have a direct crate dependency under [`dependency-policy.md`](plans/dependency-policy.md:22), application-level integration tests exercise workspace/editor routing in [`workspace_vfs_integration.rs`](crates/devil-app/tests/workspace_vfs_integration.rs:32), and the accepted phase zero gates passed in [`architecture-freeze-v0.1.md`](plans/architecture-freeze-v0.1.md:13).
 
 > Historical rebaseline note (2026-05-15): the direct save-bypass concerns captured in this review describe the pre-rebaseline implementation. Current manual saves route through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) and then through [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021), while the shell remains projection-only through [`Shell`](crates/devil-ui/src/ui.rs:228). Treat the save-bypass language below as historical context unless it is explicitly discussing proposal generalization beyond save.
+>
+> Current correction (2026-06-02): this review also predates accepted bounded slices for semantic fabric, agent/tracker/memory, plugin, collaboration, remote, terminal, telemetry, retention, GUI productization, and Legion workflow orchestration. Treat "placeholder crate" warnings as historical gate-discipline guidance, not as current claims that those crates are empty.
 
 However, the current implementation is not yet structurally aligned with the full target architecture. The most serious drift is concentrated around durable mutation safety, service-port mediation, observability integration, storage/session integration, security-policy completeness, and large-file scalability. These are architectural issues, not isolated bugs, because they affect ownership boundaries, data-flow invariants, and future feature scaling.
 
@@ -249,16 +251,16 @@ The diagram above is historical for the save path. The current phase-zero baseli
 | Impact | Passing gates do not prove all crates follow intended layering. Several crates are not fully covered by explicit allowed dependency sets, and warning-only dependency governance may not block security or supply-chain drift. |
 | Recommendation | Expand [`dependency-policy.md`](plans/dependency-policy.md:1) to cover every internal crate. Fail if an internal crate has no declared policy. Move hardcoded constraints from [`xtask`](xtask/src/main.rs:1) into policy data. Consider upgrading dependency/security findings from warnings to denial where appropriate for CI. |
 
-### Finding 18 — Placeholder crates create architectural surface before ownership contracts exist
+### Finding 18 — Runtime crate expansion must stay tied to accepted ownership contracts
 
 | Field | Assessment |
 |---|---|
-| Category | Premature crate proliferation |
+| Category | Runtime-surface governance |
 | Severity | Medium |
 | Affected areas | index, agent, tracker, memory, CLI, AI providers |
-| Evidence | The workspace includes many founding crates in [`Cargo.toml`](Cargo.toml:3). Phase zero evidence states the index crate remains a minimal placeholder in [`text-index-stress-baseline.md`](plans/evidence/phase-0/text-index-stress-baseline.md:35). The earlier founding review also flagged early crate proliferation in [`architecture-review-v0.1.md`](plans/architecture-review-v0.1.md:27). |
-| Impact | Placeholder crates are acceptable as roadmap markers, but each crate creates expectations, dependency-policy burden, CI surface, and potential drift. Empty crates can hide missing ownership decisions until later phases. |
-| Recommendation | Keep placeholder crates implementation-free until their ADR and phase gate are accepted. Add README or module-level phase status for each placeholder crate. Require a contract, owner, dependency policy entry, and test gate before adding runtime behavior to any placeholder crate. |
+| Evidence | The workspace includes many runtime-surface crates in [`Cargo.toml`](Cargo.toml:3). Later accepted evidence activates `devil-index`, `devil-agent`, `devil-tracker`, `devil-memory`, `devil-plugin`, `devil-collaboration`, `devil-remote`, `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` only within bounded policy surfaces described in [`plans/dependency-policy.md`](plans/dependency-policy.md:769). |
+| Impact | The accepted slices reduce the earlier placeholder risk, but every new runtime expansion still creates dependency-policy burden, CI surface, attack surface, retention/privacy questions, and product truth obligations. Treating accepted slices as permission for unrestricted production activation would recreate the original governance problem. |
+| Recommendation | Keep each runtime surface inside its accepted ADR, dependency-policy, protocol, contract-test, ownership-test, and evidence gate. Require an explicit policy/evidence update before expanding any surface into hosted providers, autonomous apply/merge, direct filesystem/process/network authority, raw-source retention, arbitrary VSIX execution, production remote transport, native PTY execution, hosted telemetry export, or model-flywheel training. |
 
 ### Finding 19 — AI/provider boundary is corrected but remains isolated from policy and event contracts
 
@@ -293,7 +295,7 @@ The diagram above is historical for the save path. The current phase-zero baseli
 5. **Harden capability policy.** Enforce write byte limits, LSP binary allowlists, plugin namespace policy, terminal command classes, and network target policy with dedicated tests.
 6. **Split projection from full text.** Refactor UI and app projections to use viewport slices and metadata, then introduce degraded large-file editor behavior for files above the full-cache budget.
 7. **Strengthen architecture gates.** Expand dependency policy to every crate, fail on missing policy entries, increase DTO golden coverage, and adjust supply-chain policy severity in [`deny.toml`](deny.toml:7).
-8. **Freeze placeholder crate expansion.** Keep placeholder crates inert until each has an ADR, policy entry, owner, contract tests, and phase gate.
+8. **Gate runtime crate expansion.** Keep every runtime surface within its accepted ADR, policy entry, owner, contract tests, and phase gate; require new evidence before production activation expands authority.
 
 ## Required validation additions
 

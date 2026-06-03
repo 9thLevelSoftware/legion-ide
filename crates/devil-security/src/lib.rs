@@ -14,7 +14,8 @@ use devil_protocol::{
     CapabilityRequestContext, CapabilityResponse, CorrelationId,
     DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionRequest,
     DelegatedTaskToolPermissionRequestInput, McpServerId, McpToolDescriptor, McpToolName,
-    PrincipalId, WorkspaceTrustState, delegated_task_tool_permission_request,
+    PrincipalId, ProductMode, WorkspaceTrustState, delegated_task_tool_permission_request,
+    product_runtime_surface_for_capability,
 };
 use thiserror::Error;
 
@@ -436,6 +437,58 @@ pub struct RemoteDevelopmentPolicy {
     pub offline_resume_enabled: bool,
 }
 
+/// Legion Cloud Lane capability policy controls.
+#[derive(Debug, Clone)]
+pub struct CloudLaneSecurityPolicy {
+    /// Allowed cloud-lane capabilities. Unknown capabilities remain denied.
+    pub allowed_capabilities: HashSet<String>,
+    /// Require trusted workspace for all cloud lane actions.
+    pub require_trusted_workspace: bool,
+    /// Whether cloud task submission is enabled.
+    pub task_submission_enabled: bool,
+    /// Whether cloud event streaming is enabled.
+    pub event_stream_enabled: bool,
+    /// Whether cloud cancellation is enabled.
+    pub cancellation_enabled: bool,
+    /// Whether cloud proposal/evidence fetch is enabled.
+    pub artifact_fetch_enabled: bool,
+    /// Maximum upload bytes for one cloud task.
+    pub max_upload_bytes: u64,
+    /// Maximum cloud cost in cents for one task.
+    pub max_cost_cents: u32,
+    /// Require visible upload scope before submit.
+    pub require_scope_visibility: bool,
+    /// Require prior task-packet validation before submit.
+    pub require_validated_task_packet: bool,
+    /// Require a hard cost cap before submit.
+    pub require_hard_cost_cap: bool,
+}
+
+impl Default for CloudLaneSecurityPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_capabilities: HashSet::from([
+                "cloud.lane.submit".to_string(),
+                "cloud.lane.events.stream".to_string(),
+                "cloud.lane.cancel".to_string(),
+                "cloud.lane.proposal.fetch".to_string(),
+                "cloud.lane.evidence.fetch".to_string(),
+                "cloud.usage.meter".to_string(),
+            ]),
+            require_trusted_workspace: true,
+            task_submission_enabled: false,
+            event_stream_enabled: false,
+            cancellation_enabled: false,
+            artifact_fetch_enabled: false,
+            max_upload_bytes: 0,
+            max_cost_cents: 0,
+            require_scope_visibility: true,
+            require_validated_task_packet: true,
+            require_hard_cost_cap: true,
+        }
+    }
+}
+
 impl Default for RemoteDevelopmentPolicy {
     fn default() -> Self {
         Self {
@@ -667,6 +720,8 @@ pub struct SecurityPolicy {
     pub collaboration_policy: CollaborationCapabilityPolicy,
     /// Remote-development policy.
     pub remote_policy: RemoteDevelopmentPolicy,
+    /// Legion Cloud Lane policy.
+    pub cloud_lane_policy: CloudLaneSecurityPolicy,
     /// Hosted telemetry policy.
     pub telemetry_policy: HostedTelemetryPolicy,
     /// Raw-source retention policy.
@@ -765,6 +820,23 @@ impl SecurityDecision {
 
     fn allow() -> Self {
         Self::Allow
+    }
+}
+
+/// Evaluate whether a product mode may request a capability before detailed policy checks.
+pub fn product_mode_capability_decision(
+    mode: ProductMode,
+    capability: &CapabilityId,
+) -> SecurityDecision {
+    let surface = product_runtime_surface_for_capability(capability);
+    if mode.allows_runtime_surface(surface) {
+        SecurityDecision::Allow
+    } else {
+        SecurityDecision::deny(format!(
+            "{} mode denies {:?} capability surface",
+            mode.label(),
+            surface
+        ))
     }
 }
 
@@ -1351,6 +1423,101 @@ impl DenyByDefaultBroker {
         }
     }
 
+    fn cloud_lane_capability_decision(
+        &self,
+        trust: TrustState,
+        capability: &str,
+        context: &CapabilityRequestContext,
+    ) -> SecurityDecision {
+        let policy = &self.policy.cloud_lane_policy;
+        if policy.require_trusted_workspace && trust != TrustState::Trusted {
+            return SecurityDecision::deny("cloud lane capability denied for untrusted workspace");
+        }
+        if !policy.allowed_capabilities.contains(capability) {
+            return SecurityDecision::deny(format!(
+                "capability {capability} denied by deny-by-default"
+            ));
+        }
+
+        match capability {
+            "cloud.lane.submit" => {
+                if !policy.task_submission_enabled {
+                    return SecurityDecision::deny(
+                        "cloud lane task submission is disabled by policy",
+                    );
+                }
+                if policy.require_scope_visibility && !context.cloud_lane_scope_visible_to_user {
+                    return SecurityDecision::deny(
+                        "cloud lane upload scope must be visible before submit",
+                    );
+                }
+                if context.cloud_lane_forbidden_upload_count > 0 {
+                    return SecurityDecision::deny("cloud lane upload contains forbidden material");
+                }
+                if policy.require_validated_task_packet && !context.cloud_lane_task_packet_validated
+                {
+                    return SecurityDecision::deny(
+                        "cloud lane submit requires a validated task packet",
+                    );
+                }
+                if policy.require_hard_cost_cap && !context.cloud_lane_hard_cap_enforced {
+                    return SecurityDecision::deny("cloud lane submit requires a hard cost cap");
+                }
+                let Some(estimated_cost_cents) = context.cloud_lane_estimated_cost_cents else {
+                    return SecurityDecision::deny("cloud lane submit requires an estimated cost");
+                };
+                if policy.max_cost_cents == 0 || estimated_cost_cents > policy.max_cost_cents {
+                    return SecurityDecision::deny(
+                        "cloud lane estimated cost exceeds configured cost cap",
+                    );
+                }
+                let Some(upload_bytes) = context.cloud_lane_upload_bytes else {
+                    return SecurityDecision::deny("cloud lane submit requires upload byte count");
+                };
+                if policy.max_upload_bytes == 0 || upload_bytes > policy.max_upload_bytes {
+                    return SecurityDecision::deny(
+                        "cloud lane upload bytes exceed configured upload cap",
+                    );
+                }
+                if let Some(decision) = self.require_https_network_target(context) {
+                    return decision;
+                }
+                self.network_target_decision(context)
+            }
+            "cloud.lane.events.stream" => {
+                if policy.event_stream_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("cloud lane event streaming is disabled by policy")
+                }
+            }
+            "cloud.lane.cancel" => {
+                if policy.cancellation_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("cloud lane cancellation is disabled by policy")
+                }
+            }
+            "cloud.lane.proposal.fetch" | "cloud.lane.evidence.fetch" => {
+                if policy.artifact_fetch_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("cloud lane artifact fetch is disabled by policy")
+                }
+            }
+            "cloud.usage.meter" => {
+                if policy.task_submission_enabled {
+                    SecurityDecision::allow()
+                } else {
+                    SecurityDecision::deny("cloud usage metering is disabled by policy")
+                }
+            }
+            _ => {
+                SecurityDecision::deny(format!("capability {capability} denied by deny-by-default"))
+            }
+        }
+    }
+
     fn decide_with_context(
         &self,
         trust: TrustState,
@@ -1396,6 +1563,10 @@ impl DenyByDefaultBroker {
 
         if capability.starts_with("storage.migration.") {
             return self.storage_migration_capability_decision(trust, &capability, context);
+        }
+
+        if capability.starts_with("cloud.") {
+            return self.cloud_lane_capability_decision(trust, &capability, context);
         }
 
         if capability.starts_with("plugin.") {
@@ -1665,11 +1836,71 @@ mod tests {
         ProposalRiskLabel, RedactionHint,
     };
 
+    fn cloud_lane_context(
+        estimated_cost_cents: u32,
+        upload_bytes: u64,
+        scope_visible: bool,
+        forbidden_upload_count: u32,
+        task_packet_validated: bool,
+    ) -> CapabilityRequestContext {
+        CapabilityRequestContext {
+            network_target: Some(devil_protocol::NetworkTarget {
+                scheme: "https".to_string(),
+                host: "cloud.legion.invalid".to_string(),
+                port: Some(443),
+            }),
+            cloud_lane_estimated_cost_cents: Some(estimated_cost_cents),
+            cloud_lane_upload_bytes: Some(upload_bytes),
+            cloud_lane_scope_visible_to_user: scope_visible,
+            cloud_lane_forbidden_upload_count: forbidden_upload_count,
+            cloud_lane_task_packet_validated: task_packet_validated,
+            cloud_lane_hard_cap_enforced: true,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn trust_state_conversion_roundtrips() {
         let protocol = WorkspaceTrustState::Trusted;
         let security: TrustState = protocol.into();
         assert_eq!(security, TrustState::Trusted);
+    }
+
+    #[test]
+    fn manual_product_mode_denies_ai_cloud_network_worker_telemetry_and_automation_surfaces() {
+        for capability in [
+            "ai.inline.predict",
+            "ai.provider.openai",
+            "network.fetch",
+            "telemetry.export.hosted",
+            "worker.spawn",
+            "legion.workflow.run",
+            "remote.workspace.connect",
+        ] {
+            let decision = product_mode_capability_decision(
+                ProductMode::Manual,
+                &CapabilityId(capability.to_string()),
+            );
+            assert!(
+                matches!(decision, SecurityDecision::Deny(reason) if reason.contains("Manual mode denies")),
+                "{capability} should be denied in Manual mode"
+            );
+        }
+
+        assert_eq!(
+            product_mode_capability_decision(
+                ProductMode::Manual,
+                &CapabilityId("fs.read".to_string())
+            ),
+            SecurityDecision::Allow
+        );
+        assert_eq!(
+            product_mode_capability_decision(
+                ProductMode::Manual,
+                &CapabilityId("plugin.management.inspect".to_string())
+            ),
+            SecurityDecision::Allow
+        );
     }
 
     #[test]
@@ -2041,6 +2272,123 @@ mod tests {
         );
 
         assert!(matches!(decision, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn cloud_lane_capabilities_are_disabled_by_default_and_require_trust() {
+        let mut broker = DenyByDefaultBroker::default();
+        let default_denied = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cloud.lane.submit".to_string()),
+            None,
+        );
+        assert!(
+            matches!(default_denied, SecurityDecision::Deny(reason) if reason.contains("disabled"))
+        );
+
+        let policy = SecurityPolicy {
+            cloud_lane_policy: CloudLaneSecurityPolicy {
+                task_submission_enabled: true,
+                ..CloudLaneSecurityPolicy::default()
+            },
+            network_policy: NetworkPolicy {
+                air_gap: false,
+                local_provider_only: false,
+                allowlist: vec!["cloud.legion.invalid".to_string()],
+                ..NetworkPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+        let untrusted = broker.decide_with_request_context(
+            TrustState::Untrusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cloud.lane.submit".to_string()),
+            None,
+            cloud_lane_context(50, 16_384, true, 0, true),
+        );
+        assert!(
+            matches!(untrusted, SecurityDecision::Deny(reason) if reason.contains("untrusted"))
+        );
+    }
+
+    #[test]
+    fn cloud_lane_submit_requires_visible_scope_budget_cap_and_https_target() {
+        let policy = SecurityPolicy {
+            cloud_lane_policy: CloudLaneSecurityPolicy {
+                task_submission_enabled: true,
+                max_upload_bytes: 32_768,
+                max_cost_cents: 75,
+                ..CloudLaneSecurityPolicy::default()
+            },
+            network_policy: NetworkPolicy {
+                air_gap: false,
+                local_provider_only: false,
+                allowlist: vec!["cloud.legion.invalid".to_string()],
+                ..NetworkPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
+
+        let missing_visibility = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cloud.lane.submit".to_string()),
+            None,
+            cloud_lane_context(50, 16_384, false, 0, true),
+        );
+        assert!(
+            matches!(missing_visibility, SecurityDecision::Deny(reason) if reason.contains("upload scope"))
+        );
+
+        let forbidden_scope = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cloud.lane.submit".to_string()),
+            None,
+            cloud_lane_context(50, 16_384, true, 1, true),
+        );
+        assert!(
+            matches!(forbidden_scope, SecurityDecision::Deny(reason) if reason.contains("forbidden"))
+        );
+
+        let budget_exceeded = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cloud.lane.submit".to_string()),
+            None,
+            cloud_lane_context(76, 16_384, true, 0, true),
+        );
+        assert!(
+            matches!(budget_exceeded, SecurityDecision::Deny(reason) if reason.contains("cost cap"))
+        );
+
+        let plaintext = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cloud.lane.submit".to_string()),
+            None,
+            CapabilityRequestContext {
+                network_target: Some(devil_protocol::NetworkTarget {
+                    scheme: "http".to_string(),
+                    host: "cloud.legion.invalid".to_string(),
+                    port: Some(80),
+                }),
+                ..cloud_lane_context(50, 16_384, true, 0, true)
+            },
+        );
+        assert!(matches!(plaintext, SecurityDecision::Deny(reason) if reason.contains("HTTPS")));
+
+        let allowed = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cloud.lane.submit".to_string()),
+            None,
+            cloud_lane_context(50, 16_384, true, 0, true),
+        );
+        assert!(matches!(allowed, SecurityDecision::Allow));
     }
 
     #[test]

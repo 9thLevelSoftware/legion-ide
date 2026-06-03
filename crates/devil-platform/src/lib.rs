@@ -1979,7 +1979,7 @@ impl TimeService for NativeTimeService {
 
 /// Returns a platform shell title.
 pub fn shell_title() -> &'static str {
-    "Devil IDE — Platform Shell"
+    "Legion IDE - Platform Shell"
 }
 
 #[cfg(test)]

@@ -27,6 +27,21 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-project/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-protocol/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/devil-security/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-collaboration/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-desktop/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-desktop/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-plugin/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-remote-transport/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-remote/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-retention/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-storage/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-telemetry/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-terminal/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-terminal/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-ui/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/devil-vscode-compat/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/crates/devil-agent/target" />
+      <excludeFolder url="file://$MODULE_DIR$/crates/devil-app/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

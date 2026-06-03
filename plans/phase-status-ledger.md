@@ -1,4 +1,4 @@
-# Devil IDE Phase Status Ledger
+# Legion IDE Phase Status Ledger
 
 Prepared: 2026-05-24  
 Authority: [`plans/implementation-plan.md`](implementation-plan.md), [`plans/remaining-implementation-tasks-plan-v0.1.md`](remaining-implementation-tasks-plan-v0.1.md), and [`plans/evidence/`](evidence/)  

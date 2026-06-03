@@ -34,7 +34,9 @@ impl TempGitRepo {
         run_git(&root, ["init"]);
         run_git(&root, ["branch", "-M", "master"]);
         run_git(&root, ["config", "user.email", "devil@example.test"]);
-        run_git(&root, ["config", "user.name", "Devil Test"]);
+        run_git(&root, ["config", "user.name", "Legion Test"]);
+        run_git(&root, ["config", "core.autocrlf", "false"]);
+        run_git(&root, ["config", "core.eol", "lf"]);
         Self { root }
     }
 
@@ -156,7 +158,7 @@ fn git_snapshot_projects_syntactic_diff_blame_graph_conflicts_and_hunk_staging()
         snapshot
             .blame_lines
             .iter()
-            .any(|line| line.path == "src/lib.rs" && line.author == "Devil Test")
+            .any(|line| line.path == "src/lib.rs" && line.author == "Legion Test")
     );
     assert!(
         snapshot

@@ -11,15 +11,23 @@ use devil_protocol::{
     DelegatedTaskToolPermissionDecision, FileFingerprint, FileId, LanguageToolingProjection,
     LegionWorkflowConflictId, LegionWorkflowProjection, LegionWorkflowSessionId,
     LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, PermissionBudgetProjection,
-    PluginContributionProjection, PluginId, PrivacyInspectorProjection,
-    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
-    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
-    ProposalRollbackReason, ProtocolTextRange, RedactionHint, RemoteGuiProjection, SnapshotId,
-    SystemGraphProjection, TerminalPanelProjection, TerminalSessionId, TextCoordinate,
-    TimestampMillis, VerificationRunProjection, ViewportScroll, WorkspaceId,
+    PluginContributionProjection, PluginId, PrivacyInspectorProjection, ProductMode,
+    ProductRuntimeSurface, ProposalApprovalChecklistProjection, ProposalCancellationReason,
+    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
+    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
+    RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
+    TerminalSessionId, TextCoordinate, TimestampMillis, VerificationRunProjection, ViewportScroll,
+    WorkspaceId, product_mode_allows_runtime_surface,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Dock-panel capability contract used for mode filtering.
+///
+/// The UI layer intentionally aliases the shared protocol runtime-surface
+/// contract instead of maintaining a parallel enum that could drift from app
+/// and security policy.
+pub type PanelCapability = ProductRuntimeSurface;
 
 /// Render mode for shell projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +129,28 @@ impl DockMode {
             Self::Automate => "Automate",
         }
     }
+
+    /// Convert to the shared protocol product mode.
+    pub fn to_product_mode(self) -> ProductMode {
+        match self {
+            Self::Manual => ProductMode::Manual,
+            Self::Assist => ProductMode::Assist,
+            Self::Delegate => ProductMode::Delegates,
+            Self::Automate => ProductMode::Automate,
+        }
+    }
+
+    /// Parse a stable user-facing or persisted mode label.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "Manual" | "manual" => Some(Self::Manual),
+            "Assist" | "assist" => Some(Self::Assist),
+            "Delegate" | "Delegates" | "delegate" | "delegates" => Some(Self::Delegate),
+            "Automate" | "LegionWorkflows" | "Legion Workflows" | "automate"
+            | "legion_workflows" => Some(Self::Automate),
+            _ => None,
+        }
+    }
 }
 
 /// Stable dock side identifier.
@@ -141,6 +171,16 @@ impl DockSide {
             Self::Left => "Left",
             Self::Right => "Right",
             Self::Bottom => "Bottom",
+        }
+    }
+
+    /// Parse a stable user-facing or persisted side label.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "Left" | "left" => Some(Self::Left),
+            "Right" | "right" => Some(Self::Right),
+            "Bottom" | "bottom" => Some(Self::Bottom),
+            _ => None,
         }
     }
 }
@@ -231,6 +271,38 @@ impl PanelId {
             Self::RemoteWorkspace => "remote_workspace",
         }
     }
+
+    /// Parse a persisted panel identifier.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "project_explorer" => Some(Self::ProjectExplorer),
+            "symbol_outline" => Some(Self::SymbolOutline),
+            "search" => Some(Self::Search),
+            "diagnostics" => Some(Self::Diagnostics),
+            "quick_fixes" => Some(Self::QuickFixes),
+            "references" => Some(Self::References),
+            "structural_search" => Some(Self::StructuralSearch),
+            "git" => Some(Self::Git),
+            "debug" => Some(Self::Debug),
+            "test_explorer" => Some(Self::TestExplorer),
+            "coverage" => Some(Self::Coverage),
+            "dependency_inspector" => Some(Self::DependencyInspector),
+            "repl" => Some(Self::Repl),
+            "terminal" => Some(Self::Terminal),
+            "context" => Some(Self::Context),
+            "assistant" => Some(Self::Assistant),
+            "delegation" => Some(Self::Delegation),
+            "approval_queue" => Some(Self::ApprovalQueue),
+            "agent_fleet" => Some(Self::AgentFleet),
+            "decision_feed" => Some(Self::DecisionFeed),
+            "agent_logs" => Some(Self::AgentLogs),
+            "workflow" => Some(Self::Workflow),
+            "plugin_manager" => Some(Self::PluginManager),
+            "collaboration" => Some(Self::Collaboration),
+            "remote_workspace" => Some(Self::RemoteWorkspace),
+            _ => None,
+        }
+    }
 }
 
 /// Registered dock panel metadata.
@@ -244,7 +316,9 @@ pub struct DockPanelDescriptor {
     pub icon: String,
     /// Default dock side.
     pub default_dock: DockSide,
-    /// Whether constructing this panel requires AI-capable product mode.
+    /// Runtime surfaces required to construct or render this panel.
+    pub capabilities: Vec<PanelCapability>,
+    /// Compatibility summary derived from capabilities for older render rows.
     pub requires_ai: bool,
 }
 
@@ -257,13 +331,47 @@ impl DockPanelDescriptor {
         default_dock: DockSide,
         requires_ai: bool,
     ) -> Self {
+        let capabilities = if requires_ai {
+            vec![PanelCapability::AssistedAi]
+        } else {
+            vec![PanelCapability::ManualIde]
+        };
+        Self::with_capabilities(id, title, icon, default_dock, capabilities)
+    }
+
+    /// Construct a panel descriptor with explicit runtime-surface capabilities.
+    pub fn with_capabilities(
+        id: PanelId,
+        title: impl Into<String>,
+        icon: impl Into<String>,
+        default_dock: DockSide,
+        capabilities: impl Into<Vec<PanelCapability>>,
+    ) -> Self {
+        let mut capabilities = capabilities.into();
+        if capabilities.is_empty() {
+            capabilities.push(PanelCapability::ManualIde);
+        }
+        let requires_ai = capabilities.iter().any(|capability| {
+            !matches!(
+                capability,
+                PanelCapability::ManualIde | PanelCapability::PluginManagement
+            )
+        });
         Self {
             id,
             title: title.into(),
             icon: icon.into(),
             default_dock,
+            capabilities,
             requires_ai,
         }
+    }
+
+    /// Whether this panel is constructible in the requested product mode.
+    pub fn is_visible_in_mode(&self, mode: DockMode) -> bool {
+        self.capabilities.iter().all(|capability| {
+            product_mode_allows_runtime_surface(mode.to_product_mode(), *capability)
+        })
     }
 }
 
@@ -296,17 +404,26 @@ pub trait DockPanel {
     /// Default dock side.
     fn default_dock(&self) -> DockSide;
 
-    /// Whether constructing this panel requires AI-capable product mode.
+    /// Compatibility summary derived from capabilities for older render rows.
     fn requires_ai(&self) -> bool;
+
+    /// Runtime surfaces required by this panel.
+    fn capabilities(&self) -> Vec<PanelCapability> {
+        if self.requires_ai() {
+            vec![PanelCapability::AssistedAi]
+        } else {
+            vec![PanelCapability::ManualIde]
+        }
+    }
 
     /// Return this panel as a registry descriptor.
     fn descriptor(&self) -> DockPanelDescriptor {
-        DockPanelDescriptor::new(
+        DockPanelDescriptor::with_capabilities(
             self.id(),
             self.title(),
             self.icon(),
             self.default_dock(),
-            self.requires_ai(),
+            self.capabilities(),
         )
     }
 
@@ -374,6 +491,10 @@ impl DockPanel for DockPanelDescriptor {
     fn requires_ai(&self) -> bool {
         self.requires_ai
     }
+
+    fn capabilities(&self) -> Vec<PanelCapability> {
+        self.capabilities.clone()
+    }
 }
 
 /// Shared panel registry filtered by product mode.
@@ -391,6 +512,11 @@ impl PanelRegistry {
             Debug, DecisionFeed, Delegation, DependencyInspector, Diagnostics, Git, PluginManager,
             ProjectExplorer, QuickFixes, References, RemoteWorkspace, Repl, Search,
             StructuralSearch, SymbolOutline, Terminal, TestExplorer, Workflow,
+        };
+        use ProductRuntimeSurface::{
+            AssistedAi, Automation, CloudProvider, Collaboration as CollaborationSurface,
+            DelegatedTask, NetworkEgress, PluginManagement, RemoteWorkspace as RemoteSurface,
+            WorkerRuntime,
         };
 
         Self {
@@ -422,16 +548,76 @@ impl PanelRegistry {
                 DockPanelDescriptor::new(Repl, "Scratchpad", "repl", Bottom, false),
                 DockPanelDescriptor::new(Terminal, "Terminal", "terminal", Bottom, false),
                 DockPanelDescriptor::new(Context, "Context", "context", Right, false),
-                DockPanelDescriptor::new(PluginManager, "Plugins", "plug", Right, false),
-                DockPanelDescriptor::new(Collaboration, "Collaboration", "users", Right, false),
-                DockPanelDescriptor::new(RemoteWorkspace, "Remote", "cloud", Right, false),
-                DockPanelDescriptor::new(Assistant, "Assistant", "spark", Right, true),
-                DockPanelDescriptor::new(Delegation, "Delegation", "delegate", Right, true),
-                DockPanelDescriptor::new(ApprovalQueue, "Approval Queue", "checklist", Right, true),
-                DockPanelDescriptor::new(AgentFleet, "Agent Fleet", "fleet", Right, true),
-                DockPanelDescriptor::new(DecisionFeed, "Decision Feed", "feed", Right, true),
-                DockPanelDescriptor::new(AgentLogs, "Agent Logs", "logs", Bottom, true),
-                DockPanelDescriptor::new(Workflow, "Workflow", "workflow", Bottom, true),
+                DockPanelDescriptor::with_capabilities(
+                    PluginManager,
+                    "Plugins",
+                    "plug",
+                    Right,
+                    [PluginManagement],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    Collaboration,
+                    "Collaboration",
+                    "users",
+                    Right,
+                    [CollaborationSurface, NetworkEgress],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    RemoteWorkspace,
+                    "Remote",
+                    "cloud",
+                    Right,
+                    [RemoteSurface, NetworkEgress, CloudProvider],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    Assistant,
+                    "Assistant",
+                    "spark",
+                    Right,
+                    [AssistedAi],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    Delegation,
+                    "Delegation",
+                    "delegate",
+                    Right,
+                    [AssistedAi, DelegatedTask],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    ApprovalQueue,
+                    "Approval Queue",
+                    "checklist",
+                    Right,
+                    [DelegatedTask],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    AgentFleet,
+                    "Agent Fleet",
+                    "fleet",
+                    Right,
+                    [Automation, WorkerRuntime],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    DecisionFeed,
+                    "Decision Feed",
+                    "feed",
+                    Right,
+                    [Automation],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    AgentLogs,
+                    "Agent Logs",
+                    "logs",
+                    Bottom,
+                    [Automation, WorkerRuntime],
+                ),
+                DockPanelDescriptor::with_capabilities(
+                    Workflow,
+                    "Workflow",
+                    "workflow",
+                    Bottom,
+                    [Automation, WorkerRuntime],
+                ),
             ],
         }
     }
@@ -464,14 +650,14 @@ impl PanelRegistry {
     pub fn visible_for(&self, mode: DockMode) -> Vec<&DockPanelDescriptor> {
         self.panels
             .iter()
-            .filter(|panel| mode != DockMode::Manual || !panel.requires_ai)
+            .filter(|panel| panel.is_visible_in_mode(mode))
             .collect()
     }
 
     /// Whether a panel can be constructed in the requested mode.
     pub fn is_visible_in(&self, id: PanelId, mode: DockMode) -> bool {
         self.panel(id)
-            .is_some_and(|panel| mode != DockMode::Manual || !panel.requires_ai)
+            .is_some_and(|panel| panel.is_visible_in_mode(mode))
     }
 }
 
@@ -4017,19 +4203,33 @@ mod tests {
     };
 
     #[test]
-    fn panel_registry_filters_ai_panels_out_of_manual_mode() {
+    fn panel_registry_filters_restricted_panels_out_of_manual_mode() {
         let registry = PanelRegistry::standard();
         let manual = registry.visible_for(DockMode::Manual);
 
         assert!(!manual.is_empty());
         assert!(
             manual.iter().all(|panel| !panel.requires_ai),
-            "manual mode must not construct AI panels: {manual:?}"
+            "manual mode must not construct restricted panels: {manual:?}"
         );
+        assert!(registry.is_visible_in(PanelId::ProjectExplorer, DockMode::Manual));
+        assert!(registry.is_visible_in(PanelId::Terminal, DockMode::Manual));
+        assert!(registry.is_visible_in(PanelId::PluginManager, DockMode::Manual));
         assert!(!registry.is_visible_in(PanelId::Assistant, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::Delegation, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::ApprovalQueue, DockMode::Manual));
         assert!(!registry.is_visible_in(PanelId::AgentFleet, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::DecisionFeed, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::Workflow, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::Collaboration, DockMode::Manual));
+        assert!(!registry.is_visible_in(PanelId::RemoteWorkspace, DockMode::Manual));
         assert!(registry.is_visible_in(PanelId::Assistant, DockMode::Assist));
+        assert!(!registry.is_visible_in(PanelId::Delegation, DockMode::Assist));
+        assert!(registry.is_visible_in(PanelId::Delegation, DockMode::Delegate));
+        assert!(registry.is_visible_in(PanelId::Collaboration, DockMode::Delegate));
+        assert!(!registry.is_visible_in(PanelId::RemoteWorkspace, DockMode::Delegate));
         assert!(registry.is_visible_in(PanelId::AgentFleet, DockMode::Automate));
+        assert!(registry.is_visible_in(PanelId::RemoteWorkspace, DockMode::Automate));
     }
 
     #[test]
@@ -4044,6 +4244,8 @@ mod tests {
 
         let state = panel.persist_state();
         assert_eq!(state["id"], "diagnostics");
+        let expected: Vec<PanelCapability> = vec![PanelCapability::ManualIde];
+        assert_eq!(panel.capabilities, expected);
         panel
             .restore_state(state)
             .expect("descriptor state restores");
@@ -4058,6 +4260,21 @@ mod tests {
             error,
             DockPanelStateError::InvalidState { message } if message.contains("does not match")
         ));
+    }
+
+    #[test]
+    fn dock_persisted_ids_parse_for_session_restore() {
+        assert_eq!(DockMode::parse("Manual"), Some(DockMode::Manual));
+        assert_eq!(
+            DockMode::parse("Legion Workflows"),
+            Some(DockMode::Automate)
+        );
+        assert_eq!(DockSide::parse("Right"), Some(DockSide::Right));
+        assert_eq!(
+            PanelId::parse("approval_queue"),
+            Some(PanelId::ApprovalQueue)
+        );
+        assert_eq!(PanelId::parse("unknown_panel"), None);
     }
 
     #[test]

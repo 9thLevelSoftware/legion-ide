@@ -18,11 +18,11 @@ use devil_protocol::{
     AssistedAiOperationClass, AssistedAiProviderAvailabilityState, AssistedAiProviderCapability,
     AssistedAiProviderClass, AssistedAiRefusalMetadata, AssistedAiSupportLabel, CapabilityId,
     DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequest, FileFingerprint,
-    McpJsonRpcEnvelope, McpListChangedKind, McpPromptDescriptor, McpPromptName,
-    McpRegistrySnapshot, McpResourceDescriptor, McpResourceUri, McpServerId, McpToolDescriptor,
-    McpToolName, PermissionBudgetActionClass, ProposalRiskLabel, RedactionHint,
-    SemanticPrivacyScope, TimestampMillis, validate_mcp_json_rpc_envelope,
-    validate_mcp_registry_snapshot,
+    LEGACY_PRODUCT_ENV_PREFIX, McpJsonRpcEnvelope, McpListChangedKind, McpPromptDescriptor,
+    McpPromptName, McpRegistrySnapshot, McpResourceDescriptor, McpResourceUri, McpServerId,
+    McpToolDescriptor, McpToolName, PRODUCT_ENV_PREFIX, PermissionBudgetActionClass,
+    ProposalRiskLabel, RedactionHint, SemanticPrivacyScope, TimestampMillis,
+    validate_mcp_json_rpc_envelope, validate_mcp_registry_snapshot,
 };
 use devil_security::mcp_tool_permission_allows_runtime;
 use serde_json::{Value, json};
@@ -32,6 +32,8 @@ use thiserror::Error;
 pub const DETERMINISTIC_LOCAL_PROVIDER_ID: &str = "deterministic-local";
 /// Ollama inline prediction provider slot.
 pub const OLLAMA_PROVIDER_ID: &str = "ollama";
+/// llama.cpp OpenAI-compatible loopback provider slot.
+pub const LLAMA_CPP_PROVIDER_ID: &str = "llama-cpp";
 /// OpenAI-compatible inline prediction provider slot.
 pub const OPENAI_COMPATIBLE_PROVIDER_ID: &str = "openai-compatible";
 /// GitHub Copilot NES inline prediction provider slot.
@@ -48,6 +50,7 @@ pub fn make_provider_registry() -> devil_ai::ProviderRegistry {
         DETERMINISTIC_LOCAL_PROVIDER_ID,
     )));
     registry.register(Box::new(OllamaProvider::default()));
+    registry.register(Box::new(LlamaCppProvider::default()));
     registry.register(Box::new(OpenAiCompatibleProvider::from_env(
         OPENAI_COMPATIBLE_PROVIDER_ID,
     )));
@@ -87,6 +90,12 @@ pub fn inline_prediction_provider_capabilities() -> Vec<AssistedAiProviderCapabi
         provider_capability(
             OLLAMA_PROVIDER_ID,
             "Ollama",
+            AssistedAiProviderClass::LocalLoopback,
+            AssistedAiProviderAvailabilityState::Unavailable,
+        ),
+        provider_capability(
+            LLAMA_CPP_PROVIDER_ID,
+            "llama.cpp",
             AssistedAiProviderClass::LocalLoopback,
             AssistedAiProviderAvailabilityState::Unavailable,
         ),
@@ -415,18 +424,37 @@ pub struct OpenAiCompatibleProvider<T = ReqwestProviderHttpTransport> {
     id: ProviderId,
     base_url: String,
     api_key: Option<String>,
+    auth_policy: OpenAiCompatibleAuthPolicy,
+    metadata_kind: &'static str,
     transport: T,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OpenAiCompatibleAuthPolicy {
+    Required,
+    Optional,
 }
 
 impl OpenAiCompatibleProvider<ReqwestProviderHttpTransport> {
     /// Creates a BYOK OpenAI-compatible adapter from environment configuration.
     pub fn from_env(id: impl Into<ProviderId>) -> Self {
-        let api_key = std::env::var("DEVIL_OPENAI_COMPATIBLE_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .ok();
-        let base_url = std::env::var("DEVIL_OPENAI_COMPATIBLE_BASE_URL")
-            .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let api_key = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_OPENAI_COMPATIBLE_API_KEY")).ok(),
+            std::env::var(format!(
+                "{LEGACY_PRODUCT_ENV_PREFIX}_OPENAI_COMPATIBLE_API_KEY"
+            ))
+            .ok(),
+            std::env::var("OPENAI_API_KEY").ok(),
+        ]);
+        let base_url = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_OPENAI_COMPATIBLE_BASE_URL")).ok(),
+            std::env::var(format!(
+                "{LEGACY_PRODUCT_ENV_PREFIX}_OPENAI_COMPATIBLE_BASE_URL"
+            ))
+            .ok(),
+            std::env::var("OPENAI_BASE_URL").ok(),
+        ])
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
         Self::with_transport(id, base_url, api_key, ReqwestProviderHttpTransport)
     }
 }
@@ -442,10 +470,30 @@ where
         api_key: Option<String>,
         transport: T,
     ) -> Self {
+        Self::with_transport_and_auth_policy(
+            id,
+            base_url,
+            api_key,
+            OpenAiCompatibleAuthPolicy::Required,
+            "openai-compatible",
+            transport,
+        )
+    }
+
+    fn with_transport_and_auth_policy(
+        id: impl Into<ProviderId>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        auth_policy: OpenAiCompatibleAuthPolicy,
+        metadata_kind: &'static str,
+        transport: T,
+    ) -> Self {
         Self {
             id: id.into(),
             base_url: normalize_base_url(base_url.into()),
             api_key,
+            auth_policy,
+            metadata_kind,
             transport,
         }
     }
@@ -454,16 +502,17 @@ where
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
 
-    fn api_key(&self) -> Result<&str, ProviderError> {
-        self.api_key
-            .as_deref()
-            .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| {
-                ProviderError::unavailable(
-                    self.id.clone(),
-                    "OpenAI-compatible API key is not configured",
-                )
-            })
+    fn bearer_token(&self) -> Result<Option<&str>, ProviderError> {
+        if let Some(api_key) = self.api_key.as_deref().filter(|key| !key.trim().is_empty()) {
+            return Ok(Some(api_key));
+        }
+        match self.auth_policy {
+            OpenAiCompatibleAuthPolicy::Required => Err(ProviderError::unavailable(
+                self.id.clone(),
+                "OpenAI-compatible API key is not configured",
+            )),
+            OpenAiCompatibleAuthPolicy::Optional => Ok(None),
+        }
     }
 }
 
@@ -487,10 +536,10 @@ where
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, ProviderError> {
-        let api_key = self.api_key()?;
+        let bearer_token = self.bearer_token()?;
         let response = self.transport.post_json(
             &self.endpoint("/chat/completions"),
-            Some(api_key),
+            bearer_token,
             json!({
                 "model": request.model,
                 "messages": request.messages.iter().map(|message| {
@@ -519,15 +568,15 @@ where
             provider: self.id.clone(),
             model: request.model,
             text,
-            metadata: provider_metadata("openai-compatible", &self.base_url),
+            metadata: provider_metadata(self.metadata_kind, &self.base_url),
         })
     }
 
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
-        let api_key = self.api_key()?;
+        let bearer_token = self.bearer_token()?;
         let response = self.transport.post_json(
             &self.endpoint("/embeddings"),
-            Some(api_key),
+            bearer_token,
             json!({
                 "model": request.model,
                 "input": request.inputs,
@@ -548,7 +597,7 @@ where
             provider: self.id.clone(),
             model: request.model,
             vectors,
-            metadata: provider_metadata("openai-compatible", &self.base_url),
+            metadata: provider_metadata(self.metadata_kind, &self.base_url),
         })
     }
 
@@ -563,8 +612,107 @@ where
     }
 }
 
+/// Configured llama.cpp OpenAI-compatible loopback provider adapter.
+#[derive(Debug, Clone)]
+pub struct LlamaCppProvider<T = ReqwestProviderHttpTransport> {
+    inner: OpenAiCompatibleProvider<T>,
+}
+
+impl Default for LlamaCppProvider<ReqwestProviderHttpTransport> {
+    fn default() -> Self {
+        Self::from_env(LLAMA_CPP_PROVIDER_ID)
+    }
+}
+
+impl LlamaCppProvider<ReqwestProviderHttpTransport> {
+    /// Creates a llama.cpp adapter from environment configuration.
+    ///
+    /// `LEGION_LLAMA_CPP_*` names take priority over legacy `DEVIL_LLAMA_CPP_*`
+    /// names, then unprefixed `LLAMA_CPP_*` names. The default endpoint is the
+    /// llama.cpp `llama-server` OpenAI-compatible base URL.
+    pub fn from_env(id: impl Into<ProviderId>) -> Self {
+        let api_key = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_LLAMA_CPP_API_KEY")).ok(),
+            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_LLAMA_CPP_API_KEY")).ok(),
+            std::env::var("LLAMA_CPP_API_KEY").ok(),
+        ]);
+        let base_url = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_LLAMA_CPP_BASE_URL")).ok(),
+            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_LLAMA_CPP_BASE_URL")).ok(),
+            std::env::var("LLAMA_CPP_BASE_URL").ok(),
+        ])
+        .unwrap_or_else(|| "http://localhost:8080/v1".to_string());
+        Self::with_transport(id, base_url, api_key, ReqwestProviderHttpTransport)
+    }
+}
+
+impl<T> LlamaCppProvider<T>
+where
+    T: ProviderHttpTransport,
+{
+    /// Creates a llama.cpp adapter with an injected transport.
+    pub fn with_transport(
+        id: impl Into<ProviderId>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        transport: T,
+    ) -> Self {
+        Self {
+            inner: OpenAiCompatibleProvider::with_transport_and_auth_policy(
+                id,
+                base_url,
+                api_key,
+                OpenAiCompatibleAuthPolicy::Optional,
+                "llama-cpp",
+                transport,
+            ),
+        }
+    }
+}
+
+impl<T> ModelProvider for LlamaCppProvider<T>
+where
+    T: ProviderHttpTransport,
+{
+    fn provider_id(&self) -> ProviderId {
+        self.inner.provider_id()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        self.inner.complete(request)
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        self.inner.embed(request)
+    }
+
+    fn predict_inline(
+        &self,
+        request: InlinePredictionRequest,
+    ) -> Result<InlinePredictionResponse, ProviderError> {
+        Err(ProviderError::unavailable(
+            request.provider,
+            "llama.cpp inline prediction provider is not configured",
+        ))
+    }
+}
+
 fn normalize_base_url(value: String) -> String {
     value.trim().trim_end_matches('/').to_string()
+}
+
+fn first_configured_value<const N: usize>(values: [Option<String>; N]) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
 }
 
 fn chat_prompt(request: &ChatCompletionRequest) -> String {
@@ -1441,10 +1589,10 @@ mod tests {
     use devil_ai::InlinePredictionRequest;
     use devil_protocol::{
         AssistedAiOperationClass, AssistedAiProviderClass, AssistedAiProviderInvocationState,
-        BufferId, BufferVersion, CancellationTokenId, CapabilityId, CausalityId, CorrelationId,
-        DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
-        DelegatedTaskToolPermissionRequestInput, EventSequence, FileContentVersion,
-        FileFingerprint, FileId, InlinePredictionFingerprintMetadata,
+        AssistedAiSupportLabel, BufferId, BufferVersion, CancellationTokenId, CapabilityId,
+        CausalityId, CorrelationId, DelegatedTaskToolPermissionDecision,
+        DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequestInput, EventSequence,
+        FileContentVersion, FileFingerprint, FileId, InlinePredictionFingerprintMetadata,
         InlinePredictionLatencyMetadata, InlinePredictionProviderMetadata,
         InlinePredictionRequestId, InlinePredictionRequestMetadata, InlinePredictionTriggerKind,
         LanguageId, McpPromptDescriptor, McpResourceDescriptor, McpServerDescriptor,
@@ -1522,6 +1670,30 @@ mod tests {
                 schema_version: 1,
             },
         }
+    }
+
+    #[test]
+    fn configured_provider_value_prefers_legion_then_legacy_then_standard_names() {
+        assert_eq!(
+            first_configured_value([
+                Some("legion".to_string()),
+                Some("legacy".to_string()),
+                Some("standard".to_string())
+            ]),
+            Some("legion".to_string())
+        );
+        assert_eq!(
+            first_configured_value([
+                Some("   ".to_string()),
+                Some("legacy".to_string()),
+                Some("standard".to_string())
+            ]),
+            Some("legacy".to_string())
+        );
+        assert_eq!(
+            first_configured_value([None, None, Some("standard".to_string())]),
+            Some("standard".to_string())
+        );
     }
 
     #[test]
@@ -1723,6 +1895,78 @@ mod tests {
     }
 
     #[test]
+    fn llama_cpp_provider_posts_loopback_requests_without_bearer_by_default() {
+        let transport = RecordingProviderTransport::default();
+        let provider = LlamaCppProvider::with_transport(
+            LLAMA_CPP_PROVIDER_ID,
+            "http://localhost:8080/v1/",
+            None,
+            transport.clone(),
+        );
+
+        let completion = provider
+            .complete(
+                ChatCompletionRequest::new(LLAMA_CPP_PROVIDER_ID, "local-gguf", "explain")
+                    .with_max_tokens(24),
+            )
+            .expect("llama.cpp completion parses");
+        let embeddings = provider
+            .embed(EmbeddingRequest::new(
+                LLAMA_CPP_PROVIDER_ID,
+                "local-embedding-gguf",
+                "embed me",
+            ))
+            .expect("llama.cpp embedding parses");
+
+        assert_eq!(completion.provider, LLAMA_CPP_PROVIDER_ID);
+        assert_eq!(completion.text, "openai-compatible answer");
+        assert_eq!(
+            completion.metadata.get("provider.kind"),
+            Some(&"llama-cpp".to_string())
+        );
+        assert_eq!(
+            completion.metadata.get("redaction"),
+            Some(&"metadata-only".to_string())
+        );
+        assert_eq!(embeddings.vectors, vec![vec![0.125, 0.875]]);
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].endpoint,
+            "http://localhost:8080/v1/chat/completions"
+        );
+        assert_eq!(calls[0].bearer_token, None);
+        assert_eq!(calls[0].payload["messages"][0]["role"], "user");
+        assert_eq!(calls[0].payload["max_tokens"], 24);
+        assert_eq!(calls[1].endpoint, "http://localhost:8080/v1/embeddings");
+        assert_eq!(calls[1].bearer_token, None);
+        assert_eq!(calls[1].payload["input"][0], "embed me");
+    }
+
+    #[test]
+    fn llama_cpp_provider_can_attach_optional_local_bearer_token() {
+        let transport = RecordingProviderTransport::default();
+        let provider = LlamaCppProvider::with_transport(
+            LLAMA_CPP_PROVIDER_ID,
+            "http://127.0.0.1:8080/v1",
+            Some("local-token".to_string()),
+            transport.clone(),
+        );
+
+        provider
+            .complete(ChatCompletionRequest::new(
+                LLAMA_CPP_PROVIDER_ID,
+                "local-gguf",
+                "explain",
+            ))
+            .expect("llama.cpp completion parses");
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].bearer_token, Some("local-token".to_string()));
+    }
+
+    #[test]
     fn provider_registry_exposes_configured_adapters() {
         let registry = make_provider_registry();
         let mut ids = registry.provider_ids();
@@ -1732,6 +1976,7 @@ mod tests {
             ids,
             vec![
                 DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+                LLAMA_CPP_PROVIDER_ID.to_string(),
                 OLLAMA_PROVIDER_ID.to_string(),
                 OPENAI_COMPATIBLE_PROVIDER_ID.to_string(),
             ]
@@ -1750,6 +1995,7 @@ mod tests {
                 CODESTRAL_PROVIDER_ID.to_string(),
                 COPILOT_NES_PROVIDER_ID.to_string(),
                 DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+                LLAMA_CPP_PROVIDER_ID.to_string(),
                 MERCURY_PROVIDER_ID.to_string(),
                 OLLAMA_PROVIDER_ID.to_string(),
                 OPENAI_COMPATIBLE_PROVIDER_ID.to_string(),
@@ -1757,7 +2003,7 @@ mod tests {
         );
 
         let capabilities = inline_prediction_provider_capabilities();
-        assert_eq!(capabilities.len(), 6);
+        assert_eq!(capabilities.len(), 7);
         let deterministic = capabilities
             .iter()
             .find(|capability| capability.provider_id == DETERMINISTIC_LOCAL_PROVIDER_ID)
@@ -1771,6 +2017,19 @@ mod tests {
                 .supported_operations
                 .contains(&devil_protocol::AssistedAiOperationClass::InlinePrediction)
         );
+        let llama_cpp = capabilities
+            .iter()
+            .find(|capability| capability.provider_id == LLAMA_CPP_PROVIDER_ID)
+            .expect("llama.cpp capability is present");
+        assert_eq!(
+            llama_cpp.provider_class,
+            AssistedAiProviderClass::LocalLoopback
+        );
+        assert_eq!(
+            llama_cpp.local_execution_support,
+            AssistedAiSupportLabel::Supported
+        );
+        assert_eq!(llama_cpp.byok_support, AssistedAiSupportLabel::Unsupported);
 
         for capability in capabilities
             .iter()
@@ -1815,6 +2074,7 @@ mod tests {
 
         for provider_id in [
             OLLAMA_PROVIDER_ID,
+            LLAMA_CPP_PROVIDER_ID,
             OPENAI_COMPATIBLE_PROVIDER_ID,
             COPILOT_NES_PROVIDER_ID,
             MERCURY_PROVIDER_ID,

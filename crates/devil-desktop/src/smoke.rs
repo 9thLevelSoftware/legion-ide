@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use devil_protocol::PRODUCT_NAME;
 use devil_ui::ShellProjectionSnapshot;
 
 use crate::{
@@ -272,10 +273,11 @@ fn run_smoke_window(
     let duration = Duration::from_millis(smoke.duration_ms);
     let report_config = config.clone();
 
-    let native_options = desktop_native_options("Devil IDE Smoke");
+    let smoke_title = format!("{PRODUCT_NAME} Smoke");
+    let native_options = desktop_native_options(&smoke_title);
 
     eframe::run_native(
-        "Devil IDE Smoke",
+        &smoke_title,
         native_options,
         Box::new(move |_cc| {
             let runtime = DesktopRuntime::open(config)

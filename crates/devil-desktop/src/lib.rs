@@ -1,4 +1,4 @@
-//! Renderer-backed desktop adapter for Devil IDE.
+//! Renderer-backed desktop adapter for Legion IDE.
 //!
 //! This crate owns native windowing, renderer resources, and adapter-local
 //! presentation state. Product state remains owned by `devil-app` and

@@ -14,15 +14,15 @@ use devil_app::{
 };
 use devil_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, DelegatedTaskPlanContract,
-    DelegatedTaskPlanId, LegionWorkflowMergeReadinessState, LegionWorkflowSessionId,
+    DelegatedTaskPlanId, LegionWorkflowMergeReadinessState, LegionWorkflowSessionId, PRODUCT_NAME,
     PluginDenialReason, PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
     ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
-    RemoteWorkspaceSessionId, SessionPanelState, TextCoordinate, ViewportScroll,
-    WorkspaceSessionRecord, WorkspaceTrustState,
+    RemoteWorkspaceSessionId, SessionDockLayout, SessionDockSideLayout, SessionPanelState,
+    TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use devil_ui::{
-    CommandDispatchIntent, DockMode, SearchScopeProjection, Shell, ShellProjectionSnapshot,
-    StatusMessageProjection, StatusSeverity,
+    CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PanelId,
+    SearchScopeProjection, Shell, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
 };
 
 use crate::{
@@ -41,7 +41,7 @@ use crate::{
     view::{DesktopProjectionViewState, ProjectionView},
 };
 
-const WINDOW_TITLE: &str = "Devil IDE";
+const WINDOW_TITLE: &str = PRODUCT_NAME;
 
 /// Process launch configuration for the desktop adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,6 +462,7 @@ pub struct DesktopRuntime {
     structural_search_scope: SearchScopeProjection,
     explorer_expansion: BTreeSet<String>,
     panel_state: SessionPanelState,
+    dock_layouts: Vec<DockLayout>,
     session_state_path: Option<PathBuf>,
     diagnostics_export_path: Option<PathBuf>,
     quit_requested: bool,
@@ -486,6 +487,7 @@ impl DesktopRuntime {
 
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
+        let mut dock_layouts = DockLayout::standard_all_modes();
         let mut status = status_message(StatusSeverity::Info, "Desktop adapter ready");
         let mut status_details = Vec::new();
 
@@ -498,6 +500,7 @@ impl DesktopRuntime {
                     .map(|path| path.0.clone())
                     .collect();
                 panel_state = record.panel_state.clone();
+                dock_layouts = restore_dock_layouts(record);
                 let (restore_status, restore_details) = restore_status_messages(&restore);
                 status = restore_status;
                 status_details = restore_details;
@@ -541,6 +544,7 @@ impl DesktopRuntime {
             structural_search_scope: SearchScopeProjection::ActiveFile,
             explorer_expansion,
             panel_state,
+            dock_layouts,
             session_state_path: config.session_state,
             diagnostics_export_path: config.diagnostics_export,
             quit_requested: false,
@@ -666,9 +670,19 @@ impl DesktopRuntime {
         &self.panel_state
     }
 
+    /// Return the adapter-local restored dock layouts.
+    pub fn dock_layouts(&self) -> &[DockLayout] {
+        &self.dock_layouts
+    }
+
     /// Replace adapter-local panel state for future session captures.
     pub fn set_panel_state(&mut self, panel_state: SessionPanelState) {
         self.panel_state = panel_state;
+    }
+
+    /// Replace adapter-local dock layouts for future session captures.
+    pub fn set_dock_layouts(&mut self, dock_layouts: Vec<DockLayout>) {
+        self.dock_layouts = normalized_dock_layouts(dock_layouts);
     }
 
     /// Capture a metadata-only session record with adapter-local desktop state applied.
@@ -681,6 +695,7 @@ impl DesktopRuntime {
             .map(CanonicalPath)
             .collect();
         record.panel_state = self.panel_state.clone();
+        record.dock_layouts = session_dock_layouts_from_ui(&self.dock_layouts);
         Ok(record)
     }
 
@@ -730,7 +745,7 @@ impl DesktopRuntime {
         DesktopProjectionViewState {
             expanded_explorer_paths: self.explorer_expansion.clone(),
             selected_explorer_file: None,
-            dock_layouts: devil_ui::DockLayout::standard_all_modes(),
+            dock_layouts: self.dock_layouts.clone(),
         }
     }
 
@@ -1621,6 +1636,109 @@ fn default_panel_state() -> SessionPanelState {
         active_panel: None,
         bottom_height_px: None,
         side_width_px: None,
+    }
+}
+
+fn restore_dock_layouts(record: &WorkspaceSessionRecord) -> Vec<DockLayout> {
+    if record.dock_layouts.is_empty() {
+        return DockLayout::standard_all_modes();
+    }
+    let mut layouts = DockLayout::standard_all_modes();
+    for persisted in &record.dock_layouts {
+        let Some(restored) = dock_layout_from_session(persisted) else {
+            continue;
+        };
+        if let Some(existing) = layouts
+            .iter_mut()
+            .find(|layout| layout.mode == restored.mode)
+        {
+            *existing = restored;
+        }
+    }
+    layouts
+}
+
+fn normalized_dock_layouts(layouts: Vec<DockLayout>) -> Vec<DockLayout> {
+    let mut normalized = DockLayout::standard_all_modes();
+    for layout in layouts {
+        if let Some(existing) = normalized
+            .iter_mut()
+            .find(|candidate| candidate.mode == layout.mode)
+        {
+            *existing = layout;
+        }
+    }
+    normalized
+}
+
+fn dock_layout_from_session(record: &SessionDockLayout) -> Option<DockLayout> {
+    if record.schema_version == 0 {
+        return None;
+    }
+    let mode = DockMode::parse(&record.mode)?;
+    let mut layout = DockLayout::standard(mode);
+    for side_record in &record.sides {
+        let (side, side_layout) = dock_side_layout_from_session(side_record)?;
+        match side {
+            DockSide::Left => layout.left = side_layout,
+            DockSide::Right => layout.right = side_layout,
+            DockSide::Bottom => layout.bottom = side_layout,
+        }
+    }
+    Some(layout)
+}
+
+fn dock_side_layout_from_session(
+    record: &SessionDockSideLayout,
+) -> Option<(DockSide, DockSideLayout)> {
+    if record.schema_version == 0 {
+        return None;
+    }
+    let side = DockSide::parse(&record.side)?;
+    let pinned_default = PanelId::parse(&record.pinned_default_panel_id)?;
+    let custom_toolkit = record
+        .custom_toolkit_panel_ids
+        .iter()
+        .map(|id| PanelId::parse(id))
+        .collect::<Option<Vec<_>>>()?;
+    Some((
+        side,
+        DockSideLayout::new(
+            pinned_default,
+            custom_toolkit,
+            record.splitter_fraction,
+            record.collapsed,
+        ),
+    ))
+}
+
+fn session_dock_layouts_from_ui(layouts: &[DockLayout]) -> Vec<SessionDockLayout> {
+    layouts
+        .iter()
+        .map(|layout| SessionDockLayout {
+            mode: layout.mode.label().to_string(),
+            sides: vec![
+                session_dock_side_layout(DockSide::Left, &layout.left),
+                session_dock_side_layout(DockSide::Right, &layout.right),
+                session_dock_side_layout(DockSide::Bottom, &layout.bottom),
+            ],
+            schema_version: 1,
+        })
+        .collect()
+}
+
+fn session_dock_side_layout(side: DockSide, layout: &DockSideLayout) -> SessionDockSideLayout {
+    SessionDockSideLayout {
+        side: side.label().to_string(),
+        pinned_default_panel_id: layout.pinned_default.as_str().to_string(),
+        custom_toolkit_panel_ids: layout
+            .custom_toolkit
+            .iter()
+            .map(|panel| panel.as_str().to_string())
+            .collect(),
+        splitter_fraction: layout.splitter_fraction,
+        collapsed: layout.collapsed,
+        schema_version: 1,
     }
 }
 

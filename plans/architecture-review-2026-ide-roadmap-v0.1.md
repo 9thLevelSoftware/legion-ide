@@ -1,9 +1,10 @@
-# Devil IDE 2026 Architecture and Functional Review Roadmap v0.1
+# Legion IDE 2026 Architecture and Functional Review Roadmap v0.1
 
 Status: Strategic review artifact  
 Mode: Architecture planning  
 Scope: end-to-end repository review against a state-of-the-art 2026 IDE target  
 Baseline date: 2026-05-14
+Current correction date: 2026-06-02
 
 ---
 
@@ -11,9 +12,9 @@ Baseline date: 2026-05-14
 
 The repository has moved beyond a spike-only baseline in several critical foundations. The most important current strength is that durable local saves are now proposal-mediated, conflict-aware, fingerprint-checked, and fail-closed through [`SaveWorkflowService`](crates/devil-app/src/lib.rs:935), [`WorkspaceSaveRequest`](crates/devil-project/src/lib.rs:133), and [`WorkspaceActor::save_file_with_proposal()`](crates/devil-project/src/lib.rs:1620). The UI shell is also projection-oriented through [`ActiveBufferProjection`](crates/devil-ui/src/ui.rs:86) and command intents rather than editor ownership.
 
-That said, the product is still far from the requested 2026 IDE target. The current system is best described as a deterministic local core with partial proposal safety and metadata-oriented observability, not yet a modern AI-native, predictive, extensible, remote, and collaborative IDE platform.
+That said, the product is still far from the requested 2026 IDE target. The original 2026-05-14 baseline was best described as a deterministic local core with partial proposal safety and metadata-oriented observability, not yet a modern AI-native, predictive, extensible, remote, and collaborative IDE platform. As of 2026-06-02, several slices have since been implemented behind ADR, dependency-policy, contract-test, and evidence gates; the remaining gap is production completeness, external-service activation, and end-to-end product hardening rather than empty placeholder crates.
 
-The gap is not a single missing feature. The required 2026 paradigm needs five platform layers that are either absent or only represented by protocol stubs:
+The gap is not a single missing feature. The required 2026 paradigm still needs five platform layers to reach production completeness:
 
 1. Agentic AI execution embedded in editor, workspace, task, terminal, semantic index, policy, and replay context.
 2. Zero-latency predictive semantic analysis backed by incremental parsing, symbol graphs, LSP fusion, typed caches, and speculative invalidation.
@@ -48,7 +49,9 @@ Important correction: older review documents such as [`plans/architecture-review
 - Atomic write fallback is fail-closed through [`NonAtomicSaveFallbackPolicy`](crates/devil-project/src/lib.rs:172).
 - Untrusted writes, stale saves, and external overwrites are asserted by [`workspace_vfs_integration_untrusted_save_is_denied_without_disk_mutation`](crates/devil-app/tests/workspace_vfs_integration.rs:73) and [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict`](crates/devil-app/tests/workspace_vfs_integration.rs:280).
 
-The roadmap below therefore treats proposal-mediated save as a current strength, while identifying that the proposal system is still narrow, save-focused, local-only, and not yet generalized for LSP edits, plugin edits, AI-generated edits, collaborative operations, or remote workspace mutations.
+Current 2026-06-02 correction: this review also predates later accepted slices. `devil-index` now has the Phase 3 semantic-fabric implementation and tests; `devil-agent`, `devil-tracker`, and `devil-memory` have Phase 4 and Phase 13 metadata-only agent/workflow records; `devil-plugin` has the Phase 5 isolated plugin boundary; `devil-collaboration` has the Phase 6 deterministic collaboration runtime; `devil-remote` has the Phase 7 deterministic edge-workspace harness; and `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention` have Phase 8 default-deny implementation slices. These are accepted bounded surfaces, not unrestricted production activation. Hosted providers, production cloud lanes, full autonomous execution, vector indexing, standalone production LSP, arbitrary VSIX execution, hosted telemetry export, raw-source vault operation, and autonomous merge/apply remain gated by the dependency policy and evidence requirements.
+
+The roadmap below therefore treats proposal-mediated save and the accepted metadata-first runtime slices as current strengths, while identifying remaining production-completeness gaps.
 
 ---
 
@@ -66,13 +69,13 @@ The roadmap below therefore treats proposal-mediated save as a current strength,
 | Observability | [`InMemoryEventSink`](crates/devil-observability/src/lib.rs:71), [`RedactingEventSink`](crates/devil-observability/src/lib.rs:130), [`event_metadata_record()`](crates/devil-observability/src/lib.rs:376), and [`proposal_audit_record()`](crates/devil-observability/src/lib.rs:394) provide metadata-only event and audit foundations. | Good privacy direction, but production event storage, replay drills, metrics, tracing spans, distributed correlation, and privacy-inspector surfaces are incomplete. |
 | Storage | [`InMemoryStorageRepositoryPort`](crates/devil-storage/src/lib.rs) supports protocol-oriented metadata, trust, sessions, proposal audit, and event records. | Not yet a durable SQLite or multi-store production boundary for sessions, tracker, semantic index, memory, collaboration logs, remote sync metadata, or migration governance. |
 | AI | [`ModelProvider`](crates/devil-ai/src/lib.rs:216) defines provider abstraction; [`OllamaStub`](crates/devil-ai-providers/src/lib.rs:75) and [`OpenAiStub`](crates/devil-ai-providers/src/lib.rs:83) reject real calls. | Provider inversion is correct, but the AI layer is not an orchestrator. No context graph, provider router, streaming, tool policy, context manifest, privacy inspector, patch synthesis, agent state machine, or proposal integration exists. |
-| Indexing | [`crates/devil-index/src/lib.rs`](crates/devil-index/src/lib.rs:1) is a placeholder. | Critical missing layer. No tree-sitter, symbol graph, lexical index, vector index, semantic cache, predictive invalidation, or LSP fusion. |
-| Agent workflows | [`crates/devil-agent/src/lib.rs`](crates/devil-agent/src/lib.rs:1) is a placeholder. | Critical missing layer. No autonomous planning, tool-use state machine, approval model, run records, policy transitions, or recovery semantics. |
-| Tracker and memory | [`crates/devil-tracker/src/lib.rs`](crates/devil-tracker/src/lib.rs) and [`crates/devil-memory/src/lib.rs`](crates/devil-memory/src/lib.rs:1) are placeholders. | Critical for AI-native workflows, but not implemented. No task graph, AI run ledger, approval ledger, context manifest, opt-in memory, retention controls, or privacy inspector data model. |
-| Plugins | Protocol DTOs and target architecture exist in [`plans/ide-core-architecture-spec-v0.1.md`](plans/ide-core-architecture-spec-v0.1.md:525), but no runtime crate exists. | Not ready. There is no WASM host, WASI capabilities, ABI, manifest loader, contribution registry, sandbox quotas, plugin state store, or marketplace governance. |
-| Terminal and LSP | Platform has process and PTY scaffolding through [`ProcessRequest`](crates/devil-platform/src/lib.rs:558) and [`NativePtyService`](crates/devil-platform/src/lib.rs:632); LSP remains protocol and plan only. | Not ready for 2026 language workflows. No supervised LSP runtime, semantic-token cache, completion broker, diagnostics store, terminal UX, or remote process substrate. |
-| Remote development | Foundational roadmap explicitly excludes hosted dependency and remote collaboration in [`plans/foundational-core-ide-platform-roadmap-v0.1.md`](plans/foundational-core-ide-platform-roadmap-v0.1.md:24). | Absent. No edge workspace agent, transport protocol, remote filesystem, remote process, remote LSP, sync model, or identity federation. |
-| Multiplayer collaboration | No collaboration crate, protocol, operation log, CRDT, presence, cursor sharing, shared proposal, or conflict policy exists. | Absent. This is a full platform initiative, not a feature flag. |
+| Indexing | Phase 3 activates `devil-index` for actor-owned semantic fabric, lexical maps, tree-sitter syntax caches, normalized graph records, semantic query APIs, structural search, and LSP-fusion contracts. | Strong metadata-first foundation; vector indexing, hosted embeddings, production-scale parser/runtime supervision, and full language-server execution remain separately gated. |
+| Agent workflows | Phase 4 and Phase 13 activate `devil-agent` for metadata-only local/provider route planning, delegated sandbox checks, Legion workflow coordination, proposal-only worker outputs, and merge-readiness metadata. | Correct authority boundary; full autonomous execution, unrestricted tool use, provider-backed production workers, and autonomous merge/apply remain forbidden until later gates. |
+| Tracker and memory | `devil-tracker` and `devil-memory` now persist metadata-only run/workflow records, memory candidates, consent-gated retention, and Legion workflow outcome candidates. | Useful audit/memory substrate; raw prompt/source/provider payload retention, hosted upload, and training trace export require explicit consent/redaction/export gates. |
+| Plugins | `devil-plugin` now implements the accepted Phase 5 isolated plugin boundary with manifest/capability validation, quota metadata, plugin-scoped storage, metadata-only observability, and proposal-mediated mutation outputs. | Runtime boundary exists; arbitrary VSIX execution, webviews, notebooks, marketplace install, direct process/network/filesystem access, and broad extension host parity remain deferred. |
+| Terminal and LSP | `devil-terminal` is active for default-deny terminal/runtime and DAP fixture behavior; language tooling is projected through semantic/index and proposal-mediated edit previews. | Useful local IDE loop; standalone production LSP runtime, unrestricted native PTY launch, and production terminal hardening remain evidence gated. |
+| Remote development | `devil-remote` and `devil-remote-transport` now provide deterministic edge-workspace and transport slices with proposal IDs, write preconditions, reconnect/offline metadata, and policy gates. | Edge harness exists; production network transport, identity federation, broad remote process/LSP/index execution, and hosted workspace service readiness remain gated. |
+| Multiplayer collaboration | `devil-collaboration` now provides deterministic collaboration operation, presence, replay, convergence, and fail-closed conflict behavior. | Local collaboration substrate exists; production multi-user service, transport, retention policy, enterprise identity, and hosted/shared proposal operations remain future hardening work. |
 
 ---
 
@@ -139,9 +142,9 @@ Remedy:
 - Require every proposal to emit audit records through [`proposal_audit_record()`](crates/devil-observability/src/lib.rs:394) and event metadata through [`event_metadata_record()`](crates/devil-observability/src/lib.rs:376).
 - Add golden tests for all proposal payloads and lifecycle transitions.
 
-### 5.3 Missing semantic fabric prevents predictive IDE behavior
+### 5.3 Semantic fabric production hardening remains required
 
-Evidence: [`crates/devil-index/src/lib.rs`](crates/devil-index/src/lib.rs:1) is placeholder-only, and the accepted baseline states no active semantic indexing, embeddings, or vector retrieval in [`plans/evidence/phase-0/text-index-stress-baseline.md`](plans/evidence/phase-0/text-index-stress-baseline.md:37).
+Evidence: the Phase 3 semantic-fabric slice is now active and evidenced by `plans/evidence/phase-3/semantic-fabric-architecture-map.md`, `plans/evidence/phase-3/devil-index-tests.txt`, and the `devil-index` workflow tests. The remaining production gap is not placeholder activation; it is scale, parser/runtime breadth, live LSP supervision, vector/embedding governance, and end-to-end product integration.
 
 Remedy:
 
@@ -151,9 +154,9 @@ Remedy:
 - Add low-latency query APIs for completion ranking, go-to-definition, references, AI retrieval, test impact analysis, and agent planning.
 - Add speculative invalidation and cancellation tokens for obsolete parse, LSP, embedding, and ranking work.
 
-### 5.4 AI is provider abstraction only, not an execution plane
+### 5.4 AI execution plane is metadata-first but not fully productized
 
-Evidence: [`ModelProvider`](crates/devil-ai/src/lib.rs:216) abstracts provider calls, while provider implementations are stubs in [`crates/devil-ai-providers/src/lib.rs`](crates/devil-ai-providers/src/lib.rs:23). [`crates/devil-agent/src/lib.rs`](crates/devil-agent/src/lib.rs:1) is empty.
+Evidence: `devil-ai` now includes provider routing with policy decisions, `devil-ai-providers` includes deterministic/local and configured adapter tests, and `devil-agent` includes agent state-machine and Legion workflow coordination slices. Hosted/cloud providers, production worker lanes, and autonomous apply remain policy-gated.
 
 Remedy:
 
@@ -195,7 +198,7 @@ Remedy:
 - Make dependency policy complete for every workspace crate.
 - Fail the gate when a crate lacks a policy section.
 - Move hardcoded dependency requirements out of [`Policy::from_markdown()`](xtask/src/main.rs:245) and into [`plans/dependency-policy.md`](plans/dependency-policy.md).
-- Add policy sections before activating placeholder crates or adding new runtime crates.
+- Add or update policy sections before expanding any accepted runtime surface or adding new runtime crates.
 - Add CI gates for protocol symbol drift, architecture-boundary imports, event coverage, proposal-only mutation, and privacy retention defaults.
 
 ---
@@ -211,7 +214,7 @@ Technical steps:
 1. Mark stale findings in [`plans/architecture-review-full-codebase-v0.1.md`](plans/architecture-review-full-codebase-v0.1.md:61) and [`plans/architecture-review-phases-5-6-v0.1.md`](plans/architecture-review-phases-5-6-v0.1.md:25) as historical where they contradict current save and UI behavior.
 2. Expand [`plans/dependency-policy.md`](plans/dependency-policy.md:9) to include every current crate and all planned runtime crates.
 3. Change [`validate_dependency_policy()`](xtask/src/main.rs:117) so missing crate policy is a violation, not a silent skip.
-4. Require a new ADR before activating each placeholder crate: index, agent, tracker, memory, plugin, LSP, terminal, collaboration, remote.
+4. Require a new or revised ADR before expanding runtime authority beyond accepted bounded surfaces: semantic index, agent, tracker, memory, plugin, LSP, terminal, collaboration, remote, telemetry, retention, cloud, and model-flywheel surfaces.
 5. Add architecture-gate tests proving UI does not own editor/workspace state, saves remain proposal-mediated, and source snapshots are not persisted by default.
 
 Validation gate:
@@ -421,7 +424,7 @@ The roadmap should not be parallelized in a way that violates core safety depend
 3. Do not enable remote workspace writes until local proposal and conflict semantics are generalized and tested.
 4. Do not enable collaborative editing until the editor text model supports operation replay, snapshot leases, and convergence tests.
 5. Do not enable predictive semantic indexing on the live edit path until the text model supports incremental line metrics, chunked snapshots, and bounded background queues.
-6. Do not activate placeholder crates without dependency-policy entries, ADR acceptance, protocol contracts, and tests.
+6. Do not expand runtime surfaces without dependency-policy entries, ADR acceptance, protocol contracts, ownership tests, security tests, and evidence.
 
 ---
 
@@ -431,4 +434,4 @@ The current repository has the right architectural instincts: Rust-first boundar
 
 The gap to a 2026 IDE is nevertheless substantial. The repository must evolve from a local deterministic IDE core into a distributed platform with a semantic fabric, agentic control plane, sandboxed extension runtime, collaboration substrate, and edge workspace agent. The highest-leverage path is not to graft those systems onto the app crate. The correct path is to promote the existing proposal, protocol, event, and policy patterns into universal platform contracts that every advanced subsystem must consume.
 
-The next implementation handoff should start with Phase 0, Phase 1, and Phase 2. Those phases remove the current scalability and governance blockers and create the stable mutation substrate required for AI, semantic prediction, WASM plugins, collaboration, and edge remote development.
+The next implementation handoff should start from the current accepted baseline and drive remaining Legion end-to-end product gaps through the same safety gates. Reopen earlier phases only when current code or evidence shows a regression in scalability, proposal mediation, governance, privacy, or authority boundaries.
