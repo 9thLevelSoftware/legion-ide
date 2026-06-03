@@ -1,4 +1,4 @@
-# Devil IDE — Architecture Review for Phases 5-6 v0.1
+# Legion IDE - Architecture Review for Phases 5-6 v0.1
 
 Status: **HOLD FOR REQUIRED CHANGES**
 
@@ -23,6 +23,8 @@ Primary source artifacts reviewed:
 The phase 5 and phase 6 direction is architecturally correct, but the plan is not implementation-ready without stronger contract and sequencing guards.
 
 > Historical rebaseline note (2026-05-15): the first two bullets below, phase 5 current-state gaps 1-2, and phase 6 current-state gap 1 describe superseded spike behavior. The current shell is projection-only through [`Shell`](crates/devil-ui/src/ui.rs:228), and current manual saves route through [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) into [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021).
+>
+> Current correction (2026-06-02): this review also predates later observability, proposal, collaboration, plugin, remote, terminal, telemetry, retention, GUI productization, and Legion workflow slices. Treat placeholder language below as historical unless it is explicitly describing still-gated production expansion.
 
 - **Historical (superseded by the current shell): Phase 5 had to begin as a replacement of spike UI ownership**, not as incremental extension of the earlier shell. The current [`Shell`](crates/devil-ui/src/ui.rs:228) no longer owns `EditorSession` and now emits [`CommandDispatchIntent`](crates/devil-ui/src/ui.rs:141) without mutating editor or workspace state.
 - **Historical (superseded by the current manual save workflow): Phase 6 was blocked until the save path became proposal-mediated.** Current [`SaveWorkflowService::save_active_buffer()`](crates/devil-app/src/lib.rs:938) performs save request, proposal creation, validation, preview, event/audit observation, and then applies the write through [`WorkspaceActor::save_file_with_proposal()`](crates/devil-app/src/lib.rs:1021).
@@ -69,7 +71,7 @@ The intended phase 6 architecture is essential and correctly sequenced. It enfor
 5. **Proposal DTOs are close but incomplete.** [`WorkspaceProposal`](crates/devil-protocol/src/lib.rs:783) contains principal, capability, correlation, preconditions, preview, and timing, but the implementation plan also requires trust decision, required capability, diagnostics, and audit lifecycle fields in [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:157).
 6. **Save proposal payload is too small for phase 6 safety.** [`SaveFileProposal`](crates/devil-protocol/src/lib.rs:873) contains file identity and snapshot id only. The save lifecycle needs buffer version, file content version, workspace generation, expected fingerprint, save intent, and conflict policy either in the payload or in mandatory preconditions.
 7. **Proposal lifecycle responses do not express audit-grade outcomes.** [`ProposalResponse`](crates/devil-protocol/src/lib.rs:1568) returns valid, preview, applied, or denied, but phase 6 needs created, validated, approved, rejected, applied, failed, rolled back, conflict, and stale states.
-8. **Observability contracts exist but are not implemented.** [`EventEnvelope`](crates/devil-protocol/src/lib.rs:1725) exists, but [`crates/devil-observability/src/lib.rs`](crates/devil-observability/src/lib.rs:1) remains a placeholder. Phase 6 requires proposal and conflict observability events in [`plans/foundational-core-ide-platform-implementation-plan-v0.1.md`](plans/foundational-core-ide-platform-implementation-plan-v0.1.md:160).
+8. **Historical: observability contracts existed before the current implementation.** [`devil-observability`](crates/devil-observability/src/lib.rs:1) now contains metadata-only sinks, envelope builders, redaction behavior, and proposal/event helper coverage. The remaining production work is durable event storage, operational replay, distributed trace correlation, and productized diagnostics surfaces without raw-source or secret retention.
 9. **Filesystem and workspace ADRs are not accepted artifacts.** The core architecture requires ADR decisions for file system abstraction, atomic save, conflict detection, path policy, workspace state, trust policy, watcher behavior, and identity strategy in [`plans/ide-core-architecture-spec-v0.1.md`](plans/ide-core-architecture-spec-v0.1.md:962). Phase 6 should not finalize save semantics without those decisions.
 
 ### Required phase 6 changes

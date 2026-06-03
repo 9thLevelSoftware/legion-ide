@@ -1,4 +1,4 @@
-# Dependency Policy for Devil IDE v0.1
+# Dependency Policy for Legion IDE v0.1
 
 ## Scope
 

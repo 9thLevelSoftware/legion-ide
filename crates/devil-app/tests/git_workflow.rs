@@ -36,7 +36,7 @@ impl TempGitRepo {
         run_git(&root, ["init"]);
         run_git(&root, ["branch", "-M", "master"]);
         run_git(&root, ["config", "user.email", "devil@example.test"]);
-        run_git(&root, ["config", "user.name", "Devil Test"]);
+        run_git(&root, ["config", "user.name", "Legion Test"]);
         Self { root }
     }
 
@@ -124,7 +124,7 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         projection
             .blame_lines
             .iter()
-            .any(|line| line.author == "Devil Test")
+            .any(|line| line.author == "Legion Test")
     );
     assert!(
         projection

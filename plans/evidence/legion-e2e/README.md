@@ -14,4 +14,9 @@ Required final gates:
 Record command, working directory, exit code, and raw output for every phase gate.
 
 Complete current final-gate capture: `20260602T091320_final_gates.txt`.
+Latest rebaseline/product-surface gate capture: `20260602T182617_rebaseline_product_surface_gates.txt`.
+Latest dock/mode-shell gate capture: `20260602T184509_dock_mode_shell_gates.txt`.
+Latest Assist llama.cpp provider gate capture: `20260602T190023_assist_llama_cpp_provider_gates.txt`.
+Latest Manual editor completion gate capture: `20260602T191139_editor_completion_gates.txt`.
+Latest Phase 8 trace/model-flywheel dry-run gate capture: `20260602T204859_phase8_trace_model_flywheel_gates.txt`.
 The evidence redacts absolute workspace paths as `<workspace>` to keep committed logs machine-neutral.

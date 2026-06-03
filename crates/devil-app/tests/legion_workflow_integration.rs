@@ -12,15 +12,21 @@ use devil_app::{
 };
 use devil_editor::{TextEdit, TextPosition};
 use devil_protocol::{
-    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, ByteRange, CapabilityId,
+    AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, ByteRange,
+    CancellationTokenId, CanonicalPath, CapabilityDecision, CapabilityDecisionId, CapabilityId,
     CausalityId, CommandRiskLabel, CorrelationId, DelegatedTaskAffectedTargetSummary,
     DelegatedTaskOperationClass, DelegatedTaskPlanId, DelegatedTaskPlanningBoundaryInput,
     DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile, FileFingerprint,
-    LegionWorkflowConflictState, LegionWorkflowDecisionKind, LegionWorkflowDependency,
-    LegionWorkflowDependencyId, LegionWorkflowDependencyState, LegionWorkflowMergeApproval,
-    LegionWorkflowMergeReadinessBlocker, LegionWorkflowMergeReadinessState,
-    LegionWorkflowModelBackend, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
-    LegionWorkflowSessionId, LegionWorkflowSignOff, LegionWorkflowSignOffId,
+    LegionCloudLaneBudget, LegionCloudLaneSecretScanStatus, LegionCloudLaneTaskId,
+    LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneUploadManifest,
+    LegionEvidenceKind, LegionProviderLocalityPreference, LegionProviderPrivacyPolicy,
+    LegionTaskContextRef, LegionTaskContextRefKind, LegionTaskFileScope, LegionTaskOutputContract,
+    LegionTaskPacket, LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan,
+    LegionWorkerResultKind, LegionWorkflowConflictState, LegionWorkflowDecisionKind,
+    LegionWorkflowDependency, LegionWorkflowDependencyId, LegionWorkflowDependencyState,
+    LegionWorkflowMergeApproval, LegionWorkflowMergeReadinessBlocker,
+    LegionWorkflowMergeReadinessState, LegionWorkflowModelBackend, LegionWorkflowRiskMonitorState,
+    LegionWorkflowSession, LegionWorkflowSessionId, LegionWorkflowSignOff, LegionWorkflowSignOffId,
     LegionWorkflowSignOffState, LegionWorkflowState, LegionWorkflowVerificationGate,
     LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerRole,
@@ -318,6 +324,107 @@ fn allow_delegated_runtime(app: &mut AppComposition, plan_id: &DelegatedTaskPlan
     .expect("allow delegated runtime");
 }
 
+fn cloud_lane_task_request(workspace_id: WorkspaceId) -> LegionCloudLaneTaskRequest {
+    let allowed_scope = LegionTaskFileScope {
+        scope_id: "cloud-app-allowed:main".to_string(),
+        path: CanonicalPath("/workspace/main.txt".to_string()),
+        fingerprint: Some(fingerprint("cloud-app-main")),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    let forbidden_scope = LegionTaskFileScope {
+        scope_id: "cloud-app-forbidden:env".to_string(),
+        path: CanonicalPath("/workspace/.env".to_string()),
+        fingerprint: Some(fingerprint("cloud-app-env")),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    LegionCloudLaneTaskRequest {
+        task_id: LegionCloudLaneTaskId("cloud-task:app:1".to_string()),
+        lane_id: "cloud-lane:validation".to_string(),
+        control_plane_endpoint_id: "endpoint:legion-cloud:app".to_string(),
+        task_packet: LegionTaskPacket {
+            packet_id: LegionTaskPacketId("cloud-packet:app:1".to_string()),
+            workspace_id,
+            objective_summary_hash: fingerprint("cloud-app-objective"),
+            allowed_files: vec![allowed_scope.clone()],
+            forbidden_files: vec![forbidden_scope.clone()],
+            context_snippet_refs: vec![LegionTaskContextRef {
+                reference_id: "cloud-app-context:1".to_string(),
+                kind: LegionTaskContextRefKind::ContextSnippet,
+                payload_hash: fingerprint("cloud-app-context-hash"),
+                redacted_summary: "redacted cloud task context".to_string(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            full_file_refs: Vec::new(),
+            command_output_refs: Vec::new(),
+            output_contract: LegionTaskOutputContract {
+                expected_result_kind: LegionWorkerResultKind::PatchProposal,
+                proposal_only: true,
+                direct_mutation_allowed: false,
+                required_evidence_kinds: vec![LegionEvidenceKind::CommandRun],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            validation_plan: LegionTaskValidationPlan {
+                required_commands: vec!["cargo test -p devil-app legion_cloud_lane".to_string()],
+                success_criteria: vec!["cloud lane app test passes".to_string()],
+                stop_conditions: vec!["policy denied".to_string()],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            policy: LegionTaskPolicy {
+                locality_preference: LegionProviderLocalityPreference::RemoteAllowed,
+                privacy_policy: LegionProviderPrivacyPolicy::MetadataOnly,
+                cost_budget_cents: Some(75),
+                latency_budget_ms: Some(30_000),
+                allow_network: true,
+                allow_direct_workspace_mutation: false,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            correlation_id: CorrelationId(901),
+            causality_id: causality(901),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        upload_manifest: LegionCloudLaneUploadManifest {
+            manifest_id: "cloud-upload:app:1".to_string(),
+            allowed_files: vec![allowed_scope],
+            forbidden_files: vec![forbidden_scope],
+            total_upload_bytes: 12_288,
+            scope_visible_to_user: true,
+            contains_forbidden_material: false,
+            secret_scan_status: LegionCloudLaneSecretScanStatus::Passed,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        budget: LegionCloudLaneBudget {
+            max_cost_cents: 75,
+            estimated_cost_cents: 50,
+            max_queue_depth: 2,
+            current_queue_depth: 1,
+            usage_metering_label: "meter:app:cloud-lane".to_string(),
+            hard_cap_enforced: true,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        capability_decision: CapabilityDecision {
+            decision_id: CapabilityDecisionId(701),
+            granted: true,
+            capability: CapabilityId("cloud.lane.submit".to_string()),
+            reason: Some("allowed".to_string()),
+        },
+        cancellation_token: CancellationTokenId(uuid::Uuid::from_u128(0xaaaa)),
+        correlation_id: CorrelationId(901),
+        causality_id: causality(901),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
 #[test]
 fn legion_workflow_session_not_found_fails_closed() {
     let mut app = automate_app();
@@ -344,6 +451,56 @@ fn manual_mode_rejects_local_legion_workflow_execution() {
         err.to_string()
             .contains("Automate workflow dispatch requires")
     );
+}
+
+#[test]
+fn legion_cloud_lane_app_submit_enforces_policy_and_projects_status() {
+    let root = temp_workspace("cloud-lane");
+    let mut app = automate_app();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("principal:cloud".to_string()),
+        )
+        .expect("open workspace");
+    app.enable_legion_cloud_lane_runtime("https://cloud.legion.invalid", 75, 32_768)
+        .expect("enable cloud lane");
+
+    let request = cloud_lane_task_request(opened.workspace_id);
+    let status = app
+        .submit_legion_cloud_lane_task(request.clone())
+        .expect("submit cloud lane task");
+    assert_eq!(status.state, LegionCloudLaneTaskState::Submitted);
+
+    let projection = app.legion_cloud_lane_projection();
+    assert!(projection.runtime_enabled);
+    assert_eq!(projection.rows.len(), 1);
+    assert_eq!(projection.rows[0].task_id, request.task_id);
+    assert_eq!(
+        projection.rows[0].state,
+        LegionCloudLaneTaskState::Submitted
+    );
+    assert!(projection.rows[0].scope_visible_to_user);
+
+    let mut unsafe_request = request;
+    unsafe_request.task_id = LegionCloudLaneTaskId("cloud-task:app:unsafe".to_string());
+    unsafe_request.upload_manifest.contains_forbidden_material = true;
+    let error = app
+        .submit_legion_cloud_lane_task(unsafe_request)
+        .expect_err("unsafe upload scope must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("cloud upload manifest contains forbidden material")
+    );
+    assert_eq!(
+        app.legion_cloud_lane_projection().rows.len(),
+        1,
+        "rejected cloud submit must not create a task row"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

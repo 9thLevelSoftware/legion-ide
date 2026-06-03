@@ -1,4 +1,4 @@
-//! Devil IDE renderer-backed desktop entry point.
+//! Legion IDE renderer-backed desktop entry point.
 
 use anyhow::Result;
 

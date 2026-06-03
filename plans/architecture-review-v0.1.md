@@ -1,4 +1,4 @@
-# Devil IDE — Founding Architecture Review v0.1
+# Legion IDE - Founding Architecture Review v0.1
 
 Status: **PASS WITH CHANGES**
 

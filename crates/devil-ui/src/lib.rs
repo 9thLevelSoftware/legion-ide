@@ -14,9 +14,9 @@ pub use ui::{
     ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
     GitBlameLineProjection, GitCommitProjection, GitConflictChoiceProjection,
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-    GitHunkStageProjection, GitProjection, Layout, PanelId, PanelRegistry, RenderMode,
-    SearchProjection, SearchResultProjection, SearchScopeProjection, SearchStatusKindProjection,
-    SearchStatusProjection, Shell, ShellCommandError, ShellLayoutProjection,
-    ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+    GitHunkStageProjection, GitProjection, Layout, PanelCapability, PanelId, PanelRegistry,
+    RenderMode, SearchProjection, SearchResultProjection, SearchScopeProjection,
+    SearchStatusKindProjection, SearchStatusProjection, Shell, ShellCommandError,
+    ShellLayoutProjection, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
     StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
 };

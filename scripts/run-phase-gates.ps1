@@ -21,4 +21,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 Write-Host "[6/6] Supply-chain policy gate"
 cargo deny check
 
-Write-Host "All Devil IDE phase gates passed."
+Write-Host "All Legion IDE phase gates passed."

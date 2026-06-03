@@ -1,4 +1,4 @@
-//! Shared protocol types, event schemas, action schemas, and versioning for Devil IDE.
+//! Shared protocol types, event schemas, action schemas, and versioning for Legion IDE.
 
 #![warn(missing_docs)]
 
@@ -9,6 +9,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
+
+/// User-facing product name.
+///
+/// Internal crates and package names intentionally keep the `devil-*` namespace until
+/// a separate migration can be completed without destabilizing dependency policy.
+pub const PRODUCT_NAME: &str = "Legion IDE";
+
+/// Short user-facing product name.
+pub const PRODUCT_SHORT_NAME: &str = "Legion";
+
+/// Current product environment-variable prefix.
+pub const PRODUCT_ENV_PREFIX: &str = "LEGION";
+
+/// Legacy environment-variable prefix retained for compatibility.
+pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
 
 // -----------------------------------------------------------------------------
 // Core identifiers and shared primitives
@@ -8257,6 +8272,138 @@ pub enum ProductMode {
     Automate,
     /// Legion runs a full workflow through planning, execution, verification, and sign-off.
     LegionWorkflows,
+}
+
+impl ProductMode {
+    /// Stable user-facing product-mode label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Assist => "Assist",
+            Self::Delegates => "Delegate",
+            Self::Automate => "Automate",
+            Self::LegionWorkflows => "Legion Workflows",
+        }
+    }
+
+    /// Whether this product mode allows a runtime surface.
+    pub fn allows_runtime_surface(self, surface: ProductRuntimeSurface) -> bool {
+        product_mode_allows_runtime_surface(self, surface)
+    }
+}
+
+/// Runtime surface or panel capability governed by product mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProductRuntimeSurface {
+    /// Deterministic local IDE surface.
+    ManualIde,
+    /// Plugin management metadata surface without plugin runtime execution.
+    PluginManagement,
+    /// Assisted AI request or preview surface.
+    AssistedAi,
+    /// BYOK or hosted model/provider surface.
+    CloudProvider,
+    /// Network egress surface.
+    NetworkEgress,
+    /// Hosted telemetry export or spool surface.
+    HostedTelemetry,
+    /// Delegated task planning or review surface.
+    DelegatedTask,
+    /// Runtime worker or sandbox orchestration surface.
+    WorkerRuntime,
+    /// Automation or workflow orchestration surface.
+    Automation,
+    /// Collaboration session surface.
+    Collaboration,
+    /// Remote workspace surface.
+    RemoteWorkspace,
+    /// Plugin runtime execution surface.
+    PluginRuntime,
+}
+
+/// Evaluate product-mode access to a runtime surface.
+pub fn product_mode_allows_runtime_surface(
+    mode: ProductMode,
+    surface: ProductRuntimeSurface,
+) -> bool {
+    use ProductMode::{Assist, Automate, Delegates, LegionWorkflows, Manual};
+    use ProductRuntimeSurface::{
+        AssistedAi, Automation, CloudProvider, Collaboration, DelegatedTask, HostedTelemetry,
+        ManualIde, NetworkEgress, PluginManagement, PluginRuntime, RemoteWorkspace, WorkerRuntime,
+    };
+
+    match mode {
+        Manual => matches!(surface, ManualIde | PluginManagement),
+        Assist => matches!(
+            surface,
+            ManualIde
+                | PluginManagement
+                | AssistedAi
+                | CloudProvider
+                | NetworkEgress
+                | HostedTelemetry
+        ),
+        Delegates => matches!(
+            surface,
+            ManualIde
+                | PluginManagement
+                | AssistedAi
+                | CloudProvider
+                | NetworkEgress
+                | HostedTelemetry
+                | DelegatedTask
+                | WorkerRuntime
+                | Collaboration
+        ),
+        Automate | LegionWorkflows => matches!(
+            surface,
+            ManualIde
+                | PluginManagement
+                | AssistedAi
+                | CloudProvider
+                | NetworkEgress
+                | HostedTelemetry
+                | DelegatedTask
+                | WorkerRuntime
+                | Automation
+                | Collaboration
+                | RemoteWorkspace
+                | PluginRuntime
+        ),
+    }
+}
+
+/// Classify a capability id into the product-mode runtime surface it needs.
+pub fn product_runtime_surface_for_capability(capability: &CapabilityId) -> ProductRuntimeSurface {
+    let capability = capability.0.as_str();
+    if capability.starts_with("telemetry.") || capability.contains(".telemetry.") {
+        ProductRuntimeSurface::HostedTelemetry
+    } else if capability.starts_with("remote.") {
+        ProductRuntimeSurface::RemoteWorkspace
+    } else if capability.starts_with("network.") {
+        ProductRuntimeSurface::NetworkEgress
+    } else if capability.starts_with("provider.")
+        || capability.starts_with("ai.provider.")
+        || capability.starts_with("cloud.")
+    {
+        ProductRuntimeSurface::CloudProvider
+    } else if capability.starts_with("ai.") {
+        ProductRuntimeSurface::AssistedAi
+    } else if capability.starts_with("legion.workflow.") || capability.starts_with("mcp.") {
+        ProductRuntimeSurface::Automation
+    } else if capability.starts_with("delegate.") {
+        ProductRuntimeSurface::DelegatedTask
+    } else if capability.starts_with("worker.") || capability.starts_with("sandbox.") {
+        ProductRuntimeSurface::WorkerRuntime
+    } else if capability.starts_with("collaboration.") {
+        ProductRuntimeSurface::Collaboration
+    } else if capability.starts_with("plugin.runtime.") {
+        ProductRuntimeSurface::PluginRuntime
+    } else if capability.starts_with("plugin.") {
+        ProductRuntimeSurface::PluginManagement
+    } else {
+        ProductRuntimeSurface::ManualIde
+    }
 }
 
 /// Risk label for command-registry entries.
@@ -18222,7 +18369,7 @@ pub enum VsCodeExtensionKind {
     Unknown,
 }
 
-/// Devil compatibility tier for a VS Code extension surface.
+/// Legion compatibility tier for a VS Code extension surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum VsCodeCompatibilityTier {
     /// Tier 0: declarative manifest-only contributions.
@@ -18259,7 +18406,7 @@ pub struct VsCodeActivationEvent {
     pub status: VsCodeCompatibilityStatus,
 }
 
-/// VS Code contribution kind mapped into Devil contracts.
+/// VS Code contribution kind mapped into Legion contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VsCodeContributionKind {
     /// Theme contribution.
@@ -18339,7 +18486,7 @@ pub struct VsCodeCompatibilityDiagnostic {
 pub struct VsCodeExtensionManifest {
     /// Stable extension identifier.
     pub extension_id: VsCodeExtensionId,
-    /// Devil plugin identifier reserved for policy correlation.
+    /// Legion plugin identifier reserved for policy correlation.
     pub plugin_id: PluginId,
     /// Publisher from package metadata.
     pub publisher: String,
@@ -19706,6 +19853,22 @@ pub struct CapabilityRequestContext {
     /// Whether separate hosted raw-source export consent has been verified.
     #[serde(default)]
     pub raw_source_hosted_export_consent_current: bool,
+    /// Estimated cloud-lane task cost in cents for hard-cap enforcement.
+    pub cloud_lane_estimated_cost_cents: Option<u32>,
+    /// Cloud-lane upload size in bytes for upload-bound enforcement.
+    pub cloud_lane_upload_bytes: Option<u64>,
+    /// Whether the cloud upload scope has been shown to the user before submit.
+    #[serde(default)]
+    pub cloud_lane_scope_visible_to_user: bool,
+    /// Number of forbidden upload entries detected by scope/secret policy.
+    #[serde(default)]
+    pub cloud_lane_forbidden_upload_count: u32,
+    /// Whether the task packet was validated before the capability request.
+    #[serde(default)]
+    pub cloud_lane_task_packet_validated: bool,
+    /// Whether a hard cost cap is enforced for this cloud request.
+    #[serde(default)]
+    pub cloud_lane_hard_cap_enforced: bool,
 }
 
 /// Plugin action proposal.
@@ -20422,6 +20585,34 @@ pub struct SessionPanelState {
     pub side_width_px: Option<u32>,
 }
 
+/// Persisted dock side layout for one product mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionDockSideLayout {
+    /// Stable side label, such as `Left`, `Right`, or `Bottom`.
+    pub side: String,
+    /// Stable panel identifier pinned as the side default.
+    pub pinned_default_panel_id: String,
+    /// Stable panel identifiers in the custom toolkit region.
+    pub custom_toolkit_panel_ids: Vec<String>,
+    /// Persisted splitter fraction.
+    pub splitter_fraction: f32,
+    /// Whether this side is collapsed.
+    pub collapsed: bool,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Persisted dock layout for one product mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionDockLayout {
+    /// Stable product mode label, such as `Manual`, `Assist`, `Delegate`, or `Automate`.
+    pub mode: String,
+    /// Persisted side layouts for this mode.
+    pub sides: Vec<SessionDockSideLayout>,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
 /// Persisted dirty indicator record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDirtyIndicator {
@@ -20458,6 +20649,9 @@ pub struct WorkspaceSessionRecord {
     pub explorer_expansion: Vec<CanonicalPath>,
     /// Panel state.
     pub panel_state: SessionPanelState,
+    /// Mode-scoped dock layouts.
+    #[serde(default)]
+    pub dock_layouts: Vec<SessionDockLayout>,
     /// Dirty indicators.
     pub dirty_indicators: Vec<SessionDirtyIndicator>,
     /// Last saved timestamp.
@@ -22999,6 +23193,219 @@ pub struct LegionWorkerResult {
     pub schema_version: u16,
 }
 
+/// Stable Legion Cloud Lane task identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LegionCloudLaneTaskId(pub String);
+
+/// Secret-scan status for a cloud upload manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionCloudLaneSecretScanStatus {
+    /// Secret scan has not run; cloud submit must reject.
+    NotRun,
+    /// Secret scan passed.
+    Passed,
+    /// Secret scan found forbidden material.
+    Failed,
+}
+
+/// Metadata-only upload manifest for a Legion Cloud Lane task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneUploadManifest {
+    /// Stable manifest id.
+    pub manifest_id: String,
+    /// Explicit allowed file scopes for upload.
+    pub allowed_files: Vec<LegionTaskFileScope>,
+    /// Explicit forbidden file scopes that must not be uploaded.
+    pub forbidden_files: Vec<LegionTaskFileScope>,
+    /// Total planned upload bytes.
+    pub total_upload_bytes: u64,
+    /// Whether the user-visible upload scope was presented before submission.
+    pub scope_visible_to_user: bool,
+    /// Whether forbidden material was detected in the upload scope.
+    pub contains_forbidden_material: bool,
+    /// Secret-scan disposition.
+    pub secret_scan_status: LegionCloudLaneSecretScanStatus,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Manifest schema version.
+    pub schema_version: u16,
+}
+
+/// Hard-cap budget for a Legion Cloud Lane task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneBudget {
+    /// Maximum allowed task cost in cents.
+    pub max_cost_cents: u32,
+    /// Estimated task cost in cents before submit.
+    pub estimated_cost_cents: u32,
+    /// Maximum allowed queue depth.
+    pub max_queue_depth: u32,
+    /// Current queue depth observed before submit.
+    pub current_queue_depth: u32,
+    /// Display-safe metering label.
+    pub usage_metering_label: String,
+    /// Whether the hard cap is enforced by the caller/control plane.
+    pub hard_cap_enforced: bool,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Budget schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only cloud task request sent to the Legion control plane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneTaskRequest {
+    /// Stable cloud task id.
+    pub task_id: LegionCloudLaneTaskId,
+    /// Display-safe lane id.
+    pub lane_id: String,
+    /// Display-safe control-plane endpoint id.
+    pub control_plane_endpoint_id: String,
+    /// Scoped task packet. Raw repo contents remain external to this DTO.
+    pub task_packet: LegionTaskPacket,
+    /// Explicit upload manifest.
+    pub upload_manifest: LegionCloudLaneUploadManifest,
+    /// Cost/queue budget.
+    pub budget: LegionCloudLaneBudget,
+    /// Capability decision authorizing cloud submission.
+    pub capability_decision: CapabilityDecision,
+    /// Cancellation token for the remote task.
+    pub cancellation_token: CancellationTokenId,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Request schema version.
+    pub schema_version: u16,
+}
+
+/// Lifecycle state of a Legion Cloud Lane task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegionCloudLaneTaskState {
+    /// Request was submitted.
+    Submitted,
+    /// Task is queued.
+    Queued,
+    /// Task is running.
+    Running,
+    /// Task returned a proposal.
+    ProposalReady,
+    /// Task finished.
+    Completed,
+    /// Task was cancelled.
+    Cancelled,
+    /// Task failed.
+    Failed,
+}
+
+/// Metadata-only cloud task status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneTaskStatus {
+    /// Task id.
+    pub task_id: LegionCloudLaneTaskId,
+    /// Current task state.
+    pub state: LegionCloudLaneTaskState,
+    /// Display-safe status label.
+    pub status_label: String,
+    /// Estimated cost in cents.
+    pub estimated_cost_cents: u32,
+    /// Billed cost in cents.
+    pub billed_cost_cents: u32,
+    /// Queue position, when queued.
+    pub queue_position: Option<u32>,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Status schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only cloud task event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneTaskEvent {
+    /// Task id.
+    pub task_id: LegionCloudLaneTaskId,
+    /// Stable event id.
+    pub event_id: String,
+    /// Task state represented by this event.
+    pub state: LegionCloudLaneTaskState,
+    /// Display-safe event label.
+    pub event_label: String,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Event schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only proposal fetch response from Legion Cloud Lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneProposalResponse {
+    /// Task id.
+    pub task_id: LegionCloudLaneTaskId,
+    /// Proposal id returned by the cloud worker.
+    pub proposal_id: Option<ProposalId>,
+    /// Worker result metadata.
+    pub worker_result: Option<LegionWorkerResult>,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Response schema version.
+    pub schema_version: u16,
+}
+
+/// Projection row for the local Legion Cloud Lane panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneProjectionRow {
+    /// Task id.
+    pub task_id: LegionCloudLaneTaskId,
+    /// Lane id.
+    pub lane_id: String,
+    /// Current state.
+    pub state: LegionCloudLaneTaskState,
+    /// Display-safe status label.
+    pub status_label: String,
+    /// Estimated cost in cents.
+    pub estimated_cost_cents: u32,
+    /// Billed cost in cents.
+    pub billed_cost_cents: u32,
+    /// Planned upload bytes.
+    pub upload_bytes: u64,
+    /// Whether upload scope was visible before submit.
+    pub scope_visible_to_user: bool,
+    /// Proposal id, when available.
+    pub proposal_id: Option<ProposalId>,
+    /// Number of evidence records visible for this task.
+    pub evidence_count: usize,
+}
+
+/// Projection for app/UI-owned Legion Cloud Lane state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionCloudLaneProjection {
+    /// Projection id.
+    pub projection_id: String,
+    /// Whether cloud lane runtime is enabled by app policy.
+    pub runtime_enabled: bool,
+    /// Task rows.
+    pub rows: Vec<LegionCloudLaneProjectionRow>,
+    /// Display-safe status label.
+    pub status_label: String,
+    /// Generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Metadata redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
 /// Workflow lifecycle state for Legion orchestration metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegionWorkflowState {
@@ -23857,6 +24264,286 @@ pub fn validate_legion_task_packet(
             "legion.policy.allow_network",
             "privacy.denied_network",
         ));
+    }
+    Ok(())
+}
+
+fn validate_legion_cloud_upload_manifest(
+    manifest: &LegionCloudLaneUploadManifest,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema(
+        "legion.cloud.upload_manifest.schema_version",
+        manifest.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.cloud.upload_manifest.redaction_hints",
+        &manifest.redaction_hints,
+    )?;
+    validate_legion_string(
+        "legion.cloud.upload_manifest.manifest_id",
+        &manifest.manifest_id,
+    )?;
+    if manifest.allowed_files.is_empty() {
+        return Err(legion_contract_invalid(
+            "legion.cloud.upload_manifest.allowed_files",
+            "allowed_scope.missing",
+        ));
+    }
+    for scope in manifest
+        .allowed_files
+        .iter()
+        .chain(manifest.forbidden_files.iter())
+    {
+        validate_legion_file_scope(scope)?;
+    }
+    if manifest.total_upload_bytes == 0 {
+        return Err(legion_contract_invalid(
+            "legion.cloud.upload_manifest.total_upload_bytes",
+            "upload_bytes.zero",
+        ));
+    }
+    if !manifest.scope_visible_to_user {
+        return Err(legion_contract_invalid(
+            "legion.cloud.upload_manifest.scope_visible_to_user",
+            "scope_not_visible",
+        ));
+    }
+    if manifest.contains_forbidden_material {
+        return Err(legion_contract_invalid(
+            "legion.cloud.upload_manifest.contains_forbidden_material",
+            "forbidden_material",
+        ));
+    }
+    if manifest.secret_scan_status != LegionCloudLaneSecretScanStatus::Passed {
+        return Err(legion_contract_invalid(
+            "legion.cloud.upload_manifest.secret_scan_status",
+            "secret_scan.not_passed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_legion_cloud_lane_budget(
+    budget: &LegionCloudLaneBudget,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema("legion.cloud.budget.schema_version", budget.schema_version)?;
+    validate_legion_ai_redaction(
+        "legion.cloud.budget.redaction_hints",
+        &budget.redaction_hints,
+    )?;
+    validate_legion_string(
+        "legion.cloud.budget.usage_metering_label",
+        &budget.usage_metering_label,
+    )?;
+    if budget.max_cost_cents == 0 {
+        return Err(legion_contract_invalid(
+            "legion.cloud.budget.max_cost_cents",
+            "cost_budget.zero",
+        ));
+    }
+    if !budget.hard_cap_enforced {
+        return Err(legion_contract_invalid(
+            "legion.cloud.budget.hard_cap_enforced",
+            "hard_cap.required",
+        ));
+    }
+    if budget.estimated_cost_cents > budget.max_cost_cents {
+        return Err(legion_contract_invalid(
+            "legion.cloud.budget.estimated_cost_cents",
+            "cost_budget.exceeded",
+        ));
+    }
+    if budget.current_queue_depth > budget.max_queue_depth {
+        return Err(legion_contract_invalid(
+            "legion.cloud.budget.current_queue_depth",
+            "queue_depth.exceeded",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_legion_cloud_capability_decision(
+    decision: &CapabilityDecision,
+) -> Result<(), AssistedAiContractError> {
+    if decision.decision_id.0 == 0 {
+        return Err(legion_contract_invalid(
+            "legion.cloud.capability_decision",
+            "decision_id.zero",
+        ));
+    }
+    if !decision.granted {
+        return Err(legion_contract_invalid(
+            "legion.cloud.capability_decision",
+            "capability.denied",
+        ));
+    }
+    if decision.capability.0 != "cloud.lane.submit" {
+        return Err(legion_contract_invalid(
+            "legion.cloud.capability_decision",
+            "capability.mismatch",
+        ));
+    }
+    if let Some(reason) = &decision.reason {
+        validate_legion_string("legion.cloud.capability_decision.reason", reason)?;
+    }
+    Ok(())
+}
+
+/// Validates a metadata-only Legion Cloud Lane task request.
+pub fn validate_legion_cloud_lane_task_request(
+    request: &LegionCloudLaneTaskRequest,
+) -> Result<(), AssistedAiContractError> {
+    validate_assisted_ai_correlation(request.correlation_id, request.causality_id)?;
+    validate_legion_schema(
+        "legion.cloud.task_request.schema_version",
+        request.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.cloud.task_request.redaction_hints",
+        &request.redaction_hints,
+    )?;
+    validate_legion_string("legion.cloud.task_request.task_id", &request.task_id.0)?;
+    validate_legion_string("legion.cloud.task_request.lane_id", &request.lane_id)?;
+    validate_legion_string(
+        "legion.cloud.task_request.control_plane_endpoint_id",
+        &request.control_plane_endpoint_id,
+    )?;
+    validate_legion_task_packet(&request.task_packet)?;
+    validate_legion_cloud_upload_manifest(&request.upload_manifest)?;
+    validate_legion_cloud_lane_budget(&request.budget)?;
+    validate_legion_cloud_capability_decision(&request.capability_decision)?;
+    if request.cancellation_token.0.is_nil() {
+        return Err(legion_contract_invalid(
+            "legion.cloud.task_request.cancellation_token",
+            "cancellation_token.nil",
+        ));
+    }
+    if !request.task_packet.policy.allow_network {
+        return Err(legion_contract_invalid(
+            "legion.cloud.task_request.task_packet.policy.allow_network",
+            "network.required_for_cloud",
+        ));
+    }
+    if request.task_packet.policy.privacy_policy == LegionProviderPrivacyPolicy::Denied {
+        return Err(legion_contract_invalid(
+            "legion.cloud.task_request.task_packet.policy.privacy_policy",
+            "privacy.denied",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a metadata-only Legion Cloud Lane task status.
+pub fn validate_legion_cloud_lane_task_status(
+    status: &LegionCloudLaneTaskStatus,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema(
+        "legion.cloud.task_status.schema_version",
+        status.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.cloud.task_status.redaction_hints",
+        &status.redaction_hints,
+    )?;
+    validate_legion_string("legion.cloud.task_status.task_id", &status.task_id.0)?;
+    validate_legion_string(
+        "legion.cloud.task_status.status_label",
+        &status.status_label,
+    )?;
+    if status.event_sequence.0 == 0 {
+        return Err(legion_contract_invalid(
+            "legion.cloud.task_status.event_sequence",
+            "event_sequence.zero",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a metadata-only Legion Cloud Lane task event.
+pub fn validate_legion_cloud_lane_task_event(
+    event: &LegionCloudLaneTaskEvent,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema(
+        "legion.cloud.task_event.schema_version",
+        event.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.cloud.task_event.redaction_hints",
+        &event.redaction_hints,
+    )?;
+    validate_legion_string("legion.cloud.task_event.task_id", &event.task_id.0)?;
+    validate_legion_string("legion.cloud.task_event.event_id", &event.event_id)?;
+    validate_legion_string("legion.cloud.task_event.event_label", &event.event_label)?;
+    if event.event_sequence.0 == 0 {
+        return Err(legion_contract_invalid(
+            "legion.cloud.task_event.event_sequence",
+            "event_sequence.zero",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates metadata-only Legion Cloud Lane proposal response.
+pub fn validate_legion_cloud_lane_proposal_response(
+    response: &LegionCloudLaneProposalResponse,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema(
+        "legion.cloud.proposal_response.schema_version",
+        response.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.cloud.proposal_response.redaction_hints",
+        &response.redaction_hints,
+    )?;
+    validate_legion_string(
+        "legion.cloud.proposal_response.task_id",
+        &response.task_id.0,
+    )?;
+    if let Some(result) = &response.worker_result {
+        validate_legion_worker_result(result)?;
+        if result.patch_proposal != response.proposal_id {
+            return Err(legion_contract_invalid(
+                "legion.cloud.proposal_response.proposal_id",
+                "worker_result.proposal_mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates metadata-only Legion Cloud Lane projection.
+pub fn validate_legion_cloud_lane_projection(
+    projection: &LegionCloudLaneProjection,
+) -> Result<(), AssistedAiContractError> {
+    validate_legion_schema(
+        "legion.cloud.projection.schema_version",
+        projection.schema_version,
+    )?;
+    validate_legion_ai_redaction(
+        "legion.cloud.projection.redaction_hints",
+        &projection.redaction_hints,
+    )?;
+    validate_legion_string(
+        "legion.cloud.projection.projection_id",
+        &projection.projection_id,
+    )?;
+    validate_legion_string(
+        "legion.cloud.projection.status_label",
+        &projection.status_label,
+    )?;
+    for row in &projection.rows {
+        validate_legion_string("legion.cloud.projection.row.task_id", &row.task_id.0)?;
+        validate_legion_string("legion.cloud.projection.row.lane_id", &row.lane_id)?;
+        validate_legion_string(
+            "legion.cloud.projection.row.status_label",
+            &row.status_label,
+        )?;
+        if !row.scope_visible_to_user {
+            return Err(legion_contract_invalid(
+                "legion.cloud.projection.row.scope_visible_to_user",
+                "scope_not_visible",
+            ));
+        }
     }
     Ok(())
 }

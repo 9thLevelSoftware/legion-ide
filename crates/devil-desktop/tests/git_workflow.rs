@@ -36,7 +36,7 @@ impl TempGitRepo {
         run_git(&root, ["init"]);
         run_git(&root, ["branch", "-M", "master"]);
         run_git(&root, ["config", "user.email", "devil@example.test"]);
-        run_git(&root, ["config", "user.name", "Devil Test"]);
+        run_git(&root, ["config", "user.name", "Legion Test"]);
         Self { root }
     }
 

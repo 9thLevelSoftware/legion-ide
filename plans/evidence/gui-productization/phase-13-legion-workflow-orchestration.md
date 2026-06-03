@@ -8,7 +8,7 @@ This document is the final evidence ledger for Phase 13: Legion Workflow Orchest
 
 ## Scope
 
-Phase 13 coordinates a Legion Workflow team across local and provider-backed worker metadata while preserving the existing Devil IDE authority boundaries.
+Phase 13 coordinates a Legion Workflow team across local and provider-backed worker metadata while preserving the existing Legion IDE authority boundaries.
 
 The accepted scope is metadata-first workflow orchestration. It includes protocol DTOs, a bounded agent coordinator, tracker and memory evidence records, app-owned execution and merge-readiness routing, projection-only UI rows, desktop review actions, final gate evidence, and an operational runbook.
 

@@ -1,6 +1,6 @@
-# Devil IDE Product Readiness Ledger
+# Legion IDE Product Readiness Ledger
 
-This ledger is the product-readiness track for Devil as an enterprise AI-native IDE with required VS Code extension compatibility. It is separate from substrate phase acceptance: a phase can prove architectural safety without proving that the product is ready for daily IDE use.
+This ledger is the product-readiness track for Legion as an enterprise AI-native IDE with required VS Code extension compatibility. It is separate from substrate phase acceptance: a phase can prove architectural safety without proving that the product is ready for daily IDE use.
 
 ## Product Target
 

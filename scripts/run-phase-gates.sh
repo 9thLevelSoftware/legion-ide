@@ -22,4 +22,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 printf '%s\n' '[6/6] Supply-chain policy gate'
 cargo deny check
 
-printf '%s\n' 'All Devil IDE phase gates passed.'
+printf '%s\n' 'All Legion IDE phase gates passed.'

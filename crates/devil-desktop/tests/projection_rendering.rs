@@ -471,9 +471,9 @@ fn projection_rendering_populates_required_phase2_surfaces() {
     );
     assert!(
         model
-            .right_console_rows
+            .directive_panel_rows
             .iter()
-            .any(|row| row.contains("directive console") && row.contains("artifacts=1"))
+            .any(|row| row.contains("directive dock") && row.contains("artifacts=1"))
     );
     assert!(
         model
@@ -766,7 +766,7 @@ fn projection_rendering_keeps_advanced_surfaces_metadata_and_projection_derived(
 
     assert!(
         model
-            .right_console_rows
+            .directive_panel_rows
             .iter()
             .any(|row| row.contains("proposal-mediated"))
     );
@@ -793,7 +793,7 @@ fn projection_rendering_keeps_advanced_surfaces_metadata_and_projection_derived(
     );
     assert!(
         model
-            .right_console_rows
+            .directive_panel_rows
             .iter()
             .any(|row| row.contains("remote=0"))
     );

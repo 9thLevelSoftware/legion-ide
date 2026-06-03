@@ -34,6 +34,49 @@ fn causality_id() -> CausalityId {
     CausalityId(Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap())
 }
 
+#[test]
+fn dto_contracts_product_mode_runtime_surface_policy_is_shared_and_fail_closed_for_manual() {
+    assert!(product_mode_allows_runtime_surface(
+        ProductMode::Manual,
+        ProductRuntimeSurface::ManualIde
+    ));
+    assert!(product_mode_allows_runtime_surface(
+        ProductMode::Manual,
+        ProductRuntimeSurface::PluginManagement
+    ));
+
+    for surface in [
+        ProductRuntimeSurface::AssistedAi,
+        ProductRuntimeSurface::CloudProvider,
+        ProductRuntimeSurface::NetworkEgress,
+        ProductRuntimeSurface::HostedTelemetry,
+        ProductRuntimeSurface::DelegatedTask,
+        ProductRuntimeSurface::WorkerRuntime,
+        ProductRuntimeSurface::Automation,
+        ProductRuntimeSurface::Collaboration,
+        ProductRuntimeSurface::RemoteWorkspace,
+        ProductRuntimeSurface::PluginRuntime,
+    ] {
+        assert!(
+            !product_mode_allows_runtime_surface(ProductMode::Manual, surface),
+            "Manual mode must deny {surface:?}"
+        );
+    }
+
+    assert_eq!(
+        product_runtime_surface_for_capability(&CapabilityId("telemetry.export.hosted".into())),
+        ProductRuntimeSurface::HostedTelemetry
+    );
+    assert_eq!(
+        product_runtime_surface_for_capability(&CapabilityId("remote.workspace.connect".into())),
+        ProductRuntimeSurface::RemoteWorkspace
+    );
+    assert_eq!(
+        product_runtime_surface_for_capability(&CapabilityId("legion.workflow.run".into())),
+        ProductRuntimeSurface::Automation
+    );
+}
+
 fn collaboration_vector() -> CollaborationVersionVector {
     CollaborationVersionVector {
         entries: vec![CollaborationVersionVectorEntry {
@@ -3833,6 +3876,18 @@ fn dto_contracts_session_record_schema_golden() {
             bottom_height_px: Some(240),
             side_width_px: Some(320),
         },
+        dock_layouts: vec![SessionDockLayout {
+            mode: "Delegate".to_string(),
+            sides: vec![SessionDockSideLayout {
+                side: "Right".to_string(),
+                pinned_default_panel_id: "approval_queue".to_string(),
+                custom_toolkit_panel_ids: vec!["delegation".to_string(), "context".to_string()],
+                splitter_fraction: 0.75,
+                collapsed: true,
+                schema_version: 1,
+            }],
+            schema_version: 1,
+        }],
         dirty_indicators: vec![SessionDirtyIndicator {
             buffer_id: BufferId(22),
             file_id: Some(FileId(33)),
@@ -3880,6 +3935,18 @@ fn dto_contracts_session_record_schema_golden() {
             "bottom_height_px": 240,
             "side_width_px": 320
         },
+        "dock_layouts": [{
+            "mode": "Delegate",
+            "sides": [{
+                "side": "Right",
+                "pinned_default_panel_id": "approval_queue",
+                "custom_toolkit_panel_ids": ["delegation", "context"],
+                "splitter_fraction": 0.75,
+                "collapsed": true,
+                "schema_version": 1
+            }],
+            "schema_version": 1
+        }],
         "dirty_indicators": [{
             "buffer_id": 22,
             "file_id": 33,
@@ -4270,6 +4337,12 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
             hosted_telemetry_consent_current: false,
             raw_source_retention_consent_current: false,
             raw_source_hosted_export_consent_current: false,
+            cloud_lane_estimated_cost_cents: Some(50),
+            cloud_lane_upload_bytes: Some(16_384),
+            cloud_lane_scope_visible_to_user: true,
+            cloud_lane_forbidden_upload_count: 0,
+            cloud_lane_task_packet_validated: true,
+            cloud_lane_hard_cap_enforced: true,
         },
         correlation_id: CorrelationId(91),
     };
@@ -4304,7 +4377,13 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                 "storage_explicit_apply": false,
                 "hosted_telemetry_consent_current": false,
                 "raw_source_retention_consent_current": false,
-                "raw_source_hosted_export_consent_current": false
+                "raw_source_hosted_export_consent_current": false,
+                "cloud_lane_estimated_cost_cents": 50,
+                "cloud_lane_upload_bytes": 16384,
+                "cloud_lane_scope_visible_to_user": true,
+                "cloud_lane_forbidden_upload_count": 0,
+                "cloud_lane_task_packet_validated": true,
+                "cloud_lane_hard_cap_enforced": true
             },
             "correlation_id": 91
         }
@@ -4328,6 +4407,8 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
             assert_eq!(target_path.expect("target path").0, "C:/repo/src/main.rs");
             assert_eq!(decision_id, Some(CapabilityDecisionId(4)));
             assert_eq!(context.write_byte_count, Some(4096));
+            assert_eq!(context.cloud_lane_estimated_cost_cents, Some(50));
+            assert!(context.cloud_lane_scope_visible_to_user);
             assert!(matches!(
                 context.command_class,
                 Some(CapabilityCommandClass::Terminal)
@@ -9793,6 +9874,122 @@ fn legion_task_packet() -> LegionTaskPacket {
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
+}
+
+fn cloud_lane_upload_manifest() -> LegionCloudLaneUploadManifest {
+    LegionCloudLaneUploadManifest {
+        manifest_id: "cloud-upload:phase7:1".to_string(),
+        allowed_files: vec![LegionTaskFileScope {
+            scope_id: "cloud-allowed:src-lib".to_string(),
+            path: CanonicalPath("/repo/src/lib.rs".to_string()),
+            fingerprint: Some(fingerprint("cloud-allowed-src-lib")),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        forbidden_files: vec![LegionTaskFileScope {
+            scope_id: "cloud-forbidden:env".to_string(),
+            path: CanonicalPath("/repo/.env".to_string()),
+            fingerprint: Some(fingerprint("cloud-forbidden-env")),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        total_upload_bytes: 16_384,
+        scope_visible_to_user: true,
+        contains_forbidden_material: false,
+        secret_scan_status: LegionCloudLaneSecretScanStatus::Passed,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn cloud_lane_budget() -> LegionCloudLaneBudget {
+    LegionCloudLaneBudget {
+        max_cost_cents: 75,
+        estimated_cost_cents: 50,
+        max_queue_depth: 2,
+        current_queue_depth: 1,
+        usage_metering_label: "meter:cloud-lane:unit".to_string(),
+        hard_cap_enforced: true,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn cloud_lane_request() -> LegionCloudLaneTaskRequest {
+    let mut task_packet = legion_task_packet();
+    task_packet.policy.locality_preference = LegionProviderLocalityPreference::RemoteAllowed;
+    task_packet.policy.allow_network = true;
+    LegionCloudLaneTaskRequest {
+        task_id: LegionCloudLaneTaskId("cloud-task:phase7:1".to_string()),
+        lane_id: "cloud-lane:validation".to_string(),
+        control_plane_endpoint_id: "endpoint:legion-cloud:unit".to_string(),
+        task_packet,
+        upload_manifest: cloud_lane_upload_manifest(),
+        budget: cloud_lane_budget(),
+        capability_decision: CapabilityDecision {
+            decision_id: CapabilityDecisionId(700),
+            granted: true,
+            capability: CapabilityId("cloud.lane.submit".to_string()),
+            reason: Some("cloud lane allowed by test policy".to_string()),
+        },
+        cancellation_token: cancellation_token_id(),
+        correlation_id: CorrelationId(901),
+        causality_id: causality_id(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+#[test]
+fn dto_contracts_legion_cloud_lane_task_request_is_metadata_only_and_budgeted() {
+    let request = cloud_lane_request();
+    validate_legion_cloud_lane_task_request(&request).expect("cloud request should validate");
+
+    let serialized = serde_json::to_string(&request).expect("serialize cloud request");
+    assert!(serialized.contains("cloud-task:phase7:1"));
+    assert!(serialized.contains("cloud.lane.submit"));
+    assert!(!serialized.contains("raw_prompt"));
+    assert!(!serialized.contains("raw_source"));
+    assert!(!serialized.contains("provider_payload"));
+    assert!(!serialized.contains("SECRET="));
+
+    let roundtrip: LegionCloudLaneTaskRequest =
+        serde_json::from_str(&serialized).expect("deserialize cloud request");
+    assert_eq!(roundtrip.task_id, request.task_id);
+
+    let mut missing_scope_visibility = request.clone();
+    missing_scope_visibility
+        .upload_manifest
+        .scope_visible_to_user = false;
+    assert_legion_contract_error(
+        validate_legion_cloud_lane_task_request(&missing_scope_visibility),
+        "legion.cloud.upload_manifest.scope_visible_to_user",
+        "scope_not_visible",
+    );
+
+    let mut forbidden_upload = request.clone();
+    forbidden_upload.upload_manifest.contains_forbidden_material = true;
+    assert_legion_contract_error(
+        validate_legion_cloud_lane_task_request(&forbidden_upload),
+        "legion.cloud.upload_manifest.contains_forbidden_material",
+        "forbidden_material",
+    );
+
+    let mut cost_over_budget = request.clone();
+    cost_over_budget.budget.estimated_cost_cents = 76;
+    assert_legion_contract_error(
+        validate_legion_cloud_lane_task_request(&cost_over_budget),
+        "legion.cloud.budget.estimated_cost_cents",
+        "cost_budget.exceeded",
+    );
+
+    let mut missing_capability = request.clone();
+    missing_capability.capability_decision.granted = false;
+    assert_legion_contract_error(
+        validate_legion_cloud_lane_task_request(&missing_capability),
+        "legion.cloud.capability_decision",
+        "capability.denied",
+    );
 }
 
 #[test]

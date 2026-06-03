@@ -1,0 +1,16 @@
+workers:
+  - id: qwen25-coder-1_5b
+    kind: llama_cpp
+    endpoint: "http://127.0.0.1:8011/v1"
+    model: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    command: ["llama-server", "--host", "127.0.0.1", "--port", "8011", "-m", "models/qwen25-coder-1.5b.gguf"]
+  - id: qwen25-coder-3b
+    kind: llama_cpp
+    endpoint: "http://127.0.0.1:8013/v1"
+    model: "Qwen/Qwen2.5-Coder-3B-Instruct"
+    command: ["llama-server", "--host", "127.0.0.1", "--port", "8013", "-m", "models/qwen25-coder-3b.gguf"]
+  - id: ollama-local
+    kind: ollama
+    endpoint: "http://127.0.0.1:11434/v1"
+    model: "operator-configured"
+    command: ["ollama", "serve"]

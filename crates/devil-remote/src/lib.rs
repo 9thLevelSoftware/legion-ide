@@ -5,8 +5,10 @@
 use std::collections::{HashMap, HashSet};
 
 use devil_protocol::{
-    CancellationTokenId, CanonicalPath, CapabilityDecision, CorrelationId, EventSequence,
-    FileContentVersion, FileFingerprint, FileId, PrincipalId, ProposalId, RedactionHint,
+    AssistedAiContractError, CancellationTokenId, CanonicalPath, CapabilityDecision, CorrelationId,
+    EventSequence, FileContentVersion, FileFingerprint, FileId, LegionCloudLaneProposalResponse,
+    LegionCloudLaneTaskEvent, LegionCloudLaneTaskId, LegionCloudLaneTaskRequest,
+    LegionCloudLaneTaskStatus, LegionEvidenceRecord, PrincipalId, ProposalId, RedactionHint,
     RemoteAgentDescriptor, RemoteAgentId, RemoteAuditRecord, RemoteAuthorityDescriptor,
     RemoteAuthorityId, RemoteCapabilityKind, RemoteFilesystemOperation,
     RemoteFilesystemOperationKind, RemoteFilesystemSnapshot, RemoteNetworkHealthState,
@@ -15,7 +17,9 @@ use devil_protocol::{
     RemoteTransportEnvelope, RemoteTransportPayload, RemoteWorkspaceLifecycleState,
     RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId, RemoteWritePreconditions,
     RetentionLabel, SnapshotId, TimestampMillis, WorkspaceGeneration, WorkspaceId,
-    WorkspaceTrustState,
+    WorkspaceTrustState, validate_legion_cloud_lane_proposal_response,
+    validate_legion_cloud_lane_task_event, validate_legion_cloud_lane_task_request,
+    validate_legion_cloud_lane_task_status, validate_legion_evidence_record,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -116,6 +120,243 @@ impl Default for RemoteRuntimeConfig {
             max_file_bytes: 4 * 1024 * 1024,
             max_output_bytes: 256 * 1024,
         }
+    }
+}
+
+/// Deterministic Legion Cloud Lane client limits and feature switches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegionCloudLaneClientConfig {
+    /// Whether cloud-lane operations may call the configured transport.
+    pub runtime_enabled: bool,
+    /// Maximum cost in cents accepted before transport submission.
+    pub max_cost_cents: u32,
+    /// Maximum metadata-declared upload bytes accepted before transport submission.
+    pub max_upload_bytes: u64,
+}
+
+impl LegionCloudLaneClientConfig {
+    /// Build an enabled config with explicit task cost and upload caps.
+    pub fn enabled(max_cost_cents: u32, max_upload_bytes: u64) -> Self {
+        Self {
+            runtime_enabled: true,
+            max_cost_cents,
+            max_upload_bytes,
+        }
+    }
+
+    /// Build the conservative deterministic config used by crate-level tests.
+    pub fn enabled_for_tests() -> Self {
+        Self::enabled(75, 32 * 1024)
+    }
+}
+
+/// Transport boundary used by Legion Cloud Lane clients.
+pub trait LegionCloudLaneTransport {
+    /// Submit a metadata-only task request to the cloud-lane control plane.
+    fn submit_task(
+        &mut self,
+        request: &LegionCloudLaneTaskRequest,
+    ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError>;
+
+    /// Stream currently available metadata-only task events.
+    fn stream_task_events(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<Vec<LegionCloudLaneTaskEvent>, RemoteRuntimeError>;
+
+    /// Cancel a task through its scoped cancellation token.
+    fn cancel_task(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+        cancellation_token: CancellationTokenId,
+        reason_label: &str,
+    ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError>;
+
+    /// Fetch metadata for a cloud-produced proposal.
+    fn fetch_task_proposal(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<LegionCloudLaneProposalResponse, RemoteRuntimeError>;
+
+    /// Fetch metadata-only evidence records for a cloud task.
+    fn fetch_task_evidence(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<Vec<LegionEvidenceRecord>, RemoteRuntimeError>;
+}
+
+/// Policy-validating client wrapper for a Legion Cloud Lane transport.
+#[derive(Debug, Clone)]
+pub struct LegionCloudLaneClient<T> {
+    transport: T,
+    config: LegionCloudLaneClientConfig,
+}
+
+impl<T> LegionCloudLaneClient<T> {
+    /// Create a client from an explicit transport and policy config.
+    pub fn new(transport: T, config: LegionCloudLaneClientConfig) -> Self {
+        Self { transport, config }
+    }
+
+    /// Inspect the underlying deterministic transport.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    /// Mutably inspect the underlying deterministic transport.
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+}
+
+impl<T: LegionCloudLaneTransport> LegionCloudLaneClient<T> {
+    /// Validate and submit a cloud-lane task request.
+    pub fn submit_task(
+        &mut self,
+        request: LegionCloudLaneTaskRequest,
+    ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+        self.ensure_enabled()?;
+        validate_cloud_task_request_limits(&request, &self.config)?;
+        let status = self.transport.submit_task(&request)?;
+        validate_legion_cloud_lane_task_status(&status).map_err(cloud_contract_error)?;
+        validate_cloud_task_response_id("submit status", &request.task_id, &status.task_id)?;
+        Ok(status)
+    }
+
+    /// Fetch current task event metadata.
+    pub fn stream_task_events(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<Vec<LegionCloudLaneTaskEvent>, RemoteRuntimeError> {
+        self.ensure_enabled()?;
+        validate_cloud_task_id(task_id)?;
+        let events = self.transport.stream_task_events(task_id)?;
+        for event in &events {
+            validate_legion_cloud_lane_task_event(event).map_err(cloud_contract_error)?;
+            validate_cloud_task_response_id("event", task_id, &event.task_id)?;
+        }
+        Ok(events)
+    }
+
+    /// Cancel a task with a non-nil cancellation token and display-safe reason label.
+    pub fn cancel_task(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+        cancellation_token: CancellationTokenId,
+        reason_label: &str,
+    ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+        self.ensure_enabled()?;
+        validate_cloud_task_id(task_id)?;
+        validate_cancellation_token(cancellation_token)?;
+        if reason_label.trim().is_empty() {
+            return Err(RemoteRuntimeError::InvalidOperation {
+                reason: "cloud lane cancellation reason must be non-empty".to_string(),
+            });
+        }
+        let status = self
+            .transport
+            .cancel_task(task_id, cancellation_token, reason_label)?;
+        validate_legion_cloud_lane_task_status(&status).map_err(cloud_contract_error)?;
+        validate_cloud_task_response_id("cancel status", task_id, &status.task_id)?;
+        Ok(status)
+    }
+
+    /// Fetch metadata for the proposal produced by a task.
+    pub fn fetch_task_proposal(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<LegionCloudLaneProposalResponse, RemoteRuntimeError> {
+        self.ensure_enabled()?;
+        validate_cloud_task_id(task_id)?;
+        let response = self.transport.fetch_task_proposal(task_id)?;
+        validate_legion_cloud_lane_proposal_response(&response).map_err(cloud_contract_error)?;
+        validate_cloud_task_response_id("proposal response", task_id, &response.task_id)?;
+        Ok(response)
+    }
+
+    /// Fetch metadata-only evidence records for a task.
+    pub fn fetch_task_evidence(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<Vec<LegionEvidenceRecord>, RemoteRuntimeError> {
+        self.ensure_enabled()?;
+        validate_cloud_task_id(task_id)?;
+        let evidence = self.transport.fetch_task_evidence(task_id)?;
+        for record in &evidence {
+            validate_legion_evidence_record(record).map_err(cloud_contract_error)?;
+        }
+        Ok(evidence)
+    }
+
+    fn ensure_enabled(&self) -> Result<(), RemoteRuntimeError> {
+        if self.config.runtime_enabled {
+            Ok(())
+        } else {
+            Err(RemoteRuntimeError::RuntimeDisabled)
+        }
+    }
+}
+
+fn validate_cloud_task_request_limits(
+    request: &LegionCloudLaneTaskRequest,
+    config: &LegionCloudLaneClientConfig,
+) -> Result<(), RemoteRuntimeError> {
+    validate_legion_cloud_lane_task_request(request).map_err(cloud_contract_error)?;
+    if config.max_cost_cents == 0 || request.budget.estimated_cost_cents > config.max_cost_cents {
+        return Err(RemoteRuntimeError::LimitExceeded {
+            reason: "cloud lane estimated cost exceeds configured cost cap".to_string(),
+        });
+    }
+    if config.max_upload_bytes == 0
+        || request.upload_manifest.total_upload_bytes > config.max_upload_bytes
+    {
+        return Err(RemoteRuntimeError::LimitExceeded {
+            reason: "cloud lane upload bytes exceed configured upload cap".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cloud_task_id(task_id: &LegionCloudLaneTaskId) -> Result<(), RemoteRuntimeError> {
+    if task_id.0.trim().is_empty() {
+        return Err(RemoteRuntimeError::InvalidOperation {
+            reason: "cloud lane task id must be non-empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cloud_task_response_id(
+    response_kind: &str,
+    expected: &LegionCloudLaneTaskId,
+    actual: &LegionCloudLaneTaskId,
+) -> Result<(), RemoteRuntimeError> {
+    if actual != expected {
+        return Err(RemoteRuntimeError::InvalidOperation {
+            reason: format!(
+                "cloud lane {response_kind} task id {} does not match requested task id {}",
+                actual.0, expected.0
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn cloud_contract_error(error: AssistedAiContractError) -> RemoteRuntimeError {
+    RemoteRuntimeError::InvalidOperation {
+        reason: cloud_contract_reason(&error),
+    }
+}
+
+fn cloud_contract_reason(error: &AssistedAiContractError) -> String {
+    match error {
+        AssistedAiContractError::NonMetadataOnlyAuditRecord { field, reason }
+            if field == "legion.cloud.upload_manifest.contains_forbidden_material"
+                && reason == "forbidden_material" =>
+        {
+            "cloud upload manifest contains forbidden material".to_string()
+        }
+        _ => format!("invalid Legion Cloud Lane metadata: {error}"),
     }
 }
 
@@ -1330,9 +1571,18 @@ fn stable_hash_u128(value: &str) -> u128 {
 mod tests {
     use super::*;
     use devil_protocol::{
-        CapabilityId, CausalityId, LanguageId, LanguageServerId, LspRequestId, PrincipalId,
-        RemoteAgentDescriptor, RemoteAuthorityDescriptor, RemoteOperationLogCheckpointId,
-        SemanticQueryId, TerminalSessionId, TimestampMillis, WorkspaceId, WorkspaceTrustState,
+        AssistedAiProviderClass, CapabilityDecisionId, CapabilityId, CausalityId, LanguageId,
+        LanguageServerId, LegionCloudLaneBudget, LegionCloudLaneSecretScanStatus,
+        LegionCloudLaneTaskId, LegionCloudLaneTaskRequest, LegionCloudLaneTaskState,
+        LegionCloudLaneUploadManifest, LegionEvidenceKind, LegionEvidencePrivacyScope,
+        LegionEvidenceRecord, LegionEvidenceSource, LegionModelCapability,
+        LegionProviderLocalityPreference, LegionProviderPrivacyPolicy, LegionProviderRouteHealth,
+        LegionProviderRouteMetadata, LegionTaskContextRef, LegionTaskContextRefKind,
+        LegionTaskFileScope, LegionTaskOutputContract, LegionTaskPacket, LegionTaskPacketId,
+        LegionTaskPolicy, LegionTaskValidationPlan, LegionWorkerResult, LegionWorkerResultKind,
+        LspRequestId, PrincipalId, RemoteAgentDescriptor, RemoteAuthorityDescriptor,
+        RemoteOperationLogCheckpointId, SemanticQueryId, TerminalSessionId, TimestampMillis,
+        WorkspaceId, WorkspaceTrustState,
     };
 
     fn causality_id() -> CausalityId {
@@ -1388,6 +1638,343 @@ mod tests {
             snapshot_id: SnapshotId(66),
             correlation_id: CorrelationId(901),
             causality_id: causality_id(),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingCloudLaneTransport {
+        calls: Vec<&'static str>,
+    }
+
+    impl LegionCloudLaneTransport for RecordingCloudLaneTransport {
+        fn submit_task(
+            &mut self,
+            request: &LegionCloudLaneTaskRequest,
+        ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+            self.calls.push("submit");
+            Ok(LegionCloudLaneTaskStatus {
+                task_id: request.task_id.clone(),
+                state: LegionCloudLaneTaskState::Submitted,
+                status_label: "submitted".to_string(),
+                estimated_cost_cents: request.budget.estimated_cost_cents,
+                billed_cost_cents: 0,
+                queue_position: Some(1),
+                event_sequence: EventSequence(1),
+                generated_at: TimestampMillis(1700),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn stream_task_events(
+            &mut self,
+            task_id: &LegionCloudLaneTaskId,
+        ) -> Result<Vec<LegionCloudLaneTaskEvent>, RemoteRuntimeError> {
+            self.calls.push("events");
+            Ok(vec![LegionCloudLaneTaskEvent {
+                task_id: task_id.clone(),
+                event_id: "event:queued".to_string(),
+                state: LegionCloudLaneTaskState::Queued,
+                event_label: "queued for validation lane".to_string(),
+                event_sequence: EventSequence(2),
+                generated_at: TimestampMillis(1710),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }])
+        }
+
+        fn cancel_task(
+            &mut self,
+            task_id: &LegionCloudLaneTaskId,
+            _cancellation_token: CancellationTokenId,
+            reason_label: &str,
+        ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+            self.calls.push("cancel");
+            Ok(LegionCloudLaneTaskStatus {
+                task_id: task_id.clone(),
+                state: LegionCloudLaneTaskState::Cancelled,
+                status_label: reason_label.to_string(),
+                estimated_cost_cents: 0,
+                billed_cost_cents: 0,
+                queue_position: None,
+                event_sequence: EventSequence(3),
+                generated_at: TimestampMillis(1720),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn fetch_task_proposal(
+            &mut self,
+            task_id: &LegionCloudLaneTaskId,
+        ) -> Result<LegionCloudLaneProposalResponse, RemoteRuntimeError> {
+            self.calls.push("proposal");
+            Ok(LegionCloudLaneProposalResponse {
+                task_id: task_id.clone(),
+                proposal_id: Some(ProposalId(9001)),
+                worker_result: Some(cloud_worker_result(task_id)),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn fetch_task_evidence(
+            &mut self,
+            task_id: &LegionCloudLaneTaskId,
+        ) -> Result<Vec<LegionEvidenceRecord>, RemoteRuntimeError> {
+            self.calls.push("evidence");
+            Ok(vec![cloud_evidence(task_id)])
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MismatchedCloudLaneTransport;
+
+    impl LegionCloudLaneTransport for MismatchedCloudLaneTransport {
+        fn submit_task(
+            &mut self,
+            request: &LegionCloudLaneTaskRequest,
+        ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+            Ok(LegionCloudLaneTaskStatus {
+                task_id: mismatched_cloud_task_id(),
+                state: LegionCloudLaneTaskState::Submitted,
+                status_label: "submitted".to_string(),
+                estimated_cost_cents: request.budget.estimated_cost_cents,
+                billed_cost_cents: 0,
+                queue_position: Some(1),
+                event_sequence: EventSequence(1),
+                generated_at: TimestampMillis(1700),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn stream_task_events(
+            &mut self,
+            _task_id: &LegionCloudLaneTaskId,
+        ) -> Result<Vec<LegionCloudLaneTaskEvent>, RemoteRuntimeError> {
+            Ok(vec![LegionCloudLaneTaskEvent {
+                task_id: mismatched_cloud_task_id(),
+                event_id: "event:queued".to_string(),
+                state: LegionCloudLaneTaskState::Queued,
+                event_label: "queued for validation lane".to_string(),
+                event_sequence: EventSequence(2),
+                generated_at: TimestampMillis(1710),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }])
+        }
+
+        fn cancel_task(
+            &mut self,
+            _task_id: &LegionCloudLaneTaskId,
+            _cancellation_token: CancellationTokenId,
+            reason_label: &str,
+        ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+            Ok(LegionCloudLaneTaskStatus {
+                task_id: mismatched_cloud_task_id(),
+                state: LegionCloudLaneTaskState::Cancelled,
+                status_label: reason_label.to_string(),
+                estimated_cost_cents: 0,
+                billed_cost_cents: 0,
+                queue_position: None,
+                event_sequence: EventSequence(3),
+                generated_at: TimestampMillis(1720),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn fetch_task_proposal(
+            &mut self,
+            _task_id: &LegionCloudLaneTaskId,
+        ) -> Result<LegionCloudLaneProposalResponse, RemoteRuntimeError> {
+            let task_id = mismatched_cloud_task_id();
+            Ok(LegionCloudLaneProposalResponse {
+                task_id: task_id.clone(),
+                proposal_id: Some(ProposalId(9001)),
+                worker_result: Some(cloud_worker_result(&task_id)),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn fetch_task_evidence(
+            &mut self,
+            task_id: &LegionCloudLaneTaskId,
+        ) -> Result<Vec<LegionEvidenceRecord>, RemoteRuntimeError> {
+            Ok(vec![cloud_evidence(task_id)])
+        }
+    }
+
+    fn cloud_packet() -> LegionTaskPacket {
+        LegionTaskPacket {
+            packet_id: LegionTaskPacketId("cloud-packet:remote:1".to_string()),
+            workspace_id: WorkspaceId(11),
+            objective_summary_hash: FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: "objective".to_string(),
+            },
+            allowed_files: vec![LegionTaskFileScope {
+                scope_id: "allowed:src-lib".to_string(),
+                path: CanonicalPath("/workspace/src/lib.rs".to_string()),
+                fingerprint: None,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            forbidden_files: vec![LegionTaskFileScope {
+                scope_id: "forbidden:env".to_string(),
+                path: CanonicalPath("/workspace/.env".to_string()),
+                fingerprint: None,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            context_snippet_refs: vec![LegionTaskContextRef {
+                reference_id: "snippet:1".to_string(),
+                kind: LegionTaskContextRefKind::ContextSnippet,
+                payload_hash: metadata_fingerprint("snippet"),
+                redacted_summary: "redacted snippet".to_string(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            full_file_refs: Vec::new(),
+            command_output_refs: Vec::new(),
+            output_contract: LegionTaskOutputContract {
+                expected_result_kind: LegionWorkerResultKind::PatchProposal,
+                proposal_only: true,
+                direct_mutation_allowed: false,
+                required_evidence_kinds: vec![LegionEvidenceKind::CommandRun],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            validation_plan: LegionTaskValidationPlan {
+                required_commands: vec!["cargo test -p devil-remote --all-targets".to_string()],
+                success_criteria: vec!["remote cloud lane test passes".to_string()],
+                stop_conditions: vec!["policy denied".to_string()],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            policy: LegionTaskPolicy {
+                locality_preference: LegionProviderLocalityPreference::RemoteAllowed,
+                privacy_policy: LegionProviderPrivacyPolicy::MetadataOnly,
+                cost_budget_cents: Some(75),
+                latency_budget_ms: Some(30_000),
+                allow_network: true,
+                allow_direct_workspace_mutation: false,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            correlation_id: CorrelationId(901),
+            causality_id: causality_id(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn cloud_request() -> LegionCloudLaneTaskRequest {
+        LegionCloudLaneTaskRequest {
+            task_id: LegionCloudLaneTaskId("cloud-task:remote:1".to_string()),
+            lane_id: "cloud-lane:validation".to_string(),
+            control_plane_endpoint_id: "endpoint:legion-cloud:test".to_string(),
+            task_packet: cloud_packet(),
+            upload_manifest: LegionCloudLaneUploadManifest {
+                manifest_id: "upload:remote:1".to_string(),
+                allowed_files: vec![LegionTaskFileScope {
+                    scope_id: "upload:src".to_string(),
+                    path: CanonicalPath("/workspace/src/lib.rs".to_string()),
+                    fingerprint: None,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                }],
+                forbidden_files: vec![LegionTaskFileScope {
+                    scope_id: "upload:forbidden-env".to_string(),
+                    path: CanonicalPath("/workspace/.env".to_string()),
+                    fingerprint: None,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                }],
+                total_upload_bytes: 16_384,
+                scope_visible_to_user: true,
+                contains_forbidden_material: false,
+                secret_scan_status: LegionCloudLaneSecretScanStatus::Passed,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            budget: LegionCloudLaneBudget {
+                max_cost_cents: 75,
+                estimated_cost_cents: 50,
+                max_queue_depth: 2,
+                current_queue_depth: 1,
+                usage_metering_label: "meter:remote:unit".to_string(),
+                hard_cap_enforced: true,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            },
+            capability_decision: CapabilityDecision {
+                decision_id: CapabilityDecisionId(700),
+                granted: true,
+                capability: CapabilityId("cloud.lane.submit".to_string()),
+                reason: Some("allowed".to_string()),
+            },
+            cancellation_token: CancellationTokenId(
+                Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+            ),
+            correlation_id: CorrelationId(901),
+            causality_id: causality_id(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn cloud_evidence(task_id: &LegionCloudLaneTaskId) -> LegionEvidenceRecord {
+        LegionEvidenceRecord {
+            evidence_id: format!("evidence:{}", task_id.0),
+            kind: LegionEvidenceKind::CommandRun,
+            source: LegionEvidenceSource::ProviderMetadata,
+            payload_hash: metadata_fingerprint("cloud-evidence"),
+            redacted_payload_summary: "cloud validation evidence metadata".to_string(),
+            command_label: Some("cargo test".to_string()),
+            exit_status: Some(0),
+            privacy_scope: LegionEvidencePrivacyScope::WorkspaceMetadata,
+            generated_at: TimestampMillis(1730),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    fn mismatched_cloud_task_id() -> LegionCloudLaneTaskId {
+        LegionCloudLaneTaskId("cloud-task:remote:other".to_string())
+    }
+
+    fn cloud_worker_result(task_id: &LegionCloudLaneTaskId) -> LegionWorkerResult {
+        LegionWorkerResult {
+            result_id: format!("worker-result:{}", task_id.0),
+            packet_id: cloud_packet().packet_id,
+            result_kind: LegionWorkerResultKind::PatchProposal,
+            patch_proposal: Some(ProposalId(9001)),
+            documentation_proposal: None,
+            analysis_summary: Some("cloud worker returned proposal metadata".to_string()),
+            test_plan_summary: Some("cloud validation lane ran configured tests".to_string()),
+            blocked_reason: None,
+            invalid_reason: None,
+            evidence_records: vec![cloud_evidence(task_id)],
+            provider_route: Some(LegionProviderRouteMetadata {
+                route_id: "cloud-route:validation".to_string(),
+                locality_preference: LegionProviderLocalityPreference::RemoteAllowed,
+                cost_budget_cents: Some(75),
+                latency_budget_ms: Some(30_000),
+                privacy_policy: LegionProviderPrivacyPolicy::MetadataOnly,
+                model_capability: LegionModelCapability::CodePatch,
+                provider_class: AssistedAiProviderClass::HostedRemote,
+                route_health: LegionProviderRouteHealth::Healthy,
+                labels: vec!["cloud-lane".to_string()],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }),
+            correlation_id: CorrelationId(901),
+            causality_id: causality_id(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
         }
     }
 
@@ -1747,5 +2334,116 @@ mod tests {
         assert!(!audit.metadata_summary.contains("raw_source"));
         assert!(!audit.metadata_summary.contains("raw_transcript"));
         assert!(!audit.metadata_summary.contains("process_output"));
+    }
+
+    #[test]
+    fn cloud_lane_client_submits_streams_cancels_and_fetches_metadata() {
+        let mut client = LegionCloudLaneClient::new(
+            RecordingCloudLaneTransport::default(),
+            LegionCloudLaneClientConfig::enabled_for_tests(),
+        );
+        let request = cloud_request();
+
+        let status = client
+            .submit_task(request.clone())
+            .expect("submit cloud task");
+        assert_eq!(status.state, LegionCloudLaneTaskState::Submitted);
+
+        let events = client
+            .stream_task_events(&request.task_id)
+            .expect("stream events");
+        assert_eq!(events[0].state, LegionCloudLaneTaskState::Queued);
+
+        let cancelled = client
+            .cancel_task(
+                &request.task_id,
+                request.cancellation_token,
+                "user cancelled cloud task",
+            )
+            .expect("cancel cloud task");
+        assert_eq!(cancelled.state, LegionCloudLaneTaskState::Cancelled);
+
+        let proposal = client
+            .fetch_task_proposal(&request.task_id)
+            .expect("fetch cloud proposal");
+        assert_eq!(proposal.proposal_id, Some(ProposalId(9001)));
+
+        let evidence = client
+            .fetch_task_evidence(&request.task_id)
+            .expect("fetch cloud evidence");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            client.transport().calls,
+            vec!["submit", "events", "cancel", "proposal", "evidence"]
+        );
+    }
+
+    #[test]
+    fn cloud_lane_client_rejects_mismatched_response_task_ids() {
+        let request = cloud_request();
+        let mut client = LegionCloudLaneClient::new(
+            MismatchedCloudLaneTransport,
+            LegionCloudLaneClientConfig::enabled_for_tests(),
+        );
+
+        let error = client
+            .submit_task(request.clone())
+            .expect_err("submit status must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
+        );
+
+        let error = client
+            .stream_task_events(&request.task_id)
+            .expect_err("events must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
+        );
+
+        let error = client
+            .cancel_task(
+                &request.task_id,
+                request.cancellation_token,
+                "user cancelled cloud task",
+            )
+            .expect_err("cancel status must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
+        );
+
+        let error = client
+            .fetch_task_proposal(&request.task_id)
+            .expect_err("proposal response must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
+        );
+    }
+
+    #[test]
+    fn cloud_lane_client_rejects_forbidden_upload_scope_before_transport() {
+        let mut client = LegionCloudLaneClient::new(
+            RecordingCloudLaneTransport::default(),
+            LegionCloudLaneClientConfig::enabled_for_tests(),
+        );
+        let mut request = cloud_request();
+        request.upload_manifest.contains_forbidden_material = true;
+
+        let error = client
+            .submit_task(request)
+            .expect_err("forbidden upload must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cloud upload manifest contains forbidden material")
+        );
+        assert!(client.transport().calls.is_empty());
     }
 }

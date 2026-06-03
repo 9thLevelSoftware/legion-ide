@@ -1,0 +1,149 @@
+# Legion E2E Evidence - Manual editor-port completion
+
+Timestamp: 2026-06-02T19:11:39-04:00
+Working directory: C:\Users\dasbl\RustroverProjects\devil-ide
+Branch: codex/legion-full-implementation
+
+## Scope
+
+- Replaced the production `EditorRequest::Completion` unsupported path with deterministic editor-owned lexical completion.
+- Completion requests now resolve the open editor buffer from `(workspace_id, file_id)`.
+- Completion rejects stale snapshot ids instead of serving results from the wrong text version.
+- Byte and absolute UTF-16 offsets are resolved through the text model; invalid offsets fail closed.
+- Degraded large-file mode returns an empty completion set without materializing full text.
+- Completion is read-only and does not mutate editor buffers or disk.
+
+## Source References
+
+- `crates/devil-editor/src/lib.rs`
+- `crates/devil-protocol/src/lib.rs` (`CompletionRequest`, `CompletionItem`, `EditorRequest::Completion`, `EditorResponse::Completion`)
+
+## Removed Unsupported Marker
+
+Command: `rg -n "completion is not implemented|EditorRequest::Completion\(_\)|not implemented by the editor" crates/devil-editor crates/devil-protocol -S`
+Exit code: 1
+Output:
+
+```text
+<no matches>
+```
+
+## Focused Verification
+
+Command: `cargo fmt --all --check`
+Exit code: 0
+Output:
+
+```text
+<no output>
+```
+
+Command: `cargo test -p devil-editor --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+running 19 tests
+test tests::editor_port_completion_returns_bounded_lexical_items_without_mutation ... ok
+test tests::editor_port_completion_rejects_stale_snapshot ... ok
+test tests::degraded_completion_returns_empty_without_full_text_materialization ... ok
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 7 tests
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 10 tests
+test result: ok. 7 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out
+```
+
+Command: `cargo check -p devil-editor --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+Checking devil-editor v0.1.0
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo clippy -p devil-editor --all-targets -- -D warnings`
+Exit code: 0
+Output excerpt:
+
+```text
+Checking devil-editor v0.1.0
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+## Workspace Gate Rerun
+
+Rerun completed after the editor completion slice at 2026-06-02T19:19:06-04:00.
+
+Command: `cargo run -p xtask -- check-deps`
+Exit code: 0
+Output excerpt:
+
+```text
+Dependency policy check passed.
+```
+
+Command: `cargo fmt --all --check`
+Exit code: 0
+Output:
+
+```text
+<no output>
+```
+
+Command: `cargo check --workspace --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_closed_file_create_delete_rename_apply_through_workspace -- --nocapture`
+Exit code: 0
+Output excerpt:
+
+```text
+running 1 test
+test workspace_vfs_integration_closed_file_create_delete_rename_apply_through_workspace ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 59 filtered out
+```
+
+Command: `cargo test --workspace --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+test workspace_vfs_integration_closed_file_create_delete_rename_apply_through_workspace ... ok
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Command: `cargo clippy --workspace --all-targets -- -D warnings`
+Exit code: 0
+Output excerpt:
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo deny check`
+Exit code: 0
+Output excerpt:
+
+```text
+advisories ok, bans ok, licenses ok, sources ok
+warning[duplicate]: found duplicate entries for transitive GUI/platform crates under the warning-level policy.
+```
+
+## Interrupted Verification Notes
+
+- One `cargo test --workspace --all-targets` run was interrupted by MSVC `LNK1102: out of memory` while linking desktop test binaries.
+- The next exact rerun got past linking but reported a one-off failure in `workspace_vfs_integration_closed_file_create_delete_rename_apply_through_workspace`.
+- The targeted reproduction command above passed, and the subsequent exact workspace test gate passed. No code changes were made for that transient failure.
+
+## Result
+
+Passed. The Manual IDE editor completion path now has production code, stale-snapshot protection, degraded-mode behavior, regression coverage, and a successful current-tree final-gate rerun.

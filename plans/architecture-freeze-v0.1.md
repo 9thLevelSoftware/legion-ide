@@ -1,4 +1,4 @@
-# Architecture Freeze: Devil IDE Spike 1A Prerequisites v0.1
+# Architecture Freeze: Legion IDE Spike 1A Prerequisites v0.1
 
 ## Status
 

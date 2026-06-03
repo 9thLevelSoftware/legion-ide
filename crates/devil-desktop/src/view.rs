@@ -4,8 +4,9 @@ use std::collections::{BTreeSet, HashSet};
 
 use devil_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
-    PluginCommandDescriptor, PluginContribution, PluginContributionProjection, ProposalId,
-    ProposalRejectionReason, ProposalRiskLabel, TextCoordinate, ViewportProjectionMode,
+    PRODUCT_NAME, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
+    ProductRuntimeSurface, ProposalId, ProposalRejectionReason, ProposalRiskLabel, TextCoordinate,
+    ViewportProjectionMode, product_mode_allows_runtime_surface,
 };
 use devil_ui::{
     DockLayout, DockMode, DockSide, DockSideLayout, PanelId, PanelRegistry,
@@ -57,8 +58,8 @@ pub struct DesktopProjectionViewModel {
     pub left_sidebar_rows: Vec<String>,
     /// Main code-canvas summary rows.
     pub main_canvas_rows: Vec<String>,
-    /// Right directive and trust console summary rows.
-    pub right_console_rows: Vec<String>,
+    /// Right dock directive and trust summary rows.
+    pub directive_panel_rows: Vec<String>,
     /// Bottom operational console rows.
     pub bottom_console_rows: Vec<String>,
     /// Mode-specific bottom tab rows.
@@ -163,7 +164,7 @@ impl DesktopProjectionViewModel {
             command_palette_rows,
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
-            right_console_rows: right_console_rows(snapshot),
+            directive_panel_rows: directive_panel_rows(snapshot),
             bottom_console_rows: bottom_console_rows(snapshot),
             bottom_tab_rows: bottom_tab_rows(snapshot),
             dock_rows,
@@ -281,7 +282,7 @@ impl ProjectionView {
             .resizable(true)
             .frame(theme::pane_frame(theme::BG_BASE))
             .show_inside(ui, |ui| {
-                render_right_console(
+                render_right_dock(
                     ui,
                     snapshot,
                     &model,
@@ -316,7 +317,7 @@ fn render_top_command_bar(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         render_window_controls(ui);
-        ui.label(theme::title("Devil IDE"));
+        ui.label(theme::title(PRODUCT_NAME));
         ui.separator();
         ui.label(theme::body_strong(&model.layout_title));
         render_branch_pill(ui, snapshot);
@@ -498,7 +499,7 @@ fn render_code_canvas(
     }
 }
 
-fn render_right_console(
+fn render_right_dock(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
@@ -2308,7 +2309,7 @@ struct PaletteItem {
     label: &'static str,
     action: Option<&'static str>,
     hint: Option<&'static str>,
-    requires_ai: bool,
+    capabilities: &'static [ProductRuntimeSurface],
     requires_confirmation: bool,
 }
 
@@ -2499,12 +2500,19 @@ fn dock_panel_rows(
     for side in [DockSide::Left, DockSide::Right, DockSide::Bottom] {
         for id in layout.visible_panel_ids(side, &registry) {
             if let Some(panel) = registry.panel(id) {
+                let capabilities = panel
+                    .capabilities
+                    .iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 rows.push(format!(
-                    "dock panel: side={} id={} title={} requires_ai={}",
+                    "dock panel: side={} id={} title={} requires_ai={} capabilities=[{}]",
                     side.label(),
                     panel.id.as_str(),
                     panel.title,
-                    panel.requires_ai
+                    panel.requires_ai,
+                    capabilities
                 ));
             }
         }
@@ -2599,7 +2607,7 @@ fn mode_confirmation_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 
 fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let mode = projected_product_mode(snapshot);
-    let ai_available = mode != DesktopProductMode::Manual;
+    let product_mode = mode.to_dock_mode().to_product_mode();
     let files = projected_palette_files(snapshot);
     let mut rows = vec![format!(
         "command palette group: Files prefix=<none> items={}",
@@ -2615,7 +2623,7 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             label: "Switch to Automate",
             action: Some("mode:automate"),
             hint: Some("Legion Workflows"),
-            requires_ai: true,
+            capabilities: &[ProductRuntimeSurface::Automation],
             requires_confirmation: true,
         },
         PaletteItem {
@@ -2623,7 +2631,7 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             label: "Switch to Delegate",
             action: Some("mode:delegate"),
             hint: None,
-            requires_ai: true,
+            capabilities: &[ProductRuntimeSurface::DelegatedTask],
             requires_confirmation: true,
         },
         PaletteItem {
@@ -2631,7 +2639,10 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             label: "Run Directive",
             action: None,
             hint: Some("proposal-mediated"),
-            requires_ai: true,
+            capabilities: &[
+                ProductRuntimeSurface::Automation,
+                ProductRuntimeSurface::WorkerRuntime,
+            ],
             requires_confirmation: true,
         },
         PaletteItem {
@@ -2639,7 +2650,7 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             label: "Run Tests",
             action: None,
             hint: Some("deterministic"),
-            requires_ai: false,
+            capabilities: &[ProductRuntimeSurface::ManualIde],
             requires_confirmation: false,
         },
         PaletteItem {
@@ -2647,7 +2658,7 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             label: "Open Permissions & Settings",
             action: None,
             hint: Some("local"),
-            requires_ai: false,
+            capabilities: &[ProductRuntimeSurface::ManualIde],
             requires_confirmation: false,
         },
     ];
@@ -2656,28 +2667,49 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         command_items.len()
     ));
     rows.extend(command_items.iter().map(|item| {
-        let visible = !item.requires_ai || ai_available;
+        let visible = item
+            .capabilities
+            .iter()
+            .all(|surface| product_mode_allows_runtime_surface(product_mode, *surface));
+        let capabilities = item
+            .capabilities
+            .iter()
+            .map(|surface| format!("{surface:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let requires_ai = item
+            .capabilities
+            .iter()
+            .any(|surface| {
+                !matches!(
+                    surface,
+                    ProductRuntimeSurface::ManualIde | ProductRuntimeSurface::PluginManagement
+                )
+            });
         format!(
-            "command palette item: group={} label={} action={} hint={} requires_ai={} requires_confirmation={} visible={}",
+            "command palette item: group={} label={} action={} hint={} requires_ai={} capabilities=[{}] requires_confirmation={} visible={}",
             item.group,
             item.label,
             item.action.unwrap_or("<none>"),
             item.hint.unwrap_or("<none>"),
-            item.requires_ai,
+            requires_ai,
+            capabilities,
             item.requires_confirmation,
             visible
         )
     }));
 
     let agent_rows = projected_palette_agents(snapshot);
+    let agents_visible =
+        product_mode_allows_runtime_surface(product_mode, ProductRuntimeSurface::AssistedAi);
     rows.push(format!(
-        "command palette group: Agents prefix=@ items={} visible={}",
+        "command palette group: Agents prefix=@ items={} capabilities=[AssistedAi] visible={}",
         agent_rows.len(),
-        ai_available
+        agents_visible
     ));
     rows.extend(agent_rows.into_iter().take(6).map(|label| {
         format!(
-            "command palette item: group=Agents label={label} requires_ai=true requires_confirmation=false visible={ai_available}"
+            "command palette item: group=Agents label={label} requires_ai=true capabilities=[AssistedAi] requires_confirmation=false visible={agents_visible}"
         )
     }));
     rows
@@ -2940,10 +2972,10 @@ fn main_canvas_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     rows
 }
 
-fn right_console_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+fn directive_panel_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     vec![
         format!(
-            "directive console: proposals={} artifacts={} trust_items={} approval_gates={} proposal-mediated",
+            "directive dock: proposals={} artifacts={} trust_items={} approval_gates={} proposal-mediated",
             snapshot.proposal_ledger_projection.rows.len(),
             snapshot.artifact_ledger_projection.rows.len(),
             snapshot.context_manifest_projection.manifest.items.len(),

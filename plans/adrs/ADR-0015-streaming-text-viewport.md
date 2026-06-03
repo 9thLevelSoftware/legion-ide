@@ -46,7 +46,7 @@ Projection consumers may request a new viewport, scroll anchor, or command dispa
 - A chunk must never split an invalid UTF-8 sequence; for valid text it should not split a CRLF pair. If no suitable line boundary exists, a hard chunk may extend up to 96 KiB before a boundary is forced at a valid byte boundary.
 - Very long logical lines may span multiple chunks. The viewport projection must represent such lines as clipped segments with continuation metadata rather than materializing the whole line for UI.
 - Each chunk descriptor records snapshot identifier, chunk ordinal, absolute byte range, byte length, line-start count, line-end count when known, and a content-addressed chunk hash.
-- Chunk hashes are algorithm-tagged, domain-separated for Devil text chunks, and computed over the exact source bytes represented by the chunk. Identical byte content may share cache entries, but chunk identity still includes snapshot identifier, ordinal, and byte range.
+- Chunk hashes are algorithm-tagged, domain-separated for Legion text chunks, and computed over the exact source bytes represented by the chunk. Identical byte content may share cache entries, but chunk identity still includes snapshot identifier, ordinal, and byte range.
 - The snapshot content hash is derived from ordered chunk descriptors and chunk hashes so consumers can invalidate by changed chunks without receiving full source.
 - Hashes are cache and invalidation keys, not security or save-precondition authority in Phase 1. Save preconditions continue to use the existing workspace fingerprint and file content version path.
 - Chunk hash events and observability records may include identifiers, ranges, lengths, and hashes, but must not include full source by default.

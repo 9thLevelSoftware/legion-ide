@@ -135,7 +135,7 @@ pub fn load_open_vsx_extension(
     })
 }
 
-/// Normalizes a VS Code `package.json` manifest into Devil compatibility DTOs.
+/// Normalizes a VS Code `package.json` manifest into Legion compatibility DTOs.
 pub fn manifest_from_package_json(
     plugin_id: PluginId,
     package_json: Value,
@@ -622,7 +622,7 @@ mod tests {
                 "version": "1.0.0",
                 "engines": { "vscode": "^1.90.0" },
                 "contributes": {
-                    "themes": [{ "label": "Devil Dark" }],
+                    "themes": [{ "label": "Legion Dark" }],
                     "snippets": [{ "language": "rust" }]
                 }
             }),
@@ -787,7 +787,7 @@ mod tests {
                 "version": "1.0.0",
                 "engines": { "vscode": "^1.90.0" },
                 "contributes": {
-                    "themes": [{ "label": "Devil Dark" }]
+                    "themes": [{ "label": "Legion Dark" }]
                 }
             }),
             CorrelationId(6),

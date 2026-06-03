@@ -1,4 +1,4 @@
-# Devil IDE Architecture Charter v0.1
+# Legion IDE Architecture Charter v0.1
 
 Status: Draft for founding engineering review  
 Audience: Founding engineering team, product leadership, design leadership, security lead  
@@ -9,7 +9,7 @@ Repository baseline: Initial Rust binary crate, edition 2024, no dependencies ye
 
 ## 0. Executive Position
 
-Devil IDE is an IDE-first AI development environment: a native, high-performance editor where AI is not a sidebar, chatbot, or extension, but a first-class execution layer embedded into editor state, repository knowledge, task state, user intent, and controlled automation. The product must feel like a serious systems tool: fast under load, predictable under AI intervention, privacy-preserving by default, and engineered around user agency.
+Legion IDE is an IDE-first AI development environment: a native, high-performance editor where AI is not a sidebar, chatbot, or extension, but a first-class execution layer embedded into editor state, repository knowledge, task state, user intent, and controlled automation. The product must feel like a serious systems tool: fast under load, predictable under AI intervention, privacy-preserving by default, and engineered around user agency.
 
 The architectural center of gravity is a Rust workspace composed of deterministic core services, asynchronous actor-style subsystems, and a latency-critical UI/editor shell. AI is integrated through a provider-agnostic orchestration layer that can route requests to local models, user-supplied cloud keys, or a future hosted gateway without contaminating the core editor model with provider-specific assumptions.
 
@@ -65,7 +65,7 @@ The product should be pure Rust wherever feasible.
 
 ### 1.6 Clean-Slate Ecosystem
 
-Devil IDE is not a VS Code fork and does not support VS Code extensions.
+Legion IDE is not a VS Code fork and does not support VS Code extensions.
 
 - Extension compatibility is not a V1 or V2 goal.
 - Native plugin and automation APIs should be designed for determinism, security policy enforcement, and Rust-first performance.
@@ -292,7 +292,7 @@ Rules:
 
 ## 4. UI and Editor Stack Evaluation
 
-The UI decision is strategic. Devil IDE cannot redefine AI-native development if the editor surface feels slower, less native, or less controllable than incumbent tools.
+The UI decision is strategic. Legion IDE cannot redefine AI-native development if the editor surface feels slower, less native, or less controllable than incumbent tools.
 
 ### 4.1 Evaluation Criteria
 
@@ -363,7 +363,7 @@ Best use:
 Recommendation: Build a Rust-native GPU UI/editor shell using a GPUI-style architecture as the primary path, with Slint evaluated as a fallback for non-editor panels and Tauri/WRY reserved for non-core auxiliary surfaces only.
 
 Rationale:
-- Devil IDE's thesis depends on native responsiveness, not merely native packaging.
+- Legion IDE's thesis depends on native responsiveness, not merely native packaging.
 - The editor and AI interaction layer require custom rendering, precise state synchronization, and predictable latency.
 - A browser-based shell would accelerate early UI delivery but risks locking the product into a performance and architecture ceiling that contradicts the brand promise.
 
@@ -1010,6 +1010,6 @@ This sequence is not a schedule. It is the recommended dependency order for redu
 
 ## 18. Architecture Charter Summary
 
-Devil IDE should be architected as a Rust-native, local-first, latency-obsessed development environment where AI is deeply integrated but never unbounded. The product should differentiate by making AI agency explicit, inspectable, reversible, and tied to real editor and repository state. The founding engineering team should resist shortcuts that compromise the core thesis: browser-first architecture, opaque AI side effects, hidden cloud dependencies, unrestricted agent execution, or extension compatibility obligations.
+Legion IDE should be architected as a Rust-native, local-first, latency-obsessed development environment where AI is deeply integrated but never unbounded. The product should differentiate by making AI agency explicit, inspectable, reversible, and tied to real editor and repository state. The founding engineering team should resist shortcuts that compromise the core thesis: browser-first architecture, opaque AI side effects, hidden cloud dependencies, unrestricted agent execution, or extension compatibility obligations.
 
 The most important immediate decisions are the native UI/editor stack, text transaction model, indexing pipeline, action broker, provider router, and privacy enforcement model. These must be validated through focused spikes before broader product development scales.

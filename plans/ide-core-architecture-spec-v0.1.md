@@ -1,4 +1,4 @@
-# Devil IDE Core Architecture and Design Specification v0.1
+# Legion IDE Core Architecture and Design Specification v0.1
 
 Status: Draft for architecture review  
 Audience: Founding engineering team, systems architecture, editor engineering, platform engineering  
@@ -26,7 +26,7 @@ This specification is derived from the existing project architecture artifacts a
 
 ## 2. Executive Architecture Position
 
-Devil IDE should be built as a standalone, Rust-native IDE core whose first-class responsibilities are opening and managing local workspaces, abstracting file system operations safely, editing text with deterministic transactions, integrating language servers, and hosting first-party or tightly sandboxed extensions through capability-scoped plugin APIs.
+Legion IDE should be built as a standalone, Rust-native IDE core whose first-class responsibilities are opening and managing local workspaces, abstracting file system operations safely, editing text with deterministic transactions, integrating language servers, and hosting first-party or tightly sandboxed extensions through capability-scoped plugin APIs.
 
 The foundational core must be useful without AI:
 
@@ -1012,7 +1012,7 @@ This ensures AI can later become an additional client of the same editor, worksp
 
 ## 13. Final Architecture Summary
 
-The Devil IDE core should be designed as a deterministic, local-first, actor-oriented system with clear ownership boundaries:
+The Legion IDE core should be designed as a deterministic, local-first, actor-oriented system with clear ownership boundaries:
 
 - Workspace management owns project identity, trust, file tree, and watcher state.
 - The file system abstraction owns safe OS access, workspace path policy, atomic saves, and conflict detection.
