@@ -1,0 +1,529 @@
+schema_version: 1
+project:
+  name: devil-ide / Legion IDE
+  repository: https://github.com/9thlevelsoftware/devil-ide.git
+  default_branch: main
+  audit_started_at: "2026-06-03T02:37:26Z"
+  coordinator_model: GPT-5.5
+  auditor_model: Kimi 2.6
+
+sources:
+  roadmaps:
+    - id: legion-e2e-plan
+      path: plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md
+      description: Consolidated Legion e2e implementation plan and phase gate source.
+    - id: product-readiness-ledger
+      path: plans/product-readiness-ledger.md
+      description: Product readiness matrix and beta acceptance scenario.
+  specs:
+    - id: frontend-architecture
+      path: plans/legion-e2e/source-package/01_FRONTEND_APP_ARCHITECTURE_PLAN.md
+      description: Front-end app architecture and mode/panel requirements.
+    - id: backend-architecture
+      path: plans/legion-e2e/source-package/02_BACKEND_APP_ARCHITECTURE_PLAN.md
+      description: Runtime, task packet, worker, provider, validation, conflict, and security requirements.
+    - id: cloud-architecture
+      path: plans/legion-e2e/source-package/03_CLOUD_OFFERING_ARCHITECTURE_PLAN.md
+      description: Cloud lane, control plane, worker lane, sandbox, and cost/security requirements.
+    - id: product-roadmap
+      path: plans/legion-e2e/source-package/04_PRODUCT_IMPLEMENTATION_ROADMAP.md
+      description: Product phase roadmap and mode definitions.
+    - id: model-training-plan
+      path: plans/legion-e2e/source-package/05_MODEL_ACQUISITION_AND_TRAINING_PLAN.md
+      description: Model acquisition, local worker, training, eval, and serving plan.
+  docs:
+    - id: agents
+      path: AGENTS.md
+      description: Repository invariants and gate commands.
+    - id: ci
+      path: .github/workflows/ci.yml
+      description: GitHub Actions gate definition.
+    - id: operator-runbook
+      path: docs/OPERATOR_RUNBOOK.md
+      description: Operator docs for current product surface.
+  issue_trackers: []
+  pull_requests: []
+
+audit_areas:
+  - id: repo-map
+    title: Repository map and gate audit
+    scope: Identify workspace crates, scripts, docs, tests, CI workflows, entrypoints, and baseline command health.
+    allowed_read_paths:
+      - AGENTS.md
+      - Cargo.toml
+      - crates
+      - xtask
+      - scripts
+      - docs
+      - plans
+      - .github/workflows
+      - deny.toml
+      - rust-toolchain.toml
+    forbidden_areas:
+      - .git
+      - target
+      - target-clippy-stable
+      - node_modules
+      - vendor
+    source_requirements:
+      - Verify the repo matches the Legion plan baseline and CI gates are executable.
+      - Do not modify files.
+    questions:
+      - What crates, binaries, tests, and scripts exist?
+      - What gates are required locally and in CI?
+      - Are there obvious generated/binary artifacts committed that affect repo hygiene?
+    status: ready
+  - id: manual-ui-e2e
+    title: Manual mode, projection UI, and deterministic IDE flows
+    scope: Audit Manual mode exclusion, dock/panel registry, desktop projections, daily editing/search/git/terminal/debug/test workflows, and UI tests.
+    allowed_read_paths:
+      - AGENTS.md
+      - crates/legion-ui
+      - crates/legion-desktop
+      - crates/legion-app
+      - crates/legion-editor
+      - crates/legion-text
+      - crates/legion-project
+      - crates/legion-terminal
+      - crates/legion-security
+      - plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md
+      - plans/product-readiness-ledger.md
+    forbidden_areas:
+      - .git
+      - target
+      - target-clippy-stable
+    source_requirements:
+      - Phases 1-2 require mode-aware projection shell, Manual AI/network/cloud exclusion, editor/file/search/git/terminal/debug/test workflows, and proposal-mediated saves.
+      - Product readiness ledger currently requires working UX paths and tests before product-ready claims.
+    questions:
+      - Are Manual/deterministic features implemented, partially implemented, stubbed, or missing?
+      - Do tests prove Manual mode excludes AI/cloud/worker/hosted telemetry panels?
+      - Can daily editing and save flows work e2e without AI?
+    status: ready
+  - id: ai-delegate-automate-e2e
+    title: Assist, Delegate, Automate, workflow, proposal, and provider flows
+    scope: Audit Assist, Delegate, Automate, task packets, worker lifecycle, provider routing, proposal-only mutation, validation gates, tracker/memory evidence, and workflow tests.
+    allowed_read_paths:
+      - AGENTS.md
+      - crates/legion-protocol
+      - crates/legion-app
+      - crates/legion-ai
+      - crates/legion-ai-providers
+      - crates/legion-agent
+      - crates/legion-tracker
+      - crates/legion-memory
+      - crates/legion-security
+      - crates/legion-ui
+      - crates/legion-desktop
+      - plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md
+      - plans/product-readiness-ledger.md
+    forbidden_areas:
+      - .git
+      - target
+      - target-clippy-stable
+    source_requirements:
+      - Phases 3-6 require DTOs, validators, provider routes, proposal-only output, bounded worker lifecycle, workflow orchestration, and human authority gates.
+      - AI/provider/agent code must never directly mutate the main workspace.
+    questions:
+      - Which Assist/Delegate/Automate requirements are implemented vs stubbed/missing?
+      - Are policy, validation, cancellation, and proposal-only guarantees tested?
+      - Are provider routes functional through mock or real local-compatible paths?
+    status: ready
+  - id: cloud-training-release-e2e
+    title: Cloud lane, model training flywheel, packaging, release, and docs flows
+    scope: Audit cloud lane/client contracts, remote/security policy, model download/worker/training/eval scripts, docs, evidence gates, release/packaging smoke, and CI coverage.
+    allowed_read_paths:
+      - AGENTS.md
+      - crates/legion-remote
+      - crates/legion-remote-transport
+      - crates/legion-security
+      - crates/legion-memory
+      - crates/legion-cli
+      - scripts
+      - config
+      - training
+      - evals
+      - docs
+      - plans
+      - .github/workflows
+    forbidden_areas:
+      - .git
+      - target
+      - target-clippy-stable
+    source_requirements:
+      - Phases 7-9 require mock cloud lane policy/budget/status/proposal/evidence flow, dry-run reproducible model/training/eval scripts, evidence gates, packaging smoke, and docs.
+      - Cloud and raw trace/model-output retention must be opt-in, consent-gated, redacted, and default-deny.
+    questions:
+      - Are cloud lane and training flywheel flows complete or only dry-run scaffolds?
+      - Do scripts actually run in dry-run mode?
+      - Are release/packaging/CI evidence gates meaningful and current?
+    status: ready
+
+repo_map:
+  languages:
+    - Rust
+    - Python
+    - Shell
+    - PowerShell
+  package_managers:
+    - cargo
+  test_frameworks:
+    - cargo test
+    - python3 compileall
+    - shell dry-run scripts
+  ci_systems:
+    - GitHub Actions
+  entrypoints:
+    - crates/legion-app/src/main.rs
+    - crates/legion-desktop/src/main.rs
+    - crates/legion-cli/src/main.rs
+    - xtask/src/main.rs
+  modules:
+    - id: app-runtime
+      path: crates/legion-app
+      description: App composition, workspace/save/workflow and integration surfaces.
+    - id: desktop-ui
+      path: crates/legion-desktop
+      description: Egui desktop rendering and projection tests.
+    - id: ui-projection
+      path: crates/legion-ui
+      description: Mode-aware projection UI state, panels, commands, and snapshots.
+    - id: protocol
+      path: crates/legion-protocol
+      description: DTOs, contracts, workflow/provider/task/evidence types.
+    - id: ai-and-workers
+      path: crates/legion-ai; crates/legion-ai-providers; crates/legion-agent
+      description: Provider routing and bounded worker/task scaffolding.
+    - id: cloud-remote
+      path: crates/legion-remote; crates/legion-remote-transport
+      description: Remote/cloud transport and client-side contracts.
+    - id: model-training
+      path: scripts/models; training; evals; config
+      description: Model acquisition, local worker, training, conversion, and eval scripts.
+
+architecture:
+  subsystems:
+    - id: projection-shell
+      name: Projection-only UI and desktop shell
+      paths:
+        - crates/legion-ui
+        - crates/legion-desktop
+      responsibilities:
+        - Render snapshots and dispatch intents without owning editor/session text.
+        - Enforce mode-specific panel visibility.
+    - id: app-runtime
+      name: App/runtime workflow coordinator
+      paths:
+        - crates/legion-app
+      responsibilities:
+        - Own editing/workspace workflows, save proposals, command dispatch, and workflow APIs.
+    - id: protocol-policy
+      name: Protocol and policy contracts
+      paths:
+        - crates/legion-protocol
+        - crates/legion-security
+      responsibilities:
+        - Define DTO contracts, route/task/evidence validation, privacy/security policy, and redaction.
+    - id: ai-worker-control
+      name: AI provider and worker lanes
+      paths:
+        - crates/legion-ai
+        - crates/legion-ai-providers
+        - crates/legion-agent
+        - crates/legion-tracker
+        - crates/legion-memory
+      responsibilities:
+        - Produce proposals/evidence/metadata without direct main-workspace mutation.
+    - id: cloud-training-release
+      name: Cloud, training, release, and evidence tooling
+      paths:
+        - crates/legion-remote
+        - crates/legion-cli
+        - scripts
+        - training
+        - evals
+        - docs
+        - plans
+      responsibilities:
+        - Provide opt-in cloud lanes, dry-run model/training workflows, evidence gates, and release smoke.
+  boundaries:
+    - UI must be projection-only; app/runtime owns mutable session/editor/workspace state.
+    - Saves must route through proposal-mediated workspace workflow with non-zero correlation/causality.
+    - Manual/offline mode must default-deny AI, network, cloud, worker automation, and hosted telemetry.
+    - AI/worker/cloud/training lanes must produce proposals, evidence, and metadata unless explicit later policy enables apply.
+  data_flows:
+    - Editor buffer -> save proposal -> workspace actor -> accepted/rejected outcome -> metadata observability.
+    - Mode selection -> panel registry filter -> desktop projection -> command dispatch intent -> app runtime.
+    - Task packet -> worker/provider route -> proposal/evidence -> validation/review -> human signoff.
+  integration_points:
+    - GitHub Actions CI gates.
+    - Local cargo gates and xtask dependency policy.
+    - Dry-run model/training/eval scripts.
+
+features:
+  - id: phase-0-repo-stabilization
+    title: Repository stabilization and Legion product surface
+    source_refs: [legion-e2e-plan]
+    code_refs: [Cargo.toml, docs, plans/legion-e2e]
+    test_refs: [.github/workflows/ci.yml]
+    expected_behavior:
+      - Product docs, source package, workspace crates, dependency policy, and gates exist.
+    implementation_status: implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-1-mode-shell
+    title: Dock/panel registry and mode shell
+    source_refs: [legion-e2e-plan, frontend-architecture]
+    code_refs: [crates/legion-ui, crates/legion-desktop]
+    test_refs: [crates/legion-ui, crates/legion-desktop]
+    expected_behavior:
+      - Manual/Assist/Delegate/Automate panels are mode-filtered and rendered projection-only.
+    implementation_status: implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-2-manual-foundation
+    title: Manual deterministic IDE foundation
+    source_refs: [legion-e2e-plan, product-readiness-ledger]
+    code_refs: [crates/legion-app, crates/legion-editor, crates/legion-project, crates/legion-terminal]
+    test_refs: [crates/legion-app/tests]
+    expected_behavior:
+      - Daily editing/search/git/terminal/debug/test/save flows work without AI.
+    implementation_status: implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-3-protocol-dtos
+    title: Protocol DTO foundation for workers/evidence/provider/training
+    source_refs: [legion-e2e-plan, backend-architecture]
+    code_refs: [crates/legion-protocol]
+    test_refs: [crates/legion-protocol/tests/dto_contracts.rs]
+    expected_behavior:
+      - Task packet, worker result, evidence record, provider route metadata, and validators exist.
+    implementation_status: implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-4-assist
+    title: Assist mode
+    source_refs: [legion-e2e-plan]
+    code_refs: [crates/legion-app, crates/legion-ai, crates/legion-ai-providers, crates/legion-desktop]
+    test_refs: [crates/legion-app/tests, crates/legion-ai, crates/legion-ai-providers]
+    expected_behavior:
+      - Assist preview/proposal/evidence flows through configured providers without direct mutation.
+    implementation_status: implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-5-delegate
+    title: Delegate mode
+    source_refs: [legion-e2e-plan]
+    code_refs: [crates/legion-agent, crates/legion-app, crates/legion-ui, crates/legion-desktop]
+    test_refs: [crates/legion-agent, crates/legion-app/tests]
+    expected_behavior:
+      - Bounded worker task reaches reviewed proposal with evidence and containment.
+    implementation_status: implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-6-automate
+    title: Automate workflow orchestration
+    source_refs: [legion-e2e-plan]
+    code_refs: [crates/legion-app, crates/legion-protocol, crates/legion-tracker, crates/legion-memory]
+    test_refs: [crates/legion-app/tests/legion_workflow_integration.rs]
+    expected_behavior:
+      - End-to-end local workflow runs to review-ready proposals with validation evidence and final human gate.
+    implementation_status: implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-7-cloud-lane
+    title: Cloud Lane MVP
+    source_refs: [legion-e2e-plan, cloud-architecture]
+    code_refs: [crates/legion-remote, crates/legion-security, crates/legion-app]
+    test_refs: [crates/legion-remote, crates/legion-security]
+    expected_behavior:
+      - Mock cloud lane submission/status/cancel/proposal/evidence works with policy and budget enforcement.
+    implementation_status: partially_implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-8-training-flywheel
+    title: Trace collection and specialist model flywheel
+    source_refs: [legion-e2e-plan, model-training-plan]
+    code_refs: [scripts/models, config, training, evals, crates/legion-memory, crates/legion-security]
+    test_refs: [evals/run_eval.py, scripts/models, training]
+    expected_behavior:
+      - Dry-run acquisition/local-worker/training/eval scripts run and trace retention is consent-gated/redacted.
+    implementation_status: partially_implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+  - id: phase-9-product-hardening
+    title: Product hardening, accessibility, packaging, release
+    source_refs: [legion-e2e-plan, product-readiness-ledger]
+    code_refs: [scripts, docs, .github/workflows/ci.yml]
+    test_refs: [.github/workflows/ci.yml]
+    expected_behavior:
+      - All phase gates, clippy, deny, product smoke, packaging, accessibility, docs, and evidence pass.
+    implementation_status: partially_implemented
+    confidence: high
+    evidence_refs: []
+    finding_refs: []
+
+validation_matrix:
+  - id: val-full-workspace-tests
+    feature_id: phase-9-product-hardening
+    validation_type: test_command
+    command: cargo test --workspace --all-targets
+    files: [Cargo.toml]
+    result: passed
+    confidence: high
+    evidence: Background run proc_a28b306a6117 exited 0; workspace test run completed with no failures.
+  - id: val-format-check-deps
+    feature_id: phase-0-repo-stabilization
+    validation_type: build_lint
+    command: cargo fmt --all --check && cargo check --workspace --all-targets && cargo run -p xtask -- check-deps
+    files: [Cargo.toml, plans/dependency-policy.md, xtask]
+    result: passed
+    confidence: high
+    evidence: Command exited 0; dependency policy checks passed.
+  - id: val-clippy-evidence-gates
+    feature_id: phase-9-product-hardening
+    validation_type: build_lint
+    command: cargo clippy --workspace --all-targets -- -D warnings && cargo run -p legion-cli -- evidence check --phase phase8/gui-phase6/gui-phase7/gui-phase8
+    files: [.github/workflows/ci.yml, crates/legion-cli]
+    result: passed
+    confidence: high
+    evidence: Command exited 0; all evidence checks returned OK.
+  - id: val-training-dry-run
+    feature_id: phase-8-training-flywheel
+    validation_type: cli_command
+    command: bash scripts/models/download-models.sh --dry-run && bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml && python3 evals/run_eval.py --dry-run && python3 -m compileall training evals scripts/models
+    files: [scripts/models, config/workers.example.yaml, evals, training]
+    result: passed
+    confidence: high
+    evidence: Command exited 0; scripts printed model roster, worker plan, eval suite, and compileall completed.
+  - id: val-manual-ui-subaudit
+    feature_id: phase-2-manual-foundation
+    validation_type: code_inspection
+    command: Kimi bounded subaudit plus crate tests
+    files: [audit-reports/manual-ui-e2e-audit-2026-06-02.md]
+    result: passed
+    confidence: high
+    evidence: Subaudit reported 603 tests pass across audited UI/manual crates and documented manual exclusion/proposal-mediated save evidence.
+  - id: val-ai-delegate-automate-subaudit
+    feature_id: phase-6-automate
+    validation_type: code_inspection
+    command: Kimi bounded subaudit plus targeted tests
+    files: [crates/legion-protocol, crates/legion-app, crates/legion-agent, crates/legion-ai, crates/legion-ai-providers, crates/legion-tracker, crates/legion-memory, crates/legion-security]
+    result: passed
+    confidence: high
+    evidence: Subaudit reported targeted Assist/Delegate/Automate/provider/workflow/security tests pass; proposal-only guarantees validated.
+  - id: val-cloud-training-release-subaudit
+    feature_id: phase-7-cloud-lane
+    validation_type: code_inspection
+    command: Kimi bounded subaudit plus targeted cloud/training/release commands
+    files: [crates/legion-remote, crates/legion-remote-transport, scripts, training, evals, docs, .github/workflows]
+    result: passed
+    confidence: high
+    evidence: Subaudit reported cloud policy/security/evidence gates pass while identifying production cloud transport and real training/eval as dry-run/deferred.
+
+findings:
+  - id: finding-product-readiness-ledger-stale
+    title: Product readiness ledger still marks all gates Not started despite implemented/tested surfaces
+    type: docs_gap
+    severity: medium
+    status: fixed
+    confidence: high
+    affected_files: [plans/product-readiness-ledger.md, audit-reports/manual-ui-e2e-audit-2026-06-02.md]
+    source_refs: [product-readiness-ledger, legion-e2e-plan]
+    evidence: plans/product-readiness-ledger.md now records evidence-backed Legion statuses and deferred cut lines; targeted evidence gates remain listed.
+    expected_behavior: Readiness ledger should reflect current code/test/evidence state and distinguish implemented, in progress, deferred, and unsupported items.
+    actual_behavior: Resolved by the linked implementation task; see evidence and suggested tests.
+    proposed_fix: Implemented; keep evidence gates in CI and final validation.
+    suggested_tests:
+      - cargo run -p legion-cli -- evidence check --phase gui-phase8
+    converted_task_id: docs-ledger-01
+  - id: finding-unified-beta-e2e-test-missing
+    title: Beta acceptance scenario is covered by multiple tests but not one unified e2e scenario
+    type: missing_test
+    severity: medium
+    status: fixed
+    confidence: medium
+    affected_files: [plans/product-readiness-ledger.md, crates/legion-desktop/tests, crates/legion-app/tests]
+    source_refs: [product-readiness-ledger, legion-e2e-plan]
+    evidence: Added crates/legion-desktop/tests/beta_acceptance_e2e.rs and captured passing output in plans/evidence/legion-e2e/2026-06-03_beta_acceptance_e2e.txt.
+    expected_behavior: A beta acceptance scenario should have an explicit integrated smoke/e2e test or documented matrix showing sufficient decomposition.
+    actual_behavior: Resolved by the linked implementation task; see evidence and suggested tests.
+    proposed_fix: Implemented; keep evidence gates in CI and final validation.
+    suggested_tests:
+      - cargo test -p legion-desktop --test beta_workflow -- --nocapture
+    converted_task_id: beta-e2e-01
+  - id: finding-cloud-lane-production-transport-missing
+    title: Cloud lane has policy/client contracts but no production cloud transport
+    type: missing_feature
+    severity: medium
+    status: fixed
+    confidence: high
+    affected_files: [crates/legion-remote/src/lib.rs]
+    source_refs: [legion-e2e-plan, cloud-architecture]
+    evidence: Added HttpLegionCloudLaneTransport with deterministic TcpListener integration coverage; evidence captured in 2026-06-03_cloud_lane_http_transport_gates.txt and contract doc.
+    expected_behavior: Phase 7 Cloud Lane MVP should include a production or local mock-server transport path for submit/status/stream/cancel/fetch proposal/evidence.
+    actual_behavior: Resolved by the linked implementation task; see evidence and suggested tests.
+    proposed_fix: Implemented; keep evidence gates in CI and final validation.
+    suggested_tests:
+      - cargo test -p legion-remote --all-targets
+    converted_task_id: cloud-transport-01
+  - id: finding-training-eval-real-execution-deferred
+    title: Training and eval scripts are dry-run scaffolds, not real training/inference harnesses
+    type: missing_feature
+    severity: medium
+    status: fixed
+    confidence: high
+    affected_files: [training/qlora_train.py, training/convert_to_gguf.py, evals/run_eval.py]
+    source_refs: [legion-e2e-plan, model-training-plan]
+    evidence: Added offline/fixture-smoke and optional real execution paths for eval, QLoRA training, and GGUF conversion with lazy dependency checks.
+    expected_behavior: Phase 8 final product flywheel should either run real operator-provisioned training/eval or clearly mark real execution as deferred.
+    actual_behavior: Resolved by the linked implementation task; see evidence and suggested tests.
+    proposed_fix: Implemented; keep evidence gates in CI and final validation.
+    suggested_tests:
+      - python3 evals/run_eval.py --dry-run
+      - python3 -m compileall training evals scripts/models
+    converted_task_id: training-eval-01
+  - id: finding-agents-placeholder-note-stale
+    title: AGENTS.md placeholder crate warning appears stale for agent/tracker/memory
+    type: docs_gap
+    severity: low
+    status: fixed
+    confidence: medium
+    affected_files: [AGENTS.md]
+    source_refs: [agents]
+    evidence: AGENTS.md now distinguishes active phase-gated Legion crates from deferred collaboration/admin/runtime-extension surfaces.
+    expected_behavior: Repo guidance should distinguish still-inert placeholders from crates that have passed ADR/phase gates and tests.
+    actual_behavior: Resolved by the linked implementation task; see evidence and suggested tests.
+    proposed_fix: Implemented; keep evidence gates in CI and final validation.
+    suggested_tests:
+      - cargo test -p legion-agent --all-targets
+      - cargo test -p legion-tracker --all-targets
+      - cargo test -p legion-memory --all-targets
+    converted_task_id: docs-agents-02
+  - id: finding-training-dry-runs-not-in-ci
+    title: Python/model training dry-run scripts are not directly run by CI
+    type: ci_risk
+    severity: low
+    status: fixed
+    confidence: high
+    affected_files: [.github/workflows/ci.yml, scripts/models, training, evals]
+    source_refs: [ci, legion-e2e-plan]
+    evidence: .github/workflows/ci.yml now runs model script dry-runs, eval offline fixture, training fixture smoke, GGUF fixture smoke, and compileall on Linux.
+    expected_behavior: Phase 8 dry-run scripts should have CI coverage if considered release evidence.
+    actual_behavior: Resolved by the linked implementation task; see evidence and suggested tests.
+    proposed_fix: Implemented; keep evidence gates in CI and final validation.
+    suggested_tests:
+      - bash scripts/models/download-models.sh --dry-run
+      - bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml
+      - python3 evals/run_eval.py --dry-run
+      - python3 -m compileall training evals scripts/models
+    converted_task_id: ci-audit-01

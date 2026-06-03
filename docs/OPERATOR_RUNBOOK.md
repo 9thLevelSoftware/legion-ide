@@ -69,6 +69,11 @@ Run from repo root before claiming model-flywheel readiness:
 bash scripts/models/download-models.sh --dry-run
 bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml
 python3 evals/run_eval.py --dry-run
+python3 evals/run_eval.py --offline-fixture --dataset evals/fixtures/minimal.jsonl --output /tmp/legion-eval.json
+python3 training/qlora_train.py --dry-run
+python3 training/qlora_train.py --fixture-smoke --dataset training/fixtures/minimal_traces.jsonl --output-dir /tmp/legion-train-smoke
+python3 training/convert_to_gguf.py --dry-run
+python3 training/convert_to_gguf.py --fixture-smoke --model-dir /tmp/legion-train-smoke --output /tmp/legion-model.gguf --metadata-output /tmp/legion-gguf.json
 python3 -m compileall training evals scripts/models
 cargo test -p legion-memory --all-targets trace
 cargo test -p legion-security --all-targets redaction

@@ -1,0 +1,90 @@
+COMMAND: cargo test -p legion-remote --test cloud_lane_http_transport -- --nocapture
+warning: unused import: `LegionWorkerResult`
+  --> crates/legion-remote/tests/cloud_lane_http_transport.rs:20:59
+   |
+20 |     LegionProviderRouteMetadata, AssistedAiProviderClass, LegionWorkerResult, RedactionHint,
+   |                                                           ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `LegionCloudLaneTransport`
+  --> crates/legion-remote/tests/cloud_lane_http_transport.rs:25:57
+   |
+25 |     LegionCloudLaneClient, LegionCloudLaneClientConfig, LegionCloudLaneTransport,
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `legion-remote` (test "cloud_lane_http_transport") generated 2 warnings (run `cargo fix --test "cloud_lane_http_transport" -p legion-remote` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/cloud_lane_http_transport.rs (target/debug/deps/cloud_lane_http_transport-0ff61247e3285135)
+
+running 11 tests
+test http_transport_config_debug_redacts_auth_token ... ok
+test http_transport_disabled_policy_rejects_before_network ... ok
+test http_transport_cost_cap_rejects_before_network ... ok
+test http_transport_forbidden_upload_rejects_before_network ... ok
+test http_transport_stream_task_events ... ok
+test http_transport_submit_task_sends_headers_and_body ... ok
+test http_transport_classifies_4xx_as_http_response_error ... ok
+test http_transport_cancel_task ... ok
+test http_transport_fetch_task_evidence ... ok
+test http_transport_fetch_task_proposal ... ok
+test http_transport_classifies_5xx_as_http_response_error ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT_CODE: 0
+
+COMMAND: cargo test -p legion-remote --all-targets
+warning: unused import: `LegionWorkerResult`
+  --> crates/legion-remote/tests/cloud_lane_http_transport.rs:20:59
+   |
+20 |     LegionProviderRouteMetadata, AssistedAiProviderClass, LegionWorkerResult, RedactionHint,
+   |                                                           ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `LegionCloudLaneTransport`
+  --> crates/legion-remote/tests/cloud_lane_http_transport.rs:25:57
+   |
+25 |     LegionCloudLaneClient, LegionCloudLaneClientConfig, LegionCloudLaneTransport,
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `legion-remote` (test "cloud_lane_http_transport") generated 2 warnings (run `cargo fix --test "cloud_lane_http_transport" -p legion-remote` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/legion_remote-ce1794d107d3c738)
+
+running 13 tests
+test tests::remote_audit_records_are_metadata_only_valid ... ok
+test tests::cloud_lane_client_rejects_forbidden_upload_scope_before_transport ... ok
+test tests::devcontainer_connection_plan_fails_closed_without_image_or_dockerfile ... ok
+test tests::remote_reconnect_and_offline_resume_are_explicit ... ok
+test tests::remote_execution_surfaces_are_policy_gated_and_bounded ... ok
+test tests::remote_filesystem_stale_fingerprint_preserves_fixture_text ... ok
+test tests::devcontainer_connection_plan_parses_config_and_activates_runtime ... ok
+test tests::remote_filesystem_write_requires_proposal_and_preconditions ... ok
+test tests::cloud_lane_client_rejects_mismatched_response_task_ids ... ok
+test tests::remote_runtime_is_default_off ... ok
+test tests::cloud_lane_client_submits_streams_cancels_and_fetches_metadata ... ok
+test tests::remote_session_requires_trusted_active_enabled_descriptor ... ok
+test tests::ssh_connection_plan_activates_remote_runtime ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cloud_lane_http_transport.rs (target/debug/deps/cloud_lane_http_transport-0ff61247e3285135)
+
+running 11 tests
+test http_transport_config_debug_redacts_auth_token ... ok
+test http_transport_disabled_policy_rejects_before_network ... ok
+test http_transport_cost_cap_rejects_before_network ... ok
+test http_transport_forbidden_upload_rejects_before_network ... ok
+test http_transport_classifies_4xx_as_http_response_error ... ok
+test http_transport_fetch_task_evidence ... ok
+test http_transport_stream_task_events ... ok
+test http_transport_classifies_5xx_as_http_response_error ... ok
+test http_transport_submit_task_sends_headers_and_body ... ok
+test http_transport_fetch_task_proposal ... ok
+test http_transport_cancel_task ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT_CODE: 0

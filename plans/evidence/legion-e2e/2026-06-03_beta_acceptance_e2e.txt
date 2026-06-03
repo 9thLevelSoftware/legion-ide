@@ -1,0 +1,17 @@
+COMMAND: cargo test -p legion-desktop --test beta_acceptance_e2e -- --nocapture
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.1
+   Compiling legion-remote v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote)
+   Compiling legion-ai-providers v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ai-providers)
+   Compiling legion-app v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-app)
+   Compiling legion-desktop v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-desktop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.88s
+     Running tests/beta_acceptance_e2e.rs (target/debug/deps/beta_acceptance_e2e-8068bfbec9624f7f)
+
+running 1 test
+test beta_acceptance_e2e_policy_gated_local_loop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+EXIT_CODE: 0

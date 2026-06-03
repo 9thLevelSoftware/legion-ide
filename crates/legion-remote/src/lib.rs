@@ -67,6 +67,26 @@ pub enum RemoteRuntimeError {
         /// Limit reason.
         reason: String,
     },
+    /// Transport or network layer failed.
+    #[error("transport error: {reason}")]
+    Transport {
+        /// Failure reason.
+        reason: String,
+    },
+    /// Body serialization or deserialization failed.
+    #[error("serialization error: {reason}")]
+    Serialization {
+        /// Failure reason.
+        reason: String,
+    },
+    /// HTTP response indicated an error.
+    #[error("HTTP response error: status={status}, reason={reason}")]
+    HttpResponse {
+        /// HTTP status code.
+        status: u16,
+        /// Failure reason.
+        reason: String,
+    },
 }
 
 /// Runtime feature and deterministic fixture limits.
@@ -1565,6 +1585,208 @@ fn stable_hash_u128(value: &str) -> u128 {
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }
     hash
+}
+
+/// Configuration for HTTP Legion Cloud Lane transport.
+///
+/// The `Debug` implementation intentionally redacts the auth token value.
+#[derive(Clone)]
+pub struct HttpLegionCloudLaneTransportConfig {
+    /// Base URL for the cloud control plane (e.g., `https://cloud.example.invalid`).
+    pub base_url: String,
+    /// Request timeout.
+    pub timeout: std::time::Duration,
+    /// Display-safe client identity label used for observability and correlation.
+    pub client_identity_label: String,
+    /// Optional auth token as `(label, value)`. The value is redacted in logs.
+    pub auth_token: Option<(String, String)>,
+}
+
+impl std::fmt::Debug for HttpLegionCloudLaneTransportConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut builder = f.debug_struct("HttpLegionCloudLaneTransportConfig");
+        builder
+            .field("base_url", &self.base_url)
+            .field("timeout", &self.timeout)
+            .field("client_identity_label", &self.client_identity_label)
+            .field(
+                "auth_token",
+                &self
+                    .auth_token
+                    .as_ref()
+                    .map(|(label, _)| format!("{label}:<redacted>")),
+            )
+            .finish()
+    }
+}
+
+/// Production HTTP JSON transport for the Legion Cloud Lane.
+pub struct HttpLegionCloudLaneTransport {
+    client: reqwest::blocking::Client,
+    config: HttpLegionCloudLaneTransportConfig,
+}
+
+impl std::fmt::Debug for HttpLegionCloudLaneTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpLegionCloudLaneTransport")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+fn ensure_rustls_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("rustls ring provider install");
+    });
+}
+
+impl HttpLegionCloudLaneTransport {
+    /// Construct a transport from explicit configuration.
+    pub fn new(config: HttpLegionCloudLaneTransportConfig) -> Result<Self, RemoteRuntimeError> {
+        ensure_rustls_provider();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .map_err(|err| RemoteRuntimeError::Transport {
+                reason: format!("failed to build HTTP client: {err}"),
+            })?;
+        Ok(Self { client, config })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.config.base_url.trim_end_matches('/'))
+    }
+
+    fn common_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+        if let Some((label, value)) = &self.config.auth_token {
+            let auth_value = format!("{label} {value}");
+            if let Ok(header_value) = reqwest::header::HeaderValue::from_str(&auth_value) {
+                headers.insert(reqwest::header::AUTHORIZATION, header_value);
+            }
+        }
+        if let Ok(identity_value) =
+            reqwest::header::HeaderValue::from_str(&self.config.client_identity_label)
+        {
+            headers.insert("X-Legion-Client-Identity", identity_value);
+        }
+        headers
+    }
+
+    fn send_with_body(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::blocking::Response, RemoteRuntimeError> {
+        let mut request = self.client.request(method, url);
+        request = request.headers(self.common_headers());
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
+            .send()
+            .map_err(|err| RemoteRuntimeError::Transport {
+                reason: format!("HTTP request failed: {err}"),
+            })?;
+        Ok(response)
+    }
+
+    fn expect_ok(
+        response: reqwest::blocking::Response,
+    ) -> Result<reqwest::blocking::Response, RemoteRuntimeError> {
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let reason = response
+                .text()
+                .unwrap_or_else(|_| "unable to read error body".to_string());
+            return Err(RemoteRuntimeError::HttpResponse { status, reason });
+        }
+        Ok(response)
+    }
+
+    fn parse_json<T: serde::de::DeserializeOwned>(
+        response: reqwest::blocking::Response,
+    ) -> Result<T, RemoteRuntimeError> {
+        response
+            .json()
+            .map_err(|err| RemoteRuntimeError::Serialization {
+                reason: format!("failed to deserialize response body: {err}"),
+            })
+    }
+}
+
+impl LegionCloudLaneTransport for HttpLegionCloudLaneTransport {
+    fn submit_task(
+        &mut self,
+        request: &LegionCloudLaneTaskRequest,
+    ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+        let body =
+            serde_json::to_value(request).map_err(|err| RemoteRuntimeError::Serialization {
+                reason: format!("failed to serialize request body: {err}"),
+            })?;
+        let response = self.send_with_body(
+            reqwest::Method::POST,
+            &self.url("/v1/cloud/tasks"),
+            Some(&body),
+        )?;
+        let response = Self::expect_ok(response)?;
+        Self::parse_json(response)
+    }
+
+    fn stream_task_events(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<Vec<LegionCloudLaneTaskEvent>, RemoteRuntimeError> {
+        let url = self.url(&format!("/v1/cloud/tasks/{}/events", task_id.0));
+        let response = self.send_with_body(reqwest::Method::GET, &url, None)?;
+        let response = Self::expect_ok(response)?;
+        Self::parse_json(response)
+    }
+
+    fn cancel_task(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+        cancellation_token: CancellationTokenId,
+        reason_label: &str,
+    ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+        let body = serde_json::json!({
+            "cancellation_token": cancellation_token.0,
+            "reason_label": reason_label,
+        });
+        let url = self.url(&format!("/v1/cloud/tasks/{}/cancel", task_id.0));
+        let response = self.send_with_body(reqwest::Method::POST, &url, Some(&body))?;
+        let response = Self::expect_ok(response)?;
+        Self::parse_json(response)
+    }
+
+    fn fetch_task_proposal(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<LegionCloudLaneProposalResponse, RemoteRuntimeError> {
+        let url = self.url(&format!("/v1/cloud/tasks/{}/proposal", task_id.0));
+        let response = self.send_with_body(reqwest::Method::GET, &url, None)?;
+        let response = Self::expect_ok(response)?;
+        Self::parse_json(response)
+    }
+
+    fn fetch_task_evidence(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+    ) -> Result<Vec<LegionEvidenceRecord>, RemoteRuntimeError> {
+        let url = self.url(&format!("/v1/cloud/tasks/{}/evidence", task_id.0));
+        let response = self.send_with_body(reqwest::Method::GET, &url, None)?;
+        let response = Self::expect_ok(response)?;
+        Self::parse_json(response)
+    }
 }
 
 #[cfg(test)]

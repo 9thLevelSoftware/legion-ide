@@ -1,0 +1,107 @@
+<!doctype html><html><head><meta charset='utf-8'>
+<title>devil-ide / Legion IDE Engineering Audit</title>
+
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;line-height:1.5;max-width:1200px;margin:2rem auto;padding:0 1rem;color:#202124}code{background:#f5f5f5;padding:.1rem .25rem;border-radius:4px}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #ddd;padding:.5rem;text-align:left;vertical-align:top}th{background:#f6f8fa}.card{border:1px solid #ddd;border-radius:10px;padding:1rem;margin:1rem 0}.critical,.high{border-left:5px solid #c33}.medium{border-left:5px solid #d99000}.low,.info{border-left:5px solid #777}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem}.box{background:#f8f9fa;border-radius:8px;padding:1rem}.meta{color:#555}
+</style></head><body>
+
+<h1 id='top'>devil-ide / Legion IDE Engineering Audit</h1>
+<p class='meta'>Generated from <code>ENGINEERING_AUDIT.yaml</code>. GPT-5.5 synthesizes; Kimi 2.6 audits bounded packets only.</p>
+<h2 id='summary'>Summary</h2><div class='grid'>
+<div class='box'><strong>Audit areas</strong><br>4</div>
+<div class='box'><strong>Features</strong><br>10</div>
+<div class='box'><strong>Validations</strong><br>7</div>
+<div class='box'><strong>Findings</strong><br>6</div>
+</div>
+<h2 id='repo-map'>Repo Map</h2>
+<h3>languages</h3><ul><li><code>Rust</code></li><li><code>Python</code></li><li><code>Shell</code></li><li><code>PowerShell</code></li></ul>
+<h3>package_managers</h3><ul><li><code>cargo</code></li></ul>
+<h3>test_frameworks</h3><ul><li><code>cargo test</code></li><li><code>python3 compileall</code></li><li><code>shell dry-run scripts</code></li></ul>
+<h3>ci_systems</h3><ul><li><code>GitHub Actions</code></li></ul>
+<h3>entrypoints</h3><ul><li><code>crates/legion-app/src/main.rs</code></li><li><code>crates/legion-desktop/src/main.rs</code></li><li><code>crates/legion-cli/src/main.rs</code></li><li><code>xtask/src/main.rs</code></li></ul>
+<h2 id='architecture-map'>Architecture Map</h2>
+<div class='card' id='subsystem-projection-shell'><h3>Projection-only UI and desktop shell</h3>
+<p></p>
+<h4>Paths</h4><ul><li><code>crates/legion-ui</code></li><li><code>crates/legion-desktop</code></li></ul>
+<h4>Responsibilities</h4><ul><li><span>Render snapshots and dispatch intents without owning editor/session text.</span></li><li><span>Enforce mode-specific panel visibility.</span></li></ul>
+</div>
+<div class='card' id='subsystem-app-runtime'><h3>App/runtime workflow coordinator</h3>
+<p></p>
+<h4>Paths</h4><ul><li><code>crates/legion-app</code></li></ul>
+<h4>Responsibilities</h4><ul><li><span>Own editing/workspace workflows, save proposals, command dispatch, and workflow APIs.</span></li></ul>
+</div>
+<div class='card' id='subsystem-protocol-policy'><h3>Protocol and policy contracts</h3>
+<p></p>
+<h4>Paths</h4><ul><li><code>crates/legion-protocol</code></li><li><code>crates/legion-security</code></li></ul>
+<h4>Responsibilities</h4><ul><li><span>Define DTO contracts, route/task/evidence validation, privacy/security policy, and redaction.</span></li></ul>
+</div>
+<div class='card' id='subsystem-ai-worker-control'><h3>AI provider and worker lanes</h3>
+<p></p>
+<h4>Paths</h4><ul><li><code>crates/legion-ai</code></li><li><code>crates/legion-ai-providers</code></li><li><code>crates/legion-agent</code></li><li><code>crates/legion-tracker</code></li><li><code>crates/legion-memory</code></li></ul>
+<h4>Responsibilities</h4><ul><li><span>Produce proposals/evidence/metadata without direct main-workspace mutation.</span></li></ul>
+</div>
+<div class='card' id='subsystem-cloud-training-release'><h3>Cloud, training, release, and evidence tooling</h3>
+<p></p>
+<h4>Paths</h4><ul><li><code>crates/legion-remote</code></li><li><code>crates/legion-cli</code></li><li><code>scripts</code></li><li><code>training</code></li><li><code>evals</code></li><li><code>docs</code></li><li><code>plans</code></li></ul>
+<h4>Responsibilities</h4><ul><li><span>Provide opt-in cloud lanes, dry-run model/training workflows, evidence gates, and release smoke.</span></li></ul>
+</div>
+<h2 id='feature-inventory'>Feature Inventory</h2>
+<table><thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Confidence</th><th>Findings</th></tr></thead><tbody><tr><td><a id='feature-phase-0-repo-stabilization' href='#feature-phase-0-repo-stabilization'>phase-0-repo-stabilization</a></td><td>Repository stabilization and Legion product surface</td><td>implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-1-mode-shell' href='#feature-phase-1-mode-shell'>phase-1-mode-shell</a></td><td>Dock/panel registry and mode shell</td><td>implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-2-manual-foundation' href='#feature-phase-2-manual-foundation'>phase-2-manual-foundation</a></td><td>Manual deterministic IDE foundation</td><td>implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-3-protocol-dtos' href='#feature-phase-3-protocol-dtos'>phase-3-protocol-dtos</a></td><td>Protocol DTO foundation for workers/evidence/provider/training</td><td>implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-4-assist' href='#feature-phase-4-assist'>phase-4-assist</a></td><td>Assist mode</td><td>implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-5-delegate' href='#feature-phase-5-delegate'>phase-5-delegate</a></td><td>Delegate mode</td><td>implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-6-automate' href='#feature-phase-6-automate'>phase-6-automate</a></td><td>Automate workflow orchestration</td><td>implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-7-cloud-lane' href='#feature-phase-7-cloud-lane'>phase-7-cloud-lane</a></td><td>Cloud Lane MVP</td><td>partially_implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-8-training-flywheel' href='#feature-phase-8-training-flywheel'>phase-8-training-flywheel</a></td><td>Trace collection and specialist model flywheel</td><td>partially_implemented</td><td>high</td><td></td></tr><tr><td><a id='feature-phase-9-product-hardening' href='#feature-phase-9-product-hardening'>phase-9-product-hardening</a></td><td>Product hardening, accessibility, packaging, release</td><td>partially_implemented</td><td>high</td><td></td></tr></tbody></table>
+<h2 id='validation-matrix'>Validation Matrix</h2>
+<table><thead><tr><th>ID</th><th>Feature</th><th>Type</th><th>Result</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody><tr><td>val-full-workspace-tests</td><td>phase-9-product-hardening</td><td>test_command</td><td>passed</td><td>high</td><td>Background run proc_a28b306a6117 exited 0; workspace test run completed with no failures.</td></tr><tr><td>val-format-check-deps</td><td>phase-0-repo-stabilization</td><td>build_lint</td><td>passed</td><td>high</td><td>Command exited 0; dependency policy checks passed.</td></tr><tr><td>val-clippy-evidence-gates</td><td>phase-9-product-hardening</td><td>build_lint</td><td>passed</td><td>high</td><td>Command exited 0; all evidence checks returned OK.</td></tr><tr><td>val-training-dry-run</td><td>phase-8-training-flywheel</td><td>cli_command</td><td>passed</td><td>high</td><td>Command exited 0; scripts printed model roster, worker plan, eval suite, and compileall completed.</td></tr><tr><td>val-manual-ui-subaudit</td><td>phase-2-manual-foundation</td><td>code_inspection</td><td>passed</td><td>high</td><td>Subaudit reported 603 tests pass across audited UI/manual crates and documented manual exclusion/proposal-mediated save evidence.</td></tr><tr><td>val-ai-delegate-automate-subaudit</td><td>phase-6-automate</td><td>code_inspection</td><td>passed</td><td>high</td><td>Subaudit reported targeted Assist/Delegate/Automate/provider/workflow/security tests pass; proposal-only guarantees validated.</td></tr><tr><td>val-cloud-training-release-subaudit</td><td>phase-7-cloud-lane</td><td>code_inspection</td><td>passed</td><td>high</td><td>Subaudit reported cloud policy/security/evidence gates pass while identifying production cloud transport and real training/eval as dry-run/deferred.</td></tr></tbody></table>
+<h2 id='findings'>Findings</h2>
+<article class='card medium' id='finding-finding-product-readiness-ledger-stale'><h3>finding-product-readiness-ledger-stale — Product readiness ledger still marks all gates Not started despite implemented/tested surfaces</h3>
+<p><strong>Type:</strong> docs_gap | <strong>Severity:</strong> medium | <strong>Status:</strong> fixed | <strong>Confidence:</strong> high</p>
+<h4>Affected files</h4><ul><li><code>plans/product-readiness-ledger.md</code></li><li><code>audit-reports/manual-ui-e2e-audit-2026-06-02.md</code></li></ul>
+<h4>evidence</h4><p>plans/product-readiness-ledger.md now records evidence-backed Legion statuses and deferred cut lines; targeted evidence gates remain listed.</p>
+<h4>expected_behavior</h4><p>Readiness ledger should reflect current code/test/evidence state and distinguish implemented, in progress, deferred, and unsupported items.</p>
+<h4>actual_behavior</h4><p>Resolved by the linked implementation task; see evidence and suggested tests.</p>
+<h4>proposed_fix</h4><p>Implemented; keep evidence gates in CI and final validation.</p>
+<h4>Suggested tests</h4><ul><li><code>cargo run -p legion-cli -- evidence check --phase gui-phase8</code></li></ul>
+</article>
+<article class='card medium' id='finding-finding-unified-beta-e2e-test-missing'><h3>finding-unified-beta-e2e-test-missing — Beta acceptance scenario is covered by multiple tests but not one unified e2e scenario</h3>
+<p><strong>Type:</strong> missing_test | <strong>Severity:</strong> medium | <strong>Status:</strong> fixed | <strong>Confidence:</strong> medium</p>
+<h4>Affected files</h4><ul><li><code>plans/product-readiness-ledger.md</code></li><li><code>crates/legion-desktop/tests</code></li><li><code>crates/legion-app/tests</code></li></ul>
+<h4>evidence</h4><p>Added crates/legion-desktop/tests/beta_acceptance_e2e.rs and captured passing output in plans/evidence/legion-e2e/2026-06-03_beta_acceptance_e2e.txt.</p>
+<h4>expected_behavior</h4><p>A beta acceptance scenario should have an explicit integrated smoke/e2e test or documented matrix showing sufficient decomposition.</p>
+<h4>actual_behavior</h4><p>Resolved by the linked implementation task; see evidence and suggested tests.</p>
+<h4>proposed_fix</h4><p>Implemented; keep evidence gates in CI and final validation.</p>
+<h4>Suggested tests</h4><ul><li><code>cargo test -p legion-desktop --test beta_workflow -- --nocapture</code></li></ul>
+</article>
+<article class='card medium' id='finding-finding-cloud-lane-production-transport-missing'><h3>finding-cloud-lane-production-transport-missing — Cloud lane has policy/client contracts but no production cloud transport</h3>
+<p><strong>Type:</strong> missing_feature | <strong>Severity:</strong> medium | <strong>Status:</strong> fixed | <strong>Confidence:</strong> high</p>
+<h4>Affected files</h4><ul><li><code>crates/legion-remote/src/lib.rs</code></li></ul>
+<h4>evidence</h4><p>Added HttpLegionCloudLaneTransport with deterministic TcpListener integration coverage; evidence captured in 2026-06-03_cloud_lane_http_transport_gates.txt and contract doc.</p>
+<h4>expected_behavior</h4><p>Phase 7 Cloud Lane MVP should include a production or local mock-server transport path for submit/status/stream/cancel/fetch proposal/evidence.</p>
+<h4>actual_behavior</h4><p>Resolved by the linked implementation task; see evidence and suggested tests.</p>
+<h4>proposed_fix</h4><p>Implemented; keep evidence gates in CI and final validation.</p>
+<h4>Suggested tests</h4><ul><li><code>cargo test -p legion-remote --all-targets</code></li></ul>
+</article>
+<article class='card medium' id='finding-finding-training-eval-real-execution-deferred'><h3>finding-training-eval-real-execution-deferred — Training and eval scripts are dry-run scaffolds, not real training/inference harnesses</h3>
+<p><strong>Type:</strong> missing_feature | <strong>Severity:</strong> medium | <strong>Status:</strong> fixed | <strong>Confidence:</strong> high</p>
+<h4>Affected files</h4><ul><li><code>training/qlora_train.py</code></li><li><code>training/convert_to_gguf.py</code></li><li><code>evals/run_eval.py</code></li></ul>
+<h4>evidence</h4><p>Added offline/fixture-smoke and optional real execution paths for eval, QLoRA training, and GGUF conversion with lazy dependency checks.</p>
+<h4>expected_behavior</h4><p>Phase 8 final product flywheel should either run real operator-provisioned training/eval or clearly mark real execution as deferred.</p>
+<h4>actual_behavior</h4><p>Resolved by the linked implementation task; see evidence and suggested tests.</p>
+<h4>proposed_fix</h4><p>Implemented; keep evidence gates in CI and final validation.</p>
+<h4>Suggested tests</h4><ul><li><code>python3 evals/run_eval.py --dry-run</code></li><li><code>python3 -m compileall training evals scripts/models</code></li></ul>
+</article>
+<article class='card low' id='finding-finding-agents-placeholder-note-stale'><h3>finding-agents-placeholder-note-stale — AGENTS.md placeholder crate warning appears stale for agent/tracker/memory</h3>
+<p><strong>Type:</strong> docs_gap | <strong>Severity:</strong> low | <strong>Status:</strong> fixed | <strong>Confidence:</strong> medium</p>
+<h4>Affected files</h4><ul><li><code>AGENTS.md</code></li></ul>
+<h4>evidence</h4><p>AGENTS.md now distinguishes active phase-gated Legion crates from deferred collaboration/admin/runtime-extension surfaces.</p>
+<h4>expected_behavior</h4><p>Repo guidance should distinguish still-inert placeholders from crates that have passed ADR/phase gates and tests.</p>
+<h4>actual_behavior</h4><p>Resolved by the linked implementation task; see evidence and suggested tests.</p>
+<h4>proposed_fix</h4><p>Implemented; keep evidence gates in CI and final validation.</p>
+<h4>Suggested tests</h4><ul><li><code>cargo test -p legion-agent --all-targets</code></li><li><code>cargo test -p legion-tracker --all-targets</code></li><li><code>cargo test -p legion-memory --all-targets</code></li></ul>
+</article>
+<article class='card low' id='finding-finding-training-dry-runs-not-in-ci'><h3>finding-training-dry-runs-not-in-ci — Python/model training dry-run scripts are not directly run by CI</h3>
+<p><strong>Type:</strong> ci_risk | <strong>Severity:</strong> low | <strong>Status:</strong> fixed | <strong>Confidence:</strong> high</p>
+<h4>Affected files</h4><ul><li><code>.github/workflows/ci.yml</code></li><li><code>scripts/models</code></li><li><code>training</code></li><li><code>evals</code></li></ul>
+<h4>evidence</h4><p>.github/workflows/ci.yml now runs model script dry-runs, eval offline fixture, training fixture smoke, GGUF fixture smoke, and compileall on Linux.</p>
+<h4>expected_behavior</h4><p>Phase 8 dry-run scripts should have CI coverage if considered release evidence.</p>
+<h4>actual_behavior</h4><p>Resolved by the linked implementation task; see evidence and suggested tests.</p>
+<h4>proposed_fix</h4><p>Implemented; keep evidence gates in CI and final validation.</p>
+<h4>Suggested tests</h4><ul><li><code>bash scripts/models/download-models.sh --dry-run</code></li><li><code>bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml</code></li><li><code>python3 evals/run_eval.py --dry-run</code></li><li><code>python3 -m compileall training evals scripts/models</code></li></ul>
+</article>
+</body></html>

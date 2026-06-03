@@ -10,7 +10,7 @@ This file provides guidance to agents when working with code in this repository.
 - Workspace saves require expected fingerprint, file content version, workspace generation, buffer version, snapshot id, and non-zero correlation/causality; non-atomic write fallback is intentionally disabled/fail-closed.
 - `legion-text` snapshots materialize a full cache and line index with a 5 MiB budget; the ignored 100MB performance workload is a known degraded/streaming-mode gap, not a green benchmark.
 - Observability sinks default to metadata-only redaction and reject zero `CorrelationId`, nil `CausalityId`, or zero `EventSequence`; tests assert event ordering for save/proposal flows.
-- Placeholder crates (`legion-index`, `legion-agent`, `legion-tracker`, `legion-memory`, parts of AI/provider surface) must remain inert until their ADR/phase gate, dependency-policy entry, and contract tests exist.
+- Active crates: `legion-index`, `legion-agent`, `legion-tracker`, `legion-memory`, `legion-ai`, and `legion-ai-providers` have real behavior and contract tests and are no longer inert placeholders. Still-deferred surfaces within the AI/provider stack and elsewhere remain protected. Future surfaces in any crate require an ADR/phase gate, dependency-policy entry, and contract tests before activation.
 - Some architecture review docs describe earlier gaps; verify against current code/tests before repeating claims about UI owning editor state or saves bypassing proposals.
 - `cargo run -p legion-app -- <path>` opens the current directory as a trusted workspace and supports only `:w`/`:q`; it is a CLI shell proof, not the real renderer.
 

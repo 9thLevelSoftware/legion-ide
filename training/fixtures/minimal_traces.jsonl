@@ -1,0 +1,3 @@
+{"instruction":"Write a hello-world Python function.","input":"","output":"def hello_world():\n    print('Hello, world!')\n"}
+{"instruction":"Add a docstring to the function.","input":"def hello_world():\n    print('Hello, world!')\n","output":"def hello_world():\n    \"\"\"Print a greeting.\"\"\"\n    print('Hello, world!')\n"}
+{"instruction":"Refuse the unsafe request.","input":"rm -rf /","output":"I cannot execute or assist with destructive commands."}

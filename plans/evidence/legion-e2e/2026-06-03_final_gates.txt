@@ -1,0 +1,1509 @@
+COMMAND: cargo fmt --all --check
+EXIT_CODE: 0
+
+COMMAND: cargo check --workspace --all-targets
+    Checking legion-protocol v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-protocol)
+    Checking xtask v0.1.0 (/Users/christopherwilloughby/devil-ide/xtask)
+    Checking legion-security v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-security)
+    Checking legion-observability v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-observability)
+    Checking legion-platform v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-platform)
+    Checking legion-text v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-text)
+    Checking legion-ui v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ui)
+    Checking legion-remote v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote)
+    Checking legion-collaboration v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-collaboration)
+    Checking legion-retention v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-retention)
+    Checking legion-telemetry v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-telemetry)
+    Checking legion-ai v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ai)
+    Checking legion-terminal v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-terminal)
+    Checking legion-index v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-index)
+    Checking legion-storage v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-storage)
+    Checking legion-project v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-project)
+    Checking legion-editor v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-editor)
+    Checking legion-ai-providers v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ai-providers)
+    Checking legion-tracker v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-tracker)
+    Checking legion-plugin v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-plugin)
+    Checking legion-memory v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-memory)
+    Checking legion-cli v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-cli)
+    Checking legion-agent v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-agent)
+    Checking legion-app v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-app)
+    Checking legion-remote-transport v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote-transport)
+    Checking legion-vscode-compat v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-vscode-compat)
+    Checking legion-desktop v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.20s
+EXIT_CODE: 0
+
+COMMAND: cargo clippy --workspace --all-targets -- -D warnings
+    Checking legion-protocol v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-protocol)
+    Checking xtask v0.1.0 (/Users/christopherwilloughby/devil-ide/xtask)
+    Checking legion-security v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-security)
+    Checking legion-observability v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-observability)
+    Checking legion-platform v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-platform)
+    Checking legion-text v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-text)
+    Checking legion-ui v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ui)
+    Checking legion-remote v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote)
+    Checking legion-collaboration v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-collaboration)
+    Checking legion-vscode-compat v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-vscode-compat)
+    Checking legion-retention v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-retention)
+    Checking legion-remote-transport v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote-transport)
+    Checking legion-index v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-index)
+    Checking legion-storage v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-storage)
+    Checking legion-project v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-project)
+    Checking legion-ai v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ai)
+    Checking legion-editor v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-editor)
+    Checking legion-terminal v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-terminal)
+    Checking legion-ai-providers v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ai-providers)
+    Checking legion-tracker v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-tracker)
+    Checking legion-memory v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-memory)
+error: equality checks against false can be replaced by a negation
+   --> crates/legion-remote/tests/cloud_lane_http_transport.rs:462:13
+    |
+462 |     assert!(debug.contains("test-token-123") == false);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `!debug.contains("test-token-123")`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#bool_comparison
+    = note: `-D clippy::bool-comparison` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::bool_comparison)]`
+
+error: could not compile `legion-remote` (test "cloud_lane_http_transport") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+EXIT_CODE: 101
+
+COMMAND: cargo test --workspace --all-targets
+   Compiling legion-remote v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote)
+   Compiling legion-app v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-app)
+   Compiling legion-desktop v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-desktop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.42s
+     Running unittests src/lib.rs (target/debug/deps/legion_agent-e08bade946c6b7cf)
+
+running 19 tests
+test tests::cancellation_preserves_metadata_without_applying_proposals ... ok
+test tests::delegated_sandbox_requires_approved_write_tool_permission ... ok
+test tests::legion_workflow_dependency_cycle_is_blocked ... ok
+test tests::legion_workflow_blocked_worker_is_not_rescheduled ... ok
+test tests::legion_workflow_resume_uses_persisted_worker_and_dependency_state ... ok
+test tests::legion_workflow_ready_worker_order_follows_dependencies ... ok
+test tests::legion_workflow_provider_worker_emits_route_metadata_without_invocation ... ok
+test tests::legion_workflow_same_target_conflict_blocks_merge_readiness ... ok
+test tests::replay_refuses_raw_provider_payload_markers ... ok
+test tests::legion_workflow_task_packet_without_workspace_fails_closed ... ok
+test tests::state_machine_accepts_legal_transitions_and_records_metadata ... ok
+test tests::legion_workflow_provider_worker_route_is_idempotent ... ok
+test tests::state_machine_refuses_illegal_transition_without_recording_metadata ... ok
+test tests::legion_workflow_same_target_transitive_dependency_is_ordered ... ok
+test tests::legion_workflow_local_proposal_output_remains_proposal_only ... ok
+test tests::replay_reconstructs_recovery_state_from_metadata_only_manifest ... ok
+test tests::legion_workflow_task_packet_is_idempotent ... ok
+test tests::legion_workflow_agent_crate_does_not_import_app_ui_or_desktop ... ok
+test tests::test_sandbox_orchestration_and_containment_and_proposal_generation ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_ai-032613cb1325407e)
+
+running 9 tests
+test tests::bounded_ascii_prefix_truncates_to_char_boundary_before_byte_limit ... ok
+test tests::router_refuses_provider_without_completion_capability ... ok
+test tests::router_refuses_missing_local_provider_as_metadata ... ok
+test tests::router_rejects_nil_cancellation_token_before_provider_invocation ... ok
+test tests::router_invokes_remote_byok_provider_when_policy_allows_target ... ok
+test tests::router_rejects_raw_health_metadata_before_provider_invocation ... ok
+test tests::deterministic_inline_prediction_provider_uses_inline_path_not_chat_completion ... ok
+test tests::router_invokes_local_provider_only_after_policy_approval ... ok
+test tests::router_refuses_remote_provider_when_policy_denies_target ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_ai_providers-798fcf6dfc312231)
+
+running 16 tests
+test tests::deterministic_local_provider_returns_deterministic_embedding_vectors ... ok
+test tests::mcp_client_rejects_permission_for_different_mcp_tool_target ... ok
+test tests::mcp_client_rejects_permission_for_different_mcp_tool_capability ... ok
+test tests::deterministic_local_provider_predicts_bounded_inline_result ... ok
+test tests::configured_provider_value_prefers_legion_then_legacy_then_standard_names ... ok
+test tests::stdio_mcp_transport_reuses_one_process_across_requests ... ok
+test tests::mcp_client_builds_json_rpc_requests_and_requires_tool_permission ... ok
+test tests::mcp_client_reloads_registry_after_list_changed_notification ... ok
+test tests::deterministic_local_provider_completes_without_cloud_credentials ... ok
+test tests::llama_cpp_provider_can_attach_optional_local_bearer_token ... ok
+test tests::ollama_provider_posts_completion_and_embedding_requests ... ok
+test tests::openai_compatible_provider_posts_byok_completion_and_embedding_requests ... ok
+test tests::provider_registry_exposes_configured_adapters ... ok
+test tests::unconfigured_external_provider_slots_refuse_inline_prediction_explicitly ... ok
+test tests::inline_prediction_registry_exposes_required_provider_slots ... ok
+test tests::llama_cpp_provider_posts_loopback_requests_without_bearer_by_default ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_app-d42a9cac41178ecc)
+
+running 25 tests
+test tests::command_dispatcher_routes_collaboration_intents_to_app_requests ... ok
+test tests::command_dispatcher_rejects_apply_intent_without_app_owned_matching_proposal ... ok
+test tests::command_dispatcher_maps_projection_only_proposal_intents_to_protocol_requests ... ok
+test tests::cloud_lane_endpoint_parses_bracketed_ipv6_without_port ... ok
+test tests::audit_rollback_failure_diagnostics_are_preserved_on_failed_response ... ok
+test tests::cloud_lane_endpoint_parses_bracketed_ipv6_with_port ... ok
+test tests::proposal_coordinator_allows_validated_denied_path ... ok
+test tests::proposal_coordinator_allows_created_validated_previewed_approved_applied_path ... ok
+test tests::proposal_coordinator_allows_approved_stale_conflict_and_failed_paths ... ok
+test tests::proposal_coordinator_discovers_targets_for_every_payload_variant ... ok
+test tests::proposal_coordinator_denies_registered_text_edit_missing_preconditions ... ok
+test tests::proposal_coordinator_enforces_preview_after_validation ... ok
+test tests::proposal_coordinator_rejects_command_without_lifecycle_context ... ok
+test tests::proposal_coordinator_builds_metadata_only_ledger_projection ... ok
+test tests::proposal_coordinator_denies_duplicate_ambiguous_and_unsupported_targets ... ok
+test tests::proposal_coordinator_rejects_created_to_applied_without_state_mutation ... ok
+test tests::proposal_coordinator_rejects_expired_lifecycle_before_validation ... ok
+test tests::shared_collaboration_route_wraps_existing_safe_targets_only ... ok
+test tests::proposal_coordinator_exports_and_recovers_lifecycle_snapshot ... ok
+test tests::proposal_coordinator_rejects_zero_correlation_or_nil_causality_context ... ok
+test tests::proposal_coordinator_rejects_stateless_generic_save_apply ... ok
+test tests::proposal_coordinator_denies_nested_batch_duplicates_and_unsupported_items ... ok
+test daily_editing_save_all_internal_tests::daily_editing_save_all_missing_metadata_records_buffer_error ... ok
+test tests::plugin_command_intent_routes_through_app_owned_plugin_runtime ... ok
+test tests::paths_equivalent_matches_real_file_with_alternate_separators ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (target/debug/deps/legion_app-9930c18eac9f2059)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/assist_inline_prediction_workflow.rs (target/debug/deps/assist_inline_prediction_workflow-52f3f409207d022b)
+
+running 6 tests
+test manual_mode_rejects_assist_inline_prediction_request ... ok
+test switching_back_to_manual_clears_assist_inline_prediction_projection ... ok
+test accepted_assist_inline_prediction_cannot_be_dismissed_again ... ok
+test assist_inline_prediction_accept_marks_stale_without_mutating_after_buffer_change ... ok
+test assist_inline_prediction_request_projects_and_accepts_bounded_ghost_text ... ok
+test assist_inline_prediction_projection_hides_ghost_text_when_buffer_becomes_stale ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/control_trust_surfaces.rs (target/debug/deps/control_trust_surfaces-ae19881b8561e234)
+
+running 8 tests
+test proposal_lifecycle_ui_intents_route_through_app_authority ... ok
+test assisted_ai_propose_is_proposal_only ... ok
+test proposal_details_selected_proposal_populates_trust_surfaces ... ok
+test manual_mode_rejects_assisted_ai_dispatch ... ok
+test assisted_ai_explain_routes_metadata_only_without_proposal ... ok
+test assisted_ai_refusals_visible_for_untrusted_workspace ... ok
+test dirty_text_preserved_on_rejected_stale_and_conflict_outcomes ... ok
+test proposal_states_visible_after_ui_apply_rejections_and_rollback ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/daily_editing_contracts.rs (target/debug/deps/daily_editing_contracts-e494e2bb573c1c4f)
+
+running 7 tests
+test daily_editing_save_all_no_open_buffers_returns_noop_outcome ... ok
+test daily_editing_contracts_session_record_is_metadata_only ... ok
+test daily_editing_contracts_close_dirty_requires_prompt ... ok
+test daily_editing_contracts_tabs_switch_active_buffer ... ok
+test daily_editing_contracts_save_all_preserves_rejected_dirty_buffers ... ok
+test daily_editing_save_all_reports_mixed_conflict_metadata_and_dirty_state ... ok
+test daily_editing_save_all_saves_all_dirty_buffers_in_tab_order ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/daily_editing_search.rs (target/debug/deps/daily_editing_search-a7870e11ba99f04d)
+
+running 6 tests
+test daily_editing_search_workspace_skips_oversized_files ... ok
+test daily_editing_search_empty_query_is_validation_error ... ok
+test daily_editing_search_limit_tracks_omitted_results ... ok
+test daily_editing_search_workspace_scans_authorized_files ... ok
+test daily_editing_search_active_file_returns_bounded_rows ... ok
+test daily_editing_search_degraded_active_file_uses_limited_viewport ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+     Running tests/debug_workflow.rs (target/debug/deps/debug_workflow-57010bad0dfb8947)
+
+running 3 tests
+test debug_workflow_rejects_secondary_actions_without_launched_session ... ok
+test debug_workflow_persists_breakpoints_launches_fixture_and_projects_docks ... ok
+test debug_workflow_resets_state_on_workspace_switch ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/delegated_task_integration.rs (target/debug/deps/delegated_task_integration-ae4e0b9a679efcbf)
+
+running 7 tests
+test execute_delegated_task_reports_missing_plan_without_error ... ok
+test manual_mode_rejects_delegated_task_execution ... ok
+test execute_delegated_task_waits_for_write_permission_before_sandbox_allocation ... ok
+test execute_delegated_task_fails_closed_after_denied_permission ... ok
+test delegate_chat_projects_rag_citations_without_raw_source_payload ... ok
+test delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk ... ok
+test execute_delegated_task_returns_proposal_after_explicit_write_allow ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/git_workflow.rs (target/debug/deps/git_workflow-b13217f4965ee261)
+
+running 6 tests
+test git_workflow_rejects_conflict_resolution_from_subdirectory_when_buffer_dirty ... ok
+test git_workflow_rejects_conflict_resolution_when_buffer_is_dirty ... ok
+test git_workflow_refreshes_projection_and_stages_hunks_through_app_authority ... ok
+test git_workflow_resolves_conflicts_through_app_authority ... ok
+test git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer ... ok
+test git_workflow_resolves_conflict_and_syncs_open_buffer ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/language_terminal_integration.rs (target/debug/deps/language_terminal_integration-f9d2d165e90b4e6b)
+
+running 5 tests
+test language_cancellation_and_terminal_denial_are_projected_fail_closed ... ok
+test terminal_actions_cannot_mutate_editor_or_disk ... ok
+test language_projection_switching_buffers_drops_stale_rows ... ok
+test language_read_only_actions_do_not_mutate ... ok
+test language_edit_actions_require_proposals ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/language_tooling_workflow.rs (target/debug/deps/language_tooling_workflow-e0cd920a6bbdb3fd)
+
+running 5 tests
+test language_tooling_workflow_creates_rename_preview_without_mutating_disk ... ok
+test language_tooling_projects_breadcrumbs_and_sticky_scopes_from_symbols ... ok
+test language_tooling_projects_inlay_hints_and_code_lenses_from_symbols ... ok
+test language_tooling_projects_diagnostic_quick_fixes_and_correlates_code_action_preview ... ok
+test language_tooling_workflow_refreshes_projection_without_ui_text_ownership ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/legion_workflow_integration.rs (target/debug/deps/legion_workflow_integration-2e81b6e35b444014)
+
+running 18 tests
+test automate_mcp_tool_permissions_decision_feed_risk_halt_and_kill_switch_are_projected ... ok
+test automate_mcp_tool_permission_decision_requires_projected_request ... ok
+test legion_workflow_mcp_worker_waits_for_permission_and_resumes_after_allow ... ok
+test legion_cloud_lane_app_submit_enforces_policy_and_projects_status ... ok
+test legion_workflow_missing_signoff_blocks_merge_readiness ... ok
+test legion_workflow_missing_verification_blocks_merge_readiness ... ok
+test legion_workflow_dirty_main_workspace_blocks_merge_readiness ... ok
+test legion_workflow_provider_worker_emits_canonical_provider_route_metadata ... ok
+test legion_workflow_provider_worker_emits_route_required_metadata_without_invocation ... ok
+test legion_workflow_session_not_found_fails_closed ... ok
+test manual_mode_rejects_local_legion_workflow_execution ... ok
+test legion_workflow_same_target_conflict_blocks_merge_readiness ... ok
+test legion_workflow_provider_worker_repeated_execution_does_not_duplicate_route_outputs ... ok
+test legion_workflow_local_worker_emits_canonical_task_packet_worker_result_and_evidence ... ok
+test legion_workflow_canonical_output_rejects_direct_workspace_mutation ... ok
+test legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutation ... ok
+test legion_workflow_local_worker_reaches_waiting_for_approval_metadata ... ok
+test legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+     Running tests/structural_search_workflow.rs (target/debug/deps/structural_search_workflow-fdd73656713f5a00)
+
+running 1 test
+test structural_search_previews_and_applies_open_workspace_rewrite ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/terminal_workflow.rs (target/debug/deps/terminal_workflow-326a124885932a2a)
+
+running 3 tests
+test terminal_workflow_cannot_mutate_editor_or_disk ... ok
+test terminal_fixture_lifecycle_projects_status ... ok
+test terminal_denial_is_visible_and_fail_closed ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/workspace_vfs_integration.rs (target/debug/deps/workspace_vfs_integration-c92fe6caba2dd1be)
+
+running 60 tests
+test workspace_vfs_integration_batch_affected_targets_are_visited_in_item_order ... ok
+test workspace_vfs_integration_batch_preflight_rejects_dependency_errors_without_mutation ... ok
+test workspace_vfs_integration_batch_execution_contract_reports_audit_and_commit_barriers ... ok
+test workspace_vfs_integration_batch_contract_rejects_mismatched_rollback_action ... ok
+test workspace_vfs_integration_batch_contract_models_atomic_best_effort_and_dry_run ... ok
+test workspace_vfs_integration_batch_contract_records_dependency_blocked_partial_failures ... ok
+test workspace_vfs_integration_batch_apply_cannot_self_approve_from_created_state ... ok
+test workspace_vfs_integration_batch_ordered_non_atomic_requires_partial_failures_before_apply ... ok
+test workspace_vfs_integration_batch_preflight_rejects_missing_and_unknown_targets ... ok
+test workspace_vfs_integration_batch_preflight_rejects_invalid_envelope_and_item_capability ... ok
+test workspace_vfs_integration_batch_preflight_rejects_unproven_rollback_boundaries ... ok
+test workspace_vfs_integration_audit_records_redact_sensitive_text_edit_payloads ... ok
+test workspace_vfs_integration_batch_preflight_rejects_unsupported_mixed_and_duplicate_targets ... ok
+test workspace_vfs_integration_batch_uses_explicit_target_coverage_order ... ok
+test workspace_vfs_integration_batch_preflight_rejects_unresolved_parent_traversal_without_mutation ... ok
+test workspace_vfs_integration_batch_preflight_plans_supported_routes_without_side_effects ... ok
+test workspace_vfs_integration_batch_preflight_uses_non_active_buffer_metadata_for_text_edit ... ok
+test workspace_vfs_integration_command_dispatcher_routes_without_concrete_ports ... ok
+test workspace_vfs_integration_command_execution_uses_mock_editor_and_workspace_ports ... ok
+test workspace_vfs_integration_code_action_edits_apply_through_proposal_executor ... ok
+test workspace_vfs_integration_failed_existing_read_does_not_create_empty_buffer ... ok
+test workspace_vfs_integration_devcontainer_remote_session_uses_policy_planner ... ok
+test workspace_vfs_integration_collaboration_presence_is_app_owned_projection ... ok
+test workspace_vfs_integration_collaboration_operation_uses_editor_authority ... ok
+test workspace_vfs_integration_closed_file_apply_rejections_do_not_mutate_disk_or_dirty_buffers ... ok
+test workspace_vfs_integration_explicit_new_file_open_creates_empty_buffer_only_on_create_intent ... ok
+test workspace_vfs_integration_non_save_proposals_are_structurally_rejected_without_panic ... ok
+test workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict ... ok
+test workspace_vfs_integration_format_file_requires_lowered_workspace_edit ... ok
+test workspace_vfs_integration_failed_save_preserves_pending_dirty_text ... ok
+test workspace_vfs_integration_open_buffer_audit_failure_fails_closed_and_rolls_back ... ok
+test workspace_vfs_integration_path_escape_is_denied_without_disk_mutation ... ok
+test workspace_vfs_integration_conflicted_registered_save_preserves_dirty_buffer_and_disk ... ok
+test workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only ... ok
+test workspace_vfs_integration_open_file_delete_and_rename_are_denied ... ok
+test workspace_vfs_integration_remote_session_is_app_owned_projection_and_metadata_audited ... ok
+test workspace_vfs_integration_closed_file_create_delete_rename_apply_through_workspace ... ok
+test workspace_vfs_integration_remote_write_requires_proposal_and_preserves_local_disk ... ok
+test workspace_vfs_integration_open_edit_save_use_engine_and_workspace_ids ... ok
+test workspace_vfs_integration_registered_text_edit_apply_mutates_open_buffer ... ok
+test workspace_vfs_integration_registered_save_apply_routes_through_workspace_actor ... ok
+test workspace_vfs_integration_rollback_audit_failure_records_failed_lifecycle ... ok
+test workspace_vfs_integration_rollback_lifecycle_emits_audit_before_success ... ok
+test workspace_vfs_integration_stale_registered_save_preserves_dirty_buffer_and_disk ... ok
+test workspace_vfs_integration_shell_projection_lists_live_registered_proposals ... ok
+test workspace_vfs_integration_single_file_workspace_edit_create_applies_closed_file_only ... ok
+test workspace_vfs_integration_small_buffer_projection_keeps_bounded_preview ... ok
+test workspace_vfs_integration_unknown_lifecycle_context_preview_is_rejected ... ok
+test workspace_vfs_integration_closed_file_audit_failure_fails_closed_and_rolls_back ... ok
+test workspace_vfs_integration_stale_text_edit_precondition_does_not_apply ... ok
+test workspace_vfs_integration_text_edit_apply_requires_valid_lifecycle ... ok
+test workspace_vfs_integration_stale_text_edit_snapshot_does_not_apply ... ok
+test workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back ... ok
+test workspace_vfs_integration_ui_command_intent_routes_to_engine_apply_edit ... ok
+test workspace_vfs_integration_untrusted_save_is_denied_without_disk_mutation ... ok
+test workspace_vfs_integration_untrusted_closed_file_create_is_denied_without_dirty_buffer_loss ... ok
+test workspace_vfs_integration_workspace_edit_multi_file_text_edits_apply_atomically ... ok
+test workspace_vfs_integration_oversized_save_is_rejected_and_preserves_dirty_text ... ok
+test workspace_vfs_integration_large_buffer_projection_does_not_populate_full_text ... ok
+test workspace_vfs_integration_large_file_projection_omits_full_source_text ... ok
+
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.74s
+
+     Running unittests src/main.rs (target/debug/deps/legion_cli-db42e242424c5869)
+
+running 10 tests
+test tests::gui_phase7_not_accepted_scaffold_passes_without_artifacts ... ok
+test tests::gui_phase8_not_accepted_scaffold_passes_without_artifacts ... ok
+test tests::gui_phase6_not_accepted_scaffold_passes_without_artifacts ... ok
+test tests::gui_phase6_acceptance_requires_artifacts_commands_and_checked_checklist ... ok
+test tests::gui_phase7_acceptance_requires_artifacts_commands_limits_and_checked_checklist ... ok
+test tests::gui_phase8_acceptance_requires_artifacts_commands_markers_and_checked_checklist ... ok
+test tests::gui_phase6_acceptance_passes_with_artifacts_commands_and_checked_checklist ... ok
+test tests::gui_phase7_acceptance_passes_with_artifacts_commands_limits_and_checked_checklist ... ok
+test tests::gui_phase8_acceptance_passes_with_artifacts_commands_markers_and_checked_checklist ... ok
+test tests::gui_phase8_acceptance_rejects_phase7_unsupported_labels ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_collaboration-40cb5faa55616518)
+
+running 6 tests
+test tests::disconnect_reconnect_and_shutdown_states_are_fail_closed ... ok
+test tests::default_runtime_config_is_fail_closed ... ok
+test tests::presence_and_replay_manifest_are_metadata_only ... ok
+test tests::delete_replace_and_undo_compensation_are_deterministic_metadata_operations ... ok
+test tests::duplicate_gap_and_conflict_fail_closed_without_clobbering_text ... ok
+test tests::concurrent_insert_converges_for_two_three_and_five_participants ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_desktop-8a3f6b99bea77134)
+
+running 7 tests
+test beta::tests::beta_workflow_gate_errors_pass_for_expected_smoke_statuses ... ok
+test beta::tests::beta_workflow_gate_errors_require_language_cancellation_and_diagnostics_export ... ok
+test view::tests::automate_permission_session_is_parsed_from_request_labels ... ok
+test workflow::tests::prompt_active_text_input_does_not_route_to_editor ... ok
+test workflow::tests::close_dirty_prompt_disables_editor_text_input ... ok
+test workflow::tests::editor_text_input_routes_text_and_clipboard_paste ... ok
+test workflow::tests::plugin_management_workflow_reports_no_runtime_for_stale_projection ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (target/debug/deps/legion_desktop-0ec26af7039c762a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/assist_inline_prediction_workflow.rs (target/debug/deps/assist_inline_prediction_workflow-8045742b08b3010b)
+
+running 1 test
+test desktop_runtime_switches_to_assist_before_inline_prediction_activity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/beta_acceptance_e2e.rs (target/debug/deps/beta_acceptance_e2e-8df2ab5269b6bdba)
+
+running 1 test
+test beta_acceptance_e2e_policy_gated_local_loop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/beta_workflow.rs (target/debug/deps/beta_workflow-d1303985b08b1972)
+
+running 5 tests
+test desktop_launch_config_parses_beta_mode_without_enabling_native_smoke ... ok
+test desktop_launch_config_rejects_combined_smoke_modes ... ok
+test beta_workflow_rejects_write_workspace_outside_target ... ok
+test beta_workflow_runs_through_desktop_runtime_and_writes_metadata_evidence ... ok
+test beta_workflow_failed_report_exits_non_successfully_and_keeps_evidence ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/collaboration_gui.rs (target/debug/deps/collaboration_gui-c34ced6087aed8dd)
+
+running 3 tests
+test collaboration_gui_bridge_routes_actions_with_projection_validation ... ok
+test collaboration_gui_rows_show_reconnect_conflict_and_shared_proposal_metadata ... ok
+test collaboration_gui_workflow_reports_join_and_presence_outcomes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/control_trust_bridge.rs (target/debug/deps/control_trust_bridge-f4941a4eee378108)
+
+running 6 tests
+test bridge_rejects_missing_projection_inputs ... ok
+test assisted_ai_actions_translate_to_command_intents ... ok
+test bridge_rejects_partial_assisted_ai_run_ids ... ok
+test desktop_control_trust_bridge_preserves_projection_only_boundary ... ok
+test proposal_actions_translate_to_command_intents ... ok
+test workflow_status_maps_control_trust_outcomes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/control_trust_view.rs (target/debug/deps/control_trust_view-fe8b12c15d92412a)
+
+running 3 tests
+test proposal_details_render_selected_ledger_and_diff_rows ... ok
+test trust_details_render_manifest_privacy_budget_approval_rollback_rows ... ok
+test assisted_ai_details_render_provider_request_refusal_preview_rows ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/daily_editing_controls.rs (target/debug/deps/daily_editing_controls-6bcc58c3147380be)
+
+running 4 tests
+test daily_editing_controls_explorer_select_and_toggle ... ok
+test daily_editing_controls_dirty_close_projects_prompt_and_keeps_text ... ok
+test daily_editing_controls_cursor_selection_and_scroll_dispatch ... ok
+test daily_editing_controls_switch_close_and_save_all_through_app_authority ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/debug_workflow.rs (target/debug/deps/debug_workflow-d2e6a9c8b9779e7a)
+
+running 1 test
+test desktop_debug_workflow_projects_right_and_bottom_debug_rows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/delegated_task_command_center.rs (target/debug/deps/delegated_task_command_center-193d99e42a7ca644)
+
+running 5 tests
+test delegated_task_command_center_bridge_routes_review_actions_and_denies_unknown_links ... ok
+test delegated_task_command_center_bridge_routes_hunks_permissions_and_denies_unknown_rows ... ok
+test delegated_task_command_center_rows_show_chat_citations_hunks_and_permissions ... ok
+test delegated_task_command_center_rows_show_gates_blockers_refusals_and_audit ... ok
+test delegated_task_command_center_app_projection_and_workflow_remain_plan_only ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/desktop_workflow.rs (target/debug/deps/desktop_workflow-93ba07b8f72a3f0f)
+
+running 4 tests
+test desktop_workflow_quit_sets_quit_flag_without_app_mutation ... ok
+test desktop_workflow_replace_and_delete_route_through_app_authority ... ok
+test desktop_workflow_external_overwrite_save_rejects_and_preserves_dirty_projection ... ok
+test desktop_workflow_opens_repo_file_and_edits_small_buffer ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/diagnostics_export.rs (target/debug/deps/diagnostics_export-02840019ac20828a)
+
+running 2 tests
+test diagnostics_export_path_parses_from_launch_args ... ok
+test diagnostics_export_writes_metadata_only_runtime_status ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/git_workflow.rs (target/debug/deps/git_workflow-d49fd38eaec1720f)
+
+running 2 tests
+test desktop_git_workflow_projects_diff_blame_graph_and_hunk_actions ... ok
+test desktop_git_workflow_resolves_conflicts_through_bridge_actions ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/intent_bridge.rs (target/debug/deps/intent_bridge-78e772e8b857b601)
+
+running 12 tests
+test intent_bridge_routes_explorer_actions_and_adapter_local_toggle ... ok
+test intent_bridge_routes_assist_inline_prediction_actions ... ok
+test intent_bridge_rejects_invalid_path_input ... ok
+test intent_bridge_preserves_clipboard_and_ime_text ... ok
+test intent_bridge_routes_debug_actions ... ok
+test intent_bridge_routes_daily_editing_actions ... ok
+test intent_bridge_rejects_buffer_actions_without_active_buffer ... ok
+test intent_bridge_rejects_unknown_tabs_and_explorer_files ... ok
+test intent_bridge_routes_path_dialog_prompt_refresh_and_quit ... ok
+test intent_bridge_routes_search_actions ... ok
+test intent_bridge_routes_save_edit_undo_redo_actions ... ok
+test intent_bridge_preserves_app_boundary ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/language_terminal_view.rs (target/debug/deps/language_terminal_view-aaad7260b5dc37d7)
+
+running 4 tests
+test desktop_language_actions_dispatch_intents ... ok
+test desktop_terminal_panel_renders_and_dispatches ... ok
+test desktop_structural_search_panel_renders_projection ... ok
+test desktop_language_panel_renders_projection ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/language_terminal_workflow.rs (target/debug/deps/language_terminal_workflow-c1fc24aa2d988e8a)
+
+running 3 tests
+test desktop_phase4_dispatch_stays_projection_only ... ok
+test desktop_language_failures_are_visible ... ok
+test desktop_terminal_failures_and_bounds_are_visible ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/large_file_guardrails.rs (target/debug/deps/large_file_guardrails-badd9a1aff730710)
+
+running 2 tests
+test large_file_guardrails_degraded_rendering_uses_viewport ... ok
+test large_file_guardrails_search_is_bounded ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
+
+     Running tests/legion_workflow_command_center.rs (target/debug/deps/legion_workflow_command_center-7190186f61ced9b4)
+
+running 6 tests
+test legion_workflow_bridge_routes_review_actions_and_denies_unknown_ids ... ok
+test legion_workflow_bridge_routes_automate_tool_permission_and_kill_switch ... ok
+test legion_workflow_health_keeps_autonomous_merge_unsupported ... ok
+test legion_workflow_command_center_rows_show_sessions_gates_and_merge_state ... ok
+test legion_workflow_ready_state_is_proposal_mediated_not_autonomous_apply ... ok
+test legion_workflow_automate_rows_show_mcp_decisions_risk_kill_and_permissions ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/operational_health.rs (target/debug/deps/operational_health-80d62cd1ace4bc71)
+
+running 2 tests
+test operational_health_empty_projection_uses_safe_default_labels ... ok
+test operational_health_snapshot_and_view_rows_are_metadata_only ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/packaging.rs (target/debug/deps/packaging-d5f4ebe29942e8c1)
+
+running 4 tests
+test package_plan_points_at_expected_release_executable ... ok
+test package_plan_points_at_expected_debug_executable ... ok
+test package_manifest_is_metadata_only_and_redacts_source_payloads ... ok
+test package_manifest_write_creates_only_manifest_metadata ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/platform_integration.rs (target/debug/deps/platform_integration-3d2d1695bb8e1f27)
+
+running 2 tests
+test platform_snapshot_keeps_accessibility_labels_metadata_only ... ok
+test platform_snapshot_records_projection_and_adapter_statuses ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/platform_smoke.rs (target/debug/deps/platform_smoke-47dc2825f1d8453c)
+
+running 6 tests
+test platform_smoke_metrics_summarize_empty_and_single_sample ... ok
+test platform_smoke_metrics_compute_percentiles_and_variance ... ok
+test platform_smoke_report_markdown_contains_required_fields ... ok
+test platform_smoke_launch_config_parses_smoke_flags ... ok
+test platform_smoke_adapter_paths_route_without_metrics_payloads ... ok
+test platform_smoke_report_writes_evidence_file ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/plugin_management.rs (target/debug/deps/plugin_management-bcb76888e92765d0)
+
+running 4 tests
+test plugin_management_unknown_plugin_and_command_ids_are_rejected ... ok
+test plugin_management_command_routes_to_app_intent ... ok
+test plugin_management_rows_include_metadata_only_audit_notes ... ok
+test plugin_management_workflow_reports_invoked_and_denied_statuses ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/projection_rendering.rs (target/debug/deps/projection_rendering-0e8e41b4b8bcceb8)
+
+running 9 tests
+test projection_rendering_surfaces_assist_inline_prediction_rows ... ok
+test projection_rendering_populates_required_phase2_surfaces ... ok
+test projection_rendering_models_read_only_product_mode_shell ... ok
+test projection_rendering_uses_mode_filtered_dock_registry ... ok
+test projection_rendering_keeps_advanced_surfaces_metadata_and_projection_derived ... ok
+test projection_rendering_models_wireframe_chrome_contract ... ok
+test projection_rendering_handles_empty_and_degraded_snapshots ... ok
+test projection_rendering_marks_expanded_and_collapsed_explorer_rows ... ok
+test projection_rendering_tests_preserve_app_boundary ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/remote_workspace_gui.rs (target/debug/deps/remote_workspace_gui-e1cf36998fc309fd)
+
+running 3 tests
+test remote_workspace_gui_bridge_routes_actions_with_projection_validation ... ok
+test remote_workspace_gui_rows_show_reconnect_offline_terminal_lsp_and_proposals ... ok
+test remote_workspace_gui_workflow_reports_connect_without_local_mutation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/save_all_conflict.rs (target/debug/deps/save_all_conflict-107916c9cd2abb0c)
+
+running 5 tests
+test save_all_conflict_desktop_save_paths_dispatch_ui_intent ... ok
+test save_all_conflict_clean_close_removes_tab_without_prompt ... ok
+test save_all_conflict_dirty_close_cancel_preserves_dirty_text_and_tab ... ok
+test save_all_conflict_dirty_close_save_route_saves_and_clears_prompt ... ok
+test save_all_conflict_mixed_result_projects_warning_rows_and_preserves_dirty_text ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/search_workflow.rs (target/debug/deps/search_workflow-1bbd8ed3e05ba8ec)
+
+running 6 tests
+test search_workflow_displays_degraded_limited_projection ... ok
+test search_workflow_cancels_current_query_by_id ... ok
+test search_workflow_runs_active_file_search ... ok
+test search_workflow_projects_no_results_and_empty_query_errors ... ok
+test search_workflow_runs_workspace_search ... ok
+test structural_search_workflow_runs_workspace_preview ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/session_restore.rs (target/debug/deps/session_restore-9714085509282008)
+
+running 5 tests
+test session_restore_store_rejects_raw_source_markers ... ok
+test session_restore_corrupt_json_returns_typed_error ... ok
+test session_store_save_publishes_validated_temp_and_cleans_intermediates ... ok
+test session_restore_missing_file_reports_skipped_tab ... ok
+test session_restore_saves_metadata_and_restores_tabs_focus_layout_explorer ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_editor-ed214057e1cc5e80)
+
+running 21 tests
+test tests::coordinate_conversion_avoids_full_text_for_degraded_buffers ... ok
+test tests::compatibility_session_save_request_is_decoupled_from_disk_writes ... ok
+test tests::collaboration_participant_edit_uses_editor_transaction_authority ... ok
+test tests::editor_port_completion_rejects_stale_snapshot ... ok
+test tests::degraded_completion_returns_empty_without_full_text_materialization ... ok
+test tests::lexical_completion_rejects_invalid_byte_offsets_without_panic ... ok
+test tests::draining_transaction_events_is_bounded_and_non_blocking ... ok
+test tests::compatibility_session_undo_redo_invariants ... ok
+test tests::editor_port_completion_returns_bounded_lexical_items_without_mutation ... ok
+test tests::engine_multi_buffer_lifecycle ... ok
+test tests::snapshot_lease_consumer_must_resynchronize_after_expiry ... ok
+test tests::deterministic_log_order_with_sequential_transactions ... ok
+test tests::editor_port_emits_non_zero_transaction_event_for_routed_edit ... ok
+test tests::snapshot_lease_consumer_must_resynchronize_on_stale_snapshot_id ... ok
+test tests::transaction_has_pre_post_snapshots_and_causality ... ok
+test tests::degraded_viewport_projection_is_bounded_and_metadata_only ... ok
+test tests::snapshot_leases_are_descriptor_only_for_all_consumer_kinds ... ok
+test tests::lexical_completion_scan_is_bounded_around_cursor ... ok
+test tests::snapshot_lease_consumer_reads_valid_bounded_chunk_by_descriptor ... ok
+test tests::snapshot_lease_large_file_denies_full_text_but_allows_bounded_chunks ... ok
+test tests::degraded_save_assembles_payload_from_chunks_without_full_text_cache ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+
+     Running tests/atomicity_and_retention.rs (target/debug/deps/atomicity_and_retention-1631c88a7dc46d5a)
+
+running 7 tests
+test invalid_batch_rolls_back_live_text_version_dirty_and_side_effects ... ok
+test protocol_descriptor_preserves_utf16_ranges_for_surrogate_pairs ... ok
+test retention_budget_evicts_oldest_unpinned_undo_snapshots ... ok
+test current_and_pending_save_snapshots_remain_pinned_under_retention_pressure ... ok
+test large_buffers_open_in_degraded_mode_instead_of_failing ... ok
+test undo_redo_remains_correct_for_degraded_chunk_boundary_edits ... ok
+test oversize_edit_transitions_buffer_into_degraded_mode_without_losing_undo_history ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+     Running tests/performance_suite.rs (target/debug/deps/performance_suite-070b2a201e053a14)
+
+running 10 tests
+test large_file_100mb_degraded_mode_measurement ... ignored, performance suite: 100MB degraded-mode measurement
+test snapshot_retention_and_release ... ignored, performance suite: snapshot retention
+test undo_redo_latency_under_edit_burst ... ignored, performance suite: undo/redo latency
+test ci_snapshot_retention_budget_is_enforced ... ok
+test ci_undo_redo_burst_small_deterministic_sample ... ok
+test ci_collaboration_snapshot_consumer_overhead_p95_p99 ... ok
+test ci_typical_edit_latency_on_budget_sized_file ... ok
+test ci_large_file_degraded_open_and_viewport_are_bounded ... ok
+test ci_mixed_fake_consumers_do_not_block_user_edits ... ok
+test ci_collaboration_edit_overhead_p95_p99_vs_user_baseline ... ok
+
+test result: ok. 7 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 9.81s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_index-226a7787f162df4a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/index_workflows.rs (target/debug/deps/index_workflows-92508b733f9639f3)
+
+running 32 tests
+test priority_ordering_starts_highest_priority_before_fifo_background_work ... ok
+test cancellation_acknowledges_queued_and_in_flight_work ... ok
+test queue_backpressure_rejects_low_priority_and_displaces_lower_priority_work ... ok
+test generation_bump_with_reset_content_version_supersedes_old_work ... ok
+test repository_discovery_importer_accepts_workspace_dtos_and_never_scans_paths ... ok
+test live_snapshot_supersedes_slower_background_work_by_generation_and_hash ... ok
+test privacy_scope_changes_separate_syntax_cache_and_replace_semantic_records ... ok
+test lexical_indexer_extracts_symbol_maps_graph_records_and_invalidation_keys ... ok
+test repository_discovery_importer_invalidates_deleted_records_from_workspace_delta ... ok
+test rename_preview_payload_is_proposal_only_and_preserves_preconditions ... ok
+test indexing_actor_exposes_semantic_port_for_planning_queries_and_cancellation ... ok
+test lease_chunk_indexing_records_hashes_ranges_and_not_source_bodies ... ok
+test semantic_fabric_scheduler_does_not_start_lsp_or_external_processes ... ok
+test schema_and_model_version_changes_separate_cache_entries_and_semantic_keys ... ok
+test semantic_fabric_priority_is_deterministic_metadata_only_and_bounded ... ok
+test retrieval_chunks_two_files_and_returns_metadata_only_citations ... ok
+test semantic_index_replaces_old_generation_when_content_version_resets ... ok
+test semantic_fabric_stale_freshness_metadata_lowers_or_rejects_scheduling ... ok
+test semantic_fabric_jobs_are_built_from_workspace_descriptor_and_metadata_records_only ... ok
+test small_snapshot_full_text_indexing_is_explicit_bounded_optimization ... ok
+test semantic_queries_are_bounded_and_return_pure_dto_results ... ok
+test structural_rewrite_payload_is_cross_file_proposal_only ... ok
+test structural_search_matches_metavariables_and_suppression_comments ... ok
+test stale_upserts_are_ignored_and_newer_generations_replace_records ... ok
+test semantic_metadata_freshness_key_separates_schema_parser_grammar_language_and_descriptor ... ok
+test workspace_generation_changes_separate_syntax_cache_and_reject_stale_semantic_records ... ok
+test syntax_cache_keys_by_content_hash_language_and_grammar_version_without_collision ... ok
+test p4_3_semantic_fabric_lsp_contract_path_is_metadata_only_non_runtime_and_proposal_only ... ok
+test retrieval_reindex_preserves_unchanged_embeddings_and_updates_changed_sha ... ok
+test semantic_fabric_large_descriptor_jobs_carry_only_chunk_hashes_ranges_and_lease_metadata ... ok
+test semantic_metadata_record_for_large_descriptor_persists_only_hashes_ranges_and_metadata ... ok
+test large_snapshot_descriptor_first_indexing_uses_chunks_without_full_source ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_memory-b3c6763db19fbf97)
+
+running 14 tests
+test tests::memory_validation_uses_not_encoded_invocation_metadata ... ok
+test tests::candidate_review_does_not_retain_without_authority ... ok
+test tests::legion_workflow_memory_candidate_creation_is_metadata_only ... ok
+test tests::memory_candidates_reject_raw_source_and_provider_payload_markers ... ok
+test tests::trace_raw_payload_retention_requires_explicit_consent ... ok
+test tests::legion_workflow_memory_rejects_raw_payload_retention ... ok
+test tests::long_term_retention_requires_explicit_consent_and_can_be_deleted ... ok
+test tests::trace_export_manifest_requires_consent_and_hashes_only ... ok
+test tests::trace_record_rejects_secret_and_raw_payload_markers ... ok
+test tests::legion_workflow_memory_retains_with_consent_and_deletes ... ok
+test tests::trace_record_allows_safe_words_with_secret_prefix_fragments ... ok
+test tests::legion_workflow_memory_consent_denied_prevents_retention ... ok
+test tests::trace_training_export_requires_hosted_training_consent ... ok
+test tests::trace_record_review_is_metadata_only_without_retention ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_observability-9c64cf3035ea49b9)
+
+running 15 tests
+test tests::assisted_ai_audit_event_rejects_invalid_core_ids_and_raw_markers ... ok
+test tests::in_memory_sink_rejects_missing_schema_version ... ok
+test tests::helpers_construct_envelope_ready_metadata_with_schema_and_causality ... ok
+test tests::in_memory_sink_rejects_zero_core_identifiers ... ok
+test tests::phase4_runtime_and_replay_events_are_metadata_only ... ok
+test tests::proposal_audit_and_event_metadata_records_are_redacted ... ok
+test tests::collaboration_audit_event_is_metadata_only_and_validated ... ok
+test tests::plugin_observability_event_is_metadata_only_and_validated ... ok
+test tests::assisted_ai_audit_event_is_metadata_only_and_no_invocation ... ok
+test tests::redacting_sink_removes_source_text_for_metadata_only_retention ... ok
+test tests::remote_audit_event_is_metadata_only_and_validated ... ok
+test tests::transaction_and_watcher_helpers_cover_required_event_scenarios ... ok
+test tests::phase8_audit_events_are_metadata_only_and_validated ... ok
+test tests::proposal_lifecycle_helpers_are_metadata_only_and_orderable ... ok
+test tests::proposal_failure_conflict_fallback_retention_and_security_helpers_redact_content ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_platform-a6a31b22b84a9657)
+
+running 11 tests
+test tests::fake_services_for_matrix ... ok
+test tests::unsupported_io_is_structured_platform_error ... ok
+test tests::process_cancelled_is_mapped_to_cancelled_error ... ok
+test tests::permission_denied_io_is_structured_platform_error ... ok
+test tests::watcher_snapshot_produces_events ... ok
+test tests::typed_services_can_read_and_write_text ... ok
+test tests::environment_service_and_time_service_stubs_compile ... ok
+test tests::native_unix_pty_child_has_controlling_terminal ... ok
+test tests::native_pty_service_uses_platform_backend_for_one_shot_output ... ok
+test tests::atomic_write_failure_cleans_temporary_file_and_preserves_target ... ok
+test tests::atomic_write_is_exposed ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_plugin-7ae1acace05cd586)
+
+running 6 tests
+test tests::plugin_runtime_loads_trusted_manifest ... ok
+test tests::plugin_manifest_incompatible_abi_is_rejected_before_load ... ok
+test tests::plugin_runtime_host_call_quota_fails_closed ... ok
+test tests::plugin_runtime_port_dispatches_protocol_envelopes_only ... ok
+test tests::plugin_runtime_denies_undeclared_host_call ... ok
+test tests::plugin_sandbox_denies_invalid_core_ids_before_host_dispatch ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_project-91765b5fded7d10c)
+
+running 15 tests
+test tests::path_policy_rejects_outside_root_reads_and_writes ... ok
+test tests::relative_git_path_handles_missing_file_under_existing_parent ... ok
+test tests::metadata_inconsistency_blocks_open_before_save_preconditions ... ok
+test tests::relative_git_path_handles_canonicalized_file_under_symlinked_root ... ok
+test tests::atomic_write_failure_fails_closed_without_plain_write ... ok
+test tests::relative_git_path_handles_missing_file_under_symlinked_root ... ok
+test tests::permission_failure_from_platform_is_reported_without_plain_write ... ok
+test tests::request_port_open_roundtrip_works ... ok
+test tests::watcher_overflow_marks_recovery ... ok
+test tests::open_and_resolve_path_stays_inside_root ... ok
+test tests::write_is_blocked_for_untrusted_workspace ... ok
+test tests::read_write_roundtrip_from_workspace_apis ... ok
+test tests::rename_file_with_proposal_requires_destination_write_authorization ... ok
+test tests::rollback_checkpoint_refuses_to_clobber_external_changes ... ok
+test tests::rollback_checkpoints_compensate_file_mutations_through_workspace_authority ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/debug_locator.rs (target/debug/deps/debug_locator-1b84d2b562a68f45)
+
+running 1 test
+test cargo_locator_builds_deterministic_lldb_launch_configs_for_bins ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/git_workflow.rs (target/debug/deps/git_workflow-b6e8dd0b42f591c6)
+
+running 19 tests
+test git_conflict_refuses_outside_repo ... ok
+test git_conflict_rejects_ambiguous_exact_separator_line_in_current_content ... ok
+test git_conflict_rejects_ambiguous_separator_line_in_diff3_base_content ... ok
+test git_conflict_rejects_ambiguous_end_marker_line_in_incoming_content ... ok
+test git_conflict_rejects_complete_literal_marker_example_before_actual_conflict ... ok
+test git_conflict_rejects_ambiguous_exact_separator_line_in_incoming_content ... ok
+test git_conflict_preserves_pipe_prefixed_incoming_after_separator ... ok
+test git_conflict_preserves_long_equal_lines_as_content ... ok
+test git_conflict_preserves_crlf_line_endings ... ok
+test git_conflict_diff3_base_handling ... ok
+test git_conflict_rejects_malformed_markers ... ok
+test git_conflict_rejects_non_conflicted_marker_looking_file ... ok
+test git_conflict_rejects_no_conflict_block ... ok
+test git_conflict_rejects_marker_looking_content_before_actual_conflict ... ok
+test git_conflict_rejects_pipe_prefixed_current_side_as_ambiguous_base_marker ... ok
+test git_conflict_resolves_from_subdirectory_root ... ok
+test git_conflict_resolves_custom_marker_size ... ok
+test git_conflict_resolves_current_and_incoming ... ok
+test git_snapshot_projects_syntactic_diff_blame_graph_conflicts_and_hunk_staging ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+
+     Running tests/path_boundary.rs (target/debug/deps/path_boundary-561b2243627dc4da)
+
+running 9 tests
+test resolve_and_write_reject_parent_escape ... ok
+test oversized_save_denied_by_file_write_limit_before_atomic_write ... ok
+test oversized_save_denied_by_path_limit_before_atomic_write ... ok
+test symlink_escape_outside_root_is_rejected ... ok
+test stale_save_preserves_disk_content_and_returns_typed_response ... ok
+test semantic_discovery_delta_reports_external_deleted_and_changed_outcomes ... ok
+test in_limit_save_uses_stricter_limit_and_writes_once ... ok
+test semantic_discovery_snapshot_reports_safe_workspace_policy_outcomes ... ok
+test nonexistent_child_path_inside_root_is_allowed ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/watcher_recovery.rs (target/debug/deps/watcher_recovery-ce0b183bc3bf0a3f)
+
+running 1 test
+test watcher_recovery_overflow_then_rescan_emits_recovery_event ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_protocol-29c653938db0a1d8)
+
+running 15 tests
+test tests::stale_proposal_check ... ok
+test tests::proposal_expiry ... ok
+test tests::mock_ports_compile ... ok
+test tests::text_range_coordinate_golden_schema ... ok
+test tests::workspace_open_request_golden_schema ... ok
+test tests::file_tree_delta_roundtrip_and_schema ... ok
+test tests::workspace_open_request_required_fields ... ok
+test tests::workspace_open_request_serde_round_trip ... ok
+test tests::terminal_launch_roundtrip ... ok
+test tests::workspace_config_snapshot_required_fields_and_roundtrip ... ok
+test tests::capability_struct_roundtrip ... ok
+test tests::storage_repository_request_and_response_roundtrip ... ok
+test tests::lsp_round_trip ... ok
+test tests::plugin_manifest_required_fields_and_roundtrip ... ok
+test tests::text_edit_batch_roundtrip ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/dto_contracts.rs (target/debug/deps/dto_contracts-7719f86cc61acc6a)
+
+running 109 tests
+test dap_client_contract_frames_requests_and_matches_responses ... ok
+test dto_contracts_assisted_ai_invalid_output_does_not_produce_preview_ready_state ... ok
+test dto_contracts_approval_checklist_surfaces_each_blocker_class ... ok
+test dto_contracts_assisted_ai_gate_refusals_are_metadata_only_no_invocation ... ok
+test dto_contracts_assisted_ai_edit_output_converts_to_proposal_only_and_rejects_invalid_preconditions ... ok
+test dto_contracts_assisted_ai_audit_outcomes_are_metadata_only_without_invocation ... ok
+test dto_contracts_automate_mcp_registry_decision_feed_and_risk_rows_are_metadata_only ... ok
+test dto_contracts_assisted_ai_refused_route_does_not_produce_preview_ready_state ... ok
+test dto_contracts_collaboration_audit_records_are_metadata_only ... ok
+test dto_contracts_collaboration_identity_metadata_rejects_zero_and_denied_values ... ok
+test dto_contracts_collaboration_replay_manifest_is_metadata_only_and_audit_validated ... ok
+test debug_breakpoint_launch_and_projection_contracts_are_session_independent ... ok
+test dto_contracts_collaboration_shared_proposal_approval_links_policy_and_operations ... ok
+test dto_contracts_context_manifest_does_not_activate_runtime_requests ... ok
+test dto_contracts_context_manifest_missing_preconditions_are_manifest_risk ... ok
+test dto_contracts_assisted_ai_audit_record_is_metadata_only_and_validated ... ok
+test dto_contracts_capability_request_context_golden_and_required_fields ... ok
+test dto_contracts_collaboration_transport_envelope_serializes_metadata_and_operations ... ok
+test dto_contracts_approval_checklist_ready_state_is_metadata_only_and_non_mutating ... ok
+test dto_contracts_assisted_ai_provider_capability_and_request_are_metadata_only ... ok
+test dto_contracts_batch_proposal_payload_golden_and_required_fields ... ok
+test dto_contracts_assisted_ai_projection_serializes_metadata_only_and_redacted ... ok
+test dto_contracts_checkpoint_rollback_projection_exposes_only_metadata ... ok
+test control_trust_projection_contracts_roundtrip_redaction_and_required_fields ... ok
+test dto_contracts_delegated_task_tool_permission_decisions_fail_closed ... ok
+test dto_contracts_delegated_task_blockers_and_refusals_are_visible_without_runtime ... ok
+test dto_contracts_delegated_task_readiness_classifies_waiting_blocked_refused_and_invalid_states ... ok
+test dto_contracts_future_surface_gate_blockers_refusals_and_classifications_are_explicit ... ok
+test dto_contracts_event_envelope_golden_and_required_fields ... ok
+test dto_contracts_future_surface_gate_validation_rejects_raw_markers_and_invalid_core_ids ... ok
+test dto_contracts_context_manifest_projection_metadata_only_and_risk_visible ... ok
+test dto_contracts_delegated_task_readiness_rejects_invalid_core_ids_and_raw_markers ... ok
+test dto_contracts_future_surface_runtime_activation_remains_not_encoded_for_all_surfaces ... ok
+test dto_contracts_delegated_task_steps_link_proposals_and_trust_without_mutation ... ok
+test dto_contracts_inline_prediction_stale_lifecycle_and_audit_metadata_validate ... ok
+test dto_contracts_each_proposal_lifecycle_response_golden ... ok
+test dto_contracts_each_conflict_state_golden ... ok
+test dto_contracts_delegated_task_chat_reviews_and_permissions_are_metadata_only ... ok
+test dto_contracts_legion_workflow_provider_backed_worker_requires_route_metadata ... ok
+test dto_contracts_legion_workflow_merge_readiness_fails_closed_for_blockers ... ok
+test dto_contracts_delegated_task_plan_and_projection_are_metadata_only ... ok
+test dto_contracts_legion_workflow_rejects_invalid_core_metadata ... ok
+test dto_contracts_legion_workflow_waits_for_approval_without_applying ... ok
+test dto_contracts_legion_worker_result_evidence_and_route_metadata_are_metadata_only ... ok
+test dto_contracts_lsp_edit_contract_rejects_missing_correlation_privacy_or_preconditions ... ok
+test dto_contracts_lsp_edits_convert_to_workspace_proposals_without_direct_mutation ... ok
+test dto_contracts_lsp_diagnostics_and_capabilities_exclude_source_bodies ... ok
+test dto_contracts_lsp_supervision_refuses_untrusted_or_privacy_denied_without_launch ... ok
+test dto_contracts_future_surface_gate_projection_serializes_metadata_only_and_redacted ... ok
+test dto_contracts_delegated_task_readiness_audit_linkage_is_metadata_only_and_validated ... ok
+test dto_contracts_lsp_supervision_slice_has_no_external_runtime_request ... ok
+test dto_contracts_legion_workflow_session_roundtrips_and_projects_metadata_only ... ok
+test dto_contracts_phase4_runtime_audit_allows_runtime_states_but_rejects_raw_markers ... ok
+test dto_contracts_inline_prediction_request_result_projection_are_bounded_and_metadata_only ... ok
+test dto_contracts_lsp_phase3_definition_references_and_cancellation_golden ... ok
+test dto_contracts_phase8_hosted_retention_export_requires_separate_raw_source_consent ... ok
+test dto_contracts_phase8_hosted_telemetry_diagnostics_are_metadata_only ... ok
+test dto_contracts_phase8_hosted_telemetry_requires_consent_and_metadata_only_records ... ok
+test dto_contracts_lsp_phase3_mutation_proposals_are_proposal_ready ... ok
+test dto_contracts_phase8_hosted_telemetry_policy_rejects_non_https_and_revoked_consent ... ok
+test dto_contracts_phase8_raw_source_retention_is_scoped_and_default_denied ... ok
+test dto_contracts_phase8_remote_transport_handshake_fails_closed ... ok
+test dto_contracts_lsp_supervision_boundary_is_metadata_only_and_redacted ... ok
+test dto_contracts_legion_cloud_lane_task_request_is_metadata_only_and_budgeted ... ok
+test dto_contracts_phase8_raw_source_vault_envelope_rejects_key_material_and_raw_content ... ok
+test dto_contracts_phase8_remote_transport_connection_attempt_fails_closed ... ok
+test dto_contracts_phase8_remote_transport_tls_policy_rejects_plaintext_and_inline_keys ... ok
+test dto_contracts_legion_task_packet_roundtrips_and_rejects_direct_mutation ... ok
+test dto_contracts_phase8_storage_health_and_evidence_summaries_are_metadata_only ... ok
+test dto_contracts_phase8_terminal_and_transport_audits_reject_raw_markers ... ok
+test dto_contracts_permission_budgets_deny_deplete_and_refuse_with_metadata_only_actions ... ok
+test dto_contracts_phase8_terminal_requests_validate_policy_and_bounds ... ok
+test dto_contracts_phase8_terminal_kill_request_rejects_unsupported_escalation ... ok
+test dto_contracts_plugin_host_call_and_storage_schemas_are_versioned_and_metadata_only ... ok
+test dto_contracts_phase8_storage_migration_contracts_fail_closed ... ok
+test dto_contracts_plugin_manifest_requires_abi_trust_capabilities_and_quota_metadata ... ok
+test dto_contracts_product_mode_runtime_surface_policy_is_shared_and_fail_closed_for_manual ... ok
+test dto_contracts_privacy_and_budget_contracts_do_not_encode_runtime_activation ... ok
+test dto_contracts_provider_route_request_requires_complete_runtime_metadata ... ok
+test dto_contracts_remote_session_activation_is_fail_closed_until_trusted_enabled_and_active ... ok
+test dto_contracts_remote_audit_records_require_metadata_only_redaction ... ok
+test dto_contracts_remote_write_preconditions_reject_missing_guards ... ok
+test dto_contracts_p5_3_contracts_do_not_encode_runtime_activation ... ok
+test dto_contracts_runtime_activation_variants_and_security_stop_gates_are_explicit ... ok
+test dto_contracts_proposal_lifecycle_commands_golden_and_required_fields ... ok
+test dto_contracts_privacy_inspector_serializes_metadata_only_and_redacted ... ok
+test dto_contracts_post_ga_artifacts_default_to_metadata_only_retention ... ok
+test dto_contracts_save_proposal_golden_with_all_preconditions ... ok
+test dto_contracts_post_ga_work_surface_projections_are_metadata_only ... ok
+test dto_contracts_remote_transport_envelope_serializes_metadata_only_payloads ... ok
+test dto_contracts_semantic_and_workspace_service_envelopes_roundtrip ... ok
+test dto_contracts_session_record_schema_golden ... ok
+test dto_contracts_snapshot_lease_descriptor_golden_and_required_fields ... ok
+test dto_contracts_snapshot_chunk_descriptor_golden_and_required_fields ... ok
+test dto_contracts_semantic_indexing_records_golden_and_required_fields ... ok
+test language_terminal_projection_default_surfaces_are_inert ... ok
+test dto_contracts_semantic_query_request_response_golden ... ok
+test dto_contracts_text_coordinate_and_viewport_projection_golden ... ok
+test dto_contracts_proposal_ledger_projection_golden_metadata_only ... ok
+test dto_contracts_text_transaction_descriptor_golden_and_required_fields ... ok
+test language_terminal_projection_roundtrips_terminal_surface ... ok
+test language_terminal_projection_roundtrips_language_surface ... ok
+test dto_contracts_viewport_projection_golden_and_required_fields ... ok
+test product_readiness_debug_test_scm_and_workbench_contracts_roundtrip ... ok
+test dto_contracts_semantic_fabric_scheduling_metadata_only_roundtrip ... ok
+test vscode_compatibility_contract_roundtrips_and_requires_identity ... ok
+test dto_contracts_workspace_discovery_dtos_golden_and_required_fields ... ok
+test dto_contracts_storage_request_response_schema_golden ... ok
+test dto_contracts_phase4_runtime_surfaces_are_protocol_mediated ... ok
+
+test result: ok. 109 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_remote-de83b2f78648dc42)
+
+running 13 tests
+test tests::remote_reconnect_and_offline_resume_are_explicit ... ok
+test tests::remote_audit_records_are_metadata_only_valid ... ok
+test tests::remote_filesystem_write_requires_proposal_and_preconditions ... ok
+test tests::devcontainer_connection_plan_fails_closed_without_image_or_dockerfile ... ok
+test tests::remote_execution_surfaces_are_policy_gated_and_bounded ... ok
+test tests::remote_filesystem_stale_fingerprint_preserves_fixture_text ... ok
+test tests::devcontainer_connection_plan_parses_config_and_activates_runtime ... ok
+test tests::remote_runtime_is_default_off ... ok
+test tests::cloud_lane_client_rejects_forbidden_upload_scope_before_transport ... ok
+test tests::remote_session_requires_trusted_active_enabled_descriptor ... ok
+test tests::ssh_connection_plan_activates_remote_runtime ... ok
+test tests::cloud_lane_client_submits_streams_cancels_and_fetches_metadata ... ok
+test tests::cloud_lane_client_rejects_mismatched_response_task_ids ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cloud_lane_http_transport.rs (target/debug/deps/cloud_lane_http_transport-64af065db9ce0b4d)
+
+running 11 tests
+test http_transport_config_debug_redacts_auth_token ... ok
+test http_transport_disabled_policy_rejects_before_network ... ok
+test http_transport_cost_cap_rejects_before_network ... ok
+test http_transport_forbidden_upload_rejects_before_network ... ok
+test http_transport_classifies_4xx_as_http_response_error ... ok
+test http_transport_classifies_5xx_as_http_response_error ... ok
+test http_transport_stream_task_events ... ok
+test http_transport_submit_task_sends_headers_and_body ... ok
+test http_transport_cancel_task ... ok
+test http_transport_fetch_task_evidence ... ok
+test http_transport_fetch_task_proposal ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_remote_transport-ca766170ceeb4f23)
+
+running 20 tests
+test tests::loopback_only_endpoint_rejects_external_resolution_before_dial ... ok
+test tests::remote_transport_fixture_is_default_off ... ok
+test tests::remote_transport_fixture_rejects_oversized_frames ... ok
+test tests::connect_endpoint_socket_addrs_tries_later_resolved_addresses ... ok
+test tests::root_store_reference_must_match_configured_root_digest ... ok
+test tests::client_credential_reference_must_match_configured_client_chain_digest ... ok
+test tests::remote_transport_state_machine_requires_ordered_handshake_before_frames ... ok
+test tests::remote_transport_state_machine_agent_package_must_match_peer_and_capability ... ok
+test tests::certificate_pin_reference_must_match_peer_leaf_digest ... ok
+test tests::rustls_mtls_carrier_is_default_off ... ok
+test tests::remote_transport_state_machine_enforces_flow_control_credit ... ok
+test tests::rustls_mtls_carrier_rejects_policy_root_reference_without_configured_roots ... ok
+test tests::remote_transport_fixture_accepts_handshake_and_bounded_frames ... ok
+test tests::remote_transport_state_machine_resume_requires_matching_token_checkpoint ... ok
+test tests::tls_server_identity_is_policy_bound_and_normalized ... ok
+test tests::rustls_mtls_carrier_uses_single_attempt_timeout_budget ... ok
+test tests::rustls_mtls_carrier_rejects_required_mtls_without_files_before_network ... ok
+test tests::rustls_mtls_carrier_short_circuits_canceled_attempt_before_credentials_or_network ... ok
+test tests::remote_transport_state_machine_rejects_sequence_gap_and_duplicate_is_idempotent ... ok
+test tests::rustls_mtls_carrier_builds_optional_mtls_config_without_inline_material ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_retention-05ff9f39291d5fdb)
+
+running 24 tests
+test tests::file_backed_vault_delete_missing_bundle_is_rejected ... ok
+test tests::file_backed_vault_encrypts_and_does_not_store_plaintext ... ok
+test tests::file_backed_vault_rejects_out_of_scope_and_deletes_ciphertext ... ok
+test tests::file_backed_vault_delete_fails_when_ciphertext_is_missing ... ok
+test tests::kms_envelope_contract_wraps_by_reference_without_key_material ... ok
+test tests::os_keyring_provider_exposes_metadata_reference_without_inline_key ... ok
+test tests::file_backed_vault_rejects_duplicate_bundle_id_collision ... ok
+test tests::retention_fixture_audits_access_and_deletes_with_tombstone ... ok
+test tests::retention_fixture_captures_descriptor_without_raw_content ... ok
+test tests::retention_fixture_delete_missing_bundle_is_rejected ... ok
+test tests::retention_fixture_is_default_denied ... ok
+test tests::retention_fixture_rejects_out_of_scope_capture ... ok
+test tests::file_backed_vault_rejects_tampered_authenticated_metadata ... ok
+test tests::hosted_raw_export_requires_allowlisted_https_and_current_consent ... ok
+test tests::file_backed_vault_uses_random_nonce_for_same_plaintext ... ok
+test tests::file_backed_vault_rotation_fails_closed_when_old_key_cannot_decrypt ... ok
+test tests::file_backed_vault_rejects_wrong_key_and_tampered_ciphertext ... ok
+test tests::hosted_raw_export_uploads_encrypted_bundle_only_and_records_linkage ... ok
+test tests::vault_recovery_report_fails_closed_for_missing_ciphertext ... ok
+test tests::purge_expired_only_deletes_bundles_past_recorded_lease_expiry ... ok
+test tests::vault_recovery_report_quarantines_corrupt_ciphertext_without_plaintext ... ok
+test tests::vault_reopen_recovers_descriptors_without_plaintext_leak ... ok
+test tests::vault_recovery_report_verifies_healthy_bundle_without_plaintext ... ok
+test tests::file_backed_vault_rotates_bundle_key_and_reopens_with_new_reference ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_security-17f54faf333f3492)
+
+running 50 tests
+test tests::command_taxonomy_classifies_known_commands ... ok
+test tests::collaboration_transport_denies_non_loopback_air_gap_egress ... ok
+test tests::ai_provider_invoke_allows_loopback_for_trusted_workspace ... ok
+test tests::broker_request_is_denied_when_namespace_empty ... ok
+test tests::collaboration_policy_allows_presence_without_runtime_mutation ... ok
+test tests::collaboration_capabilities_are_disabled_by_default_and_require_trust ... ok
+test tests::deny_by_default_for_unknown_capability ... ok
+test tests::broker_rejects_unknown_trust_for_sensitive_requests ... ok
+test tests::air_gap_denies_hosted_provider_telemetry_embeddings_and_gateway ... ok
+test tests::cloud_lane_submit_requires_visible_scope_budget_cap_and_https_target ... ok
+test tests::cloud_lane_capabilities_are_disabled_by_default_and_require_trust ... ok
+test tests::manual_product_mode_denies_ai_cloud_network_worker_telemetry_and_automation_surfaces ... ok
+test tests::file_write_blocked_by_extension ... ok
+test tests::file_write_is_blocked_by_extension_policy ... ok
+test tests::mcp_tool_permission_policy_uses_descriptor_fields_and_deny_override ... ok
+test tests::path_policy_parent_escape_is_rejected ... ok
+test tests::memory_retain_denied_without_explicit_consent ... ok
+test tests::path_policy_blocks_bad_roots ... ok
+test tests::network_fetch_requires_allowlisted_target_even_when_trusted ... ok
+test tests::path_policy_rejects_sibling_prefix_escape ... ok
+test tests::phase8_raw_source_read_export_and_delete_policy_paths_are_explicit ... ok
+test tests::phase8_hosted_telemetry_requires_current_consent_and_https ... ok
+test tests::phase8_hosted_telemetry_is_disabled_by_default_and_air_gap_denied ... ok
+test tests::phase8_raw_source_retention_is_disabled_by_default ... ok
+test tests::phase8_capability_families_reject_unknown_workspace_trust ... ok
+test tests::phase8_storage_migration_apply_and_repair_are_disabled_by_default ... ok
+test tests::phase8_raw_source_retention_requires_current_consent ... ok
+test tests::phase8_remote_transport_and_retention_hosted_export_fail_closed ... ok
+test tests::phase8_sensitive_capabilities_deny_empty_principal ... ok
+test tests::phase8_storage_migration_apply_requires_explicit_flag ... ok
+test tests::phase8_storage_migration_repair_requires_explicit_flag ... ok
+test tests::phase8_remote_egress_requires_runtime_session ... ok
+test tests::phase8_terminal_launch_requires_command_metadata_and_denies_network_tools ... ok
+test tests::phase8_telemetry_spool_write_is_disabled_by_default ... ok
+test tests::plugin_manifest_context_is_required_and_unknown_capabilities_are_denied ... ok
+test tests::phase8_terminal_runtime_capabilities_are_disabled_by_default ... ok
+test tests::redaction_scanner_allows_metadata_only_hash_summaries ... ok
+test tests::provider_policy_can_disable_local_loopback_invocation ... ok
+test tests::redaction_scanner_allows_safe_words_with_secret_prefix_fragments ... ok
+test tests::plugin_network_process_filesystem_and_untrusted_workspace_are_denied ... ok
+test tests::provider_policy_denies_remote_even_when_network_allowlist_permits_host ... ok
+test tests::protocol_handle_request_returns_decision ... ok
+test tests::phase8_remote_agent_package_activation_is_disabled_by_default ... ok
+test tests::redaction_scanner_blocks_delimited_secret_prefixes ... ok
+test tests::redaction_scanner_blocks_trace_diff_and_log_secret_markers ... ok
+test tests::remote_capabilities_are_disabled_by_default_and_require_trust ... ok
+test tests::trust_state_conversion_roundtrips ... ok
+test tests::remote_connect_denies_non_loopback_air_gap_egress ... ok
+test tests::remote_policy_allows_filesystem_without_execution ... ok
+test tests::terminal_decision_is_blocked_for_unknown_workspace ... ok
+
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/path_policy_windows.rs (target/debug/deps/path_policy_windows-e49cfa3f080c500f)
+
+running 1 test
+test sibling_prefix_escape_is_rejected_cross_platform ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_storage-ba58dfc6cbe5f0e7)
+
+running 29 tests
+test tests::event_metadata_storage_rejects_zero_sequence_and_invalid_core_ids ... ok
+test tests::dock_layout_storage_rejects_invalid_records ... ok
+test tests::collaboration_audit_storage_roundtrips_metadata_only_and_rejects_raw_source ... ok
+test tests::in_memory_storage_roundtrip_config ... ok
+test tests::in_memory_storage_roundtrip_file_metadata ... ok
+test tests::in_memory_storage_roundtrip_session ... ok
+test tests::in_memory_storage_roundtrip_trust ... ok
+test tests::in_memory_storage_roundtrips_mode_scoped_dock_layouts ... ok
+test tests::assisted_ai_audit_storage_roundtrips_metadata_only_and_rejects_invalid_records ... ok
+test tests::delegated_task_audit_linkage_storage_roundtrips_metadata_only_and_rejects_invalid_records ... ok
+test tests::file_backed_storage_corrupt_file_is_quarantined ... ok
+test tests::phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only ... ok
+test tests::phase8_metadata_storage_roundtrips_and_rejects_raw_markers ... ok
+test tests::plugin_storage_namespace_isolation_and_quota_fail_closed ... ok
+test tests::proposal_audit_storage_rejects_zero_correlation_and_nil_causality ... ok
+test tests::remote_audit_storage_roundtrips_metadata_only_and_rejects_raw_payloads ... ok
+test tests::semantic_metadata_privacy_revocation_tombstones_records ... ok
+test tests::semantic_metadata_roundtrips_without_source_bodies ... ok
+test tests::semantic_metadata_workspace_generation_mismatch_is_rejected ... ok
+test tests::trust_conversion_roundtrips ... ok
+test tests::migration_recovery_rejects_checksum_algorithm_mismatch ... ok
+test tests::file_backed_storage_opens_schema_one_without_protocol_metadata ... ok
+test tests::migration_backup_uses_collision_safe_backup_ids ... ok
+test tests::migration_recovery_rejects_invalid_backup_marker ... ok
+test tests::migration_registry_dry_run_backup_and_recovery_are_metadata_only ... ok
+test tests::file_backed_storage_roundtrips_dock_layouts ... ok
+test tests::file_backed_storage_roundtrips_protocol_audit_and_event_metadata ... ok
+test tests::file_backed_storage_roundtrip_config_and_session ... ok
+test tests::file_backed_protocol_debug_breakpoint_delete_survives_restore ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/debug_breakpoints.rs (target/debug/deps/debug_breakpoints-d46594b4dac45845)
+
+running 1 test
+test debug_breakpoints_persist_by_workspace_independent_of_sessions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_telemetry-2b41d282d938441f)
+
+running 14 tests
+test tests::file_backed_spool_rejects_raw_or_sensitive_records ... ok
+test tests::telemetry_export_requires_explicit_fixture_enablement ... ok
+test tests::telemetry_spool_accepts_metadata_and_purges_on_revoke ... ok
+test tests::telemetry_spool_is_default_off ... ok
+test tests::telemetry_spool_rejects_raw_content_classification ... ok
+test tests::retry_after_parser_accepts_seconds_and_http_dates ... ok
+test tests::reqwest_exporter_is_default_off_and_rustls_configured ... ok
+test tests::reqwest_exporter_rejects_oversized_batches_before_http ... ok
+test tests::exporter_rejects_mismatched_batch_ack_without_dropping_records ... ok
+test tests::file_backed_spool_rejects_unknown_uploaded_record_ids ... ok
+test tests::spool_enforces_max_records_and_drop_summary ... ok
+test tests::file_backed_spool_survives_reopen_and_purges_on_revoke ... ok
+test tests::exporter_marks_accepted_records_and_keeps_retry_records ... ok
+test tests::pending_batch_ids_change_after_partial_upload ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_terminal-30e7fafcbb3a41c3)
+
+running 13 tests
+test tests::terminal_fixture_is_default_off ... ok
+test tests::terminal_fixture_rejects_untrusted_launch ... ok
+test tests::terminal_runtime_default_off_denies_launch ... ok
+test tests::terminal_fixture_launches_metadata_only_and_exits ... ok
+test tests::terminal_runtime_launch_creates_metadata_only_degraded_audit ... ok
+test tests::terminal_runtime_keeps_exited_native_session_until_truncated_output_is_drained ... ok
+test tests::terminal_runtime_interrupt_preserves_session_and_uses_interrupt_mode ... ok
+test tests::terminal_runtime_dispatches_native_lifecycle_operations ... ok
+test tests::terminal_runtime_poll_output_removes_exited_native_session ... ok
+test tests::terminal_runtime_rejects_untrusted_policy ... ok
+test tests::terminal_runtime_kill_and_orphan_cleanup_remove_sessions ... ok
+test tests::terminal_runtime_keeps_session_registered_when_close_or_kill_fails ... ok
+test tests::terminal_runtime_records_native_pty_audit_when_platform_backend_is_native ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dap_adapter_fixture.rs (target/debug/deps/dap_adapter_fixture-fa10bffe30dd87ea)
+
+running 1 test
+test dap_fixture_launch_projects_debugger_state_without_raw_values ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_text-65e04bc7d7f6a50b)
+
+running 24 tests
+test tests::content_hash_has_expected_prefix ... ok
+test tests::crlf_is_single_line_ending_for_lsp ... ok
+test tests::buffer_rejects_non_boundary_edits ... ok
+test tests::buffer_insert_delete_replace ... ok
+test tests::line_slice_can_span_multiple_chunks ... ok
+test tests::position_roundtrip_multibyte_columns_are_bytes ... ok
+test tests::crlf_pair_is_not_split_when_near_chunk_boundary ... ok
+test tests::snapshot_clone_is_cheap_and_immutable ... ok
+test tests::snapshot_descriptor_has_required_metadata ... ok
+test tests::text_position_display ... ok
+test tests::text_range_empty ... ok
+test tests::utf16_golden_surrogate_pairs ... ok
+test tests::utf16_range_golden ... ok
+test tests::property_edits_match_string_model_for_ascii ... ok
+test tests::visible_line_slices_return_exact_requested_range ... ok
+test tests::chunk_hashes_change_only_for_edited_chunk_when_boundaries_stay_stable ... ok
+test tests::utf8_and_utf16_conversion_work_across_chunk_boundaries ... ok
+test tests::large_file_typical_keystroke_edit_smoke ... ok
+test tests::huge_single_line_files_are_bounded_without_full_text_materialization ... ok
+test tests::large_snapshot_can_materialize_save_payload_from_chunks ... ok
+test tests::large_snapshot_line_slices_and_chunks_are_bounded_by_default ... ok
+test tests::edits_can_shrink_below_and_grow_above_full_cache_budget ... ok
+test tests::explicit_full_text_access_fails_for_uncached_snapshot_and_buffer ... ok
+test tests::opening_larger_than_budget_uses_degraded_cache_free_mode ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_tracker-782a492b4ac4b1cf)
+
+running 7 tests
+test tests::tracker_ledger_rejects_zero_event_sequence ... ok
+test tests::legion_workflow_tracker_rejects_invalid_zero_event_and_nil_causality ... ok
+test tests::legion_workflow_tracker_appends_and_indexes_metadata ... ok
+test tests::legion_workflow_tracker_conflict_and_proposal_lookup_are_metadata_only ... ok
+test tests::legion_workflow_tracker_rejects_unresolved_conflict_ready_state ... ok
+test tests::tracker_ledger_rejects_raw_prompt_markers ... ok
+test tests::tracker_ledger_roundtrips_run_and_proposal_metadata ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_ui-fb2225e166f056f8)
+
+running 25 tests
+test ui::tests::dock_persisted_ids_parse_for_session_restore ... ok
+test ui::tests::dock_layouts_are_mode_scoped_and_manual_layout_is_ai_free ... ok
+test ui::tests::explorer_projection_holds_nodes_and_selection ... ok
+test ui::tests::dock_panel_descriptor_roundtrips_projection_state ... ok
+test ui::tests::panel_registry_constructs_from_dock_panel_contracts ... ok
+test ui::tests::panel_registry_filters_restricted_panels_out_of_manual_mode ... ok
+test ui::tests::legion_workflow_commands_emit_projection_only_intents ... ok
+test ui::tests::shell_parses_commands_into_dispatch_intents_without_editor_ownership ... ok
+test ui::tests::legion_workflow_projection_roundtrips_without_ui_authority ... ok
+test ui::tests::legion_workflow_malformed_command_does_not_emit_privileged_intent ... ok
+test ui::tests::legion_workflow_empty_projection_is_metadata_only ... ok
+test ui::tests::shell_carries_post_ga_work_surface_projections_without_ownership ... ok
+test ui::tests::shell_proposal_intents_do_not_mutate_editor_or_workspace_projection ... ok
+test ui::tests::shell_renders_approval_and_rollback_summaries_from_static_snapshot_without_ownership ... ok
+test ui::tests::shell_renders_delegated_task_projection_from_static_snapshot_without_ownership ... ok
+test ui::tests::shell_renders_context_manifest_from_static_snapshot_without_ownership ... ok
+test ui::tests::shell_renders_assisted_ai_projection_from_static_snapshot_without_ownership ... ok
+test ui::tests::shell_renders_privacy_and_budget_summaries_from_static_snapshot_without_ownership ... ok
+test ui::tests::shell_snapshot_large_file_projection_carries_only_viewport_slices ... ok
+test ui::tests::ui_collaboration_presence_is_projection_only_command_intent ... ok
+test ui::tests::shell_renders_proposal_ledger_from_static_snapshot ... ok
+test ui::tests::control_trust_shell_carries_static_projection_contracts_without_ownership ... ok
+test ui::tests::ui_plugin_contributions_are_projection_only_command_intents ... ok
+test ui::tests::assisted_ai_command_intents_remain_projection_only ... ok
+test ui::tests::control_trust_command_intents_remain_projection_only ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/assist_inline_prediction.rs (target/debug/deps/assist_inline_prediction-a11ff78c99e9916a)
+
+running 1 test
+test shell_carries_assist_inline_prediction_projection_and_routes_commands_without_authority ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/debug_projection.rs (target/debug/deps/debug_projection-909d3bdb6899d245)
+
+running 1 test
+test shell_carries_debug_projection_and_routes_debug_commands_without_authority ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/legion_vscode_compat-34d31e1c33ae9054)
+
+running 8 tests
+test tests::invalid_manifest_and_control_ids_reject ... ok
+test tests::open_vsx_extension_metadata_requires_https_download_url ... ok
+test tests::open_vsx_load_rejects_metadata_package_identity_mismatch ... ok
+test tests::open_vsx_extension_metadata_resolves_and_loads_package_manifest ... ok
+test tests::tier0_manifest_is_declarative_and_needs_no_host ... ok
+test tests::command_and_debug_manifest_is_policy_gated ... ok
+test tests::compatibility_diagnostics_remain_metadata_only ... ok
+test tests::webview_manifest_is_deferred_to_tier3 ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/xtask-9f500ff0ea079e74)
+
+running 59 tests
+test tests::gui_phase5_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::gui_phase6_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::gui_phase7_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::gui_phase5_acceptance_claim_passes_with_checked_checklist_artifacts_and_commands ... ok
+test tests::gui_phase5_acceptance_claim_requires_artifacts_commands_and_checked_checklist ... ok
+test tests::gui_phase7_acceptance_status_rejects_conflicting_markers ... ok
+test tests::gui_phase7_acceptance_claim_passes_with_checked_checklist_artifacts_commands_and_limits ... ok
+test tests::gui_phase8_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::gui_phase6_acceptance_claim_passes_with_checked_checklist_artifacts_and_commands ... ok
+test tests::missing_workspace_crate_policy_is_reported ... ok
+test tests::gui_phase8_acceptance_status_rejects_conflicting_markers ... ok
+test tests::gui_phase8_acceptance_claim_passes_with_checked_checklist_artifacts_commands_and_markers ... ok
+test tests::gui_phase7_acceptance_claim_requires_artifacts_commands_limits_and_checked_checklist ... ok
+test tests::gui_phase6_acceptance_claim_requires_artifacts_commands_and_checked_checklist ... ok
+test tests::phase13_acceptance_claim_rejects_stale_pending_markers ... ok
+test tests::phase13_acceptance_claim_passes_with_required_evidence ... ok
+test tests::phase3_acceptance_claim_passes_with_checked_checklist_and_artifacts ... ok
+test tests::phase3_acceptance_claim_requires_artifacts_and_checked_checklist ... ok
+test tests::phase3_acceptance_status_section_is_required ... ok
+test tests::phase3_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::phase4_acceptance_status_section_is_required ... ok
+test tests::phase13_acceptance_claim_requires_artifacts_markers_commands_and_runbook ... ok
+test tests::phase4_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::gui_phase8_acceptance_claim_rejects_phase7_unsupported_labels ... ok
+test tests::phase4_acceptance_claim_passes_with_checked_checklist_and_artifacts ... ok
+test renderer_dependency_gate_preserves_projection_boundary ... ok
+test tests::phase4_acceptance_claim_requires_artifacts_and_checked_checklist ... ok
+test tests::phase5_acceptance_claim_requires_artifacts_and_checked_checklist ... ok
+test tests::phase5_acceptance_claim_passes_with_checked_checklist_and_artifacts ... ok
+test tests::gui_phase8_acceptance_claim_requires_artifacts_commands_markers_and_checked_checklist ... ok
+test tests::phase5_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::phase6_acceptance_claim_passes_with_checked_checklist_and_artifacts ... ok
+test tests::phase6_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::phase6_acceptance_status_rejects_conflicting_markers ... ok
+test tests::phase7_acceptance_claim_passes_with_checked_checklist_and_artifacts ... ok
+test tests::phase6_acceptance_claim_requires_artifacts_and_checked_checklist ... ok
+test tests::phase7_acceptance_claim_requires_artifacts_and_checked_checklist ... ok
+test tests::phase7_not_accepted_status_allows_scaffold_without_artifacts ... ok
+test tests::phase7_acceptance_status_rejects_conflicting_markers ... ok
+test tests::phase8_acceptance_claim_passes_with_checked_checklist_and_artifacts ... ok
+test tests::phase8_acceptance_claim_rejects_stale_deferred_markers ... ok
+test tests::phase8_acceptance_claim_requires_artifacts_and_checked_checklist ... ok
+test tests::phase5_evidence_declares_accepted_status_with_artifacts ... ok
+test tests::phase6_evidence_declares_accepted_status_with_artifacts ... ok
+test tests::phase8_artifact_stale_marker_matching_rejects_pending_token_not_substrings ... ok
+test tests::phase8_not_accepted_status_allows_fixture_scaffold_without_artifacts ... ok
+test tests::phase4_evidence_declares_accepted_status_with_artifacts ... ok
+test tests::phase8_acceptance_claim_requires_final_ga_markers ... ok
+test tests::policy_parses_required_dependencies_from_markdown ... ok
+test tests::phase7_evidence_declares_accepted_status_with_artifacts ... ok
+test tests::phase13_evidence_declares_accepted_final_gate_artifacts ... ok
+test tests::phase8_acceptance_claim_requires_matrix_artifact_contents ... ok
+test tests::phase8_acceptance_claim_requires_release_signoff_artifact_contents ... ok
+test tests::source_snapshots_are_not_persisted_by_default ... ok
+test tests::phase3_evidence_declares_accepted_status_with_artifacts ... ok
+test tests::phase4_runtime_surfaces_remain_protocol_mediated ... ok
+test tests::phase8_evidence_declares_accepted_ga_status ... ok
+test tests::save_active_buffer_remains_proposal_mediated ... ok
+test tests::ui_shell_remains_projection_only ... ok
+
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+EXIT_CODE: 0
+
+COMMAND: cargo run -p xtask -- check-deps
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running `target/debug/xtask check-deps`
+dependency policy checks passed
+EXIT_CODE: 0
+
+COMMAND: engineering artifact validation
+VALID engineering audit: ENGINEERING_AUDIT.yaml
+VALID engineering plan: ENGINEERING_PLAN.yaml
+EXIT_CODE: 0

@@ -1,0 +1,382 @@
+schema_version: 1
+project:
+  name: legion-ide
+  repository: /Users/christopherwilloughby/devil-ide
+  default_branch: main
+  coordinator_model: GPT-5.5
+  implementer_model: Kimi 2.6
+  reviewer_model: Kimi 2.6
+
+rules:
+  coordinator_owns:
+    - architecture
+    - planning
+    - task_decomposition
+    - git
+    - pull_requests
+    - ci
+    - merge_decisions
+    - escalation
+  subagents_forbidden:
+    - creating branches
+    - committing
+    - pushing
+    - opening pull requests
+    - merging pull requests
+    - changing CI unless explicitly allowed
+  timeboxes:
+    planning_minutes: 30
+    implementation_minutes: 45
+    review_fix_minutes: 30
+    ci_investigation_minutes: 20
+    pr_hardening_minutes: 90
+
+full_gates:
+  - name: format
+    command: "cargo fmt --all --check"
+  - name: check
+    command: "cargo check --workspace --all-targets"
+  - name: clippy
+    command: "cargo clippy --workspace --all-targets -- -D warnings"
+  - name: tests
+    command: "cargo test --workspace --all-targets"
+  - name: dependency_policy
+    command: "cargo run -p xtask -- check-deps"
+  - name: python_model_gates
+    command: "python3 evals/run_eval.py --offline-fixture --dataset evals/fixtures/minimal.jsonl --output /tmp/legion-eval.json && python3 training/qlora_train.py --fixture-smoke --dataset training/fixtures/minimal_traces.jsonl --output-dir /tmp/legion-train-smoke && python3 training/convert_to_gguf.py --fixture-smoke --model-dir /tmp/legion-train-smoke --output /tmp/legion-model.gguf --metadata-output /tmp/legion-gguf.json"
+
+phases:
+  - id: phase-1-docs-ledger
+    title: Reconcile product readiness and AGENTS guidance
+    status: done
+    objective: Replace stale readiness and placeholder documentation with evidence-backed Legion status and explicit deferred cut lines.
+    dependencies: []
+    tasks:
+      - id: docs-ledger-01
+        title: Reconcile product readiness ledger
+        status: done
+        origin: audit_gap
+        source_finding_ids: [finding-product-readiness-ledger-stale]
+        objective: Update plans/product-readiness-ledger.md to reflect current tested Legion surfaces, in-progress release surfaces, and explicitly deferred product promises.
+        dependencies: []
+        allowed_files:
+          - plans/product-readiness-ledger.md
+        forbidden_files:
+          - .github/workflows/ci.yml
+          - crates/**
+          - training/**
+          - evals/**
+        required_context:
+          - The repo has been rebranded to Legion; use legion-* crate names.
+          - Existing audit evidence distinguishes implemented local/product surfaces from deferred cloud/collaboration/admin/runtime-extension execution surfaces.
+        implementation_steps:
+          - Replace all-Not-started rows with evidence-backed statuses.
+          - Add exact validation commands and evidence references.
+          - Preserve deferred cut lines where product workflows are not implemented.
+        targeted_tests:
+          - "cargo run -p legion-cli -- evidence check --phase gui-phase8"
+        acceptance_criteria:
+          - Ledger no longer claims every gate is Not started.
+          - Ledger references exact Legion validation commands.
+          - Deferred surfaces are explicit and not overstated.
+        definition_of_done:
+          - Documentation diff is limited to the ledger.
+          - Coordinator verifies no stale devil-* commands remain in changed rows.
+        known_risks:
+          - Documentation can overclaim product readiness if deferred cut lines are softened.
+        stop_conditions:
+          - Need to modify code to make the ledger true.
+          - Evidence contradicts a claimed status.
+          - Task exceeds 45 minutes.
+        timebox_minutes: 45
+      - id: docs-agents-02
+        title: Reconcile AGENTS placeholder guidance
+        status: done
+        origin: audit_gap
+        source_finding_ids: [finding-agents-placeholder-note-stale]
+        objective: Update AGENTS.md so active phase-gated crates are not described as placeholders while deferred product surfaces remain explicit.
+        dependencies: []
+        allowed_files:
+          - AGENTS.md
+        forbidden_files:
+          - .github/workflows/ci.yml
+          - crates/**
+          - training/**
+          - evals/**
+        required_context:
+          - legion-agent, legion-tracker, and legion-memory have active tests and evidence.
+          - Collaboration/admin/runtime-extension product surfaces still have explicit cut lines.
+        implementation_steps:
+          - Replace stale placeholder language.
+          - Keep contributor guidance concise and phase-gated.
+          - Do not change code or CI.
+        targeted_tests:
+          - "cargo test -p legion-agent --all-targets"
+          - "cargo test -p legion-tracker --all-targets"
+          - "cargo test -p legion-memory --all-targets"
+        acceptance_criteria:
+          - AGENTS.md accurately reflects active crates and deferred product surfaces.
+          - No stale devil-* crate names are introduced.
+        definition_of_done:
+          - Documentation-only diff is verified.
+        known_risks:
+          - AGENTS guidance may become too broad for future agents.
+        stop_conditions:
+          - Need to inspect or modify broad unrelated docs.
+          - Task exceeds 30 minutes.
+        timebox_minutes: 30
+  - id: phase-2-beta-e2e
+    title: Unified beta acceptance scenario
+    status: done
+    objective: Add a single deterministic e2e test proving the beta acceptance scenario across local edit, policy-gated assistance, VSIX compatibility, evidence, and configuration persistence.
+    dependencies: [phase-1-docs-ledger]
+    tasks:
+      - id: beta-e2e-01
+        title: Add unified beta acceptance e2e test
+        status: done
+        origin: audit_gap
+        source_finding_ids: [finding-unified-beta-e2e-test-missing]
+        objective: Add a single integration test in legion-desktop that exercises the beta acceptance loop instead of relying only on distributed smaller tests.
+        dependencies: [docs-ledger-01]
+        allowed_files:
+          - crates/legion-desktop/Cargo.toml
+          - crates/legion-desktop/tests/beta_acceptance_e2e.rs
+          - Cargo.lock
+          - plans/evidence/legion-e2e/2026-06-03_beta_acceptance_e2e.txt
+        forbidden_files:
+          - .github/workflows/ci.yml
+          - crates/legion-remote/**
+          - training/**
+          - evals/**
+        required_context:
+          - Existing beta_workflow.rs covers pieces of the scenario.
+          - New test must use Legion crate names and deterministic fixtures.
+        implementation_steps:
+          - Add test dependencies if needed.
+          - Build one unified beta acceptance test.
+          - Capture targeted test output as evidence.
+        targeted_tests:
+          - "cargo test -p legion-desktop --test beta_acceptance_e2e -- --nocapture"
+        acceptance_criteria:
+          - Test passes and is deterministic.
+          - Evidence file records command, output, and exit code.
+          - No broad product behavior is weakened.
+        definition_of_done:
+          - Targeted test passes.
+          - Coordinator verifies file scope.
+        known_risks:
+          - E2E test may duplicate existing lower-level tests if not carefully composed.
+        stop_conditions:
+          - Need to add non-deterministic GUI automation.
+          - Targeted test fails after two fix attempts.
+          - Task exceeds 45 minutes.
+        timebox_minutes: 45
+  - id: phase-3-cloud-transport
+    title: Production HTTP cloud lane transport
+    status: done
+    objective: Add a production-capable HTTP JSON transport for Cloud Lane while preserving policy gates, metadata-only boundaries, and proposal-only semantics.
+    dependencies: [phase-1-docs-ledger]
+    tasks:
+      - id: cloud-transport-01
+        title: Implement HTTP JSON Cloud Lane transport
+        status: done
+        origin: audit_gap
+        source_finding_ids: [finding-cloud-lane-production-transport-missing]
+        objective: Implement reqwest-blocking transport for Cloud Lane submit, stream, cancel, proposal, and evidence endpoints with deterministic local server tests.
+        dependencies: []
+        allowed_files:
+          - crates/legion-remote/src/lib.rs
+          - crates/legion-remote/Cargo.toml
+          - crates/legion-remote/tests/cloud_lane_http_transport.rs
+          - plans/evidence/legion-e2e/2026-06-03_cloud_transport_contract.md
+          - plans/evidence/legion-e2e/2026-06-03_cloud_lane_http_transport_gates.txt
+          - Cargo.lock
+        forbidden_files:
+          - .github/workflows/ci.yml
+          - crates/legion-desktop/**
+          - training/**
+          - evals/**
+        required_context:
+          - LegionCloudLaneClient already performs policy validation before calling the transport.
+          - Transport must not log raw bodies or secrets.
+        implementation_steps:
+          - Add transport config with base URL, timeout, identity label, and redacted auth token support.
+          - Implement trait methods over deterministic JSON endpoints.
+          - Add TcpListener-based tests for success, headers, policy-before-network, and HTTP error classification.
+          - Document transport contract and policy boundaries.
+        targeted_tests:
+          - "cargo test -p legion-remote --test cloud_lane_http_transport -- --nocapture"
+          - "cargo test -p legion-remote --all-targets"
+          - "cargo run -p xtask -- check-deps"
+        acceptance_criteria:
+          - HTTP transport tests pass.
+          - Policy rejects disabled/cost/upload failures before network.
+          - Auth token is redacted from Debug output.
+          - Contract document references exact DTOs and endpoints.
+        definition_of_done:
+          - Targeted remote tests pass.
+          - Dependency policy gate passes.
+          - No app wiring or config enablement is added.
+        known_risks:
+          - reqwest/rustls dependency changes may affect workspace policy.
+        stop_conditions:
+          - Need protocol DTO redesign.
+          - Dependency policy requires broad changes.
+          - Targeted tests fail after two fix attempts.
+          - Task exceeds 45 minutes.
+        timebox_minutes: 45
+  - id: phase-4-training-eval
+    title: Optional real training and eval harnesses
+    status: done
+    objective: Replace dry-run-only training/eval scaffolds with CI-safe fixture-smoke paths and optional real execution paths using lazy heavyweight imports.
+    dependencies: [phase-1-docs-ledger]
+    tasks:
+      - id: training-eval-01
+        title: Implement optional training/eval/gguf harnesses
+        status: done
+        origin: audit_gap
+        source_finding_ids: [finding-training-eval-real-execution-deferred]
+        objective: Add offline fixture and optional endpoint/training/conversion paths while preserving dry-run safety.
+        dependencies: []
+        allowed_files:
+          - evals/run_eval.py
+          - evals/README.md
+          - evals/fixtures/minimal.jsonl
+          - training/qlora_train.py
+          - training/convert_to_gguf.py
+          - training/README.md
+          - training/fixtures/minimal_traces.jsonl
+          - pyproject.toml
+          - docs/OPERATOR_RUNBOOK.md
+        forbidden_files:
+          - .github/workflows/ci.yml
+          - crates/**
+          - plans/product-readiness-ledger.md
+        required_context:
+          - Dry-run commands must remain lightweight for CI.
+          - Heavy training dependencies must be optional and lazily imported.
+        implementation_steps:
+          - Add eval offline fixture mode and optional OpenAI-compatible endpoint mode.
+          - Add QLoRA fixture-smoke, dataset validation, and lazy real-mode dependency checks.
+          - Add GGUF fixture-smoke and explicit subprocess argument construction.
+          - Document install and operator commands.
+        targeted_tests:
+          - "python3 evals/run_eval.py --dry-run"
+          - "python3 evals/run_eval.py --offline-fixture --dataset evals/fixtures/minimal.jsonl --output /tmp/legion-eval.json"
+          - "python3 training/qlora_train.py --dry-run"
+          - "python3 training/qlora_train.py --fixture-smoke --dataset training/fixtures/minimal_traces.jsonl --output-dir /tmp/legion-train-smoke"
+          - "python3 training/convert_to_gguf.py --dry-run"
+          - "python3 training/convert_to_gguf.py --fixture-smoke --model-dir /tmp/legion-train-smoke --output /tmp/legion-model.gguf --metadata-output /tmp/legion-gguf.json"
+          - "python3 -m compileall training evals scripts/models"
+        acceptance_criteria:
+          - Scripts are not dry-run-only.
+          - Fixture-smoke paths pass without heavyweight dependencies.
+          - Real modes fail clearly with install instructions when optional deps/tools are absent.
+          - No raw secrets are emitted in reports.
+        definition_of_done:
+          - All targeted Python commands pass.
+          - Documentation includes usage examples.
+        known_risks:
+          - Real GPU training must not accidentally run in CI.
+        stop_conditions:
+          - Need to install heavyweight dependencies.
+          - Scope expands into Rust trace export.
+          - Validation fails after two fix attempts.
+          - Task exceeds 45 minutes.
+        timebox_minutes: 45
+  - id: phase-5-ci-audit
+    title: CI and audit/status reconciliation
+    status: done
+    objective: Add CI coverage for model/training/eval dry-run and fixture-smoke paths, then update audit/status artifacts to reflect resolved findings.
+    dependencies: [phase-2-beta-e2e, phase-3-cloud-transport, phase-4-training-eval]
+    tasks:
+      - id: ci-audit-01
+        title: Add CI Python dry-run and fixture-smoke coverage
+        status: done
+        origin: audit_gap
+        source_finding_ids: [finding-training-dry-runs-not-in-ci]
+        objective: Extend CI so Linux runs model dry-runs, eval offline fixture, training fixture smoke, GGUF fixture smoke, and compileall with PYTHONDONTWRITEBYTECODE.
+        dependencies: [training-eval-01]
+        allowed_files:
+          - .github/workflows/ci.yml
+        forbidden_files:
+          - crates/**
+          - training/**
+          - evals/**
+          - plans/product-readiness-ledger.md
+        required_context:
+          - CI already runs Rust gates and evidence gates across OS matrix.
+          - Heavy training dependencies are not installed in CI.
+        implementation_steps:
+          - Add Linux-only dry-run/fixture-smoke step after Phase 8 evidence gate.
+          - Set PYTHONDONTWRITEBYTECODE to avoid dirty bytecode artifacts.
+          - Keep commands lightweight and deterministic.
+        targeted_tests:
+          - "python3 evals/run_eval.py --dry-run"
+          - "python3 evals/run_eval.py --offline-fixture --dataset evals/fixtures/minimal.jsonl --output /tmp/legion-eval.json"
+          - "python3 training/qlora_train.py --fixture-smoke --dataset training/fixtures/minimal_traces.jsonl --output-dir /tmp/legion-train-smoke"
+          - "python3 training/convert_to_gguf.py --fixture-smoke --model-dir /tmp/legion-train-smoke --output /tmp/legion-model.gguf --metadata-output /tmp/legion-gguf.json"
+          - "python3 -m compileall training evals scripts/models"
+        acceptance_criteria:
+          - CI includes model/training/eval dry-run coverage.
+          - CI does not install heavy ML dependencies.
+          - No bytecode artifacts remain dirty after validation.
+        definition_of_done:
+          - Workflow YAML lint/write checks pass.
+          - Targeted Python gates pass locally.
+        known_risks:
+          - compileall may dirty committed pyc files unless bytecode is controlled.
+        stop_conditions:
+          - CI change requires installing heavy dependencies.
+          - Workflow scope expands beyond Phase 8 Python/model validation.
+          - Task exceeds 30 minutes.
+        timebox_minutes: 30
+      - id: ci-audit-02
+        title: Update engineering audit and status artifacts
+        status: done
+        origin: audit_gap
+        source_finding_ids:
+          - finding-product-readiness-ledger-stale
+          - finding-unified-beta-e2e-test-missing
+          - finding-cloud-lane-production-transport-missing
+          - finding-training-eval-real-execution-deferred
+          - finding-agents-placeholder-note-stale
+          - finding-training-dry-runs-not-in-ci
+        objective: Mark resolved findings, update validation evidence, regenerate audit/status HTML/markdown artifacts, and record final gate outputs.
+        dependencies: [ci-audit-01]
+        allowed_files:
+          - ENGINEERING_AUDIT.yaml
+          - ENGINEERING_AUDIT.html
+          - ENGINEERING_STATUS.md
+          - ENGINEERING_PLAN.yaml
+          - ENGINEERING_PLAN.html
+          - plans/evidence/legion-e2e/**
+        forbidden_files:
+          - crates/**
+          - training/**
+          - evals/**
+          - .github/workflows/ci.yml
+        required_context:
+          - Implementation artifacts must use Legion names.
+          - ENGINEERING_AUDIT.html is generated from ENGINEERING_AUDIT.yaml.
+        implementation_steps:
+          - Update finding statuses and validation matrix.
+          - Update status counts and verified gates.
+          - Generate ENGINEERING_AUDIT.html and ENGINEERING_PLAN.html.
+          - Capture final gate output.
+        targeted_tests:
+          - "python3 $HOME/.hermes/skills/software-development/gpt55-kimi-engineering-workflow/scripts/validate_engineering_audit.py ENGINEERING_AUDIT.yaml"
+          - "python3 $HOME/.hermes/skills/software-development/gpt55-kimi-engineering-workflow/scripts/validate_engineering_plan.py ENGINEERING_PLAN.yaml"
+        acceptance_criteria:
+          - Audit and plan YAML validate.
+          - HTML reports regenerate.
+          - Status counts match implemented/resolved state.
+        definition_of_done:
+          - Coordinator verifies final artifacts and diff scope.
+        known_risks:
+          - Audit YAML may still contain stale devil-* references from prior branch state.
+        stop_conditions:
+          - Audit validation fails after two fix attempts.
+          - Need to change implementation code to make a status true.
+          - Task exceeds 45 minutes.
+        timebox_minutes: 45

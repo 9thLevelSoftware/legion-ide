@@ -2215,6 +2215,7 @@ dependencies = [
  "legion-ui",
  "serde_json",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -2309,6 +2310,9 @@ name = "legion-remote"
 version = "0.1.0"
 dependencies = [
  "legion-protocol",
+ "reqwest",
+ "rustls",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "uuid",

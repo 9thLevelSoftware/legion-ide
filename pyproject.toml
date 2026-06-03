@@ -1,0 +1,21 @@
+# Minimal Python metadata for Legion training/eval harnesses.
+# This project is primarily a Rust workspace; Python entrypoints are standalone
+# scripts with lazy imports for heavy dependencies.
+
+[project]
+name = "legion-harnesses"
+version = "0.1.0"
+description = "Optional training, eval, and GGUF conversion harnesses for Legion"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+training = [
+    "torch",
+    "transformers",
+    "peft",
+    "datasets",
+    "trl",
+]
+eval = [
+    "openai",
+]
