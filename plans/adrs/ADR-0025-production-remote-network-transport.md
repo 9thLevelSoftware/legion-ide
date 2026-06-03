@@ -8,7 +8,7 @@ Phase 7 accepted only a deterministic edge workspace harness. Phase 8 must add p
 
 ## Decision
 
-Implement production remote transport as a typed `RemoteTransportEnvelope` carrier behind explicit policy and feature activation. Keep the deterministic metadata-only `devil-remote-transport` fixture as the conformance backend for tests.
+Implement production remote transport as a typed `RemoteTransportEnvelope` carrier behind explicit policy and feature activation. Keep the deterministic metadata-only `legion-remote-transport` fixture as the conformance backend for tests.
 
 Production transport must be app-composed, endpoint-allowlisted, encrypted/authenticated, identity-bound, schema-negotiated, replay-protected, resumable, flow-controlled, metadata-audited, and unable to mutate editor, workspace, UI, or disk state directly. Local file/editor changes received through remote traffic must continue through proposal/workspace/editor authorities and existing save/write preconditions.
 

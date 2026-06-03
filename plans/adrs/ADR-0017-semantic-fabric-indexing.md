@@ -6,11 +6,11 @@ Accepted. Phase 3 implementation evidence satisfies this ADR in [`predictive-sem
 
 ## Context
 
-Phase 3 of [`implementation-plan.md`](../implementation-plan.md:246) activates [`lib.rs`](../../crates/devil-index/src/lib.rs:1) from a placeholder into the predictive semantic fabric for navigation, completion ranking, AI context selection, refactoring previews, and test impact analysis.
+Phase 3 of [`implementation-plan.md`](../implementation-plan.md:246) activates [`lib.rs`](../../crates/legion-index/src/lib.rs:1) from a placeholder into the predictive semantic fabric for navigation, completion ranking, AI context selection, refactoring previews, and test impact analysis.
 
 This activation depends on the Phase 1 streaming text substrate in [`ADR-0015-streaming-text-viewport.md`](ADR-0015-streaming-text-viewport.md:1) and the Phase 2 proposal substrate in [`ADR-0016-generalized-proposal-service.md`](ADR-0016-generalized-proposal-service.md:1). The index must consume text snapshots, file identities, and event metadata without reintroducing full-source UI projection or direct workspace mutation.
 
-The dependency boundary for Phase 3 is intentionally narrow: [`Cargo.toml`](../../crates/devil-index/Cargo.toml:1) can use shared DTOs and ports from [`Cargo.toml`](../../crates/devil-protocol/Cargo.toml:1), persisted index metadata from [`Cargo.toml`](../../crates/devil-storage/Cargo.toml:1), and text snapshot or chunk primitives from [`Cargo.toml`](../../crates/devil-text/Cargo.toml:1). It must not gain direct authority over editor sessions, UI state, app orchestration, or workspace VFS writes.
+The dependency boundary for Phase 3 is intentionally narrow: [`Cargo.toml`](../../crates/legion-index/Cargo.toml:1) can use shared DTOs and ports from [`Cargo.toml`](../../crates/legion-protocol/Cargo.toml:1), persisted index metadata from [`Cargo.toml`](../../crates/legion-storage/Cargo.toml:1), and text snapshot or chunk primitives from [`Cargo.toml`](../../crates/legion-text/Cargo.toml:1). It must not gain direct authority over editor sessions, UI state, app orchestration, or workspace VFS writes.
 
 ## Decision
 
@@ -22,7 +22,7 @@ Phase 3 will implement semantic indexing as an actor-owned, bounded, cancellable
 - Inputs are immutable snapshot descriptors, content hashes, chunk leases, file identities, discovery deltas, LSP DTOs, and metadata-only event envelopes.
 - Outputs are index records, semantic query responses, diagnostics links, graph records, cache freshness markers, and metadata-only observability events.
 - Indexing may request bounded text leases from the text substrate, but it must not mutate editor buffers, workspace files, or UI projections.
-- Any mutation suggested by semantic analysis, refactoring preview, LSP rename, formatting, or code actions must route through [`WorkspaceProposal`](../../crates/devil-protocol/src/lib.rs:1343) and the generalized proposal lifecycle accepted in [`ADR-0016-generalized-proposal-service.md`](ADR-0016-generalized-proposal-service.md:15).
+- Any mutation suggested by semantic analysis, refactoring preview, LSP rename, formatting, or code actions must route through [`WorkspaceProposal`](../../crates/legion-protocol/src/lib.rs:1343) and the generalized proposal lifecycle accepted in [`ADR-0016-generalized-proposal-service.md`](ADR-0016-generalized-proposal-service.md:15).
 
 ### 2. Bounded queues, priority scheduling, cancellation, and backpressure
 
@@ -95,7 +95,7 @@ Phase 3 will implement semantic indexing as an actor-owned, bounded, cancellable
 
 ## Consequences
 
-- **Positive**: Phase 3 can activate [`lib.rs`](../../crates/devil-index/src/lib.rs:1) without giving it app, UI, editor, or workspace mutation authority.
+- **Positive**: Phase 3 can activate [`lib.rs`](../../crates/legion-index/src/lib.rs:1) without giving it app, UI, editor, or workspace mutation authority.
 - **Positive**: Live editor work has deterministic priority over repository scans and stale semantic jobs.
 - **Positive**: Cache invalidation keys are explicit before LSP fusion, learned ranking, or future vector features depend on them.
 - **Negative**: Query APIs must expose freshness and degradation state because the fabric intentionally prefers responsiveness over blocking for perfect completeness.
@@ -105,7 +105,7 @@ Phase 3 will implement semantic indexing as an actor-owned, bounded, cancellable
 
 - This ADR does not implement Rust source, manifests, tests, build scripts, or runtime behavior.
 - This ADR does not activate vector indexing or embeddings.
-- This ADR does not create direct dependencies on [`Cargo.toml`](../../crates/devil-editor/Cargo.toml:1), [`Cargo.toml`](../../crates/devil-project/Cargo.toml:1), [`Cargo.toml`](../../crates/devil-app/Cargo.toml:1), or UI internals.
+- This ADR does not create direct dependencies on [`Cargo.toml`](../../crates/legion-editor/Cargo.toml:1), [`Cargo.toml`](../../crates/legion-project/Cargo.toml:1), [`Cargo.toml`](../../crates/legion-app/Cargo.toml:1), or UI internals.
 - This ADR does not weaken the projection-only UI or proposal-mediated save constraints.
 
 ## Exit condition

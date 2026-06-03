@@ -58,7 +58,7 @@ Result:
 - Non-ignored performance tests `ci_typical_edit_latency_on_budget_sized_file`, `ci_snapshot_retention_budget_is_enforced`, and `ci_undo_redo_burst_small_deterministic_sample` passed.
 - Atomicity and UTF-16 transaction descriptor tests passed.
 - Archived ignored benchmark output records the 100MB full-cache boundary and retained-history reservations without treating them as green benchmark data.
-- Index responsiveness remains a baseline no-op because `devil-index` is not active in Phase 0.
+- Index responsiveness remains a baseline no-op because `legion-index` is not active in Phase 0.
 
 ### Track D — Platform Boundary Verification
 
@@ -71,7 +71,7 @@ Evidence:
 - `plans/evidence/phase-0/cargo-test-workspace-all-targets.txt`
 
 Result:
-- Every public `devil-platform` API is mapped to an OS concern.
+- Every public `legion-platform` API is mapped to an OS concern.
 - Editor, window, model, and request-routing ownership are explicitly excluded from platform ownership.
 
 ## Milestone exit criteria

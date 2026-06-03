@@ -17,7 +17,7 @@ The front end must support four product states:
    - No inference-backed panels.
    - No remote/cloud worker controls.
    - Deterministic IDE features only.
-   - Offline build must compile without `devil-ai`, `devil-ai-providers`, or `devil-agent`.
+   - Offline build must compile without `legion-ai`, `legion-ai-providers`, or `legion-agent`.
 
 2. Assist
    - Inline, local or remote inference.
@@ -53,11 +53,11 @@ The front end should make the product’s trust model visible:
 
 From repo inspection and the planning artifact:
 
-- `devil-ui` owns UI components and should own the dock/panel registry.
-- `devil-desktop` should remain projection-only.
-- `devil-app` owns application authority, proposals, and approval gates.
-- `devil-protocol` owns DTOs and protocol-facing data.
-- `devil-agent` owns delegated task runtime and Legion orchestration.
+- `legion-ui` owns UI components and should own the dock/panel registry.
+- `legion-desktop` should remain projection-only.
+- `legion-app` owns application authority, proposals, and approval gates.
+- `legion-protocol` owns DTOs and protocol-facing data.
+- `legion-agent` owns delegated task runtime and Legion orchestration.
 - Existing UI currently has a `RightConsole` style whole-pane swap by mode.
 - The first front-end pivot is replacing that whole-pane swap with a real dock host.
 
@@ -66,7 +66,7 @@ Rename/pivot note:
 - Rename user-facing product to Legion IDE.
 - Avoid immediate internal crate rename if it slows delivery.
 - First rename visible app strings, docs, branding, plan names, window titles, and user-facing commands.
-- Later rename crates/packages from `devil-*` to `legion-*` in a controlled migration.
+- Later rename crates/packages from `legion-*` to `legion-*` in a controlled migration.
 
 ## 2. Front-end architecture principles
 
@@ -79,7 +79,7 @@ The UI may:
 - Render panels.
 - Dispatch user intents.
 - Display diagnostics, results, proposals, evidence, and agent status.
-- Send approval/rejection decisions to `devil-app`.
+- Send approval/rejection decisions to `legion-app`.
 - Request commands through typed APIs.
 
 The UI must not:
@@ -583,11 +583,11 @@ Good UI:
 
 ```text
 Patch proposed by rust-compiler-fixer-3b.
-Allowed files: crates/devil-agent/src/lib.rs only.
-Touched files: crates/devil-agent/src/lib.rs only.
+Allowed files: crates/legion-agent/src/lib.rs only.
+Touched files: crates/legion-agent/src/lib.rs only.
 Validation:
-  cargo check -p devil-agent: passed.
-  cargo test -p devil-agent: passed.
+  cargo check -p legion-agent: passed.
+  cargo test -p legion-agent: passed.
 Risk: low.
 Conflicts: none.
 ```
@@ -636,7 +636,7 @@ Change:
 - docs.
 - menus.
 - command palette prefixes.
-- mode names if they include Devil.
+- mode names if they include Legion.
 - icons/branding assets.
 
 Keep temporarily:
@@ -649,12 +649,12 @@ Keep temporarily:
 
 Later migrate:
 
-- `devil-ui` → `legion-ui`.
-- `devil-agent` → `legion-agent`.
-- `devil-ai` → `legion-ai`.
-- `devil-ai-providers` → `legion-ai-providers`.
-- `devil-protocol` → `legion-protocol`.
-- `devil-app` → `legion-app`.
+- `legion-ui` → `legion-ui`.
+- `legion-agent` → `legion-agent`.
+- `legion-ai` → `legion-ai`.
+- `legion-ai-providers` → `legion-ai-providers`.
+- `legion-protocol` → `legion-protocol`.
+- `legion-app` → `legion-app`.
 
 Do it only after the dock refactor is stable.
 

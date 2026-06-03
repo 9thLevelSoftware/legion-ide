@@ -42,7 +42,7 @@ Accepted at: 2026-05-14T02:07:05Z
 
 - Windows 11 is the validated platform for this evidence set.
 - GPU utilization, compositor frame variance, native IME, native clipboard, native focus, and accessibility tree validation are renderer-integration follow-ups.
-- `devil-platform` remains OS-bound and is not the owner of window state, editor state, domain models, or request routing.
+- `legion-platform` remains OS-bound and is not the owner of window state, editor state, domain models, or request routing.
 
 ## Fallback criteria
 

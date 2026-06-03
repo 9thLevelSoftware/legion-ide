@@ -10,7 +10,7 @@ Transform the roadmap in [`plans/foundational-core-ide-platform-roadmap-v0.1.md`
 - [`plans/ide-core-architecture-spec-v0.1.md`](plans/ide-core-architecture-spec-v0.1.md): system layers, workspace/VFS/editor/LSP/plugin ownership, data flows, required protocol contracts, validation strategy, implementation gaps, and sequencing constraints.
 - [`Cargo.toml`](../Cargo.toml): current Rust 2024 workspace members and shared dependencies.
 - [`plans/dependency-policy.md`](plans/dependency-policy.md) and [`xtask/src/main.rs`](../xtask/src/main.rs): dependency direction and protocol-symbol enforcement.
-- [`crates/devil-protocol/src/lib.rs`](../crates/devil-protocol/src/lib.rs), [`crates/devil-text/src/lib.rs`](../crates/devil-text/src/lib.rs), [`crates/devil-editor/src/lib.rs`](../crates/devil-editor/src/lib.rs), [`crates/devil-platform/src/lib.rs`](../crates/devil-platform/src/lib.rs), [`crates/devil-project/src/lib.rs`](../crates/devil-project/src/lib.rs), [`crates/devil-ui/src/ui.rs`](../crates/devil-ui/src/ui.rs), and [`crates/devil-app/src/main.rs`](../crates/devil-app/src/main.rs): current spike/scaffold implementation state.
+- [`crates/legion-protocol/src/lib.rs`](../crates/legion-protocol/src/lib.rs), [`crates/legion-text/src/lib.rs`](../crates/legion-text/src/lib.rs), [`crates/legion-editor/src/lib.rs`](../crates/legion-editor/src/lib.rs), [`crates/legion-platform/src/lib.rs`](../crates/legion-platform/src/lib.rs), [`crates/legion-project/src/lib.rs`](../crates/legion-project/src/lib.rs), [`crates/legion-ui/src/ui.rs`](../crates/legion-ui/src/ui.rs), and [`crates/legion-app/src/main.rs`](../crates/legion-app/src/main.rs): current spike/scaffold implementation state.
 - [`plans/architecture-freeze-v0.1.md`](plans/architecture-freeze-v0.1.md), [`plans/milestone-0-feasibility-proofs.md`](plans/milestone-0-feasibility-proofs.md), [`plans/SPIKE-001A-native-shell-proof.md`](plans/SPIKE-001A-native-shell-proof.md), [`plans/spikes/SPIKE-001A-result.md`](plans/spikes/SPIKE-001A-result.md), and [`plans/SPIKE-000-platform-boundary-proof.md`](plans/SPIKE-000-platform-boundary-proof.md): Phase 0 proof and freeze gates.
 
 ## Current Architecture Summary
@@ -56,7 +56,7 @@ Tasks:
 2. Produce protocol gap list for workspace IDs, file identity, editor versions, proposals, terminal DTOs, LSP DTOs, plugin manifests, and event envelopes.
 3. Execute native shell proof for input-to-paint latency, frame variance, CPU/GPU utilization, memory growth, IME, clipboard, accessibility, and focus behavior.
 4. Collect text/index stress metrics for edit throughput, latency under load, snapshot memory growth, rollback cycles, and index lag.
-5. Complete platform boundary proof by mapping each [`devil-platform`](../crates/devil-platform/src/lib.rs) API to OS-only ownership.
+5. Complete platform boundary proof by mapping each [`legion-platform`](../crates/legion-platform/src/lib.rs) API to OS-only ownership.
 6. Update [`plans/spikes/SPIKE-001A-result.md`](plans/spikes/SPIKE-001A-result.md) with PASS, PASS WITH RESERVATIONS, or FAIL plus evidence owners and fallback criteria.
 
 Exit criteria: M0 accepted; no unresolved blocker is treated as cleared.
@@ -68,7 +68,7 @@ QA: existing unit tests, dependency check, build/check/test/clippy, shell latenc
 Goal: establish serializable, versioned contracts before subsystem implementation.
 
 Tasks:
-1. Add opaque identifiers and version wrappers in [`crates/devil-protocol/src/lib.rs`](../crates/devil-protocol/src/lib.rs) for workspace, root, file content, buffer version, snapshot, terminal session, proposal, correlation, language server, plugin, capability decision, and event sequence.
+1. Add opaque identifiers and version wrappers in [`crates/legion-protocol/src/lib.rs`](../crates/legion-protocol/src/lib.rs) for workspace, root, file content, buffer version, snapshot, terminal session, proposal, correlation, language server, plugin, capability decision, and event sequence.
 2. Add workspace DTOs for open/close, trust state, canonical path, file identity, file metadata, file tree node, tree delta, watcher event, config snapshot, and conflict state.
 3. Add editor DTOs for buffer lifecycle, coordinate encodings, byte/UTF-16 offsets, ranges, edit batches, transaction source, transaction descriptor, undo group, overlays, diagnostics, completion requests, and completion items.
 4. Add proposal DTOs for text edit, create, delete, rename, save, format, code action, and terminal command proposals with principal, capability, correlation, version preconditions, preview summary, and expiry.
@@ -86,10 +86,10 @@ QA: serialization tests, required-field tests, stale-version tests, coordinate t
 Goal: replace spike helpers with OS-service traits and default-deny policies.
 
 Tasks:
-1. Replace direct helper-centric APIs in [`crates/devil-platform/src/lib.rs`](../crates/devil-platform/src/lib.rs) with filesystem, watcher, process, PTY, environment, path normalization, and time service traits.
+1. Replace direct helper-centric APIs in [`crates/legion-platform/src/lib.rs`](../crates/legion-platform/src/lib.rs) with filesystem, watcher, process, PTY, environment, path normalization, and time service traits.
 2. Expand platform errors for permission denied, not found, encoding, symlink loop, path too long, atomic replace unsupported, watcher overflow, process spawn failure, PTY unavailable, timeout, and cancellation.
-3. Implement trust state, path policy, command taxonomy, terminal policy, LSP launch policy, plugin capability policy, file-write policy, network policy, and deny-by-default broker stub in [`crates/devil-security/src/lib.rs`](../crates/devil-security/src/lib.rs).
-4. Remove app-facing raw [`open_text_file`](../crates/devil-platform/src/lib.rs) and [`save_text_file`](../crates/devil-platform/src/lib.rs) usage from [`crates/devil-app/src/main.rs`](../crates/devil-app/src/main.rs), replacing it with workspace/VFS port composition stubs.
+3. Implement trust state, path policy, command taxonomy, terminal policy, LSP launch policy, plugin capability policy, file-write policy, network policy, and deny-by-default broker stub in [`crates/legion-security/src/lib.rs`](../crates/legion-security/src/lib.rs).
+4. Remove app-facing raw [`open_text_file`](../crates/legion-platform/src/lib.rs) and [`save_text_file`](../crates/legion-platform/src/lib.rs) usage from [`crates/legion-app/src/main.rs`](../crates/legion-app/src/main.rs), replacing it with workspace/VFS port composition stubs.
 5. Update dependency policy so platform never depends on editor/project/UI/security domain logic.
 6. Update platform boundary proof after refactor.
 
@@ -102,13 +102,13 @@ QA: fake filesystem/process/PTY services, policy matrix tests, app composition t
 Goal: implement trusted workspace ownership, identity, shallow tree, watcher intake, and initial persistence.
 
 Tasks:
-1. Add workspace actor state in [`crates/devil-project/src/lib.rs`](../crates/devil-project/src/lib.rs): workspace ID, generation, root, trust, config snapshot, file ID map, tree, watcher, and session state.
+1. Add workspace actor state in [`crates/legion-project/src/lib.rs`](../crates/legion-project/src/lib.rs): workspace ID, generation, root, trust, config snapshot, file ID map, tree, watcher, and session state.
 2. Add VFS resolver that canonicalizes paths, enforces root boundaries and trust policy, maps paths to file IDs, records fingerprints, and returns protocol file metadata.
 3. Implement shallow discovery with ignore, hidden, generated, binary, large-file, and unreadable flags.
 4. Implement watcher debounce, stable rename correlation, overflow marker, bounded rescan, and recovery state.
-5. Add storage repositories in [`crates/devil-storage/src/lib.rs`](../crates/devil-storage/src/lib.rs) for recent workspaces, trust decisions, metadata, and sessions.
-6. Add explorer projection types in [`crates/devil-ui/src/ui.rs`](../crates/devil-ui/src/ui.rs) without direct filesystem ownership.
-7. Wire workspace actor, platform service, security service, storage, and UI projection in [`crates/devil-app/src/main.rs`](../crates/devil-app/src/main.rs).
+5. Add storage repositories in [`crates/legion-storage/src/lib.rs`](../crates/legion-storage/src/lib.rs) for recent workspaces, trust decisions, metadata, and sessions.
+6. Add explorer projection types in [`crates/legion-ui/src/ui.rs`](../crates/legion-ui/src/ui.rs) without direct filesystem ownership.
+7. Wire workspace actor, platform service, security service, storage, and UI projection in [`crates/legion-app/src/main.rs`](../crates/legion-app/src/main.rs).
 
 Exit criteria: trusted workspace open, shallow tree, trust toggles, and watcher updates work under bounded rescan.
 
@@ -119,10 +119,10 @@ QA: path policy tests, symlink/long-path tests, watcher overflow tests, storage 
 Goal: replace string-backed text with scalable rope or piece table and deterministic multi-buffer transactions.
 
 Tasks:
-1. Replace [`TextBuffer`](../crates/devil-text/src/lib.rs) internals with rope or piece-table storage.
+1. Replace [`TextBuffer`](../crates/legion-text/src/lib.rs) internals with rope or piece-table storage.
 2. Add immutable snapshot descriptors with snapshot ID, buffer version, content hash, length, line count, memory estimate, and retention pin reason.
 3. Implement line index with byte, UTF-8, and UTF-16 conversions, CRLF handling, surrogate-pair-sensitive LSP mapping, and invalid conversion reporting.
-4. Replace single [`EditorSession`](../crates/devil-editor/src/lib.rs) with multi-buffer editor engine, lifecycle, versions, dirty state, transaction groups, undo/redo groups, selections, cursors, overlays, and snapshot retention budget.
+4. Replace single [`EditorSession`](../crates/legion-editor/src/lib.rs) with multi-buffer editor engine, lifecycle, versions, dirty state, transaction groups, undo/redo groups, selections, cursors, overlays, and snapshot retention budget.
 5. Expand transaction pipeline with pre/post snapshots, transaction/source IDs, buffer/file/workspace IDs, changed byte and UTF-16 ranges, undo group, timestamp, and causality trace.
 6. Replace direct persistence snapshot flow with save request DTO emission to workspace/proposal ports.
 7. Add large-file edit, undo/redo, snapshot retention, and mixed workload benchmarks.
@@ -136,10 +136,10 @@ QA: property tests against reference string model, UTF-16 golden tests, undo/red
 Goal: build production shell projections for explorer, tabs, editor viewport, panels, status, command palette, and session restore.
 
 Tasks:
-1. Replace spike [`Shell`](../crates/devil-ui/src/ui.rs) with projection-only shell state.
+1. Replace spike [`Shell`](../crates/legion-ui/src/ui.rs) with projection-only shell state.
 2. Add tab groups, file/buffer binding, dirty indicators, pinned/preview flags, active tab, split metadata, and close/save prompts.
 3. Replace direct command-to-editor mutation with protocol-port dispatch for open, close, save, split, reveal, and search.
-4. Persist open tabs, active buffer, layout, explorer expansion, panel state, and last workspace in [`crates/devil-storage/src/lib.rs`](../crates/devil-storage/src/lib.rs).
+4. Persist open tabs, active buffer, layout, explorer expansion, panel state, and last workspace in [`crates/legion-storage/src/lib.rs`](../crates/legion-storage/src/lib.rs).
 5. Load session after trust check and persist session on shutdown/stable changes.
 6. Re-run production UI latency checks.
 
@@ -152,7 +152,7 @@ QA: tab/projection/session tests, open/save/close/restart integration, focus/res
 Goal: make every durable mutation explicit, versioned, previewable, auditable, and safe.
 
 Tasks:
-1. Implement save pipeline in [`crates/devil-project/src/lib.rs`](../crates/devil-project/src/lib.rs): resolve file ID, verify capability, compare fingerprint, temp-write, flush, atomic replace, fallback, metadata/hash update, workspace generation update, event emission.
+1. Implement save pipeline in [`crates/legion-project/src/lib.rs`](../crates/legion-project/src/lib.rs): resolve file ID, verify capability, compare fingerprint, temp-write, flush, atomic replace, fallback, metadata/hash update, workspace generation update, event emission.
 2. Add editor conflict states: clean, dirty, saving, save failed, disk changed clean, conflict dirty, reload available, keep-both pending, compare pending.
 3. Ensure proposal DTOs carry buffer version, file content version, workspace generation, trust decision, required capability, principal, correlation ID, preview summary, and diagnostics.
 4. Apply open-buffer edits through editor transactions and closed-file mutations through VFS, with shared proposal audit metadata and rollback on batch failure.
@@ -168,7 +168,7 @@ QA: fingerprint/conflict/proposal validation tests, save/conflict/preview/apply 
 Goal: introduce terminal as policy-gated, cancellable adjacent core service with bounded transcript.
 
 Tasks:
-1. Finalize terminal ADR before creating [`crates/devil-terminal/Cargo.toml`](../crates/devil-terminal/Cargo.toml).
+1. Finalize terminal ADR before creating [`crates/legion-terminal/Cargo.toml`](../crates/legion-terminal/Cargo.toml).
 2. If approved, add terminal actor, session registry, bounded output ring buffer, input/resize/cancel messages, shell profile, environment sanitization, and transcript limits.
 3. Implement Windows-primary PTY/process adapter through platform traits.
 4. Enforce command classes, environment restrictions, untrusted workspace denial, dangerous escalation, timeout, working-directory boundary, and output limits.
@@ -184,7 +184,7 @@ QA: terminal actor tests, command classifier tests, PTY/process smoke tests, den
 Goal: add language services through normalized DTOs, stale-response suppression, overlays, and proposal-only mutation.
 
 Tasks:
-1. After ADR-0011 acceptance, create [`crates/devil-lsp/Cargo.toml`](../crates/devil-lsp/Cargo.toml) and [`crates/devil-lsp/src/lib.rs`](../crates/devil-lsp/src/lib.rs) with dependencies only on protocol, platform, security, observability, and allowed runtime/serialization crates.
+1. After ADR-0011 acceptance, create [`crates/legion-lsp/Cargo.toml`](../crates/legion-lsp/Cargo.toml) and [`crates/legion-lsp/src/lib.rs`](../crates/legion-lsp/src/lib.rs) with dependencies only on protocol, platform, security, observability, and allowed runtime/serialization crates.
 2. Implement LSP coordinator, per-language runtime config, server route table, lifecycle state, bounded restart policy, capability cache, and trust-gated launch.
 3. Implement JSON-RPC process supervision, framed IO, request IDs, cancellation tokens, timeout policy, and crash handling.
 4. Implement document sync: didOpen/didChange/didSave/didClose, per-buffer version mapping, incremental sync when safe, full sync fallback when ambiguous, and debounce that never delays editor input.
@@ -210,9 +210,9 @@ QA: document sync tests, UTF-16 fallback tests, fake LSP server tests, Rust Anal
 Goal: make behavior measurable, privacy-aware, replayable, and CI-enforced.
 
 Tasks:
-1. Implement event envelopes in [`crates/devil-observability/src/lib.rs`](../crates/devil-observability/src/lib.rs) with event ID, parent ID, causality chain, subsystem, severity, retention label, redaction hints, timestamps, and schema version.
+1. Implement event envelopes in [`crates/legion-observability/src/lib.rs`](../crates/legion-observability/src/lib.rs) with event ID, parent ID, causality chain, subsystem, severity, retention label, redaction hints, timestamps, and schema version.
 2. Add latency histograms for open, scan, edit, render, save, proposal, LSP, terminal, plugin activation, and storage migration.
-3. Persist event metadata with retention, compaction, corruption detection, and repair in [`crates/devil-storage/src/lib.rs`](../crates/devil-storage/src/lib.rs).
+3. Persist event metadata with retention, compaction, corruption detection, and repair in [`crates/legion-storage/src/lib.rs`](../crates/legion-storage/src/lib.rs).
 4. Add CLI diagnostics for dependency graph, protocol symbols, event summary, performance summary, storage health, and replay drill.
 5. Add CI gates in [`xtask/src/main.rs`](../xtask/src/main.rs) for performance thresholds, event envelope coverage, protocol golden schemas, and storage migration validation.
 6. Run replay drills for open workspace, edit/save, conflict, terminal denial, LSP completion, and code action proposal.
@@ -226,7 +226,7 @@ QA: event/redaction/metrics tests, replay drills, CLI integration tests, storage
 Goal: add controlled extensibility after core stability while preserving non-AI coupling and proposal-only mutation.
 
 Tasks:
-1. After ADR-0012 acceptance, create [`crates/devil-plugin/Cargo.toml`](../crates/devil-plugin/Cargo.toml) and [`crates/devil-plugin/src/lib.rs`](../crates/devil-plugin/src/lib.rs) for first-party/trusted plugins only.
+1. After ADR-0012 acceptance, create [`crates/legion-plugin/Cargo.toml`](../crates/legion-plugin/Cargo.toml) and [`crates/legion-plugin/src/lib.rs`](../crates/legion-plugin/src/lib.rs) for first-party/trusted plugins only.
 2. Implement plugin manifest parser/validator with ID, version, compatibility, activation events, contributions, requested capabilities, storage namespace, and checksum/source metadata.
 3. Implement registry discovery, deterministic activation, lifecycle states, cancellation, deactivation, and failure isolation.
 4. Replace broker stub with production grant/deny/prompt decisions for workspace read/write, editor read/write, process, terminal, network, UI contribution, and storage.
@@ -293,18 +293,18 @@ QA: manifest tests, capability matrix tests, contribution registry tests, plugin
 - [`Cargo.toml`](../Cargo.toml)
 - [`plans/dependency-policy.md`](plans/dependency-policy.md)
 - [`xtask/src/main.rs`](../xtask/src/main.rs)
-- [`crates/devil-protocol/src/lib.rs`](../crates/devil-protocol/src/lib.rs)
-- [`crates/devil-platform/src/lib.rs`](../crates/devil-platform/src/lib.rs)
-- [`crates/devil-security/src/lib.rs`](../crates/devil-security/src/lib.rs)
-- [`crates/devil-project/src/lib.rs`](../crates/devil-project/src/lib.rs)
-- [`crates/devil-storage/src/lib.rs`](../crates/devil-storage/src/lib.rs)
-- [`crates/devil-text/src/lib.rs`](../crates/devil-text/src/lib.rs)
-- [`crates/devil-editor/src/lib.rs`](../crates/devil-editor/src/lib.rs)
-- [`crates/devil-ui/src/lib.rs`](../crates/devil-ui/src/lib.rs)
-- [`crates/devil-ui/src/ui.rs`](../crates/devil-ui/src/ui.rs)
-- [`crates/devil-app/src/main.rs`](../crates/devil-app/src/main.rs)
-- [`crates/devil-observability/src/lib.rs`](../crates/devil-observability/src/lib.rs)
-- [`crates/devil-cli/src/main.rs`](../crates/devil-cli/src/main.rs)
+- [`crates/legion-protocol/src/lib.rs`](../crates/legion-protocol/src/lib.rs)
+- [`crates/legion-platform/src/lib.rs`](../crates/legion-platform/src/lib.rs)
+- [`crates/legion-security/src/lib.rs`](../crates/legion-security/src/lib.rs)
+- [`crates/legion-project/src/lib.rs`](../crates/legion-project/src/lib.rs)
+- [`crates/legion-storage/src/lib.rs`](../crates/legion-storage/src/lib.rs)
+- [`crates/legion-text/src/lib.rs`](../crates/legion-text/src/lib.rs)
+- [`crates/legion-editor/src/lib.rs`](../crates/legion-editor/src/lib.rs)
+- [`crates/legion-ui/src/lib.rs`](../crates/legion-ui/src/lib.rs)
+- [`crates/legion-ui/src/ui.rs`](../crates/legion-ui/src/ui.rs)
+- [`crates/legion-app/src/main.rs`](../crates/legion-app/src/main.rs)
+- [`crates/legion-observability/src/lib.rs`](../crates/legion-observability/src/lib.rs)
+- [`crates/legion-cli/src/main.rs`](../crates/legion-cli/src/main.rs)
 - [`plans/spikes/SPIKE-001A-result.md`](plans/spikes/SPIKE-001A-result.md)
 - [`plans/SPIKE-000-platform-boundary-proof.md`](plans/SPIKE-000-platform-boundary-proof.md)
 
@@ -314,12 +314,12 @@ QA: manifest tests, capability matrix tests, contribution registry tests, plugin
 - [`plans/adrs/ADR-0012-plugin-runtime.md`](plans/adrs/ADR-0012-plugin-runtime.md)
 - [`plans/adrs/ADR-0013-filesystem-vfs-policy.md`](plans/adrs/ADR-0013-filesystem-vfs-policy.md)
 - [`plans/adrs/ADR-0014-workspace-state-watcher-policy.md`](plans/adrs/ADR-0014-workspace-state-watcher-policy.md)
-- [`crates/devil-lsp/Cargo.toml`](../crates/devil-lsp/Cargo.toml)
-- [`crates/devil-lsp/src/lib.rs`](../crates/devil-lsp/src/lib.rs)
-- [`crates/devil-plugin/Cargo.toml`](../crates/devil-plugin/Cargo.toml)
-- [`crates/devil-plugin/src/lib.rs`](../crates/devil-plugin/src/lib.rs)
-- [`crates/devil-terminal/Cargo.toml`](../crates/devil-terminal/Cargo.toml)
-- [`crates/devil-terminal/src/lib.rs`](../crates/devil-terminal/src/lib.rs)
+- [`crates/legion-lsp/Cargo.toml`](../crates/legion-lsp/Cargo.toml)
+- [`crates/legion-lsp/src/lib.rs`](../crates/legion-lsp/src/lib.rs)
+- [`crates/legion-plugin/Cargo.toml`](../crates/legion-plugin/Cargo.toml)
+- [`crates/legion-plugin/src/lib.rs`](../crates/legion-plugin/src/lib.rs)
+- [`crates/legion-terminal/Cargo.toml`](../crates/legion-terminal/Cargo.toml)
+- [`crates/legion-terminal/src/lib.rs`](../crates/legion-terminal/src/lib.rs)
 
 ## Handoff Direction
 

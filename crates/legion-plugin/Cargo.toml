@@ -1,0 +1,15 @@
+[package]
+name = "legion-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+legion-protocol = { workspace = true }
+legion-security = { workspace = true }
+legion-observability = { workspace = true }
+legion-storage = { workspace = true }
+legion-platform = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

@@ -68,7 +68,7 @@ if ($Phase8) {
 }
 
 $ArgsList = @(
-    "run", "-p", "devil-desktop", "--",
+    "run", "-p", "legion-desktop", "--",
     "--workspace", $Workspace,
     "--evidence", $Evidence,
     "--session-state", $SessionState,

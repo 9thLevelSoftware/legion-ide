@@ -196,23 +196,23 @@ The initial repository should evolve from a single binary crate into a multi-cra
 [workspace]
 resolver = "3"
 members = [
-    "crates/devil-app",
-    "crates/devil-ui",
-    "crates/devil-editor",
-    "crates/devil-text",
-    "crates/devil-project",
-    "crates/devil-index",
-    "crates/devil-ai",
-    "crates/devil-ai-providers",
-    "crates/devil-agent",
-    "crates/devil-tracker",
-    "crates/devil-memory",
-    "crates/devil-security",
-    "crates/devil-platform",
-    "crates/devil-protocol",
-    "crates/devil-storage",
-    "crates/devil-observability",
-    "crates/devil-cli"
+    "crates/legion-app",
+    "crates/legion-ui",
+    "crates/legion-editor",
+    "crates/legion-text",
+    "crates/legion-project",
+    "crates/legion-index",
+    "crates/legion-ai",
+    "crates/legion-ai-providers",
+    "crates/legion-agent",
+    "crates/legion-tracker",
+    "crates/legion-memory",
+    "crates/legion-security",
+    "crates/legion-platform",
+    "crates/legion-protocol",
+    "crates/legion-storage",
+    "crates/legion-observability",
+    "crates/legion-cli"
 ]
 
 [workspace.package]
@@ -234,57 +234,57 @@ uuid = { version = "1", features = ["v7", "serde"] }
 
 | Crate | Responsibility | Critical traits |
 |---|---|---|
-| `devil-app` | Main desktop binary, startup, dependency wiring, workspace lifecycle | Thin composition root |
-| `devil-ui` | UI shell, rendering adapters, input translation, panels | Latency critical |
-| `devil-editor` | Buffers, transactions, undo/redo, diagnostics, editor commands | Deterministic core |
-| `devil-text` | Rope, spans, ranges, UTF indexing, edits, snapshots | Allocation disciplined |
-| `devil-project` | Workspace model, file tree, file watcher, project config | Cross-platform stable |
-| `devil-index` | Tree-sitter parsing, symbol graph, lexical and vector indexes | Highly concurrent |
-| `devil-ai` | Prompt assembly, context selection, model request abstraction | Provider agnostic |
-| `devil-ai-providers` | Ollama, llama.cpp, OpenAI, Anthropic, future gateway adapters | Replaceable adapters |
-| `devil-agent` | Plans, tool-use state machines, capability-scoped agent workflows | Auditable automation |
-| `devil-tracker` | Local tasks, plans, links, approvals, run records | Local durable state |
-| `devil-memory` | Opt-in long-term memory, embedding references, retention policies | Consent enforced |
-| `devil-security` | Policy engine, air-gap mode, exfiltration checks, secrets boundaries | Mandatory gatekeeper |
-| `devil-platform` | OS abstractions, keychain, filesystem, processes, window integration | Platform-specific internals |
-| `devil-protocol` | Shared DTOs, event schemas, action schemas, versioning | Stable contracts |
-| `devil-storage` | SQLite, sled, Tantivy, vector store wrappers, migrations | Data durability |
-| `devil-observability` | Tracing, metrics, event log, performance counters | Low overhead |
-| `devil-cli` | Diagnostics, index commands, repair tools, headless tests | Developer tooling |
+| `legion-app` | Main desktop binary, startup, dependency wiring, workspace lifecycle | Thin composition root |
+| `legion-ui` | UI shell, rendering adapters, input translation, panels | Latency critical |
+| `legion-editor` | Buffers, transactions, undo/redo, diagnostics, editor commands | Deterministic core |
+| `legion-text` | Rope, spans, ranges, UTF indexing, edits, snapshots | Allocation disciplined |
+| `legion-project` | Workspace model, file tree, file watcher, project config | Cross-platform stable |
+| `legion-index` | Tree-sitter parsing, symbol graph, lexical and vector indexes | Highly concurrent |
+| `legion-ai` | Prompt assembly, context selection, model request abstraction | Provider agnostic |
+| `legion-ai-providers` | Ollama, llama.cpp, OpenAI, Anthropic, future gateway adapters | Replaceable adapters |
+| `legion-agent` | Plans, tool-use state machines, capability-scoped agent workflows | Auditable automation |
+| `legion-tracker` | Local tasks, plans, links, approvals, run records | Local durable state |
+| `legion-memory` | Opt-in long-term memory, embedding references, retention policies | Consent enforced |
+| `legion-security` | Policy engine, air-gap mode, exfiltration checks, secrets boundaries | Mandatory gatekeeper |
+| `legion-platform` | OS abstractions, keychain, filesystem, processes, window integration | Platform-specific internals |
+| `legion-protocol` | Shared DTOs, event schemas, action schemas, versioning | Stable contracts |
+| `legion-storage` | SQLite, sled, Tantivy, vector store wrappers, migrations | Data durability |
+| `legion-observability` | Tracing, metrics, event log, performance counters | Low overhead |
+| `legion-cli` | Diagnostics, index commands, repair tools, headless tests | Developer tooling |
 
 ### 3.3 Dependency Direction
 
 ```mermaid
 flowchart TD
-    App[devil-app] --> UI[devil-ui]
-    App --> Editor[devil-editor]
-    App --> Project[devil-project]
-    App --> Index[devil-index]
-    App --> AI[devil-ai]
-    App --> Agent[devil-agent]
-    App --> Tracker[devil-tracker]
-    UI --> Protocol[devil-protocol]
+    App[legion-app] --> UI[legion-ui]
+    App --> Editor[legion-editor]
+    App --> Project[legion-project]
+    App --> Index[legion-index]
+    App --> AI[legion-ai]
+    App --> Agent[legion-agent]
+    App --> Tracker[legion-tracker]
+    UI --> Protocol[legion-protocol]
     UI --> Editor
-    Editor --> Text[devil-text]
+    Editor --> Text[legion-text]
     Editor --> Protocol
-    Project --> Platform[devil-platform]
+    Project --> Platform[legion-platform]
     Editor -. uses interface via .-> Protocol
     Index --> Text
-    Index --> Storage[devil-storage]
+    Index --> Storage[legion-storage]
     AI --> Protocol
-    AI --> Providers[devil-ai-providers]
+    AI --> Providers[legion-ai-providers]
     Agent --> AI
     Agent --> Tracker
     Tracker --> Storage
-    Memory[devil-memory] --> Storage
-    Security[devil-security] --> Protocol
+    Memory[legion-memory] --> Storage
+    Security[legion-security] --> Protocol
     Providers --> Security
-    Observability[devil-observability] --> Protocol
+    Observability[legion-observability] --> Protocol
 ```
 
 Rules:
-- `devil-ui` may depend on semantic core crates but core crates must not depend on UI.
-- `devil-editor`, `devil-index`, `devil-tracker`, and `devil-ai` communicate through protocol types and service traits.
+- `legion-ui` may depend on semantic core crates but core crates must not depend on UI.
+- `legion-editor`, `legion-index`, `legion-tracker`, and `legion-ai` communicate through protocol types and service traits.
 - Provider crates must be behind capability and privacy checks.
 - Storage implementation details must not leak into feature crates.
 
@@ -951,17 +951,17 @@ Required validation:
 Do not scale crates or implement additional adapters until cross-crate direction is validated against the charter intent.
 
 Required validation:
-- Confirm `devil-ai` depends on `devil-protocol` and does not depend on `devil-ai-providers` directly.
-- Confirm `devil-ai-providers` depends on `devil-ai` and does not pull in feature semantics through hidden imports.
-- Confirm `devil-ui` and `devil-editor` consume `devil-protocol` data contracts for cross-domain interactions.
-- Confirm no domain crate introduces a hard dependency from `devil-editor` to `devil-project`.
+- Confirm `legion-ai` depends on `legion-protocol` and does not depend on `legion-ai-providers` directly.
+- Confirm `legion-ai-providers` depends on `legion-ai` and does not pull in feature semantics through hidden imports.
+- Confirm `legion-ui` and `legion-editor` consume `legion-protocol` data contracts for cross-domain interactions.
+- Confirm no domain crate introduces a hard dependency from `legion-editor` to `legion-project`.
 
 ### 16.7 Protocol-Contract Gate
 
 Do not proceed to multi-crate implementation before project/editor contracts are explicitly versioned and validated.
 
 Required validation:
-- `ProjectInfoQuery`, `ProjectInfo`, and `EditorTransactionEvent` are defined in `devil-protocol` and consumed by intended callers.
+- `ProjectInfoQuery`, `ProjectInfo`, and `EditorTransactionEvent` are defined in `legion-protocol` and consumed by intended callers.
 - `ProjectInfoPort` trait is stable and used for editor/project interaction tests.
 - Add a lightweight regression check to ensure protocol crate API changes are explicit and reviewed before downstream updates.
 

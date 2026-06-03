@@ -27,90 +27,90 @@ mappings:
     lastKnownFileCount: 60
   app:
     paths:
-      - "crates/devil-app/src"
+      - "crates/legion-app/src"
     priority: 10
-    pattern: "crates/devil-app/src/*.rs"
+    pattern: "crates/legion-app/src/*.rs"
     description: "Application composition root and CLI proof"
     lastKnownFileCount: 2
   desktop:
     paths:
-      - "crates/devil-desktop/src"
+      - "crates/legion-desktop/src"
     priority: 10
-    pattern: "crates/devil-desktop/src/*.rs"
+    pattern: "crates/legion-desktop/src/*.rs"
     description: "Renderer-backed desktop adapter, view, bridge, workflow, session, search, smoke, and metrics"
     lastKnownFileCount: 9
   desktop_tests:
     paths:
-      - "crates/devil-desktop/tests"
+      - "crates/legion-desktop/tests"
     priority: 10
-    pattern: "crates/devil-desktop/tests/*.rs"
+    pattern: "crates/legion-desktop/tests/*.rs"
     description: "Desktop adapter integration tests"
     lastKnownFileCount: 11
   ui:
     paths:
-      - "crates/devil-ui/src"
+      - "crates/legion-ui/src"
     priority: 10
-    pattern: "crates/devil-ui/src/*.rs"
+    pattern: "crates/legion-ui/src/*.rs"
     description: "Projection-only UI shell and intent contracts"
     lastKnownFileCount: 2
   protocol:
     paths:
-      - "crates/devil-protocol/src"
-      - "crates/devil-protocol/tests"
+      - "crates/legion-protocol/src"
+      - "crates/legion-protocol/tests"
     priority: 10
-    pattern: "crates/devil-protocol/**/*.rs"
+    pattern: "crates/legion-protocol/**/*.rs"
     description: "Shared DTO, validation, port, projection, and contract tests"
     lastKnownFileCount: 2
   workspace:
     paths:
-      - "crates/devil-project/src"
-      - "crates/devil-project/tests"
+      - "crates/legion-project/src"
+      - "crates/legion-project/tests"
     priority: 10
-    pattern: "crates/devil-project/**/*.rs"
+    pattern: "crates/legion-project/**/*.rs"
     description: "Workspace VFS, file authority, path boundary, watcher tests"
     lastKnownFileCount: 3
   editor:
     paths:
-      - "crates/devil-editor/src"
-      - "crates/devil-editor/tests"
-      - "crates/devil-text/src"
+      - "crates/legion-editor/src"
+      - "crates/legion-editor/tests"
+      - "crates/legion-text/src"
     priority: 10
-    pattern: "crates/devil-{editor,text}/**/*.rs"
+    pattern: "crates/legion-{editor,text}/**/*.rs"
     description: "Editor engine, text model, performance, atomicity, retention tests"
     lastKnownFileCount: 4
   security:
     paths:
-      - "crates/devil-security/src"
-      - "crates/devil-security/tests"
+      - "crates/legion-security/src"
+      - "crates/legion-security/tests"
     priority: 10
-    pattern: "crates/devil-security/**/*.rs"
+    pattern: "crates/legion-security/**/*.rs"
     description: "Trust, path, command, provider, terminal, and capability policy"
     lastKnownFileCount: 2
   storage_observability:
     paths:
-      - "crates/devil-storage/src"
-      - "crates/devil-observability/src"
+      - "crates/legion-storage/src"
+      - "crates/legion-observability/src"
     priority: 8
-    pattern: "crates/devil-{storage,observability}/src/*.rs"
+    pattern: "crates/legion-{storage,observability}/src/*.rs"
     description: "Storage repositories, event sinks, and metadata-only audit"
     lastKnownFileCount: 2
   feature_surfaces:
     paths:
-      - "crates/devil-index/src"
-      - "crates/devil-ai/src"
-      - "crates/devil-ai-providers/src"
-      - "crates/devil-agent/src"
-      - "crates/devil-memory/src"
-      - "crates/devil-tracker/src"
-      - "crates/devil-plugin/src"
-      - "crates/devil-collaboration/src"
-      - "crates/devil-remote/src"
-      - "crates/devil-remote-transport/src"
-      - "crates/devil-terminal/src"
-      - "crates/devil-telemetry/src"
-      - "crates/devil-retention/src"
+      - "crates/legion-index/src"
+      - "crates/legion-ai/src"
+      - "crates/legion-ai-providers/src"
+      - "crates/legion-agent/src"
+      - "crates/legion-memory/src"
+      - "crates/legion-tracker/src"
+      - "crates/legion-plugin/src"
+      - "crates/legion-collaboration/src"
+      - "crates/legion-remote/src"
+      - "crates/legion-remote-transport/src"
+      - "crates/legion-terminal/src"
+      - "crates/legion-telemetry/src"
+      - "crates/legion-retention/src"
     priority: 8
-    pattern: "crates/devil-*/src/*.rs"
+    pattern: "crates/legion-*/src/*.rs"
     description: "Activated or gated feature runtimes and future product surfaces"
     lastKnownFileCount: 13
   planning_docs:
@@ -147,44 +147,44 @@ mappings:
     lastKnownFileCount: 1
 
 packages:
-  devil-app:
+  legion-app:
     source:
-      paths: ["crates/devil-app/src"]
+      paths: ["crates/legion-app/src"]
       priority: 10
     tests:
-      paths: ["crates/devil-app/tests"]
+      paths: ["crates/legion-app/tests"]
       priority: 10
-  devil-desktop:
+  legion-desktop:
     source:
-      paths: ["crates/devil-desktop/src"]
+      paths: ["crates/legion-desktop/src"]
       priority: 10
     tests:
-      paths: ["crates/devil-desktop/tests"]
+      paths: ["crates/legion-desktop/tests"]
       priority: 10
-  devil-ui:
+  legion-ui:
     source:
-      paths: ["crates/devil-ui/src"]
+      paths: ["crates/legion-ui/src"]
       priority: 10
-  devil-protocol:
+  legion-protocol:
     source:
-      paths: ["crates/devil-protocol/src"]
+      paths: ["crates/legion-protocol/src"]
       priority: 10
     tests:
-      paths: ["crates/devil-protocol/tests"]
+      paths: ["crates/legion-protocol/tests"]
       priority: 10
-  devil-editor:
+  legion-editor:
     source:
-      paths: ["crates/devil-editor/src"]
+      paths: ["crates/legion-editor/src"]
       priority: 10
     tests:
-      paths: ["crates/devil-editor/tests"]
+      paths: ["crates/legion-editor/tests"]
       priority: 10
-  devil-project:
+  legion-project:
     source:
-      paths: ["crates/devil-project/src"]
+      paths: ["crates/legion-project/src"]
       priority: 10
     tests:
-      paths: ["crates/devil-project/tests"]
+      paths: ["crates/legion-project/tests"]
       priority: 10
 
 rules:
@@ -192,7 +192,7 @@ rules:
   exceptions:
     - "Generated Legion artifacts may be written under .planning"
     - "Inline Rust tests may live beside source under cfg(test)"
-    - "Renderer dependencies are isolated to devil-desktop by policy"
+    - "Renderer dependencies are isolated to legion-desktop by policy"
 
 autoUpdate:
   enabled: true

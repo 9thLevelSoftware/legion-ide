@@ -1,4 +1,4 @@
-# Devil IDE GUI Productization - Roadmap
+# Legion IDE GUI Productization - Roadmap
 
 ## Phases
 
@@ -30,7 +30,7 @@
 - Renderer ADR records accepted stack, fallback criteria, and Windows-first evidence requirements.
 - Desktop adapter boundary is specified before code is added.
 - Dependency policy and `xtask` rules describe any approved renderer crate edges.
-- `devil-ui` remains projection-only and no GUI dependency is introduced without policy coverage.
+- `legion-ui` remains projection-only and no GUI dependency is introduced without policy coverage.
 - Verification includes `cargo run -p xtask -- check-deps`, `cargo fmt --all --check`, `cargo check --workspace --all-targets`, and targeted app/UI tests.
 
 **Plans**: 7
@@ -164,9 +164,9 @@ Phase 9 status: Complete for the metadata-first foundation slice.
 
 **Success Criteria**:
 - Command registry, artifact ledger, verification run, and system graph projections exist as public protocol contracts.
-- `devil-app` builds app-owned projection data.
-- `devil-ui` carries the projections without gaining authority.
-- `devil-desktop` renders summary rows derived from `ShellProjectionSnapshot`.
+- `legion-app` builds app-owned projection data.
+- `legion-ui` carries the projections without gaining authority.
+- `legion-desktop` renders summary rows derived from `ShellProjectionSnapshot`.
 
 ### Phase 10: Metadata-First Artifact Model
 Phase 10 status: Complete for protocol DTO contracts.
@@ -191,7 +191,7 @@ Phase 11 status: Complete for protocol and policy contracts.
 ### Phase 12: Delegated Task Runtime
 Phase 12 status: Complete; accepted on 2026-05-28.
 
-**Goal**: Activate `devil-agent` as an isolated orchestrator that emits proposals and evidence, never direct main-workspace mutation.
+**Goal**: Activate `legion-agent` as an isolated orchestrator that emits proposals and evidence, never direct main-workspace mutation.
 
 **Success Criteria**:
 - Isolated sandboxing via git worktrees (`DelegatedTaskSandboxOrchestrator`) is fully functional.
@@ -208,10 +208,10 @@ Phase 13 status: Complete; accepted and review passed on 2026-05-28 after final 
 **Success Criteria**:
 - Legion Workflow orchestration has an accepted ADR, dependency-policy boundary, and governance evidence before runtime behavior is expanded.
 - Protocol contracts represent workflow sessions, workers, local/provider-backed model routing, dependency edges, conflicts, verification gates, sign-off, and merge readiness as metadata-first DTOs.
-- `devil-agent` coordinates workflow teams through isolated delegated-task primitives and provider-route metadata without app/UI authority, direct provider invocation, or main-workspace mutation.
+- `legion-agent` coordinates workflow teams through isolated delegated-task primitives and provider-route metadata without app/UI authority, direct provider invocation, or main-workspace mutation.
 - Tracker and memory record workflow evidence, conflicts, verification, sign-off, and outcomes as metadata-only records with consent-gated memory retention.
 - `AppComposition` owns workflow execution state, verification/sign-off routing, dirty/stale/conflict blockers, and approval-gated merge readiness.
-- `devil-ui` and `devil-desktop` expose workflow command-center projections and app-request intents without owning runtime authority.
+- `legion-ui` and `legion-desktop` expose workflow command-center projections and app-request intents without owning runtime authority.
 - Final evidence proves targeted workflow tests, repository gates, and no autonomous merge/apply behavior.
 
 **Plans**: 7

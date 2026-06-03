@@ -57,7 +57,7 @@ jobs:
         run: sh scripts/gui-smoke.sh --dry-run
 
       - name: GUI Phase 6 evidence gate
-        run: cargo run -p devil-cli -- evidence check --phase gui-phase6
+        run: cargo run -p legion-cli -- evidence check --phase gui-phase6
 
       - name: GUI Phase 7 smoke dry run (Windows)
         if: runner.os == 'Windows'
@@ -68,7 +68,7 @@ jobs:
         run: sh scripts/gui-smoke.sh --beta --dry-run
 
       - name: GUI Phase 7 evidence gate
-        run: cargo run -p devil-cli -- evidence check --phase gui-phase7
+        run: cargo run -p legion-cli -- evidence check --phase gui-phase7
 
       - name: GUI Phase 8 smoke dry run (Windows)
         if: runner.os == 'Windows'
@@ -79,10 +79,10 @@ jobs:
         run: sh scripts/gui-smoke.sh --phase-8 --dry-run
 
       - name: GUI Phase 8 evidence gate
-        run: cargo run -p devil-cli -- evidence check --phase gui-phase8
+        run: cargo run -p legion-cli -- evidence check --phase gui-phase8
 
       - name: Phase 8 evidence gate
-        run: cargo run -p devil-cli -- evidence check --phase phase8
+        run: cargo run -p legion-cli -- evidence check --phase phase8
 
       - name: Reclaim Linux runner disk before cargo-deny
         if: runner.os == 'Linux'

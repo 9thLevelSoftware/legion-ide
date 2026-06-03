@@ -8,7 +8,7 @@ Phase 8 requires production readiness across any activated transport, terminal, 
 
 ## Decision
 
-Implement operational hardening as an evidence-first release gate. Keep the existing `xtask` and `devil-cli` acceptance governance: Phase 8 cannot be marked accepted while required artifacts are missing, final checklist items are unchecked, or the architecture map still declares scaffold evidence.
+Implement operational hardening as an evidence-first release gate. Keep the existing `xtask` and `legion-cli` acceptance governance: Phase 8 cannot be marked accepted while required artifacts are missing, final checklist items are unchecked, or the architecture map still declares scaffold evidence.
 
 Production hardening requires explicit storage migrations, dry-run, backup/checksum/recovery, read-only diagnostics by default, metadata-only replay, enterprise policy profile CI, platform matrix evidence, performance budgets, failure drills, cargo-deny review, rollout controls, rollback playbooks, canary criteria, and incident runbooks.
 

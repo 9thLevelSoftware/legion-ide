@@ -63,7 +63,7 @@ Phase 3 LSP runtime work will use a supervised, cancellable, backpressured worke
 ### 7. Mutation routing through proposals
 
 - Rename, formatting, organize imports, quick fixes, refactor actions, and workspace edits from language servers are mutation proposals.
-- LSP workers translate edit-producing responses into [`WorkspaceProposal`](../../crates/devil-protocol/src/lib.rs:1343) payloads with explicit target coverage, version preconditions, privacy metadata, capability requirements, rollback expectations, and preview summaries.
+- LSP workers translate edit-producing responses into [`WorkspaceProposal`](../../crates/legion-protocol/src/lib.rs:1343) payloads with explicit target coverage, version preconditions, privacy metadata, capability requirements, rollback expectations, and preview summaries.
 - The proposal service validates, previews, approves, applies, rejects, cancels, or rolls back these proposals. LSP workers never apply edits directly to buffers or disk.
 - If a proposal cannot express the server response safely, the action is denied with metadata-only diagnostics rather than applying a partial edit.
 

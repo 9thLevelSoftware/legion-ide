@@ -10,7 +10,7 @@ Phase 7 includes remote process, PTY, terminal, LSP, and semantic-query behavior
 
 ## Decision
 
-Remote process, PTY, LSP, and semantic-query behavior is represented as protocol descriptors handled by `devil-remote`. The accepted implementation validates capabilities, session identity, cancellation tokens where applicable, output/transcript limits, schema versions, and metadata-only redaction. It does not spawn local processes, launch standalone terminal crates, persist raw transcripts, persist raw process output, or apply LSP edits directly.
+Remote process, PTY, LSP, and semantic-query behavior is represented as protocol descriptors handled by `legion-remote`. The accepted implementation validates capabilities, session identity, cancellation tokens where applicable, output/transcript limits, schema versions, and metadata-only redaction. It does not spawn local processes, launch standalone terminal crates, persist raw transcripts, persist raw process output, or apply LSP edits directly.
 
 LSP, format, code action, terminal-triggered mutation, and remote filesystem mutation outputs must be lowered into proposal-mediated paths before local durable state can change. The current Phase 7 implementation tests the remote descriptor boundary and app-owned audit bridge; production process isolation and broad terminal/LSP product surfaces remain later hardening work.
 

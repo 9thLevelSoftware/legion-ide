@@ -98,7 +98,7 @@ if [ "$beta" = true ] && [ "$phase8" = true ]; then
 fi
 
 if [ "$beta" = true ]; then
-    set -- run -p devil-desktop -- \
+    set -- run -p legion-desktop -- \
         --workspace "$workspace" \
         --evidence "$evidence" \
         --session-state "$session_state" \
@@ -106,7 +106,7 @@ if [ "$beta" = true ]; then
         --beta-smoke \
         --beta-workspace "$beta_workspace"
 else
-    set -- run -p devil-desktop -- \
+    set -- run -p legion-desktop -- \
         --smoke \
         --workspace "$workspace" \
         --duration-ms "$duration_ms" \

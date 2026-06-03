@@ -61,7 +61,7 @@ To continue with any previously logged blocker, the governing freeze or phase de
 
 | Area | Action | Owner | Exit criteria |
 |---|---|---|---|
-| Gates | Run dependency direction checks and protocol symbol validation | `devil-app` + `xtask` | `cargo run -p xtask -- check-deps` passes and artifacts logged |
+| Gates | Run dependency direction checks and protocol symbol validation | `legion-app` + `xtask` | `cargo run -p xtask -- check-deps` passes and artifacts logged |
 | Contract baseline | Snapshot protocol gaps from current spike state | Architecture lead + protocol engineer | Drafted list of missing DTOs, ports, and IDs is approved |
 | Native shell | Execute latency proof (input-to-paint, frame variance, resource usage) | UI/runtime engineer | Proof report complete and reviewed |
 | Spike result | Update SPIKE-001A result artifact with findings, pass/fail decision, and fallback handling | UI owner + architecture owner | Decision and fallback handling are explicit and signed-off |
@@ -107,8 +107,8 @@ Phase-0 evidence set also includes explicit ownership for decision paths under `
 
 | Area | Scope | Exit criteria |
 |---|---|---|
-| `devil-platform` | filesystem traits (canonicalize/read/write/list/watch hash/symlink), process traits, pty traits, typed errors | No direct caller bypasses typed traits for filesystem/process calls |
-| `devil-security` | trust state, path policy, command/terminal policy, default-deny for untrusted workspace | Schema and broker tests confirm blocked terminal/LSP/plugin/file-write behavior for denied principals |
+| `legion-platform` | filesystem traits (canonicalize/read/write/list/watch hash/symlink), process traits, pty traits, typed errors | No direct caller bypasses typed traits for filesystem/process calls |
+| `legion-security` | trust state, path policy, command/terminal policy, default-deny for untrusted workspace | Schema and broker tests confirm blocked terminal/LSP/plugin/file-write behavior for denied principals |
 | Composition | remove direct ad-hoc file helper usage in app entry path | app composes through workspace/VFS ports |
 | Terminal policy (phase-in) | define command classes and output limits early (prevents bypass later) | Dangerous command class requires explicit escalation in tests |
 | Capability-broker stub | add deny-by-default capability/broker stub for terminal/LSP/plugin/file-write policy paths used by security checks | Stale or missing decisions are denied and traced with correlation IDs |
@@ -130,7 +130,7 @@ Phase 2 only requires the policy schema and deny/allow behavior to be exercised 
 
 | Area | Scope | Exit criteria |
 |---|---|---|
-| `devil-project` workspace actor | open/close, trust, config snapshot, generation, file id mapping | Trust state updates are visible to UI and other services |
+| `legion-project` workspace actor | open/close, trust, config snapshot, generation, file id mapping | Trust state updates are visible to UI and other services |
 | File tree | shallow discovery with ignore/hidden/generated/binary/large flags; stable IDs | Repository opens quickly and tree updates without editing block |
 | Watcher | raw-event intake with debounce and bounded overflow rescan | Renames preserve identity when metadata permits; overflow recovery is visible |
 | Storage contracts | recent workspace, trust, and session metadata repos | Schema migrate/read tests pass |
@@ -156,8 +156,8 @@ This roadmap intentionally retains shallow metadata discovery for the foundation
 
 | Area | Scope | Exit criteria |
 |---|---|---|
-| `devil-text` | rope/piece-table core, immutable snapshot descriptors, UTF8/UTF16 conversions, line index | Large-file operations stay within measured budgets and preserve snapshot immutability |
-| `devil-editor` | multi-buffer registry, transaction groups, undo/redo, overlays, dirty-state | Edits and undo/redo preserve invariants across multiple open buffers |
+| `legion-text` | rope/piece-table core, immutable snapshot descriptors, UTF8/UTF16 conversions, line index | Large-file operations stay within measured budgets and preserve snapshot immutability |
+| `legion-editor` | multi-buffer registry, transaction groups, undo/redo, overlays, dirty-state | Edits and undo/redo preserve invariants across multiple open buffers |
 | Save hooks | save requests become proposal-aware workspace-mediated operations | Editor does not perform raw writes |
 
 **Exit criteria:** deterministic transaction log includes pre/post snapshot and causality ids.
@@ -170,7 +170,7 @@ This roadmap intentionally retains shallow metadata discovery for the foundation
 
 | Area | Scope | Exit criteria |
 |---|---|---|
-| `devil-ui` shell layout | explorer/sidebar/editor/panels/status/command palette projection | Focus and resize operations are non-blocking |
+| `legion-ui` shell layout | explorer/sidebar/editor/panels/status/command palette projection | Focus and resize operations are non-blocking |
 | Tabs | tab/group model, dirty indicators, pinned/preview behavior, activation semantics | Opening same file focuses existing tab unless explicit split requested |
 | Commands | command registry for open/close/save/split/search reveal commands | Commands dispatch via protocol ports, never mutate text directly |
 | Session restore | restore tabs, focus, layout, explorer expansion from storage | Restart yields expected layout and open context |
@@ -204,7 +204,7 @@ This roadmap intentionally retains shallow metadata discovery for the foundation
 | Security | command class taxonomy and escalation policy in security service | Untrusted workspace cannot launch shell or dangerous command classes |
 | Platform pty/process backends | pty traits and tested adapters | Smoke tests for launch/write/resize/cancel/exit on primary platform |
 | UI terminal projection | panel with tabs/output/scrollback/search status controls | Terminal state visible and restart/kill/reconnect controls available |
-| Crate-introduction gate | only introduce `devil-terminal` as a dedicated crate once terminal-specific ADR is reviewed and accepted | Terminal service ownership remains explicit and ADR-gated |
+| Crate-introduction gate | only introduce `legion-terminal` as a dedicated crate once terminal-specific ADR is reviewed and accepted | Terminal service ownership remains explicit and ADR-gated |
 
 **Exit criteria:** terminal execution cannot bypass trust, command, environment, or timeout policy.
 
@@ -216,7 +216,7 @@ This roadmap intentionally retains shallow metadata discovery for the foundation
 
 | Area | Scope | Exit criteria |
 |---|---|---|
-| `devil-lsp` | ADR-0011 accepted before implementation; server lifecycle, transport, supervision, restart policy | trusted workspace can start LSP, untrusted cannot |
+| `legion-lsp` | ADR-0011 accepted before implementation; server lifecycle, transport, supervision, restart policy | trusted workspace can start LSP, untrusted cannot |
 | Sync pipeline | per-buffer versioning, incremental/full sync fallback, stale response suppression | Completion/hover/diagnostic do not apply to stale document versions |
 | Feature normalization | diagnostics/hover/completion/rename/format/code actions normalized into internal DTOs | LSP responses consumed by editor/UI through protocol types |
 | Mutation bridge | code actions/format become proposal objects | Editor/workspace apply all proposals through validation lifecycle |

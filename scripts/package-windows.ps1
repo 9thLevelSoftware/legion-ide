@@ -12,10 +12,10 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Profile = if ($Release) { "release" } else { "debug" }
 $PackageDir = Join-Path $RepoRoot $OutDir
-$SourceExe = Join-Path (Join-Path (Join-Path $RepoRoot "target") $Profile) "devil-desktop.exe"
-$DestExe = Join-Path $PackageDir "devil-desktop.exe"
-$Manifest = Join-Path $PackageDir "devil-desktop-package-manifest.txt"
-$CargoArgs = @("build", "-p", "devil-desktop")
+$SourceExe = Join-Path (Join-Path (Join-Path $RepoRoot "target") $Profile) "legion-desktop.exe"
+$DestExe = Join-Path $PackageDir "legion-desktop.exe"
+$Manifest = Join-Path $PackageDir "legion-desktop-package-manifest.txt"
+$CargoArgs = @("build", "-p", "legion-desktop")
 if ($Release) {
     $CargoArgs += "--release"
 }
@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force
 
 $ManifestText = @(
-    "package: devil-desktop",
+    "package: legion-desktop",
     "platform: windows",
     "profile: $Profile",
     "dry_run: false",

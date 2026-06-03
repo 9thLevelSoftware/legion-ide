@@ -7,7 +7,7 @@ Accepted
 The editor core must own all text state deterministically. AI patch application, undo/redo, diagnostics overlays, and indexing snapshots all depend on a stable, immutable-by-default text model. String-based buffers are insufficient for large files and high-frequency edits.
 
 ## Decision
-Implement a rope-based text buffer in `devil-text` with immutable snapshots, explicit edit transactions, and deterministic undo/redo. Editor Core (`devil-editor`) consumes the rope and exposes typed edit APIs. Snapshots are content-addressed where practical for indexing correlation.
+Implement a rope-based text buffer in `legion-text` with immutable snapshots, explicit edit transactions, and deterministic undo/redo. Editor Core (`legion-editor`) consumes the rope and exposes typed edit APIs. Snapshots are content-addressed where practical for indexing correlation.
 
 ## Consequences
 - **Positive**: O(log n) edits and copies for large files; snapshots can be shared safely across threads.
