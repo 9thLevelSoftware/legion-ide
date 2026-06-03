@@ -283,8 +283,6 @@ pub fn scan_payload_for_sensitive_markers(
         ("api_key=", "generic-api-key-assignment"),
         ("authorization: bearer", "bearer-token-header"),
         ("ghp_", "github-token-prefix"),
-        ("xoxb-", "slack-bot-token-prefix"),
-        ("sk-", "provider-secret-key-prefix"),
         ("source_body", "raw-source-body"),
         ("provider_payload", "raw-provider-payload"),
         ("raw prompt", "raw-prompt"),
@@ -303,12 +301,37 @@ pub fn scan_payload_for_sensitive_markers(
         }
     }
 
+    for (needle, label) in [
+        ("xoxb-", "slack-bot-token-prefix"),
+        ("sk-", "provider-secret-key-prefix"),
+    ] {
+        if let Some(byte_offset) = sensitive_prefix_marker_offset(&lower, needle) {
+            findings.push(RedactionScanFinding {
+                payload_kind,
+                marker_label: label.to_string(),
+                byte_offset,
+            });
+        }
+    }
+
     RedactionScanReport {
         payload_kind,
         scanned_bytes: payload.len(),
         redaction_required: !findings.is_empty(),
         findings,
     }
+}
+
+fn sensitive_prefix_marker_offset(lower: &str, marker: &str) -> Option<usize> {
+    let mut start = 0;
+    while let Some(relative_offset) = lower[start..].find(marker) {
+        let byte_offset = start + relative_offset;
+        if byte_offset == 0 || !lower.as_bytes()[byte_offset - 1].is_ascii_alphabetic() {
+            return Some(byte_offset);
+        }
+        start = byte_offset + marker.len();
+    }
+    None
 }
 
 impl fmt::Display for TrustState {
@@ -3386,5 +3409,38 @@ mod tests {
         assert!(report.passed());
         assert!(report.scanned_bytes > 0);
         assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn redaction_scanner_allows_safe_words_with_secret_prefix_fragments() {
+        let report = scan_payload_for_sensitive_markers(
+            RedactionPayloadKind::Trace,
+            "task-manager risk-assessment desk-top ask-user localxoxb-worker",
+        );
+
+        assert!(report.passed());
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn redaction_scanner_blocks_delimited_secret_prefixes() {
+        let report = scan_payload_for_sensitive_markers(
+            RedactionPayloadKind::Log,
+            "sk-secret token=xoxb-secret",
+        );
+
+        assert!(!report.passed());
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.marker_label == "provider-secret-key-prefix")
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.marker_label == "slack-bot-token-prefix")
+        );
     }
 }

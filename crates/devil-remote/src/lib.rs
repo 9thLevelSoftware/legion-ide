@@ -219,6 +219,7 @@ impl<T: LegionCloudLaneTransport> LegionCloudLaneClient<T> {
         validate_cloud_task_request_limits(&request, &self.config)?;
         let status = self.transport.submit_task(&request)?;
         validate_legion_cloud_lane_task_status(&status).map_err(cloud_contract_error)?;
+        validate_cloud_task_response_id("submit status", &request.task_id, &status.task_id)?;
         Ok(status)
     }
 
@@ -232,6 +233,7 @@ impl<T: LegionCloudLaneTransport> LegionCloudLaneClient<T> {
         let events = self.transport.stream_task_events(task_id)?;
         for event in &events {
             validate_legion_cloud_lane_task_event(event).map_err(cloud_contract_error)?;
+            validate_cloud_task_response_id("event", task_id, &event.task_id)?;
         }
         Ok(events)
     }
@@ -255,6 +257,7 @@ impl<T: LegionCloudLaneTransport> LegionCloudLaneClient<T> {
             .transport
             .cancel_task(task_id, cancellation_token, reason_label)?;
         validate_legion_cloud_lane_task_status(&status).map_err(cloud_contract_error)?;
+        validate_cloud_task_response_id("cancel status", task_id, &status.task_id)?;
         Ok(status)
     }
 
@@ -267,6 +270,7 @@ impl<T: LegionCloudLaneTransport> LegionCloudLaneClient<T> {
         validate_cloud_task_id(task_id)?;
         let response = self.transport.fetch_task_proposal(task_id)?;
         validate_legion_cloud_lane_proposal_response(&response).map_err(cloud_contract_error)?;
+        validate_cloud_task_response_id("proposal response", task_id, &response.task_id)?;
         Ok(response)
     }
 
@@ -317,6 +321,22 @@ fn validate_cloud_task_id(task_id: &LegionCloudLaneTaskId) -> Result<(), RemoteR
     if task_id.0.trim().is_empty() {
         return Err(RemoteRuntimeError::InvalidOperation {
             reason: "cloud lane task id must be non-empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cloud_task_response_id(
+    response_kind: &str,
+    expected: &LegionCloudLaneTaskId,
+    actual: &LegionCloudLaneTaskId,
+) -> Result<(), RemoteRuntimeError> {
+    if actual != expected {
+        return Err(RemoteRuntimeError::InvalidOperation {
+            reason: format!(
+                "cloud lane {response_kind} task id {} does not match requested task id {}",
+                actual.0, expected.0
+            ),
         });
     }
     Ok(())
@@ -1707,6 +1727,86 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct MismatchedCloudLaneTransport;
+
+    impl LegionCloudLaneTransport for MismatchedCloudLaneTransport {
+        fn submit_task(
+            &mut self,
+            request: &LegionCloudLaneTaskRequest,
+        ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+            Ok(LegionCloudLaneTaskStatus {
+                task_id: mismatched_cloud_task_id(),
+                state: LegionCloudLaneTaskState::Submitted,
+                status_label: "submitted".to_string(),
+                estimated_cost_cents: request.budget.estimated_cost_cents,
+                billed_cost_cents: 0,
+                queue_position: Some(1),
+                event_sequence: EventSequence(1),
+                generated_at: TimestampMillis(1700),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn stream_task_events(
+            &mut self,
+            _task_id: &LegionCloudLaneTaskId,
+        ) -> Result<Vec<LegionCloudLaneTaskEvent>, RemoteRuntimeError> {
+            Ok(vec![LegionCloudLaneTaskEvent {
+                task_id: mismatched_cloud_task_id(),
+                event_id: "event:queued".to_string(),
+                state: LegionCloudLaneTaskState::Queued,
+                event_label: "queued for validation lane".to_string(),
+                event_sequence: EventSequence(2),
+                generated_at: TimestampMillis(1710),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }])
+        }
+
+        fn cancel_task(
+            &mut self,
+            _task_id: &LegionCloudLaneTaskId,
+            _cancellation_token: CancellationTokenId,
+            reason_label: &str,
+        ) -> Result<LegionCloudLaneTaskStatus, RemoteRuntimeError> {
+            Ok(LegionCloudLaneTaskStatus {
+                task_id: mismatched_cloud_task_id(),
+                state: LegionCloudLaneTaskState::Cancelled,
+                status_label: reason_label.to_string(),
+                estimated_cost_cents: 0,
+                billed_cost_cents: 0,
+                queue_position: None,
+                event_sequence: EventSequence(3),
+                generated_at: TimestampMillis(1720),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn fetch_task_proposal(
+            &mut self,
+            _task_id: &LegionCloudLaneTaskId,
+        ) -> Result<LegionCloudLaneProposalResponse, RemoteRuntimeError> {
+            let task_id = mismatched_cloud_task_id();
+            Ok(LegionCloudLaneProposalResponse {
+                task_id: task_id.clone(),
+                proposal_id: Some(ProposalId(9001)),
+                worker_result: Some(cloud_worker_result(&task_id)),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+        }
+
+        fn fetch_task_evidence(
+            &mut self,
+            task_id: &LegionCloudLaneTaskId,
+        ) -> Result<Vec<LegionEvidenceRecord>, RemoteRuntimeError> {
+            Ok(vec![cloud_evidence(task_id)])
+        }
+    }
+
     fn cloud_packet() -> LegionTaskPacket {
         LegionTaskPacket {
             packet_id: LegionTaskPacketId("cloud-packet:remote:1".to_string()),
@@ -1840,6 +1940,10 @@ mod tests {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         }
+    }
+
+    fn mismatched_cloud_task_id() -> LegionCloudLaneTaskId {
+        LegionCloudLaneTaskId("cloud-task:remote:other".to_string())
     }
 
     fn cloud_worker_result(task_id: &LegionCloudLaneTaskId) -> LegionWorkerResult {
@@ -2271,6 +2375,55 @@ mod tests {
         assert_eq!(
             client.transport().calls,
             vec!["submit", "events", "cancel", "proposal", "evidence"]
+        );
+    }
+
+    #[test]
+    fn cloud_lane_client_rejects_mismatched_response_task_ids() {
+        let request = cloud_request();
+        let mut client = LegionCloudLaneClient::new(
+            MismatchedCloudLaneTransport,
+            LegionCloudLaneClientConfig::enabled_for_tests(),
+        );
+
+        let error = client
+            .submit_task(request.clone())
+            .expect_err("submit status must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
+        );
+
+        let error = client
+            .stream_task_events(&request.task_id)
+            .expect_err("events must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
+        );
+
+        let error = client
+            .cancel_task(
+                &request.task_id,
+                request.cancellation_token,
+                "user cancelled cloud task",
+            )
+            .expect_err("cancel status must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
+        );
+
+        let error = client
+            .fetch_task_proposal(&request.task_id)
+            .expect_err("proposal response must match requested task id");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested task id")
         );
     }
 

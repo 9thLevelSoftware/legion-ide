@@ -10197,16 +10197,50 @@ fn parse_cloud_lane_endpoint(
             "cloud lane endpoint host must be non-empty".to_string(),
         ));
     }
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port_label)) if !host.is_empty() && !port_label.is_empty() => {
-            let port = port_label.parse::<u16>().map_err(|_| {
+    let (host, port) = if authority.starts_with('[') {
+        let Some(closing_bracket) = authority.find(']') else {
+            return Err(AppCompositionError::Remote(
+                "cloud lane endpoint IPv6 host must be bracketed".to_string(),
+            ));
+        };
+        let host = &authority[..=closing_bracket];
+        if host == "[]" {
+            return Err(AppCompositionError::Remote(
+                "cloud lane endpoint host must be non-empty".to_string(),
+            ));
+        }
+        let suffix = &authority[closing_bracket + 1..];
+        let port = if suffix.is_empty() {
+            443
+        } else if let Some(port_label) = suffix.strip_prefix(':') {
+            if port_label.is_empty() {
+                return Err(AppCompositionError::Remote(
+                    "cloud lane endpoint port must be non-empty".to_string(),
+                ));
+            }
+            port_label.parse::<u16>().map_err(|_| {
                 AppCompositionError::Remote(
                     "cloud lane endpoint port must be a valid u16".to_string(),
                 )
-            })?;
-            (host.to_string(), Some(port))
+            })?
+        } else {
+            return Err(AppCompositionError::Remote(
+                "cloud lane endpoint IPv6 host must not include an unparsed suffix".to_string(),
+            ));
+        };
+        (host.to_string(), Some(port))
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port_label)) if !host.is_empty() && !port_label.is_empty() => {
+                let port = port_label.parse::<u16>().map_err(|_| {
+                    AppCompositionError::Remote(
+                        "cloud lane endpoint port must be a valid u16".to_string(),
+                    )
+                })?;
+                (host.to_string(), Some(port))
+            }
+            _ => (authority.to_string(), Some(443)),
         }
-        _ => (authority.to_string(), Some(443)),
     };
     if host.trim().is_empty() {
         return Err(AppCompositionError::Remote(
@@ -20942,5 +20976,25 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cloud_lane_endpoint_parses_bracketed_ipv6_without_port() {
+        let target =
+            parse_cloud_lane_endpoint("https://[::1]").expect("bracketed IPv6 defaults to HTTPS");
+
+        assert_eq!(target.scheme, "https");
+        assert_eq!(target.host, "[::1]");
+        assert_eq!(target.port, Some(443));
+    }
+
+    #[test]
+    fn cloud_lane_endpoint_parses_bracketed_ipv6_with_port() {
+        let target =
+            parse_cloud_lane_endpoint("https://[::1]:9443/path").expect("bracketed IPv6 with port");
+
+        assert_eq!(target.scheme, "https");
+        assert_eq!(target.host, "[::1]");
+        assert_eq!(target.port, Some(9443));
     }
 }

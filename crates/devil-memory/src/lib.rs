@@ -446,7 +446,7 @@ pub fn validate_legion_trace_record(record: &LegionTraceRecord) -> Result<(), Me
 
 fn trace_metadata_contains_forbidden_marker(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    [
+    let simple_markers = [
         "source_body",
         "provider_payload",
         "raw prompt",
@@ -455,11 +455,22 @@ fn trace_metadata_contains_forbidden_marker(value: &str) -> bool {
         "openai_api_key",
         "aws_secret_access_key",
         "ghp_",
-        "xoxb-",
-        "sk-",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    ];
+    simple_markers.iter().any(|marker| lower.contains(marker))
+        || contains_sensitive_prefix_marker(&lower, "xoxb-")
+        || contains_sensitive_prefix_marker(&lower, "sk-")
+}
+
+fn contains_sensitive_prefix_marker(lower: &str, marker: &str) -> bool {
+    let mut start = 0;
+    while let Some(relative_offset) = lower[start..].find(marker) {
+        let byte_offset = start + relative_offset;
+        if byte_offset == 0 || !lower.as_bytes()[byte_offset - 1].is_ascii_alphabetic() {
+            return true;
+        }
+        start = byte_offset + marker.len();
+    }
+    false
 }
 
 /// Consent-aware metadata-only candidate for Legion workflow outcome learning.
@@ -983,6 +994,20 @@ mod tests {
         failed_scan.secret_scan_passed = false;
         assert!(matches!(
             validate_legion_trace_record(&failed_scan),
+            Err(MemoryError::InvalidMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn trace_record_allows_safe_words_with_secret_prefix_fragments() {
+        let mut record = trace_record(LegionTraceConsentState::MetadataOnly);
+        record.redacted_payload_summary =
+            "task-manager risk-assessment desk-top ask-user localxoxb-worker".to_string();
+        validate_legion_trace_record(&record).expect("safe metadata words are not secret markers");
+
+        record.redacted_payload_summary = "metadata summary sk-secret".to_string();
+        assert!(matches!(
+            validate_legion_trace_record(&record),
             Err(MemoryError::InvalidMetadata(_))
         ));
     }

@@ -2056,23 +2056,30 @@ impl EditorEngine {
     }
 }
 
-fn lexical_completion_items(text: &str, byte_offset: usize) -> Vec<CompletionItem> {
-    const MAX_COMPLETION_ITEMS: usize = 32;
+const MAX_COMPLETION_ITEMS: usize = 32;
+const COMPLETION_SCAN_WINDOW_BYTES: usize = 64 * 1024;
+const MAX_COMPLETION_SCAN_IDENTIFIERS: usize = 1024;
 
+fn lexical_completion_items(text: &str, byte_offset: usize) -> Vec<CompletionItem> {
+    if !text.is_char_boundary(byte_offset) {
+        return Vec::new();
+    }
     let prefix_start = identifier_start_before(text, byte_offset);
     let prefix = &text[prefix_start..byte_offset];
+    let (scan_start, scan_end) = completion_scan_window(text, byte_offset);
     let mut labels = Vec::new();
     let mut seen = HashSet::new();
 
-    for (start, end) in identifier_ranges(text) {
+    for_each_identifier_range(text, scan_start, scan_end, |start, end| {
         let label = &text[start..end];
         if label.is_empty() || (!prefix.is_empty() && !label.starts_with(prefix)) {
-            continue;
+            return true;
         }
         if seen.insert(label.to_string()) {
             labels.push(label.to_string());
         }
-    }
+        seen.len() < MAX_COMPLETION_SCAN_IDENTIFIERS
+    });
 
     labels.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
     labels.truncate(MAX_COMPLETION_ITEMS);
@@ -2090,23 +2097,60 @@ fn lexical_completion_items(text: &str, byte_offset: usize) -> Vec<CompletionIte
         .collect()
 }
 
-fn identifier_ranges(text: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut start = None;
+fn completion_scan_window(text: &str, byte_offset: usize) -> (usize, usize) {
+    let half_window = COMPLETION_SCAN_WINDOW_BYTES / 2;
+    let mut start = byte_offset.saturating_sub(half_window);
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = byte_offset.saturating_add(half_window).min(text.len());
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    (start, end)
+}
 
-    for (offset, character) in text.char_indices() {
+fn for_each_identifier_range(
+    text: &str,
+    scan_start: usize,
+    scan_end: usize,
+    mut visit: impl FnMut(usize, usize) -> bool,
+) {
+    let mut start = None;
+    let mut skip_open_identifier = scan_start > 0
+        && text[..scan_start]
+            .chars()
+            .next_back()
+            .is_some_and(is_identifier_character);
+
+    for (relative_offset, character) in text[scan_start..scan_end].char_indices() {
+        let offset = scan_start + relative_offset;
         if is_identifier_character(character) {
-            start.get_or_insert(offset);
+            if !skip_open_identifier {
+                start.get_or_insert(offset);
+            }
         } else if let Some(start_offset) = start.take() {
-            ranges.push((start_offset, offset));
+            if !visit(start_offset, offset) {
+                return;
+            }
+        } else {
+            skip_open_identifier = false;
+        }
+        if !is_identifier_character(character) {
+            skip_open_identifier = false;
         }
     }
 
     if let Some(start_offset) = start {
-        ranges.push((start_offset, text.len()));
+        let continues_after_window = scan_end < text.len()
+            && text[scan_end..]
+                .chars()
+                .next()
+                .is_some_and(is_identifier_character);
+        if !continues_after_window {
+            let _ = visit(start_offset, scan_end);
+        }
     }
-
-    ranges
 }
 
 fn identifier_start_before(text: &str, byte_offset: usize) -> usize {
@@ -2833,6 +2877,27 @@ mod tests {
         );
         let editor = port.into_inner().expect("editor engine");
         assert_eq!(editor.text(buffer_id).expect("editor text"), source);
+    }
+
+    #[test]
+    fn lexical_completion_rejects_invalid_byte_offsets_without_panic() {
+        assert!(lexical_completion_items("a🦀b", 2).is_empty());
+        assert!(lexical_completion_items("abc", 4).is_empty());
+    }
+
+    #[test]
+    fn lexical_completion_scan_is_bounded_around_cursor() {
+        let padding = "x\n".repeat(COMPLETION_SCAN_WINDOW_BYTES);
+        let source = format!("local_far\n{padding}\nlocal_near loc");
+        let items = lexical_completion_items(&source, source.len());
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(labels.contains(&"local_near"));
+        assert!(!labels.contains(&"local_far"));
+        assert!(items.len() <= MAX_COMPLETION_ITEMS);
     }
 
     #[test]

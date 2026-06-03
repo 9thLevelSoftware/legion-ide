@@ -94,7 +94,12 @@ def main() -> int:
     pid_dir.mkdir(parents=True, exist_ok=True)
     launches = []
     for worker in workers:
-        process = subprocess.Popen(worker["command"])  # noqa: S603
+        process = subprocess.Popen(  # noqa: S603
+            worker["command"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         launches.append({"id": worker["id"], "pid": process.pid})
     (pid_dir / "workers.json").write_text(
         json.dumps(launches, indent=2, sort_keys=True),
