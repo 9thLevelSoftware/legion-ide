@@ -5,7 +5,7 @@
 use devil_protocol::{
     AgentRunId, AssistedAiContractError, CausalityId, CorrelationId, EventSequence,
     FileFingerprint, LegionWorkflowModelBackend, LegionWorkflowSession, Phase4RuntimeAuditRecord,
-    PrivacyClassification, RedactionHint, validate_phase4_runtime_audit_record,
+    PrivacyClassification, RedactionHint, TimestampMillis, validate_phase4_runtime_audit_record,
 };
 use thiserror::Error;
 
@@ -15,6 +15,9 @@ pub enum MemoryError {
     /// Retention was requested without explicit consent.
     #[error("memory retention requires explicit consent")]
     ConsentRequired,
+    /// Trace retention or export was requested without explicit trace consent.
+    #[error("trace retention requires explicit consent")]
+    TraceConsentRequired,
     /// A metadata record failed protocol validation.
     #[error("invalid memory metadata: {0}")]
     InvalidMetadata(#[from] AssistedAiContractError),
@@ -50,11 +53,104 @@ pub struct MemoryCandidateRecord {
     pub event_sequence: EventSequence,
 }
 
+/// Consent state for Legion trace collection and model-flywheel exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegionTraceConsentState {
+    /// No trace retention or export consent has been granted.
+    NotGranted,
+    /// Metadata-only trace retention is approved.
+    MetadataOnly,
+    /// Raw payload retention is approved for local-only operator workflows.
+    LocalRawRetention,
+    /// Raw payload export for hosted training is approved after redaction and scanning.
+    HostedTrainingExport,
+}
+
+/// Phase 8 trace record category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegionTraceKind {
+    /// Prompt or context-manifest trace metadata.
+    PromptContext,
+    /// Patch, diff, or proposal trace metadata.
+    PatchDiff,
+    /// Command or validation-log trace metadata.
+    CommandLog,
+    /// Human review, sign-off, or rejection trace metadata.
+    ReviewDecision,
+    /// Evaluation input or output trace metadata.
+    Evaluation,
+}
+
+/// Consent-gated trace record used by the model-flywheel path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegionTraceRecord {
+    /// Stable trace identifier.
+    pub trace_id: String,
+    /// Trace category.
+    pub kind: LegionTraceKind,
+    /// Display-safe source label.
+    pub source_label: String,
+    /// Hash of the redacted or raw payload, never the payload body.
+    pub payload_hash: FileFingerprint,
+    /// Display-safe redacted summary.
+    pub redacted_payload_summary: String,
+    /// Consent state governing retention/export.
+    pub consent: LegionTraceConsentState,
+    /// Privacy labels represented by this trace.
+    pub privacy_labels: Vec<PrivacyClassification>,
+    /// Whether raw payload bytes were retained. Defaults must keep this false.
+    pub raw_payload_retained: bool,
+    /// Whether this record is permitted to leave the local machine.
+    pub hosted_export_allowed: bool,
+    /// Whether this record is eligible for training dataset export.
+    pub training_export_allowed: bool,
+    /// Whether secret scanning passed before retention/export.
+    pub secret_scan_passed: bool,
+    /// Trace generation time.
+    pub generated_at: TimestampMillis,
+    /// Correlation identifier.
+    pub correlation_id: CorrelationId,
+    /// Causality identifier.
+    pub causality_id: CausalityId,
+    /// Event sequence.
+    pub event_sequence: EventSequence,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Trace schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only manifest for JSONL trace export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegionTraceExportManifest {
+    /// Stable export identifier.
+    pub export_id: String,
+    /// Export format label, for example `jsonl`.
+    pub format_label: String,
+    /// Number of represented records.
+    pub record_count: u32,
+    /// Payload hashes included in the export.
+    pub payload_hashes: Vec<FileFingerprint>,
+    /// Whether the export includes raw payloads.
+    pub includes_raw_payloads: bool,
+    /// Whether hosted export is allowed for all records.
+    pub hosted_export_allowed: bool,
+    /// Whether training export is allowed for all records.
+    pub training_export_allowed: bool,
+    /// Manifest generation time.
+    pub generated_at: TimestampMillis,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Manifest schema version.
+    pub schema_version: u16,
+}
+
 /// Metadata-only memory service.
 #[derive(Debug, Default)]
 pub struct MemoryService {
     retained: Vec<MemoryCandidateRecord>,
     workflow_retained: Vec<LegionWorkflowOutcomeCandidate>,
+    trace_retained: Vec<LegionTraceRecord>,
 }
 
 impl MemoryService {
@@ -130,6 +226,93 @@ impl MemoryService {
         &self.workflow_retained
     }
 
+    /// Proposes a trace record without retaining it.
+    pub fn propose_trace_record(
+        &self,
+        record: LegionTraceRecord,
+    ) -> Result<LegionTraceRecord, MemoryError> {
+        validate_legion_trace_record(&record)?;
+        Ok(record)
+    }
+
+    /// Retains a trace record only with explicit consent.
+    pub fn retain_trace_record(&mut self, record: LegionTraceRecord) -> Result<(), MemoryError> {
+        validate_legion_trace_record(&record)?;
+        if record.consent == LegionTraceConsentState::NotGranted {
+            return Err(MemoryError::TraceConsentRequired);
+        }
+        self.trace_retained.push(record);
+        Ok(())
+    }
+
+    /// Deletes a retained trace record by id.
+    pub fn delete_trace_record(&mut self, trace_id: &str) -> bool {
+        let before = self.trace_retained.len();
+        self.trace_retained
+            .retain(|record| record.trace_id != trace_id);
+        before != self.trace_retained.len()
+    }
+
+    /// Returns retained trace records.
+    pub fn retained_trace_records(&self) -> &[LegionTraceRecord] {
+        &self.trace_retained
+    }
+
+    /// Builds a metadata-only JSONL export manifest after consent validation.
+    pub fn trace_export_manifest(
+        &self,
+        export_id: impl Into<String>,
+        include_raw_payloads: bool,
+        hosted_export: bool,
+        training_export: bool,
+        generated_at: TimestampMillis,
+    ) -> Result<LegionTraceExportManifest, MemoryError> {
+        let export_id = export_id.into();
+        if export_id.trim().is_empty() {
+            return Err(MemoryError::InvalidMetadata(
+                AssistedAiContractError::InvalidProposalMetadata {
+                    reason: "trace export manifest requires an id".to_string(),
+                },
+            ));
+        }
+        for record in &self.trace_retained {
+            validate_legion_trace_record(record)?;
+            if record.consent == LegionTraceConsentState::NotGranted {
+                return Err(MemoryError::TraceConsentRequired);
+            }
+            if include_raw_payloads && !record.raw_payload_retained {
+                return Err(MemoryError::InvalidMetadata(
+                    AssistedAiContractError::InvalidProposalMetadata {
+                        reason: "raw trace export requested for metadata-only record".to_string(),
+                    },
+                ));
+            }
+            if hosted_export && !record.hosted_export_allowed {
+                return Err(MemoryError::TraceConsentRequired);
+            }
+            if training_export && !record.training_export_allowed {
+                return Err(MemoryError::TraceConsentRequired);
+            }
+        }
+
+        Ok(LegionTraceExportManifest {
+            export_id,
+            format_label: "jsonl".to_string(),
+            record_count: self.trace_retained.len() as u32,
+            payload_hashes: self
+                .trace_retained
+                .iter()
+                .map(|record| record.payload_hash.clone())
+                .collect(),
+            includes_raw_payloads: include_raw_payloads,
+            hosted_export_allowed: hosted_export,
+            training_export_allowed: training_export,
+            generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        })
+    }
+
     /// Looks up retained Legion workflow candidates by workflow session id.
     pub fn legion_workflow_candidates_by_session_id(
         &self,
@@ -169,6 +352,114 @@ fn validate_memory_candidate(candidate: &MemoryCandidateRecord) -> Result<(), Me
         schema_version: 1,
     })?;
     Ok(())
+}
+
+/// Validates a Phase 8 Legion trace record before retention or export.
+pub fn validate_legion_trace_record(record: &LegionTraceRecord) -> Result<(), MemoryError> {
+    if record.trace_id.trim().is_empty()
+        || record.source_label.trim().is_empty()
+        || record.payload_hash.algorithm.trim().is_empty()
+        || record.payload_hash.value.trim().is_empty()
+        || record.redacted_payload_summary.trim().is_empty()
+    {
+        return Err(MemoryError::InvalidMetadata(
+            AssistedAiContractError::InvalidProposalMetadata {
+                reason: "trace record requires ids, source label, payload hash, and summary"
+                    .to_string(),
+            },
+        ));
+    }
+    if record.schema_version == 0
+        || record.redaction_hints.is_empty()
+        || record.redaction_hints.contains(&RedactionHint::None)
+    {
+        return Err(MemoryError::InvalidMetadata(
+            AssistedAiContractError::NonMetadataOnlyAuditRecord {
+                field: "legion_trace".to_string(),
+                reason: "metadata-only redaction and non-zero schema are required".to_string(),
+            },
+        ));
+    }
+    if !record.secret_scan_passed {
+        return Err(MemoryError::InvalidMetadata(
+            AssistedAiContractError::NonMetadataOnlyAuditRecord {
+                field: "legion_trace.secret_scan".to_string(),
+                reason: "trace payload must pass secret scanning before retention".to_string(),
+            },
+        ));
+    }
+    if trace_metadata_contains_forbidden_marker(&record.source_label)
+        || trace_metadata_contains_forbidden_marker(&record.redacted_payload_summary)
+    {
+        return Err(MemoryError::InvalidMetadata(
+            AssistedAiContractError::NonMetadataOnlyAuditRecord {
+                field: "legion_trace.summary".to_string(),
+                reason: "trace metadata contains raw payload or secret marker".to_string(),
+            },
+        ));
+    }
+    if record
+        .privacy_labels
+        .contains(&PrivacyClassification::RawContent)
+        && !record.raw_payload_retained
+    {
+        return Err(MemoryError::InvalidMetadata(
+            AssistedAiContractError::NonMetadataOnlyAuditRecord {
+                field: "legion_trace.privacy".to_string(),
+                reason: "raw-content label requires explicit raw retention metadata".to_string(),
+            },
+        ));
+    }
+    if record.raw_payload_retained
+        && !matches!(
+            record.consent,
+            LegionTraceConsentState::LocalRawRetention
+                | LegionTraceConsentState::HostedTrainingExport
+        )
+    {
+        return Err(MemoryError::TraceConsentRequired);
+    }
+    if (record.hosted_export_allowed || record.training_export_allowed)
+        && record.consent != LegionTraceConsentState::HostedTrainingExport
+    {
+        return Err(MemoryError::TraceConsentRequired);
+    }
+    validate_phase4_runtime_audit_record(&Phase4RuntimeAuditRecord {
+        audit_id: format!("trace:{}", record.trace_id),
+        run_id: None,
+        step_id: None,
+        provider_route_id: None,
+        invocation_state: devil_protocol::AssistedAiProviderInvocationState::NotEncoded,
+        outcome_label: format!("trace.{:?}", record.kind),
+        labels: vec![
+            record.source_label.clone(),
+            record.redacted_payload_summary.clone(),
+        ],
+        correlation_id: record.correlation_id,
+        causality_id: record.causality_id,
+        event_sequence: record.event_sequence,
+        redaction_hints: record.redaction_hints.clone(),
+        schema_version: record.schema_version,
+    })?;
+    Ok(())
+}
+
+fn trace_metadata_contains_forbidden_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "source_body",
+        "provider_payload",
+        "raw prompt",
+        "terminal output",
+        "-----begin",
+        "openai_api_key",
+        "aws_secret_access_key",
+        "ghp_",
+        "xoxb-",
+        "sk-",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 /// Consent-aware metadata-only candidate for Legion workflow outcome learning.
@@ -575,6 +866,123 @@ mod tests {
 
         assert!(matches!(
             validate_legion_workflow_candidate(&candidate),
+            Err(MemoryError::InvalidMetadata(_))
+        ));
+    }
+
+    fn trace_record(consent: LegionTraceConsentState) -> LegionTraceRecord {
+        LegionTraceRecord {
+            trace_id: "trace:phase8:1".to_string(),
+            kind: LegionTraceKind::PatchDiff,
+            source_label: "proposal-diff-metadata".to_string(),
+            payload_hash: workflow_hash("trace-payload-hash"),
+            redacted_payload_summary: "bounded patch summary with redacted file labels".to_string(),
+            consent,
+            privacy_labels: vec![PrivacyClassification::Metadata],
+            raw_payload_retained: false,
+            hosted_export_allowed: false,
+            training_export_allowed: false,
+            secret_scan_passed: true,
+            generated_at: devil_protocol::TimestampMillis(8101),
+            correlation_id: CorrelationId(81),
+            causality_id: causality(81),
+            event_sequence: EventSequence(81),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn trace_record_review_is_metadata_only_without_retention() {
+        let service = MemoryService::new();
+        let proposed = service
+            .propose_trace_record(trace_record(LegionTraceConsentState::NotGranted))
+            .expect("metadata-only trace review is allowed without retention");
+
+        assert_eq!(proposed.trace_id, "trace:phase8:1");
+        assert!(!proposed.raw_payload_retained);
+        assert!(service.retained_trace_records().is_empty());
+    }
+
+    #[test]
+    fn trace_raw_payload_retention_requires_explicit_consent() {
+        let mut record = trace_record(LegionTraceConsentState::MetadataOnly);
+        record.raw_payload_retained = true;
+
+        assert_eq!(
+            validate_legion_trace_record(&record),
+            Err(MemoryError::TraceConsentRequired)
+        );
+
+        record.consent = LegionTraceConsentState::LocalRawRetention;
+        validate_legion_trace_record(&record).expect("local raw consent permits local retention");
+    }
+
+    #[test]
+    fn trace_export_manifest_requires_consent_and_hashes_only() {
+        let mut service = MemoryService::new();
+        let record = trace_record(LegionTraceConsentState::MetadataOnly);
+        service
+            .retain_trace_record(record)
+            .expect("metadata trace retention is consented");
+
+        let manifest = service
+            .trace_export_manifest(
+                "trace-export:metadata",
+                false,
+                false,
+                false,
+                devil_protocol::TimestampMillis(8102),
+            )
+            .expect("metadata export manifest");
+
+        assert_eq!(manifest.format_label, "jsonl");
+        assert_eq!(manifest.record_count, 1);
+        assert_eq!(manifest.payload_hashes[0].value, "trace-payload-hash");
+        assert!(!manifest.includes_raw_payloads);
+        assert!(service.delete_trace_record("trace:phase8:1"));
+    }
+
+    #[test]
+    fn trace_training_export_requires_hosted_training_consent() {
+        let mut service = MemoryService::new();
+        let mut record = trace_record(LegionTraceConsentState::HostedTrainingExport);
+        record.raw_payload_retained = true;
+        record.hosted_export_allowed = true;
+        record.training_export_allowed = true;
+        service
+            .retain_trace_record(record)
+            .expect("hosted training consent allows exportable trace");
+
+        let manifest = service
+            .trace_export_manifest(
+                "trace-export:training",
+                true,
+                true,
+                true,
+                devil_protocol::TimestampMillis(8103),
+            )
+            .expect("training export manifest");
+
+        assert!(manifest.includes_raw_payloads);
+        assert!(manifest.hosted_export_allowed);
+        assert!(manifest.training_export_allowed);
+    }
+
+    #[test]
+    fn trace_record_rejects_secret_and_raw_payload_markers() {
+        let mut record = trace_record(LegionTraceConsentState::MetadataOnly);
+        record.redacted_payload_summary = "raw prompt included sk-secret".to_string();
+
+        assert!(matches!(
+            validate_legion_trace_record(&record),
+            Err(MemoryError::InvalidMetadata(_))
+        ));
+
+        let mut failed_scan = trace_record(LegionTraceConsentState::MetadataOnly);
+        failed_scan.secret_scan_passed = false;
+        assert!(matches!(
+            validate_legion_trace_record(&failed_scan),
             Err(MemoryError::InvalidMetadata(_))
         ));
     }

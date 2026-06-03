@@ -229,6 +229,88 @@ pub fn mcp_tool_permission_allows_runtime(permission: &DelegatedTaskToolPermissi
     permission.runtime_allowed && permission.human_approval_recorded && !permission.deny_overrides
 }
 
+/// Payload class inspected before trace retention or export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RedactionPayloadKind {
+    /// Model-flywheel trace payload.
+    Trace,
+    /// Patch or diff payload.
+    Diff,
+    /// Command, validation, or terminal log payload.
+    Log,
+}
+
+/// Finding emitted by the conservative redaction scanner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionScanFinding {
+    /// Payload kind where the marker was found.
+    pub payload_kind: RedactionPayloadKind,
+    /// Display-safe marker label.
+    pub marker_label: String,
+    /// Byte offset of the marker in the inspected payload.
+    pub byte_offset: usize,
+}
+
+/// Scan report for trace, diff, and log payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionScanReport {
+    /// Payload kind that was scanned.
+    pub payload_kind: RedactionPayloadKind,
+    /// Number of bytes scanned.
+    pub scanned_bytes: usize,
+    /// Display-safe findings.
+    pub findings: Vec<RedactionScanFinding>,
+    /// Whether the payload must be redacted before retention/export.
+    pub redaction_required: bool,
+}
+
+impl RedactionScanReport {
+    /// Returns true when no sensitive marker was found.
+    pub fn passed(&self) -> bool {
+        self.findings.is_empty() && !self.redaction_required
+    }
+}
+
+/// Conservatively scans trace, diff, or log text for raw payload and secret markers.
+pub fn scan_payload_for_sensitive_markers(
+    payload_kind: RedactionPayloadKind,
+    payload: &str,
+) -> RedactionScanReport {
+    const MARKERS: &[(&str, &str)] = &[
+        ("-----begin", "pem-private-material"),
+        ("aws_secret_access_key", "aws-secret-access-key"),
+        ("openai_api_key", "openai-api-key"),
+        ("api_key=", "generic-api-key-assignment"),
+        ("authorization: bearer", "bearer-token-header"),
+        ("ghp_", "github-token-prefix"),
+        ("xoxb-", "slack-bot-token-prefix"),
+        ("sk-", "provider-secret-key-prefix"),
+        ("source_body", "raw-source-body"),
+        ("provider_payload", "raw-provider-payload"),
+        ("raw prompt", "raw-prompt"),
+        ("terminal output", "raw-terminal-output"),
+    ];
+
+    let lower = payload.to_ascii_lowercase();
+    let mut findings = Vec::new();
+    for (needle, label) in MARKERS {
+        if let Some(byte_offset) = lower.find(needle) {
+            findings.push(RedactionScanFinding {
+                payload_kind,
+                marker_label: (*label).to_string(),
+                byte_offset,
+            });
+        }
+    }
+
+    RedactionScanReport {
+        payload_kind,
+        scanned_bytes: payload.len(),
+        redaction_required: !findings.is_empty(),
+        findings,
+    }
+}
+
 impl fmt::Display for TrustState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -3254,5 +3336,55 @@ mod tests {
         assert!(
             matches!(untrusted, SecurityDecision::Deny(reason) if reason.contains("untrusted"))
         );
+    }
+
+    #[test]
+    fn redaction_scanner_blocks_trace_diff_and_log_secret_markers() {
+        let trace = scan_payload_for_sensitive_markers(
+            RedactionPayloadKind::Trace,
+            "raw prompt included OPENAI_API_KEY=sk-secret",
+        );
+        assert!(!trace.passed());
+        assert!(trace.redaction_required);
+        assert!(
+            trace
+                .findings
+                .iter()
+                .any(|finding| finding.marker_label == "openai-api-key")
+        );
+
+        let diff = scan_payload_for_sensitive_markers(
+            RedactionPayloadKind::Diff,
+            "+ source_body: -----BEGIN PRIVATE KEY-----",
+        );
+        assert!(!diff.passed());
+        assert!(
+            diff.findings
+                .iter()
+                .any(|finding| finding.marker_label == "raw-source-body")
+        );
+
+        let log = scan_payload_for_sensitive_markers(
+            RedactionPayloadKind::Log,
+            "terminal output: Authorization: Bearer token",
+        );
+        assert!(!log.passed());
+        assert!(
+            log.findings
+                .iter()
+                .any(|finding| finding.marker_label == "bearer-token-header")
+        );
+    }
+
+    #[test]
+    fn redaction_scanner_allows_metadata_only_hash_summaries() {
+        let report = scan_payload_for_sensitive_markers(
+            RedactionPayloadKind::Trace,
+            "trace_id=trace:1 payload_hash=sha256:abcd summary=metadata-only",
+        );
+
+        assert!(report.passed());
+        assert!(report.scanned_bytes > 0);
+        assert!(report.findings.is_empty());
     }
 }

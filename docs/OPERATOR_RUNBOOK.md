@@ -61,6 +61,21 @@ Before any task touching AI, worker, cloud, or trace code, verify:
 - consent-gated raw trace path remains tested;
 - network routes are denied in offline/air-gap policy unless explicitly loopback and allowed.
 
+## Phase 8 trace and model dry-runs
+
+Run from repo root before claiming model-flywheel readiness:
+
+```sh
+bash scripts/models/download-models.sh --dry-run
+bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml
+python3 evals/run_eval.py --dry-run
+python3 -m compileall training evals scripts/models
+cargo test -p devil-memory --all-targets trace
+cargo test -p devil-security --all-targets redaction
+```
+
+Real model download, serving, training, conversion, hosted export, or dataset construction requires explicit consented trace export plus redaction/secret-scan evidence.
+
 ## PR creation
 
 After all phases and gates pass:
