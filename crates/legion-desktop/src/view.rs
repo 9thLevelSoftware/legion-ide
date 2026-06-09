@@ -20,6 +20,8 @@ use crate::{
     search::DesktopSearchViewModel, theme,
 };
 
+const COMMAND_PALETTE_VISIBLE_RESULT_ROWS: usize = 10;
+
 /// Adapter-local view state layered over app-owned projections.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesktopProjectionViewState {
@@ -3237,27 +3239,46 @@ fn command_palette_overlay(
 fn command_palette_result_rows(
     palette: &PaletteProjection,
 ) -> Vec<DesktopCommandPaletteResultViewModel> {
+    let visible_start =
+        command_palette_visible_result_start(palette.results.len(), palette.selected_index);
     palette
         .results
         .iter()
+        .skip(visible_start)
+        .take(COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
         .enumerate()
-        .map(|(index, result)| DesktopCommandPaletteResultViewModel {
-            id: result.id.clone(),
-            kind_label: match result.kind {
-                PaletteResultKind::File => "File",
-                PaletteResultKind::Command => "Command",
-                PaletteResultKind::Search => "Search",
-                PaletteResultKind::StructuralSearch => "Structural Search",
+        .map(|(offset, result)| {
+            let index = visible_start + offset;
+            DesktopCommandPaletteResultViewModel {
+                id: result.id.clone(),
+                kind_label: match result.kind {
+                    PaletteResultKind::File => "File",
+                    PaletteResultKind::Command => "Command",
+                    PaletteResultKind::Search => "Search",
+                    PaletteResultKind::StructuralSearch => "Structural Search",
+                }
+                .to_string(),
+                title: result.title.clone(),
+                detail: result.detail.clone(),
+                shortcut_label: result.shortcut_label.clone(),
+                match_indices: result.match_indices.clone(),
+                selected: index == palette.selected_index,
+                disabled_reason: result.disabled_reason.clone(),
             }
-            .to_string(),
-            title: result.title.clone(),
-            detail: result.detail.clone(),
-            shortcut_label: result.shortcut_label.clone(),
-            match_indices: result.match_indices.clone(),
-            selected: index == palette.selected_index,
-            disabled_reason: result.disabled_reason.clone(),
         })
         .collect()
+}
+
+fn command_palette_visible_result_start(total: usize, selected_index: usize) -> usize {
+    if total <= COMMAND_PALETTE_VISIBLE_RESULT_ROWS {
+        return 0;
+    }
+
+    let selected_index = selected_index.min(total.saturating_sub(1));
+    selected_index
+        .saturating_add(1)
+        .saturating_sub(COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
+        .min(total - COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
 }
 
 fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

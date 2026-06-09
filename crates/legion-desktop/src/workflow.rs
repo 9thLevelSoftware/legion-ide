@@ -43,6 +43,7 @@ use crate::{
 };
 
 const WINDOW_TITLE: &str = PRODUCT_NAME;
+const COMMAND_PALETTE_VISIBLE_RESULT_ROWS: usize = 10;
 
 /// Process launch configuration for the desktop adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2038,44 +2039,58 @@ impl DesktopEframeApp {
                             ui.label(theme::muted("No results"));
                         } else {
                             let row_height = 34.0;
-                            for (index, result) in palette.results.iter().take(10).enumerate() {
+                            let visible_start = palette_visible_result_start(
+                                palette.results.len(),
+                                palette.selected_index,
+                            );
+                            for (offset, result) in palette
+                                .results
+                                .iter()
+                                .skip(visible_start)
+                                .take(COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
+                                .enumerate()
+                            {
+                                let index = visible_start + offset;
                                 let selected = index == palette.selected_index;
-                                let row_rect = ui
-                                    .allocate_ui_with_layout(
-                                        egui::vec2(width - 28.0, row_height),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            if selected {
-                                                ui.painter().rect_filled(
-                                                    ui.max_rect(),
-                                                    6.0,
-                                                    tokens.bg.active,
-                                                );
-                                            }
-                                            ui.add_space(8.0);
-                                            ui.vertical(|ui| {
-                                                ui.label(theme::body_strong(&result.title));
-                                                let detail = result
-                                                    .disabled_reason
-                                                    .as_deref()
-                                                    .or(result.detail.as_deref())
-                                                    .unwrap_or("");
-                                                if !detail.is_empty() {
-                                                    ui.label(theme::muted(detail));
-                                                }
-                                            });
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if let Some(shortcut) = &result.shortcut_label {
-                                                        ui.label(theme::muted(shortcut));
-                                                    }
-                                                },
-                                            );
-                                        },
-                                    )
-                                    .response;
-                                if row_rect.clicked() {
+                                let (row_rect, row_response) = ui.allocate_exact_size(
+                                    egui::vec2(width - 28.0, row_height),
+                                    egui::Sense::click(),
+                                );
+                                let row_response =
+                                    row_response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if selected {
+                                    ui.painter().rect_filled(
+                                        row_rect,
+                                        egui::CornerRadius::same(6),
+                                        tokens.bg.active,
+                                    );
+                                }
+                                let mut row_ui = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(row_rect)
+                                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                                );
+                                row_ui.add_space(8.0);
+                                row_ui.vertical(|ui| {
+                                    ui.label(theme::body_strong(&result.title));
+                                    let detail = result
+                                        .disabled_reason
+                                        .as_deref()
+                                        .or(result.detail.as_deref())
+                                        .unwrap_or("");
+                                    if !detail.is_empty() {
+                                        ui.label(theme::muted(detail));
+                                    }
+                                });
+                                row_ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if let Some(shortcut) = &result.shortcut_label {
+                                            ui.label(theme::muted(shortcut));
+                                        }
+                                    },
+                                );
+                                if row_response.clicked() {
                                     let delta = index as i32 - palette.selected_index as i32;
                                     if delta != 0 {
                                         let _ = self.runtime.handle_action(
@@ -2113,6 +2128,18 @@ impl eframe::App for DesktopEframeApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
+}
+
+fn palette_visible_result_start(total: usize, selected_index: usize) -> usize {
+    if total <= COMMAND_PALETTE_VISIBLE_RESULT_ROWS {
+        return 0;
+    }
+
+    let selected_index = selected_index.min(total.saturating_sub(1));
+    selected_index
+        .saturating_add(1)
+        .saturating_sub(COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
+        .min(total - COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
 }
 
 fn status_message(severity: StatusSeverity, message: impl Into<String>) -> StatusMessageProjection {

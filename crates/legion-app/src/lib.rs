@@ -10345,9 +10345,10 @@ fn palette_fuzzy_score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)
         .chars()
         .flat_map(char::to_lowercase)
         .collect::<Vec<_>>();
-    let candidate_chars = candidate
-        .chars()
-        .map(|ch| ch.to_lowercase().next().unwrap_or(ch))
+    let candidate_raw_chars = candidate.chars().collect::<Vec<_>>();
+    let candidate_chars = candidate_raw_chars
+        .iter()
+        .map(|&ch| ch.to_lowercase().next().unwrap_or(ch))
         .collect::<Vec<_>>();
 
     let mut matched_indices = Vec::with_capacity(query_chars.len());
@@ -10368,9 +10369,8 @@ fn palette_fuzzy_score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)
             score += 15;
         }
         if candidate_index == 0
-            || candidate
-                .chars()
-                .nth(candidate_index.saturating_sub(1))
+            || candidate_raw_chars
+                .get(candidate_index.saturating_sub(1))
                 .is_some_and(|previous| matches!(previous, '/' | '\\' | '-' | '_' | '.'))
         {
             score += 6;
@@ -11560,14 +11560,20 @@ impl AppComposition {
         if !self.palette.open {
             return Ok(self.palette.projection());
         }
-        if self.palette.mode == PaletteMode::File
-            && self.palette.results.len() == 1
-            && let Some(result) = self.palette.results.first()
-        {
-            self.palette.query = result.title.clone();
-            self.palette.selected_index = 0;
-            self.refresh_palette_results()?;
+        if self.palette.mode != PaletteMode::File || self.palette.results.len() != 1 {
+            return Ok(self.palette.projection());
         }
+        let Some(title) = self
+            .palette
+            .results
+            .first()
+            .map(|result| result.title.clone())
+        else {
+            return Ok(self.palette.projection());
+        };
+        self.palette.query = title;
+        self.palette.selected_index = 0;
+        self.refresh_palette_results()?;
         Ok(self.palette.projection())
     }
 
