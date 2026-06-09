@@ -445,13 +445,13 @@ Dependency spine: **WS-01/02 → WS-03/05/06 → (M1) → WS-09/10/11 + WS-07 �
 | --- | --- | --- | --- |
 | **M0** (~2–4 wks) | Plan lock | Ratify this plan + ADR-0032..0040 drafts; CI additions (perf harness skeleton WS18.T1, no-TextEdit gate WS01.T1); WS-17.T1 pipeline bootstrap; ADR-0037 vector-store spike | Plan + ADRs accepted in-repo; gates running on main |
 | **M1** (~8–12 wks) | **Credible Editor** (Manual mode alpha) | WS-01.T1–T5, WS-02.T1–T3, WS-03.T1–T5, WS-05.T1–T3, WS-06.T1–T4, WS-08.T1–T2, WS-17.T2 initial | **GP-1 on all 3 OSes**; **dogfooding gate: Legion developed in Legion for ≥1 week by every contributor**; §11 editor budgets green |
-| **M2** (~6–10 wks) | **Assist** (private beta) | WS-07.T1–T3, WS-09.T1–T4, WS-10.T1–T5, WS-11.T1–T4, WS-14.T2, WS-01.T6 | GP-2; apply enabled by default for trusted workspaces; manual + assist daily-drivable; cache-discipline test green |
-| **M3** (~8–12 wks) | **Delegate** (public beta) | WS-12.T1–T6, WS-14.T1/T3/T4/T5, WS-05.T5, WS-07.T4, WS-04.T1–T2, WS-08.T3, WS-19.T1–T2 | GP-3 incl. on Legion itself; sandbox escape suite green; Legion-Bench baseline published; injection suite green |
-| **M4** (~6–10 wks) | **Legion Workflows beta** | WS-13.T1–T5, WS-12.T7, WS-09.T5, WS-08.T5 | GP-4; fleet kill-switch < 2s; one external agent via ACP completes GP-3 in-envelope |
-| **M5** (~6–8 wks) | **Production GA** | WS-17 complete, WS-18 complete, WS-15.T1–T3, WS-04.T4, WS-20.T1–T2, docs | **GP-5**; signed/notarized installers + auto-update/rollback on 3 OSes; accessibility evidence; crash reporting opt-in working; readiness ledger flips PR-UI/LANG/AI/REL to product-validated |
-| **M6** (ongoing) | Expansion | WS-16 (cloud lane, remote, collaboration), WS-15.T4 marketplace, WS-19.T3–T4 flywheel, WS-20.T3–T4, custom prediction model exploration, scheduled agents, voice | Per-feature ADRs + gates as established |
+| **M2** (~6–10 wks) | **Assist** (private beta) | WS-07.T1–T3, WS-09.T1–T4, WS-10.T1–T5, WS-11.T1–T4, WS-14.T2, WS-01.T6, WS-02.T5 (prereq of WS-10.T3) | GP-2; apply enabled by default for trusted workspaces; manual + assist daily-drivable; cache-discipline test green |
+| **M3** (~8–12 wks) | **Delegate** (public beta) | WS-12.T1–T6, WS-14.T1/T3/T4/T5, WS-01.T9 (prereq of WS-14.T1), WS-09.T6 (prereq of WS-12.T1 MCP passthrough), WS-03.T7, WS-05.T4–T5, WS-07.T4, WS-04.T1–T2, WS-08.T3, WS-19.T1–T2 | GP-3 incl. on Legion itself; sandbox escape suite green; Legion-Bench baseline published; injection suite green |
+| **M4** (~6–10 wks) | **Legion Workflows beta** | WS-13.T1–T5, WS-12.T7, WS-09.T5, WS-08.T5, WS-10.T6 | GP-4; fleet kill-switch < 2s; one external agent via ACP completes GP-3 in-envelope |
+| **M5** (~6–8 wks) | **Production GA** | WS-17 complete, WS-18 complete, WS-15.T1–T3, WS-01.T7–T8, WS-02.T4, WS-03.T6/T8, WS-04.T4, WS-05.T6, WS-20.T1–T2, docs | **GP-5**; signed/notarized installers + auto-update/rollback on 3 OSes; accessibility evidence; crash reporting opt-in working; readiness ledger flips PR-UI/LANG/AI/REL to product-validated |
+| **M6** (ongoing) | Expansion | WS-16 (cloud lane, remote, collaboration), WS-15.T4 marketplace, WS-19.T3–T4 flywheel, WS-20.T3–T4, WS-04.T3/T5, WS-06.T5, WS-08.T4/T6, WS-09.T7, WS-11.T5, WS-14.T6, custom prediction model exploration, scheduled agents, voice | Per-feature ADRs + gates as established |
 
-Duration ranges assume 1–3 focused engineers with heavy agentic leverage; they compress with parallel staffing on the WS-03/WS-05/WS-06 fan-out and stretch if WS-01 (editor feel) needs iteration. **Sequencing is the commitment; calendar is the estimate.**
+Duration ranges assume 1–3 focused engineers with heavy agentic leverage; they compress with parallel staffing on the WS-03/WS-05/WS-06 fan-out and stretch if WS-01 (editor feel) needs iteration. **Sequencing is the commitment; calendar is the estimate.** Appendix C carries the complete task→milestone matrix; every task ID in §7 appears there exactly once, and any future task addition must update it in the same PR.
 
 ---
 
@@ -543,4 +543,31 @@ Competitive landscape (primary sources verified 2026-06-09): cursor.com/blog/cur
 Technology stack (primary sources verified 2026-06-09): boringcactus.com 2025 Rust GUI survey; egui issues #3086/#7485 + AccessKit integration; zed.dev blogs (Rope & SumTree, CRDTs, extensions/WIT, GPUI README); lapce/floem; loro.dev + diamond-types; tree-sitter; rust-analyzer book; async-lsp/tower-lsp crates; helix LSP architecture; alacritty_terminal + portable-pty crates; BurntSushi ripgrep-as-library discussion #2509; tantivy; LanceDB/sqlite-vec materials; aider repo-map; modelcontextprotocol.io spec (2025-11-25) + transport-futures blog + rust-sdk (rmcp); platform.claude.com docs (pricing, prompt caching, structured outputs, count_tokens, batch); OpenAI Responses migration guide; Codex sandboxing internals (Landlock/seccomp/Seatbelt); gitoxide README (write-path gaps); jj-vcs/jj; rcodesign distribution guide; cargo-dist; velopack; Embark crash-handler/minidumper + sentry-rust-minidump; Mozilla rust-minidump.
 
 Internal evidence: workspace code survey 2026-06-09 (per-crate maturity, fixture/flag inventory in §3); `plans/phase-status-ledger.md`; `plans/product-readiness-ledger.md`; `plans/evidence/gui-productization/phase-7-known-limitations.md`; `docs/ARCHITECTURE_AUTHORITY_BOUNDARIES.md`; `docs/MODES.md`; `docs/LEGION_PIVOT.md`; `mockups/design.md`; ADR-0001..ADR-0031.
+
+## Appendix C — Complete Task → Milestone Matrix
+
+Every task ID in §7 appears here exactly once. A task added to §7 without a row here fails plan review; this matrix is the completeness check for §8.
+
+| Workstream | Task → milestone |
+| --- | --- |
+| WS-01 | T1–T5 → M1 · T6 → M2 · T9 → M3 · T7, T8 → M5 |
+| WS-02 | T1–T3 → M1 · T5 → M2 · T4 → M5 |
+| WS-03 | T1–T5 → M1 · T7 → M3 · T6, T8 → M5 |
+| WS-04 | T1–T2 → M3 · T4 → M5 · T3, T5 → M6 |
+| WS-05 | T1–T3 → M1 · T4, T5 → M3 · T6 → M5 |
+| WS-06 | T1–T4 → M1 · T5 → M6 |
+| WS-07 | T1–T3 → M2 · T4 → M3 |
+| WS-08 | T1–T2 → M1 · T3 → M3 · T5 → M4 · T4, T6 → M6 |
+| WS-09 | T1–T4 → M2 · T6 → M3 · T5 → M4 · T7 → M6 |
+| WS-10 | T1–T5 → M2 · T6 → M4 |
+| WS-11 | T1–T4 → M2 · T5 → M6 |
+| WS-12 | T1–T6 → M3 · T7 → M4 |
+| WS-13 | T1–T5 → M4 |
+| WS-14 | T2 → M2 · T1, T3, T4, T5 → M3 · T6 → M6 |
+| WS-15 | T1–T3 → M5 · T4 → M6 |
+| WS-16 | T1–T3 → M6 |
+| WS-17 | T1 → M0 · T2 → starts M1, completes M5 · T3–T6 → M5 |
+| WS-18 | T1 → M0 (skeleton), M1 (enforced) · T3 → starts M1, completes M5 · T2, T4 → M5 |
+| WS-19 | T1–T2 → M3 · T3, T4 → M6 |
+| WS-20 | T1–T2 → M5 · T3, T4 → M6 |
 
