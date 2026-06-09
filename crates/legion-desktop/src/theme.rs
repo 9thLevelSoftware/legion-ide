@@ -139,10 +139,6 @@ impl Theme {
             typography: TypographyScale::standard(),
         }
     }
-
-    pub(crate) fn dim(self, color: Color32, alpha: u8) -> Color32 {
-        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,8 +425,8 @@ pub(crate) fn inverse(text: impl Into<String>) -> RichText {
         .size(tokens().typography.label as f32)
 }
 
-pub(crate) fn dim(color: Color32, alpha: u8) -> Color32 {
-    tokens().dim(color, alpha)
+pub(crate) const fn dim(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied_const(color.r(), color.g(), color.b(), alpha)
 }
 
 #[cfg(test)]

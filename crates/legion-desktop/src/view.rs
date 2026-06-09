@@ -451,47 +451,40 @@ fn render_product_mode_switch(
     active_level: DesktopProductMode,
     actions: &mut Vec<DesktopAction>,
 ) {
-    theme::card_frame_tinted(theme::tokens().bg.input, theme::tokens().border.default).show(
-        ui,
-        |ui| {
-            ui.horizontal(|ui| {
-                ui.label(theme::eyebrow("PRODUCT MODE"));
-                for (mode, level, label, color) in [
-                    (
-                        DesktopProductMode::Manual,
-                        "M",
-                        "Manual",
-                        theme::tokens().text.muted,
-                    ),
-                    (
-                        DesktopProductMode::Assist,
-                        "A",
-                        "Assist",
-                        theme::tokens().accent.cyan,
-                    ),
-                    (
-                        DesktopProductMode::Delegates,
-                        "D",
-                        "Delegates",
-                        theme::tokens().accent.violet,
-                    ),
-                    (
-                        DesktopProductMode::LegionWorkflows,
-                        "W",
-                        "Legion Workflows",
-                        theme::tokens().accent.purple,
-                    ),
-                ] {
-                    let response = level_pill(ui, level, label, color, mode == active_level);
-                    if response.clicked() && mode != active_level {
-                        actions.push(DesktopAction::SetProductMode {
-                            mode: mode.to_dock_mode(),
-                        });
-                    }
+    let tokens = theme::tokens();
+    theme::card_frame_tinted(tokens.bg.input, tokens.border.default).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(theme::eyebrow("PRODUCT MODE"));
+            for (mode, level, label, color) in [
+                (DesktopProductMode::Manual, "M", "Manual", tokens.text.muted),
+                (
+                    DesktopProductMode::Assist,
+                    "A",
+                    "Assist",
+                    tokens.accent.cyan,
+                ),
+                (
+                    DesktopProductMode::Delegates,
+                    "D",
+                    "Delegates",
+                    tokens.accent.violet,
+                ),
+                (
+                    DesktopProductMode::LegionWorkflows,
+                    "W",
+                    "Legion Workflows",
+                    tokens.accent.purple,
+                ),
+            ] {
+                let response = level_pill(ui, level, label, color, mode == active_level);
+                if response.clicked() && mode != active_level {
+                    actions.push(DesktopAction::SetProductMode {
+                        mode: mode.to_dock_mode(),
+                    });
                 }
-            });
-        },
-    );
+            }
+        });
+    });
 }
 
 fn render_left_sidebar(
@@ -3240,7 +3233,11 @@ fn status_line_ending(active: &ActiveBufferProjection) -> Option<String> {
 
     active.small_buffer_text().and_then(|preview| {
         let has_crlf = preview.contains("\r\n");
-        let has_lf = preview.replace("\r\n", "").contains('\n');
+        let bytes = preview.as_bytes();
+        let has_lf = bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r'));
         match (has_lf, has_crlf) {
             (true, true) => Some("Mixed EOL".to_string()),
             (true, false) => Some("LF".to_string()),
@@ -3251,23 +3248,29 @@ fn status_line_ending(active: &ActiveBufferProjection) -> Option<String> {
 }
 
 fn status_language_for_path(path: &str) -> String {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".rs") {
+    if has_ascii_extension(path, ".rs") {
         "rust"
-    } else if lower.ends_with(".toml") {
+    } else if has_ascii_extension(path, ".toml") {
         "toml"
-    } else if lower.ends_with(".ts") || lower.ends_with(".tsx") {
+    } else if has_ascii_extension(path, ".ts") || has_ascii_extension(path, ".tsx") {
         "typescript"
-    } else if lower.ends_with(".js") || lower.ends_with(".jsx") {
+    } else if has_ascii_extension(path, ".js") || has_ascii_extension(path, ".jsx") {
         "javascript"
-    } else if lower.ends_with(".md") {
+    } else if has_ascii_extension(path, ".md") {
         "markdown"
-    } else if lower.ends_with(".json") {
+    } else if has_ascii_extension(path, ".json") {
         "json"
     } else {
         "text"
     }
     .to_string()
+}
+
+fn has_ascii_extension(path: &str, extension: &str) -> bool {
+    let path = path.as_bytes();
+    let extension = extension.as_bytes();
+    path.len() > extension.len()
+        && path[path.len() - extension.len()..].eq_ignore_ascii_case(extension)
 }
 
 fn render_close_dirty_prompt_controls(
