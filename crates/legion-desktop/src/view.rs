@@ -1204,6 +1204,22 @@ fn render_code_lines(
                         response.rect.left(),
                         char_width,
                     );
+                    let drag_anchor_id = code_drag_anchor_id(buffer_id);
+                    if response.drag_started() {
+                        let drag_delta = response
+                            .total_drag_delta()
+                            .unwrap_or_else(|| response.drag_delta());
+                        let anchor = drag_anchor_for_line_pointer(
+                            line,
+                            position.x,
+                            drag_delta,
+                            response.rect.left(),
+                            char_width,
+                        );
+                        response
+                            .ctx
+                            .data_mut(|data| data.insert_temp(drag_anchor_id, anchor));
+                    }
                     if response.triple_clicked() {
                         actions.push(DesktopAction::SetSelection {
                             buffer_id: Some(buffer_id),
@@ -1217,12 +1233,12 @@ fn render_code_lines(
                             });
                         }
                     } else if response.dragged() {
+                        let anchor = response
+                            .ctx
+                            .data_mut(|data| data.get_temp::<TextCoordinate>(drag_anchor_id));
                         actions.push(DesktopAction::SetSelection {
                             buffer_id: Some(buffer_id),
-                            range: ProtocolTextRange {
-                                start: current_cursor,
-                                end: coordinate,
-                            },
+                            range: drag_selection_range(anchor, current_cursor, coordinate),
                         });
                     } else if response.clicked() {
                         let shift_pressed = response.ctx.input(|input| input.modifiers.shift);
@@ -1241,6 +1257,11 @@ fn render_code_lines(
                                 cursor: coordinate,
                             });
                         }
+                    }
+                    if response.drag_stopped() {
+                        response
+                            .ctx
+                            .data_mut(|data| data.remove::<TextCoordinate>(drag_anchor_id));
                     }
                 }
                 if let Some(buffer_id) = active_buffer_id {
@@ -2732,6 +2753,29 @@ pub fn line_range_for_code_line(line: &DesktopCodeLineViewModel) -> ProtocolText
     }
 }
 
+/// Return the text coordinate where a same-line drag gesture began.
+pub fn drag_anchor_for_line_pointer(
+    line: &DesktopCodeLineViewModel,
+    pointer_x: f32,
+    total_drag_delta: egui::Vec2,
+    origin_x: f32,
+    char_width: f32,
+) -> TextCoordinate {
+    editor_coordinate_for_line_x(line, pointer_x - total_drag_delta.x, origin_x, char_width)
+}
+
+/// Build a drag selection range, preferring the gesture anchor over the stale projected cursor.
+pub fn drag_selection_range(
+    drag_anchor: Option<TextCoordinate>,
+    current_cursor: TextCoordinate,
+    coordinate: TextCoordinate,
+) -> ProtocolTextRange {
+    ProtocolTextRange {
+        start: drag_anchor.unwrap_or(current_cursor),
+        end: coordinate,
+    }
+}
+
 fn editor_coordinate_for_line_x(
     line: &DesktopCodeLineViewModel,
     pointer_x: f32,
@@ -2747,6 +2791,10 @@ fn editor_coordinate_for_line_x(
         line.number.saturating_sub(1),
         raw_col.min(line.text.chars().count() as u32),
     )
+}
+
+fn code_drag_anchor_id(buffer_id: legion_protocol::BufferId) -> egui::Id {
+    egui::Id::new(("legion_desktop_code_drag_anchor", buffer_id.0))
 }
 
 fn text_coordinate(line: u32, character: u32) -> TextCoordinate {

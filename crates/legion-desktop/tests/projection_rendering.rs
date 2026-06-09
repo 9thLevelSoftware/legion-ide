@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use legion_desktop::view::{
     DesktopCodeHighlightSpan, DesktopCodeLineViewModel, DesktopProjectionViewModel,
-    DesktopProjectionViewState, editor_coordinate_from_pointer, line_range_for_code_line,
-    word_range_for_coordinate,
+    DesktopProjectionViewState, drag_anchor_for_line_pointer, drag_selection_range,
+    editor_coordinate_from_pointer, line_range_for_code_line, word_range_for_coordinate,
 };
 use legion_protocol::{
     ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow, BufferId, BufferVersion, ByteRange,
@@ -1053,6 +1053,27 @@ fn projection_rendering_computes_word_and_line_selection_ranges() {
     assert_eq!(full_line.start.character, 0);
     assert_eq!(full_line.end.line, 7);
     assert_eq!(full_line.end.character, 20);
+}
+
+#[test]
+fn projection_rendering_anchors_drag_selection_at_gesture_start() {
+    let line = DesktopCodeLineViewModel {
+        number: 8,
+        text: "let beta_value = 42;".to_string(),
+        highlights: Vec::new(),
+    };
+    let old_cursor = coord(20, 0, 0);
+    let end = coord(7, 14, 14);
+    let anchor = drag_anchor_for_line_pointer(&line, 74.0, egui::vec2(32.0, 0.0), 10.0, 8.0);
+    let range = drag_selection_range(Some(anchor), old_cursor, end);
+
+    assert_eq!(range.start.line, 7);
+    assert_eq!(range.start.character, 4);
+    assert_eq!(range.end, end);
+
+    let fallback = drag_selection_range(None, old_cursor, end);
+    assert_eq!(fallback.start, old_cursor);
+    assert_eq!(fallback.end, end);
 }
 
 #[test]
