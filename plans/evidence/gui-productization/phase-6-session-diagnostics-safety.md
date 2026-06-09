@@ -6,9 +6,9 @@ status: passed
 
 ## Commands
 
-- `cargo test -p devil-desktop --test session_restore -- --nocapture`: passed, 5 tests.
-- `cargo test -p devil-desktop --test diagnostics_export -- --nocapture`: passed, 2 tests.
-- `cargo run -p devil-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 250 --evidence plans/evidence/gui-productization/phase-6-platform-accessibility-smoke.md --session-state target/gui-phase6-session.json --diagnostics-export target/gui-phase6-diagnostics.md`: passed.
+- `cargo test -p legion-desktop --test session_restore -- --nocapture`: passed, 5 tests.
+- `cargo test -p legion-desktop --test diagnostics_export -- --nocapture`: passed, 2 tests.
+- `cargo run -p legion-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 250 --evidence plans/evidence/gui-productization/phase-6-platform-accessibility-smoke.md --session-state target/gui-phase6-session.json --diagnostics-export target/gui-phase6-diagnostics.md`: passed.
 
 ## Session Persistence
 

@@ -6,7 +6,7 @@
 
 ## Scope
 
-GUI Phase 6 covers Windows packaging dry runs, platform integration smoke coverage, accessibility-smoke evidence, session metadata persistence safety, diagnostics export, scripted smoke parity, and final repo gates for the current `devil-desktop` adapter.
+GUI Phase 6 covers Windows packaging dry runs, platform integration smoke coverage, accessibility-smoke evidence, session metadata persistence safety, diagnostics export, scripted smoke parity, and final repo gates for the current `legion-desktop` adapter.
 
 Legacy Phase 6 collaboration evidence under `plans/evidence/phase-6/` remains intentionally out of scope and unchanged.
 
@@ -35,16 +35,16 @@ Legacy Phase 6 collaboration evidence under `plans/evidence/phase-6/` remains in
 - `cargo test --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo deny check`
-- `cargo test -p devil-desktop --test packaging -- --nocapture`
-- `cargo test -p devil-desktop --test platform_integration -- --nocapture`
-- `cargo test -p devil-desktop --test platform_smoke -- --nocapture`
-- `cargo test -p devil-desktop --test session_restore -- --nocapture`
-- `cargo test -p devil-desktop --test diagnostics_export -- --nocapture`
-- `cargo test -p devil-cli gui_phase6 -- --nocapture`
+- `cargo test -p legion-desktop --test packaging -- --nocapture`
+- `cargo test -p legion-desktop --test platform_integration -- --nocapture`
+- `cargo test -p legion-desktop --test platform_smoke -- --nocapture`
+- `cargo test -p legion-desktop --test session_restore -- --nocapture`
+- `cargo test -p legion-desktop --test diagnostics_export -- --nocapture`
+- `cargo test -p legion-cli gui_phase6 -- --nocapture`
 - `scripts/package-windows.ps1 -DryRun`
 - `scripts/gui-smoke.ps1 -DryRun`
 - `scripts/gui-smoke.sh --dry-run`
-- `cargo run -p devil-cli -- evidence check --phase gui-phase6`
+- `cargo run -p legion-cli -- evidence check --phase gui-phase6`
 
 ## Final Validation Checklist
 
@@ -62,4 +62,4 @@ Legacy Phase 6 collaboration evidence under `plans/evidence/phase-6/` remains in
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - `cargo deny check`: passed with warning-level duplicate dependency diagnostics from the existing lockfile policy.
-- `cargo run -p devil-cli -- evidence check --phase gui-phase6`: passed.
+- `cargo run -p legion-cli -- evidence check --phase gui-phase6`: passed.

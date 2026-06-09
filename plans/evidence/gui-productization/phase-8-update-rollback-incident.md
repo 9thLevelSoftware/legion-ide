@@ -25,7 +25,7 @@ Additional verification commands are recorded in `08-06-RESULT.md` after the fin
 ## Update Decision Record
 
 - Candidate promotion is not approved by this drill alone.
-- The GUI Phase 8 CI workflow now includes Phase 8 smoke dry-run steps and `cargo run -p devil-cli -- evidence check --phase gui-phase8`.
+- The GUI Phase 8 CI workflow now includes Phase 8 smoke dry-run steps and `cargo run -p legion-cli -- evidence check --phase gui-phase8`.
 - The accepted legacy `phase8` evidence gate remains in CI and was not removed.
 - Metadata-only diagnostics rules remain required for any update evidence.
 
@@ -34,8 +34,8 @@ Additional verification commands are recorded in `08-06-RESULT.md` after the fin
 Rollback is required if any of these occur:
 
 - The GUI Phase 8 smoke dry run fails on Windows, macOS, or Linux.
-- `cargo run -p devil-cli -- evidence check --phase gui-phase8` fails.
-- `cargo run -p devil-cli -- evidence check --phase phase8` fails.
+- `cargo run -p legion-cli -- evidence check --phase gui-phase8` fails.
+- `cargo run -p legion-cli -- evidence check --phase phase8` fails.
 - A GUI surface bypasses app/protocol authority or proposal mediation.
 - Diagnostics contain raw source, dirty buffer text, prompts, provider payloads, terminal output bodies, remote transport frames, secrets, or private keys.
 - Signed release claims cannot be matched to signer, checksum, and verification evidence.

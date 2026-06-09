@@ -6,13 +6,13 @@ status: passed
 smoke_label: GUI Phase 7 beta smoke
 metadata-only: true
 real_workspace_root: .
-beta_workspace_root: \\?\C:\Users\dasbl\RustroverProjects\devil-ide\target\gui-phase7-beta-workspace
+beta_workspace_root: \\?\C:\Users\dasbl\RustroverProjects\legion-ide\target\gui-phase7-beta-workspace
 diagnostics_export: target/gui-phase7-diagnostics.md
 status_message_count: 1
 
 ## Command
 
-`cargo run -p devil-desktop -- --beta-smoke --workspace . --beta-workspace target/gui-phase7-beta-workspace --evidence plans/evidence/gui-productization/phase-7-local-workflow-smoke.md --session-state target/gui-phase7-session.json --diagnostics-export target/gui-phase7-diagnostics.md`
+`cargo run -p legion-desktop -- --beta-smoke --workspace . --beta-workspace target/gui-phase7-beta-workspace --evidence plans/evidence/gui-productization/phase-7-local-workflow-smoke.md --session-state target/gui-phase7-session.json --diagnostics-export target/gui-phase7-diagnostics.md`
 
 ## Local IDE Workflow
 

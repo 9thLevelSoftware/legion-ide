@@ -29,13 +29,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 Useful targeted workflow checks:
 
 ```powershell
-cargo test -p devil-protocol --test dto_contracts legion_workflow -- --nocapture
-cargo test -p devil-agent legion_workflow -- --nocapture
-cargo test -p devil-tracker legion_workflow -- --nocapture
-cargo test -p devil-memory legion_workflow -- --nocapture
-cargo test -p devil-app --test legion_workflow_integration -- --nocapture
-cargo test -p devil-ui legion_workflow -- --nocapture
-cargo test -p devil-desktop --test legion_workflow_command_center -- --nocapture
+cargo test -p legion-protocol --test dto_contracts legion_workflow -- --nocapture
+cargo test -p legion-agent legion_workflow -- --nocapture
+cargo test -p legion-tracker legion_workflow -- --nocapture
+cargo test -p legion-memory legion_workflow -- --nocapture
+cargo test -p legion-app --test legion_workflow_integration -- --nocapture
+cargo test -p legion-ui legion_workflow -- --nocapture
+cargo test -p legion-desktop --test legion_workflow_command_center -- --nocapture
 ```
 
 ## Local Worker Flow

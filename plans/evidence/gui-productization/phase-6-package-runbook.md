@@ -2,7 +2,7 @@
 
 ## Scope
 
-This runbook covers the deterministic Windows desktop packaging path for `devil-desktop`. It packages the existing executable and metadata only; it does not create an installer, introduce new dependencies, or change runtime ownership boundaries.
+This runbook covers the deterministic Windows desktop packaging path for `legion-desktop`. It packages the existing executable and metadata only; it does not create an installer, introduce new dependencies, or change runtime ownership boundaries.
 
 ## Dry Run
 
@@ -24,9 +24,9 @@ scripts/package-windows.ps1
 
 Expected behavior:
 
-- Runs `cargo build -p devil-desktop`.
-- Copies `target/debug/devil-desktop.exe` into `target/gui-phase6-package/devil-desktop.exe`.
-- Writes `target/gui-phase6-package/devil-desktop-package-manifest.txt`.
+- Runs `cargo build -p legion-desktop`.
+- Copies `target/debug/legion-desktop.exe` into `target/gui-phase6-package/legion-desktop.exe`.
+- Writes `target/gui-phase6-package/legion-desktop-package-manifest.txt`.
 
 ## Release Package
 
@@ -36,12 +36,12 @@ scripts/package-windows.ps1 -Release
 
 Expected behavior:
 
-- Runs `cargo build -p devil-desktop --release`.
-- Copies `target/release/devil-desktop.exe` into `target/gui-phase6-package/devil-desktop.exe`.
-- Writes `target/gui-phase6-package/devil-desktop-package-manifest.txt`.
+- Runs `cargo build -p legion-desktop --release`.
+- Copies `target/release/legion-desktop.exe` into `target/gui-phase6-package/legion-desktop.exe`.
+- Writes `target/gui-phase6-package/legion-desktop-package-manifest.txt`.
 
 ## Boundary Notes
 
 - Packaging metadata is path and command metadata only.
 - Package manifests must not include editor text, file previews, source bodies, secrets, or workspace mutation payloads.
-- Runtime state remains owned by `devil-app`; `devil-desktop` remains an adapter.
+- Runtime state remains owned by `legion-app`; `legion-desktop` remains an adapter.

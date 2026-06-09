@@ -27,6 +27,7 @@ const DEFAULT_PHASE13_EVIDENCE_PATH: &str =
 const DEFAULT_PHASE13_FINAL_GATES_PATH: &str =
     "plans/evidence/gui-productization/phase-13-final-gates.md";
 const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/phase-13-runbook.md";
+const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
 const DEFAULT_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/phase-6/collaboration-architecture-map.md";
 const DEFAULT_PHASE7_EVIDENCE_PATH: &str = "plans/evidence/phase-7/remote-architecture-map.md";
@@ -455,6 +456,12 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_POLICY_PATH)]
         policy: String,
     },
+    /// Validate Markdown links and stale documentation markers.
+    DocsHygiene {
+        /// Path to docs hygiene allowlist TOML.
+        #[arg(long, default_value = DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH)]
+        allowlist: String,
+    },
 }
 
 fn main() {
@@ -470,9 +477,53 @@ fn main() {
                 0
             }
         }
+        Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
     };
 
     process::exit(code);
+}
+
+fn run_docs_hygiene_command(allowlist: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("docs hygiene failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let allowlist_path = workspace_root.join(allowlist);
+    let config = match xtask::docs_hygiene::DocsHygieneConfig::from_file(&allowlist_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("docs hygiene failed: {err}");
+            return 1;
+        }
+    };
+    match xtask::docs_hygiene::run_docs_hygiene(&workspace_root, &config) {
+        Ok(()) => {
+            println!("documentation hygiene checks passed");
+            0
+        }
+        Err(violations) => {
+            eprintln!(
+                "documentation hygiene found {} violation(s):",
+                violations.len()
+            );
+            for violation in violations.iter().take(200) {
+                eprintln!(
+                    "{}:{}: {:?}: {}",
+                    violation.path.display(),
+                    violation.line,
+                    violation.kind,
+                    violation.message
+                );
+            }
+            if violations.len() > 200 {
+                eprintln!("... {} more violation(s) omitted", violations.len() - 200);
+            }
+            1
+        }
+    }
 }
 
 fn run_check_deps(policy_path: &str) -> Result<(), String> {

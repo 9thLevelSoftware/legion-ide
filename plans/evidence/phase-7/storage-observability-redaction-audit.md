@@ -6,9 +6,9 @@ Accepted.
 
 ## Commands
 
-- cargo test -p devil-storage remote_audit
-- cargo test -p devil-observability remote_audit
-- cargo test -p devil-app --test workspace_vfs_integration remote_session
+- cargo test -p legion-storage remote_audit
+- cargo test -p legion-observability remote_audit
+- cargo test -p legion-app --test workspace_vfs_integration remote_session
 
 ## Findings
 

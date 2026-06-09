@@ -3,24 +3,24 @@
 ## Acceptance Status
 
 - Phase 5 acceptance: Accepted.
-- Runtime surface status: `devil-plugin` boundary behavior is active for manifest-validated, capability-checked, quota-bound, metadata-only, app-composed plugin command invocation.
+- Runtime surface status: `legion-plugin` boundary behavior is active for manifest-validated, capability-checked, quota-bound, metadata-only, app-composed plugin command invocation.
 
 ## Architecture Map
 
-- `devil-protocol` owns versioned plugin manifests, contributions, host-call envelopes, storage DTOs, denial reasons, validation helpers, projection DTOs, and `PluginPort`.
-- `devil-security` owns deny-by-default plugin capability decisions requiring plugin id, namespace, manifest id, module hash, declared capability, and host-call context.
-- `devil-plugin` owns manifest loading, lifecycle state, host-call quota checks, typed fail-closed responses, and protocol-only runtime port APIs.
-- `devil-storage` owns plugin-scoped metadata storage, namespace isolation, metadata validation, and quota accounting.
-- `devil-observability` owns metadata-only plugin event envelope construction and validation.
-- `devil-app` is the plugin composition root for loading manifests and dispatching plugin command host-call envelopes.
-- `devil-ui` remains projection-only with plugin contribution projections and command intents.
+- `legion-protocol` owns versioned plugin manifests, contributions, host-call envelopes, storage DTOs, denial reasons, validation helpers, projection DTOs, and `PluginPort`.
+- `legion-security` owns deny-by-default plugin capability decisions requiring plugin id, namespace, manifest id, module hash, declared capability, and host-call context.
+- `legion-plugin` owns manifest loading, lifecycle state, host-call quota checks, typed fail-closed responses, and protocol-only runtime port APIs.
+- `legion-storage` owns plugin-scoped metadata storage, namespace isolation, metadata validation, and quota accounting.
+- `legion-observability` owns metadata-only plugin event envelope construction and validation.
+- `legion-app` is the plugin composition root for loading manifests and dispatching plugin command host-call envelopes.
+- `legion-ui` remains projection-only with plugin contribution projections and command intents.
 
 ## Governance Prerequisites
 
 - ADR: `plans/adrs/ADR-0019-wasm-plugin-runtime.md`
 - Dependency policy: `plans/dependency-policy.md`
-- Runtime crate: `crates/devil-plugin`
-- App composition: `crates/devil-app/src/lib.rs`
+- Runtime crate: `crates/legion-plugin`
+- App composition: `crates/legion-app/src/lib.rs`
 
 ## Runtime Lifecycle
 

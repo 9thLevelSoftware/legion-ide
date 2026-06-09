@@ -16,16 +16,16 @@
 | `cargo test --workspace --all-targets` | passed |
 | `cargo clippy --workspace --all-targets -- -D warnings` | passed |
 | `cargo deny check` | passed with existing warning-level duplicate dependency diagnostics |
-| `cargo test -p devil-desktop --test plugin_management -- --nocapture` | passed |
-| `cargo test -p devil-desktop --test collaboration_gui -- --nocapture` | passed |
-| `cargo test -p devil-desktop --test remote_workspace_gui -- --nocapture` | passed |
-| `cargo test -p devil-desktop --test delegated_task_command_center -- --nocapture` | passed |
-| `cargo run -p devil-cli -- evidence check --phase gui-phase8` | passed |
-| `cargo run -p devil-cli -- evidence check --phase phase8` | passed |
+| `cargo test -p legion-desktop --test plugin_management -- --nocapture` | passed |
+| `cargo test -p legion-desktop --test collaboration_gui -- --nocapture` | passed |
+| `cargo test -p legion-desktop --test remote_workspace_gui -- --nocapture` | passed |
+| `cargo test -p legion-desktop --test delegated_task_command_center -- --nocapture` | passed |
+| `cargo run -p legion-cli -- evidence check --phase gui-phase8` | passed |
+| `cargo run -p legion-cli -- evidence check --phase phase8` | passed |
 | `powershell -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Help` | passed |
 | `bash scripts/gui-smoke.sh --help` | passed |
 
-An earlier aggregate command marker, `cargo test -p devil-desktop plugin_management collaboration_gui remote_workspace_gui delegated_task_command_center -- --nocapture`, was rejected by Cargo as invalid syntax. The evidence marker was corrected to the four executable `--test` commands above, and each passed.
+An earlier aggregate command marker, `cargo test -p legion-desktop plugin_management collaboration_gui remote_workspace_gui delegated_task_command_center -- --nocapture`, was rejected by Cargo as invalid syntax. The evidence marker was corrected to the four executable `--test` commands above, and each passed.
 
 ## Platform Matrix Proof
 

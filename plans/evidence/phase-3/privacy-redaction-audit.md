@@ -4,10 +4,10 @@ Date: 2026-05-24
 
 Commands:
 
-- `cargo test -p devil-storage --all-targets` passed with 16 tests.
-- `cargo test -p devil-protocol --test dto_contracts` passed with 57 tests.
-- `cargo test -p devil-index --all-targets` passed with 28 tests.
-- `cargo test -p devil-app --test workspace_vfs_integration` passed with 54 tests.
+- `cargo test -p legion-storage --all-targets` passed with 16 tests.
+- `cargo test -p legion-protocol --test dto_contracts` passed with 57 tests.
+- `cargo test -p legion-index --all-targets` passed with 28 tests.
+- `cargo test -p legion-app --test workspace_vfs_integration` passed with 54 tests.
 
 Accepted privacy behavior:
 

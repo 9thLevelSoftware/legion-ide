@@ -8,18 +8,18 @@ Phase 4 accepts only deterministic local provider execution for tests and local/
 
 ## Evidence
 
-- `devil-ai::ProviderRouter` refuses `HostedRemote` provider classes as `provider.remote_deferred` metadata.
-- `devil-security` denies non-loopback provider invocation in air-gap mode.
-- `devil-security` denies hosted telemetry, hosted embeddings, gateway capability ids, and unapproved outbound network access.
-- `devil-security` denies remote provider invocation even when a remote host is allowlisted unless `allow_remote_provider` is explicitly enabled.
-- `devil-ai-providers::OpenAiStub` remains a refusing stub and does not read credentials or invoke remote egress.
+- `legion-ai::ProviderRouter` refuses `HostedRemote` provider classes as `provider.remote_deferred` metadata.
+- `legion-security` denies non-loopback provider invocation in air-gap mode.
+- `legion-security` denies hosted telemetry, hosted embeddings, gateway capability ids, and unapproved outbound network access.
+- `legion-security` denies remote provider invocation even when a remote host is allowlisted unless `allow_remote_provider` is explicitly enabled.
+- `legion-ai-providers::OpenAiStub` remains a refusing stub and does not read credentials or invoke remote egress.
 - No accepted Phase 4 provider code adds HTTP SDKs, keychain access, cloud credentials, or hosted gateway dependencies.
 
 ## Test evidence
 
-- `cargo test -p devil-ai --all-targets`
-- `cargo test -p devil-ai-providers --all-targets`
-- `cargo test -p devil-security --all-targets`
+- `cargo test -p legion-ai --all-targets`
+- `cargo test -p legion-ai-providers --all-targets`
+- `cargo test -p legion-security --all-targets`
 
 ## Acceptance
 

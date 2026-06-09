@@ -16,42 +16,42 @@ This evidence records the accepted Phase 2 protocol-contract, architecture-docum
 
 - Added [`ADR-0016-generalized-proposal-service.md`](../../adrs/ADR-0016-generalized-proposal-service.md) to define the generalized proposal service boundary.
 - The ADR records universal lifecycle states, explicit approve/reject/cancel/rollback lifecycle commands, batch and multi-file atomicity boundaries, rollback limits, deny-by-default validation, audit-before-success semantics, metadata-only persistence, and projection-only UI constraints.
-- The current save baseline is preserved through [`SaveWorkflowService::save_active_buffer()`](../../../crates/devil-app/src/lib.rs:1314) and [`WorkspaceActor::save_file_with_proposal()`](../../../crates/devil-project/src/lib.rs:1622).
-- Generic save-file proposal apply is now implemented through [`AppComposition::apply_save_file_proposal()`](../../../crates/devil-app/src/lib.rs) and routes through the same editor/workspace preconditions, with audit-before-success and rollback on audit failure.
+- The current save baseline is preserved through [`SaveWorkflowService::save_active_buffer()`](../../../crates/legion-app/src/lib.rs:1314) and [`WorkspaceActor::save_file_with_proposal()`](../../../crates/legion-project/src/lib.rs:1622).
+- Generic save-file proposal apply is now implemented through [`AppComposition::apply_save_file_proposal()`](../../../crates/legion-app/src/lib.rs) and routes through the same editor/workspace preconditions, with audit-before-success and rollback on audit failure.
 
 ## Protocol contract changes
 
-Updated [`lib.rs`](../../../crates/devil-protocol/src/lib.rs) with metadata-first DTOs for generalized proposal mutation:
+Updated [`lib.rs`](../../../crates/legion-protocol/src/lib.rs) with metadata-first DTOs for generalized proposal mutation:
 
-- Added [`ProposalPayload::Batch`](../../../crates/devil-protocol/src/lib.rs:1396) and [`ProposalPayloadKind::Batch`](../../../crates/devil-protocol/src/lib.rs:1830).
-- Added [`BatchProposalPayload`](../../../crates/devil-protocol/src/lib.rs:1499) with deterministic item ordering, batch identifier, explicit atomicity, rollback policy, target coverage, dependency edges, rollback steps, partial-failure records, preview warnings, and schema version.
-- Added [`ProposalBatchItem`](../../../crates/devil-protocol/src/lib.rs:1524), [`ProposalBatchDependency`](../../../crates/devil-protocol/src/lib.rs:1552), [`ProposalRollbackStep`](../../../crates/devil-protocol/src/lib.rs:1584), [`ProposalPartialFailureRecord`](../../../crates/devil-protocol/src/lib.rs:1620), and [`ProposalPreviewWarning`](../../../crates/devil-protocol/src/lib.rs:1652).
-- Added affected-target coverage through [`ProposalAffectedTarget`](../../../crates/devil-protocol/src/lib.rs:1446) and [`ProposalTargetCoverage`](../../../crates/devil-protocol/src/lib.rs:1486), including open-buffer, closed-file, path-only, terminal, remote, collaboration, plugin, and metadata-only classifications.
-- Added [`ProposalLifecycleCommand`](../../../crates/devil-protocol/src/lib.rs:2007), [`ProposalLifecycleAction`](../../../crates/devil-protocol/src/lib.rs:1973), and [`ProposalLifecycleCommandReason`](../../../crates/devil-protocol/src/lib.rs:1992).
-- Extended [`ProposalRequest`](../../../crates/devil-protocol/src/lib.rs:2804) with approve, reject, cancel, and rollback commands while preserving validate, preview, and apply variants.
-- Added [`ProposalLifecycleState::Cancelled`](../../../crates/devil-protocol/src/lib.rs:1859), [`ProposalCancellationReason`](../../../crates/devil-protocol/src/lib.rs:1918), and [`ProposalResponse::Cancelled`](../../../crates/devil-protocol/src/lib.rs:2882).
+- Added [`ProposalPayload::Batch`](../../../crates/legion-protocol/src/lib.rs:1396) and [`ProposalPayloadKind::Batch`](../../../crates/legion-protocol/src/lib.rs:1830).
+- Added [`BatchProposalPayload`](../../../crates/legion-protocol/src/lib.rs:1499) with deterministic item ordering, batch identifier, explicit atomicity, rollback policy, target coverage, dependency edges, rollback steps, partial-failure records, preview warnings, and schema version.
+- Added [`ProposalBatchItem`](../../../crates/legion-protocol/src/lib.rs:1524), [`ProposalBatchDependency`](../../../crates/legion-protocol/src/lib.rs:1552), [`ProposalRollbackStep`](../../../crates/legion-protocol/src/lib.rs:1584), [`ProposalPartialFailureRecord`](../../../crates/legion-protocol/src/lib.rs:1620), and [`ProposalPreviewWarning`](../../../crates/legion-protocol/src/lib.rs:1652).
+- Added affected-target coverage through [`ProposalAffectedTarget`](../../../crates/legion-protocol/src/lib.rs:1446) and [`ProposalTargetCoverage`](../../../crates/legion-protocol/src/lib.rs:1486), including open-buffer, closed-file, path-only, terminal, remote, collaboration, plugin, and metadata-only classifications.
+- Added [`ProposalLifecycleCommand`](../../../crates/legion-protocol/src/lib.rs:2007), [`ProposalLifecycleAction`](../../../crates/legion-protocol/src/lib.rs:1973), and [`ProposalLifecycleCommandReason`](../../../crates/legion-protocol/src/lib.rs:1992).
+- Extended [`ProposalRequest`](../../../crates/legion-protocol/src/lib.rs:2804) with approve, reject, cancel, and rollback commands while preserving validate, preview, and apply variants.
+- Added [`ProposalLifecycleState::Cancelled`](../../../crates/legion-protocol/src/lib.rs:1859), [`ProposalCancellationReason`](../../../crates/legion-protocol/src/lib.rs:1918), and [`ProposalResponse::Cancelled`](../../../crates/legion-protocol/src/lib.rs:2882).
 - Added rollback step DTOs and workspace-authorized rollback checkpoint records used for audit-failure rollback.
 
 ## App orchestration substrate
 
-Updated [`lib.rs`](../../../crates/devil-app/src/lib.rs) with an app-level proposal coordinator and total affected-target routing:
+Updated [`lib.rs`](../../../crates/legion-app/src/lib.rs) with an app-level proposal coordinator and total affected-target routing:
 
-- Replaced the save-only coordinator with [`AppProposalCoordinator`](../../../crates/devil-app/src/lib.rs:194) and proposal routing classifications in [`ProposalExecutionRoute`](../../../crates/devil-app/src/lib.rs:124).
-- Added deterministic affected-target derivation through [`AppProposalCoordinator::affected_target_coverage()`](../../../crates/devil-app/src/lib.rs:350) and a total payload visitor in [`AppProposalCoordinator::visit_payload_targets()`](../../../crates/devil-app/src/lib.rs:373).
+- Replaced the save-only coordinator with [`AppProposalCoordinator`](../../../crates/legion-app/src/lib.rs:194) and proposal routing classifications in [`ProposalExecutionRoute`](../../../crates/legion-app/src/lib.rs:124).
+- Added deterministic affected-target derivation through [`AppProposalCoordinator::affected_target_coverage()`](../../../crates/legion-app/src/lib.rs:350) and a total payload visitor in [`AppProposalCoordinator::visit_payload_targets()`](../../../crates/legion-app/src/lib.rs:373).
 - The visitor covers text edits, create/delete/rename file payloads, save payloads, format/code-action payloads, terminal commands, and batches. Batch coverage preserves explicit target order when supplied and otherwise sorts items by item order and identifier before recursively visiting payloads.
-- Replaced panic-prone save event extraction with optional save target derivation in [`save_event_target()`](../../../crates/devil-app/src/lib.rs:1734). Non-save stale or denied responses now fall back to generic proposal rejection events instead of assuming a file-backed save target.
-- Unsupported non-save validation or apply attempts return structured unsupported rejections through [`AppProposalCoordinator::unsupported_response()`](../../../crates/devil-app/src/lib.rs:545) rather than panicking or surfacing internal errors.
-- Explicit lifecycle request variants now produce typed lifecycle responses through [`ProposalPort`](../../../crates/devil-app/src/lib.rs:671) while non-save execution remains fail-closed.
-- Exposed app orchestration entry points through [`AppComposition::handle_proposal_request()`](../../../crates/devil-app/src/lib.rs:2064) and [`AppComposition::proposal_target_coverage()`](../../../crates/devil-app/src/lib.rs:2074) without adding editor text/session ownership to the UI.
+- Replaced panic-prone save event extraction with optional save target derivation in [`save_event_target()`](../../../crates/legion-app/src/lib.rs:1734). Non-save stale or denied responses now fall back to generic proposal rejection events instead of assuming a file-backed save target.
+- Unsupported non-save validation or apply attempts return structured unsupported rejections through [`AppProposalCoordinator::unsupported_response()`](../../../crates/legion-app/src/lib.rs:545) rather than panicking or surfacing internal errors.
+- Explicit lifecycle request variants now produce typed lifecycle responses through [`ProposalPort`](../../../crates/legion-app/src/lib.rs:671) while non-save execution remains fail-closed.
+- Exposed app orchestration entry points through [`AppComposition::handle_proposal_request()`](../../../crates/legion-app/src/lib.rs:2064) and [`AppComposition::proposal_target_coverage()`](../../../crates/legion-app/src/lib.rs:2074) without adding editor text/session ownership to the UI.
 - Added audit-before-success wiring: `SaveWorkflowService::observe_proposal_response()` emits proposal audit and event metadata records; audit write failure causes `rollback_audit_failed_mutation()` to compensate side effects through editor/workspace authority.
 - Added app-owned proposal ledger projection and lifecycle recovery snapshot support in `AppProposalCoordinator`; `AppComposition::shell_projection_snapshot()` now supplies live metadata-only proposal rows to the projection-only UI shell.
 
 ## Save invariants preserved and extended
 
-- Existing durable saves still flow through [`AppComposition::save_active_buffer()`](../../../crates/devil-app/src/lib.rs:1959), [`SaveWorkflowService::save_active_buffer()`](../../../crates/devil-app/src/lib.rs:1314), and [`WorkspaceActor::save_file_with_proposal()`](../../../crates/devil-project/src/lib.rs:1622).
+- Existing durable saves still flow through [`AppComposition::save_active_buffer()`](../../../crates/legion-app/src/lib.rs:1959), [`SaveWorkflowService::save_active_buffer()`](../../../crates/legion-app/src/lib.rs:1314), and [`WorkspaceActor::save_file_with_proposal()`](../../../crates/legion-project/src/lib.rs:1622).
 - Save proposals continue carrying expected disk fingerprint, file content version, workspace generation, buffer version, snapshot identifier, required write capability, principal, correlation identifier, and causality metadata.
 - Stale/conflict/denied saves continue to return rejected app save outcomes rather than thrown errors, and dirty editor text remains preserved.
-- External overwrite protection remains covered by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:402), including an assertion that the rejected response is stale.
+- External overwrite protection remains covered by [`workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict()`](../../../crates/legion-app/tests/workspace_vfs_integration.rs:402), including an assertion that the rejected response is stale.
 - Generic save-file proposal apply is now covered by:
   - `workspace_vfs_integration_registered_save_apply_routes_through_workspace_actor`
   - `workspace_vfs_integration_stale_registered_save_preserves_dirty_buffer_and_disk`
@@ -166,7 +166,7 @@ Date: 2026-05-22
 
 - Added an app-owned proposal lifecycle recovery snapshot that captures remembered proposal envelopes, lifecycle states, and lifecycle event contexts so coordinator state can be reconstructed without giving UI editor/workspace authority.
 - Added metadata-only proposal ledger row construction from `AppProposalCoordinator` state, including payload kind, lifecycle display, target coverage, risk/privacy labels, rollback availability, context summary, redacted diff summary, warnings, diagnostics, and redaction hints.
-- Wired `AppComposition::shell_projection_snapshot()` to emit the live proposal ledger projection instead of an empty placeholder while keeping `devil-ui` projection-only.
+- Wired `AppComposition::shell_projection_snapshot()` to emit the live proposal ledger projection instead of an empty placeholder while keeping `legion-ui` projection-only.
 - Added focused tests:
   - `proposal_coordinator_exports_and_recovers_lifecycle_snapshot`
   - `proposal_coordinator_builds_metadata_only_ledger_projection`
@@ -176,7 +176,7 @@ Date: 2026-05-22
 
 Date: 2026-05-22
 
-- Added workspace-owned rollback checkpoint DTOs and APIs in `devil-project`: `WorkspaceMutationRollbackTarget`, `WorkspaceMutationRollbackCheckpoint`, `WorkspaceActor::rollback_checkpoint_for_file_mutation()`, and `WorkspaceActor::rollback_file_mutation_with_checkpoint()`.
+- Added workspace-owned rollback checkpoint DTOs and APIs in `legion-project`: `WorkspaceMutationRollbackTarget`, `WorkspaceMutationRollbackCheckpoint`, `WorkspaceActor::rollback_checkpoint_for_file_mutation()`, and `WorkspaceActor::rollback_file_mutation_with_checkpoint()`.
 - `AppComposition` now captures rollback material for accepted closed-file/save mutations through `WorkspaceActor` and compensates audit-failed create/delete/rename/save mutations through workspace authority instead of direct app-level `std::fs` read/write/remove/rename calls.
 - Rollback compensation verifies the current rollback target still matches the workspace-tracked post-mutation fingerprint before deleting, overwriting, or renaming it, so external changes between mutation and audit-failure rollback are refused fail-closed.
 - Open-buffer rollback remains editor-owned undo. Single-file workspace-edit delegation reuses the same workspace rollback checkpoints for create/delete/rename operations.
@@ -192,11 +192,11 @@ Date: 2026-05-22
 
 ## Integration tests
 
-Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspace_vfs_integration.rs) with app-level Phase 2 regression coverage:
+Updated [`workspace_vfs_integration.rs`](../../../crates/legion-app/tests/workspace_vfs_integration.rs) with app-level Phase 2 regression coverage:
 
-- [`workspace_vfs_integration_non_save_proposals_are_structurally_rejected_without_panic()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:472) covers text edit, create-file, and terminal-command proposals through validate/apply requests and asserts structured unsupported rejections.
-- [`workspace_vfs_integration_batch_affected_targets_are_visited_in_item_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:515) verifies deterministic batch target derivation when explicit coverage is absent.
-- [`workspace_vfs_integration_batch_uses_explicit_target_coverage_order()`](../../../crates/devil-app/tests/workspace_vfs_integration.rs:599) verifies explicit batch target coverage order is preserved.
+- [`workspace_vfs_integration_non_save_proposals_are_structurally_rejected_without_panic()`](../../../crates/legion-app/tests/workspace_vfs_integration.rs:472) covers text edit, create-file, and terminal-command proposals through validate/apply requests and asserts structured unsupported rejections.
+- [`workspace_vfs_integration_batch_affected_targets_are_visited_in_item_order()`](../../../crates/legion-app/tests/workspace_vfs_integration.rs:515) verifies deterministic batch target derivation when explicit coverage is absent.
+- [`workspace_vfs_integration_batch_uses_explicit_target_coverage_order()`](../../../crates/legion-app/tests/workspace_vfs_integration.rs:599) verifies explicit batch target coverage order is preserved.
 - Stage 1C apply tests verify registered text-edit apply/stale behavior, closed-file workspace mutations, open-file mutation denial, and batch apply fail-closed behavior.
 - Stage 1D/1E batch tests verify supported-route planning metadata, dependency and cycle diagnostics, missing/unknown target diagnostics, route-compatible rollback proof, audit-before-success/commit/finalize barriers, deterministic direct and dependency-blocked partial-failure records, and no disk/editor mutation during planning.
 - Stage 1F/1H audit-rollback tests verify open-buffer text-edit undo, workspace-authorized closed-file create/delete/rename disk restoration, registered save rollback, audit-failure dirty-buffer preservation, failed ledger state after audit rollback, and fail-closed refusal to clobber external rollback-target changes.
@@ -205,10 +205,10 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 
 ## Placeholder and dependency boundaries
 
-- Did not activate [`devil-agent`](../../../crates/devil-agent/src/lib.rs), [`devil-index`](../../../crates/devil-index/src/lib.rs), [`devil-memory`](../../../crates/devil-memory/src/lib.rs), or [`devil-tracker`](../../../crates/devil-tracker/src/lib.rs).
+- Did not activate [`legion-agent`](../../../crates/legion-agent/src/lib.rs), [`legion-index`](../../../crates/legion-index/src/lib.rs), [`legion-memory`](../../../crates/legion-memory/src/lib.rs), or [`legion-tracker`](../../../crates/legion-tracker/src/lib.rs).
 - Did not add dependencies or change dependency policy.
-- Did not add a direct [`devil-project`](../../../crates/devil-project/src/lib.rs) dependency to [`devil-editor`](../../../crates/devil-editor/src/lib.rs).
-- Did not change [`devil-ui`](../../../crates/devil-ui/src/ui.rs) projection-only ownership rules.
+- Did not add a direct [`legion-project`](../../../crates/legion-project/src/lib.rs) dependency to [`legion-editor`](../../../crates/legion-editor/src/lib.rs).
+- Did not change [`legion-ui`](../../../crates/legion-ui/src/ui.rs) projection-only ownership rules.
 
 ## Deferred beyond Phase 2
 
@@ -221,24 +221,24 @@ Updated [`workspace_vfs_integration.rs`](../../../crates/devil-app/tests/workspa
 Completed targeted validation retained from earlier Phase 2 subtasks plus Stage 1G/1H:
 
 - `cargo fmt --all` — passed on 2026-05-22.
-- `cargo check -p devil-app --all-targets` — passed.
-- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 51 integration tests; 0 failed; 0 ignored.
-- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed.
-- `cargo test -p devil-protocol --test dto_contracts` — passed with 56 tests; 0 failed; 0 ignored.
-- `cargo check -p devil-app -p devil-observability --all-targets` — passed.
-- `cargo test -p devil-app --lib` — passed with 18 unit tests; 0 failed; 0 ignored.
-- `cargo test -p devil-project rollback_checkpoints_compensate_file_mutations_through_workspace_authority` — passed.
-- `cargo test -p devil-project rename_file_with_proposal_requires_destination_write_authorization` — passed.
-- `cargo test -p devil-project rollback_checkpoint_refuses_to_clobber_external_changes` — passed.
-- `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_closed_file_audit_failure_fails_closed_and_rolls_back` — passed.
-- `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back` — passed.
-- `cargo test -p devil-app --lib audit_rollback_failure_diagnostics_are_preserved_on_failed_response` — passed.
-- `cargo clippy -p devil-project --all-targets -- -D warnings` — passed.
-- `cargo clippy -p devil-app --all-targets -- -D warnings` — passed.
+- `cargo check -p legion-app --all-targets` — passed.
+- `cargo test -p legion-app --test workspace_vfs_integration` — passed with 51 integration tests; 0 failed; 0 ignored.
+- `cargo clippy -p legion-app --all-targets -- -D warnings` — passed.
+- `cargo test -p legion-protocol --test dto_contracts` — passed with 56 tests; 0 failed; 0 ignored.
+- `cargo check -p legion-app -p legion-observability --all-targets` — passed.
+- `cargo test -p legion-app --lib` — passed with 18 unit tests; 0 failed; 0 ignored.
+- `cargo test -p legion-project rollback_checkpoints_compensate_file_mutations_through_workspace_authority` — passed.
+- `cargo test -p legion-project rename_file_with_proposal_requires_destination_write_authorization` — passed.
+- `cargo test -p legion-project rollback_checkpoint_refuses_to_clobber_external_changes` — passed.
+- `cargo test -p legion-app --test workspace_vfs_integration workspace_vfs_integration_closed_file_audit_failure_fails_closed_and_rolls_back` — passed.
+- `cargo test -p legion-app --test workspace_vfs_integration workspace_vfs_integration_registered_save_audit_failure_fails_closed_and_rolls_back` — passed.
+- `cargo test -p legion-app --lib audit_rollback_failure_diagnostics_are_preserved_on_failed_response` — passed.
+- `cargo clippy -p legion-project --all-targets -- -D warnings` — passed.
+- `cargo clippy -p legion-app --all-targets -- -D warnings` — passed.
 
 Completed Stage 1I acceptance validation on 2026-05-24:
 
-- `cargo test -p devil-app --test workspace_vfs_integration` — passed with 54 integration tests; 0 failed; 0 ignored.
+- `cargo test -p legion-app --test workspace_vfs_integration` — passed with 54 integration tests; 0 failed; 0 ignored.
 - The suite includes `workspace_vfs_integration_workspace_edit_multi_file_text_edits_apply_atomically`, `workspace_vfs_integration_code_action_edits_apply_through_proposal_executor`, `workspace_vfs_integration_batch_ordered_non_atomic_requires_partial_failures_before_apply`, `workspace_vfs_integration_batch_apply_cannot_self_approve_from_created_state`, and the existing save conflict/dirty-buffer preservation regressions.
 
 Completed full repository phase gates on 2026-05-22 from the workspace root with `C:/Users/dasbl/.cargo/bin` first in `PATH`:

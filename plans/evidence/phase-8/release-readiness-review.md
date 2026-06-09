@@ -3,7 +3,7 @@
 Status: implementation evidence, platform matrix evidence, and final GA signoff are archived for Phase 8 acceptance.
 
 Latest archived CI matrix:
-- Run URL: https://github.com/9thLevelSoftware/devil-ide/actions/runs/26470308103
+- Run URL: https://github.com/9thLevelSoftware/legion-ide/actions/runs/26470308103
 - Head SHA: b3ca8f8efe9f4e68bf55bbfd098512e4bc0ead22
 - Completed: 2026-05-26T19:34:19Z
 - Matrix: ubuntu-latest, windows-latest, and macos-latest passed.
@@ -14,7 +14,7 @@ Validated commands:
 - `cargo test --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo deny check`
-- `cargo run -p devil-cli -- evidence check --phase phase8`
+- `cargo run -p legion-cli -- evidence check --phase phase8`
 - `cargo run -p xtask -- check-deps`
 
 Implemented release controls:

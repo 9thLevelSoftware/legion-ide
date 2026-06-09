@@ -24,29 +24,29 @@
 | 13-01 | `rg -q "Phase 13" plans/dependency-policy.md` | passed |
 | 13-01 | `rg -q "Autonomous merge: unsupported until approval" plans/evidence/gui-productization/phase-13-governance.md` | passed |
 | 13-01 | `cargo run -p xtask -- check-deps` | passed |
-| 13-02 | `rg -q "LegionWorkflowSession" crates/devil-protocol/src/lib.rs` | passed |
-| 13-02 | `rg -q "validate_legion_workflow" crates/devil-protocol/src/lib.rs` | passed |
-| 13-02 | `cargo test -p devil-protocol --test dto_contracts legion_workflow -- --nocapture` | passed, 5 tests |
-| 13-02 | `cargo check -p devil-protocol` | passed |
-| 13-03 | `rg -q "LegionWorkflowCoordinator" crates/devil-agent/src/lib.rs` | passed |
-| 13-03 | `rg -q "devil-app" crates/devil-agent/src/lib.rs; if ($LASTEXITCODE -eq 0) { exit 1 } else { exit 0 }` | passed |
-| 13-03 | `cargo test -p devil-agent legion_workflow -- --nocapture` | passed, 8 tests |
-| 13-03 | `cargo check -p devil-agent` | passed |
-| 13-04 | `rg -q "LegionWorkflow" crates/devil-tracker/src/lib.rs` | passed |
-| 13-04 | `rg -q "LegionWorkflow" crates/devil-memory/src/lib.rs` | passed |
-| 13-04 | `cargo test -p devil-tracker legion_workflow -- --nocapture` | passed, 4 tests |
-| 13-04 | `cargo test -p devil-memory legion_workflow -- --nocapture` | passed, 4 tests |
-| 13-04 | `cargo check -p devil-tracker -p devil-memory` | passed |
-| 13-05 | `rg -q "LegionWorkflow" crates/devil-app/src/lib.rs` | passed |
-| 13-05 | `rg -q "execute_legion_workflow" crates/devil-app/src/lib.rs` | passed |
-| 13-05 | `cargo test -p devil-app --test legion_workflow_integration -- --nocapture` | passed, 9 tests |
-| 13-05 | `cargo check -p devil-app --all-targets` | passed |
-| 13-06 | `rg -q "LegionWorkflow" crates/devil-ui/src/ui.rs` | passed |
-| 13-06 | `rg -q "legion workflow command center" crates/devil-desktop/src/view.rs` | passed |
-| 13-06 | `rg -q "Autonomous merge" crates/devil-desktop/src/health.rs` | passed |
-| 13-06 | `cargo test -p devil-ui legion_workflow -- --nocapture` | passed, 4 tests |
-| 13-06 | `cargo test -p devil-desktop --test legion_workflow_command_center -- --nocapture` | passed, 4 tests |
-| 13-06 | `cargo check -p devil-desktop --all-targets` | passed |
+| 13-02 | `rg -q "LegionWorkflowSession" crates/legion-protocol/src/lib.rs` | passed |
+| 13-02 | `rg -q "validate_legion_workflow" crates/legion-protocol/src/lib.rs` | passed |
+| 13-02 | `cargo test -p legion-protocol --test dto_contracts legion_workflow -- --nocapture` | passed, 5 tests |
+| 13-02 | `cargo check -p legion-protocol` | passed |
+| 13-03 | `rg -q "LegionWorkflowCoordinator" crates/legion-agent/src/lib.rs` | passed |
+| 13-03 | `rg -q "legion-app" crates/legion-agent/src/lib.rs; if ($LASTEXITCODE -eq 0) { exit 1 } else { exit 0 }` | passed |
+| 13-03 | `cargo test -p legion-agent legion_workflow -- --nocapture` | passed, 8 tests |
+| 13-03 | `cargo check -p legion-agent` | passed |
+| 13-04 | `rg -q "LegionWorkflow" crates/legion-tracker/src/lib.rs` | passed |
+| 13-04 | `rg -q "LegionWorkflow" crates/legion-memory/src/lib.rs` | passed |
+| 13-04 | `cargo test -p legion-tracker legion_workflow -- --nocapture` | passed, 4 tests |
+| 13-04 | `cargo test -p legion-memory legion_workflow -- --nocapture` | passed, 4 tests |
+| 13-04 | `cargo check -p legion-tracker -p legion-memory` | passed |
+| 13-05 | `rg -q "LegionWorkflow" crates/legion-app/src/lib.rs` | passed |
+| 13-05 | `rg -q "execute_legion_workflow" crates/legion-app/src/lib.rs` | passed |
+| 13-05 | `cargo test -p legion-app --test legion_workflow_integration -- --nocapture` | passed, 9 tests |
+| 13-05 | `cargo check -p legion-app --all-targets` | passed |
+| 13-06 | `rg -q "LegionWorkflow" crates/legion-ui/src/ui.rs` | passed |
+| 13-06 | `rg -q "legion workflow command center" crates/legion-desktop/src/view.rs` | passed |
+| 13-06 | `rg -q "Autonomous merge" crates/legion-desktop/src/health.rs` | passed |
+| 13-06 | `cargo test -p legion-ui legion_workflow -- --nocapture` | passed, 4 tests |
+| 13-06 | `cargo test -p legion-desktop --test legion_workflow_command_center -- --nocapture` | passed, 4 tests |
+| 13-06 | `cargo check -p legion-desktop --all-targets` | passed |
 
 ## Acceptance Marker Checks
 

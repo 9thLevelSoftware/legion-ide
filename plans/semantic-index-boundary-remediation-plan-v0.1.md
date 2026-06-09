@@ -1,5 +1,8 @@
 # Semantic Index Boundary Remediation Plan v0.1
 
+> Historical/superseded planning artifact. This plan is superseded by accepted Phase 3 evidence in `plans/evidence/phase-3/predictive-semantic-fabric.md` and current status in `plans/phase-status-ledger.md`.
+
+
 Date: 2026-05-15
 
 ## Scope and constraints

@@ -27,9 +27,9 @@ Semantic, LSP, AI context, and proposal preview consumers may not own editor tex
 
 ## Validation
 
-- `cargo test -p devil-editor snapshot_lease --lib && cargo test -p devil-protocol dto_contracts_snapshot_lease_descriptor_golden_and_required_fields --test dto_contracts` passed locally.
+- `cargo test -p legion-editor snapshot_lease --lib && cargo test -p legion-protocol dto_contracts_snapshot_lease_descriptor_golden_and_required_fields --test dto_contracts` passed locally.
 - `cargo run -p xtask -- check-deps` passed locally.
-- `cargo fmt --all --check` initially reported formatting drift in `crates/devil-editor/src/lib.rs`; `cargo fmt --all` was run, then `cargo fmt --all --check` passed.
+- `cargo fmt --all --check` initially reported formatting drift in `crates/legion-editor/src/lib.rs`; `cargo fmt --all` was run, then `cargo fmt --all --check` passed.
 - `cargo check --workspace --all-targets` passed locally.
 - `cargo test --workspace --all-targets` passed locally.
 - `cargo clippy --workspace --all-targets -- -D warnings` passed locally.

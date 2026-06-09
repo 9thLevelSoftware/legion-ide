@@ -1,0 +1,12 @@
+# Paths in this file are repo-relative prefixes or exact file paths.
+# They are intentionally limited to historical/generated documentation surfaces.
+# New active documentation should use Legion naming and valid relative paths.
+
+allowlisted_paths = [
+  ".planning/",
+  "plans/archive/",
+  "audit-reports/",
+  "docs/LEGION_RENAME.md",
+  "plans/foundational-core-ide-platform-implementation-plan-v0.1.md",
+  "plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md",
+]

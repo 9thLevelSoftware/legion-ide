@@ -3,9 +3,9 @@
 Status: implementation evidence
 
 Validated by:
-- `cargo test -p devil-protocol --test dto_contracts phase8`
-- `cargo test -p devil-telemetry --all-targets`
-- `cargo test -p devil-retention --all-targets`
+- `cargo test -p legion-protocol --test dto_contracts phase8`
+- `cargo test -p legion-telemetry --all-targets`
+- `cargo test -p legion-retention --all-targets`
 - `cargo test --workspace --all-targets`
 
 Results:

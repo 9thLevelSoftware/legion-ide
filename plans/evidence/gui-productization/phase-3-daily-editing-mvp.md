@@ -24,17 +24,17 @@ This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control a
 
 ## Boundary Proof
 
-- `devil-ui` remains projection-only. The live boundary check for `devil-app`, `devil-editor`, `devil-project`, `devil-storage`, `devil-desktop`, `eframe`, and `egui` references in `crates/devil-ui/Cargo.toml` and `crates/devil-ui/src/ui.rs` returned no matches.
-- `crates/devil-desktop/src/bridge.rs` and `crates/devil-desktop/src/view.rs` do not import editor/project/storage internals; the live check for `devil_editor`, `devil_project`, `devil_storage`, `EditorEngine`, `WorkspaceActor`, and `StorageRepository` returned no matches.
-- Desktop actions continue through adapter bridge and app authority. `crates/devil-desktop/src/workflow.rs` calls `self.app.dispatch_ui_intent(intent)`.
-- Saves remain proposal-mediated. `crates/devil-app/src/lib.rs` routes saves through `SaveWorkflowService::save_active_buffer` and `workspace.save_file_with_proposal`.
+- `legion-ui` remains projection-only. The live boundary check for `legion-app`, `legion-editor`, `legion-project`, `legion-storage`, `legion-desktop`, `eframe`, and `egui` references in `crates/legion-ui/Cargo.toml` and `crates/legion-ui/src/ui.rs` returned no matches.
+- `crates/legion-desktop/src/bridge.rs` and `crates/legion-desktop/src/view.rs` do not import editor/project/storage internals; the live check for `legion_editor`, `legion_project`, `legion_storage`, `EditorEngine`, `WorkspaceActor`, and `StorageRepository` returned no matches.
+- Desktop actions continue through adapter bridge and app authority. `crates/legion-desktop/src/workflow.rs` calls `self.app.dispatch_ui_intent(intent)`.
+- Saves remain proposal-mediated. `crates/legion-app/src/lib.rs` routes saves through `SaveWorkflowService::save_active_buffer` and `workspace.save_file_with_proposal`.
 - Phase 3 source reads override the stale code map. `.planning/phases/03-daily-editing-mvp/03-CONTEXT.md` records that `.planning/CODEBASE.md` predates Phase 2 and Phase 3 source changes.
 
 ## Daily Editing Proof
 
 | Capability | Decision | Evidence |
 | --- | --- | --- |
-| Multi-tab editing and close/reopen behavior | Met | Plan 03-01 added tab/session contracts; Plan 03-02 routed desktop tab controls; `cargo test -p devil-app daily_editing -- --nocapture` passed; `cargo test -p devil-desktop --all-targets` passed. |
+| Multi-tab editing and close/reopen behavior | Met | Plan 03-01 added tab/session contracts; Plan 03-02 routed desktop tab controls; `cargo test -p legion-app daily_editing -- --nocapture` passed; `cargo test -p legion-desktop --all-targets` passed. |
 | Explorer expand/collapse/selection/reveal | Met | Plan 03-02 added adapter-local explorer expansion and reveal routing through `CommandDispatchIntent`; desktop `daily_editing_controls`, `intent_bridge`, and `projection_rendering` tests passed. |
 | Cursor, selection, scrolling, undo/redo routing | Met | Plan 03-01/03-02 added projection and command handling for cursor/selection/viewport; desktop all-target tests passed. Undo/redo remains routed through existing command dispatch rather than re-owned by UI. |
 | Save all | Met | Plan 03-04 records per-buffer save-all outcomes, rejection metadata, and generation refresh after successful saves; app daily-editing tests and desktop save-all conflict tests passed. |
@@ -46,15 +46,15 @@ This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control a
 
 ## Search Proof
 
-- Search projections are projection-only DTOs in `crates/devil-ui/src/ui.rs`.
-- `AppComposition::run_search` in `crates/devil-app/src/lib.rs` performs bounded lexical active-file/workspace search and caps limits.
+- Search projections are projection-only DTOs in `crates/legion-ui/src/ui.rs`.
+- `AppComposition::run_search` in `crates/legion-app/src/lib.rs` performs bounded lexical active-file/workspace search and caps limits.
 - Degraded active-file search is limited to visible viewport content with a visible degraded-limited status.
 - Workspace search uses metadata bounds and skips oversized or unreadable files rather than reading unbounded file bodies.
-- Desktop search display is built from `SearchProjection` in `crates/devil-desktop/src/search.rs`.
+- Desktop search display is built from `SearchProjection` in `crates/legion-desktop/src/search.rs`.
 
 ## Session Proof
 
-- `crates/devil-desktop/src/session.rs` serializes/deserializes `WorkspaceSessionRecord` JSON only.
+- `crates/legion-desktop/src/session.rs` serializes/deserializes `WorkspaceSessionRecord` JSON only.
 - Session restore is invoked through `AppComposition::restore_workspace_session_record`; desktop does not recreate editor buffers directly.
 - Session validation rejects invalid schema/session ids and raw-source marker strings including `small_buffer_preview`, `source_body`, and `SECRET_DIRTY_BODY`.
 - Dirty source bodies are not persisted or replayed during restore.
@@ -79,11 +79,11 @@ This is not acceptance of Phase 4 language/terminal workflows, Phase 5 control a
 | --- | --- | --- |
 | `cargo run -p xtask -- check-deps` | Passed | Output included `dependency policy checks passed`. |
 | `cargo fmt --all --check` | Passed | No formatting diff. |
-| `cargo check --workspace --all-targets` | Passed | Workspace all-target check completed for `devil-ui`, `devil-app`, and `devil-desktop`. |
-| `cargo test -p devil-app daily_editing -- --nocapture` | Passed | App daily-editing filters passed: save-all unit coverage, 7 `daily_editing_contracts` tests, and 6 `daily_editing_search` tests. |
-| `cargo test -p devil-desktop --all-targets` | Passed | Desktop tests passed, including workflow, daily-editing controls, intent bridge, large-file guardrails, platform smoke, projection rendering, save-all conflict, search workflow, and session restore. |
+| `cargo check --workspace --all-targets` | Passed | Workspace all-target check completed for `legion-ui`, `legion-app`, and `legion-desktop`. |
+| `cargo test -p legion-app daily_editing -- --nocapture` | Passed | App daily-editing filters passed: save-all unit coverage, 7 `daily_editing_contracts` tests, and 6 `daily_editing_search` tests. |
+| `cargo test -p legion-desktop --all-targets` | Passed | Desktop tests passed, including workflow, daily-editing controls, intent bridge, large-file guardrails, platform smoke, projection rendering, save-all conflict, search workflow, and session restore. |
 | `cargo test --workspace --all-targets` | Passed on rerun | After freeing disk space, the workspace all-target test passed. The performance suite reported 7 passed and 3 ignored, including the intentionally ignored 100MB degraded-mode workload. |
-| `cargo clippy --workspace --all-targets -- -D warnings` | Passed | Finished warning-clean for `devil-ui`, `devil-app`, and `devil-desktop`. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed | Finished warning-clean for `legion-ui`, `legion-app`, and `legion-desktop`. |
 | `rg -q "Phase 3 daily editing MVP: Accepted" plans/evidence/gui-productization/phase-3-daily-editing-mvp.md` | Passed | Acceptance marker present in this evidence artifact. |
 
 ## Success Criteria Decisions

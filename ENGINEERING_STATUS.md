@@ -1,5 +1,13 @@
 # Engineering Audit Status — Legion IDE
 
+> **Historical snapshot.** This file is a point-in-time engineering audit status record (Date 2026-06-03 UTC, Branch `main`, HEAD `45d3efb`). It is preserved for traceability of the prior audit cycle, **not** as a current status report. The current product status, substrate acceptance state, and remaining gaps are tracked in:
+>
+> - `README.md` "Current Status" section;
+> - `plans/phase-status-ledger.md` (the authoritative phase status ledger, including Phase 8 substrate acceptance vs. product GA / release-readiness distinctions);
+> - `plans/product-readiness-ledger.md` (the readiness matrix and remaining product gaps).
+>
+> Do not infer current repo state from this file. If this file and the current ledgers disagree, the current ledgers win.
+
 Date: 2026-06-03 UTC
 Branch: main
 HEAD: 45d3efb Merge pull request #14 from 9thLevelSoftware/codex/legion-rebrand

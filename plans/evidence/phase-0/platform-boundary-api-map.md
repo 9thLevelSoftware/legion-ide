@@ -4,11 +4,11 @@ Status: Accepted
 
 Accepted at: 2026-05-14T02:07:05Z
 
-Source API file: `crates/devil-platform/src/lib.rs`
+Source API file: `crates/legion-platform/src/lib.rs`
 
 ## Ownership rule
 
-`devil-platform` owns OS-facing filesystem, path, process, PTY, watcher, environment, and time abstractions only. It does not own editor buffers, editor transactions, shell/window state, project models, workspace identity, trust policy, request routing, AI/provider logic, or UI command dispatch.
+`legion-platform` owns OS-facing filesystem, path, process, PTY, watcher, environment, and time abstractions only. It does not own editor buffers, editor transactions, shell/window state, project models, workspace identity, trust policy, request routing, AI/provider logic, or UI command dispatch.
 
 ## Public API ownership map
 

@@ -8,10 +8,10 @@ Phase 6 implementation evidence is accepted for the local deterministic collabor
 
 ## Runtime Surface Status
 
-- `devil-collaboration` is an active workspace crate for deterministic in-memory operation-log collaboration.
+- `legion-collaboration` is an active workspace crate for deterministic in-memory operation-log collaboration.
 - Runtime application is default-off through `CollaborationRuntimeConfig::default()` and must be explicitly enabled by an app-owned composition root.
-- `devil-collaboration` depends only on protocol and utility dependencies; it has no app, UI, editor, project, remote, terminal, process, or workspace-authority dependency.
-- `devil-app` owns collaboration session composition, deterministic local protocol-envelope transport handling, presence projection output, editor transaction application, shared proposal approval gates, and metadata-only audit linkage.
+- `legion-collaboration` depends only on protocol and utility dependencies; it has no app, UI, editor, project, remote, terminal, process, or workspace-authority dependency.
+- `legion-app` owns collaboration session composition, deterministic local protocol-envelope transport handling, presence projection output, editor transaction application, shared proposal approval gates, and metadata-only audit linkage.
 - Pure collaboration proposal targets remain fail-closed unless paired with an existing accepted proposal executor route and app-owned approval evidence.
 - UI collaboration awareness is projection-only and emits command intents without owning editor text or workspace mutation.
 
@@ -19,19 +19,19 @@ Phase 6 implementation evidence is accepted for the local deterministic collabor
 
 - Accepted ADRs: `plans/adrs/ADR-0020-collaboration-operation-model.md`, `plans/adrs/ADR-0021-collaboration-identity-permissions-retention.md`.
 - Dependency policy: `plans/dependency-policy.md` includes Phase 6 protocol symbols and collaboration dependency boundaries.
-- Contract tests: `cargo test -p devil-protocol --test dto_contracts` covers Phase 6 DTO serialization, shared approvals, replay manifests, audit validation, and identity metadata.
+- Contract tests: `cargo test -p legion-protocol --test dto_contracts` covers Phase 6 DTO serialization, shared approvals, replay manifests, audit validation, and identity metadata.
 - Evidence gate: `cargo run -p xtask -- check-deps` validates accepted Phase 6 evidence artifacts and rejects unchecked final checklist items.
 
 ## Architecture Map
 
-- `devil-protocol` owns cross-domain collaboration DTOs for sessions, participants, operations, version vectors, acknowledgements, gaps, presence, shared proposal approvals, replay manifests, transport envelopes, and metadata-only audit records.
-- `devil-collaboration` owns deterministic operation ordering, replay, duplicate suppression, causal gap detection, resync acknowledgement, presence storage, metadata-only replay manifests, and metadata-only audit summaries.
-- `devil-security` owns collaboration-specific capability policy and denies runtime sessions, operation publishing, shared proposal approval, replay/audit export, and non-loopback egress by default.
-- `devil-storage` persists collaboration audit records as metadata-only records and rejects zero identifiers or raw-source/transcript markers.
-- `devil-observability` emits collaboration audit events as metadata-only envelopes with non-zero correlation, causality, and sequence metadata.
-- `devil-editor` accepts validated collaboration participant edits only through the existing editor transaction API with `TransactionSource::CollaborationParticipant`.
-- `devil-app` applies accepted collaboration document operations through `EditorEngine::apply_protocol_edits()` and never lets UI or collaboration runtime own editor text.
-- `devil-ui` consumes collaboration presence projections and emits app-owned intents only.
+- `legion-protocol` owns cross-domain collaboration DTOs for sessions, participants, operations, version vectors, acknowledgements, gaps, presence, shared proposal approvals, replay manifests, transport envelopes, and metadata-only audit records.
+- `legion-collaboration` owns deterministic operation ordering, replay, duplicate suppression, causal gap detection, resync acknowledgement, presence storage, metadata-only replay manifests, and metadata-only audit summaries.
+- `legion-security` owns collaboration-specific capability policy and denies runtime sessions, operation publishing, shared proposal approval, replay/audit export, and non-loopback egress by default.
+- `legion-storage` persists collaboration audit records as metadata-only records and rejects zero identifiers or raw-source/transcript markers.
+- `legion-observability` emits collaboration audit events as metadata-only envelopes with non-zero correlation, causality, and sequence metadata.
+- `legion-editor` accepts validated collaboration participant edits only through the existing editor transaction API with `TransactionSource::CollaborationParticipant`.
+- `legion-app` applies accepted collaboration document operations through `EditorEngine::apply_protocol_edits()` and never lets UI or collaboration runtime own editor text.
+- `legion-ui` consumes collaboration presence projections and emits app-owned intents only.
 - Durable file writes remain proposal-mediated through existing save/workspace preconditions.
 
 ## Lifecycle
@@ -65,12 +65,12 @@ Phase 6 implementation evidence is accepted for the local deterministic collabor
 
 ## Validation Command Mapping
 
-- Protocol DTOs: `cargo test -p devil-protocol --test dto_contracts`.
-- Runtime convergence, undo, duplicate, gap, replay, presence, reconnect, leave, and shutdown: `cargo test -p devil-collaboration --all-targets`.
-- Dirty-buffer, save/proposal, app-owned collaboration composition, and editor-transaction regressions: `cargo test --workspace --all-targets` including `devil-app` integration and `devil-editor` tests.
-- UI projection-only: `cargo test -p devil-ui`.
-- Security capabilities: `cargo test -p devil-security`.
-- Storage/observability redaction: `cargo test -p devil-storage` and `cargo test -p devil-observability`.
+- Protocol DTOs: `cargo test -p legion-protocol --test dto_contracts`.
+- Runtime convergence, undo, duplicate, gap, replay, presence, reconnect, leave, and shutdown: `cargo test -p legion-collaboration --all-targets`.
+- Dirty-buffer, save/proposal, app-owned collaboration composition, and editor-transaction regressions: `cargo test --workspace --all-targets` including `legion-app` integration and `legion-editor` tests.
+- UI projection-only: `cargo test -p legion-ui`.
+- Security capabilities: `cargo test -p legion-security`.
+- Storage/observability redaction: `cargo test -p legion-storage` and `cargo test -p legion-observability`.
 - Governance: `cargo run -p xtask -- check-deps`.
 - Global gates: fmt, check, test, clippy, and cargo-deny pass locally; cargo-deny reports warning-level duplicate dependency findings that match the repository baseline policy.
 

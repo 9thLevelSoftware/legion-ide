@@ -20,8 +20,8 @@ Covered behavior:
 ## Preserved Boundaries
 
 - Plugin command execution remains app-owned and protocol-mediated through `CommandDispatchIntent::InvokePluginCommand`.
-- `devil-desktop` imports protocol projection/DTO types only; it does not import `devil-plugin` or call plugin runtime APIs directly.
-- `devil-ui` remains projection-only and was not modified for this plan.
+- `legion-desktop` imports protocol projection/DTO types only; it does not import `legion-plugin` or call plugin runtime APIs directly.
+- `legion-ui` remains projection-only and was not modified for this plan.
 - The GUI uses metadata labels, contribution descriptors, status labels, and capability ids already present in projections; it does not persist or render raw plugin payloads, raw manifest bodies, stored plugin data, source text, or sandbox output.
 - Runtime sandbox, capability, quota, and metadata-only audit behavior remains covered by the app/plugin runtime tests.
 
@@ -29,15 +29,15 @@ Covered behavior:
 
 | Command | Result |
 |---|---|
-| `rg -q "InvokePluginCommand" crates/devil-desktop/src/bridge.rs` | passed |
-| `rg -q "PluginCommand" crates/devil-desktop/src/workflow.rs` | passed |
-| `rg -q "plugin management" crates/devil-desktop/src/view.rs` | passed |
-| `rg -n "devil_plugin\|devil-plugin" crates/devil-desktop/src crates/devil-desktop/tests` | passed, no matches |
-| `cargo test -p devil-desktop plugin_management_unknown -- --nocapture` | passed, 1 matching test |
-| `cargo test -p devil-desktop plugin_management_command_routes_to_app_intent -- --nocapture` | passed, 1 matching test |
-| `cargo test -p devil-desktop plugin_management_rows -- --nocapture` | passed, 1 matching test |
-| `cargo test -p devil-desktop plugin_management -- --nocapture` | passed, 5 matching tests |
-| `cargo test -p devil-app plugin -- --nocapture` | passed, 1 matching app plugin test |
+| `rg -q "InvokePluginCommand" crates/legion-desktop/src/bridge.rs` | passed |
+| `rg -q "PluginCommand" crates/legion-desktop/src/workflow.rs` | passed |
+| `rg -q "plugin management" crates/legion-desktop/src/view.rs` | passed |
+| `rg -n "legion_plugin\|legion-plugin" crates/legion-desktop/src crates/legion-desktop/tests` | passed, no matches |
+| `cargo test -p legion-desktop plugin_management_unknown -- --nocapture` | passed, 1 matching test |
+| `cargo test -p legion-desktop plugin_management_command_routes_to_app_intent -- --nocapture` | passed, 1 matching test |
+| `cargo test -p legion-desktop plugin_management_rows -- --nocapture` | passed, 1 matching test |
+| `cargo test -p legion-desktop plugin_management -- --nocapture` | passed, 5 matching tests |
+| `cargo test -p legion-app plugin -- --nocapture` | passed, 1 matching app plugin test |
 | `cargo run -p xtask -- check-deps` | passed |
 | `cargo fmt --all --check` | passed |
 

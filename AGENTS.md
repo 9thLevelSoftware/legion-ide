@@ -2,7 +2,7 @@
 
 This file provides guidance to agents when working with code in this repository.
 
-- Phase gates: `cargo run -p xtask -- check-deps`; `cargo fmt --all --check`; `cargo check --workspace --all-targets`; `cargo test --workspace --all-targets`; `cargo clippy --workspace --all-targets -- -D warnings`; CI runs cargo-deny on the Linux matrix leg with warning-level policy in `deny.toml`; local full phase-gate scripts run `cargo deny check` when cargo-deny is installed.
+- Phase gates: `cargo run -p xtask -- check-deps`; `cargo run -p xtask -- docs-hygiene`; `cargo fmt --all --check`; `cargo check --workspace --all-targets`; `cargo test --workspace --all-targets`; `cargo clippy --workspace --all-targets -- -D warnings`; CI runs cargo-deny on the Linux matrix leg with warning-level policy in `deny.toml`; local full phase-gate scripts run `cargo deny check` when cargo-deny is installed.
 - Single test examples: `cargo test -p legion-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict`; list editor perf tests with `cargo test -p legion-editor --test performance_suite -- --list`.
 - `xtask check-deps` parses `plans/dependency-policy.md` sections 1/2 and also hardcodes required deps plus forbidden `legion-editor -> legion-project`; update policy/protocol symbols and `xtask` together.
 - Current UI shell is projection-only: `legion-ui` emits `CommandDispatchIntent` and accepts snapshots; do not put editor session/text ownership back into UI.

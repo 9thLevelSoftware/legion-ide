@@ -9,7 +9,7 @@ status: accepted; Plan 07-05 ran final gates and the main Phase 7 evidence now s
 | Area | Signoff | Evidence | Status |
 |---|---|---|---|
 | Security signoff | Proposal, terminal, provider, and unsupported-surface boundaries remain policy-gated. | `phase-7-local-workflow-smoke.md`, `phase-7-known-limitations.md` | Accepted |
-| Privacy signoff | Diagnostics and health rows are metadata-only and tested against secret-like dirty text, terminal payload, and prompt markers. | `phase-7-operational-health-diagnostics.md`, `cargo test -p devil-desktop --test diagnostics_export -- --nocapture` | Accepted |
+| Privacy signoff | Diagnostics and health rows are metadata-only and tested against secret-like dirty text, terminal payload, and prompt markers. | `phase-7-operational-health-diagnostics.md`, `cargo test -p legion-desktop --test diagnostics_export -- --nocapture` | Accepted |
 | Operations signoff | Launch, smoke, diagnostics export, and evidence check commands are documented. | `phase-7-launch-runbook.md` | Accepted |
 | Rollback signoff | No migration or persisted data format change is introduced by Phase 7; rollback is reverting desktop beta code/docs and removing target evidence. | Phase 7 result files | Accepted |
 | Support signoff | Known limitations and manual evidence paths are explicit. | `phase-7-known-limitations.md`, `phase-7-manual-beta-evidence.md` | Accepted |
@@ -25,12 +25,12 @@ status: accepted; Plan 07-05 ran final gates and the main Phase 7 evidence now s
 - `cargo test --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo deny check`
-- `cargo test -p devil-desktop --test beta_workflow -- --nocapture`
-- `cargo test -p devil-desktop --test operational_health -- --nocapture`
-- `cargo test -p devil-desktop --test diagnostics_export -- --nocapture`
+- `cargo test -p legion-desktop --test beta_workflow -- --nocapture`
+- `cargo test -p legion-desktop --test operational_health -- --nocapture`
+- `cargo test -p legion-desktop --test diagnostics_export -- --nocapture`
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun`
 - `bash scripts/gui-smoke.sh --beta --dry-run`
-- `cargo run -p devil-cli -- evidence check --phase gui-phase7`
+- `cargo run -p legion-cli -- evidence check --phase gui-phase7`
 
 ## Go/No-Go Decision
 

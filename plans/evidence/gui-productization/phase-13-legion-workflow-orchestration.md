@@ -60,43 +60,43 @@ Verification recorded in `13-01-RESULT.md`:
 
 ### 13-02 Protocol Workflow Contracts
 
-Plan 13-02 added Legion workflow DTOs to `devil-protocol` for sessions, workers, dependency edges, conflicts, verification gates, sign-off, merge approvals, readiness, and projections.
+Plan 13-02 added Legion workflow DTOs to `legion-protocol` for sessions, workers, dependency edges, conflicts, verification gates, sign-off, merge approvals, readiness, and projections.
 
 The protocol layer remains metadata-first. It validates route metadata, redaction hints, nonzero workflow metadata, provider route references, dependency references, verification evidence, sign-off metadata, and approval-gated readiness.
 
 Verification recorded in `13-02-RESULT.md`:
 
-- `rg -q "LegionWorkflowSession" crates/devil-protocol/src/lib.rs`: passed.
-- `rg -q "validate_legion_workflow" crates/devil-protocol/src/lib.rs`: passed.
-- `cargo test -p devil-protocol --test dto_contracts legion_workflow -- --nocapture`: passed, 5 tests.
-- `cargo check -p devil-protocol`: passed.
+- `rg -q "LegionWorkflowSession" crates/legion-protocol/src/lib.rs`: passed.
+- `rg -q "validate_legion_workflow" crates/legion-protocol/src/lib.rs`: passed.
+- `cargo test -p legion-protocol --test dto_contracts legion_workflow -- --nocapture`: passed, 5 tests.
+- `cargo check -p legion-protocol`: passed.
 
 ### 13-03 Agent Workflow Coordinator
 
-Plan 13-03 added `LegionWorkflowCoordinator` in `devil-agent`.
+Plan 13-03 added `LegionWorkflowCoordinator` in `legion-agent`.
 
 The coordinator schedules ready workers, detects dependency cycles, records same-target conflicts, emits provider route metadata, and collects proposal-only output metadata. It does not import app, UI, or desktop authority.
 
 Verification recorded in `13-03-RESULT.md` and refreshed during Phase 13 review remediation:
 
-- `rg -q "LegionWorkflowCoordinator" crates/devil-agent/src/lib.rs`: passed.
-- `rg -q "devil-app" crates/devil-agent/src/lib.rs; if ($LASTEXITCODE -eq 0) { exit 1 } else { exit 0 }`: passed.
-- `cargo test -p devil-agent legion_workflow -- --nocapture`: passed, 8 tests.
-- `cargo check -p devil-agent`: passed.
+- `rg -q "LegionWorkflowCoordinator" crates/legion-agent/src/lib.rs`: passed.
+- `rg -q "legion-app" crates/legion-agent/src/lib.rs; if ($LASTEXITCODE -eq 0) { exit 1 } else { exit 0 }`: passed.
+- `cargo test -p legion-agent legion_workflow -- --nocapture`: passed, 8 tests.
+- `cargo check -p legion-agent`: passed.
 
 ### 13-04 Tracker Memory Evidence Ledger
 
-Plan 13-04 added metadata-only workflow records to `devil-tracker` and consent-gated outcome candidate handling to `devil-memory`.
+Plan 13-04 added metadata-only workflow records to `legion-tracker` and consent-gated outcome candidate handling to `legion-memory`.
 
 Tracker records use session, worker, proposal, conflict, verification, sign-off, correlation, causality, event sequence, hashes, labels, and redaction metadata. Memory candidates are proposed first and retained only with explicit session or project consent.
 
 Verification recorded in `13-04-RESULT.md`:
 
-- `rg -q "LegionWorkflow" crates/devil-tracker/src/lib.rs`: passed.
-- `rg -q "LegionWorkflow" crates/devil-memory/src/lib.rs`: passed.
-- `cargo test -p devil-tracker legion_workflow -- --nocapture`: passed, 4 tests.
-- `cargo test -p devil-memory legion_workflow -- --nocapture`: passed, 4 tests.
-- `cargo check -p devil-tracker -p devil-memory`: passed.
+- `rg -q "LegionWorkflow" crates/legion-tracker/src/lib.rs`: passed.
+- `rg -q "LegionWorkflow" crates/legion-memory/src/lib.rs`: passed.
+- `cargo test -p legion-tracker legion_workflow -- --nocapture`: passed, 4 tests.
+- `cargo test -p legion-memory legion_workflow -- --nocapture`: passed, 4 tests.
+- `cargo check -p legion-tracker -p legion-memory`: passed.
 
 ### 13-05 App Workflow Composition
 
@@ -106,25 +106,25 @@ The app owns seeded sessions, workflow execution, projection generation, verific
 
 Verification recorded in `13-05-RESULT.md` and refreshed during Phase 13 review remediation:
 
-- `rg -q "LegionWorkflow" crates/devil-app/src/lib.rs`: passed.
-- `rg -q "execute_legion_workflow" crates/devil-app/src/lib.rs`: passed.
-- `cargo test -p devil-app --test legion_workflow_integration -- --nocapture`: passed, 9 tests.
-- `cargo check -p devil-app --all-targets`: passed.
+- `rg -q "LegionWorkflow" crates/legion-app/src/lib.rs`: passed.
+- `rg -q "execute_legion_workflow" crates/legion-app/src/lib.rs`: passed.
+- `cargo test -p legion-app --test legion_workflow_integration -- --nocapture`: passed, 9 tests.
+- `cargo check -p legion-app --all-targets`: passed.
 
 ### 13-06 Desktop Workflow Command Center
 
-Plan 13-06 added projection-only command center support across `devil-ui` and `devil-desktop`.
+Plan 13-06 added projection-only command center support across `legion-ui` and `legion-desktop`.
 
 The UI accepts workflow projections and emits command intents. Desktop renders rows, validates review actions from projection data, reports operational health counts, and translates requests without executing workers, invoking providers, launching terminals, applying proposals, or merging.
 
 Verification recorded in `13-06-RESULT.md`:
 
-- `rg -q "LegionWorkflow" crates/devil-ui/src/ui.rs`: passed.
-- `rg -q "legion workflow command center" crates/devil-desktop/src/view.rs`: passed.
-- `rg -q "Autonomous merge" crates/devil-desktop/src/health.rs`: passed.
-- `cargo test -p devil-ui legion_workflow -- --nocapture`: passed, 4 tests.
-- `cargo test -p devil-desktop --test legion_workflow_command_center -- --nocapture`: passed, 4 tests.
-- `cargo check -p devil-desktop --all-targets`: passed.
+- `rg -q "LegionWorkflow" crates/legion-ui/src/ui.rs`: passed.
+- `rg -q "legion workflow command center" crates/legion-desktop/src/view.rs`: passed.
+- `rg -q "Autonomous merge" crates/legion-desktop/src/health.rs`: passed.
+- `cargo test -p legion-ui legion_workflow -- --nocapture`: passed, 4 tests.
+- `cargo test -p legion-desktop --test legion_workflow_command_center -- --nocapture`: passed, 4 tests.
+- `cargo check -p legion-desktop --all-targets`: passed.
 
 ### 13-07 Evidence Final Gate And Readiness
 
@@ -134,9 +134,9 @@ Final command outcomes are archived in `plans/evidence/gui-productization/phase-
 
 ## Safety Boundary Proof
 
-- `devil-ui` remains projection-only and does not gain app, editor, project, storage, terminal, provider, or workspace mutation dependencies.
-- `devil-desktop` renders workflow status and request rows but does not own workflow sessions, proposal lifecycle, provider routing, or merge authority.
-- `devil-agent` does not depend on `devil-app`, `devil-ui`, or `devil-desktop`.
+- `legion-ui` remains projection-only and does not gain app, editor, project, storage, terminal, provider, or workspace mutation dependencies.
+- `legion-desktop` renders workflow status and request rows but does not own workflow sessions, proposal lifecycle, provider routing, or merge authority.
+- `legion-agent` does not depend on `legion-app`, `legion-ui`, or `legion-desktop`.
 - Local worker output becomes proposal metadata before review.
 - Provider-backed workers are represented by route metadata and assisted-AI trust references.
 - Merge readiness is represented as a protocol/app decision with explicit blockers.
