@@ -1712,6 +1712,110 @@ pub struct StatusMessageProjection {
     pub message: String,
 }
 
+/// App-owned command palette mode projected to renderer adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteMode {
+    /// Workspace file opener mode.
+    File,
+    /// Curated command-dispatch mode.
+    Command,
+    /// Lexical search mode.
+    Search,
+    /// Structural search/rewrite-preview mode.
+    StructuralSearch,
+}
+
+impl PaletteMode {
+    /// Stable label for display-only renderer surfaces.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::File => "Files",
+            Self::Command => "Commands",
+            Self::Search => "Search",
+            Self::StructuralSearch => "Structural Search",
+        }
+    }
+
+    /// Prefix used to force this mode from the palette input.
+    pub fn prefix(self) -> Option<char> {
+        match self {
+            Self::File => None,
+            Self::Command => Some('>'),
+            Self::Search => Some('/'),
+            Self::StructuralSearch => Some('#'),
+        }
+    }
+}
+
+/// Kind of a projected command palette result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteResultKind {
+    /// Workspace file result.
+    File,
+    /// Curated command result.
+    Command,
+    /// Lexical search execution result.
+    Search,
+    /// Structural search execution result.
+    StructuralSearch,
+}
+
+/// One app-ranked result in the command palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteResult {
+    /// Stable result identifier used by app-side selected-result dispatch.
+    pub id: String,
+    /// Result kind.
+    pub kind: PaletteResultKind,
+    /// Primary display title.
+    pub title: String,
+    /// Secondary metadata label.
+    pub detail: Option<String>,
+    /// Shortcut or action hint label.
+    pub shortcut_label: Option<String>,
+    /// Character indices in `title` that matched the current query.
+    pub match_indices: Vec<usize>,
+    /// Reason the row is displayed but not dispatchable.
+    pub disabled_reason: Option<String>,
+}
+
+/// App-owned command palette projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteProjection {
+    /// Whether the foreground palette overlay should be visible.
+    pub open: bool,
+    /// Active palette mode.
+    pub mode: PaletteMode,
+    /// Current input query including a mode prefix when present.
+    pub query: String,
+    /// Search scope used by search and structural-search modes.
+    pub scope: SearchScopeProjection,
+    /// Selected result index, clamped to `results`.
+    pub selected_index: usize,
+    /// Ranked palette results.
+    pub results: Vec<PaletteResult>,
+}
+
+impl PaletteProjection {
+    /// Empty closed palette projection.
+    pub fn closed() -> Self {
+        Self {
+            open: false,
+            mode: PaletteMode::File,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+            selected_index: 0,
+            results: Vec::new(),
+        }
+    }
+}
+
+impl Default for PaletteProjection {
+    fn default() -> Self {
+        Self::closed()
+    }
+}
+
 /// Typed command intent emitted by UI input handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandDispatchIntent {
@@ -1797,6 +1901,31 @@ pub enum CommandDispatchIntent {
         /// Scroll offsets.
         scroll: ViewportScroll,
     },
+    /// Open the app-owned command palette in the requested mode.
+    OpenPalette {
+        /// Requested palette mode.
+        mode: PaletteMode,
+        /// Initial query text.
+        query: String,
+        /// Search scope used by search-flavored palette modes.
+        scope: SearchScopeProjection,
+    },
+    /// Close the app-owned command palette.
+    ClosePalette,
+    /// Update the app-owned palette query.
+    UpdatePaletteQuery {
+        /// Updated query text.
+        query: String,
+    },
+    /// Move the selected palette result by a signed delta.
+    MovePaletteSelection {
+        /// Signed selection delta.
+        delta: i32,
+    },
+    /// Complete the current palette selection where supported.
+    CompletePaletteSelection,
+    /// Dispatch the currently selected palette result through app authority.
+    DispatchPaletteSelection,
     /// Run bounded lexical search through app authority.
     RunSearch {
         /// Search scope.
@@ -2234,6 +2363,8 @@ pub struct ShellProjectionSnapshot {
     pub active_buffer_projection: ActiveBufferProjection,
     /// Status message projections.
     pub status_messages: Vec<StatusMessageProjection>,
+    /// Command palette projection supplied by the application layer.
+    pub palette_projection: PaletteProjection,
     /// Command registry projection supplied by the application layer.
     pub command_registry_projection: CommandRegistryProjection,
     /// Proposal ledger projection supplied by the application layer.
@@ -2316,6 +2447,8 @@ pub struct Shell {
     pub active_buffer_projection: ActiveBufferProjection,
     /// Projected status messages.
     pub status_messages: Vec<StatusMessageProjection>,
+    /// App-owned command palette projection.
+    pub palette_projection: PaletteProjection,
     /// Static command registry projection.
     pub command_registry_projection: CommandRegistryProjection,
     /// Static proposal ledger projection.
@@ -2379,6 +2512,7 @@ impl Shell {
             explorer_projection: snapshot.explorer_projection,
             active_buffer_projection: snapshot.active_buffer_projection,
             status_messages: snapshot.status_messages,
+            palette_projection: snapshot.palette_projection,
             command_registry_projection: snapshot.command_registry_projection,
             proposal_ledger_projection: snapshot.proposal_ledger_projection,
             artifact_ledger_projection: snapshot.artifact_ledger_projection,
@@ -2419,6 +2553,7 @@ impl Shell {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: empty_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -2455,6 +2590,7 @@ impl Shell {
             explorer_projection: self.explorer_projection.clone(),
             active_buffer_projection: self.active_buffer_projection.clone(),
             status_messages: self.status_messages.clone(),
+            palette_projection: self.palette_projection.clone(),
             command_registry_projection: self.command_registry_projection.clone(),
             proposal_ledger_projection: self.proposal_ledger_projection.clone(),
             artifact_ledger_projection: self.artifact_ledger_projection.clone(),
@@ -2490,6 +2626,7 @@ impl Shell {
         self.explorer_projection = snapshot.explorer_projection;
         self.active_buffer_projection = snapshot.active_buffer_projection;
         self.status_messages = snapshot.status_messages;
+        self.palette_projection = snapshot.palette_projection;
         self.command_registry_projection = snapshot.command_registry_projection;
         self.proposal_ledger_projection = snapshot.proposal_ledger_projection;
         self.artifact_ledger_projection = snapshot.artifact_ledger_projection;
@@ -4579,6 +4716,7 @@ mod tests {
                 dirty: false,
             },
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -4638,6 +4776,7 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: ledger.clone(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -4807,6 +4946,7 @@ mod tests {
                 dirty: false,
             },
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -4876,6 +5016,7 @@ mod tests {
                 dirty: false,
             },
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -4939,6 +5080,7 @@ mod tests {
                 dirty: true,
             },
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -5146,6 +5288,7 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -5245,6 +5388,7 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -5331,6 +5475,7 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -5481,6 +5626,7 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
@@ -5579,6 +5725,7 @@ mod tests {
             },
             active_buffer_projection: ActiveBufferProjection::empty(),
             status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),

@@ -21,7 +21,7 @@ use legion_protocol::{
     TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_ui::{
-    CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PanelId,
+    CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
     SearchScopeProjection, Shell, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
 };
 
@@ -38,6 +38,7 @@ use crate::{
     },
     session::DesktopSessionStore,
     smoke::{self, RendererSmokeConfig},
+    theme,
     view::{DesktopProjectionViewState, ProjectionView},
 };
 
@@ -451,15 +452,6 @@ pub struct DesktopRuntime {
     view: ProjectionView,
     workspace_root: PathBuf,
     principal: PrincipalId,
-    open_path_prompt: bool,
-    open_path_text: String,
-    search_prompt: bool,
-    search_query_text: String,
-    search_scope: SearchScopeProjection,
-    structural_search_prompt: bool,
-    structural_search_pattern_text: String,
-    structural_search_rewrite_text: String,
-    structural_search_scope: SearchScopeProjection,
     explorer_expansion: BTreeSet<String>,
     panel_state: SessionPanelState,
     dock_layouts: Vec<DockLayout>,
@@ -533,15 +525,6 @@ impl DesktopRuntime {
             view: ProjectionView::new(),
             workspace_root: config.workspace_root.clone(),
             principal: config.principal,
-            open_path_prompt: false,
-            open_path_text: String::new(),
-            search_prompt: false,
-            search_query_text: String::new(),
-            search_scope: SearchScopeProjection::ActiveFile,
-            structural_search_prompt: false,
-            structural_search_pattern_text: String::new(),
-            structural_search_rewrite_text: String::new(),
-            structural_search_scope: SearchScopeProjection::ActiveFile,
             explorer_expansion,
             panel_state,
             dock_layouts,
@@ -750,10 +733,7 @@ impl DesktopRuntime {
     }
 
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
-        !self.open_path_prompt
-            && !self.search_prompt
-            && !self.structural_search_prompt
-            && !close_dirty_prompt_active(snapshot)
+        !snapshot.palette_projection.open && !close_dirty_prompt_active(snapshot)
     }
 
     fn dispatch_intent(&mut self, intent: CommandDispatchIntent) -> Result<DesktopWorkflowOutcome> {
@@ -783,23 +763,6 @@ impl DesktopRuntime {
 
     fn handle_app_request(&mut self, request: DesktopAppRequest) -> Result<DesktopWorkflowOutcome> {
         match request {
-            DesktopAppRequest::ShowOpenPathPrompt => {
-                self.open_path_prompt = true;
-                self.set_status(StatusSeverity::Info, "Open path requested");
-                Ok(DesktopWorkflowOutcome::OpenPathPromptRequested)
-            }
-            DesktopAppRequest::ShowSearchPrompt { scope } => {
-                self.search_prompt = true;
-                self.search_scope = scope;
-                self.set_status(StatusSeverity::Info, "Search requested");
-                Ok(DesktopWorkflowOutcome::Noop)
-            }
-            DesktopAppRequest::ShowStructuralSearchPrompt { scope } => {
-                self.structural_search_prompt = true;
-                self.structural_search_scope = scope;
-                self.set_status(StatusSeverity::Info, "Structural search requested");
-                Ok(DesktopWorkflowOutcome::Noop)
-            }
             DesktopAppRequest::ToggleExplorerPath { path } => {
                 if !self.explorer_expansion.remove(&path) {
                     self.explorer_expansion.insert(path.clone());
@@ -1193,6 +1156,21 @@ impl DesktopRuntime {
                     format!("Viewport scroll set {}", buffer_id.0),
                 );
                 DesktopWorkflowOutcome::ViewportScrollSet(buffer_id)
+            }
+            AppCommandOutcome::PaletteUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    if projection.open {
+                        format!(
+                            "Command palette: {} results={}",
+                            projection.mode.label(),
+                            projection.results.len()
+                        )
+                    } else {
+                        "Command palette closed".to_string()
+                    },
+                );
+                DesktopWorkflowOutcome::Noop
             }
             AppCommandOutcome::SearchUpdated(projection) => {
                 self.set_status(
@@ -1885,6 +1863,31 @@ impl DesktopEframeApp {
         let editor_input_enabled = self.runtime.editor_input_enabled(&snapshot);
         ui.input(|input| {
             let command = input.modifiers.command;
+            if snapshot.palette_projection.open {
+                if input.key_pressed(egui::Key::Escape) {
+                    actions.push(DesktopAction::ClosePalette);
+                }
+                if input.key_pressed(egui::Key::Enter) {
+                    actions.push(DesktopAction::DispatchPaletteSelection);
+                }
+                if input.key_pressed(egui::Key::ArrowUp) {
+                    actions.push(DesktopAction::MovePaletteSelection { delta: -1 });
+                }
+                if input.key_pressed(egui::Key::ArrowDown) {
+                    actions.push(DesktopAction::MovePaletteSelection { delta: 1 });
+                }
+                if input.key_pressed(egui::Key::PageUp) {
+                    actions.push(DesktopAction::MovePaletteSelection { delta: -8 });
+                }
+                if input.key_pressed(egui::Key::PageDown) {
+                    actions.push(DesktopAction::MovePaletteSelection { delta: 8 });
+                }
+                if input.key_pressed(egui::Key::Tab) {
+                    actions.push(DesktopAction::CompletePaletteSelection);
+                }
+                return;
+            }
+
             if command && input.key_pressed(egui::Key::S) {
                 if input.modifiers.shift {
                     actions.push(DesktopAction::SaveAll);
@@ -1909,10 +1912,23 @@ impl DesktopEframeApp {
                 actions.push(DesktopAction::SwitchTab { buffer_id });
             }
             if command && input.key_pressed(egui::Key::O) {
-                actions.push(DesktopAction::ShowOpenPathPrompt);
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::File,
+                    query: String::new(),
+                    scope: SearchScopeProjection::ActiveFile,
+                });
+            }
+            if command && input.key_pressed(egui::Key::P) {
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::File,
+                    query: String::new(),
+                    scope: SearchScopeProjection::ActiveFile,
+                });
             }
             if command && input.modifiers.alt && input.key_pressed(egui::Key::F) {
-                actions.push(DesktopAction::ShowStructuralSearchPrompt {
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::StructuralSearch,
+                    query: "#".to_string(),
                     scope: if input.modifiers.shift {
                         SearchScopeProjection::Workspace
                     } else {
@@ -1920,7 +1936,9 @@ impl DesktopEframeApp {
                     },
                 });
             } else if command && input.key_pressed(egui::Key::F) {
-                actions.push(DesktopAction::ShowSearchPrompt {
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::Search,
+                    query: "/".to_string(),
                     scope: if input.modifiers.shift {
                         SearchScopeProjection::Workspace
                     } else {
@@ -1956,140 +1974,122 @@ impl DesktopEframeApp {
         }
     }
 
-    fn show_open_path_prompt(&mut self, ctx: &egui::Context) {
-        if !self.runtime.open_path_prompt {
+    fn render_command_palette_overlay(&mut self, ctx: &egui::Context) {
+        let snapshot = self.runtime.projection_snapshot();
+        let palette = &snapshot.palette_projection;
+        if !palette.open {
             return;
         }
 
-        let mut open = true;
-        egui::Window::new("Open path")
-            .open(&mut open)
+        let screen = ctx.content_rect();
+        let tokens = theme::tokens();
+        egui::Area::new("command_palette_scrim".into())
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .interactable(false)
             .show(ctx, |ui| {
-                ui.text_edit_singleline(&mut self.runtime.open_path_text);
-                ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
-                        let path = std::mem::take(&mut self.runtime.open_path_text);
-                        self.runtime.open_path_prompt = false;
-                        let _ = self
-                            .runtime
-                            .handle_action(DesktopAction::OpenPathText(path));
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.runtime.open_path_prompt = false;
-                        self.runtime.open_path_text.clear();
-                        let _ = self
-                            .runtime
-                            .handle_action(DesktopAction::OpenPathDialogCancelled);
-                    }
-                });
+                ui.painter().rect_filled(screen, 0.0, tokens.bg.scrim);
             });
 
-        if !open {
-            self.runtime.open_path_prompt = false;
-        }
-    }
+        let width = screen.width().clamp(320.0, 760.0);
+        let pos = egui::pos2(screen.center().x - width / 2.0, screen.top() + 72.0);
+        egui::Area::new("command_palette_overlay".into())
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(tokens.bg.overlay)
+                    .stroke(egui::Stroke::new(1.0, tokens.border.strong))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.horizontal(|ui| {
+                            ui.label(theme::body_strong(palette.mode.label()));
+                            ui.separator();
+                            ui.label(theme::muted(match palette.scope {
+                                SearchScopeProjection::ActiveFile => "Active file",
+                                SearchScopeProjection::Workspace => "Workspace",
+                            }));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(theme::muted("Esc"));
+                                },
+                            );
+                        });
+                        ui.add_space(8.0);
 
-    fn show_search_prompt(&mut self, ctx: &egui::Context) {
-        if !self.runtime.search_prompt {
-            return;
-        }
+                        let mut query = palette.query.clone();
+                        let response = ui.add_sized(
+                            [width - 28.0, 32.0],
+                            egui::TextEdit::singleline(&mut query)
+                                .hint_text("Files, >commands, /search, #structural search"),
+                        );
+                        response.request_focus();
+                        if response.changed() {
+                            let _ = self
+                                .runtime
+                                .handle_action(DesktopAction::UpdatePaletteQuery { query });
+                        }
 
-        let mut open = true;
-        egui::Window::new("Search").open(&mut open).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.radio_value(
-                    &mut self.runtime.search_scope,
-                    SearchScopeProjection::ActiveFile,
-                    "File",
-                );
-                ui.radio_value(
-                    &mut self.runtime.search_scope,
-                    SearchScopeProjection::Workspace,
-                    "Workspace",
-                );
-            });
-            ui.text_edit_singleline(&mut self.runtime.search_query_text);
-            ui.horizontal(|ui| {
-                if ui.button("Search").clicked() {
-                    let query = self.runtime.search_query_text.clone();
-                    self.runtime.search_prompt = false;
-                    let _ = self.runtime.handle_action(DesktopAction::RunSearch {
-                        scope: self.runtime.search_scope,
-                        query,
-                        limit: 0,
+                        ui.add_space(10.0);
+                        if palette.results.is_empty() {
+                            ui.label(theme::muted("No results"));
+                        } else {
+                            let row_height = 34.0;
+                            for (index, result) in palette.results.iter().take(10).enumerate() {
+                                let selected = index == palette.selected_index;
+                                let row_rect = ui
+                                    .allocate_ui_with_layout(
+                                        egui::vec2(width - 28.0, row_height),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            if selected {
+                                                ui.painter().rect_filled(
+                                                    ui.max_rect(),
+                                                    6.0,
+                                                    tokens.bg.active,
+                                                );
+                                            }
+                                            ui.add_space(8.0);
+                                            ui.vertical(|ui| {
+                                                ui.label(theme::body_strong(&result.title));
+                                                let detail = result
+                                                    .disabled_reason
+                                                    .as_deref()
+                                                    .or(result.detail.as_deref())
+                                                    .unwrap_or("");
+                                                if !detail.is_empty() {
+                                                    ui.label(theme::muted(detail));
+                                                }
+                                            });
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if let Some(shortcut) = &result.shortcut_label {
+                                                        ui.label(theme::muted(shortcut));
+                                                    }
+                                                },
+                                            );
+                                        },
+                                    )
+                                    .response;
+                                if row_rect.clicked() {
+                                    let delta = index as i32 - palette.selected_index as i32;
+                                    if delta != 0 {
+                                        let _ = self.runtime.handle_action(
+                                            DesktopAction::MovePaletteSelection { delta },
+                                        );
+                                    }
+                                    let _ = self
+                                        .runtime
+                                        .handle_action(DesktopAction::DispatchPaletteSelection);
+                                }
+                            }
+                        }
                     });
-                }
-                if ui.button("Cancel").clicked() {
-                    self.runtime.search_prompt = false;
-                    if let Some(query_id) = self
-                        .runtime
-                        .projection_snapshot()
-                        .search_projection
-                        .query_id
-                        .clone()
-                    {
-                        let _ = self
-                            .runtime
-                            .handle_action(DesktopAction::CancelSearch { query_id });
-                    }
-                }
             });
-        });
-
-        if !open {
-            self.runtime.search_prompt = false;
-        }
-    }
-
-    fn show_structural_search_prompt(&mut self, ctx: &egui::Context) {
-        if !self.runtime.structural_search_prompt {
-            return;
-        }
-
-        let mut open = true;
-        egui::Window::new("Structural Search")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.radio_value(
-                        &mut self.runtime.structural_search_scope,
-                        SearchScopeProjection::ActiveFile,
-                        "File",
-                    );
-                    ui.radio_value(
-                        &mut self.runtime.structural_search_scope,
-                        SearchScopeProjection::Workspace,
-                        "Workspace",
-                    );
-                });
-                ui.label("Pattern");
-                ui.text_edit_singleline(&mut self.runtime.structural_search_pattern_text);
-                ui.label("Rewrite");
-                ui.text_edit_singleline(&mut self.runtime.structural_search_rewrite_text);
-                ui.horizontal(|ui| {
-                    if ui.button("Preview").clicked() {
-                        let pattern = self.runtime.structural_search_pattern_text.clone();
-                        let rewrite =
-                            trimmed_optional_text(&self.runtime.structural_search_rewrite_text);
-                        self.runtime.structural_search_prompt = false;
-                        let _ = self
-                            .runtime
-                            .handle_action(DesktopAction::RunStructuralSearch {
-                                scope: self.runtime.structural_search_scope,
-                                pattern,
-                                rewrite,
-                                limit: 0,
-                            });
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.runtime.structural_search_prompt = false;
-                    }
-                });
-            });
-
-        if !open {
-            self.runtime.structural_search_prompt = false;
-        }
     }
 }
 
@@ -2108,21 +2108,10 @@ impl eframe::App for DesktopEframeApp {
         if output.needs_repaint {
             ui.ctx().request_repaint();
         }
-        self.show_open_path_prompt(ui.ctx());
-        self.show_search_prompt(ui.ctx());
-        self.show_structural_search_prompt(ui.ctx());
+        self.render_command_palette_overlay(ui.ctx());
         if self.runtime.quit_requested() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
-    }
-}
-
-fn trimmed_optional_text(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 

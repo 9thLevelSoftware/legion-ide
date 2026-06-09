@@ -6,12 +6,12 @@ use std::time::Duration;
 use legion_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
     PRODUCT_NAME, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    ProductRuntimeSurface, ProposalId, ProposalRejectionReason, ProposalRiskLabel,
-    ProtocolTextRange, TextCoordinate, ViewportProjectionMode, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay, product_mode_allows_runtime_surface,
+    ProposalId, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, TextCoordinate,
+    ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
-    ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PanelId, PanelRegistry,
+    ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode,
+    PaletteProjection, PaletteResultKind, PanelId, PanelRegistry, SearchScopeProjection,
     ShellProjectionSnapshot, StatusSeverity,
 };
 
@@ -135,6 +135,42 @@ impl DesktopStatusBarViewModel {
     }
 }
 
+/// Structured command-palette overlay model for renderer-owned drawing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopCommandPaletteOverlayViewModel {
+    /// Whether the overlay should be rendered.
+    pub open: bool,
+    /// Human-readable mode label.
+    pub mode_label: String,
+    /// Current query text.
+    pub query: String,
+    /// Search scope label for search-oriented modes.
+    pub scope_label: String,
+    /// Projected result rows.
+    pub result_rows: Vec<DesktopCommandPaletteResultViewModel>,
+}
+
+/// Structured command-palette result row for renderer-owned drawing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopCommandPaletteResultViewModel {
+    /// Stable result identifier.
+    pub id: String,
+    /// Human-readable result kind.
+    pub kind_label: String,
+    /// Result title.
+    pub title: String,
+    /// Secondary result metadata.
+    pub detail: Option<String>,
+    /// Shortcut or action hint label.
+    pub shortcut_label: Option<String>,
+    /// Character indices matched by the app-owned scorer.
+    pub match_indices: Vec<usize>,
+    /// Whether this row is currently selected.
+    pub selected: bool,
+    /// Disabled reason when the row is visible but not dispatchable.
+    pub disabled_reason: Option<String>,
+}
+
 /// Testable display model derived only from a shell projection snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProjectionViewModel {
@@ -148,6 +184,8 @@ pub struct DesktopProjectionViewModel {
     pub autonomy_scale_rows: Vec<String>,
     /// Mode escalation confirmation and permission rows.
     pub mode_confirmation_rows: Vec<String>,
+    /// Structured command-palette overlay model.
+    pub command_palette_overlay: DesktopCommandPaletteOverlayViewModel,
     /// Command-palette group and item rows.
     pub command_palette_rows: Vec<String>,
     /// Left sidebar summary rows.
@@ -250,6 +288,7 @@ impl DesktopProjectionViewModel {
         let product_mode_rows = product_mode_rows(snapshot);
         let autonomy_scale_rows = autonomy_scale_rows(snapshot);
         let mode_confirmation_rows = mode_confirmation_rows(snapshot);
+        let command_palette_overlay = command_palette_overlay(snapshot);
         let command_palette_rows = command_palette_rows(snapshot);
         let dock_rows = dock_rows(snapshot, state);
         let dock_panel_rows = dock_panel_rows(snapshot, state);
@@ -259,6 +298,7 @@ impl DesktopProjectionViewModel {
             product_mode_rows,
             autonomy_scale_rows,
             mode_confirmation_rows,
+            command_palette_overlay,
             command_palette_rows,
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
@@ -436,15 +476,23 @@ fn render_top_command_bar(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             avatar(ui, "MK", theme::tokens().text.secondary);
             if soft_button(ui, "Open").clicked() {
-                actions.push(DesktopAction::ShowOpenPathPrompt);
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::File,
+                    query: String::new(),
+                    scope: SearchScopeProjection::ActiveFile,
+                });
             }
             if soft_button(ui, "Search").clicked() {
-                actions.push(DesktopAction::ShowSearchPrompt {
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::Search,
+                    query: "/".to_string(),
                     scope: snapshot.search_projection.scope,
                 });
             }
             if soft_button(ui, "SSR").clicked() {
-                actions.push(DesktopAction::ShowStructuralSearchPrompt {
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::StructuralSearch,
+                    query: "#".to_string(),
                     scope: snapshot.structural_search_projection.scope,
                 });
             }
@@ -1810,7 +1858,9 @@ fn render_manual_context_inspector(
         6,
     );
     if soft_button(ui, "Pattern").clicked() {
-        actions.push(DesktopAction::ShowStructuralSearchPrompt {
+        actions.push(DesktopAction::OpenPalette {
+            mode: PaletteMode::StructuralSearch,
+            query: "#".to_string(),
             scope: snapshot.structural_search_projection.scope,
         });
     }
@@ -2877,16 +2927,6 @@ struct ModeConfirmationSpec {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PaletteItem {
-    group: &'static str,
-    label: &'static str,
-    action: Option<&'static str>,
-    hint: Option<&'static str>,
-    capabilities: &'static [ProductRuntimeSurface],
-    requires_confirmation: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BottomTabSpec {
     id: &'static str,
     label: &'static str,
@@ -3178,158 +3218,70 @@ fn mode_confirmation_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         .collect()
 }
 
+fn command_palette_overlay(
+    snapshot: &ShellProjectionSnapshot,
+) -> DesktopCommandPaletteOverlayViewModel {
+    let palette = &snapshot.palette_projection;
+    DesktopCommandPaletteOverlayViewModel {
+        open: palette.open,
+        mode_label: palette.mode.label().to_string(),
+        query: palette.query.clone(),
+        scope_label: match palette.scope {
+            SearchScopeProjection::ActiveFile => "Active File".to_string(),
+            SearchScopeProjection::Workspace => "Workspace".to_string(),
+        },
+        result_rows: command_palette_result_rows(palette),
+    }
+}
+
+fn command_palette_result_rows(
+    palette: &PaletteProjection,
+) -> Vec<DesktopCommandPaletteResultViewModel> {
+    palette
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| DesktopCommandPaletteResultViewModel {
+            id: result.id.clone(),
+            kind_label: match result.kind {
+                PaletteResultKind::File => "File",
+                PaletteResultKind::Command => "Command",
+                PaletteResultKind::Search => "Search",
+                PaletteResultKind::StructuralSearch => "Structural Search",
+            }
+            .to_string(),
+            title: result.title.clone(),
+            detail: result.detail.clone(),
+            shortcut_label: result.shortcut_label.clone(),
+            match_indices: result.match_indices.clone(),
+            selected: index == palette.selected_index,
+            disabled_reason: result.disabled_reason.clone(),
+        })
+        .collect()
+}
+
 fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    let mode = projected_product_mode(snapshot);
-    let product_mode = mode.to_dock_mode().to_product_mode();
-    let files = projected_palette_files(snapshot);
+    let palette = &snapshot.palette_projection;
     let mut rows = vec![format!(
-        "command palette group: Files prefix=<none> items={}",
-        files.len()
+        "command palette overlay: open={} mode={} query=\"{}\" scope={:?} selected={} results={}",
+        palette.open,
+        palette.mode.label(),
+        palette.query,
+        palette.scope,
+        palette.selected_index,
+        palette.results.len()
     )];
-    rows.extend(files.into_iter().take(6).map(|label| {
-        format!("command palette item: group=Files label={label} requires_ai=false visible=true")
-    }));
-
-    let command_items = [
-        PaletteItem {
-            group: "Commands",
-            label: "Switch to Automate",
-            action: Some("mode:automate"),
-            hint: Some("Legion Workflows"),
-            capabilities: &[ProductRuntimeSurface::Automation],
-            requires_confirmation: true,
-        },
-        PaletteItem {
-            group: "Commands",
-            label: "Switch to Delegate",
-            action: Some("mode:delegate"),
-            hint: None,
-            capabilities: &[ProductRuntimeSurface::DelegatedTask],
-            requires_confirmation: true,
-        },
-        PaletteItem {
-            group: "Commands",
-            label: "Run Directive",
-            action: None,
-            hint: Some("proposal-mediated"),
-            capabilities: &[
-                ProductRuntimeSurface::Automation,
-                ProductRuntimeSurface::WorkerRuntime,
-            ],
-            requires_confirmation: true,
-        },
-        PaletteItem {
-            group: "Commands",
-            label: "Run Tests",
-            action: None,
-            hint: Some("deterministic"),
-            capabilities: &[ProductRuntimeSurface::ManualIde],
-            requires_confirmation: false,
-        },
-        PaletteItem {
-            group: "Commands",
-            label: "Open Permissions & Settings",
-            action: None,
-            hint: Some("local"),
-            capabilities: &[ProductRuntimeSurface::ManualIde],
-            requires_confirmation: false,
-        },
-    ];
-    rows.push(format!(
-        "command palette group: Commands prefix=> items={}",
-        command_items.len()
-    ));
-    rows.extend(command_items.iter().map(|item| {
-        let visible = item
-            .capabilities
-            .iter()
-            .all(|surface| product_mode_allows_runtime_surface(product_mode, *surface));
-        let capabilities = item
-            .capabilities
-            .iter()
-            .map(|surface| format!("{surface:?}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let requires_ai = item
-            .capabilities
-            .iter()
-            .any(|surface| {
-                !matches!(
-                    surface,
-                    ProductRuntimeSurface::ManualIde | ProductRuntimeSurface::PluginManagement
-                )
-            });
+    rows.extend(palette.results.iter().enumerate().map(|(index, result)| {
         format!(
-            "command palette item: group={} label={} action={} hint={} requires_ai={} capabilities=[{}] requires_confirmation={} visible={}",
-            item.group,
-            item.label,
-            item.action.unwrap_or("<none>"),
-            item.hint.unwrap_or("<none>"),
-            requires_ai,
-            capabilities,
-            item.requires_confirmation,
-            visible
+            "command palette result: selected={} kind={:?} title=\"{}\" shortcut={} disabled={} matches={}",
+            index == palette.selected_index,
+            result.kind,
+            result.title,
+            result.shortcut_label.as_deref().unwrap_or("<none>"),
+            result.disabled_reason.as_deref().unwrap_or("<none>"),
+            result.match_indices.len()
         )
     }));
-
-    let agent_rows = projected_palette_agents(snapshot);
-    let agents_visible =
-        product_mode_allows_runtime_surface(product_mode, ProductRuntimeSurface::AssistedAi);
-    rows.push(format!(
-        "command palette group: Agents prefix=@ items={} capabilities=[AssistedAi] visible={}",
-        agent_rows.len(),
-        agents_visible
-    ));
-    rows.extend(agent_rows.into_iter().take(6).map(|label| {
-        format!(
-            "command palette item: group=Agents label={label} requires_ai=true capabilities=[AssistedAi] requires_confirmation=false visible={agents_visible}"
-        )
-    }));
-    rows
-}
-
-fn projected_palette_files(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    let mut labels = BTreeSet::new();
-    for tab in &snapshot.daily_editing_projection.tabs.tabs {
-        if let Some(path) = &tab.file_path {
-            labels.insert(path.0.clone());
-        } else {
-            labels.insert(tab.title.clone());
-        }
-    }
-    for node in &snapshot.explorer_projection.nodes {
-        labels.insert(node.canonical_path.0.clone());
-    }
-    labels.into_iter().collect()
-}
-
-fn projected_palette_agents(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    let mut rows = Vec::new();
-    if snapshot.assisted_ai_projection.provider_count > 0
-        || snapshot.assisted_ai_projection.request_count > 0
-    {
-        rows.push(format!(
-            "Assistant · requests={} previews={}",
-            snapshot.assisted_ai_projection.request_count,
-            snapshot.assisted_ai_projection.preview_ready_count
-        ));
-    }
-    if snapshot.delegated_task_projection.plan_count > 0 {
-        rows.push(format!(
-            "Delegate Team · plans={} steps={}",
-            snapshot.delegated_task_projection.plan_count,
-            snapshot.delegated_task_projection.step_summaries.len()
-        ));
-    }
-    if snapshot.legion_workflow_projection.total_session_count > 0 {
-        rows.push(format!(
-            "Legion Workflow · sessions={}",
-            snapshot.legion_workflow_projection.total_session_count
-        ));
-    }
-    if rows.is_empty() {
-        rows.push("No projected agents".to_string());
-    }
     rows
 }
 

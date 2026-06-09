@@ -30,7 +30,8 @@ use legion_ui::ui::{
 use legion_ui::{
     ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
     AssistInlinePredictionStatusProjection, DockMode, ExplorerNodeProjection, ExplorerProjection,
-    ExplorerSelectionProjection, Shell, StatusMessageProjection, StatusSeverity,
+    ExplorerSelectionProjection, PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind,
+    SearchScopeProjection, Shell, StatusMessageProjection, StatusSeverity,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -748,12 +749,7 @@ fn projection_rendering_models_wireframe_chrome_contract() {
             && row.contains("required=true")
             && row.contains("allow_dependency_install=true")
     }));
-    assert!(manual.command_palette_rows.iter().any(|row| {
-        row.contains("label=Switch to Delegate")
-            && row.contains("requires_ai=true")
-            && row.contains("requires_confirmation=true")
-            && row.contains("visible=false")
-    }));
+    assert!(!manual.command_palette_overlay.open);
     assert!(manual.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Manual")
             && row.contains("id=term")
@@ -784,17 +780,61 @@ fn projection_rendering_models_wireframe_chrome_contract() {
             && row.contains("active=true")
             && row.contains("confirm=required")
     }));
-    assert!(delegated.command_palette_rows.iter().any(|row| {
-        row.contains("group=Agents")
-            && row.contains("Delegate Team")
-            && row.contains("visible=true")
-    }));
+    assert!(!delegated.command_palette_overlay.open);
     assert!(delegated.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Delegates")
             && row.contains("id=test")
             && row.contains("label=Test Runner")
             && row.contains("active=true")
     }));
+}
+
+#[test]
+fn projection_rendering_models_structured_command_palette_overlay() {
+    let mut snapshot = Shell::empty("Palette").projection_snapshot();
+    snapshot.palette_projection = PaletteProjection {
+        open: true,
+        mode: PaletteMode::File,
+        query: "car".to_string(),
+        scope: SearchScopeProjection::ActiveFile,
+        selected_index: 0,
+        results: vec![
+            PaletteResult {
+                id: "file:Cargo.toml".to_string(),
+                kind: PaletteResultKind::File,
+                title: "Cargo.toml".to_string(),
+                detail: Some("workspace file".to_string()),
+                shortcut_label: Some("Enter".to_string()),
+                match_indices: vec![0, 1, 2],
+                disabled_reason: None,
+            },
+            PaletteResult {
+                id: "command:save-all".to_string(),
+                kind: PaletteResultKind::Command,
+                title: "Save All".to_string(),
+                detail: Some("Save every open tab".to_string()),
+                shortcut_label: Some("Ctrl+Shift+S".to_string()),
+                match_indices: Vec::new(),
+                disabled_reason: Some("No dirty tabs".to_string()),
+            },
+        ],
+    };
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(model.command_palette_overlay.open);
+    assert_eq!(model.command_palette_overlay.mode_label, "Files");
+    assert_eq!(model.command_palette_overlay.query, "car");
+    assert_eq!(model.command_palette_overlay.result_rows.len(), 2);
+    assert!(model.command_palette_overlay.result_rows[0].selected);
+    assert_eq!(
+        model.command_palette_overlay.result_rows[0].shortcut_label,
+        Some("Enter".to_string())
+    );
+    assert_eq!(
+        model.command_palette_overlay.result_rows[1].disabled_reason,
+        Some("No dirty tabs".to_string())
+    );
 }
 
 #[test]
