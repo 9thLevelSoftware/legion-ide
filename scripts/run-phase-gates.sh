@@ -4,6 +4,12 @@
 
 set -eu
 
+if ! command -v cargo-deny >/dev/null 2>&1 && ! cargo deny --version >/dev/null 2>&1; then
+  printf '%s\n' 'cargo-deny is required for the supply-chain policy gate.' >&2
+  printf '%s\n' 'Install it with: cargo install cargo-deny --locked' >&2
+  exit 127
+fi
+
 printf '%s\n' '[1/6] Dependency policy gate'
 cargo run -p xtask -- check-deps
 

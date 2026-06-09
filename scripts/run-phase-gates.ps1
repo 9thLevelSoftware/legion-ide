@@ -3,6 +3,13 @@
 
 $ErrorActionPreference = "Stop"
 
+try {
+    cargo deny --version | Out-Null
+} catch {
+    Write-Error "cargo-deny is required for the supply-chain policy gate. Install it with: cargo install cargo-deny --locked"
+    exit 127
+}
+
 Write-Host "[1/6] Dependency policy gate"
 cargo run -p xtask -- check-deps
 
