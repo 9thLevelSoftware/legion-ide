@@ -9,7 +9,7 @@ use legion_protocol::{
     ViewportProjectionMode, product_mode_allows_runtime_surface,
 };
 use legion_ui::{
-    DockLayout, DockMode, DockSide, DockSideLayout, PanelId, PanelRegistry,
+    ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PanelId, PanelRegistry,
     ShellProjectionSnapshot, StatusSeverity,
 };
 
@@ -35,6 +35,78 @@ impl Default for DesktopProjectionViewState {
             expanded_explorer_paths: BTreeSet::new(),
             selected_explorer_file: None,
             dock_layouts: DockLayout::standard_all_modes(),
+        }
+    }
+}
+
+/// Structured status-bar projection derived from app-owned shell data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopStatusBarViewModel {
+    /// Active product-mode label.
+    pub product_mode: String,
+    /// Display-safe state flags such as dirty, degraded, or no active buffer.
+    pub flags: Vec<String>,
+    /// Active file path when a file-backed buffer is selected.
+    pub path: Option<String>,
+    /// Active workspace identifier.
+    pub workspace_id: Option<u128>,
+    /// Active file identifier.
+    pub file_id: Option<u128>,
+    /// Active buffer identifier.
+    pub buffer_id: Option<u128>,
+    /// Text encoding when an active text buffer exists.
+    pub encoding: Option<String>,
+    /// Detected line ending when the bounded projection has enough evidence.
+    pub line_ending: Option<String>,
+    /// Primary cursor position from the bounded viewport projection.
+    pub cursor: Option<DesktopStatusCursor>,
+    /// Language label inferred from the active file path.
+    pub language: Option<String>,
+    /// Real connection state when projected by the application layer.
+    pub connection: Option<String>,
+}
+
+/// One-based cursor display coordinates for the status bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopStatusCursor {
+    /// One-based line number.
+    pub line: u32,
+    /// One-based column number.
+    pub column: u32,
+}
+
+impl DesktopStatusBarViewModel {
+    fn from_snapshot(snapshot: &ShellProjectionSnapshot, flags: &[String]) -> Self {
+        let active = &snapshot.active_buffer_projection;
+        Self {
+            product_mode: snapshot.product_mode.label().to_string(),
+            flags: flags.to_vec(),
+            path: active.file_path.as_ref().map(|path| path.0.clone()),
+            workspace_id: active.workspace_id.map(|workspace| workspace.0),
+            file_id: active.file_id.map(|file| file.0),
+            buffer_id: active.buffer_id.map(|buffer| buffer.0),
+            encoding: active.buffer_id.map(|_| "UTF-8".to_string()),
+            line_ending: status_line_ending(active),
+            cursor: active
+                .viewport
+                .as_ref()
+                .map(|viewport| DesktopStatusCursor {
+                    line: viewport.cursor.line.saturating_add(1),
+                    column: viewport.cursor.character.saturating_add(1),
+                }),
+            language: active
+                .file_path
+                .as_ref()
+                .map(|path| status_language_for_path(&path.0)),
+            connection: None,
+        }
+    }
+
+    fn state_label(&self) -> String {
+        if self.flags.is_empty() {
+            "clean".to_string()
+        } else {
+            self.flags.join(",")
         }
     }
 }
@@ -68,8 +140,8 @@ pub struct DesktopProjectionViewModel {
     pub dock_rows: Vec<String>,
     /// Visible dock panel rows after mode filtering.
     pub dock_panel_rows: Vec<String>,
-    /// Compact status-bar rows.
-    pub status_bar_rows: Vec<String>,
+    /// Compact status-bar projection.
+    pub status_bar: DesktopStatusBarViewModel,
     /// Tab-strip display rows.
     pub tab_rows: Vec<String>,
     /// Explorer display rows.
@@ -169,7 +241,7 @@ impl DesktopProjectionViewModel {
             bottom_tab_rows: bottom_tab_rows(snapshot),
             dock_rows,
             dock_panel_rows,
-            status_bar_rows: status_bar_rows(snapshot, &flags),
+            status_bar: DesktopStatusBarViewModel::from_snapshot(snapshot, &flags),
             tab_rows: tab_rows(snapshot),
             explorer_rows: explorer_rows(snapshot, state),
             explorer_state_rows: explorer_rows(snapshot, state),
@@ -198,10 +270,17 @@ impl DesktopProjectionViewModel {
 }
 
 /// Renderer-owned projection view state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ProjectionView {
     show_trust: bool,
     show_auxiliary: bool,
+    theme_preference: theme::ThemePreference,
+}
+
+impl Default for ProjectionView {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProjectionView {
@@ -210,6 +289,7 @@ impl ProjectionView {
         Self {
             show_trust: true,
             show_auxiliary: true,
+            theme_preference: theme::ThemePreference::all()[0],
         }
     }
 
@@ -229,7 +309,8 @@ impl ProjectionView {
         snapshot: &ShellProjectionSnapshot,
         state: &DesktopProjectionViewState,
     ) -> ProjectionViewOutput {
-        theme::install(ui.ctx());
+        let active_theme = self.theme_preference.resolve(ui.ctx());
+        theme::install(ui.ctx(), &active_theme);
         let model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
         let mut actions = Vec::new();
 
@@ -244,14 +325,14 @@ impl ProjectionView {
             .default_size(272.0)
             .min_size(236.0)
             .resizable(true)
-            .frame(theme::pane_frame(theme::BG_BASE))
+            .frame(theme::pane_frame(theme::tokens().bg.panel))
             .show_inside(ui, |ui| {
                 render_left_sidebar(ui, snapshot, state, &model, &mut actions);
             });
 
         egui::Panel::bottom("legion_desktop_status")
             .exact_size(24.0)
-            .frame(theme::panel_frame(theme::BG_CODE))
+            .frame(theme::panel_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
                 render_status_bar(ui, &model);
             });
@@ -266,7 +347,7 @@ impl ProjectionView {
             .default_size(bottom_height)
             .min_size(112.0)
             .resizable(true)
-            .frame(theme::pane_frame(theme::BG_CODE))
+            .frame(theme::pane_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
                 render_bottom_console(ui, snapshot, &model);
             });
@@ -280,7 +361,7 @@ impl ProjectionView {
             .default_size(right_width)
             .min_size(260.0)
             .resizable(true)
-            .frame(theme::pane_frame(theme::BG_BASE))
+            .frame(theme::pane_frame(theme::tokens().bg.panel))
             .show_inside(ui, |ui| {
                 render_right_dock(
                     ui,
@@ -293,7 +374,7 @@ impl ProjectionView {
             });
 
         egui::CentralPanel::default()
-            .frame(theme::pane_frame(theme::BG_CODE))
+            .frame(theme::pane_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
                 render_code_canvas(ui, snapshot, &model, &mut actions);
             });
@@ -326,7 +407,7 @@ fn render_top_command_bar(
         render_product_mode_switch(ui, level, actions);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            avatar(ui, "MK", theme::TEXT_SECONDARY);
+            avatar(ui, "MK", theme::tokens().text.secondary);
             if soft_button(ui, "Open").clicked() {
                 actions.push(DesktopAction::ShowOpenPathPrompt);
             }
@@ -370,39 +451,47 @@ fn render_product_mode_switch(
     active_level: DesktopProductMode,
     actions: &mut Vec<DesktopAction>,
 ) {
-    theme::card_frame_tinted(theme::BG_INPUT, theme::BORDER_DEFAULT).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(theme::eyebrow("PRODUCT MODE"));
-            for (mode, level, label, color) in [
-                (DesktopProductMode::Manual, "M", "Manual", theme::TEXT_MUTED),
-                (
-                    DesktopProductMode::Assist,
-                    "A",
-                    "Assist",
-                    theme::ACCENT_CYAN,
-                ),
-                (
-                    DesktopProductMode::Delegates,
-                    "D",
-                    "Delegates",
-                    theme::ACCENT_VIOLET,
-                ),
-                (
-                    DesktopProductMode::LegionWorkflows,
-                    "W",
-                    "Legion Workflows",
-                    theme::ACCENT_PURPLE,
-                ),
-            ] {
-                let response = level_pill(ui, level, label, color, mode == active_level);
-                if response.clicked() && mode != active_level {
-                    actions.push(DesktopAction::SetProductMode {
-                        mode: mode.to_dock_mode(),
-                    });
+    theme::card_frame_tinted(theme::tokens().bg.input, theme::tokens().border.default).show(
+        ui,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label(theme::eyebrow("PRODUCT MODE"));
+                for (mode, level, label, color) in [
+                    (
+                        DesktopProductMode::Manual,
+                        "M",
+                        "Manual",
+                        theme::tokens().text.muted,
+                    ),
+                    (
+                        DesktopProductMode::Assist,
+                        "A",
+                        "Assist",
+                        theme::tokens().accent.cyan,
+                    ),
+                    (
+                        DesktopProductMode::Delegates,
+                        "D",
+                        "Delegates",
+                        theme::tokens().accent.violet,
+                    ),
+                    (
+                        DesktopProductMode::LegionWorkflows,
+                        "W",
+                        "Legion Workflows",
+                        theme::tokens().accent.purple,
+                    ),
+                ] {
+                    let response = level_pill(ui, level, label, color, mode == active_level);
+                    if response.clicked() && mode != active_level {
+                        actions.push(DesktopAction::SetProductMode {
+                            mode: mode.to_dock_mode(),
+                        });
+                    }
                 }
-            }
-        });
-    });
+            });
+        },
+    );
 }
 
 fn render_left_sidebar(
@@ -443,12 +532,12 @@ fn render_left_sidebar(
     }
 
     if !model.git_rows.is_empty() {
-        section_label(ui, "Git", Some(theme::ACCENT_GREEN));
+        section_label(ui, "Git", Some(theme::tokens().accent.green));
         render_compact_rows(ui, &model.git_rows, "No projected git rows", 5);
     }
 
     if !snapshot.git_projection.conflicts.is_empty() {
-        section_label(ui, "Conflicts", Some(theme::ACCENT_RED));
+        section_label(ui, "Conflicts", Some(theme::tokens().accent.red));
         for conflict in snapshot.git_projection.conflicts.iter().take(4) {
             ui.horizontal(|ui| {
                 ui.label(theme::body(trim_middle(&conflict.path, 24)));
@@ -565,7 +654,11 @@ fn render_bottom_console(
                     "No structural search results",
                 );
                 if !model.debug_rows.is_empty() {
-                    section_label(&mut columns[1], "Debug", Some(theme::ACCENT_ORANGE));
+                    section_label(
+                        &mut columns[1],
+                        "Debug",
+                        Some(theme::tokens().accent.orange),
+                    );
                     render_compact_rows(
                         &mut columns[1],
                         &model.debug_rows,
@@ -602,18 +695,51 @@ fn render_bottom_console(
 }
 
 fn render_status_bar(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    let status = &model.status_bar;
     ui.set_height(24.0);
     ui.horizontal(|ui| {
-        ui.label(theme::accent("connected", theme::ACCENT_GREEN));
-        ui.label(theme::muted("- fleet-mesh"));
-        ui.separator();
-        for row in &model.status_bar_rows {
-            ui.label(theme::code_muted(trim_middle(row, 56)));
+        if let Some(connection) = &status.connection {
+            ui.label(theme::accent(connection, theme::tokens().accent.green));
+            ui.separator();
+        }
+        let state_color = if status.flags.iter().any(|flag| flag == "dirty") {
+            theme::tokens().accent.amber
+        } else if status.flags.iter().any(|flag| flag == "degraded") {
+            theme::tokens().accent.orange
+        } else if status.flags.iter().any(|flag| flag == "no_active_buffer") {
+            theme::tokens().text.muted
+        } else {
+            theme::tokens().accent.green
+        };
+        ui.label(theme::accent(status.state_label(), state_color));
+        if let Some(path) = &status.path {
+            ui.separator();
+            ui.label(theme::code_muted(trim_middle(path, 56)));
+        }
+        if let Some(buffer_id) = status.buffer_id {
+            ui.separator();
+            ui.label(theme::code_muted(format!("buf {buffer_id}")));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(theme::accent("Product Mode", theme::ACCENT_VIOLET));
-            ui.label(theme::code_muted("UTF-8"));
-            ui.label(theme::code_muted("LF"));
+            ui.label(theme::accent(
+                &status.product_mode,
+                theme::tokens().accent.violet,
+            ));
+            if let Some(encoding) = &status.encoding {
+                ui.label(theme::code_muted(encoding));
+            }
+            if let Some(line_ending) = &status.line_ending {
+                ui.label(theme::code_muted(line_ending));
+            }
+            if let Some(cursor) = status.cursor {
+                ui.label(theme::code_muted(format!(
+                    "Ln {}, Col {}",
+                    cursor.line, cursor.column
+                )));
+            }
+            if let Some(language) = &status.language {
+                ui.label(theme::code_muted(language));
+            }
         });
     });
 }
@@ -664,9 +790,9 @@ fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapsho
 
 fn render_window_controls(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        status_dot(ui, theme::ACCENT_RED);
-        status_dot(ui, theme::ACCENT_AMBER);
-        status_dot(ui, theme::ACCENT_GREEN);
+        status_dot(ui, theme::tokens().accent.red);
+        status_dot(ui, theme::tokens().accent.amber);
+        status_dot(ui, theme::tokens().accent.green);
     });
 }
 
@@ -677,7 +803,12 @@ fn render_branch_pill(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
     } else {
         path.rsplit(['/', '\\']).next().unwrap_or(path)
     };
-    pill(ui, &format!("branch - {label}"), theme::TEXT_MUTED, false);
+    pill(
+        ui,
+        &format!("branch - {label}"),
+        theme::tokens().text.muted,
+        false,
+    );
 }
 
 fn render_engine_status(
@@ -709,12 +840,12 @@ fn render_resource_strip(
         ui.horizontal(|ui| {
             ui.label(theme::accent(
                 format!("{}%", resource_load(snapshot, level)),
-                theme::ACCENT_CYAN,
+                theme::tokens().accent.cyan,
             ));
             ui.separator();
             ui.label(theme::accent(
                 format!("{} tests", snapshot.status_messages.len()),
-                theme::ACCENT_GREEN,
+                theme::tokens().accent.green,
             ));
             ui.separator();
             ui.label(theme::accent(
@@ -754,7 +885,7 @@ fn render_project_tree_panel(
 }
 
 fn render_context_packs(ui: &mut egui::Ui) {
-    section_label(ui, "Context Packs", Some(theme::ACCENT_PURPLE));
+    section_label(ui, "Context Packs", Some(theme::tokens().accent.purple));
     for pack in [
         "Auth system",
         "Billing model",
@@ -764,7 +895,7 @@ fn render_context_packs(ui: &mut egui::Ui) {
     ] {
         theme::ghost_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
-                status_dot(ui, theme::TEXT_MUTED);
+                status_dot(ui, theme::tokens().text.muted);
                 ui.label(theme::body(pack));
             });
         });
@@ -778,7 +909,7 @@ fn render_collapsed_ai_rail(ui: &mut egui::Ui, model: &DesktopProjectionViewMode
         ui.horizontal(|ui| {
             ui.label(theme::eyebrow("MANUAL CONTROL"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::accent("AI disabled", theme::ACCENT_BLUE));
+                ui.label(theme::accent("AI disabled", theme::tokens().accent.blue));
             });
         });
         render_compact_rows(
@@ -792,7 +923,7 @@ fn render_collapsed_ai_rail(ui: &mut egui::Ui, model: &DesktopProjectionViewMode
 
 fn render_assistance_toggles(ui: &mut egui::Ui) {
     ui.add_space(8.0);
-    section_label(ui, "AI Assistance", Some(theme::ACCENT_CYAN));
+    section_label(ui, "AI Assistance", Some(theme::tokens().accent.cyan));
     for label in [
         "Inline completions",
         "Quick fixes",
@@ -803,7 +934,7 @@ fn render_assistance_toggles(ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(theme::body(label));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                pill(ui, "on", theme::ACCENT_CYAN, true);
+                pill(ui, "on", theme::tokens().accent.cyan, true);
             });
         });
     }
@@ -811,7 +942,7 @@ fn render_assistance_toggles(ui: &mut egui::Ui) {
 
 fn render_session_context(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
     ui.add_space(8.0);
-    section_label(ui, "Session Context", Some(theme::ACCENT_BLUE));
+    section_label(ui, "Session Context", Some(theme::tokens().accent.blue));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::eyebrow("CURRENT TASK"));
         ui.label(theme::body(current_objective(snapshot)));
@@ -868,19 +999,19 @@ fn render_sidebar_footer(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) 
         ui,
         "git",
         snapshot.proposal_ledger_projection.rows.len(),
-        theme::ACCENT_AMBER,
+        theme::tokens().accent.amber,
     );
     footer_metric(
         ui,
         "tests",
         snapshot.status_messages.len(),
-        theme::ACCENT_GREEN,
+        theme::tokens().accent.green,
     );
     footer_metric(
         ui,
         "workflows",
         snapshot.delegated_task_projection.plan_count as usize,
-        theme::ACCENT_CYAN,
+        theme::tokens().accent.cyan,
     );
 }
 
@@ -920,7 +1051,7 @@ fn render_tab_strip(
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
-    theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
+    theme::pane_frame(theme::tokens().bg.panel).show(ui, |ui| {
         ui.set_height(34.0);
         ui.horizontal(|ui| {
             let tabs = &snapshot.daily_editing_projection.tabs.tabs;
@@ -933,23 +1064,23 @@ fn render_tab_strip(
                     title.push_str(" *");
                 }
                 let color = if tab.active {
-                    theme::TEXT_PRIMARY
+                    theme::tokens().text.primary
                 } else {
-                    theme::TEXT_MUTED
+                    theme::tokens().text.muted
                 };
                 let response = ui.add(
                     egui::Button::new(theme::accent(title, color))
                         .fill(if tab.active {
-                            theme::BG_CODE
+                            theme::tokens().bg.code
                         } else {
-                            theme::BG_BASE
+                            theme::tokens().bg.panel
                         })
                         .stroke(egui::Stroke::new(
                             1.0,
                             if tab.active {
-                                theme::BORDER_DEFAULT
+                                theme::tokens().border.default
                             } else {
-                                theme::BG_BASE
+                                theme::tokens().bg.panel
                             },
                         ))
                         .corner_radius(egui::CornerRadius::same(6)),
@@ -970,7 +1101,7 @@ fn render_breadcrumb_bar(
     level: DesktopProductMode,
 ) {
     let language = &snapshot.language_tooling_projection;
-    theme::pane_frame(theme::BG_CODE).show(ui, |ui| {
+    theme::pane_frame(theme::tokens().bg.code).show(ui, |ui| {
         ui.set_height(28.0);
         ui.horizontal(|ui| {
             ui.label(theme::code_muted("src"));
@@ -982,7 +1113,7 @@ fn render_breadcrumb_bar(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(theme::muted("TS - LF - UTF-8"));
-                ui.label(theme::accent("checks ready", theme::ACCENT_GREEN));
+                ui.label(theme::accent("checks ready", theme::tokens().accent.green));
                 if level != DesktopProductMode::Manual {
                     ui.label(theme::accent("AI suggestions", level_color(level)));
                 }
@@ -1014,9 +1145,13 @@ fn render_assisted_suggestion_panel(
     actions: &mut Vec<DesktopAction>,
 ) {
     ui.add_space(8.0);
-    theme::card_frame_tinted(theme::BG_RAISED, theme::dim(theme::ACCENT_CYAN, 80)).show(ui, |ui| {
+    theme::card_frame_tinted(
+        theme::tokens().bg.card,
+        theme::dim(theme::tokens().accent.cyan, 80),
+    )
+    .show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(theme::accent("Suggestions", theme::ACCENT_CYAN));
+            ui.label(theme::accent("Suggestions", theme::tokens().accent.cyan));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if soft_button(ui, "Predict").clicked() {
                     actions.push(DesktopAction::RequestAssistInlinePrediction {
@@ -1038,7 +1173,7 @@ fn render_assisted_suggestion_panel(
             .is_some()
         {
             ui.horizontal(|ui| {
-                if primary_button(ui, "Accept", theme::ACCENT_GREEN).clicked() {
+                if primary_button(ui, "Accept", theme::tokens().accent.green).clicked() {
                     actions.push(DesktopAction::AcceptCurrentAssistInlinePrediction);
                 }
                 if soft_button(ui, "Dismiss").clicked() {
@@ -1076,14 +1211,18 @@ fn render_copilot_canvas(
     render_copilot_plan_strip(ui, snapshot);
     ui.columns(2, |columns| {
         theme::code_frame().show(&mut columns[0], |ui| {
-            section_label(ui, current_path(snapshot), Some(theme::ACCENT_BLUE));
+            section_label(
+                ui,
+                current_path(snapshot),
+                Some(theme::tokens().accent.blue),
+            );
             egui::ScrollArea::both().show(ui, |ui| render_code_lines(ui, model));
         });
         theme::code_frame().show(&mut columns[1], |ui| {
             ui.horizontal(|ui| {
-                section_label(ui, "Proposed changes", Some(theme::ACCENT_VIOLET));
+                section_label(ui, "Proposed changes", Some(theme::tokens().accent.violet));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if primary_button(ui, "Apply all", theme::ACCENT_BLUE).clicked()
+                    if primary_button(ui, "Apply all", theme::tokens().accent.blue).clicked()
                         && let Some(proposal_id) = first_proposal_id(snapshot)
                     {
                         actions.push(DesktopAction::ApplyProposal { proposal_id });
@@ -1096,10 +1235,10 @@ fn render_copilot_canvas(
 }
 
 fn render_copilot_plan_strip(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
-    theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
+    theme::pane_frame(theme::tokens().bg.panel).show(ui, |ui| {
         ui.set_height(40.0);
         ui.horizontal(|ui| {
-            section_label(ui, "Delegate Plan", Some(theme::ACCENT_BLUE));
+            section_label(ui, "Delegate Plan", Some(theme::tokens().accent.blue));
             for (index, label) in [
                 "Inspect current file",
                 "Draft proposal",
@@ -1113,9 +1252,9 @@ fn render_copilot_plan_strip(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapsh
                     ui,
                     &format!("{} {label}", index + 1),
                     if index == 0 {
-                        theme::ACCENT_GREEN
+                        theme::tokens().accent.green
                     } else {
-                        theme::TEXT_MUTED
+                        theme::tokens().text.muted
                     },
                     index == 0,
                 );
@@ -1146,9 +1285,9 @@ fn render_proposal_diff_cards(
     }
     for row in rows.iter().take(8) {
         let color = if row.contains("diff") {
-            theme::ACCENT_GREEN
+            theme::tokens().accent.green
         } else {
-            theme::ACCENT_VIOLET
+            theme::tokens().accent.violet
         };
         theme::small_card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1171,12 +1310,16 @@ fn render_delegated_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    theme::pane_frame(theme::BG_CODE).show(ui, |ui| {
+    theme::pane_frame(theme::tokens().bg.code).show(ui, |ui| {
         ui.set_height(220.0);
         ui.horizontal(|ui| {
-            section_label(ui, "Delegated Diff Review", Some(theme::ACCENT_VIOLET));
+            section_label(
+                ui,
+                "Delegated Diff Review",
+                Some(theme::tokens().accent.violet),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if primary_button(ui, "Approve", theme::ACCENT_BLUE).clicked()
+                if primary_button(ui, "Approve", theme::tokens().accent.blue).clicked()
                     && let Some(proposal_id) = first_proposal_id(snapshot)
                 {
                     actions.push(DesktopAction::ApproveProposal { proposal_id });
@@ -1209,12 +1352,15 @@ fn render_fleet_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    theme::pane_frame(theme::BG_BASE).show(ui, |ui| {
+    theme::pane_frame(theme::tokens().bg.panel).show(ui, |ui| {
         ui.set_height(84.0);
         ui.horizontal(|ui| {
-            avatar(ui, "LW", theme::ACCENT_PURPLE);
+            avatar(ui, "LW", theme::tokens().accent.purple);
             ui.vertical(|ui| {
-                ui.label(theme::accent("MASTER DIRECTIVE", theme::ACCENT_PURPLE));
+                ui.label(theme::accent(
+                    "MASTER DIRECTIVE",
+                    theme::tokens().accent.purple,
+                ));
                 ui.label(theme::title(current_objective(snapshot)));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1238,7 +1384,10 @@ fn render_fleet_canvas(
                 snapshot.proposal_ledger_projection.rows.len()
             )));
             ui.separator();
-            ui.label(theme::accent("confidence 87%", theme::ACCENT_GREEN));
+            ui.label(theme::accent(
+                "confidence 87%",
+                theme::tokens().accent.green,
+            ));
         });
     });
     render_task_board(
@@ -1267,21 +1416,21 @@ fn render_task_board(
                 task_column(
                     ui,
                     "ASSIGNED",
-                    theme::TEXT_MUTED,
+                    theme::tokens().text.muted,
                     delegated_plan_rows(snapshot, model, 0),
                     actions,
                 );
                 task_column(
                     ui,
                     "IN PROGRESS",
-                    theme::ACCENT_BLUE,
+                    theme::tokens().accent.blue,
                     delegated_step_rows(snapshot, model),
                     actions,
                 );
                 task_column(
                     ui,
                     "WAITING ON HUMAN",
-                    theme::ACCENT_ORANGE,
+                    theme::tokens().accent.orange,
                     proposal_board_rows(snapshot, model),
                     actions,
                 );
@@ -1292,14 +1441,14 @@ fn render_task_board(
                     } else {
                         "TESTING"
                     },
-                    theme::ACCENT_VIOLET,
+                    theme::tokens().accent.violet,
                     model.language_rows.iter().take(4).cloned().collect(),
                     actions,
                 );
                 task_column(
                     ui,
                     "DONE",
-                    theme::ACCENT_GREEN,
+                    theme::tokens().accent.green,
                     model
                         .operational_health_rows
                         .iter()
@@ -1319,34 +1468,37 @@ fn task_column(
     rows: Vec<String>,
     _actions: &mut Vec<DesktopAction>,
 ) {
-    theme::card_frame_tinted(theme::BG_CANVAS, theme::BORDER_SUBTLE).show(ui, |ui| {
-        ui.set_width(260.0);
-        ui.horizontal(|ui| {
-            status_dot(ui, color);
-            ui.label(theme::accent(title, theme::TEXT_SECONDARY));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                pill(ui, &rows.len().to_string(), color, false);
-            });
-        });
-        ui.separator();
-        if rows.is_empty() {
-            ui.label(theme::muted("No projected rows"));
-        }
-        for (index, row) in rows.iter().take(5).enumerate() {
-            theme::small_card_frame().show(ui, |ui| {
-                ui.label(theme::body_strong(trim_middle(row, 54)));
-                ui.horizontal(|ui| {
-                    let label = format!("{}", index + 1);
-                    avatar(ui, &label, color);
-                    ui.label(theme::muted("metadata-only"));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(theme::accent("review", color));
-                    });
+    theme::card_frame_tinted(theme::tokens().bg.canvas, theme::tokens().border.subtle).show(
+        ui,
+        |ui| {
+            ui.set_width(260.0);
+            ui.horizontal(|ui| {
+                status_dot(ui, color);
+                ui.label(theme::accent(title, theme::tokens().text.secondary));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    pill(ui, &rows.len().to_string(), color, false);
                 });
-                progress_bar(ui, 0.35 + (index as f32 * 0.13).min(0.55), color);
             });
-        }
-    });
+            ui.separator();
+            if rows.is_empty() {
+                ui.label(theme::muted("No projected rows"));
+            }
+            for (index, row) in rows.iter().take(5).enumerate() {
+                theme::small_card_frame().show(ui, |ui| {
+                    ui.label(theme::body_strong(trim_middle(row, 54)));
+                    ui.horizontal(|ui| {
+                        let label = format!("{}", index + 1);
+                        avatar(ui, &label, color);
+                        ui.label(theme::muted("metadata-only"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(theme::accent("review", color));
+                        });
+                    });
+                    progress_bar(ui, 0.35 + (index as f32 * 0.13).min(0.55), color);
+                });
+            }
+        },
+    );
 }
 
 fn render_manual_context_inspector(
@@ -1369,9 +1521,9 @@ fn render_manual_context_inspector(
         "{} problems",
         snapshot.language_tooling_projection.problems.len()
     )));
-    section_label(ui, "Debug", Some(theme::ACCENT_ORANGE));
+    section_label(ui, "Debug", Some(theme::tokens().accent.orange));
     render_compact_rows(ui, &model.debug_rows, "No projected debug state", 6);
-    section_label(ui, "Structural Search", Some(theme::ACCENT_CYAN));
+    section_label(ui, "Structural Search", Some(theme::tokens().accent.cyan));
     render_compact_rows(
         ui,
         &model.structural_search_rows,
@@ -1383,7 +1535,11 @@ fn render_manual_context_inspector(
             scope: snapshot.structural_search_projection.scope,
         });
     }
-    section_label(ui, "Manual Control Boundary", Some(theme::ACCENT_BLUE));
+    section_label(
+        ui,
+        "Manual Control Boundary",
+        Some(theme::tokens().accent.blue),
+    );
     render_compact_rows(
         ui,
         &model.manual_control_rows,
@@ -1409,7 +1565,7 @@ fn render_assisted_inspector(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Delegates", DesktopProductMode::Delegates);
-    section_label(ui, "Current Selection", Some(theme::ACCENT_CYAN));
+    section_label(ui, "Current Selection", Some(theme::tokens().accent.cyan));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::code(current_path(snapshot)));
         for row in model.active_buffer_lines.iter().take(5) {
@@ -1443,7 +1599,7 @@ fn render_pair_session_panel(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Delegate Session", DesktopProductMode::Delegates);
-    section_label(ui, "Current Objective", Some(theme::ACCENT_BLUE));
+    section_label(ui, "Current Objective", Some(theme::tokens().accent.blue));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
         ui.label(theme::code_muted(current_path(snapshot)));
@@ -1455,7 +1611,7 @@ fn render_pair_session_panel(
         ui.label(theme::muted(
             "Guide the delegate, revise the plan, or ask for alternatives...",
         ));
-        if primary_button(ui, "Send", theme::ACCENT_BLUE).clicked() {
+        if primary_button(ui, "Send", theme::tokens().accent.blue).clicked() {
             actions.push(DesktopAction::SendDelegateChat {
                 prompt_label: "desktop pair feedback".to_string(),
             });
@@ -1471,10 +1627,10 @@ fn render_delegation_console(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Delegation Console", DesktopProductMode::Delegates);
-    section_label(ui, "Delegate Task", Some(theme::ACCENT_VIOLET));
+    section_label(ui, "Delegate Task", Some(theme::tokens().accent.violet));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::muted("Delegate a scoped task to projected agents"));
-        if primary_button(ui, "Delegate", theme::ACCENT_BLUE).clicked() {
+        if primary_button(ui, "Delegate", theme::tokens().accent.blue).clicked() {
             actions.push(DesktopAction::StartAiProposal {
                 instruction_label: "desktop delegated task".to_string(),
             });
@@ -1485,7 +1641,7 @@ fn render_delegation_console(
             });
         }
     });
-    section_label(ui, "Approval Queue", Some(theme::ACCENT_ORANGE));
+    section_label(ui, "Approval Queue", Some(theme::tokens().accent.orange));
     render_proposal_cards(ui, snapshot, actions);
     render_delegated_tool_permission_controls(ui, snapshot, actions);
     ui.checkbox(show_trust, "Trust details");
@@ -1505,17 +1661,21 @@ fn render_fleet_console(
         "Legion Workflow Control",
         DesktopProductMode::LegionWorkflows,
     );
-    section_label(ui, "Current Directive", Some(theme::ACCENT_PURPLE));
+    section_label(ui, "Current Directive", Some(theme::tokens().accent.purple));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
         ui.horizontal(|ui| {
-            status_dot(ui, theme::ACCENT_GREEN);
+            status_dot(ui, theme::tokens().accent.green);
             ui.label(theme::muted("Running"));
             ui.separator();
             ui.label(theme::muted("proposal-mediated"));
         });
     });
-    section_label(ui, "Human Approval Queue", Some(theme::ACCENT_ORANGE));
+    section_label(
+        ui,
+        "Human Approval Queue",
+        Some(theme::tokens().accent.orange),
+    );
     render_proposal_cards(ui, snapshot, actions);
     render_delegated_tool_permission_controls(ui, snapshot, actions);
     render_legion_workflow_tool_permission_controls(ui, snapshot, actions);
@@ -1527,7 +1687,7 @@ fn render_fleet_console(
         "No agent decisions projected",
         8,
     );
-    section_label(ui, "Risk Monitor", Some(theme::ACCENT_RED));
+    section_label(ui, "Risk Monitor", Some(theme::tokens().accent.red));
     theme::small_card_frame().show(ui, |ui| {
         if snapshot.legion_workflow_projection.risk_monitors.is_empty() {
             ui.label(theme::muted("No risk monitor rows"));
@@ -1549,9 +1709,9 @@ fn render_fleet_console(
                         monitor.denied_tool_count
                     ),
                     if monitor.state == legion_protocol::LegionWorkflowRiskMonitorState::Halted {
-                        theme::ACCENT_RED
+                        theme::tokens().accent.red
                     } else {
-                        theme::ACCENT_GREEN
+                        theme::tokens().accent.green
                     },
                 ));
             }
@@ -1569,38 +1729,39 @@ fn render_proposal_cards(
         return;
     }
     for row in snapshot.proposal_ledger_projection.rows.iter().take(4) {
-        theme::card_frame_tinted(theme::BG_RAISED, theme::dim(theme::ACCENT_ORANGE, 48)).show(
-            ui,
-            |ui| {
-                ui.label(theme::body_strong(&row.title));
-                ui.horizontal(|ui| {
-                    ui.label(theme::muted(format!("{:?}", row.payload_kind)));
-                    ui.separator();
-                    ui.label(theme::accent(
-                        format!("{:?} risk", row.risk_label),
-                        risk_color(row.risk_label),
-                    ));
-                });
-                ui.horizontal(|ui| {
-                    if primary_button(ui, "Approve", theme::ACCENT_GREEN).clicked() {
-                        actions.push(DesktopAction::ApproveProposal {
-                            proposal_id: row.proposal_id,
-                        });
-                    }
-                    if soft_button(ui, "Review").clicked() {
-                        actions.push(DesktopAction::OpenProposalDetails {
-                            proposal_id: row.proposal_id,
-                        });
-                    }
-                    if soft_button(ui, "Reject").clicked() {
-                        actions.push(DesktopAction::RejectProposal {
-                            proposal_id: row.proposal_id,
-                            reason: ProposalRejectionReason::UserRejected,
-                        });
-                    }
-                });
-            },
-        );
+        theme::card_frame_tinted(
+            theme::tokens().bg.card,
+            theme::dim(theme::tokens().accent.orange, 48),
+        )
+        .show(ui, |ui| {
+            ui.label(theme::body_strong(&row.title));
+            ui.horizontal(|ui| {
+                ui.label(theme::muted(format!("{:?}", row.payload_kind)));
+                ui.separator();
+                ui.label(theme::accent(
+                    format!("{:?} risk", row.risk_label),
+                    risk_color(row.risk_label),
+                ));
+            });
+            ui.horizontal(|ui| {
+                if primary_button(ui, "Approve", theme::tokens().accent.green).clicked() {
+                    actions.push(DesktopAction::ApproveProposal {
+                        proposal_id: row.proposal_id,
+                    });
+                }
+                if soft_button(ui, "Review").clicked() {
+                    actions.push(DesktopAction::OpenProposalDetails {
+                        proposal_id: row.proposal_id,
+                    });
+                }
+                if soft_button(ui, "Reject").clicked() {
+                    actions.push(DesktopAction::RejectProposal {
+                        proposal_id: row.proposal_id,
+                        reason: ProposalRejectionReason::UserRejected,
+                    });
+                }
+            });
+        });
     }
 }
 
@@ -1613,7 +1774,7 @@ fn render_delegated_hunk_review_controls(
     if reviews.is_empty() {
         return;
     }
-    section_label(ui, "Hunk Review", Some(theme::ACCENT_VIOLET));
+    section_label(ui, "Hunk Review", Some(theme::tokens().accent.violet));
     for review in reviews.iter().take(4) {
         theme::small_card_frame().show(ui, |ui| {
             ui.label(theme::body_strong(format!(
@@ -1675,11 +1836,11 @@ fn render_delegated_tool_permission_controls(
                 ui.label(theme::accent(
                     format!("{:?}", request.disposition),
                     if request.deny_overrides {
-                        theme::ACCENT_RED
+                        theme::tokens().accent.red
                     } else if request.runtime_allowed {
-                        theme::ACCENT_GREEN
+                        theme::tokens().accent.green
                     } else {
-                        theme::ACCENT_ORANGE
+                        theme::tokens().accent.orange
                     },
                 ));
             });
@@ -1730,11 +1891,11 @@ fn render_legion_workflow_tool_permission_controls(
                 ui.label(theme::accent(
                     format!("{:?}", request.disposition),
                     if request.deny_overrides {
-                        theme::ACCENT_RED
+                        theme::tokens().accent.red
                     } else if request.runtime_allowed {
-                        theme::ACCENT_GREEN
+                        theme::tokens().accent.green
                     } else {
-                        theme::ACCENT_ORANGE
+                        theme::tokens().accent.orange
                     },
                 ));
             });
@@ -1787,7 +1948,7 @@ fn render_legion_workflow_kill_switch_controls(
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::muted(format!("kill switch {}", row.session_id.0)));
             if triggered {
-                ui.label(theme::accent("Triggered", theme::ACCENT_RED));
+                ui.label(theme::accent("Triggered", theme::tokens().accent.red));
             } else if soft_button(ui, "Kill").clicked() {
                 actions.push(DesktopAction::TriggerLegionWorkflowKillSwitch {
                     session_id: row.session_id.clone(),
@@ -1814,7 +1975,7 @@ fn parse_automate_tool_target(
 }
 
 fn render_terminal_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
-    section_label(ui, "Terminal / Runtime", Some(theme::ACCENT_CYAN));
+    section_label(ui, "Terminal / Runtime", Some(theme::tokens().accent.cyan));
     theme::code_frame().show(ui, |ui| {
         render_compact_rows(ui, &model.terminal_rows, "No terminal activity", 10);
         if model.terminal_rows.is_empty() {
@@ -1826,7 +1987,7 @@ fn render_terminal_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel)
 }
 
 fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
-    section_label(ui, "Agent Comm Stream", Some(theme::ACCENT_VIOLET));
+    section_label(ui, "Agent Comm Stream", Some(theme::tokens().accent.violet));
     theme::code_frame().show(ui, |ui| {
         if model.assistant_rows.is_empty() {
             render_compact_rows(ui, &model.manual_control_rows, "No agent stream rows", 4);
@@ -1901,7 +2062,7 @@ fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) -> e
     let fill = if active {
         theme::dim(color, 28)
     } else {
-        theme::dim(theme::TEXT_PRIMARY, 10)
+        theme::dim(theme::tokens().text.primary, 10)
     };
     egui::Frame::NONE
         .fill(fill)
@@ -1910,7 +2071,7 @@ fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) -> e
             if active {
                 theme::dim(color, 90)
             } else {
-                theme::BORDER_DEFAULT
+                theme::tokens().border.default
             },
         ))
         .corner_radius(egui::CornerRadius::same(6))
@@ -1932,7 +2093,11 @@ fn level_pill(
     pill(
         ui,
         &text,
-        if selected { color } else { theme::TEXT_MUTED },
+        if selected {
+            color
+        } else {
+            theme::tokens().text.muted
+        },
         selected,
     )
 }
@@ -1951,8 +2116,8 @@ fn avatar(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 fn soft_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(theme::label(label))
-            .fill(theme::BG_RAISED)
-            .stroke(egui::Stroke::new(1.0, theme::BORDER_DEFAULT))
+            .fill(theme::tokens().bg.card)
+            .stroke(egui::Stroke::new(1.0, theme::tokens().border.default))
             .corner_radius(egui::CornerRadius::same(6)),
     )
 }
@@ -2198,20 +2363,20 @@ fn level_primary_action(level: DesktopProductMode) -> &'static str {
 
 fn level_color(level: DesktopProductMode) -> egui::Color32 {
     match level {
-        DesktopProductMode::Manual => theme::TEXT_MUTED,
-        DesktopProductMode::Assist => theme::ACCENT_CYAN,
-        DesktopProductMode::Delegates => theme::ACCENT_VIOLET,
-        DesktopProductMode::LegionWorkflows => theme::ACCENT_PURPLE,
+        DesktopProductMode::Manual => theme::tokens().text.muted,
+        DesktopProductMode::Assist => theme::tokens().accent.cyan,
+        DesktopProductMode::Delegates => theme::tokens().accent.violet,
+        DesktopProductMode::LegionWorkflows => theme::tokens().accent.purple,
     }
 }
 
 fn risk_color(risk: ProposalRiskLabel) -> egui::Color32 {
     match risk {
-        ProposalRiskLabel::Informational => theme::ACCENT_CYAN,
-        ProposalRiskLabel::Low => theme::ACCENT_GREEN,
-        ProposalRiskLabel::Medium => theme::ACCENT_AMBER,
-        ProposalRiskLabel::High => theme::ACCENT_RED,
-        ProposalRiskLabel::Unknown => theme::TEXT_MUTED,
+        ProposalRiskLabel::Informational => theme::tokens().accent.cyan,
+        ProposalRiskLabel::Low => theme::tokens().accent.green,
+        ProposalRiskLabel::Medium => theme::tokens().accent.amber,
+        ProposalRiskLabel::High => theme::tokens().accent.red,
+        ProposalRiskLabel::Unknown => theme::tokens().text.muted,
     }
 }
 
@@ -2797,26 +2962,50 @@ fn bottom_tab_specs(snapshot: &ShellProjectionSnapshot) -> Vec<BottomTabSpec> {
     );
     match projected_product_mode(snapshot) {
         DesktopProductMode::Manual => vec![
-            BottomTabSpec::new("term", "Terminal", true, theme::TEXT_PRIMARY, None),
-            BottomTabSpec::new("test", "Tests", false, theme::ACCENT_GREEN, tests),
+            BottomTabSpec::new("term", "Terminal", true, theme::tokens().text.primary, None),
+            BottomTabSpec::new("test", "Tests", false, theme::tokens().accent.green, tests),
         ],
         DesktopProductMode::Assist => vec![
-            BottomTabSpec::new("term", "Terminal", true, theme::TEXT_PRIMARY, None),
+            BottomTabSpec::new("term", "Terminal", true, theme::tokens().text.primary, None),
             BottomTabSpec::new(
                 "sugg",
                 "AI Suggestions",
                 false,
-                theme::ACCENT_CYAN,
+                theme::tokens().accent.cyan,
                 suggestions,
             ),
         ],
         DesktopProductMode::Delegates => vec![
-            BottomTabSpec::new("test", "Test Runner", true, theme::ACCENT_GREEN, tests),
-            BottomTabSpec::new("logs", "Agent Logs", false, theme::ACCENT_CYAN, None),
+            BottomTabSpec::new(
+                "test",
+                "Test Runner",
+                true,
+                theme::tokens().accent.green,
+                tests,
+            ),
+            BottomTabSpec::new(
+                "logs",
+                "Agent Logs",
+                false,
+                theme::tokens().accent.cyan,
+                None,
+            ),
         ],
         DesktopProductMode::LegionWorkflows => vec![
-            BottomTabSpec::new("comm", "Comm Stream", true, theme::ACCENT_PURPLE, None),
-            BottomTabSpec::new("term", "Terminal", false, theme::TEXT_PRIMARY, None),
+            BottomTabSpec::new(
+                "comm",
+                "Comm Stream",
+                true,
+                theme::tokens().accent.purple,
+                None,
+            ),
+            BottomTabSpec::new(
+                "term",
+                "Terminal",
+                false,
+                theme::tokens().text.primary,
+                None,
+            ),
         ],
     }
 }
@@ -3030,27 +3219,55 @@ fn bottom_console_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     ]
 }
 
-fn status_bar_rows(snapshot: &ShellProjectionSnapshot, flags: &[String]) -> Vec<String> {
-    let active = &snapshot.active_buffer_projection;
-    let path = active
-        .file_path
-        .as_ref()
-        .map(|path| path.0.as_str())
-        .unwrap_or("<none>");
-    let status = if flags.is_empty() {
-        "clean".to_string()
+fn status_line_ending(active: &ActiveBufferProjection) -> Option<String> {
+    if let Some(viewport) = &active.viewport {
+        let mut saw_lf = false;
+        let mut saw_crlf = false;
+        for metric in &viewport.line_metrics {
+            match metric.line_ending_width {
+                1 => saw_lf = true,
+                2 => saw_crlf = true,
+                _ => {}
+            }
+        }
+        return match (saw_lf, saw_crlf) {
+            (true, true) => Some("Mixed EOL".to_string()),
+            (true, false) => Some("LF".to_string()),
+            (false, true) => Some("CRLF".to_string()),
+            (false, false) => None,
+        };
+    }
+
+    active.small_buffer_text().and_then(|preview| {
+        let has_crlf = preview.contains("\r\n");
+        let has_lf = preview.replace("\r\n", "").contains('\n');
+        match (has_lf, has_crlf) {
+            (true, true) => Some("Mixed EOL".to_string()),
+            (true, false) => Some("LF".to_string()),
+            (false, true) => Some("CRLF".to_string()),
+            (false, false) => None,
+        }
+    })
+}
+
+fn status_language_for_path(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".rs") {
+        "rust"
+    } else if lower.ends_with(".toml") {
+        "toml"
+    } else if lower.ends_with(".ts") || lower.ends_with(".tsx") {
+        "typescript"
+    } else if lower.ends_with(".js") || lower.ends_with(".jsx") {
+        "javascript"
+    } else if lower.ends_with(".md") {
+        "markdown"
+    } else if lower.ends_with(".json") {
+        "json"
     } else {
-        flags.join(",")
-    };
-    vec![
-        format!("status bar: flags={} path={}", status, path),
-        format!(
-            "status bar metadata: workspace={:?} file={:?} buffer={:?}",
-            active.workspace_id.map(|workspace| workspace.0),
-            active.file_id.map(|file| file.0),
-            active.buffer_id.map(|buffer| buffer.0)
-        ),
-    ]
+        "text"
+    }
+    .to_string()
 }
 
 fn render_close_dirty_prompt_controls(

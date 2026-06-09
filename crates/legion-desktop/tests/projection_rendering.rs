@@ -481,12 +481,13 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             .iter()
             .any(|row| row.contains("bottom console"))
     );
-    assert!(
-        model
-            .status_bar_rows
-            .iter()
-            .any(|row| row.contains("status bar"))
-    );
+    assert_eq!(model.status_bar.product_mode, "Delegate");
+    assert_eq!(model.status_bar.flags, vec!["dirty".to_string()]);
+    assert_eq!(model.status_bar.path.as_deref(), Some("Cargo.toml"));
+    assert_eq!(model.status_bar.encoding.as_deref(), Some("UTF-8"));
+    assert_eq!(model.status_bar.line_ending.as_deref(), Some("LF"));
+    assert_eq!(model.status_bar.language.as_deref(), Some("toml"));
+    assert_eq!(model.status_bar.connection, None);
     assert!(
         model
             .tab_rows
@@ -841,9 +842,14 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
     );
     assert!(
         degraded_model
-            .status_bar_rows
-            .iter()
-            .any(|row| row.contains("flags=degraded"))
+            .status_bar
+            .flags
+            .contains(&"degraded".to_string())
+    );
+    assert_eq!(degraded_model.status_bar.path.as_deref(), Some("huge.rs"));
+    assert_eq!(
+        degraded_model.status_bar.cursor,
+        Some(legion_desktop::view::DesktopStatusCursor { line: 1, column: 1 })
     );
     assert!(
         degraded_model
