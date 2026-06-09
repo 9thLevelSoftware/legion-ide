@@ -82,8 +82,12 @@ fn deterministic_large_text(byte_len: usize) -> String {
     text
 }
 
-fn open_ci_large_buffer(engine: &mut EditorEngine, file_id: u128, name: &str) -> BufferId {
-    let text = deterministic_large_text(CI_LARGE_FILE_BYTES);
+fn open_ci_large_buffer(
+    engine: &mut EditorEngine,
+    file_id: u128,
+    name: &str,
+    text: String,
+) -> BufferId {
     engine
         .open_buffer(WorkspaceId(1), FileId(file_id), name, text)
         .expect("open large buffer in degraded mode")
@@ -264,7 +268,9 @@ fn ci_undo_redo_burst_small_deterministic_sample() {
 #[test]
 fn ci_large_file_degraded_open_and_viewport_are_bounded() {
     let mut warmup_engine = EditorEngine::new();
-    let warmup_buffer = open_ci_large_buffer(&mut warmup_engine, 99, "ci-large-warmup.txt");
+    let warmup_text = deterministic_large_text(CI_LARGE_FILE_BYTES);
+    let warmup_buffer =
+        open_ci_large_buffer(&mut warmup_engine, 99, "ci-large-warmup.txt", warmup_text);
     assert_eq!(
         warmup_engine
             .buffer_mode(warmup_buffer)
@@ -273,8 +279,9 @@ fn ci_large_file_degraded_open_and_viewport_are_bounded() {
     );
 
     let mut engine = EditorEngine::new();
+    let text = deterministic_large_text(CI_LARGE_FILE_BYTES);
     let open_start = Instant::now();
-    let buffer = open_ci_large_buffer(&mut engine, 100, "ci-large.txt");
+    let buffer = open_ci_large_buffer(&mut engine, 100, "ci-large.txt", text);
     let open_elapsed = open_start.elapsed();
 
     assert_eq!(
