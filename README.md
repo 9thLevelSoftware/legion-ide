@@ -3,6 +3,7 @@
 Legion IDE is a control-first, AI-native Rust IDE substrate that keeps human authority, proposal review, and metadata-only evidence at the center of local and delegated development workflows.
 
 The current codebase is a Rust workspace that validates the core architecture for editor state, workspace mutation, projection-only UI, desktop rendering, local/hosted AI boundaries, workflow orchestration, and evidence gates.
+
 ## Current Status
 
 Legion is not yet a general-availability desktop product. The current repo is best understood as a validated substrate with explicit phase gates and known productization cut lines.
@@ -54,6 +55,8 @@ The full phase-gate scripts require `cargo-deny` locally:
 cargo install cargo-deny --locked
 cargo deny --version
 ```
+
+If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
 CI runs cargo-deny through `EmbarkStudios/cargo-deny-action`, so local developer machines must install the CLI separately before using `scripts/run-phase-gates.*`.
 

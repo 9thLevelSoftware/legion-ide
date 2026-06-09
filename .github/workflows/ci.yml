@@ -108,6 +108,10 @@ jobs:
           python3 training/convert_to_gguf.py --fixture-smoke --model-dir /tmp/legion-train-smoke --output /tmp/legion-model.gguf --metadata-output /tmp/legion-gguf.json
           python3 -m compileall training evals scripts/models
 
+      - name: Report Linux disk before cargo-deny
+        if: runner.os == 'Linux'
+        run: df -h
+
       - name: Cargo deny check
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
