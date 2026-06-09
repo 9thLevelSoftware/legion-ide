@@ -19,6 +19,7 @@ Use these docs first:
 - `docs/MODES.md` — Manual, Assist, Delegate, and Legion Workflow mode boundaries.
 - `docs/OPERATOR_RUNBOOK.md` — operator-oriented gate/runbook notes.
 - `plans/product-readiness-ledger.md` — readiness matrix and remaining product gaps.
+- `plans/legion-production-master-plan-v0.1.md` — the production master plan (current-state assessment, 2026 market/technology gap analysis, ADR queue, workstreams, milestones to GA).
 - `.almanac/pages/getting-started.md` — local Almanac wiki entry point, if the wiki is checked out locally.
 
 ## Architecture at a Glance
