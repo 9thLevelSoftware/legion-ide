@@ -2350,6 +2350,126 @@ pub enum CommandDispatchIntent {
     },
 }
 
+/// Maximum visible foreground toast notifications.
+pub const TOAST_VISIBLE_LIMIT: usize = 5;
+
+/// Optional action attached to a foreground toast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastActionProjection {
+    /// Button label shown by the renderer.
+    pub label: String,
+    /// Existing command authority intent dispatched when the action is selected.
+    pub intent: CommandDispatchIntent,
+}
+
+/// Renderer-agnostic foreground notification projected from shell status state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastProjection {
+    /// Stable deterministic id for dismissal and testing.
+    pub id: u64,
+    /// Severity classification.
+    pub severity: StatusSeverity,
+    /// Primary notification title.
+    pub title: String,
+    /// Optional secondary notification text.
+    pub body: Option<String>,
+    /// Optional action routed through existing command authority.
+    pub action: Option<ToastActionProjection>,
+    /// Whether the toast should remain visible until explicitly dismissed.
+    pub sticky: bool,
+}
+
+/// Bounded foreground notification stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastStackProjection {
+    /// Visible notification cards.
+    pub visible: Vec<ToastProjection>,
+    /// Count of additional non-dismissed notifications hidden by the visible cap.
+    pub overflow_count: usize,
+}
+
+impl ToastStackProjection {
+    /// Build a bounded toast stack from shell status messages.
+    pub fn from_status_messages(
+        messages: &[StatusMessageProjection],
+        dismissed_ids: &[u64],
+    ) -> Self {
+        let mut toasts = messages
+            .iter()
+            .filter(|message| message.severity != StatusSeverity::Info)
+            .map(ToastProjection::from_status_message)
+            .filter(|toast| !dismissed_ids.contains(&toast.id))
+            .collect::<Vec<_>>();
+        toasts.reverse();
+        let overflow_count = toasts.len().saturating_sub(TOAST_VISIBLE_LIMIT);
+        toasts.truncate(TOAST_VISIBLE_LIMIT);
+        Self {
+            visible: toasts,
+            overflow_count,
+        }
+    }
+
+    /// Empty toast stack.
+    pub fn empty() -> Self {
+        Self {
+            visible: Vec::new(),
+            overflow_count: 0,
+        }
+    }
+}
+
+impl Default for ToastStackProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl ToastProjection {
+    /// Build a toast from an existing status message.
+    pub fn from_status_message(message: &StatusMessageProjection) -> Self {
+        let mut parts = message.message.splitn(2, ':');
+        let first = parts.next().unwrap_or("").trim();
+        let second = parts.next().map(str::trim).filter(|body| !body.is_empty());
+        let title = if first.is_empty() {
+            severity_label(message.severity).to_string()
+        } else {
+            first.to_string()
+        };
+        let body = second.map(ToString::to_string);
+        Self {
+            id: toast_id(message.severity, &message.message),
+            severity: message.severity,
+            title,
+            body,
+            action: None,
+            sticky: message.severity == StatusSeverity::Error,
+        }
+    }
+}
+
+fn severity_label(severity: StatusSeverity) -> &'static str {
+    match severity {
+        StatusSeverity::Info => "Info",
+        StatusSeverity::Warning => "Warning",
+        StatusSeverity::Error => "Error",
+    }
+}
+
+fn toast_id(severity: StatusSeverity, message: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash ^= match severity {
+        StatusSeverity::Info => 0,
+        StatusSeverity::Warning => 1,
+        StatusSeverity::Error => 2,
+    };
+    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for byte in message.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Projection snapshot provided to the shell by the application layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellProjectionSnapshot {
@@ -4762,6 +4882,43 @@ mod tests {
             Some("first")
         );
         assert_eq!(shell.command_dispatch_intents.len(), 1);
+    }
+
+    #[test]
+    fn toast_stack_filters_info_bounds_visible_and_tracks_overflow() {
+        let messages = (0..(TOAST_VISIBLE_LIMIT + 2))
+            .map(|index| StatusMessageProjection {
+                severity: StatusSeverity::Warning,
+                message: format!("Warning {index}: detail"),
+            })
+            .chain(std::iter::once(StatusMessageProjection {
+                severity: StatusSeverity::Info,
+                message: "Info-only status".to_string(),
+            }))
+            .collect::<Vec<_>>();
+
+        let stack = ToastStackProjection::from_status_messages(&messages, &[]);
+        let dismissed = stack.visible[0].id;
+        let dismissed_stack = ToastStackProjection::from_status_messages(&messages, &[dismissed]);
+
+        assert_eq!(stack.visible.len(), TOAST_VISIBLE_LIMIT);
+        assert_eq!(stack.overflow_count, 2);
+        assert!(
+            stack
+                .visible
+                .iter()
+                .all(|toast| toast.severity != StatusSeverity::Info)
+        );
+        assert_eq!(stack.visible[0].title, "Warning 6");
+        assert_eq!(stack.visible[0].body.as_deref(), Some("detail"));
+        assert_eq!(dismissed_stack.visible.len(), TOAST_VISIBLE_LIMIT);
+        assert_eq!(dismissed_stack.overflow_count, 1);
+        assert!(
+            dismissed_stack
+                .visible
+                .iter()
+                .all(|toast| toast.id != dismissed)
+        );
     }
 
     #[test]

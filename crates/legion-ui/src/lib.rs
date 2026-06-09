@@ -20,4 +20,5 @@ pub use ui::{
     SearchStatusProjection, Shell, ShellCommandError, ShellLayoutProjection,
     ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
     StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
+    TOAST_VISIBLE_LIMIT, ToastActionProjection, ToastProjection, ToastStackProjection,
 };

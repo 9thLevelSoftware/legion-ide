@@ -31,7 +31,7 @@ use legion_ui::{
     ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
     AssistInlinePredictionStatusProjection, DockMode, ExplorerNodeProjection, ExplorerProjection,
     ExplorerSelectionProjection, PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind,
-    SearchScopeProjection, Shell, StatusMessageProjection, StatusSeverity,
+    SearchScopeProjection, Shell, StatusMessageProjection, StatusSeverity, TOAST_VISIBLE_LIMIT,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -871,6 +871,77 @@ fn projection_rendering_keeps_selected_palette_result_visible_in_overlay_window(
             .command_palette_rows
             .iter()
             .any(|row| row.contains("selected=12") && row.contains("results=15"))
+    );
+}
+
+#[test]
+fn projection_rendering_models_warning_and_error_statuses_as_toasts() {
+    let mut snapshot = Shell::empty("Toasts").projection_snapshot();
+    snapshot.status_messages = vec![
+        StatusMessageProjection {
+            severity: StatusSeverity::Info,
+            message: "Desktop adapter ready".to_string(),
+        },
+        StatusMessageProjection {
+            severity: StatusSeverity::Warning,
+            message: "Session restore skipped: workspace mismatch".to_string(),
+        },
+        StatusMessageProjection {
+            severity: StatusSeverity::Error,
+            message: "Save failed: stale buffer".to_string(),
+        },
+    ];
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert_eq!(model.toast_stack.visible.len(), 2);
+    assert_eq!(model.toast_stack.visible[0].severity, StatusSeverity::Error);
+    assert_eq!(model.toast_stack.visible[0].title, "Save failed");
+    assert_eq!(
+        model.toast_stack.visible[0].body.as_deref(),
+        Some("stale buffer")
+    );
+    assert!(model.toast_stack.visible[0].sticky);
+    assert_eq!(
+        model.toast_stack.visible[1].title,
+        "Session restore skipped"
+    );
+    assert_eq!(model.toast_stack.overflow_count, 0);
+}
+
+#[test]
+fn projection_rendering_bounds_and_dismisses_toasts() {
+    let mut snapshot = Shell::empty("Toasts").projection_snapshot();
+    snapshot.status_messages = (0..(TOAST_VISIBLE_LIMIT + 2))
+        .map(|index| StatusMessageProjection {
+            severity: StatusSeverity::Warning,
+            message: format!("Warning {index}: detail"),
+        })
+        .collect();
+    let initial = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    let dismissed_id = initial.toast_stack.visible[0].id;
+
+    assert_eq!(initial.toast_stack.visible.len(), TOAST_VISIBLE_LIMIT);
+    assert_eq!(initial.toast_stack.overflow_count, 2);
+
+    let mut dismissed = BTreeSet::new();
+    dismissed.insert(dismissed_id);
+    let model = DesktopProjectionViewModel::from_snapshot_with_state(
+        &snapshot,
+        &DesktopProjectionViewState {
+            dismissed_toast_ids: dismissed,
+            ..DesktopProjectionViewState::default()
+        },
+    );
+
+    assert_eq!(model.toast_stack.visible.len(), TOAST_VISIBLE_LIMIT);
+    assert_eq!(model.toast_stack.overflow_count, 1);
+    assert!(
+        model
+            .toast_stack
+            .visible
+            .iter()
+            .all(|toast| toast.id != dismissed_id)
     );
 }
 

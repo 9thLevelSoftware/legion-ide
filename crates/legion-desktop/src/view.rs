@@ -12,7 +12,7 @@ use legion_protocol::{
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode,
     PaletteProjection, PaletteResultKind, PanelId, PanelRegistry, SearchScopeProjection,
-    ShellProjectionSnapshot, StatusSeverity,
+    ShellProjectionSnapshot, StatusSeverity, ToastActionProjection, ToastStackProjection,
 };
 
 use crate::{
@@ -31,6 +31,8 @@ pub struct DesktopProjectionViewState {
     pub selected_explorer_file: Option<FileId>,
     /// Adapter-local mode-scoped dock layouts.
     pub dock_layouts: Vec<DockLayout>,
+    /// Adapter-local toast ids dismissed by the renderer.
+    pub dismissed_toast_ids: BTreeSet<u64>,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -39,6 +41,7 @@ impl Default for DesktopProjectionViewState {
             expanded_explorer_paths: BTreeSet::new(),
             selected_explorer_file: None,
             dock_layouts: DockLayout::standard_all_modes(),
+            dismissed_toast_ids: BTreeSet::new(),
         }
     }
 }
@@ -173,6 +176,32 @@ pub struct DesktopCommandPaletteResultViewModel {
     pub disabled_reason: Option<String>,
 }
 
+/// Structured foreground toast stack for renderer-owned drawing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopToastStackViewModel {
+    /// Visible toast notifications.
+    pub visible: Vec<DesktopToastViewModel>,
+    /// Additional notification count hidden by the visible cap.
+    pub overflow_count: usize,
+}
+
+/// Structured foreground toast notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopToastViewModel {
+    /// Stable toast identifier used for dismissal.
+    pub id: u64,
+    /// Severity classification.
+    pub severity: StatusSeverity,
+    /// Primary notification title.
+    pub title: String,
+    /// Optional secondary notification text.
+    pub body: Option<String>,
+    /// Optional action routed through existing command authority.
+    pub action: Option<ToastActionProjection>,
+    /// Whether the toast should remain until dismissed.
+    pub sticky: bool,
+}
+
 /// Testable display model derived only from a shell projection snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProjectionViewModel {
@@ -188,6 +217,8 @@ pub struct DesktopProjectionViewModel {
     pub mode_confirmation_rows: Vec<String>,
     /// Structured command-palette overlay model.
     pub command_palette_overlay: DesktopCommandPaletteOverlayViewModel,
+    /// Structured foreground notification stack.
+    pub toast_stack: DesktopToastStackViewModel,
     /// Command-palette group and item rows.
     pub command_palette_rows: Vec<String>,
     /// Left sidebar summary rows.
@@ -291,6 +322,7 @@ impl DesktopProjectionViewModel {
         let autonomy_scale_rows = autonomy_scale_rows(snapshot);
         let mode_confirmation_rows = mode_confirmation_rows(snapshot);
         let command_palette_overlay = command_palette_overlay(snapshot);
+        let toast_stack = toast_stack(snapshot, state);
         let command_palette_rows = command_palette_rows(snapshot);
         let dock_rows = dock_rows(snapshot, state);
         let dock_panel_rows = dock_panel_rows(snapshot, state);
@@ -301,6 +333,7 @@ impl DesktopProjectionViewModel {
             autonomy_scale_rows,
             mode_confirmation_rows,
             command_palette_overlay,
+            toast_stack,
             command_palette_rows,
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
@@ -447,6 +480,8 @@ impl ProjectionView {
             .show_inside(ui, |ui| {
                 render_code_canvas(ui, snapshot, &model, &mut actions);
             });
+
+        render_toast_overlay(ui.ctx(), &model, &mut actions);
 
         ProjectionViewOutput {
             needs_repaint: false,
@@ -812,6 +847,81 @@ fn render_status_bar(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
             }
         });
     });
+}
+
+fn render_toast_overlay(
+    ctx: &egui::Context,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if model.toast_stack.visible.is_empty() && model.toast_stack.overflow_count == 0 {
+        return;
+    }
+
+    let tokens = theme::tokens();
+    egui::Area::new("legion_desktop_toast_stack".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
+        .show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.vertical(|ui| {
+                for toast in &model.toast_stack.visible {
+                    let accent = toast_accent_color(toast.severity);
+                    egui::Frame::new()
+                        .fill(tokens.bg.panel)
+                        .stroke(egui::Stroke::new(1.0, accent))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(10))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    status_dot(ui, accent);
+                                    ui.label(theme::body_strong(&toast.title));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if soft_button(ui, "Dismiss").clicked() {
+                                                actions.push(DesktopAction::DismissToast {
+                                                    toast_id: toast.id,
+                                                });
+                                            }
+                                        },
+                                    );
+                                });
+                                if let Some(body) = &toast.body {
+                                    ui.add_space(3.0);
+                                    ui.label(theme::muted(body));
+                                }
+                                if let Some(action) = &toast.action {
+                                    ui.add_space(6.0);
+                                    if soft_button(ui, &action.label).clicked() {
+                                        actions.push(DesktopAction::InvokeToastAction {
+                                            intent: action.intent.clone(),
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
+                if model.toast_stack.overflow_count > 0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(theme::muted(format!(
+                            "+{} more notifications",
+                            model.toast_stack.overflow_count
+                        )));
+                    });
+                }
+            });
+        });
+}
+
+fn toast_accent_color(severity: StatusSeverity) -> egui::Color32 {
+    match severity {
+        StatusSeverity::Info => theme::tokens().accent.blue,
+        StatusSeverity::Warning => theme::tokens().accent.orange,
+        StatusSeverity::Error => theme::tokens().accent.red,
+    }
 }
 
 fn render_console_section(ui: &mut egui::Ui, title: &str, rows: &[String], empty: &str) {
@@ -3233,6 +3343,34 @@ fn command_palette_overlay(
             SearchScopeProjection::Workspace => "Workspace".to_string(),
         },
         result_rows: command_palette_result_rows(palette),
+    }
+}
+
+fn toast_stack(
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+) -> DesktopToastStackViewModel {
+    let dismissed_ids = state
+        .dismissed_toast_ids
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let stack =
+        ToastStackProjection::from_status_messages(&snapshot.status_messages, &dismissed_ids);
+    DesktopToastStackViewModel {
+        visible: stack
+            .visible
+            .into_iter()
+            .map(|toast| DesktopToastViewModel {
+                id: toast.id,
+                severity: toast.severity,
+                title: toast.title,
+                body: toast.body,
+                action: toast.action,
+                sticky: toast.sticky,
+            })
+            .collect(),
+        overflow_count: stack.overflow_count,
     }
 }
 

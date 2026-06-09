@@ -454,6 +454,7 @@ pub struct DesktopRuntime {
     workspace_root: PathBuf,
     principal: PrincipalId,
     explorer_expansion: BTreeSet<String>,
+    dismissed_toast_ids: BTreeSet<u64>,
     panel_state: SessionPanelState,
     dock_layouts: Vec<DockLayout>,
     session_state_path: Option<PathBuf>,
@@ -527,6 +528,7 @@ impl DesktopRuntime {
             workspace_root: config.workspace_root.clone(),
             principal: config.principal,
             explorer_expansion,
+            dismissed_toast_ids: BTreeSet::new(),
             panel_state,
             dock_layouts,
             session_state_path: config.session_state,
@@ -542,6 +544,14 @@ impl DesktopRuntime {
 
     /// Handle a desktop action through bridge and app-owned authority.
     pub fn handle_action(&mut self, action: DesktopAction) -> Result<DesktopWorkflowOutcome> {
+        if let DesktopAction::DismissToast { toast_id } = action {
+            self.dismissed_toast_ids.insert(toast_id);
+            self.refresh_projection()?;
+            self.last_outcome = DesktopWorkflowOutcome::Noop;
+            self.persist_diagnostics_if_configured();
+            return Ok(DesktopWorkflowOutcome::Noop);
+        }
+
         let snapshot = self.shell.projection_snapshot();
         let bridge_output = self.bridge.translate(action, &snapshot);
         let outcome = match bridge_output {
@@ -730,6 +740,7 @@ impl DesktopRuntime {
             expanded_explorer_paths: self.explorer_expansion.clone(),
             selected_explorer_file: None,
             dock_layouts: self.dock_layouts.clone(),
+            dismissed_toast_ids: self.dismissed_toast_ids.clone(),
         }
     }
 
