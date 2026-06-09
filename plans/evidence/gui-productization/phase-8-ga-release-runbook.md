@@ -22,8 +22,8 @@ This runbook covers the GUI Phase 8 productization track only. It does not repla
 Before a GUI Phase 8 GA release can be promoted:
 
 1. Run the repository gates from `AGENTS.md`: `cargo run -p xtask -- check-deps`, `cargo fmt --all --check`, `cargo check --workspace --all-targets`, `cargo test --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo deny check`.
-2. Run the GUI Phase 8 focused gates: `cargo test -p devil-desktop --test plugin_management -- --nocapture`, `cargo test -p devil-desktop --test collaboration_gui -- --nocapture`, `cargo test -p devil-desktop --test remote_workspace_gui -- --nocapture`, and `cargo test -p devil-desktop --test delegated_task_command_center -- --nocapture`.
-3. Run both GUI and legacy evidence gates: `cargo run -p devil-cli -- evidence check --phase gui-phase8` and `cargo run -p devil-cli -- evidence check --phase phase8`.
+2. Run the GUI Phase 8 focused gates: `cargo test -p legion-desktop --test plugin_management -- --nocapture`, `cargo test -p legion-desktop --test collaboration_gui -- --nocapture`, `cargo test -p legion-desktop --test remote_workspace_gui -- --nocapture`, and `cargo test -p legion-desktop --test delegated_task_command_center -- --nocapture`.
+3. Run both GUI and legacy evidence gates: `cargo run -p legion-cli -- evidence check --phase gui-phase8` and `cargo run -p legion-cli -- evidence check --phase phase8`.
 4. Run smoke entrypoint checks: `powershell -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Help` and `bash scripts/gui-smoke.sh --help`.
 5. Archive Windows, macOS, and Linux CI outputs that include the GUI Phase 8 smoke dry runs and the `gui-phase8` evidence gate.
 

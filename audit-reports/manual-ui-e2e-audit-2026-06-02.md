@@ -1,5 +1,8 @@
 # Audit Report: Manual Mode, Projection UI, and Deterministic IDE Flows
 
+> Historical pre-Legion-rename evidence. This file may contain `devil-*` crate names, old paths, or old commands. Do not copy commands from this file for current Legion work; use `README.md`, `AGENTS.md`, and `docs/OPERATOR_RUNBOOK.md` instead.
+
+
 ## Audit Metadata
 - **Date:** 2026-06-02
 - **Branch:** main at 5341837

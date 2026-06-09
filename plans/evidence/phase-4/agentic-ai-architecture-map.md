@@ -18,29 +18,29 @@ Cloud providers, hosted telemetry, hosted embeddings, gateway execution, vector 
 
 ## Governance prerequisites
 
-- [`dependency-policy.md`](../../dependency-policy.md) permits the Phase 4 app composition edges to `devil-agent`, `devil-ai`, `devil-ai-providers`, `devil-tracker`, and `devil-memory`.
+- [`dependency-policy.md`](../../dependency-policy.md) permits the Phase 4 app composition edges to `legion-agent`, `legion-ai`, `legion-ai-providers`, `legion-tracker`, and `legion-memory`.
 - Phase 4 runtime crates keep protocol DTOs as the boundary and do not depend on app, UI, editor, or workspace ownership.
 - `xtask check-deps` validates required protocol symbols and the Phase 4 runtime boundary tests.
 - Existing proposal-mediated save conflict and dirty-buffer preservation behavior remains covered by app integration tests.
 
 ## Architecture map
 
-- `devil-protocol` owns Phase 4 DTOs, validation helpers, storage request/response variants, route metadata, agent transition metadata, replay manifests, and proposal-only assisted edit conversion.
-- `devil-security` owns AI provider, network, loopback, air-gap, local-provider, remote-provider, tracker, memory, and tool-planning capability decisions.
-- `devil-ai` owns the `ProviderRouter`, validates route metadata, asks the capability broker before provider invocation, refuses remote classes, and returns metadata-only route responses.
-- `devil-ai-providers` owns deterministic local and stubbed provider adapters. The local adapter is test-only deterministic behavior; cloud stubs remain inactive.
-- `devil-agent` owns deterministic run-state transitions and metadata replay. It emits transition, provider-route, or proposal-only outputs, not direct mutations.
-- `devil-tracker` owns metadata-only run ledger records and lookup APIs.
-- `devil-memory` owns opt-in memory candidate review and retention metadata. Retention requires explicit consent and deletion removes retained metadata.
-- `devil-storage` persists metadata-only Phase 4 runtime audit records and replay manifests through protocol storage requests.
-- `devil-observability` emits validated metadata-only Phase 4 runtime and replay events.
-- `devil-app` is the composition root. It assembles context, privacy, provider routing, agent transitions, tracker/memory metadata, proposal registration, storage, and observability.
-- `devil-ui` remains projection-only. It emits `CommandDispatchIntent` values for AI start, cancel, replay, and inspect commands and does not own provider calls, editor state, storage, or workspace writes.
+- `legion-protocol` owns Phase 4 DTOs, validation helpers, storage request/response variants, route metadata, agent transition metadata, replay manifests, and proposal-only assisted edit conversion.
+- `legion-security` owns AI provider, network, loopback, air-gap, local-provider, remote-provider, tracker, memory, and tool-planning capability decisions.
+- `legion-ai` owns the `ProviderRouter`, validates route metadata, asks the capability broker before provider invocation, refuses remote classes, and returns metadata-only route responses.
+- `legion-ai-providers` owns deterministic local and stubbed provider adapters. The local adapter is test-only deterministic behavior; cloud stubs remain inactive.
+- `legion-agent` owns deterministic run-state transitions and metadata replay. It emits transition, provider-route, or proposal-only outputs, not direct mutations.
+- `legion-tracker` owns metadata-only run ledger records and lookup APIs.
+- `legion-memory` owns opt-in memory candidate review and retention metadata. Retention requires explicit consent and deletion removes retained metadata.
+- `legion-storage` persists metadata-only Phase 4 runtime audit records and replay manifests through protocol storage requests.
+- `legion-observability` emits validated metadata-only Phase 4 runtime and replay events.
+- `legion-app` is the composition root. It assembles context, privacy, provider routing, agent transitions, tracker/memory metadata, proposal registration, storage, and observability.
+- `legion-ui` remains projection-only. It emits `CommandDispatchIntent` values for AI start, cancel, replay, and inspect commands and does not own provider calls, editor state, storage, or workspace writes.
 
 ## State machine
 
 - Accepted states are observing, planning, proposing, waiting for approval, applying, verifying, recovering, blocked, cancelled, completed, and failed.
-- Legal transitions are enforced in `devil-agent` and illegal transitions are rejected without recording metadata.
+- Legal transitions are enforced in `legion-agent` and illegal transitions are rejected without recording metadata.
 - Cancellation is represented as metadata and does not apply pending proposals.
 - Replay reconstructs runtime state from `AgentReplayManifest` transition metadata and rejects raw provider/prompt/source markers.
 
@@ -76,14 +76,14 @@ Cloud providers, hosted telemetry, hosted embeddings, gateway execution, vector 
 | Gate | Command | Artifact |
 | --- | --- | --- |
 | Dependency policy | `cargo run -p xtask -- check-deps` | [`dependency-boundary.txt`](dependency-boundary.txt) |
-| Provider router contracts | `cargo test -p devil-ai --all-targets` | [`provider-router-contract-tests.txt`](provider-router-contract-tests.txt) |
-| Local provider adapters | `cargo test -p devil-ai-providers --all-targets` | [`local-provider-adapter-tests.txt`](local-provider-adapter-tests.txt) |
-| Air-gap provider egress | `cargo test -p devil-security --all-targets` | [`air-gap-provider-egress-tests.txt`](air-gap-provider-egress-tests.txt) |
-| Privacy inspector and context manifest | `cargo test -p devil-protocol --test dto_contracts dto_contracts_context_manifest_projection_metadata_only_and_risk_visible`; `cargo test -p devil-protocol --test dto_contracts dto_contracts_privacy_inspector_serializes_metadata_only_and_redacted`; `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only` | [`privacy-inspector-context-manifest-tests.txt`](privacy-inspector-context-manifest-tests.txt) |
-| Agent state machine | `cargo test -p devil-agent --all-targets` | [`agent-state-machine-tests.txt`](agent-state-machine-tests.txt) |
-| Tracker run ledger | `cargo test -p devil-tracker --all-targets`; `cargo test -p devil-storage phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only` | [`tracker-run-ledger-tests.txt`](tracker-run-ledger-tests.txt) |
-| Memory retention consent | `cargo test -p devil-memory --all-targets` | [`memory-retention-consent-tests.txt`](memory-retention-consent-tests.txt) |
-| Proposal routing regression | `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only`; `cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict` | [`proposal-routing-regression.txt`](proposal-routing-regression.txt) |
+| Provider router contracts | `cargo test -p legion-ai --all-targets` | [`provider-router-contract-tests.txt`](provider-router-contract-tests.txt) |
+| Local provider adapters | `cargo test -p legion-ai-providers --all-targets` | [`local-provider-adapter-tests.txt`](local-provider-adapter-tests.txt) |
+| Air-gap provider egress | `cargo test -p legion-security --all-targets` | [`air-gap-provider-egress-tests.txt`](air-gap-provider-egress-tests.txt) |
+| Privacy inspector and context manifest | `cargo test -p legion-protocol --test dto_contracts dto_contracts_context_manifest_projection_metadata_only_and_risk_visible`; `cargo test -p legion-protocol --test dto_contracts dto_contracts_privacy_inspector_serializes_metadata_only_and_redacted`; `cargo test -p legion-app --test workspace_vfs_integration workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only` | [`privacy-inspector-context-manifest-tests.txt`](privacy-inspector-context-manifest-tests.txt) |
+| Agent state machine | `cargo test -p legion-agent --all-targets` | [`agent-state-machine-tests.txt`](agent-state-machine-tests.txt) |
+| Tracker run ledger | `cargo test -p legion-tracker --all-targets`; `cargo test -p legion-storage phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only` | [`tracker-run-ledger-tests.txt`](tracker-run-ledger-tests.txt) |
+| Memory retention consent | `cargo test -p legion-memory --all-targets` | [`memory-retention-consent-tests.txt`](memory-retention-consent-tests.txt) |
+| Proposal routing regression | `cargo test -p legion-app --test workspace_vfs_integration workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only`; `cargo test -p legion-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict` | [`proposal-routing-regression.txt`](proposal-routing-regression.txt) |
 | Formatting | `cargo fmt --all --check` | [`cargo-fmt-check.txt`](cargo-fmt-check.txt) |
 | Workspace check | `cargo check --workspace --all-targets` | [`cargo-check-workspace-all-targets.txt`](cargo-check-workspace-all-targets.txt) |
 | Workspace tests | `cargo test --workspace --all-targets` | [`cargo-test-workspace-all-targets.txt`](cargo-test-workspace-all-targets.txt) |

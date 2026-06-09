@@ -22,7 +22,7 @@ Phase 8 GA release acceptance is recorded after ADR-0025 through ADR-0029, proto
 - Standalone terminal runtime is policy-gated and platform-composed through the PTY boundary. Windows uses ConPTY process attachment and isolated standard handles, Unix uses PTY/process-group plumbing through `nix`, and runtime sessions expose spawn/input/resize/output/close/kill/orphan cleanup while keeping non-native/degraded sessions distinguishable in metadata.
 - Hosted telemetry has a durable local metadata spool/exporter path plus a rustls-only reqwest HTTP exporter and remains disabled by default and denied by air-gap/non-allowlisted endpoint policy.
 - Raw-source retention has a ChaCha20-Poly1305 AEAD file-backed vault path, OS-keyring key-provider support, a KMS envelope-provider contract, and hosted encrypted-bundle export linkage. It remains disabled by default with explicit scoped local and hosted consent required before capture/export.
-- Deterministic fixture crates are active for contract validation only: `devil-remote-transport`, `devil-terminal`, `devil-telemetry`, and `devil-retention`.
+- Deterministic fixture crates are active for contract validation only: `legion-remote-transport`, `legion-terminal`, `legion-telemetry`, and `legion-retention`.
 - Normal observability, storage, remote, terminal, telemetry, plugin, AI, and collaboration metadata continue to reject raw source, raw transcripts, process output, transport payload bodies, prompts, provider payloads, and secrets by default.
 
 ## Ownership And Activation Gates
@@ -39,8 +39,8 @@ Phase 8 GA release acceptance is recorded after ADR-0025 through ADR-0029, proto
 ## Dependency And Authority Map
 
 - Phase 8 runtime crates may depend only on declared protocol/security/platform/storage/observability boundaries in `plans/dependency-policy.md`.
-- `devil-ui` remains projection-only and may not own Phase 8 runtime sessions, transports, PTYs, telemetry spools, retention vaults, storage migrations, or mutation authority.
-- `devil-app` may compose accepted runtime surfaces only through protocol DTOs/ports after the relevant acceptance gates pass.
+- `legion-ui` remains projection-only and may not own Phase 8 runtime sessions, transports, PTYs, telemetry spools, retention vaults, storage migrations, or mutation authority.
+- `legion-app` may compose accepted runtime surfaces only through protocol DTOs/ports after the relevant acceptance gates pass.
 - File/editor mutations from remote, terminal, retention, telemetry, diagnostics, plugin, AI, or collaboration surfaces must remain proposal-mediated with existing workspace/editor preconditions.
 - Air-gap policy denies hosted telemetry, hosted raw-source export, hosted providers, update checks, and non-loopback remote transport.
 

@@ -24,11 +24,11 @@ LSP supervision DTOs
 
 Accepted ownership boundaries:
 
-- `devil-index` owns queue state, parser cache state, semantic records, query results, and metadata-only scheduling decisions.
-- `devil-project` remains the workspace discovery, file identity, fingerprint, and VFS authority.
-- `devil-editor` remains the buffer, snapshot, text transaction, and undo authority.
-- `devil-app` remains the proposal lifecycle, apply, audit-before-success, and rollback orchestrator.
-- `devil-ui` remains projection-only and receives snapshots/intents, not editor sessions or mutation authority.
+- `legion-index` owns queue state, parser cache state, semantic records, query results, and metadata-only scheduling decisions.
+- `legion-project` remains the workspace discovery, file identity, fingerprint, and VFS authority.
+- `legion-editor` remains the buffer, snapshot, text transaction, and undo authority.
+- `legion-app` remains the proposal lifecycle, apply, audit-before-success, and rollback orchestrator.
+- `legion-ui` remains projection-only and receives snapshots/intents, not editor sessions or mutation authority.
 - LSP supervision records are metadata-only; edit-producing responses become proposals before any mutation.
 
 Accepted non-blocking guarantees:

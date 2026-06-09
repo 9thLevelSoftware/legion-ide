@@ -12,7 +12,7 @@ Phase 5 activates only the isolated plugin runtime boundary. The following remai
 - Node-based extension execution
 - Arbitrary host scripting
 
-Plugin network, process, filesystem, terminal, AI, tracker, memory, collaboration, remote, UI, editor, and project authority remains denied by default. `devil-app -> devil-plugin` is active only as app-owned composition over protocol DTOs and does not grant plugin direct app internals.
+Plugin network, process, filesystem, terminal, AI, tracker, memory, collaboration, remote, UI, editor, and project authority remains denied by default. `legion-app -> legion-plugin` is active only as app-owned composition over protocol DTOs and does not grant plugin direct app internals.
 
 Validated by:
 - `plans/dependency-policy.md`

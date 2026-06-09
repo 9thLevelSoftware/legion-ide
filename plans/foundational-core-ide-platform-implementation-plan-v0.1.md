@@ -1,5 +1,8 @@
 # Foundational Core IDE Platform Implementation Plan v0.1
 
+> Historical/superseded planning artifact. Do not use this file as current implementation direction without checking `README.md`, `docs/INDEX.md`, `plans/product-readiness-ledger.md`, and `plans/phase-status-ledger.md`. Some claims may describe pre-rebaseline or pre-Legion-rename behavior.
+
+
 ## Objective
 
 Transform the roadmap in [`plans/foundational-core-ide-platform-roadmap-v0.1.md`](plans/foundational-core-ide-platform-roadmap-v0.1.md) into a handoff-ready technical implementation specification for a standalone, deterministic, low-latency core IDE. This plan preserves local-first operation, no AI runtime dependency, protocol-mediated mutation, trust-gated execution, and phased LSP/plugin introduction.

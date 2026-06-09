@@ -8,6 +8,7 @@ Run from repo root:
 
 ```sh
 cargo run -p xtask -- check-deps
+cargo run -p xtask -- docs-hygiene
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
@@ -15,7 +16,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check
 ```
 
-If any command fails, save exact output under `plans/evidence/legion-e2e/` before fixing.
+If any command fails, save exact output under `plans/evidence/legion-e2e/` before fixing. Documentation hygiene allowlists live in `docs/hygiene-allowlist.toml`; keep entries narrow and historical-only.
 
 ### Supply-chain gate prerequisite
 
@@ -60,7 +61,7 @@ For every implementation task:
 6. fix reviewer findings before proceeding;
 7. commit the task.
 
-Do not ask Kimi to read the entire planning package. Give it the one task section plus the exact source files it needs.
+Do not ask the implementer subagent to read the entire planning package. Give it the one task section plus the exact source files it needs.
 
 ## Safety checks
 

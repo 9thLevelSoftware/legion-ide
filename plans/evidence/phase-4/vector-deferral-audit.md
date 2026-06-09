@@ -8,17 +8,17 @@ Phase 4 keeps embeddings, vector storage, vector retrieval, model-backed retriev
 
 ## Evidence
 
-- `devil-ai-providers::DeterministicLocalProvider::embed` rejects embedding requests with `embedding vectors remain deferred in Phase 4`.
-- `devil-ai-providers::OpenAiStub` rejects hosted embedding requests because the cloud adapter is not implemented in Phase 4.
-- `devil-memory` stores candidate and retention metadata only; it does not store vectors or raw memory bodies.
-- `devil-storage` Phase 4 records persist runtime audit and replay metadata, not vector payloads.
+- `legion-ai-providers::DeterministicLocalProvider::embed` rejects embedding requests with `embedding vectors remain deferred in Phase 4`.
+- `legion-ai-providers::OpenAiStub` rejects hosted embedding requests because the cloud adapter is not implemented in Phase 4.
+- `legion-memory` stores candidate and retention metadata only; it does not store vectors or raw memory bodies.
+- `legion-storage` Phase 4 records persist runtime audit and replay metadata, not vector payloads.
 - `plans/dependency-policy.md` keeps vector indexing deferred behind a later ADR, dependency-policy update, provenance contract, privacy-scope contract, invalidation contract, storage-retention decision, and contract-test suite.
 
 ## Test evidence
 
-- `cargo test -p devil-ai-providers --all-targets`
-- `cargo test -p devil-memory --all-targets`
-- `cargo test -p devil-storage phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only`
+- `cargo test -p legion-ai-providers --all-targets`
+- `cargo test -p legion-memory --all-targets`
+- `cargo test -p legion-storage phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only`
 
 ## Acceptance
 

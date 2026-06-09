@@ -5,12 +5,12 @@ Defines the accepted activation boundary for Phase 13 Legion Workflow Orchestrat
 
 ## Accepted Runtime Boundary
 Legion Workflow Orchestration uses metadata-only tracking via protocol DTOs.
-The app composition (`devil-app`) holds execution authority over tracking dependencies, validating sign-offs, and managing proposal lifecycle states. 
-The agent coordinator (`devil-agent`) leverages sandbox orchestration for local workers, and explicit routes to external models.
+The app composition (`legion-app`) holds execution authority over tracking dependencies, validating sign-offs, and managing proposal lifecycle states.
+The agent coordinator (`legion-agent`) leverages sandbox orchestration for local workers, and explicit routes to external models.
 
 ## Forbidden Behavior
 - Direct mutation of the main workspace is strictly forbidden.
-- UI (`devil-ui`) and desktop (`devil-desktop`) components are projection and event-trigger layers only; they are strictly forbidden from executing workflows, invoking AI, or gaining direct control over editor states.
+- UI (`legion-ui`) and desktop (`legion-desktop`) components are projection and event-trigger layers only; they are strictly forbidden from executing workflows, invoking AI, or gaining direct control over editor states.
 - Raw generated source, prompts, logs, or external provider details must not be persisted indiscriminately; tracking retains metadata exclusively by default.
 
 ## Verification

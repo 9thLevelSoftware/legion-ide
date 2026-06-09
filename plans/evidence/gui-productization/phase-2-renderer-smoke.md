@@ -9,7 +9,7 @@ duration_ms: 1500
 
 ## Command
 
-`cargo run -p devil-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 1500 --evidence plans/evidence/gui-productization/phase-2-renderer-smoke.md`
+`cargo run -p legion-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 1500 --evidence plans/evidence/gui-productization/phase-2-renderer-smoke.md`
 
 ## Timing
 

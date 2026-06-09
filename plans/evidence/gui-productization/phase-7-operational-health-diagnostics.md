@@ -35,9 +35,9 @@ unsupported_surfaces:
 
 ## Commands
 
-- `cargo test -p devil-desktop --test operational_health -- --nocapture`: passed, 2 tests.
-- `cargo test -p devil-desktop --test diagnostics_export -- --nocapture`: passed, 2 tests.
-- `cargo run -p devil-desktop -- --beta-smoke --workspace . --beta-workspace target/gui-phase7-beta-workspace --evidence plans/evidence/gui-productization/phase-7-local-workflow-smoke.md --session-state target/gui-phase7-session.json --diagnostics-export target/gui-phase7-diagnostics.md`: passed.
+- `cargo test -p legion-desktop --test operational_health -- --nocapture`: passed, 2 tests.
+- `cargo test -p legion-desktop --test diagnostics_export -- --nocapture`: passed, 2 tests.
+- `cargo run -p legion-desktop -- --beta-smoke --workspace . --beta-workspace target/gui-phase7-beta-workspace --evidence plans/evidence/gui-productization/phase-7-local-workflow-smoke.md --session-state target/gui-phase7-session.json --diagnostics-export target/gui-phase7-diagnostics.md`: passed.
 - `rg -q "Operational Health" target/gui-phase7-diagnostics.md`: passed.
 - `rg -q "unsupported_surfaces" plans/evidence/gui-productization/phase-7-operational-health-diagnostics.md`: passed.
 

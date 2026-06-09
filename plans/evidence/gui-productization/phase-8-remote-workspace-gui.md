@@ -20,8 +20,8 @@ Covered behavior:
 
 ## Preserved Boundaries
 
-- Remote runtime state remains app-owned. `devil-ui` stores projections only and owns no remote sessions, editor text, proposal state, terminal execution, LSP authority, or transport state.
-- `devil-desktop` validates against projection metadata and emits app/proposal requests only; it does not parse raw transport frames or apply remote operations.
+- Remote runtime state remains app-owned. `legion-ui` stores projections only and owns no remote sessions, editor text, proposal state, terminal execution, LSP authority, or transport state.
+- `legion-desktop` validates against projection metadata and emits app/proposal requests only; it does not parse raw transport frames or apply remote operations.
 - Remote writes remain proposal-mediated. Existing app remote tests still prove denied remote writes and accepted remote fixture writes do not mutate local disk directly.
 - Terminal and LSP rows are descriptor/status metadata only. They do not expose shell output bodies, PTY transcripts, LSP payloads, source text, file contents, secrets, or private keys.
 - Evidence and GUI rows contain metadata only. They do not include raw remote transport frames, remote command output bodies, LSP payload bodies, dirty buffer text, prompt text, or file contents.
@@ -30,15 +30,15 @@ Covered behavior:
 
 | Command | Result |
 |---|---|
-| `rg -q "Remote" crates/devil-protocol/src/lib.rs` | passed |
-| `rg -q "remote" crates/devil-ui/src/ui.rs` | passed |
-| `rg -q "remote_session" crates/devil-app/src/lib.rs` | passed |
-| `rg -q "RemoteWorkspaceSession" crates/devil-protocol/src/lib.rs` | passed |
-| `rg -q "Remote" crates/devil-desktop/src/bridge.rs` | passed |
-| `rg -q "remote workspace" crates/devil-desktop/src/view.rs` | passed |
-| `cargo test -p devil-desktop remote_workspace_gui -- --nocapture` | passed, 3 matching tests |
-| `cargo test -p devil-app remote -- --nocapture` | passed, 2 matching tests |
-| `cargo test -p devil-ui -- --nocapture` | passed, 15 tests |
+| `rg -q "Remote" crates/legion-protocol/src/lib.rs` | passed |
+| `rg -q "remote" crates/legion-ui/src/ui.rs` | passed |
+| `rg -q "remote_session" crates/legion-app/src/lib.rs` | passed |
+| `rg -q "RemoteWorkspaceSession" crates/legion-protocol/src/lib.rs` | passed |
+| `rg -q "Remote" crates/legion-desktop/src/bridge.rs` | passed |
+| `rg -q "remote workspace" crates/legion-desktop/src/view.rs` | passed |
+| `cargo test -p legion-desktop remote_workspace_gui -- --nocapture` | passed, 3 matching tests |
+| `cargo test -p legion-app remote -- --nocapture` | passed, 2 matching tests |
+| `cargo test -p legion-ui -- --nocapture` | passed, 15 tests |
 | `cargo run -p xtask -- check-deps` | passed |
 | `cargo fmt --all --check` | passed |
 
@@ -47,7 +47,7 @@ Covered behavior:
 - `remote_workspace_gui_bridge_routes_actions_with_projection_validation` proves runtime-disabled connect denial, invalid session denial, unknown-session denial, unknown-proposal denial, connect routing through an app request, and remote proposal review routing through `OpenProposalDetails`.
 - `remote_workspace_gui_rows_show_reconnect_offline_terminal_lsp_and_proposals` proves reconnect/offline visibility, terminal descriptor status, LSP descriptor status, filesystem status, metadata-only redaction wording, and proposal-mediated remote review wording.
 - `remote_workspace_gui_workflow_reports_connect_without_local_mutation` proves desktop connect uses app-owned remote authority, projects a connected remote session row, and does not mutate local disk or dirty editor text.
-- `cargo test -p devil-ui -- --nocapture` proves the added remote projection field is carried by shell snapshots without breaking existing projection-only UI contracts.
+- `cargo test -p legion-ui -- --nocapture` proves the added remote projection field is carried by shell snapshots without breaking existing projection-only UI contracts.
 - Existing app remote tests still prove remote runtime is disabled by default, session descriptors are app-owned projection data, remote audit records are metadata-only, remote writes require proposal linkage, and local disk is not mutated by remote operation receipt.
 
 ## Residual Risk

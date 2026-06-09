@@ -27,7 +27,7 @@ Status: accepted.
 Current proof:
 
 - GitHub Actions run: `26590800830`
-- Run URL: `https://github.com/9thLevelSoftware/devil-ide/actions/runs/26590800830`
+- Run URL: `https://github.com/9thLevelSoftware/legion-ide/actions/runs/26590800830`
 - Job: `Milestone validation (macos-latest)`
 - Job conclusion: `success`
 - Created: `2026-05-28T17:24:44Z`
@@ -43,7 +43,7 @@ Status: accepted.
 Current proof:
 
 - GitHub Actions run: `26590800830`
-- Run URL: `https://github.com/9thLevelSoftware/devil-ide/actions/runs/26590800830`
+- Run URL: `https://github.com/9thLevelSoftware/legion-ide/actions/runs/26590800830`
 - Job: `Milestone validation (ubuntu-latest)`
 - Job conclusion: `success`
 - Created: `2026-05-28T17:24:44Z`

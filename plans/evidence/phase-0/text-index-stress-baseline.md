@@ -34,7 +34,7 @@ Current reservations from that archive:
 
 ## Index baseline
 
-The current `devil-index` crate remains a minimal placeholder in this milestone. The accepted baseline is therefore:
+The current `legion-index` crate remains a minimal placeholder in this milestone. The accepted baseline is therefore:
 
 - No semantic indexing, embeddings, or vector retrieval are active in Phase 0.
 - No index mutation path participates in editor keystroke latency.

@@ -18,7 +18,7 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | Phase 5 — WASM isolated extension ecosystem | **Accepted** | [`plans/evidence/phase-5/plugin-architecture-map.md`](evidence/phase-5/plugin-architecture-map.md) | Manifest-validated, capability-checked, quota-bound, metadata-only plugin runtime boundary is accepted. Plugin command invocation is app-owned and protocol-mediated; UI remains projection-only. Marketplace, VS Code compatibility, Node extensions, arbitrary host scripting, network/process/filesystem/terminal authority, collaboration, and remote development remain deferred. |
 | Phase 6 — Collaboration substrate | **Accepted** | [`plans/evidence/phase-6/collaboration-architecture-map.md`](evidence/phase-6/collaboration-architecture-map.md) | Local deterministic collaboration runtime, app-owned session composition/transport envelopes, shared proposal approval gates, reconnect/shutdown lifecycle semantics, metadata-only audit/replay, projection-only UI, and p95/p99 editor overhead evidence are accepted. Production remote network transport, standalone terminal/process execution, hosted telemetry, and raw-source retention remain deferred. |
 | Phase 7 — Remote development | **Accepted** | [`plans/evidence/phase-7/remote-architecture-map.md`](evidence/phase-7/remote-architecture-map.md) | Deterministic edge workspace runtime harness, app-owned remote session composition, proposal-gated remote fixture filesystem mutation, bounded process/PTY/LSP/semantic descriptors, reconnect/offline metadata, security policy gates, and metadata-only audit/storage are accepted. Production network transport, standalone local terminal runtime, hosted telemetry, raw-source retention, and Phase 8 operational hardening remain deferred. |
-| Phase 8 — Hardening | **Accepted** | [`plans/evidence/phase-8/`](evidence/phase-8/) | Phase 8 acceptance: Accepted. The accepted GA evidence includes `phase-8-architecture-map.md`, `platform-matrix-evidence.txt`, and `release-readiness-review.md`. GUI productization is a new post-substrate track; renderer-backed latency, IME, clipboard, focus, and accessibility remain GUI follow-up evidence, not reopened Phase 8 substrate blockers. |
+| Phase 8 — Hardening | **Substrate accepted** | [`plans/evidence/phase-8/`](evidence/phase-8/) | Phase 8 runtime-hardening substrate acceptance: Accepted. The accepted substrate evidence includes `phase-8-architecture-map.md`, `platform-matrix-evidence.txt`, and `release-readiness-review.md`. This acceptance covers the runtime-hardening substrate (production remote transport, standalone local terminal, hosted telemetry/egress, raw-source retention, operational hardening) and is **not** a product GA or release-readiness sign-off. Product GA / release readiness is a separate, post-substrate track that requires additional GUI productization evidence (renderer-backed latency, IME, clipboard, focus, and accessibility), packaging/signing/auto-update decisions, and collaboration/admin/runtime-extension surface decisions; none of those reopen accepted Phase 8 substrate hardening. |
 
 ---
 
@@ -46,11 +46,11 @@ Purpose: unambiguous mapping of accepted evidence to each phase before implement
 | ADR-0022 — Remote edge workspace agent | Accepted | Phase 7 evidence accepts a default-off deterministic edge workspace runtime harness with app-owned composition and proposal-mediated mutation boundaries. |
 | ADR-0023 — Remote transport security | Accepted | Phase 7 evidence accepts metadata-only transport envelopes, trust/capability gating, and deferred production network hardening. |
 | ADR-0024 — Remote execution boundary | Accepted | Phase 7 evidence accepts bounded descriptor-only process, PTY, LSP, and semantic-query surfaces without activating standalone local terminal or LSP runtimes. |
-| ADR-0025 — Production remote network transport | Accepted | Phase 8 GA evidence archives the production transport runtime, security, platform, fault, ownership, and release evidence. |
-| ADR-0026 — Standalone local terminal runtime | Accepted | Phase 8 GA evidence archives native PTY runtime, policy, cleanup, platform, privacy, and release evidence. |
-| ADR-0027 — Hosted telemetry and egress | Accepted | Phase 8 GA evidence archives durable spool, hosted exporter, consent, classifier, failure-mode, and operations evidence. |
-| ADR-0028 — Raw-source retention | Accepted | Phase 8 GA evidence archives encrypted vault, consent, deletion, recovery, privacy, and release evidence. |
-| ADR-0029 — Phase 8 operational hardening | Accepted | Phase 8 GA evidence archives migration/recovery, diagnostics, platform, performance, fault, cargo-deny, rollback, canary, incident, and final gate evidence. |
+| ADR-0025 — Production remote network transport | Accepted | Phase 8 substrate evidence archives the production transport runtime, security, platform, fault, and ownership evidence. Substrate acceptance is not a product GA / release-readiness sign-off. |
+| ADR-0026 — Standalone local terminal runtime | Accepted | Phase 8 substrate evidence archives native PTY runtime, policy, cleanup, platform, and privacy evidence. Substrate acceptance is not a product GA / release-readiness sign-off. |
+| ADR-0027 — Hosted telemetry and egress | Accepted | Phase 8 substrate evidence archives durable spool, hosted exporter, consent, classifier, failure-mode, and operations evidence. Substrate acceptance is not a product GA / release-readiness sign-off. |
+| ADR-0028 — Raw-source retention | Accepted | Phase 8 substrate evidence archives encrypted vault, consent, deletion, recovery, and privacy evidence. Substrate acceptance is not a product GA / release-readiness sign-off. |
+| ADR-0029 — Phase 8 operational hardening | Accepted | Phase 8 substrate evidence archives migration/recovery, diagnostics, platform, performance, fault, cargo-deny, rollback, canary, incident, and final gate evidence. Substrate acceptance is not a product GA / release-readiness sign-off. |
 
 ---
 
@@ -90,7 +90,7 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 6. **R5 — Phase 5 WASM isolated extension ecosystem** — complete and accepted for the manifest-validated, capability-checked, metadata-only plugin runtime boundary.
 7. **R6 — Collaboration substrate** — complete and accepted for the local deterministic, app-owned, metadata-only collaboration substrate.
 8. **R7 — Remote development** — complete and accepted for the deterministic edge workspace runtime harness and app-owned local projection scope.
-9. **R8 — Hardening** — complete and accepted for the archived Phase 8 GA runtime evidence. GUI productization starts after this substrate acceptance and does not reopen accepted Phase 8 runtime hardening.
+9. **R8 — Hardening** — complete and accepted for the archived Phase 8 runtime-hardening substrate evidence. GUI productization starts after this substrate acceptance and does not reopen accepted Phase 8 runtime hardening; product GA / release readiness remains a separate, post-substrate track.
 
 ---
 
@@ -104,7 +104,7 @@ Rationale: the markdown file is the source of truth for crate-level allowed-depe
 - [x] Phase 5 is explicitly accepted.
 - [x] Phase 6 is explicitly accepted.
 - [x] Phase 7 is explicitly accepted for deterministic edge workspace runtime scope.
-- [x] Phase 8 acceptance: Accepted.
+- [x] Phase 8 acceptance: Substrate accepted (runtime hardening). This is **not** a product GA / release-readiness sign-off; product GA / release readiness is a separate, post-substrate track.
 - [x] GUI productization follow-up evidence is tracked as post-substrate work, not as a Phase 8 acceptance blocker.
 - [x] ADR-0002 and ADR-0005 ambiguity is resolved.
 - [x] Historical claims are annotated as historical.

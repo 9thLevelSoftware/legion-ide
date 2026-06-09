@@ -1,5 +1,7 @@
 # Legion IDE
 
+> **License notice:** This codebase is proprietary software. All rights reserved. The source in this repository is provided for internal development and review only; it is not open source, not OSI-licensed, and the workspace `publish` flag is `false` (see `Cargo.toml` `[workspace.package]`). Do not redistribute, sublicense, or treat the contents as permissively licensed. See `LICENSE` (or your internal distribution agreement) for the terms that govern use of this code.
+
 Legion IDE is a control-first, AI-native Rust IDE substrate that keeps human authority, proposal review, and metadata-only evidence at the center of local and delegated development workflows.
 
 The current codebase is a Rust workspace that validates the core architecture for editor state, workspace mutation, projection-only UI, desktop rendering, local/hosted AI boundaries, workflow orchestration, and evidence gates.
@@ -11,6 +13,8 @@ Legion is not yet a general-availability desktop product. The current repo is be
 Use these docs first:
 
 - `AGENTS.md` — concise agent/developer invariants and required gates.
+- `docs/INDEX.md` — entry point for the canonical documentation set (architecture boundaries, pivot, modes, runbook, rename history).
+- `docs/ARCHITECTURE_AUTHORITY_BOUNDARIES.md` — canonical ownership rules (UI projection-only, app composition, workspace authority, AI/provider boundary).
 - `docs/LEGION_PIVOT.md` — product direction and pivot context.
 - `docs/MODES.md` — Manual, Assist, Delegate, and Legion Workflow mode boundaries.
 - `docs/OPERATOR_RUNBOOK.md` — operator-oriented gate/runbook notes.
@@ -33,7 +37,8 @@ Run these before claiming code work is complete:
 
 ```bash
 cargo run -p xtask -- check-deps
-cargo fmt --all -- --check
+cargo run -p xtask -- docs-hygiene
+cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
@@ -81,7 +86,7 @@ Do not infer production GUI readiness from substrate tests alone; check the prod
 
 ## Historical Devil Naming
 
-This repository was renamed from Devil IDE to Legion IDE. Current user-facing docs should use Legion naming. Archived evidence may still contain `devil-*` markers, and validators intentionally accept historical markers when checking archived evidence. See `docs/LEGION_RENAME.md`.
+This repository was renamed from its previous Devil-era product identity to Legion IDE. Current user-facing docs should use Legion naming. Archived evidence may still contain historical Devil-era markers, and validators intentionally accept historical markers when checking archived evidence. See `docs/LEGION_RENAME.md`.
 
 ## Repository Hygiene
 

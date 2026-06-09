@@ -15,8 +15,8 @@ Phase 6 collaboration activates only the local operation-log collaboration runti
 
 ## Enforcement Notes
 
-- `devil-collaboration` has no dependency on app/UI/editor/project/remote/terminal internals.
-- `devil-security` denies collaboration runtime sessions by default and denies non-loopback collaboration transport egress under air-gap policy.
-- `devil-storage` and `devil-observability` reject raw-source or raw-transcript collaboration audit markers.
-- `devil-ui` collaboration commands emit intents only and preserve projections.
-- `devil-app` routes collaboration command intents to explicit app-owned requests, owns deterministic local session composition, and still does not grant UI, collaboration runtime, remote, terminal, process, or direct workspace authority.
+- `legion-collaboration` has no dependency on app/UI/editor/project/remote/terminal internals.
+- `legion-security` denies collaboration runtime sessions by default and denies non-loopback collaboration transport egress under air-gap policy.
+- `legion-storage` and `legion-observability` reject raw-source or raw-transcript collaboration audit markers.
+- `legion-ui` collaboration commands emit intents only and preserve projections.
+- `legion-app` routes collaboration command intents to explicit app-owned requests, owns deterministic local session composition, and still does not grant UI, collaboration runtime, remote, terminal, process, or direct workspace authority.

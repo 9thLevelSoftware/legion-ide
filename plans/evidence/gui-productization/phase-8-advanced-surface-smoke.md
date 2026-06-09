@@ -38,13 +38,13 @@ The Phase 8 smoke mode uses the existing desktop smoke runtime path and changes 
 
 - GUI Phase 8 smoke dry run on Windows.
 - GUI Phase 8 smoke dry run on Unix runners.
-- `cargo run -p devil-cli -- evidence check --phase gui-phase8`.
-- The existing legacy `cargo run -p devil-cli -- evidence check --phase phase8` gate remains present.
+- `cargo run -p legion-cli -- evidence check --phase gui-phase8`.
+- The existing legacy `cargo run -p legion-cli -- evidence check --phase phase8` gate remains present.
 
 ## Boundary Notes
 
-- `devil-ui` remains projection-only.
-- `devil-desktop` owns renderer and smoke harness orchestration only.
+- `legion-ui` remains projection-only.
+- `legion-desktop` owns renderer and smoke harness orchestration only.
 - Plugin, collaboration, remote, delegated task, terminal, provider, storage, and proposal authority remain in app/protocol/runtime layers.
 - Smoke evidence must stay metadata-only and must not include raw source, dirty buffer text, prompts, provider payloads, terminal output bodies, remote transport frames, secrets, or private keys.
 

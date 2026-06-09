@@ -21,9 +21,9 @@ Covered behavior:
 
 ## Preserved Boundaries
 
-- `devil-agent`, `devil-memory`, and `devil-tracker` were not activated.
+- `legion-agent`, `legion-memory`, and `legion-tracker` were not activated.
 - Delegated task command-center rows are projection-only and metadata-only.
-- `devil-desktop` does not execute delegated tasks, apply plan output, write files, mutate editor buffers, invoke providers, run tools, or launch terminals.
+- `legion-desktop` does not execute delegated tasks, apply plan output, write files, mutate editor buffers, invoke providers, run tools, or launch terminals.
 - Proposal-preview links remain proposal-mediated and require projected proposal ids.
 - Health text explicitly preserves the unsupported autonomous apply boundary.
 - Evidence and GUI rows contain no raw prompts, raw context manifests, raw generated diffs, source text, dirty buffer text, provider payloads, terminal output bodies, secrets, or private keys.
@@ -32,15 +32,15 @@ Covered behavior:
 
 | Command | Result |
 |---|---|
-| `rg -q "DelegatedTask" crates/devil-app/src/lib.rs` | passed |
-| `rg -q "delegated" crates/devil-desktop/src/view.rs` | passed |
-| `rg -q "autonomous" crates/devil-desktop/src/health.rs` | passed |
-| `rg -q "delegated task command center" crates/devil-desktop/src/view.rs` | passed |
-| `rg -q "Delegated" crates/devil-desktop/src/bridge.rs` | passed |
-| `rg -q "NotEncoded" crates/devil-app/src/lib.rs` | passed |
-| `cargo test -p devil-desktop delegated_task_command_center -- --nocapture` | passed, 3 matching tests |
-| `cargo test -p devil-ui delegated -- --nocapture` | passed, 1 matching test |
-| `cargo test -p devil-desktop operational_health -- --nocapture` | passed, 2 matching tests |
+| `rg -q "DelegatedTask" crates/legion-app/src/lib.rs` | passed |
+| `rg -q "delegated" crates/legion-desktop/src/view.rs` | passed |
+| `rg -q "autonomous" crates/legion-desktop/src/health.rs` | passed |
+| `rg -q "delegated task command center" crates/legion-desktop/src/view.rs` | passed |
+| `rg -q "Delegated" crates/legion-desktop/src/bridge.rs` | passed |
+| `rg -q "NotEncoded" crates/legion-app/src/lib.rs` | passed |
+| `cargo test -p legion-desktop delegated_task_command_center -- --nocapture` | passed, 3 matching tests |
+| `cargo test -p legion-ui delegated -- --nocapture` | passed, 1 matching test |
+| `cargo test -p legion-desktop operational_health -- --nocapture` | passed, 2 matching tests |
 | `cargo run -p xtask -- check-deps` | passed |
 | `cargo fmt --all --check` | passed |
 

@@ -41,6 +41,9 @@ jobs:
       - name: Dependency policy gate
         run: cargo run -p xtask -- check-deps
 
+      - name: Documentation hygiene gate
+        run: cargo run -p xtask -- docs-hygiene
+
       - name: Format check
         run: cargo fmt --all --check
 

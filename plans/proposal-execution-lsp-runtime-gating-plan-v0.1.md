@@ -1,5 +1,8 @@
 # Proposal Execution and LSP Runtime Gating Plan v0.1
 
+> Historical/superseded planning artifact. This proposal/LSP handoff is superseded by accepted Phase 2 and Phase 3 evidence plus current status in `plans/phase-status-ledger.md`.
+
+
 Date: 2026-05-15
 
 ## Status

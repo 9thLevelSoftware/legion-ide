@@ -20,8 +20,8 @@ Covered behavior:
 
 ## Preserved Boundaries
 
-- Collaboration runtime state remains app-owned. `devil-ui` stores projections only and owns no collaboration sessions, editor text, proposal state, or transport state.
-- `devil-desktop` validates against projection metadata and emits app/proposal intents only; it does not apply collaboration operations to editor text.
+- Collaboration runtime state remains app-owned. `legion-ui` stores projections only and owns no collaboration sessions, editor text, proposal state, or transport state.
+- `legion-desktop` validates against projection metadata and emits app/proposal intents only; it does not apply collaboration operations to editor text.
 - Collaboration operation application remains in `AppComposition::receive_collaboration_transport_envelope`, where accepted operations go through editor authority.
 - Shared collaboration proposal application remains proposal-mediated and requires app-owned approval evidence before apply.
 - Evidence and GUI rows contain metadata only. They do not include raw collaboration transport payloads, operation bodies, editor text, prompt text, or file contents.
@@ -30,13 +30,13 @@ Covered behavior:
 
 | Command | Result |
 |---|---|
-| `rg -q "Collaboration" crates/devil-protocol/src/lib.rs` | passed |
-| `rg -q "collaboration" crates/devil-ui/src/ui.rs` | passed |
-| `rg -q "collaboration" crates/devil-app/src/lib.rs` | passed |
-| `rg -q "Collaboration" crates/devil-desktop/src/bridge.rs` | passed |
-| `rg -q "shared proposal" crates/devil-desktop/src/view.rs` | passed |
-| `cargo test -p devil-desktop collaboration_gui -- --nocapture` | passed, 3 matching tests |
-| `cargo test -p devil-app collaboration -- --nocapture` | passed, 4 matching tests |
+| `rg -q "Collaboration" crates/legion-protocol/src/lib.rs` | passed |
+| `rg -q "collaboration" crates/legion-ui/src/ui.rs` | passed |
+| `rg -q "collaboration" crates/legion-app/src/lib.rs` | passed |
+| `rg -q "Collaboration" crates/legion-desktop/src/bridge.rs` | passed |
+| `rg -q "shared proposal" crates/legion-desktop/src/view.rs` | passed |
+| `cargo test -p legion-desktop collaboration_gui -- --nocapture` | passed, 3 matching tests |
+| `cargo test -p legion-app collaboration -- --nocapture` | passed, 4 matching tests |
 | `cargo run -p xtask -- check-deps` | passed |
 | `cargo fmt --all --check` | passed |
 

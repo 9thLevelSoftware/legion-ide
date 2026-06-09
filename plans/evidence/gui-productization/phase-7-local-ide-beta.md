@@ -37,12 +37,12 @@ It does not accept remote production GUI, collaboration GUI, plugin management, 
 - `cargo test --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo deny check`
-- `cargo test -p devil-desktop --test beta_workflow -- --nocapture`
-- `cargo test -p devil-desktop --test operational_health -- --nocapture`
-- `cargo test -p devil-desktop --test diagnostics_export -- --nocapture`
+- `cargo test -p legion-desktop --test beta_workflow -- --nocapture`
+- `cargo test -p legion-desktop --test operational_health -- --nocapture`
+- `cargo test -p legion-desktop --test diagnostics_export -- --nocapture`
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun`
 - `bash scripts/gui-smoke.sh --beta --dry-run`
-- `cargo run -p devil-cli -- evidence check --phase gui-phase7`
+- `cargo run -p legion-cli -- evidence check --phase gui-phase7`
 
 ## Known Limitations Required For Acceptance
 

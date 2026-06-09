@@ -6,8 +6,8 @@ status: passed
 
 ## Commands
 
-- `cargo test -p devil-desktop --all-targets`: passed.
-- `cargo run -p devil-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 250 --evidence plans/evidence/gui-productization/phase-6-platform-accessibility-smoke.md --session-state target/gui-phase6-session.json --diagnostics-export target/gui-phase6-diagnostics.md`: passed.
+- `cargo test -p legion-desktop --all-targets`: passed.
+- `cargo run -p legion-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 250 --evidence plans/evidence/gui-productization/phase-6-platform-accessibility-smoke.md --session-state target/gui-phase6-session.json --diagnostics-export target/gui-phase6-diagnostics.md`: passed.
 
 ## Desktop Test Coverage
 

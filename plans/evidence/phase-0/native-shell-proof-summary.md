@@ -21,7 +21,7 @@ This summary is based on the definitive Phase 0 command evidence captured after 
 
 | Metric | Evidence | Result | Reservation |
 |---|---|---|---|
-| Input-to-edit transaction latency | Non-ignored `ci_typical_edit_latency_on_budget_sized_file` in `crates/devil-editor/tests/performance_suite.rs` | Accepted: p95 assertion remained below 250ms in the full workspace test run | The current harness captures editor transaction latency rather than a compositor-backed input-to-paint span |
+| Input-to-edit transaction latency | Non-ignored `ci_typical_edit_latency_on_budget_sized_file` in `crates/legion-editor/tests/performance_suite.rs` | Accepted: p95 assertion remained below 250ms in the full workspace test run | The current harness captures editor transaction latency rather than a compositor-backed input-to-paint span |
 | p50 latency | Current accepted harness does not emit a p50 value in captured CI output | Accepted as a reporting gap, not a failing gate | Add p50 emission when the renderer-backed measurement harness lands |
 | p95 latency | Current accepted harness asserts p95 below 250ms | Accepted | Use renderer-backed p95 once native painting is integrated |
 | Frame variance | Full workspace test run completed without UI loop or projection instability | Accepted with reservations | No GPU/compositor frame-time harness exists in this phase |

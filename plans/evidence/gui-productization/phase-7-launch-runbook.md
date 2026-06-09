@@ -9,13 +9,13 @@ This runbook covers the GUI Phase 7 local IDE beta. It is for local Rust reposit
 Normal desktop launch against this repository:
 
 ```powershell
-cargo run -p devil-desktop -- --workspace . --file Cargo.toml --session-state target/gui-phase7-manual-session.json --diagnostics-export target/gui-phase7-manual-diagnostics.md
+cargo run -p legion-desktop -- --workspace . --file Cargo.toml --session-state target/gui-phase7-manual-session.json --diagnostics-export target/gui-phase7-manual-diagnostics.md
 ```
 
 Non-mutating timed real-repository smoke:
 
 ```powershell
-cargo run -p devil-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 250 --evidence target/gui-phase7-real-repo-smoke.md --session-state target/gui-phase7-real-repo-session.json --diagnostics-export target/gui-phase7-real-repo-diagnostics.md
+cargo run -p legion-desktop -- --smoke --workspace . --file Cargo.toml --duration-ms 250 --evidence target/gui-phase7-real-repo-smoke.md --session-state target/gui-phase7-real-repo-session.json --diagnostics-export target/gui-phase7-real-repo-diagnostics.md
 ```
 
 Windows package dry run:
@@ -27,7 +27,7 @@ scripts/package-windows.ps1 -DryRun
 GUI Phase 7 beta fixture smoke:
 
 ```powershell
-cargo run -p devil-desktop -- --beta-smoke --workspace . --beta-workspace target/gui-phase7-beta-workspace --evidence plans/evidence/gui-productization/phase-7-local-workflow-smoke.md --session-state target/gui-phase7-session.json --diagnostics-export target/gui-phase7-diagnostics.md
+cargo run -p legion-desktop -- --beta-smoke --workspace . --beta-workspace target/gui-phase7-beta-workspace --evidence plans/evidence/gui-productization/phase-7-local-workflow-smoke.md --session-state target/gui-phase7-session.json --diagnostics-export target/gui-phase7-diagnostics.md
 ```
 
 PowerShell wrapper dry run:
@@ -45,7 +45,7 @@ bash scripts/gui-smoke.sh --beta --dry-run
 GUI Phase 7 evidence check:
 
 ```powershell
-cargo run -p devil-cli -- evidence check --phase gui-phase7
+cargo run -p legion-cli -- evidence check --phase gui-phase7
 ```
 
 Final repository gates before acceptance:
@@ -62,7 +62,7 @@ cargo deny check
 ## Common Workflows
 
 - Open workspace: launch with `--workspace <path>` and optional `--file <path>`.
-- Browse explorer: use the explorer refresh/expand controls projected by `devil-desktop`.
+- Browse explorer: use the explorer refresh/expand controls projected by `legion-desktop`.
 - Edit/save: use normal editor input and save actions; automated write smoke uses `target/gui-phase7-beta-workspace` so it does not mutate the real checkout.
 - Search: run active-file and workspace search from the GUI search surface.
 - Language action: request completion/diagnostics-style actions; edit-producing language behavior must remain proposal-mediated.

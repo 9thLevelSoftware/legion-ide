@@ -10,7 +10,7 @@ This document is GUI Phase 8 acceptance evidence for the advanced GUI GA product
 
 GUI Phase 8 covers production-grade GUI workflows for plugin management, collaboration, remote workspace status, delegated task command-center review, release/update/rollback/incident procedures, and cross-platform parity evidence.
 
-The GUI track must preserve app/protocol/runtime authority boundaries. `devil-ui` remains projection-only, `devil-desktop` remains renderer and adapter-local state only, and mutation-capable plugin, collaboration, remote, delegated task, language, terminal, provider, storage, and security behavior remains proposal-mediated or policy-gated outside UI ownership.
+The GUI track must preserve app/protocol/runtime authority boundaries. `legion-ui` remains projection-only, `legion-desktop` remains renderer and adapter-local state only, and mutation-capable plugin, collaboration, remote, delegated task, language, terminal, provider, storage, and security behavior remains proposal-mediated or policy-gated outside UI ownership.
 
 ## Required Artifacts
 
@@ -41,12 +41,12 @@ The GUI track must preserve app/protocol/runtime authority boundaries. `devil-ui
 - `cargo test --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo deny check`
-- `cargo test -p devil-desktop --test plugin_management -- --nocapture`
-- `cargo test -p devil-desktop --test collaboration_gui -- --nocapture`
-- `cargo test -p devil-desktop --test remote_workspace_gui -- --nocapture`
-- `cargo test -p devil-desktop --test delegated_task_command_center -- --nocapture`
-- `cargo run -p devil-cli -- evidence check --phase gui-phase8`
-- `cargo run -p devil-cli -- evidence check --phase phase8`
+- `cargo test -p legion-desktop --test plugin_management -- --nocapture`
+- `cargo test -p legion-desktop --test collaboration_gui -- --nocapture`
+- `cargo test -p legion-desktop --test remote_workspace_gui -- --nocapture`
+- `cargo test -p legion-desktop --test delegated_task_command_center -- --nocapture`
+- `cargo run -p legion-cli -- evidence check --phase gui-phase8`
+- `cargo run -p legion-cli -- evidence check --phase phase8`
 - `powershell -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Help`
 - `bash scripts/gui-smoke.sh --help`
 

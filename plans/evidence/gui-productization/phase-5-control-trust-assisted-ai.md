@@ -34,8 +34,8 @@ The GUI phase does not authorize UI or desktop ownership of proposal lifecycle s
 
 | Requirement | Evidence |
 |---|---|
-| R-010 Control and trust surfaces | `crates/devil-protocol/tests/dto_contracts.rs`, `crates/devil-ui/src/ui.rs`, `crates/devil-app/tests/control_trust_surfaces.rs`, `crates/devil-desktop/tests/control_trust_view.rs`, and result files `05-02` through `05-06` prove proposal ledger rows, selected proposal details, diff/target summaries, approval checklist, rollback/checkpoint, context manifest, privacy inspector, and permission/risk budget projections are populated and rendered as bounded metadata. |
-| R-011 Assisted AI GUI | `crates/devil-app/tests/control_trust_surfaces.rs`, `crates/devil-desktop/tests/control_trust_view.rs`, `crates/devil-desktop/tests/control_trust_bridge.rs`, and `plans/evidence/gui-productization/phase-5-control-trust-safety.md` prove explain/propose flows are local-first/default-deny, refusal-visible, and proposal-only for generated edits. |
+| R-010 Control and trust surfaces | `crates/legion-protocol/tests/dto_contracts.rs`, `crates/legion-ui/src/ui.rs`, `crates/legion-app/tests/control_trust_surfaces.rs`, `crates/legion-desktop/tests/control_trust_view.rs`, and result files `05-02` through `05-06` prove proposal ledger rows, selected proposal details, diff/target summaries, approval checklist, rollback/checkpoint, context manifest, privacy inspector, and permission/risk budget projections are populated and rendered as bounded metadata. |
+| R-011 Assisted AI GUI | `crates/legion-app/tests/control_trust_surfaces.rs`, `crates/legion-desktop/tests/control_trust_view.rs`, `crates/legion-desktop/tests/control_trust_bridge.rs`, and `plans/evidence/gui-productization/phase-5-control-trust-safety.md` prove explain/propose flows are local-first/default-deny, refusal-visible, and proposal-only for generated edits. |
 | R-013 Performance and reliability evidence | The final full gates below, existing Phase 2-4 evidence, and Phase 5 safety evidence prove the GUI track preserves dependency policy, formatting, compile health, workspace tests, clippy policy, save conflict/dirty text preservation, projection-only UI/desktop boundaries, and metadata-only trust surfaces. |
 
 ## Success-criterion traceability
@@ -66,10 +66,10 @@ The first full workspace test run exposed a stale assertion in `workspace_vfs_in
 ## Artifact Inventory
 
 - Governance: `plans/dependency-policy.md`, `xtask/src/main.rs`, and this evidence file.
-- Protocol/UI contracts: `crates/devil-protocol/src/lib.rs`, `crates/devil-protocol/tests/dto_contracts.rs`, and `crates/devil-ui/src/ui.rs`.
-- App proposal routing: `crates/devil-app/src/lib.rs` and `crates/devil-app/tests/control_trust_surfaces.rs`.
-- Assisted-AI routing: `crates/devil-app/src/lib.rs`, `crates/devil-ai/src/lib.rs`, `crates/devil-ai-providers/src/lib.rs`, `crates/devil-ui/src/ui.rs`, and focused app tests.
-- Desktop controls: `crates/devil-desktop/src/view.rs`, `crates/devil-desktop/src/bridge.rs`, `crates/devil-desktop/src/workflow.rs`, and focused desktop tests.
+- Protocol/UI contracts: `crates/legion-protocol/src/lib.rs`, `crates/legion-protocol/tests/dto_contracts.rs`, and `crates/legion-ui/src/ui.rs`.
+- App proposal routing: `crates/legion-app/src/lib.rs` and `crates/legion-app/tests/control_trust_surfaces.rs`.
+- Assisted-AI routing: `crates/legion-app/src/lib.rs`, `crates/legion-ai/src/lib.rs`, `crates/legion-ai-providers/src/lib.rs`, `crates/legion-ui/src/ui.rs`, and focused app tests.
+- Desktop controls: `crates/legion-desktop/src/view.rs`, `crates/legion-desktop/src/bridge.rs`, `crates/legion-desktop/src/workflow.rs`, and focused desktop tests.
 - Safety evidence: `plans/evidence/gui-productization/phase-5-control-trust-safety.md`.
 - Full gates: cargo gate commands listed above.
 
