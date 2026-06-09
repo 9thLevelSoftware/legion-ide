@@ -26,7 +26,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-CI runs cargo-deny through `EmbarkStudios/cargo-deny-action`, so local developer machines must install the CLI separately before running the full verification suite.
+CI runs cargo-deny through `EmbarkStudios/cargo-deny-action` on the Linux matrix leg, so local developer machines must install the CLI separately before running the full verification suite.
 
 ## Evidence naming
 

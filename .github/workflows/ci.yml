@@ -113,6 +113,7 @@ jobs:
         run: df -h
 
       - name: Cargo deny check
+        if: runner.os == 'Linux'
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
