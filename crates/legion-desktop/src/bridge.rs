@@ -13,7 +13,7 @@ use legion_protocol::{
 use legion_protocol::{PluginContribution, PluginId};
 use legion_ui::{
     CommandDispatchIntent, DebugStepKindProjection, DockMode, GitConflictChoiceProjection,
-    SearchScopeProjection, ShellProjectionSnapshot,
+    PaletteMode, SearchScopeProjection, ShellProjectionSnapshot,
 };
 use thiserror::Error;
 
@@ -57,18 +57,31 @@ pub enum DesktopAction {
     OpenPathDialogSelected(String),
     /// Native file dialog was cancelled.
     OpenPathDialogCancelled,
-    /// Ask the workflow layer to show an open-path prompt.
-    ShowOpenPathPrompt,
-    /// Ask the workflow layer to show a search prompt.
-    ShowSearchPrompt {
-        /// Search scope to preselect.
+    /// Open the app-owned command palette.
+    OpenPalette {
+        /// Requested palette mode.
+        mode: PaletteMode,
+        /// Initial query text.
+        query: String,
+        /// Search scope for search-oriented palette modes.
         scope: SearchScopeProjection,
     },
-    /// Ask the workflow layer to show a structural search prompt.
-    ShowStructuralSearchPrompt {
-        /// Search scope to preselect.
-        scope: SearchScopeProjection,
+    /// Close the app-owned command palette.
+    ClosePalette,
+    /// Update command palette query text.
+    UpdatePaletteQuery {
+        /// Updated query text.
+        query: String,
     },
+    /// Move command palette selection by a signed delta.
+    MovePaletteSelection {
+        /// Signed selection delta.
+        delta: i32,
+    },
+    /// Complete command palette selection.
+    CompletePaletteSelection,
+    /// Dispatch command palette selection.
+    DispatchPaletteSelection,
     /// Ask the workflow layer to open a workspace root.
     OpenWorkspace {
         /// Workspace root selected by the adapter.
@@ -539,18 +552,6 @@ pub enum DesktopAppRequest {
         /// Workspace root path.
         root: PathBuf,
     },
-    /// Ask workflow code to display an open-path prompt.
-    ShowOpenPathPrompt,
-    /// Ask workflow code to display a search prompt.
-    ShowSearchPrompt {
-        /// Search scope to preselect.
-        scope: SearchScopeProjection,
-    },
-    /// Ask workflow code to display a structural search prompt.
-    ShowStructuralSearchPrompt {
-        /// Search scope to preselect.
-        scope: SearchScopeProjection,
-    },
     /// Toggle adapter-local explorer expansion.
     ToggleExplorerPath {
         /// Canonical path represented by the explorer row.
@@ -940,16 +941,27 @@ impl DesktopCommandBridge {
                 }
             }
             DesktopAction::OpenPathDialogCancelled => DesktopBridgeOutput::Noop,
-            DesktopAction::ShowOpenPathPrompt => {
-                DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowOpenPathPrompt)
-            }
-            DesktopAction::ShowSearchPrompt { scope } => {
-                DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowSearchPrompt { scope })
-            }
-            DesktopAction::ShowStructuralSearchPrompt { scope } => {
-                DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowStructuralSearchPrompt {
+            DesktopAction::OpenPalette { mode, query, scope } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPalette {
+                    mode,
+                    query,
                     scope,
                 })
+            }
+            DesktopAction::ClosePalette => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ClosePalette)
+            }
+            DesktopAction::UpdatePaletteQuery { query } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::UpdatePaletteQuery { query })
+            }
+            DesktopAction::MovePaletteSelection { delta } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::MovePaletteSelection { delta })
+            }
+            DesktopAction::CompletePaletteSelection => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::CompletePaletteSelection)
+            }
+            DesktopAction::DispatchPaletteSelection => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::DispatchPaletteSelection)
             }
             DesktopAction::OpenWorkspace { root } => {
                 DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenWorkspace { root })

@@ -171,10 +171,10 @@ use legion_ui::ui::{
     DebugVariableProjection, DebugWatchProjection, EditorTabProjection, EditorTabsProjection,
     EditorViewportStateProjection, GitBlameLineProjection, GitCommitProjection,
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-    GitHunkStageProjection, GitProjection, SearchProjection, SearchResultProjection,
-    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection,
-    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
-    WorkspaceSessionRecordProjection,
+    GitHunkStageProjection, GitProjection, PaletteMode, PaletteProjection, PaletteResult,
+    PaletteResultKind, SearchProjection, SearchResultProjection, SearchScopeProjection,
+    SearchStatusKindProjection, SearchStatusProjection, StructuralSearchCaptureProjection,
+    StructuralSearchMatchProjection, StructuralSearchProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, CommandDispatchIntent, DockMode, ExplorerNodeProjection,
@@ -196,6 +196,71 @@ const SEARCH_DEFAULT_RESULT_LIMIT: usize = 50;
 const SEARCH_MAX_RESULT_LIMIT: usize = 100;
 const SEARCH_SNIPPET_LIMIT_BYTES: usize = 160;
 const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
+const PALETTE_RESULT_LIMIT: usize = 50;
+
+#[derive(Debug, Clone)]
+struct PaletteState {
+    open: bool,
+    mode: PaletteMode,
+    query: String,
+    scope: SearchScopeProjection,
+    selected_index: usize,
+    results: Vec<PaletteResult>,
+}
+
+impl PaletteState {
+    fn projection(&self) -> PaletteProjection {
+        PaletteProjection {
+            open: self.open,
+            mode: self.mode,
+            query: self.query.clone(),
+            scope: self.scope,
+            selected_index: self.selected_index,
+            results: self.results.clone(),
+        }
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.selected_index = 0;
+        self.results.clear();
+    }
+
+    fn clamp_selection(&mut self) {
+        if self.results.is_empty() {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = self.selected_index.min(self.results.len() - 1);
+        }
+    }
+}
+
+impl Default for PaletteState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            mode: PaletteMode::File,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+            selected_index: 0,
+            results: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PaletteScoredResult {
+    score: i32,
+    result: PaletteResult,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaletteCommandSpec {
+    id: &'static str,
+    title: &'static str,
+    detail: &'static str,
+    shortcut_label: Option<&'static str>,
+}
 
 /// App-level composition errors.
 #[derive(Debug, Error)]
@@ -6511,6 +6576,31 @@ pub enum AppCommandRequest {
         /// Scroll offsets.
         scroll: ViewportScroll,
     },
+    /// Open the app-owned command palette.
+    OpenPalette {
+        /// Requested palette mode.
+        mode: PaletteMode,
+        /// Initial query text.
+        query: String,
+        /// Search scope for search-oriented palette modes.
+        scope: SearchScopeProjection,
+    },
+    /// Close the app-owned command palette.
+    ClosePalette,
+    /// Update command palette query text.
+    UpdatePaletteQuery {
+        /// Updated query text.
+        query: String,
+    },
+    /// Move command palette selection.
+    MovePaletteSelection {
+        /// Signed selection delta.
+        delta: i32,
+    },
+    /// Complete command palette selection.
+    CompletePaletteSelection,
+    /// Dispatch the selected command palette result.
+    DispatchPaletteSelection,
     /// Run bounded lexical search through app authority.
     RunSearch {
         /// App-generated query id.
@@ -7034,6 +7124,12 @@ impl CommandExecutionService {
             | AppCommandRequest::SetCursor { .. }
             | AppCommandRequest::SetSelection { .. }
             | AppCommandRequest::SetViewportScroll { .. }
+            | AppCommandRequest::OpenPalette { .. }
+            | AppCommandRequest::ClosePalette
+            | AppCommandRequest::UpdatePaletteQuery { .. }
+            | AppCommandRequest::MovePaletteSelection { .. }
+            | AppCommandRequest::CompletePaletteSelection
+            | AppCommandRequest::DispatchPaletteSelection
             | AppCommandRequest::RunSearch { .. }
             | AppCommandRequest::RunStructuralSearch { .. }
             | AppCommandRequest::CancelSearch { .. }
@@ -7199,6 +7295,22 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::SetViewportScroll { buffer_id, scroll } => {
                 Ok(AppCommandRequest::SetViewportScroll { buffer_id, scroll })
+            }
+            CommandDispatchIntent::OpenPalette { mode, query, scope } => {
+                Ok(AppCommandRequest::OpenPalette { mode, query, scope })
+            }
+            CommandDispatchIntent::ClosePalette => Ok(AppCommandRequest::ClosePalette),
+            CommandDispatchIntent::UpdatePaletteQuery { query } => {
+                Ok(AppCommandRequest::UpdatePaletteQuery { query })
+            }
+            CommandDispatchIntent::MovePaletteSelection { delta } => {
+                Ok(AppCommandRequest::MovePaletteSelection { delta })
+            }
+            CommandDispatchIntent::CompletePaletteSelection => {
+                Ok(AppCommandRequest::CompletePaletteSelection)
+            }
+            CommandDispatchIntent::DispatchPaletteSelection => {
+                Ok(AppCommandRequest::DispatchPaletteSelection)
             }
             CommandDispatchIntent::RunSearch {
                 scope,
@@ -9498,6 +9610,8 @@ pub enum AppCommandOutcome {
     SelectionSet(BufferId),
     /// Viewport scroll update completed.
     ViewportScrollSet(BufferId),
+    /// Command palette projection changed.
+    PaletteUpdated(PaletteProjection),
     /// Search projection changed.
     SearchUpdated(SearchProjection),
     /// Structural search projection changed.
@@ -10139,6 +10253,159 @@ fn workspace_node_is_regular_file(node: &FileTreeNode) -> bool {
     node.metadata
         .as_ref()
         .is_some_and(|metadata| matches!(metadata.kind, FileKind::File))
+}
+
+fn palette_open_query(mode: PaletteMode, query: String) -> String {
+    if query.is_empty() {
+        return mode
+            .prefix()
+            .map_or_else(String::new, |prefix| prefix.to_string());
+    }
+    if query.starts_with('>') || query.starts_with('/') || query.starts_with('#') {
+        query
+    } else {
+        mode.prefix()
+            .map_or(query.clone(), |prefix| format!("{prefix}{query}"))
+    }
+}
+
+fn palette_mode_for_query(query: &str) -> Option<PaletteMode> {
+    match query.chars().next() {
+        Some('>') => Some(PaletteMode::Command),
+        Some('/') => Some(PaletteMode::Search),
+        Some('#') => Some(PaletteMode::StructuralSearch),
+        Some(_) | None => Some(PaletteMode::File),
+    }
+}
+
+fn palette_query_body(mode: PaletteMode, query: &str) -> &str {
+    if mode
+        .prefix()
+        .is_some_and(|prefix| query.starts_with(prefix))
+    {
+        &query[1..]
+    } else {
+        query
+    }
+}
+
+fn palette_scope_label(scope: SearchScopeProjection) -> &'static str {
+    match scope {
+        SearchScopeProjection::ActiveFile => "active file",
+        SearchScopeProjection::Workspace => "workspace",
+    }
+}
+
+fn palette_command_specs() -> [PaletteCommandSpec; 4] {
+    [
+        PaletteCommandSpec {
+            id: "save-all",
+            title: "Save All",
+            detail: "Save every open tab through app authority",
+            shortcut_label: Some("Ctrl+Shift+S"),
+        },
+        PaletteCommandSpec {
+            id: "refresh-explorer",
+            title: "Refresh Explorer",
+            detail: "Reload the workspace tree projection",
+            shortcut_label: Some("F5"),
+        },
+        PaletteCommandSpec {
+            id: "refresh-git",
+            title: "Refresh Git",
+            detail: "Refresh git status and diff projections",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "close-palette",
+            title: "Close Command Palette",
+            detail: "Dismiss the foreground command palette",
+            shortcut_label: Some("Esc"),
+        },
+    ]
+}
+
+fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
+    match command_id {
+        "save-all" => Some(CommandDispatchIntent::SaveAll),
+        "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
+        "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
+        "close-palette" => Some(CommandDispatchIntent::ClosePalette),
+        _ => None,
+    }
+}
+
+fn palette_fuzzy_score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Some((0, Vec::new()));
+    }
+
+    let query_chars = query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<Vec<_>>();
+    let candidate_raw_chars = candidate.chars().collect::<Vec<_>>();
+    let candidate_chars = candidate_raw_chars
+        .iter()
+        .map(|&ch| ch.to_lowercase().next().unwrap_or(ch))
+        .collect::<Vec<_>>();
+
+    let mut matched_indices = Vec::with_capacity(query_chars.len());
+    let mut query_index = 0;
+    let mut score = 0_i32;
+    let mut last_match: Option<usize> = None;
+    for (candidate_index, candidate_char) in candidate_chars.iter().copied().enumerate() {
+        if query_index >= query_chars.len() {
+            break;
+        }
+        if candidate_char != query_chars[query_index] {
+            continue;
+        }
+
+        matched_indices.push(candidate_index);
+        score += 10;
+        if last_match.is_some_and(|last| last + 1 == candidate_index) {
+            score += 15;
+        }
+        if candidate_index == 0
+            || candidate_raw_chars
+                .get(candidate_index.saturating_sub(1))
+                .is_some_and(|previous| matches!(previous, '/' | '\\' | '-' | '_' | '.'))
+        {
+            score += 6;
+        }
+        if let Some(last) = last_match {
+            score -= candidate_index.saturating_sub(last + 1) as i32;
+        }
+        last_match = Some(candidate_index);
+        query_index += 1;
+    }
+
+    if query_index == query_chars.len() {
+        let lowercase_candidate = candidate.to_ascii_lowercase();
+        let lowercase_query = query.to_ascii_lowercase();
+        if lowercase_candidate == lowercase_query {
+            score += 100;
+        } else if lowercase_candidate.starts_with(&lowercase_query) {
+            score += 60;
+        } else if lowercase_candidate.contains(&lowercase_query) {
+            score += 35;
+        }
+        Some((score, matched_indices))
+    } else {
+        None
+    }
+}
+
+fn sort_palette_results(results: &mut [PaletteScoredResult]) {
+    results.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.result.title.cmp(&right.result.title))
+            .then_with(|| left.result.id.cmp(&right.result.id))
+    });
 }
 
 fn collect_search_results_for_text(input: SearchTextInput<'_>) {
@@ -10874,6 +11141,7 @@ pub struct AppComposition {
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
     product_mode: AppProductMode,
+    palette: PaletteState,
     correlation_generator: CorrelationGenerator,
     event_sequence_generator: EventSequenceGenerator,
     storage: InMemoryStorageRepositoryPort,
@@ -10929,6 +11197,7 @@ impl AppComposition {
             proposal_coordinator: AppProposalCoordinator::new(event_sink.clone()),
             active_documents: ActiveDocumentController::new(),
             product_mode: AppProductMode::Manual,
+            palette: PaletteState::default(),
             correlation_generator: CorrelationGenerator::default(),
             event_sequence_generator: EventSequenceGenerator::default(),
             storage: InMemoryStorageRepositoryPort::with_event_sink(event_sink.clone()),
@@ -11106,6 +11375,7 @@ impl AppComposition {
             .bind_workspace(opened.clone(), root_path, principal, trust);
         self.debug_workflow.clear_workspace_state();
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
+        self.palette = PaletteState::default();
         Ok(opened)
     }
 
@@ -11243,6 +11513,259 @@ impl AppComposition {
         self.handle_proposal_request(request)
     }
 
+    fn open_palette(
+        &mut self,
+        mode: PaletteMode,
+        query: String,
+        scope: SearchScopeProjection,
+    ) -> Result<PaletteProjection, AppCompositionError> {
+        self.palette.open = true;
+        self.palette.mode = mode;
+        self.palette.query = palette_open_query(mode, query);
+        self.palette.scope = scope;
+        self.palette.selected_index = 0;
+        self.refresh_palette_results()?;
+        Ok(self.palette.projection())
+    }
+
+    fn update_palette_query(
+        &mut self,
+        query: String,
+    ) -> Result<PaletteProjection, AppCompositionError> {
+        self.palette.open = true;
+        self.palette.query = query;
+        self.palette.selected_index = 0;
+        self.refresh_palette_results()?;
+        Ok(self.palette.projection())
+    }
+
+    fn close_palette(&mut self) -> PaletteProjection {
+        self.palette.close();
+        self.palette.projection()
+    }
+
+    fn move_palette_selection(&mut self, delta: i32) -> PaletteProjection {
+        if self.palette.results.is_empty() {
+            self.palette.selected_index = 0;
+            return self.palette.projection();
+        }
+
+        let max_index = self.palette.results.len() as i32 - 1;
+        let next = (self.palette.selected_index as i32 + delta).clamp(0, max_index);
+        self.palette.selected_index = next as usize;
+        self.palette.projection()
+    }
+
+    fn complete_palette_selection(&mut self) -> Result<PaletteProjection, AppCompositionError> {
+        if !self.palette.open {
+            return Ok(self.palette.projection());
+        }
+        if self.palette.mode != PaletteMode::File || self.palette.results.len() != 1 {
+            return Ok(self.palette.projection());
+        }
+        let Some(title) = self
+            .palette
+            .results
+            .first()
+            .map(|result| result.title.clone())
+        else {
+            return Ok(self.palette.projection());
+        };
+        self.palette.query = title;
+        self.palette.selected_index = 0;
+        self.refresh_palette_results()?;
+        Ok(self.palette.projection())
+    }
+
+    fn dispatch_palette_selection(&mut self) -> Result<AppCommandOutcome, AppCompositionError> {
+        if !self.palette.open {
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        }
+        let Some(result) = self
+            .palette
+            .results
+            .get(self.palette.selected_index)
+            .cloned()
+        else {
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        };
+        if result.disabled_reason.is_some() {
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        }
+        let Some(intent) = self.palette_result_intent(&result) else {
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        };
+
+        self.palette.close();
+        self.dispatch_ui_intent(intent)
+    }
+
+    fn refresh_palette_results(&mut self) -> Result<(), AppCompositionError> {
+        let mode = palette_mode_for_query(&self.palette.query).unwrap_or(self.palette.mode);
+        let query = palette_query_body(mode, &self.palette.query);
+        let results = match mode {
+            PaletteMode::File => self.palette_file_results(query)?,
+            PaletteMode::Command => self.palette_command_results(query),
+            PaletteMode::Search => vec![self.palette_search_result(query)],
+            PaletteMode::StructuralSearch => vec![self.palette_structural_search_result(query)],
+        };
+
+        self.palette.mode = mode;
+        self.palette.results = results;
+        self.palette.clamp_selection();
+        Ok(())
+    }
+
+    fn palette_file_results(&self, query: &str) -> Result<Vec<PaletteResult>, AppCompositionError> {
+        let Some(workspace_id) = self.active_documents.workspace_id() else {
+            return Ok(Vec::new());
+        };
+
+        let mut paths = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?
+            .into_iter()
+            .filter(workspace_node_is_regular_file)
+            .map(|node| node.identity.canonical_path.0)
+            .collect::<Vec<_>>();
+        for metadata in self.active_documents.buffer_file_metadata.values() {
+            paths.push(metadata.identity.canonical_path.0.clone());
+        }
+        paths.sort();
+        paths.dedup();
+
+        let mut scored = paths
+            .into_iter()
+            .filter_map(|path| {
+                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                    PaletteScoredResult {
+                        score,
+                        result: PaletteResult {
+                            id: format!("file:{path}"),
+                            kind: PaletteResultKind::File,
+                            title: path,
+                            detail: Some("Workspace file".to_string()),
+                            shortcut_label: Some("Enter".to_string()),
+                            match_indices,
+                            disabled_reason: None,
+                        },
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        sort_palette_results(&mut scored);
+        Ok(scored
+            .into_iter()
+            .take(PALETTE_RESULT_LIMIT)
+            .map(|scored| scored.result)
+            .collect())
+    }
+
+    fn palette_command_results(&self, query: &str) -> Vec<PaletteResult> {
+        let mut scored = palette_command_specs()
+            .into_iter()
+            .filter_map(|spec| {
+                palette_fuzzy_score(spec.title, query).map(|(score, match_indices)| {
+                    PaletteScoredResult {
+                        score,
+                        result: PaletteResult {
+                            id: format!("command:{}", spec.id),
+                            kind: PaletteResultKind::Command,
+                            title: spec.title.to_string(),
+                            detail: Some(spec.detail.to_string()),
+                            shortcut_label: spec.shortcut_label.map(str::to_string),
+                            match_indices,
+                            disabled_reason: None,
+                        },
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        sort_palette_results(&mut scored);
+        scored
+            .into_iter()
+            .take(PALETTE_RESULT_LIMIT)
+            .map(|scored| scored.result)
+            .collect()
+    }
+
+    fn palette_search_result(&self, query: &str) -> PaletteResult {
+        let trimmed = query.trim();
+        let scope = palette_scope_label(self.palette.scope);
+        PaletteResult {
+            id: "search:run".to_string(),
+            kind: PaletteResultKind::Search,
+            title: if trimmed.is_empty() {
+                format!("Search {scope}")
+            } else {
+                format!("Search {scope} for \"{trimmed}\"")
+            },
+            detail: Some("Run lexical search".to_string()),
+            shortcut_label: Some("Enter".to_string()),
+            match_indices: Vec::new(),
+            disabled_reason: trimmed
+                .is_empty()
+                .then(|| "Enter a search query".to_string()),
+        }
+    }
+
+    fn palette_structural_search_result(&self, query: &str) -> PaletteResult {
+        let trimmed = query.trim();
+        let scope = palette_scope_label(self.palette.scope);
+        PaletteResult {
+            id: "structural-search:run".to_string(),
+            kind: PaletteResultKind::StructuralSearch,
+            title: if trimmed.is_empty() {
+                format!("Structural search {scope}")
+            } else {
+                format!("Structural search {scope} for \"{trimmed}\"")
+            },
+            detail: Some("Preview structural matches".to_string()),
+            shortcut_label: Some("Enter".to_string()),
+            match_indices: Vec::new(),
+            disabled_reason: trimmed
+                .is_empty()
+                .then(|| "Enter a structural pattern".to_string()),
+        }
+    }
+
+    fn palette_result_intent(&self, result: &PaletteResult) -> Option<CommandDispatchIntent> {
+        match result.kind {
+            PaletteResultKind::File => {
+                result
+                    .id
+                    .strip_prefix("file:")
+                    .map(|path| CommandDispatchIntent::OpenPath {
+                        path: path.to_string(),
+                    })
+            }
+            PaletteResultKind::Command => result
+                .id
+                .strip_prefix("command:")
+                .and_then(palette_command_intent),
+            PaletteResultKind::Search => {
+                let query = palette_query_body(PaletteMode::Search, &self.palette.query)
+                    .trim()
+                    .to_string();
+                (!query.is_empty()).then_some(CommandDispatchIntent::RunSearch {
+                    scope: self.palette.scope,
+                    query,
+                    limit: 0,
+                })
+            }
+            PaletteResultKind::StructuralSearch => {
+                let pattern =
+                    palette_query_body(PaletteMode::StructuralSearch, &self.palette.query)
+                        .trim()
+                        .to_string();
+                (!pattern.is_empty()).then_some(CommandDispatchIntent::RunStructuralSearch {
+                    scope: self.palette.scope,
+                    pattern,
+                    rewrite: None,
+                    limit: 0,
+                })
+            }
+        }
+    }
+
     /// Route a UI dispatch intent through editor and workspace authorities.
     pub fn dispatch_ui_intent(
         &mut self,
@@ -11309,6 +11832,22 @@ impl AppComposition {
                 self.set_viewport_scroll(buffer_id, scroll)?;
                 Ok(AppCommandOutcome::ViewportScrollSet(buffer_id))
             }
+            AppCommandRequest::OpenPalette { mode, query, scope } => Ok(
+                AppCommandOutcome::PaletteUpdated(self.open_palette(mode, query, scope)?),
+            ),
+            AppCommandRequest::ClosePalette => {
+                Ok(AppCommandOutcome::PaletteUpdated(self.close_palette()))
+            }
+            AppCommandRequest::UpdatePaletteQuery { query } => Ok(
+                AppCommandOutcome::PaletteUpdated(self.update_palette_query(query)?),
+            ),
+            AppCommandRequest::MovePaletteSelection { delta } => Ok(
+                AppCommandOutcome::PaletteUpdated(self.move_palette_selection(delta)),
+            ),
+            AppCommandRequest::CompletePaletteSelection => Ok(AppCommandOutcome::PaletteUpdated(
+                self.complete_palette_selection()?,
+            )),
+            AppCommandRequest::DispatchPaletteSelection => self.dispatch_palette_selection(),
             AppCommandRequest::RunSearch {
                 query_id,
                 scope,
@@ -16813,6 +17352,7 @@ impl AppComposition {
             layout_projection,
             explorer_projection: self.explorer_projection()?,
             status_messages: Vec::new(),
+            palette_projection: self.palette.projection(),
             command_registry_projection,
             proposal_ledger_projection,
             artifact_ledger_projection,

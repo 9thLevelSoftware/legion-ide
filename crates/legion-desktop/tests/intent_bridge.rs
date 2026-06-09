@@ -12,8 +12,8 @@ use legion_ui::ui::{DailyEditingProjection, EditorTabProjection, EditorTabsProje
 use legion_ui::{
     ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
     AssistInlinePredictionStatusProjection, CommandDispatchIntent, DebugConfigurationProjection,
-    DebugStepKindProjection, ExplorerNodeProjection, ExplorerProjection, SearchScopeProjection,
-    Shell,
+    DebugStepKindProjection, ExplorerNodeProjection, ExplorerProjection, PaletteMode,
+    SearchScopeProjection, Shell,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -339,18 +339,26 @@ fn intent_bridge_routes_explorer_actions_and_adapter_local_toggle() {
 #[test]
 fn intent_bridge_routes_search_actions() {
     assert_eq!(
-        translate(DesktopAction::ShowSearchPrompt {
+        translate(DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
             scope: SearchScopeProjection::Workspace,
         }),
-        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowSearchPrompt {
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
             scope: SearchScopeProjection::Workspace,
         })
     );
     assert_eq!(
-        translate(DesktopAction::ShowStructuralSearchPrompt {
+        translate(DesktopAction::OpenPalette {
+            mode: PaletteMode::StructuralSearch,
+            query: "#".to_string(),
             scope: SearchScopeProjection::Workspace,
         }),
-        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowStructuralSearchPrompt {
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::StructuralSearch,
+            query: "#".to_string(),
             scope: SearchScopeProjection::Workspace,
         })
     );
@@ -577,8 +585,16 @@ fn intent_bridge_routes_path_dialog_prompt_refresh_and_quit() {
         DesktopBridgeOutput::Noop
     );
     assert_eq!(
-        translate(DesktopAction::ShowOpenPathPrompt),
-        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ShowOpenPathPrompt)
+        translate(DesktopAction::OpenPalette {
+            mode: PaletteMode::File,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::File,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+        })
     );
     assert_eq!(
         translate(DesktopAction::OpenWorkspace {
@@ -595,6 +611,34 @@ fn intent_bridge_routes_path_dialog_prompt_refresh_and_quit() {
     assert_eq!(
         translate(DesktopAction::Quit),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::Quit)
+    );
+}
+
+#[test]
+fn intent_bridge_routes_palette_reducer_actions() {
+    assert_eq!(
+        translate(DesktopAction::UpdatePaletteQuery {
+            query: ">save".to_string(),
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::UpdatePaletteQuery {
+            query: ">save".to_string(),
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::MovePaletteSelection { delta: 1 }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::MovePaletteSelection { delta: 1 })
+    );
+    assert_eq!(
+        translate(DesktopAction::CompletePaletteSelection),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CompletePaletteSelection)
+    );
+    assert_eq!(
+        translate(DesktopAction::DispatchPaletteSelection),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::DispatchPaletteSelection)
+    );
+    assert_eq!(
+        translate(DesktopAction::ClosePalette),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ClosePalette)
     );
 }
 
