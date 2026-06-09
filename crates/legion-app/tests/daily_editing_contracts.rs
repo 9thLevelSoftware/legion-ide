@@ -6,7 +6,8 @@ use legion_app::{
 };
 use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{
-    PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, WorkspaceTrustState,
+    PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, ViewportSemanticTokenKind,
+    WorkspaceTrustState,
 };
 use legion_ui::{CommandDispatchIntent, ShellLayoutProjection};
 
@@ -110,6 +111,63 @@ fn daily_editing_contracts_tabs_switch_active_buffer() {
     assert_eq!(viewport.cursor.character, 3);
     assert_eq!(viewport.selections.len(), 1);
     assert_eq!(viewport.scroll.left_column, 2);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_contracts_active_projection_emits_visible_syntax_overlays() {
+    let root = create_root();
+    let cases = [
+        (
+            "src/lib.rs",
+            "pub fn answer() -> u32 {\n    42\n}\n",
+            ViewportSemanticTokenKind::Keyword,
+        ),
+        (
+            "Cargo.toml",
+            "[package]\nname = \"legion-ide\"\n",
+            ViewportSemanticTokenKind::String,
+        ),
+        (
+            "README.md",
+            "# Legion IDE\n\n```rust\nfn main() {}\n```\n",
+            ViewportSemanticTokenKind::Keyword,
+        ),
+    ];
+
+    let mut app = trusted_app(&root);
+    for (relative_path, source, expected_kind) in cases {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&path, source).expect("seed source");
+
+        app.open_file(path.to_string_lossy())
+            .expect("open highlighted file");
+
+        let projection = app
+            .active_buffer_projection(&ShellLayoutProjection::plain("syntax"))
+            .expect("active projection");
+        let viewport = projection.viewport.expect("viewport projection");
+
+        assert!(
+            viewport
+                .semantic_token_overlays
+                .iter()
+                .any(|token| token.kind == expected_kind),
+            "expected {expected_kind:?} overlay for {relative_path}; got {:?}",
+            viewport.semantic_token_overlays
+        );
+        assert!(
+            viewport.semantic_token_overlays.iter().all(|token| viewport
+                .line_slices
+                .iter()
+                .any(|line| line.line_number == token.line_number)),
+            "syntax overlays must be bounded to visible viewport lines"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&root);
 }

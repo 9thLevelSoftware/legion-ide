@@ -105,6 +105,8 @@ Renderer crates are adapter-only. They must not appear in `legion-ui`, app/edito
 
 GUI Phase 4 activates `legion-app` composition edges to `legion-index` and `legion-terminal` only for the language-and-terminal IDE loop. Language features must consume semantic/index and LSP DTOs through proposal-mediated edit previews before mutation. Terminal features must remain policy-gated, projection-only at the UI boundary, metadata-redacted, and fail closed by default; native terminal execution stays controlled by the terminal crate and its security/runtime gates. This GUI Phase 4 policy does not authorize `legion-ui` ownership of editor sessions/text, direct workspace mutation from language tooling, or new dependencies from `legion-index`/`legion-terminal` back into app, UI, editor, project, or desktop internals.
 
+GUI Phase 2 editor experience authorizes `legion-app` to use `syntect` for app-side semantic-token enrichment of normal viewport projections. The dependency must remain outside `legion-editor`, `legion-ui`, and `legion-desktop` renderer ownership: editor continues to emit bounded viewport text slices, app maps visible slices into protocol `ViewportSemanticTokenOverlay` values, and desktop maps semantic token kinds into theme colors. Large-file degraded projections must continue to omit semantic overlays. The approved dependency configuration uses the pure-Rust `default-fancy` feature path rather than the native Oniguruma backend.
+
 - `legion-ai` may depend on:
   - `legion-protocol`
   - `legion-security`

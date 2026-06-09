@@ -1,12 +1,14 @@
 //! Projection rendering for the desktop adapter.
 
 use std::collections::{BTreeSet, HashSet};
+use std::time::Duration;
 
 use legion_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
     PRODUCT_NAME, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    ProductRuntimeSurface, ProposalId, ProposalRejectionReason, ProposalRiskLabel, TextCoordinate,
-    ViewportProjectionMode, product_mode_allows_runtime_surface,
+    ProductRuntimeSurface, ProposalId, ProposalRejectionReason, ProposalRiskLabel,
+    ProtocolTextRange, TextCoordinate, ViewportProjectionMode, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay, product_mode_allows_runtime_surface,
 };
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PanelId, PanelRegistry,
@@ -73,6 +75,28 @@ pub struct DesktopStatusCursor {
     pub line: u32,
     /// One-based column number.
     pub column: u32,
+}
+
+/// Structured code-canvas line derived from active-buffer viewport projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopCodeLineViewModel {
+    /// One-based display line number.
+    pub number: u32,
+    /// Visible text for this code-canvas row.
+    pub text: String,
+    /// Semantic highlight spans scoped to this visible row.
+    pub highlights: Vec<DesktopCodeHighlightSpan>,
+}
+
+/// Renderer-ready semantic highlight span for a single visible code line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopCodeHighlightSpan {
+    /// Zero-based starting display column within the line.
+    pub start_col: u32,
+    /// Exclusive ending display column within the line.
+    pub end_col: u32,
+    /// Semantic token kind to map into the active desktop theme.
+    pub kind: ViewportSemanticTokenKind,
 }
 
 impl DesktopStatusBarViewModel {
@@ -150,6 +174,8 @@ pub struct DesktopProjectionViewModel {
     pub explorer_state_rows: Vec<String>,
     /// Active-buffer viewport or small-buffer rows.
     pub active_buffer_lines: Vec<String>,
+    /// Structured active-buffer code rows for editor-canvas rendering.
+    pub active_buffer_code_lines: Vec<DesktopCodeLineViewModel>,
     /// Active editor metadata rows.
     pub editor_status_rows: Vec<String>,
     /// Dirty-close prompt rows.
@@ -246,6 +272,7 @@ impl DesktopProjectionViewModel {
             explorer_rows: explorer_rows(snapshot, state),
             explorer_state_rows: explorer_rows(snapshot, state),
             active_buffer_lines: active_buffer_lines(snapshot),
+            active_buffer_code_lines: active_buffer_code_lines(snapshot),
             editor_status_rows: editor_status_rows(snapshot),
             close_prompt_rows: close_prompt_rows(snapshot),
             viewport_metadata_rows: viewport_metadata_rows(snapshot),
@@ -1022,7 +1049,7 @@ fn render_editor_canvas(
             .id_salt("legion_desktop_code_canvas_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                render_code_lines(ui, model);
+                render_code_lines(ui, snapshot, model, actions);
             });
     });
     if level == DesktopProductMode::Assist {
@@ -1083,6 +1110,30 @@ fn render_tab_strip(
                         buffer_id: tab.buffer_id,
                     });
                 }
+                response.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        actions.push(DesktopAction::CloseTab {
+                            buffer_id: tab.buffer_id,
+                        });
+                        ui.close();
+                    }
+                    if ui.button("Close Others").clicked() {
+                        for other in tabs.iter().filter(|other| other.buffer_id != tab.buffer_id) {
+                            actions.push(DesktopAction::CloseTab {
+                                buffer_id: other.buffer_id,
+                            });
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Close All").clicked() {
+                        for other in tabs {
+                            actions.push(DesktopAction::CloseTab {
+                                buffer_id: other.buffer_id,
+                            });
+                        }
+                        ui.close();
+                    }
+                });
             }
         });
     });
@@ -1115,9 +1166,110 @@ fn render_breadcrumb_bar(
     });
 }
 
-fn render_code_lines(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
-    if model.active_buffer_lines.is_empty() {
+fn render_code_lines(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if model.active_buffer_code_lines.is_empty() && model.active_buffer_lines.is_empty() {
         ui.label(theme::muted("<no active buffer>"));
+        return;
+    }
+    if !model.active_buffer_code_lines.is_empty() {
+        let active_buffer_id = snapshot.active_buffer_projection.buffer_id;
+        let current_cursor = snapshot
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .map(|viewport| viewport.cursor)
+            .unwrap_or_else(|| projected_cursor(snapshot));
+        let char_width = code_char_width();
+        for line in &model.active_buffer_code_lines {
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [42.0, 18.0],
+                    egui::Label::new(theme::code_muted(format!("{:>3}", line.number))),
+                );
+                let response = ui.add(
+                    egui::Label::new(code_line_layout_job(line))
+                        .sense(egui::Sense::click_and_drag()),
+                );
+                if let Some(position) = response.interact_pointer_pos()
+                    && let Some(buffer_id) = active_buffer_id
+                {
+                    let coordinate = editor_coordinate_for_line_x(
+                        line,
+                        position.x,
+                        response.rect.left(),
+                        char_width,
+                    );
+                    if response.triple_clicked() {
+                        actions.push(DesktopAction::SetSelection {
+                            buffer_id: Some(buffer_id),
+                            range: line_range_for_code_line(line),
+                        });
+                    } else if response.double_clicked() {
+                        if let Some(range) = word_range_for_coordinate(line, coordinate) {
+                            actions.push(DesktopAction::SetSelection {
+                                buffer_id: Some(buffer_id),
+                                range,
+                            });
+                        }
+                    } else if response.dragged() {
+                        actions.push(DesktopAction::SetSelection {
+                            buffer_id: Some(buffer_id),
+                            range: ProtocolTextRange {
+                                start: current_cursor,
+                                end: coordinate,
+                            },
+                        });
+                    } else if response.clicked() {
+                        let shift_pressed = response.ctx.input(|input| input.modifiers.shift);
+                        if shift_pressed {
+                            actions.push(DesktopAction::SetSelection {
+                                buffer_id: Some(buffer_id),
+                                range: ProtocolTextRange {
+                                    start: current_cursor,
+                                    end: coordinate,
+                                },
+                            });
+                        } else {
+                            response.request_focus();
+                            actions.push(DesktopAction::SetCursor {
+                                buffer_id: Some(buffer_id),
+                                cursor: coordinate,
+                            });
+                        }
+                    }
+                }
+                if let Some(buffer_id) = active_buffer_id {
+                    response.context_menu(|ui| {
+                        if ui.button("Copy Line").clicked() {
+                            response.ctx.copy_text(line.text.clone());
+                            ui.close();
+                        }
+                        if ui.button("Select Word").clicked() {
+                            if let Some(range) = word_range_for_coordinate(line, current_cursor) {
+                                actions.push(DesktopAction::SetSelection {
+                                    buffer_id: Some(buffer_id),
+                                    range,
+                                });
+                            }
+                            ui.close();
+                        }
+                        if ui.button("Select Line").clicked() {
+                            actions.push(DesktopAction::SetSelection {
+                                buffer_id: Some(buffer_id),
+                                range: line_range_for_code_line(line),
+                            });
+                            ui.close();
+                        }
+                    });
+                }
+                paint_code_cursor(ui, line, &response, current_cursor, char_width);
+            });
+        }
         return;
     }
     for (index, row) in model.active_buffer_lines.iter().enumerate() {
@@ -1128,6 +1280,119 @@ fn render_code_lines(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
             );
             ui.label(theme::code(row));
         });
+    }
+}
+
+fn code_char_width() -> f32 {
+    theme::tokens().typography.code as f32 * 0.62
+}
+
+fn paint_code_cursor(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    cursor: TextCoordinate,
+    char_width: f32,
+) {
+    if cursor.line != line.number.saturating_sub(1) {
+        return;
+    }
+    ui.ctx().request_repaint_after(Duration::from_millis(530));
+    let blink_on = ui
+        .ctx()
+        .input(|input| ((input.time * 2.0) as i64).rem_euclid(2) == 0);
+    if !blink_on {
+        return;
+    }
+    let col = cursor.character.min(line.text.chars().count() as u32);
+    let x = response.rect.left() + col as f32 * char_width;
+    ui.painter().line_segment(
+        [
+            egui::pos2(x, response.rect.top()),
+            egui::pos2(x, response.rect.bottom()),
+        ],
+        egui::Stroke::new(1.0, theme::tokens().accent.cyan),
+    );
+}
+
+fn code_line_layout_job(line: &DesktopCodeLineViewModel) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let mut cursor_col = 0;
+    let char_count = line.text.chars().count() as u32;
+    let mut highlights = line.highlights.clone();
+    highlights.sort_by_key(|span| (span.start_col, span.end_col));
+
+    for span in highlights {
+        let start_col = span.start_col.min(char_count);
+        let end_col = span.end_col.min(char_count);
+        if start_col >= end_col || start_col < cursor_col {
+            continue;
+        }
+        append_code_segment(
+            &mut job,
+            char_slice(&line.text, cursor_col, start_col),
+            theme::tokens().text.secondary,
+        );
+        append_code_segment(
+            &mut job,
+            char_slice(&line.text, start_col, end_col),
+            token_color(span.kind),
+        );
+        cursor_col = end_col;
+    }
+
+    append_code_segment(
+        &mut job,
+        char_slice(&line.text, cursor_col, char_count),
+        theme::tokens().text.secondary,
+    );
+    job
+}
+
+fn append_code_segment(job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32) {
+    if text.is_empty() {
+        return;
+    }
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::monospace(theme::tokens().typography.code as f32),
+            color,
+            ..Default::default()
+        },
+    );
+}
+
+fn char_slice(text: &str, start_col: u32, end_col: u32) -> &str {
+    let start = char_col_to_byte_index(text, start_col).unwrap_or(text.len());
+    let end = char_col_to_byte_index(text, end_col).unwrap_or(text.len());
+    if start <= end { &text[start..end] } else { "" }
+}
+
+fn char_col_to_byte_index(text: &str, column: u32) -> Option<usize> {
+    if column == 0 {
+        return Some(0);
+    }
+    text.char_indices()
+        .nth(column as usize)
+        .map(|(index, _)| index)
+        .or_else(|| (column as usize == text.chars().count()).then_some(text.len()))
+}
+
+fn token_color(kind: ViewportSemanticTokenKind) -> egui::Color32 {
+    let tokens = theme::tokens();
+    match kind {
+        ViewportSemanticTokenKind::Ident => tokens.text.secondary,
+        ViewportSemanticTokenKind::Keyword => tokens.accent.violet,
+        ViewportSemanticTokenKind::Type => tokens.accent.cyan,
+        ViewportSemanticTokenKind::String => tokens.accent.green,
+        ViewportSemanticTokenKind::Number => tokens.accent.amber,
+        ViewportSemanticTokenKind::Comment => tokens.text.muted,
+        ViewportSemanticTokenKind::Punct => tokens.text.muted,
+        ViewportSemanticTokenKind::Function => tokens.accent.blue,
+        ViewportSemanticTokenKind::Attribute => tokens.accent.purple,
+        ViewportSemanticTokenKind::Error => tokens.accent.red,
     }
 }
 
@@ -1209,7 +1474,7 @@ fn render_copilot_canvas(
                 current_path(snapshot),
                 Some(theme::tokens().accent.blue),
             );
-            egui::ScrollArea::both().show(ui, |ui| render_code_lines(ui, model));
+            egui::ScrollArea::both().show(ui, |ui| render_code_lines(ui, snapshot, model, actions));
         });
         theme::code_frame().show(&mut columns[1], |ui| {
             ui.horizontal(|ui| {
@@ -2395,6 +2660,108 @@ fn trim_middle(value: &str, max: usize) -> String {
     format!("{start}...{end}")
 }
 
+/// Map a pointer position over the editor text surface to a projected text coordinate.
+pub fn editor_coordinate_from_pointer(
+    pointer: egui::Pos2,
+    text_origin: egui::Pos2,
+    line_height: f32,
+    char_width: f32,
+    lines: &[DesktopCodeLineViewModel],
+) -> Option<TextCoordinate> {
+    if !line_height.is_finite()
+        || !char_width.is_finite()
+        || line_height <= 0.0
+        || char_width <= 0.0
+        || pointer.y < text_origin.y
+    {
+        return None;
+    }
+    let row = ((pointer.y - text_origin.y) / line_height).floor() as usize;
+    let line = lines.get(row)?;
+    Some(editor_coordinate_for_line_x(
+        line,
+        pointer.x,
+        text_origin.x,
+        char_width,
+    ))
+}
+
+/// Return the word selection range containing a projected coordinate.
+pub fn word_range_for_coordinate(
+    line: &DesktopCodeLineViewModel,
+    coordinate: TextCoordinate,
+) -> Option<ProtocolTextRange> {
+    if coordinate.line != line.number.saturating_sub(1) {
+        return None;
+    }
+    let chars = line.text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+    let mut index = (coordinate.character as usize).min(chars.len().saturating_sub(1));
+    if !is_word_char(chars[index]) && index > 0 && is_word_char(chars[index - 1]) {
+        index -= 1;
+    }
+    if !is_word_char(chars[index]) {
+        return None;
+    }
+
+    let mut start = index;
+    while start > 0 && is_word_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < chars.len() && is_word_char(chars[end]) {
+        end += 1;
+    }
+
+    Some(ProtocolTextRange {
+        start: text_coordinate(line.number.saturating_sub(1), start as u32),
+        end: text_coordinate(line.number.saturating_sub(1), end as u32),
+    })
+}
+
+/// Return the full visible-line selection range for a code-canvas row.
+pub fn line_range_for_code_line(line: &DesktopCodeLineViewModel) -> ProtocolTextRange {
+    ProtocolTextRange {
+        start: text_coordinate(line.number.saturating_sub(1), 0),
+        end: text_coordinate(
+            line.number.saturating_sub(1),
+            line.text.chars().count() as u32,
+        ),
+    }
+}
+
+fn editor_coordinate_for_line_x(
+    line: &DesktopCodeLineViewModel,
+    pointer_x: f32,
+    origin_x: f32,
+    char_width: f32,
+) -> TextCoordinate {
+    let raw_col = if pointer_x <= origin_x {
+        0
+    } else {
+        ((pointer_x - origin_x) / char_width).floor() as u32
+    };
+    text_coordinate(
+        line.number.saturating_sub(1),
+        raw_col.min(line.text.chars().count() as u32),
+    )
+}
+
+fn text_coordinate(line: u32, character: u32) -> TextCoordinate {
+    TextCoordinate {
+        line,
+        character,
+        byte_offset: None,
+        utf16_offset: None,
+    }
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
+}
+
 /// Adapter-local render output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionViewOutput {
@@ -3507,6 +3874,70 @@ fn active_buffer_lines(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     }
 
     vec!["<active buffer has no visible text>".to_string()]
+}
+
+fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCodeLineViewModel> {
+    let active = &snapshot.active_buffer_projection;
+    if active.buffer_id.is_none() {
+        return Vec::new();
+    }
+
+    if let Some(viewport) = &active.viewport
+        && !viewport.line_slices.is_empty()
+    {
+        return viewport
+            .line_slices
+            .iter()
+            .map(|line| DesktopCodeLineViewModel {
+                number: line.line_number + 1,
+                text: line.visible_text.clone(),
+                highlights: semantic_highlights_for_line(
+                    line.line_number,
+                    &line.visible_text,
+                    &viewport.semantic_token_overlays,
+                ),
+            })
+            .collect();
+    }
+
+    if !active.degraded
+        && let Some(text) = active.small_buffer_text()
+    {
+        return text
+            .lines()
+            .enumerate()
+            .map(|(index, line)| DesktopCodeLineViewModel {
+                number: index as u32 + 1,
+                text: line.to_string(),
+                highlights: Vec::new(),
+            })
+            .collect();
+    }
+
+    Vec::new()
+}
+
+fn semantic_highlights_for_line(
+    line_number: u32,
+    visible_text: &str,
+    overlays: &[ViewportSemanticTokenOverlay],
+) -> Vec<DesktopCodeHighlightSpan> {
+    let max_col = visible_text.chars().count() as u32;
+    let mut spans = overlays
+        .iter()
+        .filter(|overlay| overlay.line_number == line_number)
+        .filter_map(|overlay| {
+            let start_col = overlay.start_col.min(max_col);
+            let end_col = overlay.end_col.min(max_col);
+            (start_col < end_col).then_some(DesktopCodeHighlightSpan {
+                start_col,
+                end_col,
+                kind: overlay.kind,
+            })
+        })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|span| (span.start_col, span.end_col));
+    spans
 }
 
 fn editor_status_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

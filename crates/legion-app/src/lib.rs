@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(feature = "ai")]
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "ai")]
 use legion_agent::{
@@ -134,10 +134,11 @@ use legion_protocol::{
     TerminalScrollbackProjection, TerminalSearchProjection, TerminalSessionId, TextCoordinate,
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
     TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
-    VersionContext, ViewportScroll, WorkspaceCloseRequest, WorkspaceEditProposalPayload,
-    WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
-    WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest, WorkspaceResponse,
-    WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
+    VersionContext, ViewportLineSlice, ViewportProjection, ViewportProjectionMode, ViewportScroll,
+    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, WorkspaceCloseRequest,
+    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
+    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
     delegated_task_tool_permission_request, inline_prediction_projection_from_results,
     validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
     validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
@@ -187,6 +188,8 @@ use offline_ai::{
     LegionWorkflowCoordinatorOutput, ProviderRegistry, ProviderRouter, make_stub_registry,
 };
 use serde_json::{Value, json};
+use syntect::easy::ScopeRangeIterator;
+use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use thiserror::Error;
 
 const SEARCH_DEFAULT_RESULT_LIMIT: usize = 50;
@@ -7698,6 +7701,402 @@ impl AppCommandRouteContext {
     }
 }
 
+fn syntax_set() -> &'static SyntaxSet {
+    static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_nonewlines)
+}
+
+fn add_semantic_token_overlays(path: &str, viewport: &mut ViewportProjection) {
+    if viewport.mode == ViewportProjectionMode::DegradedLargeFile
+        || viewport.large_file_status.is_some()
+        || viewport.line_slices.is_empty()
+    {
+        viewport.semantic_token_overlays.clear();
+        return;
+    }
+
+    viewport.semantic_token_overlays =
+        semantic_token_overlays_for_visible_lines(path, &viewport.line_slices);
+}
+
+fn semantic_token_overlays_for_visible_lines(
+    path: &str,
+    line_slices: &[ViewportLineSlice],
+) -> Vec<ViewportSemanticTokenOverlay> {
+    let syntax_set = syntax_set();
+    let syntax = syntax_set
+        .find_syntax_for_file(Path::new(path))
+        .ok()
+        .flatten()
+        .or_else(|| {
+            Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .and_then(|extension| syntax_set.find_syntax_by_extension(extension))
+        })
+        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+    let mut parse_state = ParseState::new(syntax);
+    let mut scope_stack = ScopeStack::new();
+    let mut overlays = Vec::new();
+
+    for line in line_slices {
+        let Ok(ops) = parse_state.parse_line(&line.visible_text, syntax_set) else {
+            continue;
+        };
+        for (range, op) in ScopeRangeIterator::new(&ops, &line.visible_text) {
+            if scope_stack.apply(op).is_err() {
+                continue;
+            }
+            if range.is_empty() || line.visible_text[range.clone()].trim().is_empty() {
+                continue;
+            }
+            let Some(kind) = semantic_kind_for_scope_stack(&scope_stack) else {
+                continue;
+            };
+            let Some(start_col) = byte_index_to_char_col(&line.visible_text, range.start) else {
+                continue;
+            };
+            let Some(end_col) = byte_index_to_char_col(&line.visible_text, range.end) else {
+                continue;
+            };
+            if start_col >= end_col {
+                continue;
+            }
+            overlays.push(ViewportSemanticTokenOverlay {
+                line_number: line.line_number,
+                start_col,
+                end_col,
+                kind,
+            });
+        }
+    }
+
+    overlays.extend(fallback_semantic_token_overlays(path, line_slices));
+    overlays.sort_by_key(|overlay| {
+        (
+            overlay.line_number,
+            overlay.start_col,
+            overlay.end_col,
+            overlay.kind,
+        )
+    });
+    overlays.dedup_by_key(|overlay| {
+        (
+            overlay.line_number,
+            overlay.start_col,
+            overlay.end_col,
+            overlay.kind,
+        )
+    });
+    overlays
+}
+
+fn byte_index_to_char_col(line: &str, byte_index: usize) -> Option<u32> {
+    line.get(..byte_index)
+        .map(|prefix| prefix.chars().count() as u32)
+}
+
+fn fallback_semantic_token_overlays(
+    path: &str,
+    line_slices: &[ViewportLineSlice],
+) -> Vec<ViewportSemanticTokenOverlay> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut overlays = Vec::new();
+    match extension.as_str() {
+        "rs" => {
+            for line in line_slices {
+                push_rust_fallback_overlays(line.line_number, &line.visible_text, &mut overlays);
+            }
+        }
+        "toml" => {
+            for line in line_slices {
+                push_toml_fallback_overlays(line.line_number, &line.visible_text, &mut overlays);
+            }
+        }
+        "md" | "markdown" => {
+            let mut in_rust_fence = false;
+            for line in line_slices {
+                let trimmed = line.visible_text.trim_start();
+                if trimmed.starts_with("```") {
+                    in_rust_fence = !in_rust_fence && trimmed.contains("rust");
+                    continue;
+                }
+                if in_rust_fence {
+                    push_rust_fallback_overlays(
+                        line.line_number,
+                        &line.visible_text,
+                        &mut overlays,
+                    );
+                } else if trimmed.starts_with('#') {
+                    let start = line.visible_text.len() - trimmed.len();
+                    push_overlay_byte_range(
+                        line.line_number,
+                        &line.visible_text,
+                        start,
+                        line.visible_text.len(),
+                        ViewportSemanticTokenKind::Attribute,
+                        &mut overlays,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+    overlays
+}
+
+fn push_rust_fallback_overlays(
+    line_number: u32,
+    line: &str,
+    overlays: &mut Vec<ViewportSemanticTokenOverlay>,
+) {
+    let code_end = line.find("//").unwrap_or(line.len());
+    if code_end < line.len() {
+        push_overlay_byte_range(
+            line_number,
+            line,
+            code_end,
+            line.len(),
+            ViewportSemanticTokenKind::Comment,
+            overlays,
+        );
+    }
+    push_quoted_string_overlays(line_number, line, code_end, overlays);
+
+    let mut index = 0;
+    while index < code_end {
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = index;
+            index += ch.len_utf8();
+            while index < code_end {
+                let Some(next) = line[index..].chars().next() else {
+                    break;
+                };
+                if next == '_' || next.is_ascii_alphanumeric() {
+                    index += next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let word = &line[start..index];
+            let kind = if RUST_KEYWORDS.contains(&word) {
+                Some(ViewportSemanticTokenKind::Keyword)
+            } else if next_non_space_char(line, index) == Some('(') {
+                Some(ViewportSemanticTokenKind::Function)
+            } else if word
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_uppercase())
+            {
+                Some(ViewportSemanticTokenKind::Type)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                push_overlay_byte_range(line_number, line, start, index, kind, overlays);
+            }
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            let start = index;
+            index += ch.len_utf8();
+            while index < code_end {
+                let Some(next) = line[index..].chars().next() else {
+                    break;
+                };
+                if next == '_' || next.is_ascii_hexdigit() {
+                    index += next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            push_overlay_byte_range(
+                line_number,
+                line,
+                start,
+                index,
+                ViewportSemanticTokenKind::Number,
+                overlays,
+            );
+            continue;
+        }
+        index += ch.len_utf8();
+    }
+}
+
+fn push_toml_fallback_overlays(
+    line_number: u32,
+    line: &str,
+    overlays: &mut Vec<ViewportSemanticTokenOverlay>,
+) {
+    let code_end = line.find('#').unwrap_or(line.len());
+    if code_end < line.len() {
+        push_overlay_byte_range(
+            line_number,
+            line,
+            code_end,
+            line.len(),
+            ViewportSemanticTokenKind::Comment,
+            overlays,
+        );
+    }
+
+    let code = &line[..code_end];
+    if let Some(start) = code.find(|ch: char| !ch.is_whitespace()) {
+        let trimmed = &code[start..];
+        if trimmed.starts_with('[')
+            && let Some(close) = trimmed.find(']')
+        {
+            push_overlay_byte_range(
+                line_number,
+                line,
+                start,
+                start + close + 1,
+                ViewportSemanticTokenKind::Attribute,
+                overlays,
+            );
+        }
+    }
+    if let Some(equals) = code.find('=')
+        && let Some(start) = code[..equals].find(|ch: char| !ch.is_whitespace())
+    {
+        let end = code[..equals].trim_end().len();
+        push_overlay_byte_range(
+            line_number,
+            line,
+            start,
+            end,
+            ViewportSemanticTokenKind::Attribute,
+            overlays,
+        );
+    }
+    push_quoted_string_overlays(line_number, line, code_end, overlays);
+}
+
+fn push_quoted_string_overlays(
+    line_number: u32,
+    line: &str,
+    code_end: usize,
+    overlays: &mut Vec<ViewportSemanticTokenOverlay>,
+) {
+    let mut index = 0;
+    while index < code_end {
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        if ch != '"' {
+            index += ch.len_utf8();
+            continue;
+        }
+        let start = index;
+        index += ch.len_utf8();
+        let mut escaped = false;
+        while index < code_end {
+            let Some(next) = line[index..].chars().next() else {
+                break;
+            };
+            index += next.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if next == '\\' {
+                escaped = true;
+            } else if next == '"' {
+                break;
+            }
+        }
+        push_overlay_byte_range(
+            line_number,
+            line,
+            start,
+            index,
+            ViewportSemanticTokenKind::String,
+            overlays,
+        );
+    }
+}
+
+fn push_overlay_byte_range(
+    line_number: u32,
+    line: &str,
+    start: usize,
+    end: usize,
+    kind: ViewportSemanticTokenKind,
+    overlays: &mut Vec<ViewportSemanticTokenOverlay>,
+) {
+    let Some(start_col) = byte_index_to_char_col(line, start) else {
+        return;
+    };
+    let Some(end_col) = byte_index_to_char_col(line, end) else {
+        return;
+    };
+    if start_col < end_col {
+        overlays.push(ViewportSemanticTokenOverlay {
+            line_number,
+            start_col,
+            end_col,
+            kind,
+        });
+    }
+}
+
+fn next_non_space_char(line: &str, byte_index: usize) -> Option<char> {
+    line.get(byte_index..)?
+        .chars()
+        .find(|candidate| !candidate.is_whitespace())
+}
+
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while",
+];
+
+fn semantic_kind_for_scope_stack(scope_stack: &ScopeStack) -> Option<ViewportSemanticTokenKind> {
+    let scope = scope_stack.to_string();
+    if scope.contains("invalid") {
+        Some(ViewportSemanticTokenKind::Error)
+    } else if scope.contains("comment") {
+        Some(ViewportSemanticTokenKind::Comment)
+    } else if scope.contains("string") {
+        Some(ViewportSemanticTokenKind::String)
+    } else if scope.contains("constant.numeric") {
+        Some(ViewportSemanticTokenKind::Number)
+    } else if scope.contains("keyword") || scope.contains("storage.modifier") {
+        Some(ViewportSemanticTokenKind::Keyword)
+    } else if scope.contains("entity.name.function") {
+        Some(ViewportSemanticTokenKind::Function)
+    } else if scope.contains("entity.name.type")
+        || scope.contains("support.type")
+        || scope.contains("storage.type")
+    {
+        Some(ViewportSemanticTokenKind::Type)
+    } else if scope.contains("entity.name.section")
+        || scope.contains("markup.heading")
+        || scope.contains("meta.annotation")
+        || scope.contains("variable.parameter")
+    {
+        Some(ViewportSemanticTokenKind::Attribute)
+    } else if scope.contains("punctuation") {
+        Some(ViewportSemanticTokenKind::Punct)
+    } else if scope.contains("variable")
+        || scope.contains("identifier")
+        || scope.contains("entity.name")
+        || scope.contains("support.function")
+    {
+        Some(ViewportSemanticTokenKind::Ident)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug)]
 struct ProjectionBuilder;
 
@@ -7720,7 +8119,10 @@ impl ProjectionBuilder {
             },
         };
 
-        let viewport = editor.viewport_projection(request).ok();
+        let mut viewport = editor.viewport_projection(request).ok();
+        if let (Some(viewport), Some(path)) = (&mut viewport, active.active_file_path.as_deref()) {
+            add_semantic_token_overlays(path, viewport);
+        }
         let degraded = viewport
             .as_ref()
             .is_some_and(|vp| vp.large_file_status.is_some());
