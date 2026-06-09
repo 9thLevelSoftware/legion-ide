@@ -1,3 +1,20 @@
 /target
+/target-clippy/
+/target-clippy-stable/
 /mockups/node_modules/
 /mockups/dist/
+
+# Local IDE/tool state
+/.idea/
+/.kilo/
+/.kilocode/
+/.serena/
+
+# Hermes local audit/agent workspace. Move durable reports into audit-reports/ or plans/ before committing.
+/.hermes/
+
+# Almanac: track pages/topics only if the project explicitly chooses to version the wiki.
+.almanac/index.db
+.almanac/index.db-wal
+.almanac/index.db-shm
+.almanac/runs/

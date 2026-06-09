@@ -17,6 +17,17 @@ cargo deny check
 
 If any command fails, save exact output under `plans/evidence/legion-e2e/` before fixing.
 
+### Supply-chain gate prerequisite
+
+The `cargo deny check` gate above requires `cargo-deny` on the local machine. Install it with:
+
+```sh
+cargo install cargo-deny --locked
+cargo deny --version
+```
+
+CI runs cargo-deny through `EmbarkStudios/cargo-deny-action` on the Linux matrix leg, so local developer machines must install the CLI separately before running the full verification suite.
+
 ## Evidence naming
 
 Use this pattern:
