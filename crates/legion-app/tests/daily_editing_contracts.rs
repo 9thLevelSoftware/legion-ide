@@ -6,7 +6,8 @@ use legion_app::{
 };
 use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{
-    PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, WorkspaceTrustState,
+    PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, ViewportSemanticTokenKind,
+    WorkspaceTrustState,
 };
 use legion_ui::{CommandDispatchIntent, ShellLayoutProjection};
 
@@ -110,6 +111,191 @@ fn daily_editing_contracts_tabs_switch_active_buffer() {
     assert_eq!(viewport.cursor.character, 3);
     assert_eq!(viewport.selections.len(), 1);
     assert_eq!(viewport.scroll.left_column, 2);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_contracts_active_projection_emits_visible_syntax_overlays() {
+    let root = create_root();
+    let cases = [
+        (
+            "src/lib.rs",
+            "pub fn answer() -> u32 {\n    42\n}\n",
+            ViewportSemanticTokenKind::Keyword,
+        ),
+        (
+            "Cargo.toml",
+            "[package]\nname = \"legion-ide\"\n",
+            ViewportSemanticTokenKind::String,
+        ),
+        (
+            "README.md",
+            "# Legion IDE\n\n```rust\nfn main() {}\n```\n",
+            ViewportSemanticTokenKind::Keyword,
+        ),
+    ];
+
+    let mut app = trusted_app(&root);
+    for (relative_path, source, expected_kind) in cases {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&path, source).expect("seed source");
+
+        app.open_file(path.to_string_lossy())
+            .expect("open highlighted file");
+
+        let projection = app
+            .active_buffer_projection(&ShellLayoutProjection::plain("syntax"))
+            .expect("active projection");
+        let viewport = projection.viewport.expect("viewport projection");
+
+        assert!(
+            viewport
+                .semantic_token_overlays
+                .iter()
+                .any(|token| token.kind == expected_kind),
+            "expected {expected_kind:?} overlay for {relative_path}; got {:?}",
+            viewport.semantic_token_overlays
+        );
+        assert!(
+            viewport.semantic_token_overlays.iter().all(|token| viewport
+                .line_slices
+                .iter()
+                .any(|line| line.line_number == token.line_number)),
+            "syntax overlays must be bounded to visible viewport lines"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_contracts_scrolled_projection_seeds_stateful_syntax_overlays() {
+    let root = create_root();
+    let rust_path = root.join("src/stateful.rs");
+    let markdown_path = root.join("README.md");
+    std::fs::create_dir_all(rust_path.parent().expect("rust parent")).expect("create src");
+    std::fs::write(
+        &rust_path,
+        "fn main() {\n    /*\n     * visible comment\n     */\n}\n",
+    )
+    .expect("seed rust source");
+    std::fs::write(&markdown_path, "# Notes\n\n```rust\nfn visible() {}\n```\n")
+        .expect("seed markdown source");
+
+    let mut app = trusted_app(&root);
+
+    app.open_file(rust_path.to_string_lossy())
+        .expect("open rust source");
+    let rust_buffer = app.active_buffer_id().expect("rust buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetViewportScroll {
+        buffer_id: rust_buffer,
+        scroll: ViewportScroll {
+            top_line: 2,
+            left_column: 0,
+        },
+    })
+    .expect("scroll rust viewport");
+    let rust_projection = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("syntax"))
+        .expect("rust projection");
+    let rust_viewport = rust_projection.viewport.expect("rust viewport");
+    assert!(
+        rust_viewport.semantic_token_overlays.iter().any(|token| {
+            token.line_number == 2 && token.kind == ViewportSemanticTokenKind::Comment
+        }),
+        "scrolled block comment line should retain comment highlighting; got {:?}",
+        rust_viewport.semantic_token_overlays
+    );
+
+    app.open_file(markdown_path.to_string_lossy())
+        .expect("open markdown source");
+    let markdown_buffer = app.active_buffer_id().expect("markdown buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetViewportScroll {
+        buffer_id: markdown_buffer,
+        scroll: ViewportScroll {
+            top_line: 3,
+            left_column: 0,
+        },
+    })
+    .expect("scroll markdown viewport");
+    let markdown_projection = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("syntax"))
+        .expect("markdown projection");
+    let markdown_viewport = markdown_projection.viewport.expect("markdown viewport");
+    assert!(
+        markdown_viewport
+            .semantic_token_overlays
+            .iter()
+            .any(|token| {
+                token.line_number == 3 && token.kind == ViewportSemanticTokenKind::Keyword
+            }),
+        "scrolled fenced Rust code should retain keyword highlighting; got {:?}",
+        markdown_viewport.semantic_token_overlays
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_contracts_fallback_comment_detection_ignores_delimiters_inside_strings() {
+    let root = create_root();
+    let rust_path = root.join("src/string_delimiter.rs");
+    let toml_path = root.join("Cargo.toml");
+    std::fs::create_dir_all(rust_path.parent().expect("rust parent")).expect("create src");
+    let rust_source = "pub const URL: &str = \"https://github.com\";\n";
+    let toml_source = "name = \"value # nested\"\n";
+    std::fs::write(&rust_path, rust_source).expect("seed rust source");
+    std::fs::write(&toml_path, toml_source).expect("seed toml source");
+
+    let mut app = trusted_app(&root);
+
+    app.open_file(rust_path.to_string_lossy())
+        .expect("open rust source");
+    let rust_viewport = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("syntax"))
+        .expect("rust projection")
+        .viewport
+        .expect("rust viewport");
+    let rust_slashes = rust_source.find("//").expect("rust delimiter") as u32;
+    assert!(
+        rust_viewport
+            .semantic_token_overlays
+            .iter()
+            .filter(|token| token.line_number == 0)
+            .all(|token| {
+                token.kind != ViewportSemanticTokenKind::Comment
+                    || token.end_col <= rust_slashes
+                    || token.start_col > rust_slashes
+            }),
+        "Rust fallback must not mark // inside a string as a comment; got {:?}",
+        rust_viewport.semantic_token_overlays
+    );
+
+    app.open_file(toml_path.to_string_lossy())
+        .expect("open toml source");
+    let toml_viewport = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("syntax"))
+        .expect("toml projection")
+        .viewport
+        .expect("toml viewport");
+    let toml_hash = toml_source.find('#').expect("toml delimiter") as u32;
+    assert!(
+        toml_viewport
+            .semantic_token_overlays
+            .iter()
+            .filter(|token| token.line_number == 0)
+            .all(|token| {
+                token.kind != ViewportSemanticTokenKind::Comment
+                    || token.end_col <= toml_hash
+                    || token.start_col > toml_hash
+            }),
+        "TOML fallback must not mark # inside a string as a comment; got {:?}",
+        toml_viewport.semantic_token_overlays
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

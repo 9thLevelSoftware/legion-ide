@@ -254,11 +254,19 @@ fn markdown_link_targets(line: &str) -> Vec<String> {
 }
 
 fn is_allowlisted(root: &Path, file: &Path, config: &DocsHygieneConfig) -> bool {
-    let rel = file.strip_prefix(root).unwrap_or(file).to_string_lossy();
-    config
-        .allowlisted_paths
-        .iter()
-        .any(|prefix| rel.starts_with(prefix))
+    let rel = repo_relative_path(file.strip_prefix(root).unwrap_or(file));
+    config.allowlisted_paths.iter().any(|prefix| {
+        let prefix = normalize_allowlist_prefix(prefix);
+        !prefix.is_empty() && rel.starts_with(&prefix)
+    })
+}
+
+fn repo_relative_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn normalize_allowlist_prefix(prefix: &str) -> String {
+    prefix.trim().replace('\\', "/")
 }
 
 fn check_stale_devil_references(

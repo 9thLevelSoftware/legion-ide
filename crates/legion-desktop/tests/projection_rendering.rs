@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
-use legion_desktop::view::{DesktopProjectionViewModel, DesktopProjectionViewState};
+use legion_desktop::view::{
+    DesktopCodeHighlightSpan, DesktopCodeLineViewModel, DesktopProjectionViewModel,
+    DesktopProjectionViewState, drag_anchor_for_line_pointer, drag_selection_range,
+    editor_coordinate_from_pointer, line_range_for_code_line, word_range_for_coordinate,
+};
 use legion_protocol::{
     ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow, BufferId, BufferVersion, ByteRange,
     CanonicalPath, CapabilityId, CollaborationParticipantId, CollaborationPresenceProjection,
@@ -16,7 +20,8 @@ use legion_protocol::{
     SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis, Utf16Position,
     Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
     ViewportDimensions, ViewportLineSlice, ViewportLineTruncationState, ViewportProjection,
-    ViewportProjectionMode, ViewportScroll, WorkspaceId,
+    ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay, WorkspaceId,
 };
 use legion_ui::ui::{
     CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
@@ -386,6 +391,94 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
             schema_version: 1,
         }),
         degraded: true,
+        small_buffer_preview: None,
+        dirty: false,
+    };
+    snapshot
+}
+
+fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
+    let mut snapshot = Shell::empty("Highlighted").projection_snapshot();
+    snapshot.active_buffer_projection = ActiveBufferProjection {
+        workspace_id: Some(WorkspaceId(1)),
+        buffer_id: Some(BufferId(3)),
+        file_id: Some(FileId(2)),
+        file_path: Some(CanonicalPath("src/lib.rs".to_string())),
+        viewport: Some(ViewportProjection {
+            workspace_id: WorkspaceId(1),
+            buffer_id: BufferId(3),
+            file_id: Some(FileId(2)),
+            snapshot_id: SnapshotId(4),
+            buffer_version: BufferVersion(5),
+            visible_range: range(0, 24),
+            selections: Vec::new(),
+            cursor: coord(0, 4, 4),
+            scroll: ViewportScroll {
+                top_line: 0,
+                left_column: 0,
+            },
+            dimensions: ViewportDimensions {
+                width_px: 800,
+                height_px: 600,
+            },
+            mode: ViewportProjectionMode::Normal,
+            line_slices: vec![
+                ViewportLineSlice {
+                    line_number: 0,
+                    visible_text: "pub fn answer() -> u32 {".to_string(),
+                    byte_range: ByteRange::new(0, 24),
+                    utf16_range: Utf16Range {
+                        start: Utf16Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Utf16Position {
+                            line: 0,
+                            character: 24,
+                        },
+                    },
+                    chunk_hash: fingerprint("chunk-0"),
+                    truncation_state: ViewportLineTruncationState::None,
+                },
+                ViewportLineSlice {
+                    line_number: 1,
+                    visible_text: "    42".to_string(),
+                    byte_range: ByteRange::new(25, 31),
+                    utf16_range: Utf16Range {
+                        start: Utf16Position {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: Utf16Position {
+                            line: 1,
+                            character: 6,
+                        },
+                    },
+                    chunk_hash: fingerprint("chunk-1"),
+                    truncation_state: ViewportLineTruncationState::None,
+                },
+            ],
+            line_metrics: Vec::new(),
+            decoration_spans: Vec::new(),
+            fold_ranges: Vec::new(),
+            semantic_token_overlays: vec![
+                ViewportSemanticTokenOverlay {
+                    line_number: 0,
+                    start_col: 0,
+                    end_col: 3,
+                    kind: ViewportSemanticTokenKind::Keyword,
+                },
+                ViewportSemanticTokenOverlay {
+                    line_number: 1,
+                    start_col: 4,
+                    end_col: 6,
+                    kind: ViewportSemanticTokenKind::Number,
+                },
+            ],
+            large_file_status: None,
+            schema_version: 2,
+        }),
+        degraded: false,
         small_buffer_preview: None,
         dirty: false,
     };
@@ -857,6 +950,130 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             .iter()
             .any(|row| row.contains("DegradedLargeFile"))
     );
+}
+
+#[test]
+fn projection_rendering_preserves_semantic_token_spans_for_code_canvas() {
+    let model = DesktopProjectionViewModel::from_snapshot(&highlighted_snapshot());
+
+    assert_eq!(model.active_buffer_code_lines.len(), 2);
+    assert_eq!(model.active_buffer_code_lines[0].number, 1);
+    assert_eq!(
+        model.active_buffer_code_lines[0].text,
+        "pub fn answer() -> u32 {"
+    );
+    assert!(
+        model.active_buffer_code_lines[0]
+            .highlights
+            .iter()
+            .any(|span| {
+                span.start_col == 0
+                    && span.end_col == 3
+                    && span.kind == ViewportSemanticTokenKind::Keyword
+            })
+    );
+    assert!(
+        model.active_buffer_code_lines[1]
+            .highlights
+            .iter()
+            .any(|span| {
+                span.start_col == 4
+                    && span.end_col == 6
+                    && span.kind == ViewportSemanticTokenKind::Number
+            })
+    );
+    assert!(
+        model
+            .active_buffer_lines
+            .iter()
+            .any(|row| row.contains("pub fn answer"))
+    );
+}
+
+#[test]
+fn projection_rendering_maps_editor_pointer_to_text_coordinate() {
+    let lines = vec![
+        DesktopCodeLineViewModel {
+            number: 4,
+            text: "alpha".to_string(),
+            highlights: vec![DesktopCodeHighlightSpan {
+                start_col: 0,
+                end_col: 5,
+                kind: ViewportSemanticTokenKind::Ident,
+            }],
+        },
+        DesktopCodeLineViewModel {
+            number: 5,
+            text: "beta_value".to_string(),
+            highlights: Vec::new(),
+        },
+    ];
+
+    let coordinate = editor_coordinate_from_pointer(
+        egui::pos2(34.0, 42.0),
+        egui::pos2(10.0, 20.0),
+        18.0,
+        8.0,
+        &lines,
+    )
+    .expect("pointer should map to second row");
+
+    assert_eq!(coordinate.line, 4);
+    assert_eq!(coordinate.character, 3);
+    assert_eq!(coordinate.byte_offset, None);
+    assert_eq!(coordinate.utf16_offset, None);
+
+    let clamped = editor_coordinate_from_pointer(
+        egui::pos2(400.0, 20.0),
+        egui::pos2(10.0, 20.0),
+        18.0,
+        8.0,
+        &lines,
+    )
+    .expect("pointer should clamp to first row end");
+    assert_eq!(clamped.line, 3);
+    assert_eq!(clamped.character, 5);
+}
+
+#[test]
+fn projection_rendering_computes_word_and_line_selection_ranges() {
+    let line = DesktopCodeLineViewModel {
+        number: 8,
+        text: "let beta_value = 42;".to_string(),
+        highlights: Vec::new(),
+    };
+    let word = word_range_for_coordinate(&line, coord(7, 6, 0)).expect("word range");
+    assert_eq!(word.start.line, 7);
+    assert_eq!(word.start.character, 4);
+    assert_eq!(word.end.line, 7);
+    assert_eq!(word.end.character, 14);
+
+    let full_line = line_range_for_code_line(&line);
+    assert_eq!(full_line.start.line, 7);
+    assert_eq!(full_line.start.character, 0);
+    assert_eq!(full_line.end.line, 7);
+    assert_eq!(full_line.end.character, 20);
+}
+
+#[test]
+fn projection_rendering_anchors_drag_selection_at_gesture_start() {
+    let line = DesktopCodeLineViewModel {
+        number: 8,
+        text: "let beta_value = 42;".to_string(),
+        highlights: Vec::new(),
+    };
+    let old_cursor = coord(20, 0, 0);
+    let end = coord(7, 14, 14);
+    let anchor = drag_anchor_for_line_pointer(&line, 74.0, egui::vec2(32.0, 0.0), 10.0, 8.0);
+    let range = drag_selection_range(Some(anchor), old_cursor, end);
+
+    assert_eq!(range.start.line, 7);
+    assert_eq!(range.start.character, 4);
+    assert_eq!(range.end, end);
+
+    let fallback = drag_selection_range(None, old_cursor, end);
+    assert_eq!(fallback.start, old_cursor);
+    assert_eq!(fallback.end, end);
 }
 
 #[test]

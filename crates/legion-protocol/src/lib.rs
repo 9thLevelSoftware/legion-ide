@@ -477,9 +477,50 @@ pub struct ViewportDecorationSpan {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ViewportFoldRange {}
 
-/// Placeholder semantic token overlay for future overlay phases.
+/// Semantic token category for viewport overlays.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub enum ViewportSemanticTokenKind {
+    /// Identifier or otherwise uncategorized semantic text.
+    #[default]
+    Ident,
+    /// Language keyword or control word.
+    Keyword,
+    /// Type, class, trait, or interface name.
+    Type,
+    /// String literal content.
+    String,
+    /// Numeric literal content.
+    Number,
+    /// Comment text.
+    Comment,
+    /// Punctuation or delimiter token.
+    Punct,
+    /// Function, method, or callable name.
+    Function,
+    /// Attribute, annotation, heading, or metadata token.
+    Attribute,
+    /// Invalid or parser-error token.
+    Error,
+}
+
+/// Semantic token overlay for a visible viewport line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ViewportSemanticTokenOverlay {}
+pub struct ViewportSemanticTokenOverlay {
+    /// Zero-based logical line number containing the token.
+    #[serde(default)]
+    pub line_number: u32,
+    /// Zero-based starting display column within the visible line slice.
+    #[serde(default)]
+    pub start_col: u32,
+    /// Exclusive ending display column within the visible line slice.
+    #[serde(default)]
+    pub end_col: u32,
+    /// Semantic token category, mapped to renderer colors outside protocol.
+    #[serde(default)]
+    pub kind: ViewportSemanticTokenKind,
+}
 
 /// Large-file projection status for degraded viewport rendering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
