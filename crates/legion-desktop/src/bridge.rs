@@ -82,6 +82,16 @@ pub enum DesktopAction {
     CompletePaletteSelection,
     /// Dispatch command palette selection.
     DispatchPaletteSelection,
+    /// Dismiss a foreground toast in adapter-local view state.
+    DismissToast {
+        /// Projected toast identifier.
+        toast_id: u64,
+    },
+    /// Invoke a foreground toast action through existing command authority.
+    InvokeToastAction {
+        /// Intent attached to the projected toast action.
+        intent: CommandDispatchIntent,
+    },
     /// Ask the workflow layer to open a workspace root.
     OpenWorkspace {
         /// Workspace root selected by the adapter.
@@ -963,6 +973,8 @@ impl DesktopCommandBridge {
             DesktopAction::DispatchPaletteSelection => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::DispatchPaletteSelection)
             }
+            DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,
+            DesktopAction::InvokeToastAction { intent } => DesktopBridgeOutput::Intent(intent),
             DesktopAction::OpenWorkspace { root } => {
                 DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenWorkspace { root })
             }

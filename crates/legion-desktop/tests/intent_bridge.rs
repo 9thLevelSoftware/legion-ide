@@ -643,6 +643,20 @@ fn intent_bridge_routes_palette_reducer_actions() {
 }
 
 #[test]
+fn intent_bridge_routes_toast_actions_without_product_state_ownership() {
+    assert_eq!(
+        translate(DesktopAction::DismissToast { toast_id: 42 }),
+        DesktopBridgeOutput::Noop
+    );
+    assert_eq!(
+        translate(DesktopAction::InvokeToastAction {
+            intent: CommandDispatchIntent::RefreshExplorer,
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshExplorer)
+    );
+}
+
+#[test]
 fn intent_bridge_rejects_invalid_path_input() {
     assert_eq!(
         translate(DesktopAction::OpenPathText(" \t ".to_string())),
