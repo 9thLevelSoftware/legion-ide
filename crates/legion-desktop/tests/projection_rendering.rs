@@ -31,7 +31,8 @@ use legion_ui::{
     ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
     AssistInlinePredictionStatusProjection, DockMode, ExplorerNodeProjection, ExplorerProjection,
     ExplorerSelectionProjection, PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind,
-    SearchScopeProjection, Shell, StatusMessageProjection, StatusSeverity, TOAST_VISIBLE_LIMIT,
+    SearchScopeProjection, SettingsProjection, Shell, StatusMessageProjection, StatusSeverity,
+    TOAST_VISIBLE_LIMIT, ThemePreferenceProjection, ToastVerbosityProjection,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -907,6 +908,14 @@ fn projection_rendering_models_warning_and_error_statuses_as_toasts() {
         "Session restore skipped"
     );
     assert_eq!(model.toast_stack.overflow_count, 0);
+
+    snapshot.settings_projection.toast_verbosity = ToastVerbosityProjection::All;
+    let all_model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert_eq!(all_model.toast_stack.visible.len(), 3);
+    assert_eq!(
+        all_model.toast_stack.visible[2].severity,
+        StatusSeverity::Info
+    );
 }
 
 #[test]
@@ -969,6 +978,12 @@ fn projection_rendering_uses_mode_filtered_dock_registry() {
             .iter()
             .any(|row| row.contains("id=project_explorer"))
     );
+    assert!(
+        empty
+            .dock_panel_rows
+            .iter()
+            .any(|row| row.contains("id=settings") && row.contains("requires_ai=false"))
+    );
 
     let delegated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
     assert!(
@@ -1000,6 +1015,46 @@ fn projection_rendering_uses_mode_filtered_dock_registry() {
             .iter()
             .any(|row| row.contains("id=assistant") && row.contains("requires_ai=true"))
     );
+}
+
+#[test]
+fn projection_rendering_projects_workbench_settings_model() {
+    let mut snapshot = Shell::empty("Settings").projection_snapshot();
+    snapshot.settings_projection = SettingsProjection {
+        theme_preference: ThemePreferenceProjection::System,
+        zoom_percent: 220,
+        editor_font_size_pt: 8,
+        toast_verbosity: ToastVerbosityProjection::All,
+        editor: legion_ui::EditorSettingsProjection {
+            line_numbers_visible: false,
+            current_line_highlight: false,
+        },
+        schema_version: 0,
+    };
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert_eq!(
+        model.settings.theme_preference,
+        ThemePreferenceProjection::System
+    );
+    assert_eq!(model.settings.theme_label, "System");
+    assert_eq!(
+        model.settings.zoom_percent,
+        SettingsProjection::MAX_ZOOM_PERCENT
+    );
+    assert_eq!(
+        model.settings.editor_font_size_pt,
+        SettingsProjection::MIN_EDITOR_FONT_SIZE_PT
+    );
+    assert_eq!(
+        model.settings.toast_verbosity,
+        ToastVerbosityProjection::All
+    );
+    assert_eq!(model.settings.toast_verbosity_label, "All statuses");
+    assert!(!model.settings.line_numbers_visible);
+    assert!(!model.settings.current_line_highlight);
+    assert_eq!(model.settings.schema_version, 1);
 }
 
 #[test]

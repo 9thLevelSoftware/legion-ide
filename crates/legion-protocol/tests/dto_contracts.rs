@@ -3888,6 +3888,7 @@ fn dto_contracts_session_record_schema_golden() {
             }],
             schema_version: 1,
         }],
+        workbench_settings: WorkbenchSettingsRecord::default(),
         dirty_indicators: vec![SessionDirtyIndicator {
             buffer_id: BufferId(22),
             file_id: Some(FileId(33)),
@@ -3947,6 +3948,15 @@ fn dto_contracts_session_record_schema_golden() {
             }],
             "schema_version": 1
         }],
+        "workbench_settings": {
+            "theme_preference": "dark",
+            "zoom_percent": 100,
+            "editor_font_size_pt": 12,
+            "toast_verbosity": "warnings_and_errors",
+            "line_numbers_visible": true,
+            "current_line_highlight": true,
+            "schema_version": 1
+        },
         "dirty_indicators": [{
             "buffer_id": 22,
             "file_id": 33,

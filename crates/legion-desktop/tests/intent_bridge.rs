@@ -13,7 +13,7 @@ use legion_ui::{
     ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
     AssistInlinePredictionStatusProjection, CommandDispatchIntent, DebugConfigurationProjection,
     DebugStepKindProjection, ExplorerNodeProjection, ExplorerProjection, PaletteMode,
-    SearchScopeProjection, Shell,
+    SearchScopeProjection, Shell, ThemePreferenceProjection, ToastVerbosityProjection,
 };
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
@@ -639,6 +639,54 @@ fn intent_bridge_routes_palette_reducer_actions() {
     assert_eq!(
         translate(DesktopAction::ClosePalette),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::ClosePalette)
+    );
+}
+
+#[test]
+fn intent_bridge_routes_settings_actions() {
+    assert_eq!(
+        translate(DesktopAction::OpenSettings),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
+    );
+    assert_eq!(
+        translate(DesktopAction::SetThemePreference {
+            preference: ThemePreferenceProjection::System,
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetThemePreference {
+            preference: ThemePreferenceProjection::System,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetZoomPercent { zoom_percent: 150 }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetZoomPercent { zoom_percent: 150 })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetEditorFontSize { font_size_pt: 15 }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetEditorFontSize { font_size_pt: 15 })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetToastVerbosity {
+            verbosity: ToastVerbosityProjection::All,
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetToastVerbosity {
+            verbosity: ToastVerbosityProjection::All,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetLineNumbersVisible { visible: false }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetLineNumbersVisible {
+            visible: false,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetCurrentLineHighlight { enabled: false }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetCurrentLineHighlight {
+            enabled: false,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::ResetSettings),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ResetSettings)
     );
 }
 

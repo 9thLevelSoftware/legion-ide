@@ -19210,6 +19210,39 @@ pub struct WorkbenchProviderRoutingSettings {
     pub schema_version: u16,
 }
 
+/// Persisted workbench UI settings for workspace-session restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchSettingsRecord {
+    /// Theme preference label, such as `dark`, `light`, or `system`.
+    pub theme_preference: String,
+    /// UI zoom percentage.
+    pub zoom_percent: u16,
+    /// Editor font size in points.
+    pub editor_font_size_pt: u16,
+    /// Toast verbosity label.
+    pub toast_verbosity: String,
+    /// Whether editor line numbers are visible.
+    pub line_numbers_visible: bool,
+    /// Whether the active editor line is highlighted.
+    pub current_line_highlight: bool,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
+impl Default for WorkbenchSettingsRecord {
+    fn default() -> Self {
+        Self {
+            theme_preference: "dark".to_string(),
+            zoom_percent: 100,
+            editor_font_size_pt: 12,
+            toast_verbosity: "warnings_and_errors".to_string(),
+            line_numbers_visible: true,
+            current_line_highlight: true,
+            schema_version: 1,
+        }
+    }
+}
+
 /// Product-readiness track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnterpriseProductReadinessTrack {
@@ -20692,6 +20725,9 @@ pub struct WorkspaceSessionRecord {
     /// Mode-scoped dock layouts.
     #[serde(default)]
     pub dock_layouts: Vec<SessionDockLayout>,
+    /// Persisted workbench UI settings.
+    #[serde(default)]
+    pub workbench_settings: WorkbenchSettingsRecord,
     /// Dirty indicators.
     pub dirty_indicators: Vec<SessionDirtyIndicator>,
     /// Last saved timestamp.

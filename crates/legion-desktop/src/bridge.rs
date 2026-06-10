@@ -13,7 +13,8 @@ use legion_protocol::{
 use legion_protocol::{PluginContribution, PluginId};
 use legion_ui::{
     CommandDispatchIntent, DebugStepKindProjection, DockMode, GitConflictChoiceProjection,
-    PaletteMode, SearchScopeProjection, ShellProjectionSnapshot,
+    PaletteMode, SearchScopeProjection, ShellProjectionSnapshot, ThemePreferenceProjection,
+    ToastVerbosityProjection,
 };
 use thiserror::Error;
 
@@ -92,6 +93,40 @@ pub enum DesktopAction {
         /// Intent attached to the projected toast action.
         intent: CommandDispatchIntent,
     },
+    /// Open the projected Settings surface.
+    OpenSettings,
+    /// Update theme preference through app authority.
+    SetThemePreference {
+        /// Requested theme preference.
+        preference: ThemePreferenceProjection,
+    },
+    /// Update UI zoom through app authority.
+    SetZoomPercent {
+        /// Requested zoom percentage.
+        zoom_percent: u16,
+    },
+    /// Update editor font size through app authority.
+    SetEditorFontSize {
+        /// Requested editor font size in points.
+        font_size_pt: u16,
+    },
+    /// Update toast verbosity through app authority.
+    SetToastVerbosity {
+        /// Requested toast verbosity.
+        verbosity: ToastVerbosityProjection,
+    },
+    /// Toggle line numbers through app authority.
+    SetLineNumbersVisible {
+        /// Whether line numbers should be visible.
+        visible: bool,
+    },
+    /// Toggle current-line highlight through app authority.
+    SetCurrentLineHighlight {
+        /// Whether current-line highlighting is enabled.
+        enabled: bool,
+    },
+    /// Reset workbench settings through app authority.
+    ResetSettings,
     /// Ask the workflow layer to open a workspace root.
     OpenWorkspace {
         /// Workspace root selected by the adapter.
@@ -975,6 +1010,38 @@ impl DesktopCommandBridge {
             }
             DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::InvokeToastAction { intent } => DesktopBridgeOutput::Intent(intent),
+            DesktopAction::OpenSettings => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
+            }
+            DesktopAction::SetThemePreference { preference } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetThemePreference {
+                    preference,
+                })
+            }
+            DesktopAction::SetZoomPercent { zoom_percent } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetZoomPercent { zoom_percent })
+            }
+            DesktopAction::SetEditorFontSize { font_size_pt } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetEditorFontSize {
+                    font_size_pt,
+                })
+            }
+            DesktopAction::SetToastVerbosity { verbosity } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetToastVerbosity { verbosity })
+            }
+            DesktopAction::SetLineNumbersVisible { visible } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetLineNumbersVisible {
+                    visible,
+                })
+            }
+            DesktopAction::SetCurrentLineHighlight { enabled } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetCurrentLineHighlight {
+                    enabled,
+                })
+            }
+            DesktopAction::ResetSettings => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ResetSettings)
+            }
             DesktopAction::OpenWorkspace { root } => {
                 DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenWorkspace { root })
             }
