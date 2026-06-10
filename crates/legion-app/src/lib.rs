@@ -135,16 +135,17 @@ use legion_protocol::{
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
     TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
     VersionContext, ViewportLineSlice, ViewportProjection, ViewportProjectionMode, ViewportScroll,
-    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, WorkspaceCloseRequest,
-    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
-    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
-    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
-    delegated_task_tool_permission_request, inline_prediction_projection_from_results,
-    validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
-    validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
-    validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
-    validate_mcp_registry_snapshot, validate_terminal_close_request, validate_terminal_input,
-    validate_terminal_kill_request, validate_terminal_resize,
+    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, WorkbenchSettingsRecord,
+    WorkspaceCloseRequest, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
+    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
+    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
+    WorkspaceTextEdit, WorkspaceTrustState, delegated_task_tool_permission_request,
+    inline_prediction_projection_from_results, validate_inline_prediction_lifecycle_command,
+    validate_legion_cloud_lane_projection, validate_legion_cloud_lane_task_request,
+    validate_legion_workflow_decision_feed_entry, validate_legion_workflow_kill_switch,
+    validate_legion_workflow_risk_monitor_snapshot, validate_mcp_registry_snapshot,
+    validate_terminal_close_request, validate_terminal_input, validate_terminal_kill_request,
+    validate_terminal_resize,
 };
 use legion_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
@@ -173,8 +174,9 @@ use legion_ui::ui::{
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
     GitHunkStageProjection, GitProjection, PaletteMode, PaletteProjection, PaletteResult,
     PaletteResultKind, SearchProjection, SearchResultProjection, SearchScopeProjection,
-    SearchStatusKindProjection, SearchStatusProjection, StructuralSearchCaptureProjection,
-    StructuralSearchMatchProjection, StructuralSearchProjection, WorkspaceSessionRecordProjection,
+    SearchStatusKindProjection, SearchStatusProjection, SettingsProjection,
+    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
+    ThemePreferenceProjection, ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, CommandDispatchIntent, DockMode, ExplorerNodeProjection,
@@ -6601,6 +6603,40 @@ pub enum AppCommandRequest {
     CompletePaletteSelection,
     /// Dispatch the selected command palette result.
     DispatchPaletteSelection,
+    /// Open the app-owned Settings projection.
+    OpenSettings,
+    /// Update the app-owned theme preference.
+    SetThemePreference {
+        /// Requested theme preference.
+        preference: ThemePreferenceProjection,
+    },
+    /// Update the app-owned UI zoom percentage.
+    SetZoomPercent {
+        /// Requested zoom percentage.
+        zoom_percent: u16,
+    },
+    /// Update the app-owned editor font size.
+    SetEditorFontSize {
+        /// Requested editor font size in points.
+        font_size_pt: u16,
+    },
+    /// Update app-owned toast verbosity.
+    SetToastVerbosity {
+        /// Requested toast verbosity.
+        verbosity: ToastVerbosityProjection,
+    },
+    /// Toggle editor line number visibility.
+    SetLineNumbersVisible {
+        /// Whether line numbers should be visible.
+        visible: bool,
+    },
+    /// Toggle current-line highlighting.
+    SetCurrentLineHighlight {
+        /// Whether current-line highlighting is enabled.
+        enabled: bool,
+    },
+    /// Reset app-owned settings to defaults.
+    ResetSettings,
     /// Run bounded lexical search through app authority.
     RunSearch {
         /// App-generated query id.
@@ -7130,6 +7166,14 @@ impl CommandExecutionService {
             | AppCommandRequest::MovePaletteSelection { .. }
             | AppCommandRequest::CompletePaletteSelection
             | AppCommandRequest::DispatchPaletteSelection
+            | AppCommandRequest::OpenSettings
+            | AppCommandRequest::SetThemePreference { .. }
+            | AppCommandRequest::SetZoomPercent { .. }
+            | AppCommandRequest::SetEditorFontSize { .. }
+            | AppCommandRequest::SetToastVerbosity { .. }
+            | AppCommandRequest::SetLineNumbersVisible { .. }
+            | AppCommandRequest::SetCurrentLineHighlight { .. }
+            | AppCommandRequest::ResetSettings
             | AppCommandRequest::RunSearch { .. }
             | AppCommandRequest::RunStructuralSearch { .. }
             | AppCommandRequest::CancelSearch { .. }
@@ -7312,6 +7356,26 @@ impl CommandDispatcher {
             CommandDispatchIntent::DispatchPaletteSelection => {
                 Ok(AppCommandRequest::DispatchPaletteSelection)
             }
+            CommandDispatchIntent::OpenSettings => Ok(AppCommandRequest::OpenSettings),
+            CommandDispatchIntent::SetThemePreference { preference } => {
+                Ok(AppCommandRequest::SetThemePreference { preference })
+            }
+            CommandDispatchIntent::SetZoomPercent { zoom_percent } => {
+                Ok(AppCommandRequest::SetZoomPercent { zoom_percent })
+            }
+            CommandDispatchIntent::SetEditorFontSize { font_size_pt } => {
+                Ok(AppCommandRequest::SetEditorFontSize { font_size_pt })
+            }
+            CommandDispatchIntent::SetToastVerbosity { verbosity } => {
+                Ok(AppCommandRequest::SetToastVerbosity { verbosity })
+            }
+            CommandDispatchIntent::SetLineNumbersVisible { visible } => {
+                Ok(AppCommandRequest::SetLineNumbersVisible { visible })
+            }
+            CommandDispatchIntent::SetCurrentLineHighlight { enabled } => {
+                Ok(AppCommandRequest::SetCurrentLineHighlight { enabled })
+            }
+            CommandDispatchIntent::ResetSettings => Ok(AppCommandRequest::ResetSettings),
             CommandDispatchIntent::RunSearch {
                 scope,
                 query,
@@ -8562,6 +8626,40 @@ fn tab_id_for_buffer(buffer_id: BufferId) -> String {
     format!("buffer:{}", buffer_id.0)
 }
 
+fn workbench_settings_record_from_projection(
+    settings: &SettingsProjection,
+) -> WorkbenchSettingsRecord {
+    let settings = settings.clone().normalized();
+    WorkbenchSettingsRecord {
+        theme_preference: settings.theme_preference.as_str().to_string(),
+        zoom_percent: settings.zoom_percent,
+        editor_font_size_pt: settings.editor_font_size_pt,
+        toast_verbosity: settings.toast_verbosity.as_str().to_string(),
+        line_numbers_visible: settings.editor.line_numbers_visible,
+        current_line_highlight: settings.editor.current_line_highlight,
+        schema_version: settings.schema_version,
+    }
+}
+
+fn settings_projection_from_workbench_record(
+    record: &WorkbenchSettingsRecord,
+) -> SettingsProjection {
+    SettingsProjection {
+        theme_preference: ThemePreferenceProjection::parse(&record.theme_preference)
+            .unwrap_or_default(),
+        zoom_percent: record.zoom_percent,
+        editor_font_size_pt: record.editor_font_size_pt,
+        toast_verbosity: ToastVerbosityProjection::parse(&record.toast_verbosity)
+            .unwrap_or_default(),
+        editor: legion_ui::ui::EditorSettingsProjection {
+            line_numbers_visible: record.line_numbers_visible,
+            current_line_highlight: record.current_line_highlight,
+        },
+        schema_version: record.schema_version,
+    }
+    .normalized()
+}
+
 fn capture_workspace_session_record(
     active: &ActiveDocumentController,
     editor: &EditorEngine,
@@ -8632,6 +8730,7 @@ fn capture_workspace_session_record(
             side_width_px: None,
         },
         dock_layouts: Vec::new(),
+        workbench_settings: WorkbenchSettingsRecord::default(),
         dirty_indicators,
         saved_at: TimestampMillis::now(),
         schema_version: 1,
@@ -9612,6 +9711,8 @@ pub enum AppCommandOutcome {
     ViewportScrollSet(BufferId),
     /// Command palette projection changed.
     PaletteUpdated(PaletteProjection),
+    /// Workbench settings projection changed.
+    SettingsUpdated(SettingsProjection),
     /// Search projection changed.
     SearchUpdated(SearchProjection),
     /// Structural search projection changed.
@@ -10296,8 +10397,8 @@ fn palette_scope_label(scope: SearchScopeProjection) -> &'static str {
     }
 }
 
-fn palette_command_specs() -> [PaletteCommandSpec; 4] {
-    [
+fn palette_command_specs() -> Vec<PaletteCommandSpec> {
+    vec![
         PaletteCommandSpec {
             id: "save-all",
             title: "Save All",
@@ -10322,6 +10423,42 @@ fn palette_command_specs() -> [PaletteCommandSpec; 4] {
             detail: "Dismiss the foreground command palette",
             shortcut_label: Some("Esc"),
         },
+        PaletteCommandSpec {
+            id: "preferences-open",
+            title: "Preferences: Open Settings",
+            detail: "Focus the workbench settings surface",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "preferences-theme-dark",
+            title: "Preferences: Theme Dark",
+            detail: "Use the dark workbench theme",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "preferences-theme-light",
+            title: "Preferences: Theme Light",
+            detail: "Use the light workbench theme",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "preferences-theme-system",
+            title: "Preferences: Theme System",
+            detail: "Follow the operating system theme",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "preferences-zoom-reset",
+            title: "Preferences: Reset Zoom",
+            detail: "Reset UI zoom to 100%",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "preferences-settings-reset",
+            title: "Preferences: Reset Settings",
+            detail: "Restore default workbench settings",
+            shortcut_label: None,
+        },
     ]
 }
 
@@ -10331,6 +10468,20 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
         "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
         "close-palette" => Some(CommandDispatchIntent::ClosePalette),
+        "preferences-open" => Some(CommandDispatchIntent::OpenSettings),
+        "preferences-theme-dark" => Some(CommandDispatchIntent::SetThemePreference {
+            preference: ThemePreferenceProjection::Dark,
+        }),
+        "preferences-theme-light" => Some(CommandDispatchIntent::SetThemePreference {
+            preference: ThemePreferenceProjection::Light,
+        }),
+        "preferences-theme-system" => Some(CommandDispatchIntent::SetThemePreference {
+            preference: ThemePreferenceProjection::System,
+        }),
+        "preferences-zoom-reset" => {
+            Some(CommandDispatchIntent::SetZoomPercent { zoom_percent: 100 })
+        }
+        "preferences-settings-reset" => Some(CommandDispatchIntent::ResetSettings),
         _ => None,
     }
 }
@@ -11142,6 +11293,7 @@ pub struct AppComposition {
     active_documents: ActiveDocumentController,
     product_mode: AppProductMode,
     palette: PaletteState,
+    settings: SettingsProjection,
     correlation_generator: CorrelationGenerator,
     event_sequence_generator: EventSequenceGenerator,
     storage: InMemoryStorageRepositoryPort,
@@ -11198,6 +11350,7 @@ impl AppComposition {
             active_documents: ActiveDocumentController::new(),
             product_mode: AppProductMode::Manual,
             palette: PaletteState::default(),
+            settings: SettingsProjection::default(),
             correlation_generator: CorrelationGenerator::default(),
             event_sequence_generator: EventSequenceGenerator::default(),
             storage: InMemoryStorageRepositoryPort::with_event_sink(event_sink.clone()),
@@ -11600,6 +11753,54 @@ impl AppComposition {
         self.dispatch_ui_intent(intent)
     }
 
+    fn settings_projection(&self) -> SettingsProjection {
+        self.settings.clone().normalized()
+    }
+
+    fn open_settings(&mut self) -> SettingsProjection {
+        self.settings_projection()
+    }
+
+    fn set_theme_preference(
+        &mut self,
+        preference: ThemePreferenceProjection,
+    ) -> SettingsProjection {
+        self.settings.theme_preference = preference;
+        self.settings_projection()
+    }
+
+    fn set_zoom_percent(&mut self, zoom_percent: u16) -> SettingsProjection {
+        self.settings.zoom_percent = zoom_percent;
+        self.settings = self.settings_projection();
+        self.settings_projection()
+    }
+
+    fn set_editor_font_size(&mut self, font_size_pt: u16) -> SettingsProjection {
+        self.settings.editor_font_size_pt = font_size_pt;
+        self.settings = self.settings_projection();
+        self.settings_projection()
+    }
+
+    fn set_toast_verbosity(&mut self, verbosity: ToastVerbosityProjection) -> SettingsProjection {
+        self.settings.toast_verbosity = verbosity;
+        self.settings_projection()
+    }
+
+    fn set_line_numbers_visible(&mut self, visible: bool) -> SettingsProjection {
+        self.settings.editor.line_numbers_visible = visible;
+        self.settings_projection()
+    }
+
+    fn set_current_line_highlight(&mut self, enabled: bool) -> SettingsProjection {
+        self.settings.editor.current_line_highlight = enabled;
+        self.settings_projection()
+    }
+
+    fn reset_settings(&mut self) -> SettingsProjection {
+        self.settings = SettingsProjection::default();
+        self.settings_projection()
+    }
+
     fn refresh_palette_results(&mut self) -> Result<(), AppCompositionError> {
         let mode = palette_mode_for_query(&self.palette.query).unwrap_or(self.palette.mode);
         let query = palette_query_body(mode, &self.palette.query);
@@ -11848,6 +12049,30 @@ impl AppComposition {
                 self.complete_palette_selection()?,
             )),
             AppCommandRequest::DispatchPaletteSelection => self.dispatch_palette_selection(),
+            AppCommandRequest::OpenSettings => {
+                Ok(AppCommandOutcome::SettingsUpdated(self.open_settings()))
+            }
+            AppCommandRequest::SetThemePreference { preference } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_theme_preference(preference)),
+            ),
+            AppCommandRequest::SetZoomPercent { zoom_percent } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_zoom_percent(zoom_percent)),
+            ),
+            AppCommandRequest::SetEditorFontSize { font_size_pt } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_editor_font_size(font_size_pt)),
+            ),
+            AppCommandRequest::SetToastVerbosity { verbosity } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_toast_verbosity(verbosity)),
+            ),
+            AppCommandRequest::SetLineNumbersVisible { visible } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_line_numbers_visible(visible)),
+            ),
+            AppCommandRequest::SetCurrentLineHighlight { enabled } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_current_line_highlight(enabled)),
+            ),
+            AppCommandRequest::ResetSettings => {
+                Ok(AppCommandOutcome::SettingsUpdated(self.reset_settings()))
+            }
             AppCommandRequest::RunSearch {
                 query_id,
                 scope,
@@ -17079,7 +17304,9 @@ impl AppComposition {
     pub fn capture_workspace_session_record(
         &self,
     ) -> Result<WorkspaceSessionRecord, AppCompositionError> {
-        capture_workspace_session_record(&self.active_documents, &self.editor)
+        let mut record = capture_workspace_session_record(&self.active_documents, &self.editor)?;
+        record.workbench_settings = workbench_settings_record_from_projection(&self.settings);
+        Ok(record)
     }
 
     /// Restore open tabs from a metadata-only session record.
@@ -17087,6 +17314,7 @@ impl AppComposition {
         &mut self,
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
+        self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
         let mut restored_file_ids = Vec::new();
         let mut skipped_tabs = Vec::new();
         for tab in &record.open_tabs {
@@ -17354,6 +17582,7 @@ impl AppComposition {
             status_messages: Vec::new(),
             palette_projection: self.palette.projection(),
             command_registry_projection,
+            settings_projection: self.settings_projection(),
             proposal_ledger_projection,
             artifact_ledger_projection,
             verification_run_projection,

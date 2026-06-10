@@ -12,7 +12,8 @@ use legion_protocol::{
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode,
     PaletteProjection, PaletteResultKind, PanelId, PanelRegistry, SearchScopeProjection,
-    ShellProjectionSnapshot, StatusSeverity, ToastActionProjection, ToastStackProjection,
+    SettingsProjection, ShellProjectionSnapshot, StatusSeverity, ThemePreferenceProjection,
+    ToastActionProjection, ToastStackProjection, ToastVerbosityProjection,
 };
 
 use crate::{
@@ -202,6 +203,46 @@ pub struct DesktopToastViewModel {
     pub sticky: bool,
 }
 
+/// Structured workbench settings view model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopSettingsViewModel {
+    /// Active theme preference.
+    pub theme_preference: ThemePreferenceProjection,
+    /// Active theme preference display label.
+    pub theme_label: String,
+    /// UI zoom percentage.
+    pub zoom_percent: u16,
+    /// Editor font size in points.
+    pub editor_font_size_pt: u16,
+    /// Toast verbosity preference.
+    pub toast_verbosity: ToastVerbosityProjection,
+    /// Toast verbosity display label.
+    pub toast_verbosity_label: String,
+    /// Whether line numbers are visible.
+    pub line_numbers_visible: bool,
+    /// Whether current-line highlighting is enabled.
+    pub current_line_highlight: bool,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl DesktopSettingsViewModel {
+    fn from_projection(projection: &SettingsProjection) -> Self {
+        let normalized = projection.clone().normalized();
+        Self {
+            theme_preference: normalized.theme_preference,
+            theme_label: normalized.theme_preference.label().to_string(),
+            zoom_percent: normalized.zoom_percent,
+            editor_font_size_pt: normalized.editor_font_size_pt,
+            toast_verbosity: normalized.toast_verbosity,
+            toast_verbosity_label: normalized.toast_verbosity.label().to_string(),
+            line_numbers_visible: normalized.editor.line_numbers_visible,
+            current_line_highlight: normalized.editor.current_line_highlight,
+            schema_version: normalized.schema_version,
+        }
+    }
+}
+
 /// Testable display model derived only from a shell projection snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProjectionViewModel {
@@ -219,6 +260,8 @@ pub struct DesktopProjectionViewModel {
     pub command_palette_overlay: DesktopCommandPaletteOverlayViewModel,
     /// Structured foreground notification stack.
     pub toast_stack: DesktopToastStackViewModel,
+    /// Structured workbench settings.
+    pub settings: DesktopSettingsViewModel,
     /// Command-palette group and item rows.
     pub command_palette_rows: Vec<String>,
     /// Left sidebar summary rows.
@@ -323,6 +366,7 @@ impl DesktopProjectionViewModel {
         let mode_confirmation_rows = mode_confirmation_rows(snapshot);
         let command_palette_overlay = command_palette_overlay(snapshot);
         let toast_stack = toast_stack(snapshot, state);
+        let settings = DesktopSettingsViewModel::from_projection(&snapshot.settings_projection);
         let command_palette_rows = command_palette_rows(snapshot);
         let dock_rows = dock_rows(snapshot, state);
         let dock_panel_rows = dock_panel_rows(snapshot, state);
@@ -334,6 +378,7 @@ impl DesktopProjectionViewModel {
             mode_confirmation_rows,
             command_palette_overlay,
             toast_stack,
+            settings,
             command_palette_rows,
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
@@ -411,7 +456,14 @@ impl ProjectionView {
         snapshot: &ShellProjectionSnapshot,
         state: &DesktopProjectionViewState,
     ) -> ProjectionViewOutput {
-        let active_theme = self.theme_preference.resolve(ui.ctx());
+        self.theme_preference =
+            desktop_theme_preference(snapshot.settings_projection.theme_preference);
+        let mut active_theme = self.theme_preference.resolve(ui.ctx());
+        let settings = snapshot.settings_projection.clone().normalized();
+        active_theme.typography.code = settings.editor_font_size_pt as u8;
+        active_theme.typography.code_muted = settings.editor_font_size_pt.saturating_sub(1) as u8;
+        ui.ctx()
+            .set_zoom_factor(settings.zoom_percent as f32 / 100.0);
         theme::install(ui.ctx(), &active_theme);
         let model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
         let mut actions = Vec::new();
@@ -535,6 +587,9 @@ fn render_top_command_bar(
             }
             if soft_button(ui, "Git").clicked() {
                 actions.push(DesktopAction::RefreshGit);
+            }
+            if soft_button(ui, "Settings").clicked() {
+                actions.push(DesktopAction::OpenSettings);
             }
             if primary_button(ui, level_primary_action(level), level_color(level)).clicked() {
                 actions.push(match level {
@@ -722,6 +777,7 @@ fn render_right_dock(
         }
         DesktopProductMode::LegionWorkflows => render_fleet_console(ui, snapshot, model, actions),
     }
+    render_settings_panel(ui, model, actions);
 }
 
 fn render_bottom_console(
@@ -1338,6 +1394,8 @@ fn render_code_lines(
     }
     if !model.active_buffer_code_lines.is_empty() {
         let active_buffer_id = snapshot.active_buffer_projection.buffer_id;
+        let show_line_numbers = model.settings.line_numbers_visible;
+        let highlight_current_line = model.settings.current_line_highlight;
         let current_cursor = snapshot
             .active_buffer_projection
             .viewport
@@ -1347,10 +1405,12 @@ fn render_code_lines(
         let char_width = code_char_width();
         for line in &model.active_buffer_code_lines {
             ui.horizontal(|ui| {
-                ui.add_sized(
-                    [42.0, 18.0],
-                    egui::Label::new(theme::code_muted(format!("{:>3}", line.number))),
-                );
+                if show_line_numbers {
+                    ui.add_sized(
+                        [42.0, 18.0],
+                        egui::Label::new(theme::code_muted(format!("{:>3}", line.number))),
+                    );
+                }
                 let response = ui.add(
                     egui::Label::new(code_line_layout_job(line))
                         .sense(egui::Sense::click_and_drag()),
@@ -1448,17 +1508,23 @@ fn render_code_lines(
                         }
                     });
                 }
+                if highlight_current_line {
+                    paint_current_line_highlight(ui, line, &response, current_cursor);
+                }
                 paint_code_cursor(ui, line, &response, current_cursor, char_width);
             });
         }
         return;
     }
+    let show_line_numbers = model.settings.line_numbers_visible;
     for (index, row) in model.active_buffer_lines.iter().enumerate() {
         ui.horizontal(|ui| {
-            ui.add_sized(
-                [42.0, 18.0],
-                egui::Label::new(theme::code_muted(format!("{:>3}", index + 1))),
-            );
+            if show_line_numbers {
+                ui.add_sized(
+                    [42.0, 18.0],
+                    egui::Label::new(theme::code_muted(format!("{:>3}", index + 1))),
+                );
+            }
             ui.label(theme::code(row));
         });
     }
@@ -1466,6 +1532,22 @@ fn render_code_lines(
 
 fn code_char_width() -> f32 {
     theme::tokens().typography.code as f32 * 0.62
+}
+
+fn paint_current_line_highlight(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    cursor: TextCoordinate,
+) {
+    if cursor.line != line.number.saturating_sub(1) {
+        return;
+    }
+    ui.painter().rect_filled(
+        response.rect.expand2(egui::vec2(3.0, 1.0)),
+        2.0,
+        theme::dim(theme::tokens().accent.blue, 22),
+    );
 }
 
 fn paint_code_cursor(
@@ -1996,6 +2078,127 @@ fn render_manual_context_inspector(
         if soft_button(ui, "Save All").clicked() {
             actions.push(DesktopAction::SaveAll);
         }
+    });
+}
+
+fn render_settings_panel(
+    ui: &mut egui::Ui,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    section_label(ui, "Settings", Some(theme::tokens().accent.blue));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(theme::label("Theme"));
+            for preference in [
+                ThemePreferenceProjection::Dark,
+                ThemePreferenceProjection::Light,
+                ThemePreferenceProjection::System,
+            ] {
+                let selected = model.settings.theme_preference == preference;
+                let response = pill(
+                    ui,
+                    preference.label(),
+                    if selected {
+                        theme::tokens().accent.blue
+                    } else {
+                        theme::tokens().text.muted
+                    },
+                    selected,
+                );
+                if response.clicked() && !selected {
+                    actions.push(DesktopAction::SetThemePreference { preference });
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(theme::label("Zoom"));
+            if soft_button(ui, "-").clicked() {
+                actions.push(DesktopAction::SetZoomPercent {
+                    zoom_percent: model.settings.zoom_percent.saturating_sub(10),
+                });
+            }
+            ui.label(theme::code(format!("{}%", model.settings.zoom_percent)));
+            if soft_button(ui, "+").clicked() {
+                actions.push(DesktopAction::SetZoomPercent {
+                    zoom_percent: model.settings.zoom_percent.saturating_add(10),
+                });
+            }
+            if soft_button(ui, "Reset").clicked() {
+                actions.push(DesktopAction::SetZoomPercent { zoom_percent: 100 });
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(theme::label("Editor font"));
+            if soft_button(ui, "-").clicked() {
+                actions.push(DesktopAction::SetEditorFontSize {
+                    font_size_pt: model.settings.editor_font_size_pt.saturating_sub(1),
+                });
+            }
+            ui.label(theme::code(format!(
+                "{} pt",
+                model.settings.editor_font_size_pt
+            )));
+            if soft_button(ui, "+").clicked() {
+                actions.push(DesktopAction::SetEditorFontSize {
+                    font_size_pt: model.settings.editor_font_size_pt.saturating_add(1),
+                });
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(theme::label("Toasts"));
+            for verbosity in [
+                ToastVerbosityProjection::ErrorsOnly,
+                ToastVerbosityProjection::WarningsAndErrors,
+                ToastVerbosityProjection::All,
+            ] {
+                let selected = model.settings.toast_verbosity == verbosity;
+                let response = pill(
+                    ui,
+                    verbosity.label(),
+                    if selected {
+                        theme::tokens().accent.orange
+                    } else {
+                        theme::tokens().text.muted
+                    },
+                    selected,
+                );
+                if response.clicked() && !selected {
+                    actions.push(DesktopAction::SetToastVerbosity { verbosity });
+                }
+            }
+        });
+        let mut line_numbers_visible = model.settings.line_numbers_visible;
+        if ui
+            .checkbox(&mut line_numbers_visible, "Line numbers")
+            .changed()
+        {
+            actions.push(DesktopAction::SetLineNumbersVisible {
+                visible: line_numbers_visible,
+            });
+        }
+        let mut current_line_highlight = model.settings.current_line_highlight;
+        if ui
+            .checkbox(&mut current_line_highlight, "Current line highlight")
+            .changed()
+        {
+            actions.push(DesktopAction::SetCurrentLineHighlight {
+                enabled: current_line_highlight,
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label(theme::muted(format!(
+                "schema v{} - {} - {}",
+                model.settings.schema_version,
+                model.settings.theme_label,
+                model.settings.toast_verbosity_label
+            )));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if soft_button(ui, "Defaults").clicked() {
+                    actions.push(DesktopAction::ResetSettings);
+                }
+            });
+        });
     });
 }
 
@@ -3127,6 +3330,14 @@ fn projected_dock_mode(snapshot: &ShellProjectionSnapshot) -> DockMode {
     }
 }
 
+fn desktop_theme_preference(preference: ThemePreferenceProjection) -> theme::ThemePreference {
+    match preference {
+        ThemePreferenceProjection::Dark => theme::ThemePreference::Dark,
+        ThemePreferenceProjection::Light => theme::ThemePreference::Light,
+        ThemePreferenceProjection::System => theme::ThemePreference::System,
+    }
+}
+
 fn active_dock_layout<'a>(
     state: &'a DesktopProjectionViewState,
     mode: DockMode,
@@ -3355,8 +3566,11 @@ fn toast_stack(
         .iter()
         .copied()
         .collect::<Vec<_>>();
-    let stack =
-        ToastStackProjection::from_status_messages(&snapshot.status_messages, &dismissed_ids);
+    let stack = ToastStackProjection::from_status_messages_with_verbosity(
+        &snapshot.status_messages,
+        &dismissed_ids,
+        snapshot.settings_projection.toast_verbosity,
+    );
     DesktopToastStackViewModel {
         visible: stack
             .visible

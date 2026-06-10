@@ -238,6 +238,8 @@ pub enum PanelId {
     Collaboration,
     /// Remote workspace panel.
     RemoteWorkspace,
+    /// Workbench preferences and editor settings.
+    Settings,
 }
 
 impl PanelId {
@@ -269,6 +271,7 @@ impl PanelId {
             Self::PluginManager => "plugin_manager",
             Self::Collaboration => "collaboration",
             Self::RemoteWorkspace => "remote_workspace",
+            Self::Settings => "settings",
         }
     }
 
@@ -300,6 +303,7 @@ impl PanelId {
             "plugin_manager" => Some(Self::PluginManager),
             "collaboration" => Some(Self::Collaboration),
             "remote_workspace" => Some(Self::RemoteWorkspace),
+            "settings" => Some(Self::Settings),
             _ => None,
         }
     }
@@ -510,7 +514,7 @@ impl PanelRegistry {
         use PanelId::{
             AgentFleet, AgentLogs, ApprovalQueue, Assistant, Collaboration, Context, Coverage,
             Debug, DecisionFeed, Delegation, DependencyInspector, Diagnostics, Git, PluginManager,
-            ProjectExplorer, QuickFixes, References, RemoteWorkspace, Repl, Search,
+            ProjectExplorer, QuickFixes, References, RemoteWorkspace, Repl, Search, Settings,
             StructuralSearch, SymbolOutline, Terminal, TestExplorer, Workflow,
         };
         use ProductRuntimeSurface::{
@@ -548,6 +552,7 @@ impl PanelRegistry {
                 DockPanelDescriptor::new(Repl, "Scratchpad", "repl", Bottom, false),
                 DockPanelDescriptor::new(Terminal, "Terminal", "terminal", Bottom, false),
                 DockPanelDescriptor::new(Context, "Context", "context", Right, false),
+                DockPanelDescriptor::new(Settings, "Settings", "settings", Right, false),
                 DockPanelDescriptor::with_capabilities(
                     PluginManager,
                     "Plugins",
@@ -720,7 +725,7 @@ impl DockLayout {
     pub fn standard(mode: DockMode) -> Self {
         use PanelId::{
             AgentFleet, AgentLogs, ApprovalQueue, Assistant, Context, DecisionFeed, Delegation,
-            DependencyInspector, Diagnostics, PluginManager, ProjectExplorer, Search,
+            DependencyInspector, Diagnostics, PluginManager, ProjectExplorer, Search, Settings,
             StructuralSearch, SymbolOutline, Terminal, TestExplorer, Workflow,
         };
 
@@ -740,6 +745,7 @@ impl DockLayout {
                         Diagnostics,
                         StructuralSearch,
                         DependencyInspector,
+                        Settings,
                         PluginManager,
                     ],
                     0.42,
@@ -750,13 +756,18 @@ impl DockLayout {
             DockMode::Assist => Self {
                 mode,
                 left: DockSideLayout::new(ProjectExplorer, vec![SymbolOutline], 0.30, false),
-                right: DockSideLayout::new(Assistant, vec![Context, Search], 0.48, false),
+                right: DockSideLayout::new(Assistant, vec![Context, Search, Settings], 0.48, false),
                 bottom: DockSideLayout::new(Terminal, vec![Diagnostics], 0.30, false),
             },
             DockMode::Delegate => Self {
                 mode,
                 left: DockSideLayout::new(ProjectExplorer, vec![SymbolOutline], 0.30, false),
-                right: DockSideLayout::new(Delegation, vec![ApprovalQueue, Context], 0.52, false),
+                right: DockSideLayout::new(
+                    Delegation,
+                    vec![ApprovalQueue, Context, Settings],
+                    0.52,
+                    false,
+                ),
                 bottom: DockSideLayout::new(Terminal, vec![AgentLogs, Diagnostics], 0.34, false),
             },
             DockMode::Automate => Self {
@@ -764,7 +775,7 @@ impl DockLayout {
                 left: DockSideLayout::new(ProjectExplorer, vec![AgentFleet], 0.28, false),
                 right: DockSideLayout::new(
                     AgentFleet,
-                    vec![DecisionFeed, ApprovalQueue],
+                    vec![DecisionFeed, ApprovalQueue, Settings],
                     0.55,
                     false,
                 ),
@@ -1816,6 +1827,173 @@ impl Default for PaletteProjection {
     }
 }
 
+/// User preference for resolving the active workbench theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemePreferenceProjection {
+    /// Always use the dark theme.
+    Dark,
+    /// Always use the light theme.
+    Light,
+    /// Follow the operating-system theme when available.
+    System,
+}
+
+impl ThemePreferenceProjection {
+    /// Stable display label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::System => "System",
+        }
+    }
+
+    /// Stable persisted label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::System => "system",
+        }
+    }
+
+    /// Parse a persisted or user-facing label.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dark" | "Dark" => Some(Self::Dark),
+            "light" | "Light" => Some(Self::Light),
+            "system" | "System" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ThemePreferenceProjection {
+    fn default() -> Self {
+        Self::Dark
+    }
+}
+
+/// User preference for which status messages become foreground toasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToastVerbosityProjection {
+    /// Show only error toasts.
+    ErrorsOnly,
+    /// Show warning and error toasts.
+    WarningsAndErrors,
+    /// Show all status messages as toasts.
+    All,
+}
+
+impl ToastVerbosityProjection {
+    /// Stable display label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ErrorsOnly => "Errors only",
+            Self::WarningsAndErrors => "Warnings and errors",
+            Self::All => "All statuses",
+        }
+    }
+
+    /// Stable persisted label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ErrorsOnly => "errors_only",
+            Self::WarningsAndErrors => "warnings_and_errors",
+            Self::All => "all",
+        }
+    }
+
+    /// Parse a persisted or user-facing label.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "errors_only" | "Errors only" => Some(Self::ErrorsOnly),
+            "warnings_and_errors" | "Warnings and errors" => Some(Self::WarningsAndErrors),
+            "all" | "All statuses" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ToastVerbosityProjection {
+    fn default() -> Self {
+        Self::WarningsAndErrors
+    }
+}
+
+/// Editor-specific user settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorSettingsProjection {
+    /// Whether line numbers are visible in the editor gutter.
+    pub line_numbers_visible: bool,
+    /// Whether the active line receives a background highlight.
+    pub current_line_highlight: bool,
+}
+
+impl Default for EditorSettingsProjection {
+    fn default() -> Self {
+        Self {
+            line_numbers_visible: true,
+            current_line_highlight: true,
+        }
+    }
+}
+
+/// App-owned settings projected to renderers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsProjection {
+    /// Theme preference.
+    pub theme_preference: ThemePreferenceProjection,
+    /// UI zoom percentage.
+    pub zoom_percent: u16,
+    /// Editor font size in points.
+    pub editor_font_size_pt: u16,
+    /// Toast verbosity.
+    pub toast_verbosity: ToastVerbosityProjection,
+    /// Editor options.
+    pub editor: EditorSettingsProjection,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl SettingsProjection {
+    /// Minimum supported zoom percentage.
+    pub const MIN_ZOOM_PERCENT: u16 = 80;
+    /// Maximum supported zoom percentage.
+    pub const MAX_ZOOM_PERCENT: u16 = 200;
+    /// Minimum supported editor font size in points.
+    pub const MIN_EDITOR_FONT_SIZE_PT: u16 = 10;
+    /// Maximum supported editor font size in points.
+    pub const MAX_EDITOR_FONT_SIZE_PT: u16 = 24;
+
+    /// Return a copy with bounded numeric values.
+    pub fn normalized(mut self) -> Self {
+        self.zoom_percent = self
+            .zoom_percent
+            .clamp(Self::MIN_ZOOM_PERCENT, Self::MAX_ZOOM_PERCENT);
+        self.editor_font_size_pt = self
+            .editor_font_size_pt
+            .clamp(Self::MIN_EDITOR_FONT_SIZE_PT, Self::MAX_EDITOR_FONT_SIZE_PT);
+        if self.schema_version == 0 {
+            self.schema_version = 1;
+        }
+        self
+    }
+}
+
+impl Default for SettingsProjection {
+    fn default() -> Self {
+        Self {
+            theme_preference: ThemePreferenceProjection::Dark,
+            zoom_percent: 100,
+            editor_font_size_pt: 12,
+            toast_verbosity: ToastVerbosityProjection::WarningsAndErrors,
+            editor: EditorSettingsProjection::default(),
+            schema_version: 1,
+        }
+    }
+}
+
 /// Typed command intent emitted by UI input handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandDispatchIntent {
@@ -1926,6 +2104,40 @@ pub enum CommandDispatchIntent {
     CompletePaletteSelection,
     /// Dispatch the currently selected palette result through app authority.
     DispatchPaletteSelection,
+    /// Open the projected Settings surface.
+    OpenSettings,
+    /// Update the app-owned theme preference.
+    SetThemePreference {
+        /// Requested theme preference.
+        preference: ThemePreferenceProjection,
+    },
+    /// Update the app-owned UI zoom percentage.
+    SetZoomPercent {
+        /// Requested zoom percentage.
+        zoom_percent: u16,
+    },
+    /// Update the app-owned editor font size.
+    SetEditorFontSize {
+        /// Requested editor font size in points.
+        font_size_pt: u16,
+    },
+    /// Update app-owned toast verbosity.
+    SetToastVerbosity {
+        /// Requested toast verbosity.
+        verbosity: ToastVerbosityProjection,
+    },
+    /// Toggle editor line-number visibility.
+    SetLineNumbersVisible {
+        /// Whether line numbers should be visible.
+        visible: bool,
+    },
+    /// Toggle current-line highlighting.
+    SetCurrentLineHighlight {
+        /// Whether the current line should be highlighted.
+        enabled: bool,
+    },
+    /// Reset app-owned workbench settings to defaults.
+    ResetSettings,
     /// Run bounded lexical search through app authority.
     RunSearch {
         /// Search scope.
@@ -2394,9 +2606,22 @@ impl ToastStackProjection {
         messages: &[StatusMessageProjection],
         dismissed_ids: &[u64],
     ) -> Self {
+        Self::from_status_messages_with_verbosity(
+            messages,
+            dismissed_ids,
+            ToastVerbosityProjection::WarningsAndErrors,
+        )
+    }
+
+    /// Build a bounded toast stack from shell status messages using a user verbosity preference.
+    pub fn from_status_messages_with_verbosity(
+        messages: &[StatusMessageProjection],
+        dismissed_ids: &[u64],
+        verbosity: ToastVerbosityProjection,
+    ) -> Self {
         let mut toasts = messages
             .iter()
-            .filter(|message| message.severity != StatusSeverity::Info)
+            .filter(|message| toast_severity_included(message.severity, verbosity))
             .map(ToastProjection::from_status_message)
             .filter(|toast| !dismissed_ids.contains(&toast.id))
             .collect::<Vec<_>>();
@@ -2415,6 +2640,14 @@ impl ToastStackProjection {
             visible: Vec::new(),
             overflow_count: 0,
         }
+    }
+}
+
+fn toast_severity_included(severity: StatusSeverity, verbosity: ToastVerbosityProjection) -> bool {
+    match verbosity {
+        ToastVerbosityProjection::ErrorsOnly => severity == StatusSeverity::Error,
+        ToastVerbosityProjection::WarningsAndErrors => severity != StatusSeverity::Info,
+        ToastVerbosityProjection::All => true,
     }
 }
 
@@ -2487,6 +2720,8 @@ pub struct ShellProjectionSnapshot {
     pub palette_projection: PaletteProjection,
     /// Command registry projection supplied by the application layer.
     pub command_registry_projection: CommandRegistryProjection,
+    /// App-owned workbench settings projection.
+    pub settings_projection: SettingsProjection,
     /// Proposal ledger projection supplied by the application layer.
     pub proposal_ledger_projection: ProposalLedgerProjection,
     /// Artifact ledger projection supplied by the application layer.
@@ -2571,6 +2806,8 @@ pub struct Shell {
     pub palette_projection: PaletteProjection,
     /// Static command registry projection.
     pub command_registry_projection: CommandRegistryProjection,
+    /// App-owned workbench settings projection.
+    pub settings_projection: SettingsProjection,
     /// Static proposal ledger projection.
     pub proposal_ledger_projection: ProposalLedgerProjection,
     /// Static artifact ledger projection.
@@ -2634,6 +2871,7 @@ impl Shell {
             status_messages: snapshot.status_messages,
             palette_projection: snapshot.palette_projection,
             command_registry_projection: snapshot.command_registry_projection,
+            settings_projection: snapshot.settings_projection,
             proposal_ledger_projection: snapshot.proposal_ledger_projection,
             artifact_ledger_projection: snapshot.artifact_ledger_projection,
             verification_run_projection: snapshot.verification_run_projection,
@@ -2675,6 +2913,7 @@ impl Shell {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: empty_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -2712,6 +2951,7 @@ impl Shell {
             status_messages: self.status_messages.clone(),
             palette_projection: self.palette_projection.clone(),
             command_registry_projection: self.command_registry_projection.clone(),
+            settings_projection: self.settings_projection.clone(),
             proposal_ledger_projection: self.proposal_ledger_projection.clone(),
             artifact_ledger_projection: self.artifact_ledger_projection.clone(),
             verification_run_projection: self.verification_run_projection.clone(),
@@ -2748,6 +2988,7 @@ impl Shell {
         self.status_messages = snapshot.status_messages;
         self.palette_projection = snapshot.palette_projection;
         self.command_registry_projection = snapshot.command_registry_projection;
+        self.settings_projection = snapshot.settings_projection;
         self.proposal_ledger_projection = snapshot.proposal_ledger_projection;
         self.artifact_ledger_projection = snapshot.artifact_ledger_projection;
         self.verification_run_projection = snapshot.verification_run_projection;
@@ -4472,6 +4713,7 @@ mod tests {
         assert!(registry.is_visible_in(PanelId::ProjectExplorer, DockMode::Manual));
         assert!(registry.is_visible_in(PanelId::Terminal, DockMode::Manual));
         assert!(registry.is_visible_in(PanelId::PluginManager, DockMode::Manual));
+        assert!(registry.is_visible_in(PanelId::Settings, DockMode::Manual));
         assert!(!registry.is_visible_in(PanelId::Assistant, DockMode::Manual));
         assert!(!registry.is_visible_in(PanelId::Delegation, DockMode::Manual));
         assert!(!registry.is_visible_in(PanelId::ApprovalQueue, DockMode::Manual));
@@ -4531,7 +4773,37 @@ mod tests {
             PanelId::parse("approval_queue"),
             Some(PanelId::ApprovalQueue)
         );
+        assert_eq!(PanelId::parse("settings"), Some(PanelId::Settings));
         assert_eq!(PanelId::parse("unknown_panel"), None);
+    }
+
+    #[test]
+    fn settings_projection_parses_labels_and_normalizes_bounds() {
+        let settings = SettingsProjection {
+            theme_preference: ThemePreferenceProjection::parse("System")
+                .expect("theme label should parse"),
+            zoom_percent: 999,
+            editor_font_size_pt: 1,
+            toast_verbosity: ToastVerbosityProjection::parse("All statuses")
+                .expect("toast label should parse"),
+            editor: EditorSettingsProjection {
+                line_numbers_visible: false,
+                current_line_highlight: false,
+            },
+            schema_version: 0,
+        }
+        .normalized();
+
+        assert_eq!(settings.theme_preference, ThemePreferenceProjection::System);
+        assert_eq!(settings.zoom_percent, SettingsProjection::MAX_ZOOM_PERCENT);
+        assert_eq!(
+            settings.editor_font_size_pt,
+            SettingsProjection::MIN_EDITOR_FONT_SIZE_PT
+        );
+        assert_eq!(settings.toast_verbosity, ToastVerbosityProjection::All);
+        assert!(!settings.editor.line_numbers_visible);
+        assert!(!settings.editor.current_line_highlight);
+        assert_eq!(settings.schema_version, 1);
     }
 
     #[test]
@@ -4838,6 +5110,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -4898,6 +5171,16 @@ mod tests {
             .collect::<Vec<_>>();
 
         let stack = ToastStackProjection::from_status_messages(&messages, &[]);
+        let all_stack = ToastStackProjection::from_status_messages_with_verbosity(
+            &messages,
+            &[],
+            ToastVerbosityProjection::All,
+        );
+        let errors_only_stack = ToastStackProjection::from_status_messages_with_verbosity(
+            &messages,
+            &[],
+            ToastVerbosityProjection::ErrorsOnly,
+        );
         let dismissed = stack.visible[0].id;
         let dismissed_stack = ToastStackProjection::from_status_messages(&messages, &[dismissed]);
 
@@ -4911,6 +5194,11 @@ mod tests {
         );
         assert_eq!(stack.visible[0].title, "Warning 6");
         assert_eq!(stack.visible[0].body.as_deref(), Some("detail"));
+        assert_eq!(all_stack.visible.len(), TOAST_VISIBLE_LIMIT);
+        assert_eq!(all_stack.overflow_count, 3);
+        assert_eq!(all_stack.visible[0].severity, StatusSeverity::Info);
+        assert!(errors_only_stack.visible.is_empty());
+        assert_eq!(errors_only_stack.overflow_count, 0);
         assert_eq!(dismissed_stack.visible.len(), TOAST_VISIBLE_LIMIT);
         assert_eq!(dismissed_stack.overflow_count, 1);
         assert!(
@@ -4935,6 +5223,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: ledger.clone(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5105,6 +5394,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5175,6 +5465,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5239,6 +5530,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5447,6 +5739,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5547,6 +5840,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5634,6 +5928,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5785,6 +6080,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),
@@ -5884,6 +6180,7 @@ mod tests {
             status_messages: Vec::new(),
             palette_projection: PaletteProjection::closed(),
             command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
             proposal_ledger_projection: test_proposal_ledger_projection(),
             artifact_ledger_projection: empty_artifact_ledger_projection(),
             verification_run_projection: empty_verification_run_projection(),

@@ -22,7 +22,8 @@ use legion_protocol::{
 };
 use legion_ui::{
     CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
-    SearchScopeProjection, Shell, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+    SearchScopeProjection, SettingsProjection, Shell, ShellProjectionSnapshot,
+    StatusMessageProjection, StatusSeverity,
 };
 
 use crate::{
@@ -260,6 +261,11 @@ pub enum DesktopWorkflowOutcome {
     SelectionSet(BufferId),
     /// Viewport scroll update completed through app authority.
     ViewportScrollSet(BufferId),
+    /// Workbench settings projection changed through app authority.
+    SettingsUpdated {
+        /// User-visible status summary.
+        status: String,
+    },
     /// Search projection changed through app authority.
     SearchUpdated,
     /// Structural search projection changed through app authority.
@@ -1183,6 +1189,11 @@ impl DesktopRuntime {
                     },
                 );
                 DesktopWorkflowOutcome::Noop
+            }
+            AppCommandOutcome::SettingsUpdated(projection) => {
+                let status = settings_status_label(&projection);
+                self.set_status(StatusSeverity::Info, status.clone());
+                DesktopWorkflowOutcome::SettingsUpdated { status }
             }
             AppCommandOutcome::SearchUpdated(projection) => {
                 self.set_status(
@@ -2151,6 +2162,17 @@ fn palette_visible_result_start(total: usize, selected_index: usize) -> usize {
         .saturating_add(1)
         .saturating_sub(COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
         .min(total - COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
+}
+
+fn settings_status_label(projection: &SettingsProjection) -> String {
+    let settings = projection.clone().normalized();
+    format!(
+        "Settings: theme={} zoom={}% font={}pt toasts={}",
+        settings.theme_preference.label(),
+        settings.zoom_percent,
+        settings.editor_font_size_pt,
+        settings.toast_verbosity.label()
+    )
 }
 
 fn status_message(severity: StatusSeverity, message: impl Into<String>) -> StatusMessageProjection {

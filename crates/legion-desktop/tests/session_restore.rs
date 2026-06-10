@@ -10,8 +10,13 @@ use legion_desktop::{
     session::{DesktopSessionError, DesktopSessionStore},
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_protocol::{CanonicalPath, SessionPanelState, TimestampMillis, WorkspaceSessionRecord};
-use legion_ui::{DockLayout, DockMode, DockSide, DockSideLayout, PanelId};
+use legion_protocol::{
+    CanonicalPath, SessionPanelState, TimestampMillis, WorkbenchSettingsRecord,
+    WorkspaceSessionRecord,
+};
+use legion_ui::{
+    DockLayout, DockMode, DockSide, DockSideLayout, PanelId, ThemePreferenceProjection,
+};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -231,6 +236,47 @@ fn session_restore_missing_file_reports_skipped_tab() {
 }
 
 #[test]
+fn session_restore_persists_workbench_settings_projection() {
+    let workspace = TempWorkspace::new("legion_desktop_session_restore_settings");
+    let first = workspace.write("first.txt", "first");
+    let session_state = workspace.path().join("session.json");
+    let mut runtime = open_runtime(workspace.path(), Some(&first), &session_state);
+
+    let outcome = runtime
+        .handle_action(DesktopAction::SetThemePreference {
+            preference: ThemePreferenceProjection::Light,
+        })
+        .expect("theme preference should update");
+    assert!(matches!(
+        outcome,
+        DesktopWorkflowOutcome::SettingsUpdated { .. }
+    ));
+    runtime
+        .handle_action(DesktopAction::SetZoomPercent { zoom_percent: 125 })
+        .expect("zoom should update");
+    runtime
+        .handle_action(DesktopAction::SetLineNumbersVisible { visible: false })
+        .expect("line number setting should update");
+    runtime
+        .handle_action(DesktopAction::SetCurrentLineHighlight { enabled: false })
+        .expect("current line setting should update");
+    runtime.save_session_state().expect("save session");
+
+    let saved = DesktopSessionStore::load(&session_state)
+        .expect("saved session should load")
+        .expect("saved session should exist");
+    assert_eq!(saved.workbench_settings.theme_preference, "light");
+    assert_eq!(saved.workbench_settings.zoom_percent, 125);
+
+    let restored = open_runtime(workspace.path(), None, &session_state);
+    let settings = restored.projection_snapshot().settings_projection;
+    assert_eq!(settings.theme_preference, ThemePreferenceProjection::Light);
+    assert_eq!(settings.zoom_percent, 125);
+    assert!(!settings.editor.line_numbers_visible);
+    assert!(!settings.editor.current_line_highlight);
+}
+
+#[test]
 fn session_restore_corrupt_json_returns_typed_error() {
     let workspace = TempWorkspace::new("legion_desktop_session_restore_corrupt");
     let session_state = workspace.path().join("corrupt-session.json");
@@ -305,6 +351,7 @@ fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
             side_width_px: None,
         },
         dock_layouts: Vec::new(),
+        workbench_settings: WorkbenchSettingsRecord::default(),
         dirty_indicators: Vec::new(),
         saved_at: TimestampMillis::now(),
         schema_version: 1,
