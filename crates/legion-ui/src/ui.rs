@@ -1828,9 +1828,10 @@ impl Default for PaletteProjection {
 }
 
 /// User preference for resolving the active workbench theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemePreferenceProjection {
     /// Always use the dark theme.
+    #[default]
     Dark,
     /// Always use the light theme.
     Light,
@@ -1868,18 +1869,13 @@ impl ThemePreferenceProjection {
     }
 }
 
-impl Default for ThemePreferenceProjection {
-    fn default() -> Self {
-        Self::Dark
-    }
-}
-
 /// User preference for which status messages become foreground toasts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToastVerbosityProjection {
     /// Show only error toasts.
     ErrorsOnly,
     /// Show warning and error toasts.
+    #[default]
     WarningsAndErrors,
     /// Show all status messages as toasts.
     All,
@@ -1912,12 +1908,6 @@ impl ToastVerbosityProjection {
             "all" | "All statuses" => Some(Self::All),
             _ => None,
         }
-    }
-}
-
-impl Default for ToastVerbosityProjection {
-    fn default() -> Self {
-        Self::WarningsAndErrors
     }
 }
 
