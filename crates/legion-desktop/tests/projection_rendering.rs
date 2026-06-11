@@ -1204,11 +1204,13 @@ fn projection_rendering_maps_editor_pointer_to_text_coordinate() {
                 end_col: 5,
                 kind: ViewportSemanticTokenKind::Ident,
             }],
+            truncation_state: ViewportLineTruncationState::None,
         },
         DesktopCodeLineViewModel {
             number: 5,
             text: "beta_value".to_string(),
             highlights: Vec::new(),
+            truncation_state: ViewportLineTruncationState::None,
         },
     ];
 
@@ -1244,6 +1246,7 @@ fn projection_rendering_computes_word_and_line_selection_ranges() {
         number: 8,
         text: "let beta_value = 42;".to_string(),
         highlights: Vec::new(),
+        truncation_state: ViewportLineTruncationState::None,
     };
     let word = word_range_for_coordinate(&line, coord(7, 6, 0)).expect("word range");
     assert_eq!(word.start.line, 7);
@@ -1264,6 +1267,7 @@ fn projection_rendering_anchors_drag_selection_at_gesture_start() {
         number: 8,
         text: "let beta_value = 42;".to_string(),
         highlights: Vec::new(),
+        truncation_state: ViewportLineTruncationState::None,
     };
     let old_cursor = coord(20, 0, 0);
     let end = coord(7, 14, 14);

@@ -13,7 +13,8 @@ use legion_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
     PRODUCT_NAME, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
     ProposalId, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, TextCoordinate,
-    ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode,
@@ -98,6 +99,8 @@ pub struct DesktopCodeLineViewModel {
     pub text: String,
     /// Semantic highlight spans scoped to this visible row.
     pub highlights: Vec<DesktopCodeHighlightSpan>,
+    /// Truncation state for the visible viewport slice backing this row.
+    pub truncation_state: ViewportLineTruncationState,
 }
 
 /// Renderer-ready semantic highlight span for a single visible code line.
@@ -1418,6 +1421,12 @@ fn render_code_lines(
                         egui::Label::new(theme::code_muted(format!("{:>3}", line.number))),
                     );
                 }
+                ui.add_sized(
+                    [16.0, 18.0],
+                    egui::Label::new(theme::code_muted(code_line_truncation_marker(
+                        line.truncation_state,
+                    ))),
+                );
                 let snapshot_id = snapshot
                     .active_buffer_projection
                     .viewport
@@ -3240,6 +3249,15 @@ pub fn line_range_for_code_line(line: &DesktopCodeLineViewModel) -> ProtocolText
     }
 }
 
+fn code_line_truncation_marker(truncation_state: ViewportLineTruncationState) -> &'static str {
+    match truncation_state {
+        ViewportLineTruncationState::None => " ",
+        ViewportLineTruncationState::Leading => "↤",
+        ViewportLineTruncationState::Trailing => "↦",
+        ViewportLineTruncationState::Both => "↔",
+    }
+}
+
 /// Return the text coordinate where a same-line drag gesture began.
 pub fn drag_anchor_for_line_pointer(
     line: &DesktopCodeLineViewModel,
@@ -4391,6 +4409,7 @@ fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCo
                     &line.visible_text,
                     &viewport.semantic_token_overlays,
                 ),
+                truncation_state: line.truncation_state,
             })
             .collect();
     }
@@ -4405,6 +4424,7 @@ fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCo
                 number: index as u32 + 1,
                 text: line.to_string(),
                 highlights: Vec::new(),
+                truncation_state: ViewportLineTruncationState::None,
             })
             .collect();
     }
@@ -6083,6 +6103,7 @@ mod tests {
             number: 1,
             text: "fn main() {}".to_string(),
             highlights: Vec::new(),
+            truncation_state: ViewportLineTruncationState::None,
         };
 
         assert_eq!(
@@ -6101,6 +6122,7 @@ mod tests {
                 end_col: 2,
                 kind: ViewportSemanticTokenKind::Keyword,
             }],
+            truncation_state: ViewportLineTruncationState::None,
         };
         let keyword_hash = code_line_content_fingerprint(&keyword);
         keyword.highlights[0].kind = ViewportSemanticTokenKind::Function;
@@ -6122,6 +6144,7 @@ mod tests {
             number: 7,
             text: "let value = 1;".to_string(),
             highlights: Vec::new(),
+            truncation_state: ViewportLineTruncationState::None,
         };
         let snapshot_id = Some(legion_protocol::SnapshotId(11));
         let base = code_line_galley_cache_key(
@@ -6175,6 +6198,26 @@ mod tests {
         assert_ne!(
             code_line_galley_cache_id(legion_protocol::BufferId(1)),
             code_line_galley_cache_id(legion_protocol::BufferId(2))
+        );
+    }
+
+    #[test]
+    fn code_line_truncation_marker_reflects_slice_state() {
+        assert_eq!(
+            code_line_truncation_marker(ViewportLineTruncationState::None),
+            " "
+        );
+        assert_eq!(
+            code_line_truncation_marker(ViewportLineTruncationState::Leading),
+            "↤"
+        );
+        assert_eq!(
+            code_line_truncation_marker(ViewportLineTruncationState::Trailing),
+            "↦"
+        );
+        assert_eq!(
+            code_line_truncation_marker(ViewportLineTruncationState::Both),
+            "↔"
         );
     }
 }
