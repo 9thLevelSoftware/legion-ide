@@ -1,0 +1,9 @@
+# M0 / WS01.T1 guardrail: the code canvas must remain a custom painter,
+# not an egui::TextEdit-backed widget. Palette/search text inputs outside the
+# code-canvas render path are intentionally out of scope for this gate.
+scanned_paths = [
+  "crates/legion-desktop/src/view.rs",
+  "crates/legion-desktop/src/view/code_canvas_painter.rs",
+]
+allowlisted_paths = []
+forbidden_tokens = ["egui::TextEdit", "eframe::egui::TextEdit"]

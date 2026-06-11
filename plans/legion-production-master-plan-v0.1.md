@@ -36,7 +36,7 @@ Meanwhile, the mid-2026 market has converged on exactly the thesis Legion bet on
 The plan defines:
 
 - **9 new ADRs** (ADR-0032..ADR-0040) that must be decided before or during early milestones (§6).
-- **20 workstreams** (WS-01..WS-20) with ~230 granular tasks, each with crate-level touchpoints, dependencies, and acceptance evidence (§7).
+- **20 workstreams** (WS-01..WS-20) with 109 granular tasks, each with crate-level touchpoints, dependencies, and acceptance evidence (§7).
 - **7 milestones** (M0..M6) with hard exit criteria, from "Credible Editor" through "Production GA" to post-GA expansion (§8).
 - An **integration process** that extends the existing phase-gate / evidence culture rather than replacing it (§9).
 - A **risk register** (§10) and **measurable quality bars** (§11).
@@ -51,6 +51,24 @@ Honest scale note: executed seriously, M1–M5 is on the order of 8–14 enginee
 2. **Market evidence second.** The competitive analysis (§4) was built from ~23 distinct web searches plus primary-source fetches of vendor docs/blogs (Cursor, Zed, GitHub, Anthropic, OpenAI, Google, Cognition, AWS, JetBrains, Sourcegraph, Block). Claims sourced only from secondary blogs are marked "reported" in Appendix B.
 3. **Technology evidence third.** The stack recommendations (§6, §7) were built from ~24 searches plus crate/docs verification covering Rust GUI stacks, rope/CRDT libraries, tree-sitter, LSP/DAP client patterns (Zed/Helix/Lapce), `alacritty_terminal`/`portable-pty`, ripgrep's library crates, tantivy, LanceDB/sqlite-vec, the MCP spec status (rev 2025-11-25) and `rmcp`, provider API specifics (Anthropic Messages incl. prompt-caching economics; OpenAI Responses), sandboxing practice (bubblewrap/Seatbelt/Landlock), wasmtime + WIT extension models, gitoxide vs git2, and the cargo-dist / rcodesign / minidumper distribution stack.
 4. **Invariant preservation.** Every workstream was checked against the authority boundaries in `docs/ARCHITECTURE_AUTHORITY_BOUNDARIES.md` and the dependency policy in `plans/dependency-policy.md`. No task in this plan requires `legion-ui` to take renderer dependencies, lets providers/workers mutate the workspace outside proposals, or persists raw payloads without consent.
+
+### 2.1 Authoritative ledger inputs
+
+This plan consolidates the existing repository truth surface rather than replacing it. The most important ledgers and runbooks are:
+
+- [`plans/phase-status-ledger.md`](phase-status-ledger.md): substrate acceptance ledger for phases 0-8 and Legion workflow orchestration.
+- [`plans/product-readiness-ledger.md`](product-readiness-ledger.md): product-readiness gates and beta acceptance scenario.
+- [`plans/remaining-implementation-tasks-plan-v0.1.md`](remaining-implementation-tasks-plan-v0.1.md): remaining implementation track and phase guardrails.
+- [`plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md`](legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md): end-to-end product roadmap.
+- [`AGENTS.md`](../AGENTS.md): non-negotiable repository invariants and phase-gate commands.
+
+### 2.2 Non-negotiable invariants
+
+1. UI stays projection-only: `legion-ui` emits intents and renders snapshots; it must not own editor sessions, workspace state, or mutation authority.
+2. Workspace and editor mutations stay proposal-mediated through the accepted app/project/editor boundaries.
+3. Storage, semantic, telemetry, AI, plugin, collaboration, remote, and extension compatibility surfaces remain metadata-first and default-deny unless an implementation packet adds the matching policy, tests, evidence, and user-visible workflow.
+4. Cloud egress, hosted providers, production remote transports, extension-host sidecars, raw-source retention, signing credentials, and autonomous apply require explicit policy and evidence before activation.
+5. Every implementation packet must pass the repository gates listed in `AGENTS.md` or record a current, actionable blocker.
 
 ---
 
@@ -70,13 +88,14 @@ Honest scale note: executed seriously, M1–M5 is on the order of 8–14 enginee
 - **Transport** (`legion-remote-transport`): rustls TLS 1.3 with cert verification and fingerprinting (20 tests) — built but not driven by a production feature.
 - **Platform** (`legion-platform`): real cross-platform FS/PTY/process primitives (nix `openpty` on Unix; `CreateProcessW`/pipes on Windows) — built but not wired to the app-level terminal.
 - **Process/CI culture**: xtask gates (`check-deps`, `docs-hygiene`), fmt/check/test/clippy/cargo-deny phase gates, evidence packages, ADR discipline, readiness ledgers.
+- **Workspace gate baseline**: after the P0.1 mock-fixture regression, the full workspace test run recorded 931 passed, 0 failed, and 3 ignored performance tests; the ignored 100MB workload remains an explicit streaming-mode gap, not a green benchmark.
 
 ### 3.2 What is fixture, stub, or disabled
 
 | Area | Mechanism | Location |
 | --- | --- | --- |
 | Proposal apply to disk | `runtime_apply_disabled` flag, defaults true (Stage 1E) | `legion-app` |
-| Terminal execution | `DeterministicTerminalFixture`; `fixture_enabled` defaults false; real PTY never invoked from app | `legion-terminal`, `legion-app` |
+| Terminal execution | `TerminalFixtureRuntime`; `fixture_enabled` defaults false; real PTY never invoked from app | `legion-terminal`, `legion-app` |
 | LSP | DTOs + supervision contracts only; no server process launched | `legion-index`, `legion-app` |
 | DAP | `DapAdapterFixtureRuntime` deterministic projections | `legion-terminal` |
 | Syntax highlighting | Token kinds → theme colors; no tokenizer in the path | `legion-desktop` |
@@ -90,13 +109,15 @@ Honest scale note: executed seriously, M1–M5 is on the order of 8–14 enginee
 | Anthropic provider | Stub (no native Messages client) | `legion-ai-providers` |
 | CLI | Argument parsing + workspace index stub | `legion-cli` |
 
+Source-cleanliness audit baseline: `rg -n 'unimplemented!|todo!' crates --glob '*.rs'` returns no product-code matches; `rg -n '//\s*(TODO|FIXME|STUB|HACK|XXX)' crates --glob '*.rs'` returns only intentional fixture/scanner constants, including the documented test-fixture string in `crates/legion-app/tests/language_tooling_workflow.rs`.
+
 ### 3.3 Crate maturity snapshot (survey, 2026-06-09)
 
 Gold (production-shaped): `legion-protocol`, `legion-text`, `legion-editor`, `legion-security`, `legion-storage`, `legion-observability`, `legion-retention`, `legion-remote-transport`, `legion-agent`, `legion-platform`, `legion-tracker`, `legion-ui`, `legion-desktop` (renderer shell).
 Silver (substantial, gaps known): `legion-app` (~80%, fixture-heavy), `legion-project`, `legion-index`, `legion-ai`, `legion-ai-providers`, `legion-vscode-compat`, `legion-collaboration`, `legion-memory`.
 Bronze (fixture/stub): `legion-terminal`, `legion-remote`, `legion-telemetry`, `legion-plugin`, `legion-cli`.
 
-Unit-test totals: ~186 across the workspace, concentrated in substrate crates; `legion-app`/`legion-desktop` rely on integration/smoke tests.
+Workspace test surface: 475 Rust `#[test]` functions are present under `crates/**/*.rs`; the broader full-workspace gate currently records 931 passed tests with 3 ignored performance workloads.
 
 ### 3.4 Product-gap recap (from the ledgers, unchanged)
 
@@ -226,6 +247,8 @@ Also ratify as policy (no new ADR needed): **prompt-cache-stable prompt assembly
 
 Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates and an acceptance signal. "Gate evidence" means an artifact under `plans/evidence/` plus passing phase gates (`check-deps`, `docs-hygiene`, fmt, check, test, clippy, cargo-deny), per the existing process. Dependencies reference ADRs (§6), other tasks, or milestones (§8). Tasks marked 🔴 are on the critical path to M1; 🟠 to M2/M3; 🟢 later.
 
+Standing P0 gate: strict source cleanliness remains active for every workstream. No `todo!()` or `unimplemented!()` may land in `crates/**/*.rs`; any remaining TODO/FIXME/STUB/HACK/XXX text in Rust code must be an intentional fixture or scanner constant with targeted tests. This gate is re-checked before any milestone or readiness-ledger status flip.
+
 ### WS-01 — Editor Surface & Rendering Productization
 
 **Objective:** a code canvas that is credible against Zed/Cursor on feel: custom-rendered, virtualized, IME-correct, large-file-safe. **Current state:** projection rendering with theme/token plumbing; GUI phases 1–2 merged; 5MiB snapshot budget; 100MB streaming gap. **Depends:** ADR-0032, ADR-0040. **Exit:** GP-1 editing feel; perf budgets in §11 enforced by CI.
@@ -252,7 +275,7 @@ Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates 
 
 ### WS-03 — Language Intelligence Runtime (LSP)
 
-**Objective:** real language servers, supervised under the existing ADR-0018 contracts, with rust-analyzer as the flagship. **Current state:** complete DTO surface + supervision contracts; no process ever launched. **Depends:** ADR-0034; WS-05.T1 (process plumbing shared); proposal routes (done). **Exit:** PR-LANG-001 product-validated; GP-1.
+**Objective:** real language servers, supervised under the existing ADR-0018 contracts, with rust-analyzer as the flagship; stale LSP responses must never mutate buffers or workspaces. **Current state:** complete DTO surface + supervision contracts; no process ever launched. **Depends:** ADR-0034; WS-05.T1 (process plumbing shared); proposal routes (done). **Exit:** PR-LANG-001 product-validated; GP-1.
 
 - 🔴 WS03.T1 **LSP transport + lifecycle.** stdio JSON-RPC client (framing, request/response correlation, cancellation, `$/progress`), server process supervision (spawn via `legion-platform`, crash/restart with backoff, health states) inside the existing actor-owned scheduling. *Accept:* contract tests against a scripted mock server; rust-analyzer initializes against the Legion repo.
 - 🔴 WS03.T2 **Document sync + diagnostics.** Incremental `didChange` from editor transactions (UTF-16 mapping already exists in `legion-text`), publishDiagnostics → existing diagnostic projections → gutter/underline rendering + diagnostics panel. *Accept:* introduce an error in the Legion repo → diagnostic appears <1s; cleared on fix.
@@ -265,7 +288,7 @@ Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates 
 
 ### WS-04 — Debugging Runtime (DAP)
 
-**Objective:** real debugging for the flagship stack; fixtures retire to test harnesses. **Current state:** deterministic DAP fixture projections; zero-config Cargo debug locator exists. **Depends:** WS-03.T5 (runnables), WS-05 (terminal for debuggee I/O), ADR-0024 boundaries. **Exit:** PR-LANG-002 debug product-validated.
+**Objective:** real debugging for the flagship stack; fixtures retire to test harnesses; stale debug/test responses must never mutate buffers or workspaces. **Current state:** deterministic DAP fixture projections; zero-config Cargo debug locator exists. **Depends:** WS-03.T5 (runnables), WS-05 (terminal for debuggee I/O), ADR-0024 boundaries. **Exit:** PR-LANG-002 debug product-validated.
 
 - 🟠 WS04.T1 **DAP client state machine.** Hand-rolled client (initialize/launch/attach, capabilities negotiation, stopped/continued event flow, threads/stack/scopes/variables requests) with the Zed-style data/UI split; transport over stdio + TCP. *Accept:* scripted mock-adapter conformance suite (reuse fixture as the mock).
 - 🟠 WS04.T2 **CodeLLDB adapter for Rust.** Adapter resolution/download (policy-gated as WS03.T8), zero-config launch from the existing Cargo locator + runnables; breakpoints (incl. conditional), step/continue, variable inspection, watch, debug console (REPL evaluate). *Accept:* GP-1 extension — set breakpoint in Legion test, hit it, inspect locals.
@@ -286,7 +309,7 @@ Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates 
 
 ### WS-06 — Search, Navigation & Command Surface
 
-**Objective:** instant project-wide search and keyboard-first navigation. **Current state:** search projections only. **Depends:** ADR-0036. **Exit:** GP-1 search; command palette parity with design.md §13.2.
+**Objective:** instant project-wide search and keyboard-first navigation. **Current state:** search projections only. **Depends:** ADR-0036. **Exit:** GP-1 search; command palette covers every registered `CommandDispatchIntent` and stays fully keyboard-operable.
 
 - 🔴 WS06.T1 **In-process ripgrep.** `grep-searcher`/`grep-regex`/`ignore`/`globset` integration in `legion-project` (or `legion-index`) behind the existing search DTOs: literal/regex/case/word modes, include/exclude globs, gitignore awareness, result streaming with bounded batches into the search panel. *Accept:* Legion-repo-wide search < 150ms warm; cancellation works; results stream incrementally.
 - 🔴 WS06.T2 **Search & replace with proposals.** Multi-file replace materializes as a reviewable workspace-edit proposal (preview per match, partial selection), through Phase 2 routes. *Accept:* project-wide rename-string lands as one reversible proposal.
@@ -334,7 +357,7 @@ Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates 
 - 🟠 WS10.T2 **Repo map.** Aider-validated structural map: tree-sitter defs/refs → file/symbol graph → PageRank → top-ranked signatures within a token budget; deterministic, cheap, always available; cached with watcher invalidation. *Accept:* map for Legion repo fits budget and names the right files for 10 scripted queries.
 - 🟠 WS10.T3 **Embedding pipeline (local-first).** AST-chunk (WS-02.T5) → local embedding model via Ollama/llama.cpp (policy: hosted embeddings only with consent) → embedded vector store per ADR-0037 spike (LanceDB vs sqlite-vec); model name+version stored per index; lazy re-embed on model change. *Accept:* index builds incrementally from watcher events; air-gap works fully.
 - 🟠 WS10.T4 **Hybrid retrieval + eval.** Lexical (WS-06) + vector + repo-map fusion with rank blending; retrieval eval fixture (queries → expected files/symbols) wired into `evals/` so retrieval quality is a tracked number, not vibes. *Accept:* hybrid beats each single method on the eval; eval runs in CI (offline fixtures).
-- 🟠 WS10.T5 **Context manifest UX (PR-AI-001).** The inspector that shows exactly what context was assembled (files, symbols, diagnostics, terminal excerpts, memory, privacy labels, egress) *before* send, with per-item exclusion. This is a trust differentiator — productize it prominently. *Accept:* GP-2 manifest interaction; manifest-to-egress equality test.
+- 🟠 WS10.T5 **Context manifest UX (PR-AI-001).** The inspector that shows exactly what context was assembled (files, symbols, diagnostics, terminal excerpts, memory, privacy labels, and egress status) *before* invocation, with per-item exclusion. This is a trust differentiator — productize it prominently. *Accept:* GP-2 manifest interaction; manifest-to-egress equality test.
 - 🟢 WS10.T6 **Memory productization.** AGENTS.md ingestion (WS-11.T4) + consented workspace memory (existing candidate/consent substrate) surfaced and editable; compaction policy for long sessions. *Accept:* memory survives restart; deletion handles verified.
 
 ### WS-11 — Assist Surfaces (inline AI)
@@ -384,9 +407,9 @@ Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates 
 
 **Objective:** activate Phase 5's plugin boundary with a real VM, scoped to the Zed-validated launch set: grammars, themes, language-server adapters. **Current state:** manifest validation, capability gates, quotas — no VM. **Depends:** ADR-0019 (accepted), WS-02.T4. **Exit:** plugin-delivered grammar + theme + LSP adapter in production.
 
-- 🟢 WS15.T1 **wasmtime + WIT host.** Versioned WIT interface (v0 surface deliberately tiny), wasmtime execution under the existing capability/quota gates, crash containment + blame (plugin crash never takes the IDE). *Accept:* hostile-plugin test suite (loops, OOM, capability probing) contained and audited.
+- 🟢 WS15.T1 **wasmtime + WIT host.** Versioned WIT interface (v0 surface deliberately tiny), wasmtime execution under the existing capability/quota gates, crash containment + blame (plugin crash never takes the IDE), and no arbitrary workspace read/write outside declared policy. *Accept:* hostile-plugin test suite (loops, OOM, capability probing, workspace-access attempts) contained and audited.
 - 🟢 WS15.T2 **Launch extension set.** Ship 2–3 bundled capabilities *as extensions* (a tier-2 grammar, a theme, an LSP adapter) to dogfood the API before any third party. *Accept:* bundled set runs via the VM path in CI.
-- 🟢 WS15.T3 **Distribution & trust.** Signed extension artifacts, checksum manifests, install/update/remove UX (known-limitations item), permission review screen per manifest capabilities. *Accept:* tampered-artifact rejection test; permission UI evidence.
+- 🟢 WS15.T3 **Distribution & trust.** Signed extension artifacts, checksum manifests, install/update/remove UX (known-limitations item), permission review screen per manifest capabilities. Extension-originated edits become proposals before preview/apply; marketplace/runtime execution remains off until policy and sandbox tests pass. *Accept:* tampered-artifact rejection test; permission UI evidence.
 - 🟢 WS15.T4 **Agent-capability marketplace position.** MCP servers + skills + plan templates as the primary "marketplace" objects (the 2026 extension primitive), curated registry format defined; full marketplace post-GA. *Accept:* registry schema + local install flow.
 
 ### WS-16 — Collaboration & Remote (post-GA track, kept warm)
@@ -394,19 +417,19 @@ Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates 
 **Objective:** preserve optionality without GA cost; activate only after M5. **Current state:** operation-log collaboration (in-memory), TLS transport, remote fixtures, Cloud Lane HTTP transport — all substrate. **Depends:** ADR-0040 anchor layer; post-GA CRDT decision.
 
 - 🟢 WS16.T1 **CRDT adoption ADR.** Decide Loro vs yrs vs homegrown over the anchor layer; prototype on the operation-log runtime. *Accept:* ADR with benchmark evidence.
-- 🟢 WS16.T2 **Remote transport activation.** Drive `legion-remote-transport` from the remote runtime against a reference edge agent; reconnect/offline-resume from existing manifests. *Accept:* remote GP-1 subset over TLS on LAN fixture.
+- 🟢 WS16.T2 **Remote transport activation.** Drive `legion-remote-transport` from the remote runtime against a reference edge agent; reconnect/offline-resume from existing manifests; production transport activates only with policy, threat-model, mock/default-deny, and failure-mode evidence. *Accept:* remote GP-1 subset over TLS on LAN fixture.
 - 🟢 WS16.T3 **Cloud Lane productization.** Hosted worker capacity with visible upload scope, budget, cancellation (existing HTTP transport + contract docs as the base). *Accept:* cloud-executed Delegate task with full egress visibility.
 
 ### WS-17 — Distribution, Updates & Crash Reporting (PR-REL-001)
 
 **Objective:** installable, updatable, supportable product on three platforms. **Current state:** deterministic Windows package path + dry-run evidence only. **Depends:** none (can start immediately, parallel). **Exit:** GP-5.
 
-- 🔴 WS17.T1 **Release pipeline.** cargo-dist-based multi-platform CI (plan/build/host) producing dmg + msi (WiX) + deb/rpm/AppImage; reproducible version stamping; release-channel model (stable/preview). *Accept:* tagged commit yields all artifacts in CI.
-- 🔴 WS17.T2 **Signing & notarization.** macOS Developer ID + notarization + stapling via rcodesign (pure-Rust, runs on Linux CI with App Store Connect API key); Windows Authenticode (Azure Trusted Signing or EV cert); Linux artifact signatures. *Accept:* Gatekeeper/SmartScreen-clean installs verified on fresh VMs.
+- 🔴 WS17.T1 **Release pipeline.** cargo-dist-based multi-platform CI (plan/build/host) producing dmg + msi (WiX) + deb/rpm/AppImage; reproducible version stamping; release-channel model (stable/preview); installer descriptors record name, platform, sha256, build command, verification command, and signer status (`dry-run/no-production-signer` until real signing exists). *Accept:* tagged commit yields all artifacts in CI; dry-run descriptors are verifiable.
+- 🔴 WS17.T2 **Signing & notarization.** macOS Developer ID + notarization + stapling via rcodesign (pure-Rust, runs on Linux CI with App Store Connect API key); Windows Authenticode (Azure Trusted Signing or EV cert); Linux artifact signatures. No private signing keys, certs, tokens, or notarization credentials may be committed. *Accept:* Gatekeeper/SmartScreen-clean installs verified on fresh VMs, or an explicitly unsigned-beta policy is recorded before any readiness-ledger status flip.
 - 🟠 WS17.T3 **Auto-update + rollback.** Updater (Velopack or custom Zed-style) with Ed25519-signed manifests, delta updates where supported, staged rollout percentage, one-click rollback to previous version (existing update/rollback incident evidence extends here). *Accept:* update → rollback e2e on all 3 OSes.
 - 🟠 WS17.T4 **Crash reporting (opt-in).** crash-handler + minidumper out-of-process capture → sentry-rust-minidump (or self-hosted endpoint per privacy posture); symbol upload in release CI; first-run consent with visible toggle, consistent with telemetry policy. *Accept:* induced crash produces symbolicated report only when consented.
 - 🟠 WS17.T5 **First-run & onboarding.** Trust prompt for workspace, telemetry/crash consent, provider setup (local-first default; BYOK optional), keybinding scheme choice, interactive tour of mode switch. *Accept:* GP-5 first-run path usability-tested.
-- 🟢 WS17.T6 **Docs & support surface.** User docs site, keyboard reference, troubleshooting (logs/diagnostics export already exists), issue-template diagnostics bundle. *Accept:* docs cover every GP path.
+- 🟢 WS17.T6 **Docs & support surface.** User docs site, keyboard reference, troubleshooting (logs/diagnostics export already exists), issue-template diagnostics bundle, GA release runbook closure after package commands and artifacts exist. *Accept:* docs cover every GP path; `plans/product-readiness-ledger.md` moves `PR-REL-001` only after signed-installer or explicitly unsigned-beta evidence exists.
 
 ### WS-18 — Performance, Accessibility & Platform Parity
 
@@ -432,7 +455,7 @@ Conventions: tasks are numbered `WSnn.Tmm`. Every task lists its primary crates 
 
 - 🟠 WS20.T1 **Threat model & security docs.** Public-facing security model (mutation gating, sandbox guarantees incl. honest Windows caveats, egress policy, secret handling, plugin isolation); responsible-disclosure policy. *Accept:* doc reviewed against implementation by adversarial pass.
 - 🟠 WS20.T2 **Secret hygiene.** Secret-pattern scanning on proposal content and terminal excerpts before any consented retention/egress (substrate hooks exist); redaction conformance tests. *Accept:* seeded-secret corpus never egresses unredacted.
-- 🟢 WS20.T3 **Org policy pack.** Admin-distributable policy bundles (provider/MCP/tool allowlists, mode ceilings, budget caps, retention rules) — signed, versioned; the PR-ENT-002 admin slice that doesn't require collaboration. *Accept:* policy bundle enforcement e2e.
+- 🟢 WS20.T3 **Org policy pack.** Admin-distributable policy bundles (provider/MCP/tool allowlists, mode ceilings, budget caps, retention rules, raw-source export rules) — signed, versioned; the PR-ENT-002 admin slice that doesn't require collaboration. Admin export is metadata-safe by default and policy-governed for raw-source inclusion. *Accept:* policy bundle enforcement e2e.
 - 🟢 WS20.T4 **External audit + pen test** before GA marketing claims. *Accept:* findings triaged; report summarized publicly.
 
 ---
@@ -463,6 +486,18 @@ Duration ranges assume 1–3 focused engineers with heavy agentic leverage; they
 4. **Activation flags retire deliberately.** `runtime_apply_disabled`, `fixture_enabled`, and remote/telemetry flags each get an activation checklist (tests proving fail-closed behavior, audit coverage, UX surface) and a removal PR — flags don't linger as dead config.
 5. **Dogfooding is a standing gate from M1.** A "Legion-on-Legion" weekly journal (friction log) feeds the backlog; any P0 friction item preempts roadmap work.
 6. **Upstream hygiene.** egui/AccessKit/tree-sitter/alacritty_terminal issues encountered get tracked links in-repo; budget ~10% time for upstream fixes rather than local forks.
+
+Required verification commands at the end of every packet that changes code or evidence, using narrower targeted tests first when useful:
+
+```bash
+cargo run -p xtask -- check-deps
+cargo run -p xtask -- docs-hygiene
+cargo fmt --all --check
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check
+```
 
 ---
 
@@ -507,6 +542,35 @@ Duration ranges assume 1–3 focused engineers with heavy agentic leverage; they
 4. Run the ADR-0037 spike (LanceDB vs sqlite-vec, 1 week, fixture corpus).
 5. Begin WS-01.T1/T2 and WS-02.T1 in parallel — they are the longest poles to M1.
 6. Stand up 3-OS CI runners (WS-18.T3 prerequisite) before M1 work needs them.
+
+---
+
+
+## 13. Production Finish Gates (P0-P7 status)
+
+The P-gates are the substrate/readiness view of the plan: §8 answers "when do we ship," while this section answers "what must be accepted before a milestone claim is credible." P5-P7 remain deferred or blocked until their policy, ADR, dependency-policy, tests, and evidence prerequisites are represented in-repo.
+
+| Phase | Gate | Status | Acceptance focus | M/WS mapping |
+| --- | --- | --- | --- | --- |
+| **P0** | Strict source cleanliness | **accepted / standing** | No unresolved `todo!()` or `unimplemented!()` in `crates/**/*.rs`; remaining markers are intentional fixtures/scanner constants with tests. | Standing gate for every WS and milestone |
+| **P1** | Release/installability hardening (`PR-REL-001`) | **in-progress** | Installers are verifiable, unsigned/dry-run status is explicit, secrets are not committed, and readiness flips only with signed-installer or unsigned-beta policy evidence. | WS-17, M0/M5 |
+| **P2** | Renderer/accessibility workflows (`PR-UI-001`, `PR-UI-002`) | **in-progress** | Renderer-backed workflows prove input, focus, accessibility, restore behavior, platform parity, and explicit large-file degradation. | WS-01, WS-18, M1/M5 |
+| **P3** | Language/debug/test/SCM workflows (`PR-LANG-001`, `PR-LANG-002`) | **blocked** | LSP/DAP/test/SCM product flows are live; every write-producing action routes through proposals or default-deny policy; stale responses cannot mutate state. | WS-03, WS-04, WS-08, M1/M3/M5 |
+| **P4** | Inspectable local-first AI and evals (`PR-AI-001`, `PR-AI-002`) | **blocked** | Context manifests show files, symbols, diagnostics, terminal excerpts, memory, privacy labels, and egress status before invocation; real adversarial evals produce pass/fail evidence. | WS-09, WS-10, WS-11, WS-14, WS-19, M2/M3 |
+| **P5** | Extension runtime (WASM/WIT; PR-VSC-002 redirected) | **deferred / redirected** | WASM extensions cannot bypass declared policy; extension-originated edits become proposals; marketplace/runtime execution stays off until policy and sandbox tests pass. | WS-15, M5/M6 cut line |
+| **P6** | Remote development UX (`PR-ENT-001`) | **deferred** | Production remote transport activates only with policy, threat model, default-deny tests, and failure-mode evidence; remote writes remain proposal-mediated. | WS-16, M6 |
+| **P7** | Collaboration/admin controls (`PR-ENT-002`) | **deferred** | Collaboration cannot bypass proposal mediation; admin export is metadata-safe by default and policy-governed for raw-source inclusion. | WS-16, WS-20, M6 |
+
+| P-gate | Required before milestone/readiness claim | Hardest open task IDs |
+| --- | --- | --- |
+| P0 | Every milestone | Standing source-cleanliness gate (§7, §9) |
+| P1 | M5 / `PR-REL-001` product-validated | WS17.T1-WS17.T6 |
+| P2 | M1 editor dogfood and M5 platform parity | WS01.T7, WS18.T1-WS18.T3 |
+| P3 | M1/M3 language-debug credibility | WS03.T1-WS03.T7, WS04.T1-WS04.T4, WS08.T1-WS08.T3 |
+| P4 | M2 Assist and M3 Delegate trust claims | WS09.T4, WS10.T5, WS14.T5, WS19.T2 |
+| P5 | M5 extension launch set or M6 expansion | WS15.T1-WS15.T3 |
+| P6 | M6 remote/cloud lane | WS16.T2-WS16.T3 |
+| P7 | M6 collaboration/admin policy | WS16.T1, WS20.T3 |
 
 ---
 

@@ -15454,6 +15454,10 @@ pub enum LanguageToolingOperationKind {
     References,
     /// Outline refresh.
     Outline,
+    /// Inlay hint refresh.
+    InlayHints,
+    /// Code lens refresh.
+    CodeLens,
     /// Formatting proposal conversion.
     FormattingProposal,
     /// Rename proposal conversion.

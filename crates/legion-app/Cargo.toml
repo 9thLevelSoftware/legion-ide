@@ -14,6 +14,7 @@ offline = []
 anyhow = { workspace = true }
 legion-editor = { workspace = true }
 legion-index = { workspace = true }
+legion-lsp = { workspace = true }
 legion-collaboration = { workspace = true }
 legion-remote = { workspace = true }
 legion-platform = { workspace = true }

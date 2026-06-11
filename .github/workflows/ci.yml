@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: ["main", "master"]
+    tags: ["v*.*.*"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   validate:
@@ -43,6 +45,21 @@ jobs:
 
       - name: Documentation hygiene gate
         run: cargo run -p xtask -- docs-hygiene
+
+      - name: Code canvas widget boundary gate
+        run: cargo run -p xtask -- no-egui-textedit
+
+      - name: Release pipeline descriptor dry run
+        run: cargo run -p xtask -- release-pipeline --dry-run
+
+      - name: Release pipeline verify
+        run: cargo run -p xtask -- verify-release-pipeline
+
+      - name: Performance harness skeleton (M0 WS18.T1)
+        run: cargo run -p xtask -- perf-harness
+
+      - name: Performance harness report verify (M0 WS18.T1)
+        run: cargo run -p xtask -- verify-perf-harness
 
       - name: Format check
         run: cargo fmt --all --check
@@ -120,3 +137,36 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  release:
+    name: Tagged release pipeline (${{ matrix.os }})
+    # WS17.T1: tagged commit must yield dry-run descriptors for every
+    # installer target on every supported OS. Real artifact upload is owned
+    # by WS17.T2 (signing) — this job asserts the descriptor plan survives
+    # the CI matrix and the verify pass reports a clean dry-run summary.
+    runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Release pipeline descriptor dry run (stable)
+        run: cargo run -p xtask -- release-pipeline --channel stable --dry-run
+
+      - name: Release pipeline descriptor dry run (preview)
+        run: cargo run -p xtask -- release-pipeline --channel preview --dry-run
+
+      - name: Release pipeline verify
+        run: cargo run -p xtask -- verify-release-pipeline

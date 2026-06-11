@@ -28,6 +28,7 @@
 //! this stand-in without changing the report shape.
 
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -39,6 +40,9 @@ use serde::{Deserialize, Serialize};
 const SKELETON_FIXTURE_BYTES: usize = 64 * 1024;
 const SKELETON_EDIT_SAMPLES: usize = 32;
 const SKELETON_DEFAULT_BUDGET_MILLIS: u64 = 250;
+const LINE_GALLEY_FIXTURE_LINES: usize = 10_000;
+const LINE_GALLEY_VISIBLE_ROWS: usize = 80;
+const LINE_GALLEY_DEFAULT_BUDGET_MILLIS: u64 = 2;
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
 
 /// Environment variable that, when set to a positive millisecond count,
@@ -53,12 +57,16 @@ pub enum SkeletonKind {
     /// p50/p95 input-to-paint budget will gate against, but does not
     /// require `legion-editor` as an `xtask` dependency.
     InputToPaintMicrobenchmark,
+    /// Synthetic line-galley shaping-cache frame: a 10K-line fixture with
+    /// only the visible viewport rows looked up/shaped per frame.
+    LineGalleyShapingCache,
 }
 
 impl SkeletonKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InputToPaintMicrobenchmark => "input_to_paint_microbenchmark",
+            Self::LineGalleyShapingCache => "line_galley_shaping_cache",
         }
     }
 }
@@ -91,6 +99,22 @@ impl SkeletonDescriptor {
                 "by the WS18.T1 follow-on that exercises `legion-editor` and ",
                 "the indexer on the Legion repo + 100K-file fixture + 100MB ",
                 "file per master-plan §11.",
+            )
+            .to_string(),
+        }
+    }
+
+    pub fn m1_line_galley_shaping_cache() -> Self {
+        Self {
+            name: "m1.line_galley_shaping_cache".to_string(),
+            kind: SkeletonKind::LineGalleyShapingCache,
+            fixture_bytes: LINE_GALLEY_FIXTURE_LINES,
+            sample_count: 1,
+            budget_millis: LINE_GALLEY_DEFAULT_BUDGET_MILLIS,
+            note: concat!(
+                "WS01.T2 line-galley shaping-cache gate: represents a ",
+                "10K-line editor buffer where only visible viewport rows ",
+                "are shaped/looked up for a frame; strict budget is <2ms."
             )
             .to_string(),
         }
@@ -173,7 +197,15 @@ impl std::error::Error for PerfHarnessError {}
 
 /// Plan a deterministic skeleton run. Pure function: no I/O, no clock.
 pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
-    let samples = run_input_to_paint_microbenchmark(skeleton.fixture_bytes, skeleton.sample_count);
+    let samples = match skeleton.kind {
+        SkeletonKind::InputToPaintMicrobenchmark => {
+            run_input_to_paint_microbenchmark(skeleton.fixture_bytes, skeleton.sample_count)
+        }
+        SkeletonKind::LineGalleyShapingCache => run_line_galley_shaping_cache_microbenchmark(
+            skeleton.fixture_bytes,
+            skeleton.sample_count,
+        ),
+    };
     let total = samples.iter().copied().sum::<Duration>();
     let mut sorted = samples.clone();
     sorted.sort();
@@ -249,6 +281,48 @@ fn run_input_to_paint_microbenchmark(fixture_bytes: usize, sample_count: usize) 
     samples
 }
 
+fn run_line_galley_shaping_cache_microbenchmark(
+    fixture_lines: usize,
+    sample_count: usize,
+) -> Vec<Duration> {
+    let fixture_lines = fixture_lines.max(LINE_GALLEY_VISIBLE_ROWS);
+    let mut line_hashes = Vec::with_capacity(fixture_lines);
+    for line in 0..fixture_lines {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in format!("fn generated_line_{line:05}() -> usize {{ {line} }}").bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        line_hashes.push(hash);
+    }
+
+    let mut cache = HashMap::with_capacity(LINE_GALLEY_VISIBLE_ROWS * 2);
+    let mut samples = Vec::with_capacity(sample_count);
+    for frame in 0..sample_count {
+        let scroll_span = fixture_lines
+            .saturating_sub(LINE_GALLEY_VISIBLE_ROWS)
+            .max(1);
+        let scroll_base = (frame * 97) % scroll_span;
+        let start = Instant::now();
+        let mut frame_vertices = 0_u64;
+        for visible_row in 0..LINE_GALLEY_VISIBLE_ROWS {
+            let line_index = scroll_base + visible_row;
+            let content_hash = line_hashes[line_index];
+            let key = (content_hash, 14_u32, 240_u32);
+            let shaped_vertices = *cache.entry(key).or_insert_with(|| {
+                // Stand-in for renderer galley shaping output. The production
+                // path caches egui `Galley` values; this synthetic gate keeps
+                // CI deterministic without depending on a graphics/font stack.
+                content_hash.count_ones() as u64 + 12
+            });
+            frame_vertices = frame_vertices.wrapping_add(shaped_vertices);
+        }
+        std::hint::black_box(frame_vertices);
+        samples.push(start.elapsed());
+    }
+    samples
+}
+
 fn percentile_micros(sorted: &[Duration], pct: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -279,6 +353,33 @@ pub fn plan_m0_skeletons(
         git_sha: git_sha.to_string(),
         summary,
         skeletons: vec![measurement],
+    }
+}
+
+pub fn plan_perf_skeletons(
+    package_name: &str,
+    git_sha: &str,
+    skeletons: &[SkeletonDescriptor],
+) -> PerfReport {
+    let measurements = skeletons.iter().map(plan_perf_harness).collect::<Vec<_>>();
+    let mut summary = PerfSummary {
+        total: measurements.len(),
+        ..PerfSummary::default()
+    };
+    for measurement in &measurements {
+        match measurement.status {
+            SkeletonStatus::Passed => summary.passed += 1,
+            SkeletonStatus::Failed => summary.failed += 1,
+            SkeletonStatus::Skipped => summary.skipped += 1,
+        }
+    }
+    PerfReport {
+        schema_version: 1,
+        package_name: package_name.to_string(),
+        measured_at_utc: current_utc_rfc3339(),
+        git_sha: git_sha.to_string(),
+        summary,
+        skeletons: measurements,
     }
 }
 

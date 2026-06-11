@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
 
 use legion_protocol::{
     ByteRange, CancellationTokenId, CanonicalPath, CapabilityId, EditBatch, FileContentVersion,
@@ -27,18 +28,23 @@ use legion_protocol::{
     SemanticRecordProvenance, SemanticRecordSource, SemanticRequest, SemanticResponse,
     SemanticSymbolId, SnapshotChunkDescriptor, SnapshotDescriptor, SnapshotId, SnapshotLeaseChunk,
     SnapshotLeaseDescriptor, SymbolFileMapRecord, TextCoordinate, TextEdit, TextOffset, TextRange,
-    TimestampMillis, WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision,
-    WorkspaceDiscoveryDelta, WorkspaceDiscoveryRecord, WorkspaceDiscoverySkipReason,
-    WorkspaceDiscoverySnapshot, WorkspaceGeneration, WorkspaceId, WorkspaceTextEdit,
+    TimestampMillis, ViewportSemanticTokenKind, WorkspaceDiscoveryChangeKind,
+    WorkspaceDiscoveryDecision, WorkspaceDiscoveryDelta, WorkspaceDiscoveryRecord,
+    WorkspaceDiscoverySkipReason, WorkspaceDiscoverySnapshot, WorkspaceGeneration, WorkspaceId,
+    WorkspaceTextEdit,
 };
 use legion_text::{TextChunkDescriptor, TextSnapshot};
 use thiserror::Error;
+use tree_sitter::StreamingIterator;
 
 /// Schema version emitted by the activated indexing crate DTOs.
 pub const INDEX_SCHEMA_VERSION: u16 = 1;
 
 /// Deterministic extraction contract version for lexical semantic records.
 pub const LEXICAL_EXTRACTION_VERSION: &str = "legion-index-lexical-v1";
+
+/// Deterministic extraction contract version for tree-sitter semantic records.
+pub const TREE_SITTER_EXTRACTION_VERSION: &str = "legion-index-tree-sitter-v1";
 
 /// Default grammar version used by the lexical parser fallback.
 pub const DEFAULT_GRAMMAR_VERSION: &str = "lexical-fallback-grammar-v1";
@@ -1729,8 +1735,7 @@ impl SourceDocument {
             descriptor: descriptor_from_parts(None, Vec::new(), Vec::new(), Vec::new(), true),
             text: BoundedFullTextSource {
                 byte_budget: text.len(),
-                policy_reason: "explicit small-buffer semantic fixture/full-text optimization"
-                    .to_string(),
+                policy_reason: "explicit small-buffer semantic/full-text optimization".to_string(),
                 text,
             },
         };
@@ -2277,6 +2282,11 @@ pub struct ParseOutcome {
 
 /// Parser worker abstraction; runtime wiring is intentionally owned by callers, not this crate.
 pub trait ParserWorker {
+    /// Extraction contract version used to segregate parser-cache records.
+    fn parser_version(&self) -> &'static str {
+        LEXICAL_EXTRACTION_VERSION
+    }
+
     /// Parses a source document into deterministic semantic records.
     fn parse(&self, request: ParseRequest) -> IndexResult<ParseOutcome>;
 }
@@ -2332,7 +2342,8 @@ impl SyntaxTreeCache {
         worker: &W,
         request: ParseRequest,
     ) -> IndexResult<ParseOutcome> {
-        let key = SyntaxCacheKey::from_request(&request);
+        let mut key = SyntaxCacheKey::from_request(&request);
+        key.parser_version = worker.parser_version().to_string();
 
         if let Some(outcome) = self.entries.get(&key) {
             let outcome = outcome.clone();
@@ -2398,6 +2409,248 @@ impl ParserWorker for LexicalFallbackParser {
             file_index,
             diagnostics,
         })
+    }
+}
+
+/// Metadata-only highlight capture emitted by a tree-sitter highlight query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeSitterHighlightCapture {
+    /// Tree-sitter highlight capture name, without the leading `@`.
+    pub capture_name: String,
+    /// Zero-based logical line number.
+    pub line_number: u32,
+    /// Zero-based starting byte column within the line.
+    pub start_byte_col: u32,
+    /// Exclusive ending byte column within the line.
+    pub end_byte_col: u32,
+    /// Zero-based starting byte offset in the transient parser input.
+    pub start_byte: u64,
+    /// Exclusive ending byte offset in the transient parser input.
+    pub end_byte: u64,
+    /// Protocol token kind selected by Legion's renderer-neutral mapping table.
+    pub token_kind: ViewportSemanticTokenKind,
+}
+
+/// Tree-sitter parser worker for bundled Rust syntax activation.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TreeSitterParser;
+
+impl TreeSitterParser {
+    /// Constructs a tree-sitter parser worker.
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Runs the bundled Rust highlight query and returns metadata-only captures.
+    pub fn highlight_captures(
+        &self,
+        document: &SourceDocument,
+    ) -> IndexResult<Vec<TreeSitterHighlightCapture>> {
+        let source = source_text(document).ok_or_else(|| IndexError::TextSnapshotUnavailable {
+            message: "tree-sitter highlight extraction requires bounded source text".to_string(),
+        })?;
+        self.highlight_captures_from_text(&document.language_id, source)
+    }
+
+    /// Runs the bundled Rust highlight query from transient text without fabricating file identity.
+    pub fn highlight_captures_from_text(
+        &self,
+        language_id: &LanguageId,
+        source: &str,
+    ) -> IndexResult<Vec<TreeSitterHighlightCapture>> {
+        if !tree_sitter_supports_language(language_id) {
+            return Ok(Vec::new());
+        }
+        tree_sitter_highlight_captures(source)
+    }
+}
+
+impl ParserWorker for TreeSitterParser {
+    fn parser_version(&self) -> &'static str {
+        TREE_SITTER_EXTRACTION_VERSION
+    }
+
+    fn parse(&self, request: ParseRequest) -> IndexResult<ParseOutcome> {
+        if !tree_sitter_supports_language(&request.document.language_id) {
+            return LexicalFallbackParser::new().parse(request);
+        }
+
+        let Some(source) = source_text(&request.document) else {
+            return LexicalFallbackParser::new().parse(request);
+        };
+        let tree = parse_tree_sitter_rust(source)?;
+        let node_count = count_tree_sitter_nodes(tree.root_node());
+        let has_error = tree.root_node().has_error();
+
+        let indexer = LexicalIndexer::new();
+        let mut file_index = indexer.index_document(
+            &request.document,
+            request.grammar_version.clone(),
+            request.model_version.clone(),
+        );
+        let mut cache_key = SyntaxCacheKey::from_document(
+            &request.document,
+            &request.grammar_version,
+            &request.model_version,
+        );
+        cache_key.parser_version = TREE_SITTER_EXTRACTION_VERSION.to_string();
+        let syntax_tree = SyntaxTreeRecord {
+            cache_key,
+            identity: request.document.identity.clone(),
+            node_count,
+            declaration_count: file_index.symbols.len(),
+            freshness: request.document.source_descriptor().freshness_state,
+            provenance: tree_sitter_provenance(),
+        };
+        file_index.syntax_tree = syntax_tree.clone();
+        if has_error {
+            file_index.diagnostics.push(diagnostic(
+                "index.tree_sitter.parse_error",
+                "tree-sitter reported parser error nodes",
+                ProtocolDiagnosticSeverity::Warning,
+                Some(request.document.identity.canonical_path.clone()),
+                None,
+            ));
+        }
+        let diagnostics = file_index.diagnostics.clone();
+        Ok(ParseOutcome {
+            syntax_tree,
+            file_index,
+            diagnostics,
+        })
+    }
+}
+
+/// Maps a tree-sitter highlight capture name to Legion's renderer-neutral token kind.
+pub fn tree_sitter_capture_kind(capture_name: &str) -> ViewportSemanticTokenKind {
+    let base = capture_name.split('.').next().unwrap_or(capture_name);
+    match base {
+        "keyword" => ViewportSemanticTokenKind::Keyword,
+        "type" => ViewportSemanticTokenKind::Type,
+        "string" => ViewportSemanticTokenKind::String,
+        "number" => ViewportSemanticTokenKind::Number,
+        "comment" => ViewportSemanticTokenKind::Comment,
+        "punctuation" => ViewportSemanticTokenKind::Punct,
+        "function" => ViewportSemanticTokenKind::Function,
+        "attribute" | "tag" | "label" => ViewportSemanticTokenKind::Attribute,
+        "error" | "invalid" => ViewportSemanticTokenKind::Error,
+        _ => ViewportSemanticTokenKind::Ident,
+    }
+}
+
+/// Returns whether the bundled tree-sitter runtime supports a language identifier.
+pub fn tree_sitter_supports_language(language_id: &LanguageId) -> bool {
+    matches!(language_id.0.as_str(), "rust" | "rs")
+}
+
+/// Returns whether the bundled tree-sitter runtime supports a source path.
+pub fn tree_sitter_supports_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+}
+
+fn rust_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_rust::LANGUAGE.into())
+}
+
+fn rust_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            rust_tree_sitter_language(),
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+        )
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter Rust highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn parse_tree_sitter_rust(source: &str) -> IndexResult<tree_sitter::Tree> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(rust_tree_sitter_language())
+        .map_err(|err| IndexError::InvalidConfig {
+            message: format!("tree-sitter Rust language load failed: {err}"),
+        })?;
+    parser
+        .parse(source, None)
+        .ok_or_else(|| IndexError::InvalidConfig {
+            message: "tree-sitter Rust parser returned no tree".to_string(),
+        })
+}
+
+fn tree_sitter_highlight_captures(source: &str) -> IndexResult<Vec<TreeSitterHighlightCapture>> {
+    let tree = parse_tree_sitter_rust(source)?;
+    let query = rust_highlight_query()?;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut captures = cursor.captures(query, tree.root_node(), source.as_bytes());
+    let capture_names = query.capture_names();
+    let mut results = Vec::new();
+
+    captures.advance();
+    while let Some((query_match, capture_index)) = captures.get() {
+        let capture = query_match.captures[*capture_index];
+        let capture_name = capture_names
+            .get(capture.index as usize)
+            .copied()
+            .unwrap_or("unknown")
+            .to_string();
+        let start = capture.node.start_position();
+        let end = capture.node.end_position();
+        results.push(TreeSitterHighlightCapture {
+            token_kind: tree_sitter_capture_kind(&capture_name),
+            capture_name,
+            line_number: start.row as u32,
+            start_byte_col: start.column as u32,
+            end_byte_col: end.column as u32,
+            start_byte: capture.node.start_byte() as u64,
+            end_byte: capture.node.end_byte() as u64,
+        });
+        captures.advance();
+    }
+
+    results.sort_by(|left, right| {
+        left.line_number
+            .cmp(&right.line_number)
+            .then_with(|| left.start_byte_col.cmp(&right.start_byte_col))
+            .then_with(|| left.end_byte_col.cmp(&right.end_byte_col))
+            .then_with(|| left.capture_name.cmp(&right.capture_name))
+    });
+    Ok(results)
+}
+
+fn count_tree_sitter_nodes(node: tree_sitter::Node<'_>) -> usize {
+    let mut total = 0usize;
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        total = total.saturating_add(1);
+        let mut cursor = current.walk();
+        if !cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            stack.push(cursor.node());
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    total
+}
+
+fn tree_sitter_provenance() -> SemanticRecordProvenance {
+    SemanticRecordProvenance {
+        source: SemanticRecordSource::TreeSitter,
+        server_id: None,
+        extraction_version: TREE_SITTER_EXTRACTION_VERSION.to_string(),
+        confidence_basis_points: 9_000,
     }
 }
 

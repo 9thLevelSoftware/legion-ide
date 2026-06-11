@@ -5,8 +5,9 @@ use legion_index::{
     RepositoryDiscoveryImporter, RetrievalQuery, SemanticFabricScheduler,
     SemanticFabricSchedulingPolicy, SemanticIndex, SemanticSourceInputKind, SemanticUpsertOutcome,
     SourceDocument, StructuralRewriteFileInput, StructuralSearchQuery, SyntaxCacheEventKind,
-    SyntaxTreeCache, WorkCompletionState, WorkPriority, build_rename_preview_payload,
-    build_structural_rewrite_preview_payload, run_structural_search, semantic_cancellation_token,
+    SyntaxTreeCache, TREE_SITTER_EXTRACTION_VERSION, TreeSitterParser, WorkCompletionState,
+    WorkPriority, build_rename_preview_payload, build_structural_rewrite_preview_payload,
+    run_structural_search, semantic_cancellation_token, tree_sitter_capture_kind,
 };
 use legion_protocol::{
     BufferId, BufferVersion, ByteRange, CancellationTokenId, CanonicalPath, CapabilityDecisionId,
@@ -23,15 +24,16 @@ use legion_protocol::{
     SemanticFreshnessState, SemanticGrammarVersion, SemanticGraphRecordKind,
     SemanticMetadataSourceKind, SemanticModelVersion, SemanticPort, SemanticPrivacyScope,
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
-    SemanticQueryScope, SemanticQueryStatus, SemanticRequest, SemanticResponse,
-    SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId, SnapshotLeaseChunk,
-    SnapshotLeaseDescriptor, TextCoordinate, TextEdit, TextRange, TimestampMillis,
-    WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision, WorkspaceDiscoveryDelta,
-    WorkspaceDiscoveryPathPolicyResult, WorkspaceDiscoveryPolicyDecision, WorkspaceDiscoveryRecord,
-    WorkspaceDiscoverySkipReason, WorkspaceDiscoverySnapshot, WorkspaceDiscoveryTrustResult,
-    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
-    WorkspaceRootId, WorkspaceTextEdit, WorkspaceTrustState,
-    convert_lsp_edit_to_workspace_proposal, validate_lsp_edit_proposal_contract,
+    SemanticQueryScope, SemanticQueryStatus, SemanticRecordSource, SemanticRequest,
+    SemanticResponse, SnapshotChunkDescriptor, SnapshotConsumerKind, SnapshotId,
+    SnapshotLeaseChunk, SnapshotLeaseDescriptor, TextCoordinate, TextEdit, TextRange,
+    TimestampMillis, ViewportSemanticTokenKind, WorkspaceDiscoveryChangeKind,
+    WorkspaceDiscoveryDecision, WorkspaceDiscoveryDelta, WorkspaceDiscoveryPathPolicyResult,
+    WorkspaceDiscoveryPolicyDecision, WorkspaceDiscoveryRecord, WorkspaceDiscoverySkipReason,
+    WorkspaceDiscoverySnapshot, WorkspaceDiscoveryTrustResult, WorkspaceEditProposalPayload,
+    WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId, WorkspaceRootId, WorkspaceTextEdit,
+    WorkspaceTrustState, convert_lsp_edit_to_workspace_proposal,
+    validate_lsp_edit_proposal_contract,
 };
 use legion_text::{DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, TextSnapshot};
 use uuid::Uuid;
@@ -1871,6 +1873,212 @@ fn syntax_cache_keys_by_content_hash_language_and_grammar_version_without_collis
             .iter()
             .any(|event| event.kind == SyntaxCacheEventKind::Hit)
     );
+}
+
+#[test]
+fn tree_sitter_worker_reuses_versioned_cache_entries_for_identical_content() {
+    let document = document(
+        "/workspace/src/tree_sitter.rs",
+        1,
+        1,
+        "fn cached() {\n    let value = 42;\n}\n",
+    );
+    let mut cache = SyntaxTreeCache::new();
+    let parser = TreeSitterParser::new();
+    let grammar_version = SemanticGrammarVersion("tree-sitter-rust-0.24.2".to_string());
+
+    let first = cache
+        .get_or_parse(
+            &parser,
+            legion_index::ParseRequest {
+                document: document.clone(),
+                grammar_version: grammar_version.clone(),
+                model_version: SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+            },
+        )
+        .unwrap();
+    let second = cache
+        .get_or_parse(
+            &parser,
+            legion_index::ParseRequest {
+                document,
+                grammar_version,
+                model_version: SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(first.syntax_tree.cache_key, second.syntax_tree.cache_key);
+    assert_eq!(
+        first.syntax_tree.provenance.source,
+        SemanticRecordSource::TreeSitter
+    );
+    assert_eq!(
+        first.syntax_tree.provenance.extraction_version,
+        TREE_SITTER_EXTRACTION_VERSION
+    );
+    assert_eq!(
+        first.syntax_tree.cache_key.parser_version,
+        TREE_SITTER_EXTRACTION_VERSION
+    );
+    assert_eq!(cache.len(), 1);
+    assert!(
+        cache
+            .events()
+            .iter()
+            .any(|event| event.kind == SyntaxCacheEventKind::Hit)
+    );
+}
+
+#[test]
+fn tree_sitter_worker_emits_rust_highlight_captures() {
+    let document = document(
+        "/workspace/src/highlights.rs",
+        1,
+        1,
+        "pub fn demo() {\n    let s = \"hi\";\n}\n",
+    );
+    let parser = TreeSitterParser::new();
+
+    let captures = parser.highlight_captures(&document).unwrap();
+
+    assert!(captures.iter().any(|capture| {
+        capture.capture_name == "keyword" && capture.line_number == 0 && capture.start_byte_col == 0
+    }));
+    assert!(captures.iter().any(|capture| {
+        capture.capture_name == "string" && capture.line_number == 1 && capture.start_byte_col <= 12
+    }));
+}
+
+#[test]
+fn tree_sitter_worker_falls_back_to_lexical_for_unsupported_languages() {
+    let document = document_with(
+        "/workspace/src/cache.ts",
+        FileId(22),
+        LanguageId("typescript".to_string()),
+        1,
+        1,
+        SemanticPrivacyScope::Workspace,
+        "export function cached() {}\n",
+    );
+    let parser = TreeSitterParser::new();
+
+    let outcome = parser
+        .parse(legion_index::ParseRequest {
+            document,
+            grammar_version: SemanticGrammarVersion("tree-sitter-rust-0.24.2".to_string()),
+            model_version: SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        })
+        .unwrap();
+
+    assert_eq!(
+        outcome.syntax_tree.provenance.source,
+        SemanticRecordSource::Lexical
+    );
+    assert_eq!(
+        outcome.syntax_tree.provenance.extraction_version,
+        legion_index::LEXICAL_EXTRACTION_VERSION
+    );
+}
+
+#[test]
+fn tree_sitter_worker_reports_rust_parse_errors_as_diagnostics() {
+    let document = document("/workspace/src/broken.rs", 1, 1, "fn broken( {\n");
+    let parser = TreeSitterParser::new();
+
+    let outcome = parser
+        .parse(legion_index::ParseRequest {
+            document,
+            grammar_version: SemanticGrammarVersion("tree-sitter-rust-0.24.2".to_string()),
+            model_version: SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        })
+        .unwrap();
+
+    assert_eq!(
+        outcome.syntax_tree.provenance.source,
+        SemanticRecordSource::TreeSitter
+    );
+    assert!(outcome.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "index.tree_sitter.parse_error"
+            && diagnostic.severity == ProtocolDiagnosticSeverity::Warning
+    }));
+}
+
+#[test]
+fn tree_sitter_capture_mapping_uses_protocol_token_kinds() {
+    assert_eq!(
+        tree_sitter_capture_kind("keyword.control.return"),
+        ViewportSemanticTokenKind::Keyword
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("type.builtin"),
+        ViewportSemanticTokenKind::Type
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("string.escape"),
+        ViewportSemanticTokenKind::String
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("number.integer"),
+        ViewportSemanticTokenKind::Number
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("comment.documentation"),
+        ViewportSemanticTokenKind::Comment
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("punctuation.bracket"),
+        ViewportSemanticTokenKind::Punct
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("function.method.call"),
+        ViewportSemanticTokenKind::Function
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("attribute"),
+        ViewportSemanticTokenKind::Attribute
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("invalid.illegal"),
+        ViewportSemanticTokenKind::Error
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("variable.parameter"),
+        ViewportSemanticTokenKind::Ident
+    );
+    assert_eq!(
+        tree_sitter_capture_kind("unknown.capture"),
+        ViewportSemanticTokenKind::Ident
+    );
+}
+
+#[test]
+fn tree_sitter_worker_does_not_store_source_bodies_in_parse_outcome() {
+    let marker = "MUST_NOT_PERSIST_SOURCE_BODY_MARKER_42";
+    let document = document(
+        "/workspace/src/privacy.rs",
+        1,
+        1,
+        &format!("fn privacy() {{\n    let _secret = \"{marker}\";\n}}\n"),
+    );
+    let parser = TreeSitterParser::new();
+
+    let outcome = parser
+        .parse(legion_index::ParseRequest {
+            document,
+            grammar_version: SemanticGrammarVersion("tree-sitter-rust-0.24.2".to_string()),
+            model_version: SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        })
+        .unwrap();
+
+    assert_eq!(
+        outcome.syntax_tree.provenance.source,
+        SemanticRecordSource::TreeSitter
+    );
+    assert!(!format!("{:?}", outcome.syntax_tree).contains(marker));
+    assert!(!format!("{:?}", outcome.file_index.source_chunks).contains(marker));
+    assert!(!format!("{:?}", outcome.file_index.graph_records).contains(marker));
+    assert!(!format!("{:?}", outcome.diagnostics).contains(marker));
 }
 
 #[test]

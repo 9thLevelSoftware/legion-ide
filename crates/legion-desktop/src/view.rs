@@ -1,7 +1,13 @@
 //! Projection rendering for the desktop adapter.
 
-use std::collections::{BTreeSet, HashSet};
+mod code_canvas_painter;
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::Duration;
+
+use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 
 use legion_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
@@ -1265,7 +1271,8 @@ fn render_editor_canvas(
             .id_salt("legion_desktop_code_canvas_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                render_code_lines(ui, snapshot, model, actions);
+                let mut painter = EguiCodeCanvasPainter;
+                painter.paint_lines(ui, snapshot, model, actions);
             });
     });
     if level == DesktopProductMode::Assist {
@@ -1411,10 +1418,20 @@ fn render_code_lines(
                         egui::Label::new(theme::code_muted(format!("{:>3}", line.number))),
                     );
                 }
-                let response = ui.add(
-                    egui::Label::new(code_line_layout_job(line))
-                        .sense(egui::Sense::click_and_drag()),
+                let snapshot_id = snapshot
+                    .active_buffer_projection
+                    .viewport
+                    .as_ref()
+                    .map(|viewport| viewport.snapshot_id);
+                let galley = cached_code_line_galley(
+                    ui,
+                    active_buffer_id,
+                    snapshot_id,
+                    line,
+                    ui.available_width(),
                 );
+                let response =
+                    ui.add(egui::Label::new(galley).sense(egui::Sense::click_and_drag()));
                 if let Some(position) = response.interact_pointer_pos()
                     && let Some(buffer_id) = active_buffer_id
                 {
@@ -1532,6 +1549,108 @@ fn render_code_lines(
 
 fn code_char_width() -> f32 {
     theme::tokens().typography.code as f32 * 0.62
+}
+
+const CODE_LINE_GALLEY_CACHE_LIMIT: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CodeLineGalleyCacheKey {
+    buffer_id: u128,
+    snapshot_id: u128,
+    content_fingerprint: u64,
+    font_size_bucket: u32,
+    width_bucket: u32,
+}
+
+fn cached_code_line_galley(
+    ui: &egui::Ui,
+    buffer_id: Option<legion_protocol::BufferId>,
+    snapshot_id: Option<legion_protocol::SnapshotId>,
+    line: &DesktopCodeLineViewModel,
+    wrap_width: f32,
+) -> Arc<egui::Galley> {
+    let Some(buffer_id) = buffer_id else {
+        return shape_code_line_galley(ui, line, wrap_width);
+    };
+    let cache_id = code_line_galley_cache_id(buffer_id);
+    let key = code_line_galley_cache_key(Some(buffer_id), snapshot_id, line, wrap_width);
+
+    if let Some(cached_galley) = ui.ctx().data_mut(|data| {
+        data.get_temp::<HashMap<CodeLineGalleyCacheKey, Arc<egui::Galley>>>(cache_id)
+            .and_then(|cache| cache.get(&key).cloned())
+    }) {
+        return cached_galley;
+    }
+
+    let galley = shape_code_line_galley(ui, line, wrap_width);
+    ui.ctx().data_mut(|data| {
+        let mut cache = data
+            .get_temp::<HashMap<CodeLineGalleyCacheKey, Arc<egui::Galley>>>(cache_id)
+            .unwrap_or_default();
+        if cache.len() >= CODE_LINE_GALLEY_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&galley));
+        data.insert_temp(cache_id, cache);
+    });
+    galley
+}
+
+fn shape_code_line_galley(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    wrap_width: f32,
+) -> Arc<egui::Galley> {
+    egui::WidgetText::from(code_line_layout_job(line)).into_galley(
+        ui,
+        None,
+        wrap_width,
+        egui::FontSelection::Default,
+    )
+}
+
+fn code_line_galley_cache_key(
+    buffer_id: Option<legion_protocol::BufferId>,
+    snapshot_id: Option<legion_protocol::SnapshotId>,
+    line: &DesktopCodeLineViewModel,
+    wrap_width: f32,
+) -> CodeLineGalleyCacheKey {
+    CodeLineGalleyCacheKey {
+        buffer_id: buffer_id.map(|buffer_id| buffer_id.0).unwrap_or_default(),
+        snapshot_id: snapshot_id
+            .map(|snapshot_id| snapshot_id.0)
+            .unwrap_or_default(),
+        content_fingerprint: code_line_content_fingerprint(line),
+        font_size_bucket: code_line_font_size_bucket(),
+        width_bucket: code_line_width_bucket(wrap_width),
+    }
+}
+
+fn code_line_galley_cache_id(buffer_id: legion_protocol::BufferId) -> egui::Id {
+    egui::Id::new(("legion_desktop_line_galley_cache", buffer_id.0))
+}
+
+fn code_line_content_fingerprint(line: &DesktopCodeLineViewModel) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    line.text.hash(&mut hasher);
+    for highlight in &line.highlights {
+        highlight.start_col.hash(&mut hasher);
+        highlight.end_col.hash(&mut hasher);
+        highlight.kind.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn code_line_font_size_bucket() -> u32 {
+    (theme::tokens().typography.code as f32 * 100.0).round() as u32
+}
+
+fn code_line_width_bucket(width: f32) -> u32 {
+    if !width.is_finite() || width <= 0.0 {
+        0
+    } else {
+        (width / 4.0).floor() as u32
+    }
 }
 
 fn paint_current_line_highlight(
@@ -1737,7 +1856,10 @@ fn render_copilot_canvas(
                 current_path(snapshot),
                 Some(theme::tokens().accent.blue),
             );
-            egui::ScrollArea::both().show(ui, |ui| render_code_lines(ui, snapshot, model, actions));
+            egui::ScrollArea::both().show(ui, |ui| {
+                let mut painter = EguiCodeCanvasPainter;
+                painter.paint_lines(ui, snapshot, model, actions);
+            });
         });
         theme::code_frame().show(&mut columns[1], |ui| {
             ui.horizontal(|ui| {
@@ -5953,5 +6075,106 @@ mod tests {
             .expect("request should carry its owning workflow session");
 
         assert_eq!(session_id.0, "session:legion:beta");
+    }
+
+    #[test]
+    fn code_line_fingerprint_is_stable_for_identical_input() {
+        let line = DesktopCodeLineViewModel {
+            number: 1,
+            text: "fn main() {}".to_string(),
+            highlights: Vec::new(),
+        };
+
+        assert_eq!(
+            code_line_content_fingerprint(&line),
+            code_line_content_fingerprint(&line)
+        );
+    }
+
+    #[test]
+    fn code_line_fingerprint_changes_with_highlight_kind() {
+        let mut keyword = DesktopCodeLineViewModel {
+            number: 1,
+            text: "fn main() {}".to_string(),
+            highlights: vec![DesktopCodeHighlightSpan {
+                start_col: 0,
+                end_col: 2,
+                kind: ViewportSemanticTokenKind::Keyword,
+            }],
+        };
+        let keyword_hash = code_line_content_fingerprint(&keyword);
+        keyword.highlights[0].kind = ViewportSemanticTokenKind::Function;
+
+        assert_ne!(keyword_hash, code_line_content_fingerprint(&keyword));
+    }
+
+    #[test]
+    fn code_line_width_bucket_quantizes_to_four_pixels() {
+        assert_eq!(code_line_width_bucket(100.0), 25);
+        assert_eq!(code_line_width_bucket(103.9), 25);
+        assert_eq!(code_line_width_bucket(104.0), 26);
+        assert_eq!(code_line_width_bucket(-1.0), 0);
+    }
+
+    #[test]
+    fn code_line_galley_cache_key_changes_on_content_width_buffer_or_snapshot() {
+        let line = DesktopCodeLineViewModel {
+            number: 7,
+            text: "let value = 1;".to_string(),
+            highlights: Vec::new(),
+        };
+        let snapshot_id = Some(legion_protocol::SnapshotId(11));
+        let base = code_line_galley_cache_key(
+            Some(legion_protocol::BufferId(1)),
+            snapshot_id,
+            &line,
+            100.0,
+        );
+        let same = code_line_galley_cache_key(
+            Some(legion_protocol::BufferId(1)),
+            snapshot_id,
+            &line,
+            103.0,
+        );
+        let different_width = code_line_galley_cache_key(
+            Some(legion_protocol::BufferId(1)),
+            snapshot_id,
+            &line,
+            104.0,
+        );
+        let different_buffer = code_line_galley_cache_key(
+            Some(legion_protocol::BufferId(2)),
+            snapshot_id,
+            &line,
+            100.0,
+        );
+        let different_snapshot = code_line_galley_cache_key(
+            Some(legion_protocol::BufferId(1)),
+            Some(legion_protocol::SnapshotId(12)),
+            &line,
+            100.0,
+        );
+        let mut changed_line = line.clone();
+        changed_line.text.push_str(" // changed");
+        let different_content = code_line_galley_cache_key(
+            Some(legion_protocol::BufferId(1)),
+            snapshot_id,
+            &changed_line,
+            100.0,
+        );
+
+        assert_eq!(base, same);
+        assert_ne!(base, different_width);
+        assert_ne!(base, different_buffer);
+        assert_ne!(base, different_snapshot);
+        assert_ne!(base, different_content);
+    }
+
+    #[test]
+    fn code_line_cache_id_is_buffer_scoped() {
+        assert_ne!(
+            code_line_galley_cache_id(legion_protocol::BufferId(1)),
+            code_line_galley_cache_id(legion_protocol::BufferId(2))
+        );
     }
 }

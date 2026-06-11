@@ -1,0 +1,43 @@
+topics:
+  - name: concepts
+    description: "Shared vocabulary and authority boundaries used across the repository."
+  - name: systems
+    description: "Stable implementation areas with distinct ownership boundaries."
+  - name: flows
+    description: "End-to-end operations that cross crates or runtime layers."
+  - name: decisions
+    description: "Architectural choices and phase-gate rules that constrain future changes."
+  - name: stack
+    description: "Core implementation substrates and dependency boundaries."
+  - name: productization
+    description: "GUI/Desktop rollout phases, evidence packages, and release-scope constraints."
+  - name: architecture
+    description: "Cross-cutting composition and crate-boundary pages."
+    parents: [systems]
+  - name: ui-shell
+    description: "Projection-only shell and renderer adapter boundaries."
+    parents: [architecture, productization]
+  - name: workspace
+    description: "Workspace authority, trust, VFS, and durable file mutation rules."
+    parents: [architecture]
+  - name: editor
+    description: "Buffer ownership, transactions, snapshots, and viewport behavior."
+    parents: [architecture]
+  - name: indexing
+    description: "Semantic/indexing and language-tooling projection surfaces."
+    parents: [architecture]
+  - name: ai-runtime
+    description: "Assisted AI, delegated task, and provider-routing surfaces."
+    parents: [architecture]
+  - name: workflow-orchestration
+    description: "Legion Workflow coordination, approval, and merge-readiness rules."
+    parents: [ai-runtime, architecture]
+  - name: observability
+    description: "Metadata-only audit, event, and storage behavior."
+    parents: [architecture]
+  - name: advanced-surfaces
+    description: "Plugin, collaboration, remote, terminal, retention, and telemetry slices."
+    parents: [architecture, productization]
+  - name: phase-gates
+    description: "xtask, CLI evidence checks, ADR gates, and accepted-scope governance."
+    parents: [decisions, productization]

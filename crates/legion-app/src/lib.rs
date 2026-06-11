@@ -3,13 +3,11 @@
 #![warn(missing_docs)]
 
 use std::cell::{Cell, RefCell};
-#[cfg(feature = "ai")]
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
-#[cfg(feature = "ai")]
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 #[cfg(feature = "ai")]
 use legion_agent::{
@@ -32,8 +30,9 @@ use legion_editor::{
 use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
-    StructuralSearchQuery, build_structural_rewrite_preview_payload,
-    run_structural_search as index_run_structural_search,
+    StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
+    build_structural_rewrite_preview_payload, run_structural_search as index_run_structural_search,
+    tree_sitter_supports_path,
 };
 use legion_memory::{
     LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryConsentState, MemoryService,
@@ -134,18 +133,18 @@ use legion_protocol::{
     TerminalScrollbackProjection, TerminalSearchProjection, TerminalSessionId, TextCoordinate,
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
     TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
-    VersionContext, ViewportLineSlice, ViewportProjection, ViewportProjectionMode, ViewportScroll,
-    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, WorkbenchSettingsRecord,
-    WorkspaceCloseRequest, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
-    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
-    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
-    WorkspaceTextEdit, WorkspaceTrustState, delegated_task_tool_permission_request,
-    inline_prediction_projection_from_results, validate_inline_prediction_lifecycle_command,
-    validate_legion_cloud_lane_projection, validate_legion_cloud_lane_task_request,
-    validate_legion_workflow_decision_feed_entry, validate_legion_workflow_kill_switch,
-    validate_legion_workflow_risk_monitor_snapshot, validate_mcp_registry_snapshot,
-    validate_terminal_close_request, validate_terminal_input, validate_terminal_kill_request,
-    validate_terminal_resize,
+    Utf16Position, Utf16Range, VersionContext, ViewportLineSlice, ViewportProjection,
+    ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay, WorkbenchSettingsRecord, WorkspaceCloseRequest,
+    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
+    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
+    delegated_task_tool_permission_request, inline_prediction_projection_from_results,
+    validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
+    validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
+    validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
+    validate_mcp_registry_snapshot, validate_terminal_close_request, validate_terminal_input,
+    validate_terminal_kill_request, validate_terminal_resize,
 };
 use legion_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
@@ -199,6 +198,68 @@ const SEARCH_MAX_RESULT_LIMIT: usize = 100;
 const SEARCH_SNIPPET_LIMIT_BYTES: usize = 160;
 const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
 const PALETTE_RESULT_LIMIT: usize = 50;
+const TREE_SITTER_OVERLAY_CACHE_MAX_ENTRIES: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TreeSitterOverlayCacheKey {
+    path: String,
+    text_hash: u64,
+    text_len: usize,
+}
+
+#[derive(Debug, Default)]
+struct TreeSitterOverlayCache {
+    entries: HashMap<TreeSitterOverlayCacheKey, Vec<TreeSitterHighlightCapture>>,
+    insertion_order: VecDeque<TreeSitterOverlayCacheKey>,
+}
+
+impl TreeSitterOverlayCache {
+    fn get(&self, key: &TreeSitterOverlayCacheKey) -> Option<&Vec<TreeSitterHighlightCapture>> {
+        self.entries.get(key)
+    }
+
+    fn insert_if_absent(
+        &mut self,
+        key: TreeSitterOverlayCacheKey,
+        captures: Vec<TreeSitterHighlightCapture>,
+    ) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        if self.entries.len() >= TREE_SITTER_OVERLAY_CACHE_MAX_ENTRIES {
+            while let Some(evicted) = self.insertion_order.pop_front() {
+                if self.entries.remove(&evicted).is_some() {
+                    break;
+                }
+            }
+        }
+        self.insertion_order.push_back(key.clone());
+        self.entries.insert(key, captures);
+    }
+}
+
+fn tree_sitter_overlay_cache() -> &'static Mutex<TreeSitterOverlayCache> {
+    static CACHE: OnceLock<Mutex<TreeSitterOverlayCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(TreeSitterOverlayCache::default()))
+}
+
+fn tree_sitter_overlay_cache_guard() -> MutexGuard<'static, TreeSitterOverlayCache> {
+    match tree_sitter_overlay_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn tree_sitter_overlay_cache_key(path: &str, text: &str) -> TreeSitterOverlayCacheKey {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    text.hash(&mut hasher);
+    TreeSitterOverlayCacheKey {
+        path: path.to_string(),
+        text_hash: hasher.finish(),
+        text_len: text.len(),
+    }
+}
 
 #[derive(Debug, Clone)]
 struct PaletteState {
@@ -4335,6 +4396,44 @@ enum LanguageReadKind {
     Definition,
     References,
     Outline,
+    InlayHints,
+    CodeLens,
+}
+
+struct LspReadProjectionIngest {
+    kind: LanguageReadKind,
+    hover: Option<LanguageHoverProjection>,
+    completions: Vec<LanguageCompletionProjection>,
+    locations: Vec<LanguageLocationProjection>,
+    outline: Vec<LanguageOutlineSymbolProjection>,
+    inlay_hints: Vec<LanguageInlayHintProjection>,
+    code_lenses: Vec<LanguageCodeLensProjection>,
+    request_id: Option<legion_protocol::LspRequestId>,
+    message: String,
+}
+
+fn lsp_identity_for_language_request(
+    input: &LanguageRequestInput,
+) -> legion_lsp::LspTextDocumentIdentity {
+    legion_lsp::LspTextDocumentIdentity {
+        uri: format!("file://{}", input.metadata.identity.canonical_path.0),
+        language_id: language_id_for_path(&input.metadata.identity.canonical_path),
+        workspace_id: input.workspace_id,
+        file_id: input.metadata.identity.file_id,
+        snapshot_id: input.snapshot_id,
+        buffer_version: input.buffer_version,
+        content_hash: Some(input.metadata.fingerprint.clone()),
+    }
+}
+
+fn utf16_position_from_text_coordinate(position: TextCoordinate) -> Utf16Position {
+    Utf16Position {
+        line: position.line,
+        character: position
+            .utf16_offset
+            .and_then(|offset| u32::try_from(offset).ok())
+            .unwrap_or(position.character),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4399,6 +4498,133 @@ impl LanguageToolingWorkflow {
         });
     }
 
+    fn ingest_lsp_diagnostics(
+        &mut self,
+        input: &LanguageRequestInput,
+        mut problems: Vec<LanguageProblemProjection>,
+        request_id: Option<legion_protocol::LspRequestId>,
+        message: String,
+    ) -> LanguageToolingProjection {
+        let same_identity = self.projection.workspace_id == Some(input.workspace_id)
+            && self.projection.buffer_id == Some(input.buffer_id)
+            && self.projection.file_id == Some(input.metadata.identity.file_id);
+        if !same_identity {
+            let mut projection = LanguageToolingProjection::empty();
+            projection.operations = self.projection.operations.clone();
+            projection.cancellation_count = self.projection.cancellation_count;
+            projection.stale_result_count = if self.projection.buffer_id.is_some() {
+                self.projection.stale_result_count.saturating_add(1)
+            } else {
+                self.projection.stale_result_count
+            };
+            self.projection = projection;
+        }
+
+        self.projection.workspace_id = Some(input.workspace_id);
+        self.projection.buffer_id = Some(input.buffer_id);
+        self.projection.file_id = Some(input.metadata.identity.file_id);
+        self.projection.status = LanguageToolingStatusKind::Ready;
+        self.projection.status_message = message.clone();
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection.redaction_hints = vec![RedactionHint::MetadataOnly];
+        self.projection.schema_version = 1;
+        self.projection.problems.retain(|problem| {
+            problem.file_id != Some(input.metadata.identity.file_id)
+                || problem.source_label.as_deref() == Some("legion-index")
+        });
+        for problem in &mut problems {
+            if problem.file_id.is_none() {
+                problem.file_id = Some(input.metadata.identity.file_id);
+            }
+            problem.redaction_hints.push(RedactionHint::MetadataOnly);
+            problem
+                .redaction_hints
+                .sort_by_key(|hint| format!("{hint:?}"));
+            problem.redaction_hints.dedup();
+        }
+        self.projection.problems.extend(problems);
+        self.projection.quick_fixes = language_quick_fixes_for_problems(&self.projection.problems);
+        let operation_id = self.next_operation_id(LanguageToolingOperationKind::Diagnostics);
+        self.push_operation(LanguageToolingOperationProjection {
+            operation_id,
+            kind: LanguageToolingOperationKind::Diagnostics,
+            status: LanguageToolingStatusKind::Ready,
+            request_id,
+            proposal_id: None,
+            message,
+            correlation_id: Some(input.event_context.correlation_id),
+            causality_id: Some(input.event_context.causality_id),
+            generated_at: TimestampMillis::now(),
+            schema_version: 1,
+        });
+        self.projection()
+    }
+
+    fn ingest_lsp_read_projection(
+        &mut self,
+        input: &LanguageRequestInput,
+        ingest: LspReadProjectionIngest,
+    ) -> LanguageToolingProjection {
+        let operation_kind = match ingest.kind {
+            LanguageReadKind::Hover => LanguageToolingOperationKind::Hover,
+            LanguageReadKind::Completion => LanguageToolingOperationKind::Completion,
+            LanguageReadKind::Definition => LanguageToolingOperationKind::Definition,
+            LanguageReadKind::References => LanguageToolingOperationKind::References,
+            LanguageReadKind::Outline => LanguageToolingOperationKind::Outline,
+            LanguageReadKind::InlayHints => LanguageToolingOperationKind::InlayHints,
+            LanguageReadKind::CodeLens => LanguageToolingOperationKind::CodeLens,
+        };
+        let same_identity = self.projection.workspace_id == Some(input.workspace_id)
+            && self.projection.buffer_id == Some(input.buffer_id)
+            && self.projection.file_id == Some(input.metadata.identity.file_id);
+        let mut projection = if same_identity {
+            self.projection.clone()
+        } else {
+            let mut projection = LanguageToolingProjection::empty();
+            projection.operations = self.projection.operations.clone();
+            projection.cancellation_count = self.projection.cancellation_count;
+            projection.stale_result_count = if self.projection.buffer_id.is_some() {
+                self.projection.stale_result_count.saturating_add(1)
+            } else {
+                self.projection.stale_result_count
+            };
+            projection
+        };
+
+        projection.workspace_id = Some(input.workspace_id);
+        projection.buffer_id = Some(input.buffer_id);
+        projection.file_id = Some(input.metadata.identity.file_id);
+        projection.status = LanguageToolingStatusKind::Ready;
+        projection.status_message = ingest.message.clone();
+        projection.generated_at = TimestampMillis::now();
+        projection.redaction_hints = vec![RedactionHint::MetadataOnly];
+        projection.schema_version = 1;
+        match ingest.kind {
+            LanguageReadKind::Hover => projection.hover = ingest.hover,
+            LanguageReadKind::Completion => projection.completions = ingest.completions,
+            LanguageReadKind::Definition => projection.definitions = ingest.locations,
+            LanguageReadKind::References => projection.references = ingest.locations,
+            LanguageReadKind::Outline => projection.outline = ingest.outline,
+            LanguageReadKind::InlayHints => projection.inlay_hints = ingest.inlay_hints,
+            LanguageReadKind::CodeLens => projection.code_lenses = ingest.code_lenses,
+        }
+        self.projection = projection;
+        let operation_id = self.next_operation_id(operation_kind);
+        self.push_operation(LanguageToolingOperationProjection {
+            operation_id,
+            kind: operation_kind,
+            status: LanguageToolingStatusKind::Ready,
+            request_id: ingest.request_id,
+            proposal_id: None,
+            message: ingest.message,
+            correlation_id: Some(input.event_context.correlation_id),
+            causality_id: Some(input.event_context.causality_id),
+            generated_at: TimestampMillis::now(),
+            schema_version: 1,
+        });
+        self.projection()
+    }
+
     fn run_read(
         &mut self,
         input: LanguageRequestInput,
@@ -4411,6 +4637,8 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Definition => LanguageToolingOperationKind::Definition,
             LanguageReadKind::References => LanguageToolingOperationKind::References,
             LanguageReadKind::Outline => LanguageToolingOperationKind::Outline,
+            LanguageReadKind::InlayHints => LanguageToolingOperationKind::InlayHints,
+            LanguageReadKind::CodeLens => LanguageToolingOperationKind::CodeLens,
         };
         let operation_id = self.next_operation_id(operation_kind);
         let same_identity = self.projection.workspace_id == Some(input.workspace_id)
@@ -4453,7 +4681,9 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Completion => SemanticQueryKind::CompletionRanking,
             LanguageReadKind::Definition => SemanticQueryKind::Definition,
             LanguageReadKind::References => SemanticQueryKind::References,
-            LanguageReadKind::Outline => SemanticQueryKind::SymbolLookup,
+            LanguageReadKind::Outline
+            | LanguageReadKind::InlayHints
+            | LanguageReadKind::CodeLens => SemanticQueryKind::SymbolLookup,
         };
         let response = self.semantic_index.query(&SemanticQueryRequest {
             query_id: SemanticQueryId(uuid::Uuid::now_v7()),
@@ -7904,6 +8134,10 @@ fn semantic_token_overlays_for_visible_lines(
     line_slices: &[ViewportLineSlice],
     full_text: Option<&str>,
 ) -> Vec<ViewportSemanticTokenOverlay> {
+    let mut overlays =
+        tree_sitter_semantic_token_overlays_for_visible_lines(path, line_slices, full_text)
+            .unwrap_or_default();
+
     let syntax_set = syntax_set();
     let syntax = syntax_set
         .find_syntax_for_file(Path::new(path))
@@ -7918,8 +8152,6 @@ fn semantic_token_overlays_for_visible_lines(
         .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
     let mut parse_state = ParseState::new(syntax);
     let mut scope_stack = ScopeStack::new();
-    let mut overlays = Vec::new();
-
     if let Some(full_text) = full_text {
         let visible_by_line = line_slices
             .iter()
@@ -7997,6 +8229,105 @@ fn semantic_token_overlays_for_visible_lines(
         )
     });
     overlays
+}
+
+fn tree_sitter_semantic_token_overlays_for_visible_lines(
+    path: &str,
+    line_slices: &[ViewportLineSlice],
+    full_text: Option<&str>,
+) -> Option<Vec<ViewportSemanticTokenOverlay>> {
+    if !tree_sitter_supports_path(path) || line_slices.is_empty() {
+        return None;
+    }
+    let full_text = full_text?;
+    let cache_key = tree_sitter_overlay_cache_key(path, full_text);
+    {
+        let cache = tree_sitter_overlay_cache_guard();
+        if let Some(cached) = cache.get(&cache_key).cloned() {
+            return tree_sitter_overlays_from_captures(line_slices, cached.iter());
+        }
+    }
+
+    // Parse outside the cache lock so rendering threads never block each other on tree-sitter work.
+    let mut captures = TreeSitterParser::new()
+        .highlight_captures_from_text(&LanguageId("rust".to_string()), full_text)
+        .ok()?;
+    if captures.is_empty() {
+        return None;
+    }
+    {
+        let mut cache = tree_sitter_overlay_cache_guard();
+        if let Some(cached) = cache.get(&cache_key).cloned() {
+            captures = cached;
+        } else {
+            cache.insert_if_absent(cache_key, captures.clone());
+        }
+    }
+
+    tree_sitter_overlays_from_captures(line_slices, captures.iter())
+}
+
+fn tree_sitter_overlays_from_captures<'a>(
+    line_slices: &[ViewportLineSlice],
+    captures: impl Iterator<Item = &'a TreeSitterHighlightCapture>,
+) -> Option<Vec<ViewportSemanticTokenOverlay>> {
+    let mut overlays = Vec::new();
+    for capture in captures {
+        let Some(visible_line) = line_slices
+            .iter()
+            .find(|line| line.line_number == capture.line_number)
+        else {
+            continue;
+        };
+        let start = capture.start_byte.max(visible_line.byte_range.start);
+        let end = capture.end_byte.min(visible_line.byte_range.end);
+        if start >= end {
+            continue;
+        }
+        let relative_start = start.saturating_sub(visible_line.byte_range.start) as usize;
+        let relative_end = end.saturating_sub(visible_line.byte_range.start) as usize;
+        if relative_end > visible_line.visible_text.len()
+            || visible_line
+                .visible_text
+                .get(relative_start..relative_end)
+                .is_none()
+        {
+            continue;
+        }
+        let Some(start_col) = byte_index_to_char_col(&visible_line.visible_text, relative_start)
+        else {
+            continue;
+        };
+        let Some(end_col) = byte_index_to_char_col(&visible_line.visible_text, relative_end) else {
+            continue;
+        };
+        if start_col < end_col {
+            overlays.push(ViewportSemanticTokenOverlay {
+                line_number: visible_line.line_number,
+                start_col,
+                end_col,
+                kind: capture.token_kind,
+            });
+        }
+    }
+
+    overlays.sort_by_key(|overlay| {
+        (
+            overlay.line_number,
+            overlay.start_col,
+            overlay.end_col,
+            overlay.kind,
+        )
+    });
+    overlays.dedup_by_key(|overlay| {
+        (
+            overlay.line_number,
+            overlay.start_col,
+            overlay.end_col,
+            overlay.kind,
+        )
+    });
+    (!overlays.is_empty()).then_some(overlays)
 }
 
 fn push_syntect_overlay_for_visible_range(
@@ -15711,6 +16042,368 @@ impl AppComposition {
         self.language_tooling.projection()
     }
 
+    /// Build an LSP `textDocument/completion` request for an already-open buffer.
+    pub fn lsp_completion_request_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        request_id: u64,
+    ) -> Result<legion_lsp::JsonRpcEnvelope, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(legion_lsp::completion_request(
+            request_id,
+            &lsp_identity_for_language_request(&input),
+            utf16_position_from_text_coordinate(position),
+        ))
+    }
+
+    /// Build an LSP `textDocument/hover` request for an already-open buffer.
+    pub fn lsp_hover_request_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        request_id: u64,
+    ) -> Result<legion_lsp::JsonRpcEnvelope, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(legion_lsp::hover_request(
+            request_id,
+            &lsp_identity_for_language_request(&input),
+            utf16_position_from_text_coordinate(position),
+        ))
+    }
+
+    /// Build an LSP `textDocument/definition` request for an already-open buffer.
+    pub fn lsp_definition_request_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        request_id: u64,
+    ) -> Result<legion_lsp::JsonRpcEnvelope, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(legion_lsp::definition_request(
+            request_id,
+            &lsp_identity_for_language_request(&input),
+            utf16_position_from_text_coordinate(position),
+        ))
+    }
+
+    /// Build an LSP `textDocument/references` request for an already-open buffer.
+    pub fn lsp_references_request_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        request_id: u64,
+        include_declaration: bool,
+    ) -> Result<legion_lsp::JsonRpcEnvelope, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(legion_lsp::references_request(
+            request_id,
+            &lsp_identity_for_language_request(&input),
+            utf16_position_from_text_coordinate(position),
+            include_declaration,
+        ))
+    }
+
+    /// Build an LSP `textDocument/documentSymbol` request for an already-open buffer.
+    pub fn lsp_document_symbol_request_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        request_id: u64,
+    ) -> Result<legion_lsp::JsonRpcEnvelope, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(legion_lsp::document_symbol_request(
+            request_id,
+            &lsp_identity_for_language_request(&input),
+        ))
+    }
+
+    /// Build an LSP `textDocument/inlayHint` request for an already-open buffer.
+    pub fn lsp_inlay_hint_request_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        range: Utf16Range,
+        request_id: u64,
+    ) -> Result<legion_lsp::JsonRpcEnvelope, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(legion_lsp::inlay_hint_request(
+            request_id,
+            &lsp_identity_for_language_request(&input),
+            range,
+        ))
+    }
+
+    /// Build an LSP `textDocument/codeLens` request for an already-open buffer.
+    pub fn lsp_code_lens_request_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        request_id: u64,
+    ) -> Result<legion_lsp::JsonRpcEnvelope, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(legion_lsp::code_lens_request(
+            request_id,
+            &lsp_identity_for_language_request(&input),
+        ))
+    }
+
+    /// Ingest an LSP `publishDiagnostics` payload into the app-owned language projection.
+    ///
+    /// This accepts an already received payload and does not launch or supervise a language-server
+    /// process. Mutation remains projection-only; write-side LSP actions still have to route through
+    /// proposal mediation.
+    pub fn ingest_lsp_publish_diagnostics_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        params: &Value,
+        disclose_ranges: bool,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let context = legion_lsp::LspDiagnosticProjectionContext {
+            workspace_id: input.workspace_id,
+            file_id: input.metadata.identity.file_id,
+            snapshot_id: input.snapshot_id,
+            buffer_version: input.buffer_version,
+            content_hash: None,
+            privacy_scope: SemanticPrivacyScope::Workspace,
+            disclose_ranges,
+        };
+        let projected = legion_lsp::project_publish_diagnostics(params, context)
+            .map_err(|error| AppCompositionError::LanguageTooling(error.to_string()))?;
+        let count = projected.summary.diagnostic_count;
+        Ok(self.language_tooling.ingest_lsp_diagnostics(
+            &input,
+            projected.problems,
+            request_id,
+            format!("LSP diagnostics merged ({count} diagnostics)"),
+        ))
+    }
+
+    /// Ingest a metadata-only fallback row when LSP is unavailable for the active buffer.
+    pub fn ingest_lsp_unavailable_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        reason: &str,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let context = legion_lsp::LspDiagnosticProjectionContext {
+            workspace_id: input.workspace_id,
+            file_id: input.metadata.identity.file_id,
+            snapshot_id: input.snapshot_id,
+            buffer_version: input.buffer_version,
+            content_hash: None,
+            privacy_scope: SemanticPrivacyScope::Workspace,
+            disclose_ranges: false,
+        };
+        let problem = legion_lsp::lsp_unavailable_problem_projection(context, reason);
+        Ok(self.language_tooling.ingest_lsp_diagnostics(
+            &input,
+            vec![problem],
+            None,
+            "LSP unavailable; semantic/index fallback remains active".to_string(),
+        ))
+    }
+
+    /// Ingest an LSP `textDocument/completion` response into the app-owned projection.
+    pub fn ingest_lsp_completion_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &Value,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let completions = legion_lsp::project_completion_response(response, 50);
+        let count = completions.len();
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            LspReadProjectionIngest {
+                kind: LanguageReadKind::Completion,
+                hover: None,
+                completions,
+                locations: Vec::new(),
+                outline: Vec::new(),
+                inlay_hints: Vec::new(),
+                code_lenses: Vec::new(),
+                request_id,
+                message: format!("LSP completions merged ({count} items)"),
+            },
+        ))
+    }
+
+    /// Ingest an LSP `textDocument/hover` response into the app-owned projection.
+    pub fn ingest_lsp_hover_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &Value,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let hover =
+            legion_lsp::project_hover_response(response, Some(input.metadata.identity.file_id));
+        let count = usize::from(hover.is_some());
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            LspReadProjectionIngest {
+                kind: LanguageReadKind::Hover,
+                hover,
+                completions: Vec::new(),
+                locations: Vec::new(),
+                outline: Vec::new(),
+                inlay_hints: Vec::new(),
+                code_lenses: Vec::new(),
+                request_id,
+                message: format!("LSP hover merged ({count} items)"),
+            },
+        ))
+    }
+
+    /// Ingest an LSP `textDocument/definition` response into the app-owned projection.
+    pub fn ingest_lsp_definition_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &Value,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let locations = legion_lsp::project_location_response(response, 100);
+        let count = locations.len();
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            LspReadProjectionIngest {
+                kind: LanguageReadKind::Definition,
+                hover: None,
+                completions: Vec::new(),
+                locations,
+                outline: Vec::new(),
+                inlay_hints: Vec::new(),
+                code_lenses: Vec::new(),
+                request_id,
+                message: format!("LSP definitions merged ({count} locations)"),
+            },
+        ))
+    }
+
+    /// Ingest an LSP `textDocument/references` response into the app-owned projection.
+    pub fn ingest_lsp_references_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &Value,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let locations = legion_lsp::project_location_response(response, 250);
+        let count = locations.len();
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            LspReadProjectionIngest {
+                kind: LanguageReadKind::References,
+                hover: None,
+                completions: Vec::new(),
+                locations,
+                outline: Vec::new(),
+                inlay_hints: Vec::new(),
+                code_lenses: Vec::new(),
+                request_id,
+                message: format!("LSP references merged ({count} locations)"),
+            },
+        ))
+    }
+
+    /// Ingest an LSP `textDocument/documentSymbol` response into the app-owned projection.
+    pub fn ingest_lsp_document_symbol_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &Value,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let outline = legion_lsp::project_document_symbol_response(response, 500);
+        let count = outline.len();
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            LspReadProjectionIngest {
+                kind: LanguageReadKind::Outline,
+                hover: None,
+                completions: Vec::new(),
+                locations: Vec::new(),
+                outline,
+                inlay_hints: Vec::new(),
+                code_lenses: Vec::new(),
+                request_id,
+                message: format!("LSP outline merged ({count} symbols)"),
+            },
+        ))
+    }
+
+    /// Ingest an LSP `textDocument/inlayHint` response into the app-owned projection.
+    pub fn ingest_lsp_inlay_hint_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &Value,
+        source_label: &str,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let inlay_hints = legion_lsp::project_inlay_hint_response(response, source_label, 500);
+        let count = inlay_hints.len();
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            LspReadProjectionIngest {
+                kind: LanguageReadKind::InlayHints,
+                hover: None,
+                completions: Vec::new(),
+                locations: Vec::new(),
+                outline: Vec::new(),
+                inlay_hints,
+                code_lenses: Vec::new(),
+                request_id,
+                message: format!("LSP inlay hints merged ({count} hints)"),
+            },
+        ))
+    }
+
+    /// Ingest an LSP `textDocument/codeLens` response into the app-owned projection.
+    pub fn ingest_lsp_code_lens_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &Value,
+        source_label: &str,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<LanguageToolingProjection, AppCompositionError> {
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        let code_lenses = legion_lsp::project_code_lens_response(response, source_label, 500);
+        let count = code_lenses.len();
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            LspReadProjectionIngest {
+                kind: LanguageReadKind::CodeLens,
+                hover: None,
+                completions: Vec::new(),
+                locations: Vec::new(),
+                outline: Vec::new(),
+                inlay_hints: Vec::new(),
+                code_lenses,
+                request_id,
+                message: format!("LSP code lenses merged ({count} lenses)"),
+            },
+        ))
+    }
+
     /// Return the current app-owned debug projection.
     pub fn debug_projection(&self) -> DebugProjection {
         self.debug_workflow.projection()
@@ -21238,6 +21931,108 @@ mod tests {
                 .any(|diagnostic| diagnostic.code == expected_code),
             "expected diagnostic {expected_code}, got {diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn rust_tree_sitter_overlay_pipeline_returns_keyword_function_and_string_tokens() {
+        let text = "pub fn demo() {\n    let s = \"hi\";\n}\n";
+        let line_slices = logical_lines_with_offsets(text)
+            .into_iter()
+            .map(|(line_number, start_byte, line)| ViewportLineSlice {
+                line_number,
+                visible_text: line.to_string(),
+                byte_range: ByteRange {
+                    start: start_byte as u64,
+                    end: start_byte.saturating_add(line.len()) as u64,
+                },
+                utf16_range: legion_protocol::Utf16Range {
+                    start: legion_protocol::Utf16Position {
+                        line: line_number,
+                        character: 0,
+                    },
+                    end: legion_protocol::Utf16Position {
+                        line: line_number,
+                        character: line.encode_utf16().count() as u32,
+                    },
+                },
+                chunk_hash: FileFingerprint {
+                    algorithm: "test".to_string(),
+                    value: format!("line:{line_number}"),
+                },
+                truncation_state: legion_protocol::ViewportLineTruncationState::None,
+            })
+            .collect::<Vec<_>>();
+
+        let overlays = tree_sitter_semantic_token_overlays_for_visible_lines(
+            "/workspace/src/highlights.rs",
+            &line_slices,
+            Some(text),
+        )
+        .expect("rust full-text input should use tree-sitter overlays");
+        let cache_key = tree_sitter_overlay_cache_key("/workspace/src/highlights.rs", text);
+        assert!(
+            tree_sitter_overlay_cache_guard().get(&cache_key).is_some(),
+            "tree-sitter highlight captures should be cached by content hash"
+        );
+        assert_ne!(
+            cache_key,
+            tree_sitter_overlay_cache_key("/workspace/src/highlights.rs", &format!("{text} ")),
+            "cache key should include length so hash collisions across lengths stay separated"
+        );
+        assert!(
+            tree_sitter_semantic_token_overlays_for_visible_lines(
+                "/workspace/src/highlights.txt",
+                &line_slices,
+                Some(text),
+            )
+            .is_none(),
+            "non-Rust paths should skip tree-sitter overlays"
+        );
+        let cached_overlays = tree_sitter_semantic_token_overlays_for_visible_lines(
+            "/workspace/src/highlights.rs",
+            &line_slices,
+            Some(text),
+        )
+        .expect("cached rust full-text input should use tree-sitter overlays");
+        assert_eq!(overlays, cached_overlays);
+
+        assert!(overlays.iter().any(|overlay| {
+            overlay.line_number == 0
+                && overlay.start_col == 0
+                && overlay.end_col == 3
+                && overlay.kind == ViewportSemanticTokenKind::Keyword
+        }));
+        assert!(overlays.iter().any(|overlay| {
+            overlay.line_number == 0
+                && overlay.start_col == 7
+                && overlay.end_col == 11
+                && overlay.kind == ViewportSemanticTokenKind::Function
+        }));
+        assert!(overlays.iter().any(|overlay| {
+            overlay.line_number == 1 && overlay.kind == ViewportSemanticTokenKind::String
+        }));
+    }
+
+    #[test]
+    fn tree_sitter_overlay_cache_evicts_oldest_inserted_entry() {
+        let mut cache = TreeSitterOverlayCache::default();
+        let first = tree_sitter_overlay_cache_key("/workspace/src/first.rs", "fn first() {}\n");
+        cache.insert_if_absent(first.clone(), Vec::new());
+        for index in 0..TREE_SITTER_OVERLAY_CACHE_MAX_ENTRIES {
+            cache.insert_if_absent(
+                tree_sitter_overlay_cache_key(
+                    &format!("/workspace/src/{index}.rs"),
+                    &format!("fn f_{index}() {{}}\n"),
+                ),
+                Vec::new(),
+            );
+        }
+
+        assert!(
+            cache.get(&first).is_none(),
+            "oldest entry should be evicted"
+        );
+        assert_eq!(cache.entries.len(), TREE_SITTER_OVERLAY_CACHE_MAX_ENTRIES);
     }
 
     #[test]

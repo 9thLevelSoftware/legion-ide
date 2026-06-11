@@ -24,7 +24,7 @@ use legion_protocol::{
     CollaborationOperationPreconditions, CollaborationParticipantId, CollaborationSessionId,
     CollaborationTransportEnvelope, CollaborationTransportPayload, CollaborationVersionVector,
     CorrelationId, EditBatch, EventEnvelope, FileConflictLifecycleState, FileContentVersion,
-    FileId, FileIdentity, FileMetadata, FileTreeNode, PreviewSummary, PrincipalId,
+    FileFingerprint, FileId, FileIdentity, FileMetadata, FileTreeNode, PreviewSummary, PrincipalId,
     ProposalAffectedTarget, ProposalAuditRecord, ProposalBatchAtomicity, ProposalBatchDependency,
     ProposalBatchDependencyKind, ProposalBatchItem, ProposalBatchRollbackPolicy,
     ProposalDenialReason, ProposalId, ProposalLifecycleAction, ProposalLifecycleCommand,
@@ -4431,16 +4431,55 @@ struct MockWorkspacePort {
     tree: Vec<FileTreeNode>,
 }
 
+#[test]
+fn mock_workspace_port_open_file_text_returns_safe_fixture_payload() {
+    let port = MockWorkspacePort::default();
+
+    let opened = port
+        .open_file_text(
+            WorkspaceId(44),
+            "/workspace/src/lib.rs",
+            OpenFileIntent::Existing,
+            None,
+        )
+        .expect("mock open should return a deterministic payload");
+
+    assert_eq!(opened.identity.workspace_id, WorkspaceId(44));
+    assert_eq!(opened.identity.canonical_path.0, "/workspace/src/lib.rs");
+    assert_eq!(opened.text, "");
+    assert_eq!(opened.fingerprint.algorithm, "mock-workspace-open");
+    assert!(!opened.is_new_file);
+}
+
 impl AppWorkspaceCommandPort for MockWorkspacePort {
     fn open_file_text(
         &self,
         workspace_id: WorkspaceId,
         path: &str,
         intent: OpenFileIntent,
-        event_context: Option<legion_app::EventContext>,
+        _event_context: Option<legion_app::EventContext>,
     ) -> Result<OpenedFileText, legion_app::AppCompositionError> {
-        let _ = (workspace_id, path, intent, event_context);
-        unimplemented!("mock command-routing tests do not exercise open execution")
+        let fingerprint = FileFingerprint {
+            algorithm: "mock-workspace-open".to_string(),
+            value: format!("{workspace_id:?}:{path}"),
+        };
+
+        Ok(OpenedFileText {
+            identity: FileIdentity {
+                file_id: FileId(44),
+                workspace_id,
+                canonical_path: CanonicalPath(path.to_string()),
+                content_version: FileContentVersion(1),
+                content_hash: Some(fingerprint.value.clone()),
+            },
+            text: String::new(),
+            fingerprint,
+            file_content_version: FileContentVersion(1),
+            workspace_generation: WorkspaceGeneration(1),
+            modified_at: None,
+            file_length: Some(0),
+            is_new_file: matches!(intent, OpenFileIntent::CreateNew),
+        })
     }
 
     fn tree_snapshot(

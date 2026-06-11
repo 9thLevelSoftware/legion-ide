@@ -28,6 +28,10 @@ const DEFAULT_PHASE13_FINAL_GATES_PATH: &str =
     "plans/evidence/gui-productization/phase-13-final-gates.md";
 const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/phase-13-runbook.md";
 const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
+const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
+const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
+const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
+const DEFAULT_PERF_HARNESS_OUTPUT_PATH: &str = "target/perf-harness";
 const DEFAULT_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/phase-6/collaboration-architecture-map.md";
 const DEFAULT_PHASE7_EVIDENCE_PATH: &str = "plans/evidence/phase-7/remote-architecture-map.md";
@@ -440,6 +444,14 @@ const FORBIDDEN_RENDERER_DEPS: &[&str] = &[
     "tao",
     "gpui",
 ];
+const PARSER_BOUNDARY_POLICY_MARKERS: &[&str] = &[
+    "`legion-index` may depend on:",
+    "`tree-sitter`",
+    "`tree-sitter-rust`",
+    "direct renderer/UI parser ownership",
+];
+const PARSER_DEPENDENCY_ALLOWED_PACKAGES: &[&str] = &["legion-index"];
+const FORBIDDEN_PARSER_DEPS: &[&str] = &["tree-sitter", "tree-sitter-rust"];
 
 #[derive(Parser)]
 #[command(author, version, about = "Repository maintenance and validation tasks")]
@@ -462,6 +474,61 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH)]
         allowlist: String,
     },
+    /// Forbid egui::TextEdit in the desktop code-canvas/editor render path.
+    NoEguiTextedit {
+        /// Path to no-egui-textedit TOML configuration.
+        #[arg(long, default_value = DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH)]
+        config: String,
+    },
+    /// Generate dry-run release pipeline installer descriptors.
+    ReleasePipeline {
+        /// Path to release pipeline TOML configuration.
+        #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_CONFIG_PATH)]
+        config: String,
+        /// Output directory for generated descriptors.
+        #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH)]
+        out: String,
+        /// Release channel: stable or preview.
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        /// Generate descriptors only; do not build, sign, or hash artifacts.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Verify previously-written release pipeline descriptors.
+    VerifyReleasePipeline {
+        /// Output directory holding descriptors and version stamp.
+        #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH)]
+        out: String,
+    },
+    /// Run the M0 performance-harness skeleton and write a perf report.
+    ///
+    /// The M0 deliverable is a deterministic in-process micro-benchmark
+    /// that exercises a stand-in for the editor input-to-paint hot path.
+    /// The post-M0 follow-on replaces this stand-in with the real
+    /// `legion-editor` workload, the 100K-file fixture, and the 100MB
+    /// file per master-plan §11. The CI leg can tighten the budget via
+    /// `LEGION_PERF_FAIL_ON_BUDGET_MS=<ms>` to demonstrate the failing
+    /// gate.
+    PerfHarness {
+        /// Output directory for the perf report.
+        #[arg(long, default_value = DEFAULT_PERF_HARNESS_OUTPUT_PATH)]
+        out: String,
+        /// Treat any failed skeleton as a CI failure (default: true).
+        /// Set `--no-strict` to keep the report-only behavior even when
+        /// measurements exceed the configured budget.
+        #[arg(long, default_value_t = true)]
+        strict: bool,
+    },
+    /// Verify a previously-written perf-harness report.
+    VerifyPerfHarness {
+        /// Output directory holding the perf report.
+        #[arg(long, default_value = DEFAULT_PERF_HARNESS_OUTPUT_PATH)]
+        out: String,
+        /// Treat any failed skeleton as a CI failure (default: true).
+        #[arg(long, default_value_t = true)]
+        strict: bool,
+    },
 }
 
 fn main() {
@@ -478,6 +545,18 @@ fn main() {
             }
         }
         Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
+        Commands::NoEguiTextedit { config } => run_no_egui_textedit_command(&config),
+        Commands::ReleasePipeline {
+            config,
+            out,
+            channel,
+            dry_run,
+        } => run_release_pipeline_command(&config, &out, &channel, dry_run),
+        Commands::VerifyReleasePipeline { out } => run_verify_release_pipeline_command(&out),
+        Commands::PerfHarness { out, strict } => run_perf_harness_command(&out, strict),
+        Commands::VerifyPerfHarness { out, strict } => {
+            run_verify_perf_harness_command(&out, strict)
+        }
     };
 
     process::exit(code);
@@ -526,6 +605,264 @@ fn run_docs_hygiene_command(allowlist: &str) -> i32 {
     }
 }
 
+fn run_no_egui_textedit_command(config_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("no-egui-textedit failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config_path = workspace_root.join(config_path);
+    let config = match xtask::no_egui_textedit::NoEguiTextEditConfig::from_file(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("no-egui-textedit failed: {err}");
+            return 1;
+        }
+    };
+    match xtask::no_egui_textedit::run_no_egui_textedit(&workspace_root, &config) {
+        Ok(()) => {
+            println!("no-egui-textedit checks passed");
+            0
+        }
+        Err(violations) => {
+            eprintln!("no-egui-textedit found {} violation(s):", violations.len());
+            for violation in violations.iter().take(200) {
+                eprintln!(
+                    "{}:{}: {:?}: {}",
+                    violation.path.display(),
+                    violation.line,
+                    violation.kind,
+                    violation.message
+                );
+            }
+            if violations.len() > 200 {
+                eprintln!("... {} more violation(s) omitted", violations.len() - 200);
+            }
+            1
+        }
+    }
+}
+
+fn run_release_pipeline_command(config_path: &str, out: &str, channel: &str, dry_run: bool) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("release pipeline failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config_path = workspace_root.join(config_path);
+    let config = match xtask::release_pipeline::ReleasePipelineConfig::from_file(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("release pipeline failed: {err}");
+            return 1;
+        }
+    };
+    let channel = match xtask::release_pipeline::ReleaseChannel::parse(channel) {
+        Ok(channel) => channel,
+        Err(err) => {
+            eprintln!("release pipeline failed: {err}");
+            return 1;
+        }
+    };
+    let plan = match xtask::release_pipeline::plan_release_pipeline(
+        &workspace_root,
+        &config,
+        channel,
+        dry_run,
+    ) {
+        Ok(plan) => plan,
+        Err(err) => {
+            eprintln!("release pipeline failed: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let written = match xtask::release_pipeline::write_descriptors(&plan, &out_dir) {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("release pipeline failed: {err}");
+            return 1;
+        }
+    };
+    println!(
+        "release pipeline dry-run wrote {} descriptor(s) to {}",
+        written.len(),
+        out_dir.display()
+    );
+    0
+}
+
+fn run_verify_release_pipeline_command(out: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("release pipeline verify failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config_path = workspace_root.join(DEFAULT_RELEASE_PIPELINE_CONFIG_PATH);
+    let config = match xtask::release_pipeline::ReleasePipelineConfig::from_file(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("release pipeline verify failed: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let stamp_path = out_dir.join(xtask::release_pipeline::VERSION_STAMP_FILE);
+    let channel = match fs::read_to_string(&stamp_path) {
+        Ok(text) => match toml::from_str::<xtask::release_pipeline::VersionStamp>(&text) {
+            Ok(stamp) => match xtask::release_pipeline::ReleaseChannel::parse(&stamp.channel) {
+                Ok(channel) => channel,
+                Err(err) => {
+                    eprintln!("release pipeline verify failed: {err}");
+                    return 1;
+                }
+            },
+            Err(err) => {
+                eprintln!(
+                    "release pipeline verify failed: unable to parse `{}`: {err}",
+                    stamp_path.display()
+                );
+                return 1;
+            }
+        },
+        Err(err) => {
+            eprintln!(
+                "release pipeline verify failed: unable to read `{}` (run `cargo run -p xtask -- release-pipeline --dry-run` first): {err}",
+                stamp_path.display()
+            );
+            return 1;
+        }
+    };
+    let plan = match xtask::release_pipeline::plan_release_pipeline(
+        &workspace_root,
+        &config,
+        channel,
+        true,
+    ) {
+        Ok(plan) => plan,
+        Err(err) => {
+            eprintln!("release pipeline verify failed: {err}");
+            return 1;
+        }
+    };
+    let report = match xtask::release_pipeline::verify_descriptors(&workspace_root, &plan, &out_dir)
+    {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("release pipeline verify failed: {err}");
+            return 1;
+        }
+    };
+    println!(
+        "release pipeline verify: total={} passed={} failed={} unchecked={} channel={} report={}",
+        report.summary.total,
+        report.summary.passed,
+        report.summary.failed,
+        report.summary.unchecked,
+        report.channel,
+        out_dir
+            .join(xtask::release_pipeline::VERIFY_REPORT_FILE)
+            .display(),
+    );
+    if report.summary.failed > 0 { 1 } else { 0 }
+}
+
+fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("perf harness failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let mut skeletons = vec![
+        xtask::perf_harness::SkeletonDescriptor::m0_input_to_paint(),
+        xtask::perf_harness::SkeletonDescriptor::m1_line_galley_shaping_cache(),
+    ];
+    for skeleton in &mut skeletons {
+        xtask::perf_harness::apply_fail_on_budget_override(skeleton);
+    }
+    let package_name = "legion-desktop".to_string();
+    let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
+    let report = xtask::perf_harness::plan_perf_skeletons(&package_name, &git_sha, &skeletons);
+    let path = match xtask::perf_harness::write_report(&out_dir, &report) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("perf harness failed: {err}");
+            return 1;
+        }
+    };
+    println!(
+        "perf harness: total={} passed={} failed={} skipped={} report={} strict={}",
+        report.summary.total,
+        report.summary.passed,
+        report.summary.failed,
+        report.summary.skipped,
+        path.display(),
+        strict,
+    );
+    for skeleton in &report.skeletons {
+        println!(
+            "  skeleton={} kind={} total_us={} p50_us={} p95_us={} budget_ms={} status={} message={}",
+            skeleton.name,
+            skeleton.kind.as_str(),
+            skeleton.total_micros,
+            skeleton.p50_micros,
+            skeleton.p95_micros,
+            skeleton.budget_millis,
+            skeleton.status.as_str(),
+            skeleton.message,
+        );
+    }
+    if strict && report.summary.failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("perf harness verify failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let report_path = out_dir.join(xtask::perf_harness::PERF_REPORT_FILE);
+    let report = match xtask::perf_harness::read_report(&report_path) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!(
+                "perf harness verify failed: {err} (run `cargo run -p xtask -- perf-harness` first)"
+            );
+            return 1;
+        }
+    };
+    println!(
+        "perf harness verify: total={} passed={} failed={} skipped={} report={} strict={}",
+        report.summary.total,
+        report.summary.passed,
+        report.summary.failed,
+        report.summary.skipped,
+        report_path.display(),
+        strict,
+    );
+    if strict && report.summary.failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 fn run_check_deps(policy_path: &str) -> Result<(), String> {
     let workspace_root =
         env::current_dir().map_err(|err| format!("unable to resolve current directory: {err}"))?;
@@ -537,11 +874,12 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
 
     let metadata = load_workspace_metadata(&workspace_root)?;
     let packages = workspace_packages(&metadata);
+    let package_dependency_names = workspace_package_dependency_names(&metadata);
     let violations = validate_dependency_policy(&packages, &policy);
-    let renderer_violations = validate_renderer_dependency_gate(
-        &policy_text,
-        &workspace_package_dependency_names(&metadata),
-    );
+    let renderer_violations =
+        validate_renderer_dependency_gate(&policy_text, &package_dependency_names);
+    let parser_violations =
+        validate_parser_dependency_gate(&policy_text, &package_dependency_names);
 
     let protocol_violations = validate_protocol_contracts(
         &workspace_root.join(DEFAULT_PROTOCOL_PATH),
@@ -712,6 +1050,7 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
 
     let mut all = violations;
     all.extend(renderer_violations);
+    all.extend(parser_violations);
     all.extend(protocol_violations);
     all.extend(phase3_violations);
     all.extend(phase4_violations);
@@ -901,6 +1240,54 @@ fn validate_renderer_dependency_gate(
             };
             issues.push(format!(
                 "{package_label} must not declare renderer/windowing dependencies outside `legion-desktop`: {}",
+                forbidden_declared.join(", ")
+            ));
+        }
+    }
+
+    issues.sort();
+    issues
+}
+
+fn validate_parser_dependency_gate(
+    policy_text: &str,
+    package_dependencies: &HashMap<String, HashSet<String>>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    for marker in PARSER_BOUNDARY_POLICY_MARKERS {
+        if !policy_text.contains(marker) {
+            issues.push(format!(
+                "`plans/dependency-policy.md` must document parser boundary marker `{marker}`"
+            ));
+        }
+    }
+
+    let allowed_packages = PARSER_DEPENDENCY_ALLOWED_PACKAGES
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut packages = package_dependencies.keys().collect::<Vec<_>>();
+    packages.sort();
+
+    for package in packages {
+        if allowed_packages.contains(package.as_str()) {
+            continue;
+        }
+
+        let dependencies = package_dependencies
+            .get(package)
+            .expect("sorted package key must exist in dependency map");
+        let mut forbidden_declared = FORBIDDEN_PARSER_DEPS
+            .iter()
+            .filter(|dependency| dependencies.contains(**dependency))
+            .copied()
+            .collect::<Vec<_>>();
+        forbidden_declared.sort();
+
+        if !forbidden_declared.is_empty() {
+            issues.push(format!(
+                "workspace package `{package}` must not declare parser/runtime dependencies outside `legion-index`: {}",
                 forbidden_declared.join(", ")
             ));
         }
@@ -2269,6 +2656,50 @@ fn renderer_dependency_gate_preserves_projection_boundary() {
             .iter()
             .any(|issue| issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("egui")),
         "legion-ui renderer dependency violation should be reported, got: {issues:?}"
+    );
+}
+
+#[test]
+fn parser_dependency_gate_keeps_tree_sitter_in_index_crate() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask manifest should live under workspace root");
+    let policy = fs::read_to_string(workspace_root.join(DEFAULT_POLICY_PATH))
+        .expect("policy should be readable");
+    let package_dependencies = HashMap::from([
+        (
+            "legion-index".to_string(),
+            HashSet::from([
+                "legion-protocol".to_string(),
+                "legion-text".to_string(),
+                "tree-sitter".to_string(),
+                "tree-sitter-rust".to_string(),
+            ]),
+        ),
+        (
+            "legion-app".to_string(),
+            HashSet::from(["legion-editor".to_string(), "legion-ui".to_string()]),
+        ),
+        (
+            "legion-desktop".to_string(),
+            HashSet::from(["legion-app".to_string(), "legion-ui".to_string()]),
+        ),
+    ]);
+
+    let issues = validate_parser_dependency_gate(&policy, &package_dependencies);
+    assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+
+    let mut violating_dependencies = package_dependencies;
+    violating_dependencies
+        .get_mut("legion-desktop")
+        .expect("legion-desktop fixture must exist")
+        .insert("tree-sitter".to_string());
+    let issues = validate_parser_dependency_gate(&policy, &violating_dependencies);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("legion-desktop") && issue.contains("tree-sitter")),
+        "desktop parser dependency violation should be reported, got: {issues:?}"
     );
 }
 

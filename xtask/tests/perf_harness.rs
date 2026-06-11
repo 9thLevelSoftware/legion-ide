@@ -8,7 +8,7 @@ use std::{
 use xtask::perf_harness::{
     FAIL_ON_BUDGET_ENV, PERF_REPORT_FILE, PerfReport, SkeletonDescriptor, SkeletonKind,
     SkeletonMeasurement, SkeletonStatus, apply_fail_on_budget_override, plan_m0_skeletons,
-    plan_perf_harness, read_report, resolve_workspace_git_sha, write_report,
+    plan_perf_harness, plan_perf_skeletons, read_report, resolve_workspace_git_sha, write_report,
 };
 
 struct TempDir {
@@ -279,6 +279,42 @@ fn perf_harness_m0_skeleton_descriptor_uses_safe_budget() {
         skeleton.note.contains("WS18.T1"),
         "skeleton note should reference the follow-on work, got {:?}",
         skeleton.note
+    );
+}
+
+#[test]
+fn perf_harness_line_galley_skeleton_gates_visible_rows_under_two_ms() {
+    let skeleton = SkeletonDescriptor::m1_line_galley_shaping_cache();
+    assert_eq!(skeleton.kind, SkeletonKind::LineGalleyShapingCache);
+    assert_eq!(skeleton.fixture_bytes, 10_000);
+    assert_eq!(skeleton.budget_millis, 2);
+    assert!(skeleton.note.contains("visible viewport rows"));
+
+    let measurement = plan_perf_harness(&skeleton);
+    assert_eq!(measurement.status, SkeletonStatus::Passed);
+    assert!(
+        measurement.total_micros < 2_000,
+        "line-galley frame should remain under 2ms, got {}us ({})",
+        measurement.total_micros,
+        measurement.message
+    );
+}
+
+#[test]
+fn perf_harness_default_report_includes_line_galley_gate() {
+    let skeletons = vec![
+        SkeletonDescriptor::m0_input_to_paint(),
+        SkeletonDescriptor::m1_line_galley_shaping_cache(),
+    ];
+    let report = plan_perf_skeletons("legion-desktop", "feedface", &skeletons);
+    assert_eq!(report.summary.total, 2);
+    assert_eq!(report.skeletons.len(), 2);
+    assert!(
+        report
+            .skeletons
+            .iter()
+            .any(|measurement| measurement.kind == SkeletonKind::LineGalleyShapingCache),
+        "default perf report should include the WS01.T2 line-galley cache gate"
     );
 }
 

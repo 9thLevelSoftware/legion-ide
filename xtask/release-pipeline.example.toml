@@ -1,0 +1,59 @@
+# Legion desktop release pipeline (WS17.T1 dry-run scaffold)
+#
+# channel: "stable"  -> version = <workspace.package.version>, rollout_policy = "full"
+# channel: "preview" -> version = <workspace.package.version>-preview, rollout_policy = "staged"
+#
+# Real signing/notarization is owned by WS17.T2. Until then every descriptor
+# reports signer_status = "dry-run/no-production-signer" and sha256 = "pending"
+# and the verify-release-pipeline command records verifier_status =
+# "dry-run/unchecked".
+package_name = "legion-desktop"
+dist_tool = "cargo-dist"
+
+[[installer_targets]]
+name = "legion-desktop-macos-x64-dmg"
+platform = "macos"
+target = "x86_64-apple-darwin"
+artifact = "dmg"
+build_command = "cargo dist build --target x86_64-apple-darwin"
+verification_command = "spctl --assess --type open --context context:primary-signature <artifact>"
+
+[[installer_targets]]
+name = "legion-desktop-macos-arm64-dmg"
+platform = "macos"
+target = "aarch64-apple-darwin"
+artifact = "dmg"
+build_command = "cargo dist build --target aarch64-apple-darwin"
+verification_command = "spctl --assess --type open --context context:primary-signature <artifact>"
+
+[[installer_targets]]
+name = "legion-desktop-windows-x64-msi"
+platform = "windows"
+target = "x86_64-pc-windows-msvc"
+artifact = "msi"
+build_command = "cargo dist build --target x86_64-pc-windows-msvc"
+verification_command = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -DryRun"
+
+[[installer_targets]]
+name = "legion-desktop-linux-x64-deb"
+platform = "linux"
+target = "x86_64-unknown-linux-gnu"
+artifact = "deb"
+build_command = "cargo dist build --target x86_64-unknown-linux-gnu"
+verification_command = "dpkg-deb --info <artifact>"
+
+[[installer_targets]]
+name = "legion-desktop-linux-x64-rpm"
+platform = "linux"
+target = "x86_64-unknown-linux-gnu"
+artifact = "rpm"
+build_command = "cargo dist build --target x86_64-unknown-linux-gnu"
+verification_command = "rpm --checksig <artifact>"
+
+[[installer_targets]]
+name = "legion-desktop-linux-x64-appimage"
+platform = "linux"
+target = "x86_64-unknown-linux-gnu"
+artifact = "AppImage"
+build_command = "cargo dist build --target x86_64-unknown-linux-gnu"
+verification_command = "bash scripts/gui-smoke.sh --dry-run"

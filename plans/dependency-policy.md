@@ -90,6 +90,7 @@ Renderer crates are adapter-only. They must not appear in `legion-ui`, app/edito
   - `legion-collaboration`
   - `legion-editor`
   - `legion-index`
+  - `legion-lsp`
   - `legion-memory`
   - `legion-observability`
   - `legion-platform`
@@ -127,8 +128,10 @@ GUI Phase 2 editor experience authorizes `legion-app` to use `syntect` for app-s
   - `legion-protocol`
   - `legion-storage`
   - `legion-text`
+  - `tree-sitter`
+  - `tree-sitter-rust`
 
-Phase 3 semantic fabric activation for `crates/legion-index/Cargo.toml` is limited to the three internal dependencies listed above. No other internal crate edge is authorized for `crates/legion-index/Cargo.toml` while activating actor-owned indexing, lexical maps, tree-sitter syntax caches, normalized graph records, semantic query APIs, and LSP fusion. Repository, editor, workspace, app, and UI facts must cross through protocol DTOs, text snapshot contracts, storage metadata, or proposal-mediated workflows rather than direct crate coupling. This policy entry does not authorize vector indexing, embeddings, model-provider dependencies, or direct mutation of buffers and workspaces.
+Phase 3 semantic fabric activation for `crates/legion-index/Cargo.toml` is limited to the three internal dependencies listed above plus parser-only tree-sitter runtime and bundled Rust grammar crates for WS02 syntax activation. No other internal crate edge is authorized for `crates/legion-index/Cargo.toml` while activating actor-owned indexing, lexical maps, tree-sitter syntax caches, normalized graph records, semantic query APIs, and LSP fusion. Repository, editor, workspace, app, and UI facts must cross through protocol DTOs, text snapshot contracts, storage metadata, or proposal-mediated workflows rather than direct crate coupling. This policy entry does not authorize vector indexing, embeddings, model-provider dependencies, direct renderer/UI parser ownership, or direct mutation of buffers and workspaces.
 
 - `legion-tracker` may depend on:
   - `legion-protocol`
@@ -182,6 +185,9 @@ The planned runtime surfaces below are policy placeholders only. They do not aut
   - `legion-protocol`
   - `legion-security`
   - `legion-storage`
+  - `legion-text` (dev/test-only for UTF-16 coordinate conformance until WS03.T2 decides the runtime composition boundary)
+
+WS03.T1 activates `legion-lsp` only for hand-rolled LSP JSON-RPC framing, request/response correlation metadata, timeout resolution, and supervised lifecycle events around a policy-approved language-server process boundary. It does not authorize app/UI/editor/project ownership, document sync, diagnostics publication, read-side feature execution, edit-producing responses, downloaded server binaries, or autonomous mutation. `legion-lsp` must remain protocol-mediated and proposal-neutral until the later WS03.T2–T8 gates land with their own contract tests and evidence.
 
 - `legion-terminal` may depend on:
   - `legion-observability`
@@ -769,7 +775,7 @@ Phase 8 production capability names are reserved for security-broker decisions b
 ### 4. Runtime Surface Activation Gates
 
 - Phase 3 activates `legion-index` only for the semantic fabric scope accepted in `plans/adrs/ADR-0017-semantic-fabric-indexing.md` and evidenced through `plans/evidence/phase-3/predictive-semantic-fabric.md`.
-- `legion-agent`, `legion-tracker`, and `legion-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `legion-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `legion-collaboration` is activated for the limited Phase 6 deterministic local collaboration runtime described above. `legion-remote` is activated for the limited Phase 7 deterministic edge workspace harness described above. `legion-remote-transport`, `legion-terminal`, `legion-telemetry`, and `legion-retention` are activated only for the current Phase 8 default-deny implementation slice described above. Standalone production `legion-lsp`, production remote transport, native terminal/PTTY execution, hosted telemetry export, raw-source vault activation, and storage migration apply remain evidence gated until the Phase 8 GA checklist and archived release gates are accepted. LSP runtime behavior is additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` before implementation.
+- `legion-agent`, `legion-tracker`, and `legion-memory` are activated for the limited Phase 4 metadata-only runtime slice described above. `legion-plugin` is activated for the limited Phase 5 isolated plugin boundary described above. `legion-collaboration` is activated for the limited Phase 6 deterministic local collaboration runtime described above. `legion-remote` is activated for the limited Phase 7 deterministic edge workspace harness described above. `legion-remote-transport`, `legion-terminal`, `legion-telemetry`, and `legion-retention` are activated only for the current Phase 8 default-deny implementation slice described above. `legion-lsp` is activated only for the WS03.T1 framing/correlation/supervision slice described in section 1; production remote transport, native terminal/PTY execution, hosted telemetry export, raw-source vault activation, storage migration apply, and broader LSP runtime behavior remain evidence gated until the relevant master-plan gates and archived release gates are accepted. Broader LSP runtime behavior remains additionally gated by `plans/adrs/ADR-0018-lsp-runtime-supervision.md` and ADR-0034 before implementation.
 - The product-readiness VS Code compatibility track activates only `legion-vscode-compat` metadata normalization and protocol DTOs. Runtime VSIX installation, extension-host sidecars, webviews, notebooks, custom editors, extension storage, arbitrary extension process/network/filesystem/terminal access, and autonomous extension mutation remain deferred until a later accepted ADR, dependency-policy update, capability policy, sandbox evidence, contract tests, ownership tests, and product evidence ledger entry exist.
 - Runtime behavior for placeholder crates or planned surfaces must not land until the same change also includes:
   - an accepted ADR for the surface being activated

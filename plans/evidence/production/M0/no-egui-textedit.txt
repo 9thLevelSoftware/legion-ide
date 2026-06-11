@@ -1,0 +1,13 @@
+Command: cargo run -p xtask -- no-egui-textedit
+Date:    2026-06-10T17:35:38Z
+Commit:  b56dcb2
+Notes:   Re-captured after fixing the broken relative ADR link in
+         plans/evidence/production/M0/ADR-0032-ratification.md
+         (was `../../adrs/…`, corrected to `../../../adrs/…`).
+         Companion gate `cargo run -p xtask -- docs-hygiene` is now clean.
+---
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running `target/debug/xtask no-egui-textedit`
+no-egui-textedit checks passed
+---
+Exit code captured separately; command above returned 0 (checks passed).
