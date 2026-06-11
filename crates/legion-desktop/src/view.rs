@@ -10,11 +10,11 @@ use std::time::Duration;
 use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 
 use legion_protocol::{
-    DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
+    BufferId, DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
     PRODUCT_NAME, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    ProposalId, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, TextCoordinate,
-    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay,
+    ProposalId, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, RedactionHint,
+    TerminalOutputRowProjection, TextCoordinate, ViewportLineTruncationState,
+    ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode,
@@ -52,6 +52,28 @@ impl Default for DesktopProjectionViewState {
             dismissed_toast_ids: BTreeSet::new(),
         }
     }
+}
+
+/// Adapter-local IME composition overlay tracked per active buffer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ImeCompositionProjection {
+    /// Whether composition is currently active.
+    pub active: bool,
+    /// Preedit text currently being composed.
+    pub preedit: String,
+}
+
+pub(crate) fn ime_composition_state_id(buffer_id: BufferId) -> egui::Id {
+    egui::Id::new(("legion-ime-composition", buffer_id))
+}
+
+pub(crate) fn ime_composition_state(
+    ui: &egui::Ui,
+    buffer_id: BufferId,
+) -> Option<ImeCompositionProjection> {
+    ui.ctx().data_mut(|data| {
+        data.get_temp::<ImeCompositionProjection>(ime_composition_state_id(buffer_id))
+    })
 }
 
 /// Structured status-bar projection derived from app-owned shell data.
@@ -816,7 +838,7 @@ fn render_bottom_console(
     match projected_product_mode(snapshot) {
         DesktopProductMode::Manual => {
             ui.columns(2, |columns| {
-                render_terminal_stream(&mut columns[0], model);
+                render_terminal_stream(&mut columns[0], snapshot, model);
                 render_console_section(
                     &mut columns[1],
                     "Structural Search",
@@ -840,7 +862,7 @@ fn render_bottom_console(
         }
         DesktopProductMode::Assist => {
             ui.columns(2, |columns| {
-                render_terminal_stream(&mut columns[0], model);
+                render_terminal_stream(&mut columns[0], snapshot, model);
                 render_agent_stream(&mut columns[1], model);
             });
         }
@@ -858,7 +880,7 @@ fn render_bottom_console(
         DesktopProductMode::LegionWorkflows => {
             ui.columns(2, |columns| {
                 render_agent_stream(&mut columns[0], model);
-                render_terminal_stream(&mut columns[1], model);
+                render_terminal_stream(&mut columns[1], snapshot, model);
             });
         }
     }
@@ -1413,6 +1435,8 @@ fn render_code_lines(
             .map(|viewport| viewport.cursor)
             .unwrap_or_else(|| projected_cursor(snapshot));
         let char_width = code_char_width();
+        let ime_composition =
+            active_buffer_id.and_then(|buffer_id| ime_composition_state(ui, buffer_id));
         for line in &model.active_buffer_code_lines {
             ui.horizontal(|ui| {
                 if show_line_numbers {
@@ -1538,6 +1562,16 @@ fn render_code_lines(
                     paint_current_line_highlight(ui, line, &response, current_cursor);
                 }
                 paint_code_cursor(ui, line, &response, current_cursor, char_width);
+                if let Some(ime_composition) = ime_composition.as_ref() {
+                    paint_ime_composition(
+                        ui,
+                        line,
+                        &response,
+                        current_cursor,
+                        char_width,
+                        ime_composition,
+                    );
+                }
             });
         }
         return;
@@ -1689,20 +1723,74 @@ fn paint_code_cursor(
         return;
     }
     ui.ctx().request_repaint_after(Duration::from_millis(530));
+    let col = cursor.character.min(line.text.chars().count() as u32);
+    let x = response.rect.left() + col as f32 * char_width;
+    let cursor_rect = egui::Rect::from_min_max(
+        egui::pos2(x, response.rect.top()),
+        egui::pos2(x + 1.0, response.rect.bottom()),
+    );
+    let to_global = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .unwrap_or_default();
+    ui.output_mut(|output| {
+        output.ime = Some(egui::output::IMEOutput {
+            rect: to_global * response.rect,
+            cursor_rect: to_global * cursor_rect,
+        });
+    });
     let blink_on = ui
         .ctx()
         .input(|input| ((input.time * 2.0) as i64).rem_euclid(2) == 0);
     if !blink_on {
         return;
     }
-    let col = cursor.character.min(line.text.chars().count() as u32);
-    let x = response.rect.left() + col as f32 * char_width;
     ui.painter().line_segment(
         [
             egui::pos2(x, response.rect.top()),
             egui::pos2(x, response.rect.bottom()),
         ],
         egui::Stroke::new(1.0, theme::tokens().accent.cyan),
+    );
+}
+
+fn paint_ime_composition(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    cursor: TextCoordinate,
+    char_width: f32,
+    ime_composition: &ImeCompositionProjection,
+) {
+    if cursor.line != line.number.saturating_sub(1) || !ime_composition.active {
+        return;
+    }
+    let preedit = ime_composition.preedit.as_str();
+    if preedit.is_empty() {
+        return;
+    }
+
+    let col = cursor.character.min(line.text.chars().count() as u32);
+    let x = response.rect.left() + col as f32 * char_width;
+    let font_id = egui::FontId::monospace(theme::tokens().typography.code as f32);
+    let galley =
+        ui.painter()
+            .layout_no_wrap(preedit.to_string(), font_id, theme::tokens().accent.orange);
+    let top_left = egui::pos2(x, response.rect.top());
+    let ime_rect = egui::Rect::from_min_size(top_left, galley.size());
+    ui.painter().rect_filled(
+        ime_rect.expand2(egui::vec2(2.0, 1.0)),
+        2.0,
+        theme::tokens().bg.input,
+    );
+    ui.painter()
+        .galley(top_left, galley, theme::tokens().accent.orange);
+    ui.painter().line_segment(
+        [
+            egui::pos2(ime_rect.left(), ime_rect.bottom() - 1.0),
+            egui::pos2(ime_rect.right(), ime_rect.bottom() - 1.0),
+        ],
+        egui::Stroke::new(1.0, theme::tokens().accent.orange),
     );
 }
 
@@ -2749,16 +2837,201 @@ fn parse_automate_tool_target(
     ))
 }
 
-fn render_terminal_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+fn render_terminal_stream(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+) {
+    let terminal = &snapshot.terminal_panel_projection;
     section_label(ui, "Terminal / Runtime", Some(theme::tokens().accent.cyan));
     theme::code_frame().show(ui, |ui| {
-        render_compact_rows(ui, &model.terminal_rows, "No terminal activity", 10);
-        if model.terminal_rows.is_empty() {
-            for row in model.bottom_console_rows.iter().take(4) {
-                ui.label(theme::code_muted(row));
+        ui.vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::code_muted(format!("status={:?}", terminal.status.kind)));
+                if let Some(session_id) = terminal.active_session_id {
+                    ui.label(theme::code_muted(format!("session={}", session_id.0)));
+                }
+                if let Some(runtime_state) = terminal.runtime_state {
+                    ui.label(theme::code_muted(format!("runtime={runtime_state:?}")));
+                }
+                ui.label(theme::code_muted(format!(
+                    "visible={} omitted={} matches={}",
+                    terminal.scrollback.visible_row_count,
+                    terminal.scrollback.omitted_row_count,
+                    terminal.search.match_count
+                )));
+                if terminal.scrollback.truncated {
+                    ui.label(theme::code_muted("scrollback truncated"));
+                }
+                if terminal.search.truncated {
+                    ui.label(theme::code_muted("search truncated"));
+                }
+            });
+            ui.label(theme::body(trim_middle(&terminal.status.message, 140)));
+            if let Some(policy) = &terminal.policy {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(theme::code_muted(format!(
+                        "policy capability={} trust={:?} granted={} timeout={}s",
+                        policy.capability_id.0,
+                        policy.workspace_trust_state,
+                        policy.granted,
+                        policy.timeout_seconds
+                    )));
+                    if let Some(decision_id) = policy.decision_id {
+                        ui.label(theme::code_muted(format!("decision={}", decision_id.0)));
+                    }
+                });
+                ui.label(theme::code_muted(trim_middle(&policy.reason, 140)));
+            }
+            if let Some(denial) = &terminal.last_denial {
+                ui.label(theme::accent(
+                    trim_middle(format!("denial: {denial}").as_str(), 140),
+                    theme::tokens().accent.orange,
+                ));
+            }
+            if let Some(error) = &terminal.last_error {
+                ui.label(theme::accent(
+                    trim_middle(format!("error: {error}").as_str(), 140),
+                    theme::tokens().accent.red,
+                ));
+            }
+            ui.add_space(theme::tokens().spacing.sm as f32);
+            if terminal.output_rows.is_empty() {
+                render_compact_rows(ui, &model.bottom_console_rows, "No terminal activity", 4);
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("terminal-output-grid")
+                        .num_columns(4)
+                        .striped(true)
+                        .spacing([theme::tokens().spacing.sm as f32, 2.0])
+                        .show(ui, |ui| {
+                            for row in terminal.output_rows.iter().take(100) {
+                                ui.label(theme::code_muted(format!("{:>4}", row.sequence.0)));
+                                ui.label(theme::code_muted(if row.is_stderr {
+                                    "stderr"
+                                } else {
+                                    "stdout"
+                                }));
+                                ui.horizontal_wrapped(|ui| {
+                                    render_terminal_payload(ui, &row.redacted_payload);
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    for badge in terminal_output_row_badges(row) {
+                                        ui.label(theme::code_muted(badge));
+                                    }
+                                    if ui.small_button("Copy").clicked() {
+                                        ui.ctx().copy_text(row.redacted_payload.clone());
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalTextSegment {
+    Text(String),
+    Url(String),
+}
+
+fn terminal_text_segments(text: &str) -> Vec<TerminalTextSegment> {
+    const URL_PREFIXES: [&str; 2] = ["https://", "http://"];
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+
+    while cursor < text.len() {
+        let remaining = &text[cursor..];
+        let next_url = URL_PREFIXES
+            .iter()
+            .filter_map(|prefix| remaining.find(prefix).map(|offset| cursor + offset))
+            .min();
+
+        let Some(url_start) = next_url else {
+            if cursor < text.len() {
+                segments.push(TerminalTextSegment::Text(text[cursor..].to_string()));
+            }
+            break;
+        };
+
+        if url_start > cursor {
+            segments.push(TerminalTextSegment::Text(text[cursor..url_start].to_string()));
+        }
+
+        let mut url_end = url_start;
+        while url_end < text.len() {
+            let Some(ch) = text[url_end..].chars().next() else {
+                break;
+            };
+            if ch.is_whitespace() {
+                break;
+            }
+            url_end += ch.len_utf8();
+        }
+
+        while url_end > url_start {
+            let Some(ch) = text[url_start..url_end].chars().next_back() else {
+                break;
+            };
+            if matches!(ch, '.' | ',' | ';' | ':' | '!' | ')' | ']' | '}' | '>' | '"' | '\'') {
+                url_end -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if url_end > url_start {
+            segments.push(TerminalTextSegment::Url(text[url_start..url_end].to_string()));
+        }
+        cursor = url_end.max(url_start + 1);
+    }
+
+    segments
+}
+
+fn render_terminal_payload(ui: &mut egui::Ui, payload: &str) {
+    let segments = terminal_text_segments(payload);
+    if segments.is_empty() {
+        ui.label(theme::code(payload));
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for segment in segments {
+            match segment {
+                TerminalTextSegment::Text(text) => {
+                    if !text.is_empty() {
+                        ui.label(theme::code(text));
+                    }
+                }
+                TerminalTextSegment::Url(url) => {
+                    ui.hyperlink_to(theme::code(url.clone()), url);
+                }
             }
         }
     });
+}
+
+fn terminal_output_row_badges(row: &TerminalOutputRowProjection) -> Vec<String> {
+    let mut badges = Vec::new();
+    if row.is_stderr {
+        badges.push("stderr".to_string());
+    }
+    if row.truncated {
+        badges.push("truncated".to_string());
+    }
+    badges.push(match row.redaction {
+        RedactionHint::None => "redacted=none".to_string(),
+        RedactionHint::MetadataOnly => "redacted=metadata-only".to_string(),
+        RedactionHint::Full => "redacted=full".to_string(),
+    });
+    badges.push(format!("{} bytes", row.byte_count));
+    badges
 }
 
 fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
@@ -6071,7 +6344,7 @@ mod tests {
     use legion_protocol::{
         CapabilityId, DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
         DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass,
-        delegated_task_tool_permission_request,
+        RedactionHint, TerminalOutputRowProjection, delegated_task_tool_permission_request,
     };
 
     #[test]
@@ -6218,6 +6491,45 @@ mod tests {
         assert_eq!(
             code_line_truncation_marker(ViewportLineTruncationState::Both),
             "↔"
+        );
+    }
+
+    #[test]
+    fn terminal_text_segments_split_urls_and_trailing_text() {
+        let segments = terminal_text_segments(
+            "open https://example.com/docs?ref=legion, then keep going",
+        );
+        assert_eq!(
+            segments,
+            vec![
+                TerminalTextSegment::Text("open ".to_string()),
+                TerminalTextSegment::Url("https://example.com/docs?ref=legion".to_string()),
+                TerminalTextSegment::Text(", then keep going".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_output_row_badges_reflect_projection_flags() {
+        let row = TerminalOutputRowProjection {
+            session_id: legion_protocol::TerminalSessionId(9),
+            sequence: legion_protocol::EventSequence(3),
+            redacted_payload: "warning: truncated".to_string(),
+            byte_count: 42,
+            is_stderr: true,
+            truncated: true,
+            redaction: RedactionHint::MetadataOnly,
+            schema_version: 1,
+        };
+
+        assert_eq!(
+            terminal_output_row_badges(&row),
+            vec![
+                "stderr".to_string(),
+                "truncated".to_string(),
+                "redacted=metadata-only".to_string(),
+                "42 bytes".to_string(),
+            ]
         );
     }
 }
