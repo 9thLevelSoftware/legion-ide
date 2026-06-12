@@ -1963,6 +1963,117 @@ fn render_assisted_suggestion_panel(
                 }
             });
         }
+        section_label(ui, "Context Chips", Some(theme::tokens().accent.violet));
+        theme::small_card_frame().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                pill(
+                    ui,
+                    &format!("file: {}", trim_middle(current_path(snapshot), 36)),
+                    theme::tokens().accent.blue,
+                    true,
+                );
+                if let Some(workspace_id) = snapshot.active_buffer_projection.workspace_id {
+                    pill(
+                        ui,
+                        &format!("workspace: {}", workspace_id.0),
+                        theme::tokens().accent.cyan,
+                        true,
+                    );
+                }
+                let manifest = &snapshot.context_manifest_projection.manifest;
+                pill(
+                    ui,
+                    &format!("manifest: {} items", manifest.items.len()),
+                    theme::tokens().accent.green,
+                    !manifest.items.is_empty(),
+                );
+                if let Some(selected_item_id) = snapshot
+                    .context_manifest_projection
+                    .selected_item_id
+                    .as_ref()
+                {
+                    pill(
+                        ui,
+                        &format!("selected: {}", trim_middle(selected_item_id, 28)),
+                        theme::tokens().accent.amber,
+                        true,
+                    );
+                }
+            });
+        });
+        section_label(ui, "Model Picker", Some(theme::tokens().accent.green));
+        theme::small_card_frame().show(ui, |ui| {
+            if snapshot.assisted_ai_projection.providers.is_empty() {
+                ui.label(theme::muted("No model providers projected"));
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for (index, provider) in snapshot
+                        .assisted_ai_projection
+                        .providers
+                        .iter()
+                        .take(4)
+                        .enumerate()
+                    {
+                        let label = format!(
+                            "{} · ops={} · tools={} · {:?}",
+                            trim_middle(&provider.provider_label, 20),
+                            provider.supported_operation_count,
+                            provider.tool_capability_label_count,
+                            provider.availability
+                        );
+                        pill(
+                            ui,
+                            &label,
+                            if index == 0 {
+                                theme::tokens().accent.cyan
+                            } else {
+                                theme::tokens().text.muted
+                            },
+                            index == 0,
+                        );
+                    }
+                });
+                for provider in snapshot.assisted_ai_projection.providers.iter().take(4) {
+                    ui.label(theme::code_muted(format!(
+                        "{}: class={:?} model_caps={} tool_caps={} context={} cost={} risk_budget={} privacy={} risk={:?}",
+                        provider.provider_id,
+                        provider.provider_class,
+                        provider.model_capability_label_count,
+                        provider.tool_capability_label_count,
+                        provider.context_window_label,
+                        provider.cost_budget_label,
+                        provider.risk_budget_label,
+                        provider.privacy_retention_label,
+                        provider.risk_label
+                    )));
+                }
+            }
+        });
+        section_label(ui, "Slash Commands", Some(theme::tokens().accent.blue));
+        theme::small_card_frame().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if soft_button(ui, "/explain").clicked() {
+                    actions.push(DesktopAction::StartAiExplain {
+                        instruction_label: "desktop /explain".to_string(),
+                    });
+                }
+                if soft_button(ui, "/fix").clicked() {
+                    actions.push(DesktopAction::StartAiProposal {
+                        instruction_label: "desktop /fix".to_string(),
+                    });
+                }
+                if soft_button(ui, "/test").clicked() {
+                    actions.push(DesktopAction::StartAiProposal {
+                        instruction_label: "desktop /test".to_string(),
+                    });
+                }
+                if soft_button(ui, "/doc").clicked() {
+                    actions.push(DesktopAction::StartAiProposal {
+                        instruction_label: "desktop /doc".to_string(),
+                    });
+                }
+            });
+        });
         let inline_rows = model
             .assistant_rows
             .iter()
@@ -5521,6 +5632,18 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             bounded_join(&refusal.reasons)
         )
     }));
+    let context_manifest = &snapshot.context_manifest_projection;
+    if !context_manifest.manifest.items.is_empty() || context_manifest.selected_item_id.is_some() {
+        rows.push(format!(
+            "context manifest {}: {} items, selected={}",
+            context_manifest.manifest.manifest_id,
+            context_manifest.manifest.items.len(),
+            context_manifest
+                .selected_item_id
+                .as_deref()
+                .unwrap_or("<none>")
+        ));
+    }
 
     let delegated = &snapshot.delegated_task_projection;
     if delegated.plan_count == 0

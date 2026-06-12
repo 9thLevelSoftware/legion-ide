@@ -3,10 +3,14 @@ use std::path::PathBuf;
 use legion_desktop::bridge::{
     DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput, DesktopCommandBridge,
 };
+use legion_desktop::view::DesktopProjectionViewModel;
 use legion_protocol::{
-    BufferId, BufferVersion, CanonicalPath, DebugConfigurationId, DebugSessionId, FileFingerprint,
-    FileId, ProtocolTextRange, SnapshotId, TextCoordinate, TimestampMillis, ViewportScroll,
-    WorkspaceId,
+    AssistedAiOperationClass, AssistedAiProjection, AssistedAiProviderAvailabilityState,
+    AssistedAiProviderCapabilitySummary, AssistedAiProviderClass,
+    AssistedAiProviderInvocationState, BufferId, BufferVersion, CanonicalPath,
+    DebugConfigurationId, DebugSessionId, FileFingerprint, FileId, ProposalPrivacyLabel,
+    ProposalRiskLabel, ProtocolTextRange, SnapshotId, TextCoordinate, TimestampMillis,
+    ViewportScroll, WorkspaceId,
 };
 use legion_ui::ui::{DailyEditingProjection, EditorTabProjection, EditorTabsProjection};
 use legion_ui::{
@@ -150,6 +154,103 @@ fn snapshot_with_assist_inline_prediction() -> legion_ui::ShellProjectionSnapsho
         schema_version: 1,
     };
     snapshot
+}
+
+fn snapshot_with_two_assisted_ai_providers() -> legion_ui::ShellProjectionSnapshot {
+    let mut snapshot = snapshot_with_active_buffer();
+    snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(7));
+    snapshot.active_buffer_projection.file_id = Some(FileId(11));
+    snapshot.context_manifest_projection.selected_item_id = Some("context:item:7".to_string());
+    snapshot.assisted_ai_projection = AssistedAiProjection {
+        projection_id: "assist:projection:1".to_string(),
+        providers: vec![
+            AssistedAiProviderCapabilitySummary {
+                provider_id: "local-mini".to_string(),
+                provider_label: "Local Mini".to_string(),
+                provider_class: AssistedAiProviderClass::Local,
+                supported_operations: vec![
+                    AssistedAiOperationClass::Explain,
+                    AssistedAiOperationClass::ProposeEdit,
+                ],
+                supported_operation_count: 2,
+                model_capability_label_count: 1,
+                tool_capability_label_count: 1,
+                context_window_label: "16k".to_string(),
+                cost_budget_label: "$".to_string(),
+                risk_budget_label: "Low".to_string(),
+                privacy_retention_label: "Local-only".to_string(),
+                availability: AssistedAiProviderAvailabilityState::Available,
+                refusal: None,
+                risk_label: ProposalRiskLabel::Low,
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: Vec::new(),
+                schema_version: 1,
+            },
+            AssistedAiProviderCapabilitySummary {
+                provider_id: "remote-pro".to_string(),
+                provider_label: "Remote Pro".to_string(),
+                provider_class: AssistedAiProviderClass::HostedRemote,
+                supported_operations: vec![
+                    AssistedAiOperationClass::Explain,
+                    AssistedAiOperationClass::ProposeEdit,
+                    AssistedAiOperationClass::StructuredMetadata,
+                ],
+                supported_operation_count: 3,
+                model_capability_label_count: 2,
+                tool_capability_label_count: 2,
+                context_window_label: "128k".to_string(),
+                cost_budget_label: "$$$".to_string(),
+                risk_budget_label: "Medium".to_string(),
+                privacy_retention_label: "Redacted".to_string(),
+                availability: AssistedAiProviderAvailabilityState::Available,
+                refusal: None,
+                risk_label: ProposalRiskLabel::Medium,
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                redaction_hints: Vec::new(),
+                schema_version: 1,
+            },
+        ],
+        routes: Vec::new(),
+        requests: Vec::new(),
+        refusals: Vec::new(),
+        proposal_previews: Vec::new(),
+        provider_count: 2,
+        request_count: 0,
+        refusal_count: 0,
+        preview_ready_count: 0,
+        provider_invocation: AssistedAiProviderInvocationState::NotEncoded,
+        generated_at: TimestampMillis(200),
+        redaction_hints: Vec::new(),
+        schema_version: 1,
+    };
+    snapshot
+}
+
+#[test]
+fn assistant_rows_show_two_providers_and_selection_context() {
+    let model =
+        DesktopProjectionViewModel::from_snapshot(&snapshot_with_two_assisted_ai_providers());
+
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("assisted ai: 2 providers")
+            && row.contains("0 requests")
+            && row.contains("0 refusals")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("assisted provider local-mini: Local Mini")
+            && row.contains("class=Local")
+            && row.contains("ops=2")
+            && row.contains("privacy=Local-only")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("assisted provider remote-pro: Remote Pro")
+            && row.contains("class=HostedRemote")
+            && row.contains("ops=3")
+            && row.contains("privacy=Redacted")
+    }));
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("context manifest") && row.contains("selected=context:item:7")
+    }));
 }
 
 fn translate(action: DesktopAction) -> DesktopBridgeOutput {
@@ -488,6 +589,57 @@ fn intent_bridge_routes_debug_actions() {
         DesktopBridgeOutput::Intent(CommandDispatchIntent::DebugAddWatch {
             session_id,
             expression_label: "count".to_string(),
+        })
+    );
+}
+
+#[test]
+fn intent_bridge_routes_assist_rail_slash_commands_through_proposals() {
+    let snapshot = snapshot_with_two_assisted_ai_providers();
+    let bridge = DesktopCommandBridge::new();
+
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::StartAiExplain {
+                instruction_label: "desktop /explain".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiExplain {
+            instruction_label: "desktop /explain".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::StartAiProposal {
+                instruction_label: "desktop /fix".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "desktop /fix".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::StartAiProposal {
+                instruction_label: "desktop /test".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "desktop /test".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::StartAiProposal {
+                instruction_label: "desktop /doc".to_string(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "desktop /doc".to_string(),
         })
     );
 }
