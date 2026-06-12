@@ -1,8 +1,13 @@
 //! Native shell theme tokens translated from the Legion prototype mockups.
 
-use std::cell::Cell;
-
-use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke};
+use egui::{
+    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Frame, Margin, RichText, Stroke,
+};
+use std::{
+    cell::Cell,
+    fs,
+    sync::{Arc, OnceLock},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemeVariant {
@@ -259,13 +264,93 @@ pub(crate) fn tokens() -> Theme {
     ACTIVE_THEME.with(Cell::get)
 }
 
+// egui's default font set only covers latin/cyrillic; load a CJK-capable fallback from the host OS
+// so the editor can render and measure composition text without bundling large binary fonts here.
+static CJK_FONT_DEFINITIONS: OnceLock<Option<FontDefinitions>> = OnceLock::new();
+
+fn cjk_font_definitions() -> Option<FontDefinitions> {
+    CJK_FONT_DEFINITIONS
+        .get_or_init(build_cjk_font_definitions)
+        .clone()
+}
+
+fn build_cjk_font_definitions() -> Option<FontDefinitions> {
+    let mut fonts = FontDefinitions::default();
+    let (font_name, font_bytes) = load_cjk_font_bytes()?;
+
+    fonts.font_data.insert(
+        font_name.clone(),
+        Arc::new(FontData::from_owned(font_bytes)),
+    );
+    fonts
+        .families
+        .get_mut(&FontFamily::Proportional)
+        .expect("proportional family should exist")
+        .push(font_name.clone());
+    fonts
+        .families
+        .get_mut(&FontFamily::Monospace)
+        .expect("monospace family should exist")
+        .push(font_name);
+    Some(fonts)
+}
+
+fn load_cjk_font_bytes() -> Option<(String, Vec<u8>)> {
+    for path in cjk_font_candidates() {
+        if let Ok(bytes) = fs::read(path) {
+            return Some(("legion-cjk-fallback".to_string(), bytes));
+        }
+    }
+    None
+}
+
+fn cjk_font_candidates() -> &'static [&'static str] {
+    #[cfg(target_os = "macos")]
+    {
+        &[
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        ]
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        &[
+            "C:\\Windows\\Fonts\\msyh.ttc",
+            "C:\\Windows\\Fonts\\msjh.ttc",
+            "C:\\Windows\\Fonts\\malgun.ttf",
+            "C:\\Windows\\Fonts\\msgothic.ttc",
+            "C:\\Windows\\Fonts\\simsun.ttc",
+        ]
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        &[
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansSC-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+        ]
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        &[]
+    }
+}
+
 pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
     ACTIVE_THEME.with(|active| active.set(*theme));
     ctx.set_theme(match theme.variant {
         ThemeVariant::Dark => egui::Theme::Dark,
         ThemeVariant::Light => egui::Theme::Light,
     });
-
+    if let Some(fonts) = cjk_font_definitions() {
+        ctx.set_fonts(fonts);
+    }
     let mut visuals = match theme.variant {
         ThemeVariant::Dark => egui::Visuals::dark(),
         ThemeVariant::Light => egui::Visuals::light(),

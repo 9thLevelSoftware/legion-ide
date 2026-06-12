@@ -4,10 +4,15 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use globset::GlobSet;
+use ignore::WalkBuilder;
+use regex::RegexBuilder;
 
 use legion_observability::{
     NoopEventSink, conflict_created_event, fallback_denied_event, open_file_read_failure_event,
@@ -57,12 +62,190 @@ const MAX_TREE_CHILDREN_DEPTH: usize = 2;
 const WATCHER_EVENT_BUFFER: usize = 1_024;
 const WATCHER_RENAME_DEBOUNCE_MILLIS: u64 = 64;
 const WATCHER_RECOVERY_MAX_RESCANS: usize = 2;
+const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
 
 type WorkspaceScanResult = (
     Vec<FileTreeNode>,
     HashMap<String, FileFingerprint>,
     Vec<WorkspaceDiscoveryRecord>,
 );
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum SearchPatternKind {
+    Literal,
+    Regex,
+}
+
+#[derive(Debug, Clone)]
+#[allow(missing_docs)]
+pub struct SearchPattern {
+    regex: regex::Regex,
+}
+
+#[allow(missing_docs)]
+impl SearchPattern {
+    pub fn literal(
+        pattern: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+    ) -> Result<Self, regex::Error> {
+        Self::build(
+            pattern,
+            SearchPatternKind::Literal,
+            case_sensitive,
+            whole_word,
+        )
+    }
+
+    pub fn regex(
+        pattern: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+    ) -> Result<Self, regex::Error> {
+        Self::build(
+            pattern,
+            SearchPatternKind::Regex,
+            case_sensitive,
+            whole_word,
+        )
+    }
+
+    fn build(
+        pattern: &str,
+        kind: SearchPatternKind,
+        case_sensitive: bool,
+        whole_word: bool,
+    ) -> Result<Self, regex::Error> {
+        let mut compiled = match kind {
+            SearchPatternKind::Literal => regex::escape(pattern),
+            SearchPatternKind::Regex => pattern.to_string(),
+        };
+        if whole_word {
+            compiled = format!(r"\b(?:{})\b", compiled);
+        }
+        let mut builder = RegexBuilder::new(&compiled);
+        builder.case_insensitive(!case_sensitive);
+        Ok(Self {
+            regex: builder.build()?,
+        })
+    }
+
+    pub fn find_ranges(&self, text: &str) -> Vec<Range<usize>> {
+        self.regex
+            .find_iter(text)
+            .map(|m| m.start()..m.end())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(missing_docs)]
+pub struct WorkspaceSearchFilters {
+    pub include: Option<Arc<GlobSet>>,
+    pub exclude: Option<Arc<GlobSet>>,
+}
+
+impl WorkspaceSearchFilters {
+    fn accepts(&self, path: &Path) -> bool {
+        if self.include.as_ref().is_some_and(|set| !set.is_match(path)) {
+            return false;
+        }
+        if self.exclude.as_ref().is_some_and(|set| set.is_match(path)) {
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(missing_docs)]
+pub struct WorkspaceSearchQuery {
+    pub workspace_id: WorkspaceId,
+    pub pattern: SearchPattern,
+    pub filters: WorkspaceSearchFilters,
+    pub result_limit: usize,
+    pub batch_size: usize,
+}
+
+#[derive(Debug, Clone)]
+#[allow(missing_docs)]
+pub struct WorkspaceSearchHit {
+    pub file_id: FileId,
+    pub canonical_path: CanonicalPath,
+    pub line_number: u32,
+    pub byte_range: Range<u64>,
+    pub line_text: String,
+    pub snippet: String,
+    pub snippet_truncated: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(missing_docs)]
+pub struct WorkspaceSearchBatch {
+    pub hits: Vec<WorkspaceSearchHit>,
+    pub omitted_hit_count: usize,
+    pub omitted_file_count: usize,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(missing_docs)]
+pub struct WorkspaceSearchReport {
+    pub hit_count: usize,
+    pub omitted_hit_count: usize,
+    pub omitted_file_count: usize,
+    pub diagnostics: Vec<String>,
+    pub cancelled: bool,
+}
+
+fn workspace_search_snippet(line: &str) -> (String, bool) {
+    const SEARCH_SNIPPET_LIMIT_BYTES: usize = 160;
+    if line.len() <= SEARCH_SNIPPET_LIMIT_BYTES {
+        return (line.to_string(), false);
+    }
+
+    let mut end = SEARCH_SNIPPET_LIMIT_BYTES;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}...", &line[..end]), true)
+}
+
+fn emit_workspace_search_batch<F>(
+    pending_hits: &mut Vec<WorkspaceSearchHit>,
+    pending_omitted_hit_count: &mut usize,
+    pending_omitted_file_count: &mut usize,
+    pending_diagnostics: &mut Vec<String>,
+    on_batch: &mut F,
+) -> bool
+where
+    F: FnMut(WorkspaceSearchBatch) -> bool,
+{
+    if pending_hits.is_empty()
+        && *pending_omitted_hit_count == 0
+        && *pending_omitted_file_count == 0
+        && pending_diagnostics.is_empty()
+    {
+        return true;
+    }
+
+    let batch = WorkspaceSearchBatch {
+        hits: std::mem::take(pending_hits),
+        omitted_hit_count: std::mem::take(pending_omitted_hit_count),
+        omitted_file_count: std::mem::take(pending_omitted_file_count),
+        diagnostics: std::mem::take(pending_diagnostics),
+    };
+    on_batch(batch)
+}
+
+fn workspace_search_path_label(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn workspace_search_match_count(text: &str, pattern: &SearchPattern) -> Vec<Range<usize>> {
+    pattern.find_ranges(text)
+}
 
 struct WorkspaceScanAccumulation {
     nodes: Vec<FileTreeNode>,
@@ -561,6 +744,86 @@ pub fn unstage_git_hunk(
     .map(|_| ())
 }
 
+/// Validate a user-provided commit message before invoking git.
+///
+/// The editor should surface this validation before running `git commit` so that
+/// empty subjects, whitespace-only messages, and NUL-containing payloads are
+/// rejected without mutating the repository.
+pub fn validate_git_commit_message(message: &str) -> Result<(), GitInspectionError> {
+    if message.contains('\0') {
+        return Err(GitInspectionError::Parse(
+            "commit message cannot contain NUL bytes".to_string(),
+        ));
+    }
+    let Some(subject) = message.lines().find(|line| !line.trim().is_empty()) else {
+        return Err(GitInspectionError::Parse(
+            "commit message cannot be empty".to_string(),
+        ));
+    };
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return Err(GitInspectionError::Parse(
+            "commit subject cannot be empty".to_string(),
+        ));
+    }
+    if subject.len() > 72 {
+        return Err(GitInspectionError::Parse(
+            "commit subject should be 72 characters or fewer".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Commit the current index with the supplied message.
+///
+/// Git inherits the caller's authentication environment unchanged, so SSH agent
+/// sockets (`SSH_AUTH_SOCK`) and credential helpers remain available for any
+/// remote hooks or commit-related integrations that rely on them.
+pub fn commit_git_changes(
+    root: impl AsRef<Path>,
+    message: &str,
+) -> Result<String, GitInspectionError> {
+    validate_git_commit_message(message)?;
+    git_stdout(
+        root.as_ref(),
+        &["commit", "--file", "-", "--cleanup=verbatim"],
+        Some(message.as_bytes()),
+    )
+}
+
+/// Push the current branch to the named remote.
+///
+/// The git subprocess inherits SSH agent and credential-helper configuration
+/// from the caller, so the desktop shell can rely on the user's existing auth
+/// setup without reimplementing credential prompts.
+pub fn push_git_remote(
+    root: impl AsRef<Path>,
+    remote: &str,
+    branch: &str,
+) -> Result<String, GitInspectionError> {
+    let args = vec!["push".to_string(), remote.to_string(), branch.to_string()];
+    git_stdout_owned(root.as_ref(), &args, None)
+}
+
+/// Fetch from the named remote without mutating the working tree.
+pub fn fetch_git_remote(
+    root: impl AsRef<Path>,
+    remote: &str,
+) -> Result<String, GitInspectionError> {
+    let args = vec!["fetch".to_string(), remote.to_string()];
+    git_stdout_owned(root.as_ref(), &args, None)
+}
+
+/// Pull the named branch from the named remote.
+pub fn pull_git_remote(
+    root: impl AsRef<Path>,
+    remote: &str,
+    branch: &str,
+) -> Result<String, GitInspectionError> {
+    let args = vec!["pull".to_string(), remote.to_string(), branch.to_string()];
+    git_stdout_owned(root.as_ref(), &args, None)
+}
+
 /// Which side of a conflict to keep when resolving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitConflictChoice {
@@ -843,6 +1106,15 @@ fn git_stdout(
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
     }
+}
+
+fn git_stdout_owned(
+    root: &Path,
+    args: &[String],
+    input: Option<&[u8]>,
+) -> Result<String, GitInspectionError> {
+    let borrowed_args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_stdout(root, &borrowed_args, input)
 }
 
 fn git_status_entries(root: &Path) -> Result<HashMap<String, String>, GitInspectionError> {
@@ -3391,6 +3663,243 @@ impl WorkspaceActor {
         self.fs
             .read_text_file(&path)
             .map_err(WorkspaceError::Platform)
+    }
+
+    /// Search workspace files with bounded batches and gitignore-aware traversal.
+    pub fn search_workspace_stream<F>(
+        &self,
+        query: WorkspaceSearchQuery,
+        mut on_batch: F,
+    ) -> WorkspaceResult<WorkspaceSearchReport>
+    where
+        F: FnMut(WorkspaceSearchBatch) -> bool,
+    {
+        let (root_path, workspace_id) = {
+            let state_guard = self
+                .state
+                .lock()
+                .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+            let state = state_guard
+                .as_ref()
+                .ok_or(WorkspaceError::WorkspaceMissing {
+                    workspace_id: query.workspace_id,
+                })?;
+            if state.workspace_id != query.workspace_id {
+                return Err(WorkspaceError::WorkspaceMissing {
+                    workspace_id: query.workspace_id,
+                });
+            }
+            (state.root_path.clone(), state.workspace_id)
+        };
+
+        let result_limit = query.result_limit.max(1);
+        let batch_size = query.batch_size.max(1);
+        let mut report = WorkspaceSearchReport::default();
+        let mut pending_hits = Vec::new();
+        let mut pending_omitted_hit_count: usize = 0;
+        let mut pending_omitted_file_count: usize = 0;
+        let mut pending_diagnostics = Vec::new();
+
+        let walker = WalkBuilder::new(&root_path)
+            .standard_filters(true)
+            .git_ignore(true)
+            .ignore(true)
+            .git_exclude(true)
+            .parents(true)
+            .hidden(true)
+            .build();
+        for entry in walker {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    report.omitted_file_count = report.omitted_file_count.saturating_add(1);
+                    let diagnostic = format!("workspace search walk error: {err}");
+                    report.diagnostics.push(diagnostic.clone());
+                    pending_omitted_file_count = pending_omitted_file_count.saturating_add(1);
+                    pending_diagnostics.push(diagnostic);
+                    if !emit_workspace_search_batch(
+                        &mut pending_hits,
+                        &mut pending_omitted_hit_count,
+                        &mut pending_omitted_file_count,
+                        &mut pending_diagnostics,
+                        &mut on_batch,
+                    ) {
+                        report.cancelled = true;
+                        return Ok(report);
+                    }
+                    continue;
+                }
+            };
+
+            let Some(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            let relative_path = path.strip_prefix(&root_path).unwrap_or(path);
+            if !query.filters.accepts(relative_path) {
+                continue;
+            }
+
+            let relative_label = workspace_search_path_label(relative_path);
+            let size_bytes = match entry.metadata() {
+                Ok(metadata) => metadata.len(),
+                Err(err) => {
+                    report.omitted_file_count = report.omitted_file_count.saturating_add(1);
+                    let diagnostic = format!(
+                        "Skipped {relative_label} because file size metadata is unavailable: {err}"
+                    );
+                    report.diagnostics.push(diagnostic.clone());
+                    pending_omitted_file_count = pending_omitted_file_count.saturating_add(1);
+                    pending_diagnostics.push(diagnostic);
+                    if !emit_workspace_search_batch(
+                        &mut pending_hits,
+                        &mut pending_omitted_hit_count,
+                        &mut pending_omitted_file_count,
+                        &mut pending_diagnostics,
+                        &mut on_batch,
+                    ) {
+                        report.cancelled = true;
+                        return Ok(report);
+                    }
+                    continue;
+                }
+            };
+            if size_bytes > WORKSPACE_SEARCH_MAX_FILE_BYTES {
+                report.omitted_file_count = report.omitted_file_count.saturating_add(1);
+                let diagnostic = format!(
+                    "Skipped {relative_label} because {size_bytes} bytes exceeds the workspace search bound"
+                );
+                report.diagnostics.push(diagnostic.clone());
+                pending_omitted_file_count = pending_omitted_file_count.saturating_add(1);
+                pending_diagnostics.push(diagnostic);
+                if !emit_workspace_search_batch(
+                    &mut pending_hits,
+                    &mut pending_omitted_hit_count,
+                    &mut pending_omitted_file_count,
+                    &mut pending_diagnostics,
+                    &mut on_batch,
+                ) {
+                    report.cancelled = true;
+                    return Ok(report);
+                }
+                continue;
+            }
+
+            let file_identity = match self.resolve_file(workspace_id, &relative_label) {
+                Ok(identity) => identity,
+                Err(err) => {
+                    report.omitted_file_count = report.omitted_file_count.saturating_add(1);
+                    let diagnostic = format!("workspace search skipped `{relative_label}`: {err}");
+                    report.diagnostics.push(diagnostic.clone());
+                    pending_omitted_file_count = pending_omitted_file_count.saturating_add(1);
+                    pending_diagnostics.push(diagnostic);
+                    if !emit_workspace_search_batch(
+                        &mut pending_hits,
+                        &mut pending_omitted_hit_count,
+                        &mut pending_omitted_file_count,
+                        &mut pending_diagnostics,
+                        &mut on_batch,
+                    ) {
+                        report.cancelled = true;
+                        return Ok(report);
+                    }
+                    continue;
+                }
+            };
+
+            let text = match self.read_file_text(workspace_id, &relative_label) {
+                Ok(text) => text,
+                Err(err) => {
+                    report.omitted_file_count = report.omitted_file_count.saturating_add(1);
+                    let diagnostic = format!("workspace search skipped `{relative_label}`: {err}");
+                    report.diagnostics.push(diagnostic.clone());
+                    pending_omitted_file_count = pending_omitted_file_count.saturating_add(1);
+                    pending_diagnostics.push(diagnostic);
+                    if !emit_workspace_search_batch(
+                        &mut pending_hits,
+                        &mut pending_omitted_hit_count,
+                        &mut pending_omitted_file_count,
+                        &mut pending_diagnostics,
+                        &mut on_batch,
+                    ) {
+                        report.cancelled = true;
+                        return Ok(report);
+                    }
+                    continue;
+                }
+            };
+
+            let mut line_start = 0u64;
+            for (line_number, line) in text.split_inclusive('\n').enumerate() {
+                let line_matches = workspace_search_match_count(line, &query.pattern);
+                if line_matches.is_empty() {
+                    line_start = line_start.saturating_add(line.len() as u64);
+                    continue;
+                }
+
+                for match_range in line_matches {
+                    if report.hit_count < result_limit {
+                        report.hit_count = report.hit_count.saturating_add(1);
+                        let byte_start = line_start + match_range.start as u64;
+                        let byte_end = line_start + match_range.end as u64;
+                        let (snippet, snippet_truncated) = workspace_search_snippet(line);
+                        pending_hits.push(WorkspaceSearchHit {
+                            file_id: file_identity.file_id,
+                            canonical_path: file_identity.canonical_path.clone(),
+                            line_number: line_number as u32,
+                            byte_range: byte_start..byte_end,
+                            line_text: line.to_string(),
+                            snippet,
+                            snippet_truncated,
+                        });
+                        if pending_hits.len() >= batch_size
+                            && !emit_workspace_search_batch(
+                                &mut pending_hits,
+                                &mut pending_omitted_hit_count,
+                                &mut pending_omitted_file_count,
+                                &mut pending_diagnostics,
+                                &mut on_batch,
+                            )
+                        {
+                            report.cancelled = true;
+                            return Ok(report);
+                        }
+                    } else {
+                        report.omitted_hit_count = report.omitted_hit_count.saturating_add(1);
+                        pending_omitted_hit_count = pending_omitted_hit_count.saturating_add(1);
+                    }
+                }
+                line_start = line_start.saturating_add(line.len() as u64);
+            }
+
+            if !emit_workspace_search_batch(
+                &mut pending_hits,
+                &mut pending_omitted_hit_count,
+                &mut pending_omitted_file_count,
+                &mut pending_diagnostics,
+                &mut on_batch,
+            ) {
+                report.cancelled = true;
+                return Ok(report);
+            }
+        }
+
+        if !emit_workspace_search_batch(
+            &mut pending_hits,
+            &mut pending_omitted_hit_count,
+            &mut pending_omitted_file_count,
+            &mut pending_diagnostics,
+            &mut on_batch,
+        ) {
+            report.cancelled = true;
+            return Ok(report);
+        }
+
+        Ok(report)
     }
 
     /// Open an existing text file and return mandatory save-precondition metadata.

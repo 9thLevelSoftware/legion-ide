@@ -6,11 +6,10 @@ use std::{
 };
 
 use legion_app::{AppCommandOutcome, AppComposition};
-use legion_protocol::PrincipalId;
-use legion_protocol::WorkspaceTrustState;
+use legion_protocol::{PrincipalId, TextCoordinate, WorkspaceTrustState};
 use legion_ui::{
     CommandDispatchIntent, PaletteMode, PaletteResultKind, SearchScopeProjection,
-    SearchStatusKindProjection,
+    SearchStatusKindProjection, ShellLayoutProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -113,6 +112,151 @@ fn palette_file_mode_ranks_workspace_file_results() {
 }
 
 #[test]
+fn palette_file_mode_frecency_boosts_recently_focused_file() {
+    let workspace = TempWorkspace::new();
+    let first = workspace.write("src/alpha_widget.rs", "fn alpha_widget() {}\n");
+    let second = workspace.write("src/beta_widget.rs", "fn beta_widget() {}\n");
+    let mut app = open_app(workspace.path(), None);
+
+    app.open_file(first.to_string_lossy())
+        .expect("open first file");
+    let first_buffer = app.active_buffer_id().expect("first buffer");
+    app.open_file(second.to_string_lossy())
+        .expect("open second file");
+    let _second_buffer = app.active_buffer_id().expect("second buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::SwitchTab {
+        buffer_id: first_buffer,
+    })
+    .expect("switch back to first file");
+    assert_eq!(app.active_buffer_id(), Some(first_buffer));
+
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::File,
+        query: String::new(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("palette open should dispatch");
+
+    let palette = app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection;
+
+    let first_path = first.to_string_lossy().to_string();
+    let second_path = second.to_string_lossy().to_string();
+
+    assert_eq!(palette.mode, PaletteMode::File);
+    assert_eq!(palette.results[0].kind, PaletteResultKind::File);
+    assert_eq!(
+        palette.results[0].path.as_deref(),
+        Some(first_path.as_str())
+    );
+    assert!(
+        palette
+            .results
+            .iter()
+            .any(|result| result.path.as_deref() == Some(second_path.as_str()))
+    );
+}
+
+#[test]
+fn palette_symbol_mode_opens_symbol_location() {
+    let workspace = TempWorkspace::new();
+    let source = workspace.write("src/lib.rs", "fn alpha_widget() {}\nfn beta_widget() {}\n");
+    let mut app = open_app(workspace.path(), Some(&source));
+    let buffer_id = app.active_buffer_id().expect("source buffer");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Symbol,
+        query: "alpha_widget".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("symbol palette should open");
+
+    let palette = app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection;
+
+    let source_path = source.to_string_lossy().to_string();
+
+    assert_eq!(palette.mode, PaletteMode::Symbol);
+    assert_eq!(palette.results[0].kind, PaletteResultKind::Symbol);
+    assert_eq!(
+        palette.results[0].path.as_deref(),
+        Some(source_path.as_str())
+    );
+    assert!(palette.results[0].position.is_some());
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+        .expect("symbol selection should dispatch");
+    assert!(matches!(outcome, AppCommandOutcome::Opened(_)));
+    assert_eq!(app.active_buffer_id(), Some(buffer_id));
+
+    let projected = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("palette"))
+        .expect("active projection after symbol jump");
+    let viewport = projected.viewport.expect("viewport");
+    assert_eq!(viewport.cursor.line, 0);
+    assert_eq!(viewport.cursor.character, 3);
+}
+
+#[test]
+fn palette_recent_buffers_mode_switches_to_recent_tab() {
+    let workspace = TempWorkspace::new();
+    let first = workspace.write("src/first.rs", "fn first() {}\n");
+    let second = workspace.write("src/second.rs", "fn second() {}\n");
+    let mut app = open_app(workspace.path(), None);
+
+    app.open_file(first.to_string_lossy())
+        .expect("open first file");
+    let first_buffer = app.active_buffer_id().expect("first buffer");
+    app.open_file(second.to_string_lossy())
+        .expect("open second file");
+    let _second_buffer = app.active_buffer_id().expect("second buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::SwitchTab {
+        buffer_id: first_buffer,
+    })
+    .expect("switch back to first file");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::RecentBuffers,
+        query: String::new(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("recent palette should open");
+
+    let palette = app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection;
+
+    let first_path = first.to_string_lossy().to_string();
+    let _second_path = second.to_string_lossy().to_string();
+
+    assert_eq!(palette.mode, PaletteMode::RecentBuffers);
+    assert_eq!(palette.results[0].kind, PaletteResultKind::RecentBuffers);
+    assert_eq!(
+        palette.results[0].path.as_deref(),
+        Some(first_path.as_str())
+    );
+    assert_eq!(palette.results[0].buffer_id, Some(first_buffer));
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+        .expect("recent selection should dispatch");
+    assert!(matches!(outcome, AppCommandOutcome::TabSwitched(buffer) if buffer == first_buffer));
+    assert_eq!(app.active_buffer_id(), Some(first_buffer));
+    assert!(
+        palette
+            .results
+            .iter()
+            .any(|result| result.buffer_id == Some(_second_buffer))
+    );
+}
+
+#[test]
 fn palette_selection_movement_is_clamped_to_projected_results() {
     let workspace = TempWorkspace::new();
     workspace.write("alpha.txt", "alpha\n");
@@ -206,4 +350,179 @@ fn palette_dispatches_file_search_structural_and_command_results() {
             .expect("command selection should dispatch"),
         AppCommandOutcome::ExplorerRefreshed(_)
     ));
+}
+
+#[test]
+fn palette_command_mode_covers_registered_command_catalog() {
+    enum ExpectedOutcome {
+        Save,
+        SaveAll,
+        TabClosed,
+        ExplorerRefreshed,
+        GitUpdated,
+        PaletteClosed,
+        SettingsUpdated,
+    }
+
+    struct CommandCase {
+        query: &'static str,
+        expected_title: &'static str,
+        expected_outcome: ExpectedOutcome,
+        dirty_before_save: bool,
+    }
+
+    let cases = [
+        CommandCase {
+            query: ">save all",
+            expected_title: "Save All",
+            expected_outcome: ExpectedOutcome::SaveAll,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">save active buffer",
+            expected_title: "Save Active Buffer",
+            expected_outcome: ExpectedOutcome::Save,
+            dirty_before_save: true,
+        },
+        CommandCase {
+            query: ">close active tab",
+            expected_title: "Close Active Tab",
+            expected_outcome: ExpectedOutcome::TabClosed,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">reveal active file",
+            expected_title: "Reveal Active File in Explorer",
+            expected_outcome: ExpectedOutcome::ExplorerRefreshed,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">refresh explorer",
+            expected_title: "Refresh Explorer",
+            expected_outcome: ExpectedOutcome::ExplorerRefreshed,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">refresh git",
+            expected_title: "Refresh Git",
+            expected_outcome: ExpectedOutcome::GitUpdated,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">close command palette",
+            expected_title: "Close Command Palette",
+            expected_outcome: ExpectedOutcome::PaletteClosed,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">preferences open settings",
+            expected_title: "Preferences: Open Settings",
+            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">preferences theme dark",
+            expected_title: "Preferences: Theme Dark",
+            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">preferences theme light",
+            expected_title: "Preferences: Theme Light",
+            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">preferences theme system",
+            expected_title: "Preferences: Theme System",
+            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">preferences reset zoom",
+            expected_title: "Preferences: Reset Zoom",
+            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">preferences reset settings",
+            expected_title: "Preferences: Reset Settings",
+            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            dirty_before_save: false,
+        },
+    ];
+
+    let workspace = TempWorkspace::new();
+    let source = workspace.write("src/main.rs", "fn main() {}\n");
+    let mut resolved_cases = 0;
+
+    for case in cases {
+        let mut app = open_app(workspace.path(), Some(&source));
+        let initial_buffer_id = app.active_buffer_id().expect("active buffer");
+        if case.dirty_before_save {
+            app.dispatch_ui_intent(CommandDispatchIntent::Insert {
+                buffer_id: initial_buffer_id,
+                at: TextCoordinate {
+                    line: 0,
+                    character: 0,
+                    byte_offset: None,
+                    utf16_offset: None,
+                },
+                text: "// dirty\n".to_string(),
+            })
+            .expect("dirty insert should dispatch");
+        }
+
+        app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Command,
+            query: case.query.to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        })
+        .expect("command palette should open");
+
+        let palette = app
+            .shell_projection_snapshot("palette")
+            .expect("projection should build")
+            .palette_projection;
+
+        assert_eq!(palette.results[0].title, case.expected_title);
+        assert_eq!(palette.results[0].kind, PaletteResultKind::Command);
+
+        let outcome = app
+            .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+            .expect("command selection should dispatch");
+
+        match case.expected_outcome {
+            ExpectedOutcome::Save => assert!(matches!(outcome, AppCommandOutcome::Save(_))),
+            ExpectedOutcome::SaveAll => {
+                assert!(matches!(outcome, AppCommandOutcome::SaveAll(_)))
+            }
+            ExpectedOutcome::TabClosed => {
+                assert!(matches!(outcome, AppCommandOutcome::TabClose(_)))
+            }
+            ExpectedOutcome::ExplorerRefreshed => {
+                assert!(matches!(outcome, AppCommandOutcome::ExplorerRefreshed(_)))
+            }
+            ExpectedOutcome::GitUpdated => {
+                assert!(matches!(outcome, AppCommandOutcome::GitUpdated(_)))
+            }
+            ExpectedOutcome::PaletteClosed => match outcome {
+                AppCommandOutcome::PaletteUpdated(projection) => {
+                    assert!(!projection.open);
+                }
+                other => panic!("expected palette update, got {other:?}"),
+            },
+            ExpectedOutcome::SettingsUpdated => {
+                assert!(matches!(outcome, AppCommandOutcome::SettingsUpdated(_)))
+            }
+        }
+
+        resolved_cases += 1;
+    }
+
+    let coverage_percent = (resolved_cases as f32 / 13.0) * 100.0;
+    assert!(
+        coverage_percent >= 95.0,
+        "command coverage report: {resolved_cases}/13 commands resolved ({coverage_percent:.1}%)"
+    );
 }

@@ -136,15 +136,29 @@ fn assist_inline_prediction_accept_marks_stale_without_mutating_after_buffer_cha
         })
         .expect("request inline prediction"),
     );
-    let prediction_id = projection
+    let active = projection
         .active_prediction
         .as_ref()
-        .expect("active prediction")
-        .prediction_id
-        .clone();
+        .expect("active prediction");
+    let prediction_id = active.prediction_id.clone();
+    let snapshot_id = active.snapshot_id.expect("request snapshot id");
+    let buffer_version = active.buffer_version.expect("request buffer version");
+
+    let current = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .expect("current snapshot");
+    assert_eq!(current.snapshot_id, snapshot_id);
+    assert_eq!(current.buffer_version, buffer_version);
 
     app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 0), "// changed\n"))
-        .expect("intervening edit");
+        .expect("first intervening edit");
+    app.edit_active_buffer(TextEdit::insert(
+        TextPosition::new(1, 0),
+        "let typed = 1;\n",
+    ))
+    .expect("second intervening edit");
+
     let stale = inline_projection(
         app.dispatch_ui_intent(CommandDispatchIntent::AcceptAssistInlinePrediction {
             buffer_id,
@@ -154,12 +168,20 @@ fn assist_inline_prediction_accept_marks_stale_without_mutating_after_buffer_cha
     );
 
     assert!(stale.active_prediction.is_none());
-    assert!(stale.rows.iter().any(|row| {
-        row.prediction_id == prediction_id
-            && row.status == legion_ui::AssistInlinePredictionStatusProjection::Stale
-    }));
+    let stale_row = stale
+        .rows
+        .iter()
+        .find(|row| row.prediction_id == prediction_id)
+        .expect("stale row retained as metadata");
+    assert_eq!(
+        stale_row.status,
+        legion_ui::AssistInlinePredictionStatusProjection::Stale
+    );
+    assert_eq!(stale_row.snapshot_id, Some(snapshot_id));
+    assert_eq!(stale_row.buffer_version, Some(buffer_version));
+    assert!(stale_row.stale);
     let text = app.editor().text(buffer_id).expect("editor text");
-    assert!(text.starts_with("// changed\n"));
+    assert!(text.starts_with("// changed\nlet typed = 1;\n"));
     assert!(!text.contains("next edit line 1"));
 
     let _ = std::fs::remove_dir_all(root);

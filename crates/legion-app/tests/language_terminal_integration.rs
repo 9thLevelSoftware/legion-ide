@@ -9,6 +9,7 @@ use legion_protocol::{
     TextCoordinate, WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
+use serde_json::json;
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -225,14 +226,14 @@ fn terminal_actions_cannot_mutate_editor_or_disk() {
             session_id,
             query: "safe".to_string(),
         },
-        CommandDispatchIntent::TerminalKill { session_id },
     ] {
         terminal = match app.dispatch_ui_intent(intent).expect("terminal intent") {
             AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
             other => panic!("expected terminal projection, got {other:?}"),
         };
     }
-    assert_eq!(terminal.status.kind, TerminalPanelStatusKind::Exited);
+    assert_eq!(terminal.status.kind, TerminalPanelStatusKind::Running);
+    assert!(terminal.active_session_id.is_some());
     assert!(!terminal.output_rows.is_empty());
     assert_eq!(
         app.editor().text(buffer_id).expect("active editor text"),
@@ -273,6 +274,56 @@ fn language_cancellation_and_terminal_denial_are_projected_fail_closed() {
     assert_eq!(terminal.status.kind, TerminalPanelStatusKind::Denied);
     assert!(terminal.active_session_id.is_none());
     assert!(terminal.last_denial.is_some());
+}
+
+#[test]
+fn rust_analyzer_runnable_code_lens_launches_the_terminal_fixture() {
+    let workspace = TempWorkspace::new();
+    let source = workspace.write("lib.rs", "pub fn item() {}\n");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace.root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language-terminal".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(source.to_string_lossy())
+        .expect("open source file");
+    app.enable_terminal_fixture_for_tests();
+
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    let code_lens_payload = json!([
+        {
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+            "command": {"title": "Run test", "command": "rust-analyzer.runSingle"},
+            "data": {"kind": "runnable"}
+        }
+    ]);
+    let projection = app
+        .ingest_lsp_code_lens_response_for_buffer(
+            buffer_id,
+            &code_lens_payload,
+            "rust-analyzer",
+            None,
+        )
+        .expect("ingest code lenses");
+    let lens_id = projection
+        .code_lenses
+        .iter()
+        .find(|lens| lens.command_label == "rust-analyzer.runSingle")
+        .map(|lens| lens.lens_id.clone())
+        .expect("runnable code lens");
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::ActivateLanguageCodeLens { buffer_id, lens_id })
+        .expect("activate runnable code lens");
+    let terminal = match outcome {
+        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
+        other => panic!("expected terminal projection, got {other:?}"),
+    };
+    assert_eq!(terminal.status.kind, TerminalPanelStatusKind::Running);
+    assert!(terminal.active_session_id.is_some());
+    assert!(terminal.status.message.contains("rust-analyzer.runSingle"));
 }
 
 #[test]

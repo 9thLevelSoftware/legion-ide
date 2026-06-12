@@ -1,9 +1,11 @@
 use legion_lsp::{
-    LspTextDocumentIdentity, code_lens_request, completion_request, definition_request,
-    document_symbol_request, hover_request, inlay_hint_request, project_code_lens_response,
+    LspTextDocumentIdentity, code_lens_request, completion_request, declaration_request,
+    definition_request, document_symbol_request, folding_range_request, hover_request,
+    implementation_request, inlay_hint_request, project_code_lens_response,
     project_completion_response, project_document_symbol_response, project_hover_response,
     project_inlay_hint_response, project_location_response, project_workspace_symbol_response,
-    references_request, workspace_symbol_request,
+    references_request, semantic_tokens_full_request, signature_help_request,
+    type_definition_request, workspace_symbol_request,
 };
 use legion_protocol::{
     BufferVersion, FileFingerprint, FileId, LanguageId, SnapshotId, Utf16Position, Utf16Range,
@@ -492,4 +494,86 @@ fn definition_response_projects_single_location_and_malformed_as_empty() {
     assert!(degraded[0].range.is_none());
     assert!(project_location_response(&json!(null), 5).is_empty());
     assert!(project_location_response(&json!([{"range": {}}]), 5).is_empty());
+}
+
+#[test]
+fn declaration_implementation_and_type_definition_requests_use_document_uri_and_position() {
+    let position = Utf16Position {
+        line: 6,
+        character: 14,
+    };
+
+    for request in [
+        declaration_request(51, &document(), position),
+        implementation_request(52, &document(), position),
+        type_definition_request(53, &document(), position),
+    ] {
+        assert!(matches!(
+            request.method.as_deref(),
+            Some("textDocument/declaration")
+                | Some("textDocument/implementation")
+                | Some("textDocument/typeDefinition")
+        ));
+        let params = request.params.expect("params");
+        assert_eq!(
+            params["textDocument"]["uri"].as_str(),
+            Some("file:///workspace/src/main.rs")
+        );
+        assert_eq!(params["position"]["line"].as_u64(), Some(6));
+        assert_eq!(params["position"]["character"].as_u64(), Some(14));
+    }
+}
+
+#[test]
+fn signature_help_request_uses_document_uri_and_position() {
+    let request = signature_help_request(
+        54,
+        &document(),
+        Utf16Position {
+            line: 2,
+            character: 17,
+        },
+    );
+
+    assert_eq!(request.id, Some(54));
+    assert_eq!(
+        request.method.as_deref(),
+        Some("textDocument/signatureHelp")
+    );
+    let params = request.params.expect("params");
+    assert_eq!(
+        params["textDocument"]["uri"].as_str(),
+        Some("file:///workspace/src/main.rs")
+    );
+    assert_eq!(params["position"]["line"].as_u64(), Some(2));
+    assert_eq!(params["position"]["character"].as_u64(), Some(17));
+}
+
+#[test]
+fn folding_range_request_uses_document_uri() {
+    let request = folding_range_request(55, &document());
+
+    assert_eq!(request.id, Some(55));
+    assert_eq!(request.method.as_deref(), Some("textDocument/foldingRange"));
+    let params = request.params.expect("params");
+    assert_eq!(
+        params["textDocument"]["uri"].as_str(),
+        Some("file:///workspace/src/main.rs")
+    );
+}
+
+#[test]
+fn semantic_tokens_full_request_uses_document_uri() {
+    let request = semantic_tokens_full_request(56, &document());
+
+    assert_eq!(request.id, Some(56));
+    assert_eq!(
+        request.method.as_deref(),
+        Some("textDocument/semanticTokens/full")
+    );
+    let params = request.params.expect("params");
+    assert_eq!(
+        params["textDocument"]["uri"].as_str(),
+        Some("file:///workspace/src/main.rs")
+    );
 }

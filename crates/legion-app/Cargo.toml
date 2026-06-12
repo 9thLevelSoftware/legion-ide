@@ -12,6 +12,7 @@ offline = []
 
 [dependencies]
 anyhow = { workspace = true }
+globset = { workspace = true }
 legion-editor = { workspace = true }
 legion-index = { workspace = true }
 legion-lsp = { workspace = true }
@@ -31,6 +32,7 @@ legion-ai-providers = { workspace = true, optional = true }
 legion-tracker = { workspace = true }
 legion-memory = { workspace = true }
 legion-plugin = { workspace = true }
+regex = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }

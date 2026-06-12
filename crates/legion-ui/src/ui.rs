@@ -1361,6 +1361,14 @@ pub struct GitHunkProjection {
     pub stage: GitHunkStageProjection,
     /// Unified diff hunk header.
     pub header: String,
+    /// Old-file start line in the patch header.
+    pub old_start: u32,
+    /// Old-file line count in the patch header.
+    pub old_lines: u32,
+    /// New-file start line in the patch header.
+    pub new_start: u32,
+    /// New-file line count in the patch header.
+    pub new_lines: u32,
     /// Added line count.
     pub added_lines: u32,
     /// Deleted line count.
@@ -1728,6 +1736,10 @@ pub struct StatusMessageProjection {
 pub enum PaletteMode {
     /// Workspace file opener mode.
     File,
+    /// Workspace symbol finder mode.
+    Symbol,
+    /// Recent open buffers switcher mode.
+    RecentBuffers,
     /// Curated command-dispatch mode.
     Command,
     /// Lexical search mode.
@@ -1741,6 +1753,8 @@ impl PaletteMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::File => "Files",
+            Self::Symbol => "Symbols",
+            Self::RecentBuffers => "Recent Buffers",
             Self::Command => "Commands",
             Self::Search => "Search",
             Self::StructuralSearch => "Structural Search",
@@ -1751,6 +1765,8 @@ impl PaletteMode {
     pub fn prefix(self) -> Option<char> {
         match self {
             Self::File => None,
+            Self::Symbol => Some('@'),
+            Self::RecentBuffers => Some('^'),
             Self::Command => Some('>'),
             Self::Search => Some('/'),
             Self::StructuralSearch => Some('#'),
@@ -1763,6 +1779,10 @@ impl PaletteMode {
 pub enum PaletteResultKind {
     /// Workspace file result.
     File,
+    /// Workspace symbol result.
+    Symbol,
+    /// Recent open buffer result.
+    RecentBuffers,
     /// Curated command result.
     Command,
     /// Lexical search execution result.
@@ -1784,6 +1804,12 @@ pub struct PaletteResult {
     pub detail: Option<String>,
     /// Shortcut or action hint label.
     pub shortcut_label: Option<String>,
+    /// Workspace path for file, symbol, or buffer-backed results.
+    pub path: Option<String>,
+    /// Buffer identifier for buffer-switching results.
+    pub buffer_id: Option<BufferId>,
+    /// Cursor position for jump-to-location results.
+    pub position: Option<TextCoordinate>,
     /// Character indices in `title` that matched the current query.
     pub match_indices: Vec<usize>,
     /// Reason the row is displayed but not dispatchable.
@@ -2155,12 +2181,12 @@ pub enum CommandDispatchIntent {
     },
     /// Refresh git status, syntactic diff, blame, graph, and conflict projections.
     RefreshGit,
-    /// Stage one projected git hunk through app-owned git authority.
+    /// Stage one cached git hunk by projected hunk id.
     StageGitHunk {
         /// Projected hunk identifier.
         hunk_id: String,
     },
-    /// Unstage one projected git hunk through app-owned git authority.
+    /// Unstage one cached git hunk by projected hunk id.
     UnstageGitHunk {
         /// Projected hunk identifier.
         hunk_id: String,
@@ -2169,12 +2195,18 @@ pub enum CommandDispatchIntent {
     ResolveGitConflict {
         /// Repository-relative path.
         path: String,
-        /// Which side to keep.
+        /// Conflict resolution choice.
         choice: GitConflictChoiceProjection,
     },
-    /// Refresh debug launch configurations and persisted breakpoints.
+    /// Commit the current staged index with a validated message.
+    CommitGitChanges {
+        /// Commit message entered in the git editor.
+        message: String,
+    },
+    /// Refresh debugger configuration projections.
     RefreshDebugConfigurations,
-    /// Toggle a source breakpoint through app-owned debug authority.
+
+    /// Toggle a breakpoint or configure a logpoint/conditional breakpoint.
     ToggleDebugBreakpoint {
         /// Target buffer identifier.
         buffer_id: BufferId,
@@ -2309,6 +2341,13 @@ pub enum CommandDispatchIntent {
         /// Code-action identifier selected from projection data.
         action_id: String,
     },
+    /// Activate a projected language code lens through app authority.
+    ActivateLanguageCodeLens {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Code lens identifier selected from projection data.
+        lens_id: String,
+    },
     /// Cancel an in-flight language operation through app authority.
     CancelLanguageOperation {
         /// Operation identifier selected from projection data.
@@ -2361,6 +2400,13 @@ pub enum CommandDispatchIntent {
     OpenPath {
         /// User-provided path text.
         path: String,
+    },
+    /// Open a file by path and position the cursor in the opened buffer.
+    OpenPathAtPosition {
+        /// User-provided path text.
+        path: String,
+        /// Cursor coordinate in the opened buffer.
+        position: TextCoordinate,
     },
     /// Refresh explorer state through workspace ports.
     RefreshExplorer,

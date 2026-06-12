@@ -9,6 +9,8 @@ use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 #[cfg(feature = "ai")]
 use legion_agent::{
     AgentRuntime, DelegatedTaskProposalGenerator, DelegatedTaskProposalInput,
@@ -50,12 +52,14 @@ use legion_platform::{NativeFileSystem, NativeWatcherService};
 use legion_plugin::PluginRuntimeHost;
 use legion_project::{
     CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitDiffStrategy, GitHunkStage,
-    GitInspectionError, GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, WorkspaceActor,
-    WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
-    WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
-    WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
-    WorkspaceSaveRequest, collect_git_snapshot, discover_cargo_debug_configurations,
-    git_repository_root, resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
+    GitInspectionError, GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, SearchPattern,
+    SearchPatternKind, WorkspaceActor, WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest,
+    WorkspaceError, WorkspaceMutationRollbackCheckpoint,
+    WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
+    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
+    WorkspaceSearchBatch, WorkspaceSearchFilters, WorkspaceSearchQuery, collect_git_snapshot,
+    commit_git_changes, discover_cargo_debug_configurations, git_repository_root,
+    resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
 };
 use legion_protocol::{
     AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
@@ -127,8 +131,8 @@ use legion_protocol::{
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
     SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup,
     StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
-    SymbolFileMapRecord, TerminalCloseRequest, TerminalInput, TerminalKillEscalation,
-    TerminalKillRequest, TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
+    SymbolFileMapRecord, TerminalInput, TerminalKillEscalation, TerminalKillRequest,
+    TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
     TerminalPanelStatusKind, TerminalPolicyProjection, TerminalResize, TerminalRuntimeState,
     TerminalScrollbackProjection, TerminalSearchProjection, TerminalSessionId, TextCoordinate,
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
@@ -143,8 +147,8 @@ use legion_protocol::{
     validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
     validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
     validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
-    validate_mcp_registry_snapshot, validate_terminal_close_request, validate_terminal_input,
-    validate_terminal_kill_request, validate_terminal_resize,
+    validate_mcp_registry_snapshot, validate_terminal_input, validate_terminal_kill_request,
+    validate_terminal_resize,
 };
 use legion_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
@@ -156,8 +160,8 @@ use legion_security::{
 };
 use legion_storage::InMemoryStorageRepositoryPort;
 use legion_terminal::{
-    DapAdapterFixtureConfig, DapAdapterFixtureOutcome, DapAdapterFixtureRuntime,
-    TerminalFixtureConfig, TerminalFixtureRuntime,
+    DapAdapterFixtureConfig, DapAdapterFixtureOutcome, DapAdapterFixtureRuntime, TerminalRuntime,
+    TerminalRuntimeConfig, TerminalRuntimeLaunchRequest, TerminalRuntimeOutputPollRequest,
 };
 use legion_tracker::{
     LegionWorkflowTrackerLedger, LegionWorkflowTrackerRecord, TrackerLedger, TrackerRunLedgerRecord,
@@ -179,8 +183,8 @@ use legion_ui::ui::{
 };
 use legion_ui::{
     ActiveBufferProjection, CommandDispatchIntent, DockMode, ExplorerNodeProjection,
-    ExplorerProjection, ExplorerSelectionProjection, ShellLayoutProjection,
-    ShellProjectionSnapshot,
+    ExplorerProjection, ExplorerSelectionProjection, GitConflictChoiceProjection,
+    ShellLayoutProjection, ShellProjectionSnapshot,
 };
 #[cfg(not(feature = "ai"))]
 use offline_ai::{
@@ -401,6 +405,9 @@ pub enum AppCompositionError {
     /// Legion workflow orchestration failed at the app authority boundary.
     #[error("legion workflow request failed: {0}")]
     LegionWorkflow(String),
+    /// Search query validation failed.
+    #[error("search validation failed: {0}")]
+    SearchValidation(String),
 }
 
 /// Product-mode authority for app-owned AI dispatch.
@@ -490,6 +497,16 @@ mod daily_editing_save_all_internal_tests {
             .expect("metadata failure summary");
         assert_eq!(metadata.response_kind, "MetadataMissing");
         assert_eq!(metadata.diagnostic_codes, vec!["save_all.metadata_missing"]);
+    }
+    #[test]
+    fn terminal_shell_output_parser_strips_markers_and_extracts_metadata() {
+        let parsed = parse_terminal_shell_output(
+            "\x1b]7;file://localhost/tmp/workspace\x1b\\output\x1b]133;D;7\x1b\\",
+        );
+
+        assert_eq!(parsed.visible_output, "output");
+        assert_eq!(parsed.cwd.as_deref(), Some("/tmp/workspace"));
+        assert_eq!(parsed.exit_code, Some(7));
     }
 }
 
@@ -4045,6 +4062,7 @@ struct ActiveDocumentController {
     active_principal_id: Option<PrincipalId>,
     active_workspace_trust: Option<WorkspaceTrustState>,
     open_tabs: Vec<BufferId>,
+    recent_buffer_ids: Vec<BufferId>,
     active_file_id: Option<FileId>,
     active_file_path: Option<String>,
     active_buffer_id: Option<BufferId>,
@@ -4062,6 +4080,7 @@ impl ActiveDocumentController {
             active_principal_id: None,
             active_workspace_trust: None,
             open_tabs: Vec::new(),
+            recent_buffer_ids: Vec::new(),
             active_file_id: None,
             active_file_path: None,
             active_buffer_id: None,
@@ -4094,6 +4113,7 @@ impl ActiveDocumentController {
 
     fn clear_active_file(&mut self) {
         self.open_tabs.clear();
+        self.recent_buffer_ids.clear();
         self.active_file_id = None;
         self.active_file_path = None;
         self.active_buffer_id = None;
@@ -4166,6 +4186,17 @@ impl ActiveDocumentController {
         self.active_file_path = Some(metadata.identity.canonical_path.0.clone());
         self.active_buffer_id = Some(buffer_id);
         self.active_file_metadata = Some(metadata.clone());
+        self.record_recent_buffer(buffer_id);
+    }
+
+    fn record_recent_buffer(&mut self, buffer_id: BufferId) {
+        self.recent_buffer_ids
+            .retain(|candidate| *candidate != buffer_id);
+        self.recent_buffer_ids.push(buffer_id);
+    }
+
+    fn recent_buffer_ids(&self) -> &[BufferId] {
+        &self.recent_buffer_ids
     }
 
     fn metadata_for_buffer(&self, buffer_id: BufferId) -> Option<&ActiveFileMetadata> {
@@ -4203,6 +4234,8 @@ impl ActiveDocumentController {
         self.open_tabs.retain(|candidate| *candidate != buffer_id);
         self.buffer_file_metadata.remove(&buffer_id);
         self.viewport_scrolls.remove(&buffer_id);
+        self.recent_buffer_ids
+            .retain(|candidate| *candidate != buffer_id);
         if self
             .close_dirty_prompt
             .as_ref()
@@ -4464,6 +4497,10 @@ impl Default for LanguageToolingWorkflow {
 impl LanguageToolingWorkflow {
     fn projection(&self) -> LanguageToolingProjection {
         self.projection.clone()
+    }
+
+    fn symbols(&self) -> &[SymbolFileMapRecord] {
+        self.semantic_index.symbols()
     }
 
     fn refresh_retrieval_document(&mut self, document: &SourceDocument) {
@@ -4958,14 +4995,15 @@ impl LanguageToolingWorkflow {
     }
 }
 
-#[derive(Debug, Clone)]
 struct TerminalWorkflow {
     projection: TerminalPanelProjection,
     fixture_enabled: bool,
-    fixture: TerminalFixtureRuntime,
+    runtime: TerminalRuntime<legion_platform::NativePtyService>,
     security_broker: DenyByDefaultBroker,
     last_audit: Option<legion_protocol::TerminalAuditRecord>,
     next_sequence: u64,
+    active_command_started_at: Option<std::time::Instant>,
+    current_cwd: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -4979,18 +5017,153 @@ struct TerminalDenial {
     clear_active_session: bool,
 }
 
+fn terminal_shell_command() -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        ("cmd".to_string(), vec!["/Q".to_string(), "/K".to_string()])
+    }
+
+    #[cfg(unix)]
+    {
+        (
+            "bash".to_string(),
+            vec![
+                "-lc".to_string(),
+                r#"export PROMPT_COMMAND='status=$?; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]133;D;%d\033\\" "$status"'; exec bash --noprofile --norc -i"#
+                    .to_string(),
+            ],
+        )
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        ("sh".to_string(), Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TerminalShellOutputProjection {
+    visible_output: String,
+    cwd: Option<String>,
+    exit_code: Option<i32>,
+}
+
+fn parse_terminal_shell_output(payload: &str) -> TerminalShellOutputProjection {
+    let mut visible_output = String::new();
+    let mut cwd = None;
+    let mut exit_code = None;
+    let bytes = payload.as_bytes();
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b']' {
+            cursor += 2;
+            let seq_start = cursor;
+            while cursor < bytes.len() {
+                if bytes[cursor] == 0x07 {
+                    break;
+                }
+                if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'\\' {
+                    break;
+                }
+                cursor += 1;
+            }
+            let sequence = &payload[seq_start..cursor];
+            if let Some(parsed_cwd) = terminal_shell_cwd_from_osc(sequence) {
+                cwd = Some(parsed_cwd);
+            }
+            if let Some(parsed_exit_code) = terminal_shell_exit_code_from_osc(sequence) {
+                exit_code = Some(parsed_exit_code);
+            }
+            if cursor < bytes.len()
+                && bytes[cursor] == 0x1b
+                && cursor + 1 < bytes.len()
+                && bytes[cursor + 1] == b'\\'
+            {
+                cursor += 2;
+            } else if cursor < bytes.len() && bytes[cursor] == 0x07 {
+                cursor += 1;
+            }
+            continue;
+        }
+
+        let Some(ch) = payload[cursor..].chars().next() else {
+            break;
+        };
+        visible_output.push(ch);
+        cursor += ch.len_utf8();
+    }
+
+    TerminalShellOutputProjection {
+        visible_output,
+        cwd,
+        exit_code,
+    }
+}
+
+fn terminal_shell_cwd_from_osc(sequence: &str) -> Option<String> {
+    let value = sequence.strip_prefix("7;")?;
+    let value = value.strip_prefix("file://")?;
+    let path = value.split_once('/')?.1;
+    Some(format!("/{}", path.trim_start_matches('/')))
+}
+
+fn terminal_shell_exit_code_from_osc(sequence: &str) -> Option<i32> {
+    let value = sequence.strip_prefix("133;")?;
+    let (command, parameters) = value.split_once(';')?;
+    if command != "D" {
+        return None;
+    }
+    parameters.split(';').next()?.parse().ok()
+}
+
+fn terminal_command_block_start_payload(byte_count: usize, cwd: Option<&str>) -> String {
+    match cwd {
+        Some(cwd) => format!(
+            "command block started • input_bytes={} • cwd={}",
+            byte_count,
+            bounded_label(cwd.to_string(), 120)
+        ),
+        None => format!("command block started • input_bytes={byte_count}"),
+    }
+}
+
+fn terminal_command_block_finish_payload(
+    exit_code: i32,
+    duration_ms: u64,
+    cwd: Option<&str>,
+) -> String {
+    match cwd {
+        Some(cwd) => format!(
+            "command block finished • exit={} • duration={}ms • cwd={}",
+            exit_code,
+            duration_ms,
+            bounded_label(cwd.to_string(), 120)
+        ),
+        None => format!(
+            "command block finished • exit={} • duration={}ms",
+            exit_code, duration_ms
+        ),
+    }
+}
+
 impl Default for TerminalWorkflow {
     fn default() -> Self {
         Self {
             projection: TerminalPanelProjection::empty(),
             fixture_enabled: false,
-            fixture: TerminalFixtureRuntime::new(TerminalFixtureConfig::default()),
+            runtime: TerminalRuntime::new(
+                TerminalRuntimeConfig::default(),
+                legion_platform::NativePtyService,
+            ),
             security_broker: DenyByDefaultBroker::new(
                 SecurityPolicy::default(),
                 CapabilityNamespace("app.terminal".to_string()),
             ),
             last_audit: None,
             next_sequence: 0,
+            active_command_started_at: None,
+            current_cwd: None,
         }
     }
 }
@@ -5002,14 +5175,17 @@ impl TerminalWorkflow {
 
     fn enable_fixture(&mut self) {
         self.fixture_enabled = true;
-        self.fixture = TerminalFixtureRuntime::new(TerminalFixtureConfig::enabled());
+        self.runtime = TerminalRuntime::new(
+            TerminalRuntimeConfig::enabled(),
+            legion_platform::NativePtyService,
+        );
         let mut policy = SecurityPolicy::default();
         policy.terminal_policy.runtime_enabled = true;
         self.security_broker =
             DenyByDefaultBroker::new(policy, CapabilityNamespace("app.terminal".to_string()));
         self.projection.status = TerminalPanelStatus {
             kind: TerminalPanelStatusKind::Idle,
-            message: "Terminal fixture enabled".to_string(),
+            message: "Terminal runtime enabled".to_string(),
         };
         self.projection.generated_at = TimestampMillis::now();
     }
@@ -5070,40 +5246,55 @@ impl TerminalWorkflow {
             timeout_seconds: 30,
             schema_version: 1,
         };
+        let (command, args) = terminal_shell_command();
         let runtime_label = std::any::type_name::<
             legion_terminal::TerminalRuntime<legion_platform::NativePtyService>,
         >();
-        match self.fixture.launch(launch_policy) {
-            Ok(audit) => {
-                let session_id = audit.session_id;
-                let output = self.fixture.output_chunk(
-                    &audit,
-                    format!(
-                        "fixture terminal ready: command_label_bytes={}; runtime={runtime_label}",
-                        command_label.len()
-                    ),
-                    command_label.len() as u64,
-                );
+        match self.runtime.launch(TerminalRuntimeLaunchRequest {
+            policy: launch_policy,
+            command,
+            args,
+        }) {
+            Ok(outcome) => {
+                let session_id = outcome.audit.session_id;
+                let command_label = bounded_label(command_label, 120);
+                let runtime_state = outcome.audit.state;
+                self.active_command_started_at = None;
+                self.current_cwd = None;
                 self.projection.active_session_id = Some(session_id);
-                self.projection.runtime_state = Some(TerminalRuntimeState::Running);
+                self.projection.runtime_state = Some(runtime_state);
                 self.projection.status = TerminalPanelStatus {
-                    kind: TerminalPanelStatusKind::Running,
-                    message: "Terminal fixture running".to_string(),
+                    kind: if runtime_state == TerminalRuntimeState::Running {
+                        TerminalPanelStatusKind::Running
+                    } else {
+                        TerminalPanelStatusKind::Degraded
+                    },
+                    message: format!(
+                        "Terminal runtime running: {command_label} via {runtime_label}"
+                    ),
                 };
                 self.projection.last_denial = None;
                 self.projection.last_error = None;
                 self.record_audit(
                     session_id,
-                    TerminalRuntimeState::Running,
+                    runtime_state,
                     event_context,
                     format!(
-                        "action=launch state=running decision_id={} command_label_bytes={} output_limit=262144",
+                        "action=launch state={} decision_id={} command_label_bytes={} runtime={} output_bytes={} truncated={}",
+                        if runtime_state == TerminalRuntimeState::Running {
+                            "running"
+                        } else {
+                            "degraded"
+                        },
                         decision.decision_id.0,
-                        command_label.len()
+                        command_label.len(),
+                        runtime_label,
+                        outcome.output.byte_count,
+                        outcome.output.truncated
                     ),
                 );
-                if let Ok(output) = output {
-                    self.push_terminal_output(output, false);
+                if outcome.output.byte_count > 0 || !outcome.output.redacted_payload.is_empty() {
+                    self.push_terminal_output(outcome.output, false);
                 }
                 self.projection()
             }
@@ -5157,24 +5348,45 @@ impl TerminalWorkflow {
         if let Err(error) = validate_terminal_input(&input) {
             return self.fail(session_id, event_context, error.message);
         }
-        self.push_row(
-            session_id,
-            format!("input accepted bytes={}", payload.len()),
-            payload.len() as u64,
-            false,
-        );
-        self.projection.status = TerminalPanelStatus {
-            kind: TerminalPanelStatusKind::Running,
-            message: "Terminal input accepted".to_string(),
+        let payload_to_send = if payload.ends_with('\n') {
+            payload.clone()
+        } else {
+            format!("{payload}\n")
         };
-        self.projection.generated_at = TimestampMillis::now();
-        self.record_audit(
+        let runtime_input = TerminalInput {
             session_id,
-            TerminalRuntimeState::Running,
-            event_context,
-            format!("action=input state=running input_bytes={}", payload.len()),
-        );
-        self.projection()
+            correlation_id: event_context.correlation_id,
+            payload: payload_to_send,
+        };
+        let command_bytes = runtime_input.payload.len();
+        match self.runtime.input(runtime_input) {
+            Ok(audit) => {
+                self.projection.runtime_state = Some(audit.state);
+                self.projection.status = TerminalPanelStatus {
+                    kind: TerminalPanelStatusKind::Running,
+                    message: "Terminal input sent".to_string(),
+                };
+                self.projection.generated_at = TimestampMillis::now();
+                self.active_command_started_at = Some(std::time::Instant::now());
+                self.push_row(
+                    session_id,
+                    terminal_command_block_start_payload(
+                        command_bytes,
+                        self.current_cwd.as_deref(),
+                    ),
+                    command_bytes as u64,
+                    false,
+                );
+                self.record_audit(
+                    session_id,
+                    audit.state,
+                    event_context,
+                    format!("action=input state=running input_bytes={command_bytes}"),
+                );
+                self.projection()
+            }
+            Err(error) => self.fail(session_id, event_context, error.to_string()),
+        }
     }
 
     fn resize(
@@ -5216,18 +5428,24 @@ impl TerminalWorkflow {
         if let Err(error) = validate_terminal_resize(&resize) {
             return self.fail(session_id, event_context, error.message);
         }
-        self.projection.status = TerminalPanelStatus {
-            kind: TerminalPanelStatusKind::Running,
-            message: format!("Terminal resized to {cols}x{rows}"),
-        };
-        self.projection.generated_at = TimestampMillis::now();
-        self.record_audit(
-            session_id,
-            TerminalRuntimeState::Running,
-            event_context,
-            format!("action=resize state=running cols={cols} rows={rows}"),
-        );
-        self.projection()
+        match self.runtime.resize(resize) {
+            Ok(audit) => {
+                self.projection.runtime_state = Some(audit.state);
+                self.projection.status = TerminalPanelStatus {
+                    kind: TerminalPanelStatusKind::Running,
+                    message: format!("Terminal resized to {cols}x{rows}"),
+                };
+                self.projection.generated_at = TimestampMillis::now();
+                self.record_audit(
+                    session_id,
+                    audit.state,
+                    event_context,
+                    format!("action=resize state=running cols={cols} rows={rows}"),
+                );
+                self.projection()
+            }
+            Err(error) => self.fail(session_id, event_context, error.to_string()),
+        }
     }
 
     fn poll(
@@ -5242,15 +5460,62 @@ impl TerminalWorkflow {
                 format!("terminal session {} is not active", session_id.0),
             );
         }
-        self.push_row(session_id, "poll complete".to_string(), 13, false);
-        self.projection.generated_at = TimestampMillis::now();
-        self.record_audit(
+        let poll_request = TerminalRuntimeOutputPollRequest {
             session_id,
-            TerminalRuntimeState::Running,
-            event_context,
-            "action=poll state=running output_poll=bounded".to_string(),
-        );
-        self.projection()
+            event_sequence: self.next_event_sequence(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+        };
+        match self.runtime.poll_output(poll_request) {
+            Ok(outcome) => {
+                let runtime_state = outcome.audit.state;
+                self.projection.runtime_state = Some(runtime_state);
+                self.projection.status = TerminalPanelStatus {
+                    kind: if runtime_state == TerminalRuntimeState::Exited {
+                        TerminalPanelStatusKind::Exited
+                    } else {
+                        TerminalPanelStatusKind::Running
+                    },
+                    message: if runtime_state == TerminalRuntimeState::Exited {
+                        "Terminal exited".to_string()
+                    } else {
+                        "Terminal output polled".to_string()
+                    },
+                };
+                if runtime_state == TerminalRuntimeState::Exited && !outcome.output.truncated {
+                    self.projection.active_session_id = None;
+                }
+                if outcome.output.byte_count > 0 || !outcome.output.redacted_payload.is_empty() {
+                    self.push_terminal_output(outcome.output, false);
+                }
+                self.projection.generated_at = TimestampMillis::now();
+                self.record_audit(
+                    session_id,
+                    runtime_state,
+                    event_context,
+                    format!(
+                        "action=poll state={} output_bytes={} truncated={}",
+                        if self.projection.active_session_id.is_some() {
+                            "running"
+                        } else {
+                            "exited"
+                        },
+                        self.projection
+                            .output_rows
+                            .last()
+                            .map(|row| row.byte_count)
+                            .unwrap_or(0),
+                        self.projection
+                            .output_rows
+                            .last()
+                            .map(|row| row.truncated)
+                            .unwrap_or(false)
+                    ),
+                );
+                self.projection()
+            }
+            Err(error) => self.fail(session_id, event_context, error.to_string()),
+        }
     }
 
     fn search(
@@ -5354,44 +5619,74 @@ impl TerminalWorkflow {
             if let Err(error) = validate_terminal_kill_request(&request) {
                 return self.fail(session_id, event_context, error.message);
             }
+            match self.runtime.kill(request) {
+                Ok(audit) => {
+                    self.projection.runtime_state = Some(audit.state);
+                    self.projection.status = TerminalPanelStatus {
+                        kind: TerminalPanelStatusKind::Exited,
+                        message: "Terminal killed".to_string(),
+                    };
+                    self.projection.active_session_id = None;
+                    self.active_command_started_at = None;
+                    self.projection.generated_at = TimestampMillis::now();
+                    self.record_audit(
+                        session_id,
+                        audit.state,
+                        event_context,
+                        "action=kill state=exited escalation=terminate".to_string(),
+                    );
+                    self.projection()
+                }
+                Err(error) => self.fail(session_id, event_context, error.to_string()),
+            }
         } else {
-            let request = TerminalCloseRequest {
+            let exit_request = TerminalInput {
+                session_id,
+                correlation_id: event_context.correlation_id,
+                payload: "exit\n".to_string(),
+            };
+            if let Err(error) = validate_terminal_input(&exit_request) {
+                return self.fail(session_id, event_context, error.message);
+            }
+            let _ = self.runtime.input(exit_request);
+            let request = TerminalKillRequest {
                 session_id,
                 principal_id: context.principal.clone(),
-                capability_id: CapabilityId("terminal.close".to_string()),
+                capability_id: CapabilityId("terminal.kill".to_string()),
+                escalation: TerminalKillEscalation::KillTree,
+                kill_tree_authorized: true,
+                escalation_timeout_ms: 5_000,
                 event_sequence: self.next_event_sequence(),
                 correlation_id: event_context.correlation_id,
                 causality_id: event_context.causality_id,
-                metadata_summary: "action=close".to_string(),
+                metadata_summary: "action=close graceful-exit".to_string(),
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             };
-            if let Err(error) = validate_terminal_close_request(&request) {
+            if let Err(error) = validate_terminal_kill_request(&request) {
                 return self.fail(session_id, event_context, error.message);
             }
+            match self.runtime.kill(request) {
+                Ok(audit) => {
+                    self.projection.runtime_state = Some(audit.state);
+                    self.projection.status = TerminalPanelStatus {
+                        kind: TerminalPanelStatusKind::Exited,
+                        message: "Terminal closed".to_string(),
+                    };
+                    self.projection.active_session_id = None;
+                    self.active_command_started_at = None;
+                    self.projection.generated_at = TimestampMillis::now();
+                    self.record_audit(
+                        session_id,
+                        audit.state,
+                        event_context,
+                        "action=close state=exited".to_string(),
+                    );
+                    self.projection()
+                }
+                Err(error) => self.fail(session_id, event_context, error.to_string()),
+            }
         }
-        self.projection.runtime_state = Some(TerminalRuntimeState::Exited);
-        self.projection.status = TerminalPanelStatus {
-            kind: TerminalPanelStatusKind::Exited,
-            message: if killed {
-                "Terminal killed".to_string()
-            } else {
-                "Terminal closed".to_string()
-            },
-        };
-        self.projection.active_session_id = None;
-        self.projection.generated_at = TimestampMillis::now();
-        self.record_audit(
-            session_id,
-            TerminalRuntimeState::Exited,
-            event_context,
-            if killed {
-                "action=kill state=exited escalation=terminate".to_string()
-            } else {
-                "action=close state=exited".to_string()
-            },
-        );
-        self.projection()
     }
 
     fn deny(&mut self, denial: TerminalDenial) -> TerminalPanelProjection {
@@ -5399,6 +5694,7 @@ impl TerminalWorkflow {
         if denial.clear_active_session {
             self.projection.active_session_id = None;
         }
+        self.active_command_started_at = None;
         self.projection.runtime_state = Some(TerminalRuntimeState::Denied);
         self.projection.status = TerminalPanelStatus {
             kind: TerminalPanelStatusKind::Denied,
@@ -5432,6 +5728,7 @@ impl TerminalWorkflow {
         event_context: EventContext,
         reason: String,
     ) -> TerminalPanelProjection {
+        self.active_command_started_at = None;
         self.projection.status = TerminalPanelStatus {
             kind: TerminalPanelStatusKind::Failed,
             message: reason.clone(),
@@ -5559,12 +5856,33 @@ impl TerminalWorkflow {
         output: legion_protocol::TerminalOutputChunk,
         is_stderr: bool,
     ) {
-        self.push_row(
-            output.session_id,
-            output.redacted_payload,
-            output.byte_count,
-            is_stderr,
-        );
+        let shell_projection = parse_terminal_shell_output(&output.redacted_payload);
+        if let Some(cwd) = shell_projection.cwd.clone() {
+            self.current_cwd = Some(cwd);
+        }
+        if !shell_projection.visible_output.trim().is_empty() {
+            self.push_row(
+                output.session_id,
+                shell_projection.visible_output,
+                output.byte_count,
+                is_stderr,
+            );
+        }
+        if let Some(exit_code) = shell_projection.exit_code
+            && let Some(started_at) = self.active_command_started_at.take()
+        {
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+            self.push_row(
+                output.session_id,
+                terminal_command_block_finish_payload(
+                    exit_code,
+                    duration_ms,
+                    self.current_cwd.as_deref(),
+                ),
+                0,
+                false,
+            );
+        }
     }
 
     fn push_row(
@@ -6912,8 +7230,13 @@ pub enum AppCommandRequest {
     ResolveGitConflict {
         /// Repository-relative path.
         path: String,
-        /// Which side to keep.
+        /// Conflict resolution choice.
         choice: GitConflictChoice,
+    },
+    /// Commit the current staged index with a validated message.
+    CommitGitChanges {
+        /// Commit message entered in the git editor.
+        message: String,
     },
     /// Request hover data through app-owned language tooling.
     RequestHover {
@@ -6995,19 +7318,27 @@ pub enum AppCommandRequest {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
-    /// Request a code-action proposal preview through app-owned language tooling.
+    /// Request a code-action proposal preview through app authority.
     RequestCodeActionProposal {
         /// Target buffer identifier.
         buffer_id: BufferId,
-        /// Code action identifier.
+        /// Code-action identifier selected from projection data.
         action_id: String,
     },
-    /// Cancel an in-flight language operation.
+    /// Activate a projected language code lens through app authority.
+    ActivateLanguageCodeLens {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Code lens identifier selected from projection data.
+        lens_id: String,
+    },
+    /// Cancel an in-flight language operation through app authority.
     CancelLanguageOperation {
-        /// Operation identifier.
+        /// Operation identifier selected from projection data.
         operation_id: String,
     },
-    /// Launch a policy-gated terminal session.
+
+    /// Launch a policy-gated terminal session through app authority.
     TerminalLaunch {
         /// Display-safe command label or fixture command.
         command_label: String,
@@ -7104,6 +7435,13 @@ pub enum AppCommandRequest {
     OpenPath {
         /// User-provided path text.
         path: String,
+    },
+    /// Open a workspace path and position the cursor in the opened buffer.
+    OpenPathAtPosition {
+        /// User-provided path text.
+        path: String,
+        /// Cursor coordinate in the opened buffer.
+        position: TextCoordinate,
     },
     /// Refresh explorer projection through workspace authority.
     RefreshExplorer,
@@ -7411,6 +7749,7 @@ impl CommandExecutionService {
             | AppCommandRequest::StageGitHunk { .. }
             | AppCommandRequest::UnstageGitHunk { .. }
             | AppCommandRequest::ResolveGitConflict { .. }
+            | AppCommandRequest::CommitGitChanges { .. }
             | AppCommandRequest::RefreshDebugConfigurations
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
@@ -7431,6 +7770,7 @@ impl CommandExecutionService {
             | AppCommandRequest::RequestRenameProposal { .. }
             | AppCommandRequest::RequestOrganizeImportsProposal { .. }
             | AppCommandRequest::RequestCodeActionProposal { .. }
+            | AppCommandRequest::ActivateLanguageCodeLens { .. }
             | AppCommandRequest::CancelLanguageOperation { .. }
             | AppCommandRequest::TerminalLaunch { .. }
             | AppCommandRequest::TerminalInput { .. }
@@ -7440,6 +7780,7 @@ impl CommandExecutionService {
             | AppCommandRequest::TerminalOutputPoll { .. }
             | AppCommandRequest::TerminalSearch { .. }
             | AppCommandRequest::OpenPath { .. }
+            | AppCommandRequest::OpenPathAtPosition { .. }
             | AppCommandRequest::StartAiRun { .. }
             | AppCommandRequest::StartAiExplain { .. }
             | AppCommandRequest::StartAiProposal { .. }
@@ -7642,14 +7983,17 @@ impl CommandDispatcher {
                 Ok(AppCommandRequest::ResolveGitConflict {
                     path,
                     choice: match choice {
-                        legion_ui::GitConflictChoiceProjection::AcceptCurrent => {
+                        GitConflictChoiceProjection::AcceptCurrent => {
                             GitConflictChoice::AcceptCurrent
                         }
-                        legion_ui::GitConflictChoiceProjection::AcceptIncoming => {
+                        GitConflictChoiceProjection::AcceptIncoming => {
                             GitConflictChoice::AcceptIncoming
                         }
                     },
                 })
+            }
+            CommandDispatchIntent::CommitGitChanges { message } => {
+                Ok(AppCommandRequest::CommitGitChanges { message })
             }
             CommandDispatchIntent::RefreshDebugConfigurations => {
                 Ok(AppCommandRequest::RefreshDebugConfigurations)
@@ -7816,6 +8160,10 @@ impl CommandDispatcher {
                     action_id,
                 })
             }
+            CommandDispatchIntent::ActivateLanguageCodeLens { buffer_id, lens_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ActivateLanguageCodeLens { buffer_id, lens_id })
+            }
             CommandDispatchIntent::CancelLanguageOperation { operation_id } => {
                 Ok(AppCommandRequest::CancelLanguageOperation { operation_id })
             }
@@ -7851,6 +8199,9 @@ impl CommandDispatcher {
                 Ok(AppCommandRequest::TerminalSearch { session_id, query })
             }
             CommandDispatchIntent::OpenPath { path } => Ok(AppCommandRequest::OpenPath { path }),
+            CommandDispatchIntent::OpenPathAtPosition { path, position } => {
+                Ok(AppCommandRequest::OpenPathAtPosition { path, position })
+            }
             CommandDispatchIntent::RefreshExplorer => Ok(AppCommandRequest::RefreshExplorer),
             CommandDispatchIntent::RevealInExplorer { file_id } => {
                 Ok(AppCommandRequest::RevealInExplorer { file_id })
@@ -10340,6 +10691,7 @@ struct SearchBuildResult {
     omitted_file_count: usize,
     diagnostics: Vec<String>,
     degraded_limited: bool,
+    validation_error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -10359,7 +10711,7 @@ struct StructuralDocumentReport {
 
 struct SearchTextInput<'a> {
     query_id: &'a str,
-    query: &'a str,
+    pattern: &'a SearchPattern,
     scope: SearchScopeProjection,
     workspace_id: Option<WorkspaceId>,
     buffer_id: Option<BufferId>,
@@ -10372,7 +10724,7 @@ struct SearchTextInput<'a> {
 
 struct SearchLineInput<'a> {
     query_id: &'a str,
-    query: &'a str,
+    pattern: &'a SearchPattern,
     scope: SearchScopeProjection,
     workspace_id: Option<WorkspaceId>,
     buffer_id: Option<BufferId>,
@@ -10383,6 +10735,110 @@ struct SearchLineInput<'a> {
     absolute_line_start: u64,
     limit: usize,
     result: &'a mut SearchBuildResult,
+}
+
+fn parse_search_query(query: &str) -> Result<(SearchPattern, WorkspaceSearchFilters), String> {
+    let mut mode = SearchPatternKind::Literal;
+    let mut case_sensitive = true;
+    let mut whole_word = false;
+    let mut include_globs = Vec::<String>::new();
+    let mut exclude_globs = Vec::<String>::new();
+    let mut pattern_parts = Vec::<String>::new();
+
+    for token in query.split_whitespace() {
+        if let Some(pattern) = token.strip_prefix("regex:") {
+            mode = SearchPatternKind::Regex;
+            if !pattern.is_empty() {
+                pattern_parts.push(pattern.to_string());
+            }
+            continue;
+        }
+        if let Some(pattern) = token.strip_prefix("re:") {
+            mode = SearchPatternKind::Regex;
+            if !pattern.is_empty() {
+                pattern_parts.push(pattern.to_string());
+            }
+            continue;
+        }
+        if let Some(pattern) = token.strip_prefix("literal:") {
+            mode = SearchPatternKind::Literal;
+            if !pattern.is_empty() {
+                pattern_parts.push(pattern.to_string());
+            }
+            continue;
+        }
+        if let Some(pattern) = token.strip_prefix("word:") {
+            whole_word = true;
+            if !pattern.is_empty() {
+                pattern_parts.push(pattern.to_string());
+            }
+            continue;
+        }
+        if token == "word" {
+            whole_word = true;
+            continue;
+        }
+        if token == "case" {
+            case_sensitive = true;
+            continue;
+        }
+        if token == "icase" || token == "nocase" {
+            case_sensitive = false;
+            continue;
+        }
+        if let Some(pattern) = token.strip_prefix("include:") {
+            if pattern.is_empty() {
+                return Err("include glob is empty".to_string());
+            }
+            include_globs.push(pattern.to_string());
+            continue;
+        }
+        if let Some(pattern) = token.strip_prefix("exclude:") {
+            if pattern.is_empty() {
+                return Err("exclude glob is empty".to_string());
+            }
+            exclude_globs.push(pattern.to_string());
+            continue;
+        }
+        pattern_parts.push(token.to_string());
+    }
+
+    let pattern = pattern_parts.join(" ").trim().to_string();
+    if pattern.is_empty() {
+        return Err("Search query is empty".to_string());
+    }
+
+    let compiled_pattern = match mode {
+        SearchPatternKind::Literal => SearchPattern::literal(&pattern, case_sensitive, whole_word)
+            .map_err(|err| format!("invalid literal search: {err}"))?,
+        SearchPatternKind::Regex => SearchPattern::regex(&pattern, case_sensitive, whole_word)
+            .map_err(|err| format!("invalid regex search: {err}"))?,
+    };
+
+    let include = compile_search_globset(&include_globs)?;
+    let exclude = compile_search_globset(&exclude_globs)?;
+
+    Ok((
+        compiled_pattern,
+        WorkspaceSearchFilters { include, exclude },
+    ))
+}
+
+fn compile_search_globset(patterns: &[String]) -> Result<Option<Arc<GlobSet>>, String> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(
+            Glob::new(pattern).map_err(|err| format!("invalid search glob `{pattern}`: {err}"))?,
+        );
+    }
+    builder
+        .build()
+        .map(|set| Some(Arc::new(set)))
+        .map_err(|err| format!("invalid search glob set: {err}"))
 }
 
 fn normalize_search_limit(limit: usize) -> usize {
@@ -10397,6 +10853,13 @@ fn search_status_for_result(
     scope: SearchScopeProjection,
     result: &SearchBuildResult,
 ) -> SearchStatusProjection {
+    if let Some(message) = &result.validation_error {
+        return SearchStatusProjection {
+            kind: SearchStatusKindProjection::ValidationError,
+            message: message.clone(),
+        };
+    }
+
     if result.degraded_limited {
         return SearchStatusProjection {
             kind: SearchStatusKindProjection::DegradedLimited,
@@ -10525,6 +10988,10 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
                 path: hunk.path,
                 stage: git_hunk_stage_projection(hunk.stage),
                 header: hunk.header,
+                old_start: hunk.old_start,
+                old_lines: hunk.old_lines,
+                new_start: hunk.new_start,
+                new_lines: hunk.new_lines,
                 added_lines: hunk.added_lines,
                 deleted_lines: hunk.deleted_lines,
                 context: hunk.context,
@@ -10693,7 +11160,12 @@ fn palette_open_query(mode: PaletteMode, query: String) -> String {
             .prefix()
             .map_or_else(String::new, |prefix| prefix.to_string());
     }
-    if query.starts_with('>') || query.starts_with('/') || query.starts_with('#') {
+    if query.starts_with('>')
+        || query.starts_with('/')
+        || query.starts_with('#')
+        || query.starts_with('@')
+        || query.starts_with('^')
+    {
         query
     } else {
         mode.prefix()
@@ -10706,6 +11178,8 @@ fn palette_mode_for_query(query: &str) -> Option<PaletteMode> {
         Some('>') => Some(PaletteMode::Command),
         Some('/') => Some(PaletteMode::Search),
         Some('#') => Some(PaletteMode::StructuralSearch),
+        Some('@') => Some(PaletteMode::Symbol),
+        Some('^') => Some(PaletteMode::RecentBuffers),
         Some(_) | None => Some(PaletteMode::File),
     }
 }
@@ -10737,6 +11211,24 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: Some("Ctrl+Shift+S"),
         },
         PaletteCommandSpec {
+            id: "save-active-buffer",
+            title: "Save Active Buffer",
+            detail: "Save the active tab through app authority",
+            shortcut_label: Some("⌘S"),
+        },
+        PaletteCommandSpec {
+            id: "close-active-tab",
+            title: "Close Active Tab",
+            detail: "Close the active tab through app authority",
+            shortcut_label: Some("⌘W"),
+        },
+        PaletteCommandSpec {
+            id: "reveal-active-file",
+            title: "Reveal Active File in Explorer",
+            detail: "Reveal the active file in the explorer",
+            shortcut_label: Some("⇧⌘E"),
+        },
+        PaletteCommandSpec {
             id: "refresh-explorer",
             title: "Refresh Explorer",
             detail: "Reload the workspace tree projection",
@@ -10746,6 +11238,12 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             id: "refresh-git",
             title: "Refresh Git",
             detail: "Refresh git status and diff projections",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-commit",
+            title: "Git: Commit Staged Changes",
+            detail: "Use the palette query as the commit message",
             shortcut_label: None,
         },
         PaletteCommandSpec {
@@ -10896,7 +11394,7 @@ fn collect_search_results_for_text(input: SearchTextInput<'_>) {
         let line_text = line.trim_end_matches(&['\r', '\n'][..]);
         collect_search_results_for_line(SearchLineInput {
             query_id: input.query_id,
-            query: input.query,
+            pattern: input.pattern,
             scope: input.scope,
             workspace_id: input.workspace_id,
             buffer_id: input.buffer_id,
@@ -10912,17 +11410,22 @@ fn collect_search_results_for_text(input: SearchTextInput<'_>) {
     }
 }
 
+fn count_chars_up_to(text: &str, byte_idx: usize) -> usize {
+    text.get(..byte_idx)
+        .map_or_else(|| text.chars().count(), |prefix| prefix.chars().count())
+}
+
 fn collect_search_results_for_line(input: SearchLineInput<'_>) {
-    if input.query.is_empty() {
+    let matches = input.pattern.find_ranges(input.line_text);
+    if matches.is_empty() {
         return;
     }
 
-    let mut cursor = 0;
-    while let Some(relative) = input.line_text[cursor..].find(input.query) {
-        let byte_start = cursor + relative;
-        let byte_end = byte_start + input.query.len();
-        let character_start = input.line_text[..byte_start].chars().count() as u32;
-        let character_end = input.line_text[..byte_end].chars().count() as u32;
+    for match_range in matches {
+        let byte_start = match_range.start;
+        let byte_end = match_range.end;
+        let character_start = count_chars_up_to(input.line_text, byte_start) as u32;
+        let character_end = count_chars_up_to(input.line_text, byte_end) as u32;
         let (snippet, snippet_truncated) = bounded_search_snippet(input.line_text);
         let row = SearchResultProjection {
             query_id: input.query_id.to_string(),
@@ -10950,7 +11453,6 @@ fn collect_search_results_for_line(input: SearchLineInput<'_>) {
             snippet_truncated,
         };
         push_bounded_search_result(input.result, input.limit, row);
-        cursor = byte_end;
     }
 }
 
@@ -11913,6 +12415,18 @@ impl AppComposition {
             )?;
 
         self.active_documents.bind_opened_file(&opened, buffer_id);
+        let document = SourceDocument::with_versions(
+            identity.workspace_id,
+            identity.file_id,
+            identity.canonical_path.clone(),
+            language_id_for_path(&identity.canonical_path),
+            opened.file_content_version,
+            opened.workspace_generation,
+            None,
+            SemanticPrivacyScope::Workspace,
+            opened.text.clone(),
+        );
+        self.language_tooling.refresh_retrieval_document(&document);
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
         Ok(identity.file_id)
@@ -12137,6 +12651,8 @@ impl AppComposition {
         let query = palette_query_body(mode, &self.palette.query);
         let results = match mode {
             PaletteMode::File => self.palette_file_results(query)?,
+            PaletteMode::Symbol => self.palette_symbol_results(query)?,
+            PaletteMode::RecentBuffers => self.palette_recent_buffer_results(query)?,
             PaletteMode::Command => self.palette_command_results(query),
             PaletteMode::Search => vec![self.palette_search_result(query)],
             PaletteMode::StructuralSearch => vec![self.palette_structural_search_result(query)],
@@ -12153,6 +12669,7 @@ impl AppComposition {
             return Ok(Vec::new());
         };
 
+        let recent_bonus = self.palette_recent_path_bonus_map();
         let mut paths = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?
             .into_iter()
             .filter(workspace_node_is_regular_file)
@@ -12168,14 +12685,22 @@ impl AppComposition {
             .into_iter()
             .filter_map(|path| {
                 palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                    let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
                     PaletteScoredResult {
-                        score,
+                        score: score.saturating_add(recency_bonus),
                         result: PaletteResult {
                             id: format!("file:{path}"),
                             kind: PaletteResultKind::File,
-                            title: path,
-                            detail: Some("Workspace file".to_string()),
+                            title: path.clone(),
+                            detail: Some(if recency_bonus > 0 {
+                                "Recent workspace file".to_string()
+                            } else {
+                                "Workspace file".to_string()
+                            }),
                             shortcut_label: Some("Enter".to_string()),
+                            path: Some(path),
+                            buffer_id: None,
+                            position: None,
                             match_indices,
                             disabled_reason: None,
                         },
@@ -12191,11 +12716,142 @@ impl AppComposition {
             .collect())
     }
 
+    fn palette_symbol_results(
+        &self,
+        query: &str,
+    ) -> Result<Vec<PaletteResult>, AppCompositionError> {
+        let Some(workspace_id) = self.active_documents.workspace_id() else {
+            return Ok(Vec::new());
+        };
+        let active_file_id = self.active_documents.active_file_id;
+        let scope_file_only = self.palette.scope == SearchScopeProjection::ActiveFile;
+        let recent_bonus = self.palette_recent_path_bonus_map();
+
+        let mut scored = self
+            .language_tooling
+            .symbols()
+            .iter()
+            .filter(|symbol| symbol.workspace_id == workspace_id)
+            .filter(|symbol| !scope_file_only || Some(symbol.file_id) == active_file_id)
+            .filter_map(|symbol| {
+                let title = symbol
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| symbol.symbol_name_hash.value.clone());
+                let searchable = format!("{title} {}", symbol.path.0);
+                palette_fuzzy_score(&searchable, query).map(|(score, match_indices)| {
+                    let recency_bonus = recent_bonus
+                        .get(&symbol.path.0)
+                        .copied()
+                        .unwrap_or_default();
+                    let position = symbol.declaration_range.map(|range| range.start);
+                    PaletteScoredResult {
+                        score: score.saturating_add(recency_bonus),
+                        result: PaletteResult {
+                            id: format!("symbol:{}", symbol.symbol_id.0),
+                            kind: PaletteResultKind::Symbol,
+                            title,
+                            detail: Some(format!("{} · {}", symbol.kind, symbol.path.0)),
+                            shortcut_label: Some("Enter".to_string()),
+                            path: Some(symbol.path.0.clone()),
+                            buffer_id: None,
+                            position,
+                            match_indices,
+                            disabled_reason: None,
+                        },
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        sort_palette_results(&mut scored);
+        Ok(scored
+            .into_iter()
+            .take(PALETTE_RESULT_LIMIT)
+            .map(|scored| scored.result)
+            .collect())
+    }
+
+    fn palette_recent_buffer_results(
+        &self,
+        query: &str,
+    ) -> Result<Vec<PaletteResult>, AppCompositionError> {
+        let recent_bonus = self.palette_recent_path_bonus_map();
+        let mut scored = self
+            .active_documents
+            .recent_buffer_ids()
+            .iter()
+            .rev()
+            .filter_map(|buffer_id| {
+                let metadata = self.active_documents.metadata_for_buffer(*buffer_id)?;
+                let path = metadata.identity.canonical_path.0.clone();
+                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                    let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
+                    PaletteScoredResult {
+                        score: score.saturating_add(recency_bonus),
+                        result: PaletteResult {
+                            id: format!("recent-buffer:{}", buffer_id.0),
+                            kind: PaletteResultKind::RecentBuffers,
+                            title: path.clone(),
+                            detail: Some("Recent open tab".to_string()),
+                            shortcut_label: Some("Enter".to_string()),
+                            path: Some(path),
+                            buffer_id: Some(*buffer_id),
+                            position: None,
+                            match_indices,
+                            disabled_reason: None,
+                        },
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        sort_palette_results(&mut scored);
+        Ok(scored
+            .into_iter()
+            .take(PALETTE_RESULT_LIMIT)
+            .map(|scored| scored.result)
+            .collect())
+    }
+
+    fn palette_recent_path_bonus_map(&self) -> HashMap<String, i32> {
+        let recent_ids = self.active_documents.recent_buffer_ids();
+        recent_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, buffer_id)| {
+                self.active_documents
+                    .metadata_for_buffer(*buffer_id)
+                    .map(|metadata| {
+                        let bonus = ((index + 1) as i32).saturating_mul(1_000);
+                        (metadata.identity.canonical_path.0.clone(), bonus)
+                    })
+            })
+            .collect()
+    }
+
     fn palette_command_results(&self, query: &str) -> Vec<PaletteResult> {
+        let active_buffer_id = self.active_documents.active_buffer_id;
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
                 palette_fuzzy_score(spec.title, query).map(|(score, match_indices)| {
+                    let (buffer_id, disabled_reason) = match spec.id {
+                        "save-active-buffer" | "close-active-tab" => (
+                            active_buffer_id,
+                            active_buffer_id
+                                .is_none()
+                                .then(|| "Open a tab first".to_string()),
+                        ),
+                        "reveal-active-file" => {
+                            let disabled_reason = active_buffer_id
+                                .and_then(|buffer_id| {
+                                    self.active_documents.metadata_for_buffer(buffer_id)
+                                })
+                                .is_none()
+                                .then(|| "Open an active file first".to_string());
+                            (active_buffer_id, disabled_reason)
+                        }
+                        _ => (None, None),
+                    };
                     PaletteScoredResult {
                         score,
                         result: PaletteResult {
@@ -12204,8 +12860,11 @@ impl AppComposition {
                             title: spec.title.to_string(),
                             detail: Some(spec.detail.to_string()),
                             shortcut_label: spec.shortcut_label.map(str::to_string),
+                            path: None,
+                            buffer_id,
+                            position: None,
                             match_indices,
-                            disabled_reason: None,
+                            disabled_reason,
                         },
                     }
                 })
@@ -12232,6 +12891,9 @@ impl AppComposition {
             },
             detail: Some("Run lexical search".to_string()),
             shortcut_label: Some("Enter".to_string()),
+            path: None,
+            buffer_id: None,
+            position: None,
             match_indices: Vec::new(),
             disabled_reason: trimmed
                 .is_empty()
@@ -12252,6 +12914,9 @@ impl AppComposition {
             },
             detail: Some("Preview structural matches".to_string()),
             shortcut_label: Some("Enter".to_string()),
+            path: None,
+            buffer_id: None,
+            position: None,
             match_indices: Vec::new(),
             disabled_reason: trimmed
                 .is_empty()
@@ -12261,18 +12926,55 @@ impl AppComposition {
 
     fn palette_result_intent(&self, result: &PaletteResult) -> Option<CommandDispatchIntent> {
         match result.kind {
-            PaletteResultKind::File => {
+            PaletteResultKind::File => result
+                .path
+                .as_ref()
+                .map(|path| CommandDispatchIntent::OpenPath { path: path.clone() }),
+            PaletteResultKind::Symbol => match (result.path.as_ref(), result.position) {
+                (Some(path), Some(position)) => Some(CommandDispatchIntent::OpenPathAtPosition {
+                    path: path.clone(),
+                    position,
+                }),
+                _ => None,
+            },
+            PaletteResultKind::RecentBuffers => result
+                .buffer_id
+                .map(|buffer_id| CommandDispatchIntent::SwitchTab { buffer_id }),
+            PaletteResultKind::Command => {
                 result
                     .id
-                    .strip_prefix("file:")
-                    .map(|path| CommandDispatchIntent::OpenPath {
-                        path: path.to_string(),
+                    .strip_prefix("command:")
+                    .and_then(|command_id| match command_id {
+                        "save-active-buffer" => result
+                            .buffer_id
+                            .map(|buffer_id| CommandDispatchIntent::Save { buffer_id }),
+                        "close-active-tab" => result
+                            .buffer_id
+                            .map(|buffer_id| CommandDispatchIntent::CloseTab { buffer_id }),
+                        "reveal-active-file" => result.buffer_id.and_then(|buffer_id| {
+                            self.active_documents
+                                .metadata_for_buffer(buffer_id)
+                                .map(|metadata| CommandDispatchIntent::RevealInExplorer {
+                                    file_id: metadata.identity.file_id,
+                                })
+                        }),
+                        "git-commit" => {
+                            let body =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            let message = body
+                                .strip_prefix("git commit")
+                                .or_else(|| body.strip_prefix("commit"))
+                                .unwrap_or(&body)
+                                .trim()
+                                .to_string();
+                            (!message.is_empty())
+                                .then_some(CommandDispatchIntent::CommitGitChanges { message })
+                        }
+                        _ => palette_command_intent(command_id),
                     })
             }
-            PaletteResultKind::Command => result
-                .id
-                .strip_prefix("command:")
-                .and_then(palette_command_intent),
             PaletteResultKind::Search => {
                 let query = palette_query_body(PaletteMode::Search, &self.palette.query)
                     .trim()
@@ -12490,6 +13192,14 @@ impl AppComposition {
 
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
             }
+            AppCommandRequest::CommitGitChanges { message } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                commit_git_changes(Path::new(root_path), &message)
+                    .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
             AppCommandRequest::RequestHover {
                 buffer_id,
                 position,
@@ -12691,6 +13401,36 @@ impl AppComposition {
             } => Ok(AppCommandOutcome::DebugProjectionUpdated(
                 self.debug_workflow.add_watch(session_id, expression_label),
             )),
+            AppCommandRequest::ActivateLanguageCodeLens { buffer_id, lens_id } => {
+                let projection = self.language_tooling_projection();
+                if projection.buffer_id != Some(buffer_id) {
+                    return Err(AppCompositionError::BufferMismatch {
+                        target: buffer_id,
+                        active: projection.buffer_id,
+                    });
+                }
+                let lens = projection
+                    .code_lenses
+                    .into_iter()
+                    .find(|lens| lens.lens_id == lens_id)
+                    .ok_or_else(|| {
+                        AppCompositionError::LanguageTooling(format!(
+                            "code lens {lens_id} not found for buffer {buffer_id:?}"
+                        ))
+                    })?;
+                if !lens.kind_label.contains("runnable") {
+                    return Err(AppCompositionError::LanguageTooling(format!(
+                        "code lens {lens_id} is not runnable"
+                    )));
+                }
+                let context = self.active_documents.require_workspace_context()?;
+                let event_context = self.next_event_context();
+                let projection =
+                    self.terminal_workflow
+                        .launch(context, lens.command_label, event_context);
+                self.persist_latest_terminal_audit()?;
+                Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
+            }
             AppCommandRequest::TerminalLaunch { command_label } => {
                 let context = self.active_documents.require_workspace_context()?;
                 let event_context = self.next_event_context();
@@ -12759,6 +13499,13 @@ impl AppComposition {
             }
             AppCommandRequest::OpenPath { path } => {
                 Ok(AppCommandOutcome::Opened(self.open_file(path)?))
+            }
+            AppCommandRequest::OpenPathAtPosition { path, position } => {
+                let outcome = self.open_file(path)?;
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    self.set_buffer_cursor(buffer_id, position)?;
+                }
+                Ok(AppCommandOutcome::Opened(outcome))
             }
             AppCommandRequest::StartAiRun { instruction_label } => Ok(
                 AppCommandOutcome::AiRunStarted(Box::new(self.start_ai_run(instruction_label)?)),
@@ -14641,6 +15388,8 @@ impl AppComposition {
         generated_at: TimestampMillis,
     ) -> legion_protocol::CommandRegistryProjection {
         let active_buffer = self.active_documents.active_buffer_id;
+        let active_file_metadata = active_buffer
+            .and_then(|buffer_id| self.active_documents.metadata_for_buffer(buffer_id));
         let selected_proposal = proposal_ledger_projection.selected_proposal_id;
         let delegated_plans_available = delegated_task_projection.plan_count > 0;
         legion_protocol::CommandRegistryProjection {
@@ -14658,6 +15407,46 @@ impl AppComposition {
                     risk_label: legion_protocol::CommandRiskLabel::Review,
                     required_permission: Some(CapabilityId("workspace.save".to_string())),
                     target: active_buffer.map(|buffer| format!("buffer:{}", buffer.0)),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "file.save.active",
+                    title: "Save Active Buffer",
+                    scope: "editor",
+                    enabled: active_buffer.is_some(),
+                    disabled_reason: active_buffer
+                        .is_none()
+                        .then(|| "no active buffer".to_string()),
+                    shortcut: Some("⌘S"),
+                    risk_label: legion_protocol::CommandRiskLabel::Review,
+                    required_permission: Some(CapabilityId("workspace.save".to_string())),
+                    target: active_buffer.map(|buffer| format!("buffer:{}", buffer.0)),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "file.close.active",
+                    title: "Close Active Tab",
+                    scope: "editor",
+                    enabled: active_buffer.is_some(),
+                    disabled_reason: active_buffer
+                        .is_none()
+                        .then(|| "no active buffer".to_string()),
+                    shortcut: Some("⌘W"),
+                    risk_label: legion_protocol::CommandRiskLabel::Destructive,
+                    required_permission: None,
+                    target: active_buffer.map(|buffer| format!("buffer:{}", buffer.0)),
+                }),
+                command_descriptor(AppCommandDescriptorInput {
+                    command_id: "explorer.reveal.active",
+                    title: "Reveal Active File in Explorer",
+                    scope: "explorer",
+                    enabled: active_file_metadata.is_some(),
+                    disabled_reason: active_file_metadata
+                        .is_none()
+                        .then(|| "no active file metadata".to_string()),
+                    shortcut: Some("⇧⌘E"),
+                    risk_label: legion_protocol::CommandRiskLabel::Safe,
+                    required_permission: None,
+                    target: active_file_metadata
+                        .map(|metadata| format!("file:{}", metadata.identity.file_id.0)),
                 }),
                 command_descriptor(AppCommandDescriptorInput {
                     command_id: "proposal.preview",
@@ -17354,7 +18143,6 @@ impl AppComposition {
             expected_file_length: input.metadata.file_length,
             expected_modified_at: input.metadata.modified_at,
         };
-        let byte = position.byte_offset.unwrap_or(0);
         let source = match kind {
             LanguageProposalKind::Formatting => WorkspaceEditSourceKind::LspFormatting,
             LanguageProposalKind::Rename => WorkspaceEditSourceKind::LspRename,
@@ -17372,8 +18160,7 @@ impl AppComposition {
                 format!("Apply code action {}", bounded_label(&label, 64))
             }
         };
-        let mut diagnostics = Vec::new();
-        let (edit_range, replacement) = match kind {
+        let (workspace_edit, diagnostics) = match kind {
             LanguageProposalKind::Rename => {
                 let replacement = bounded_label(&label, 128);
                 if replacement.trim().is_empty() {
@@ -17383,7 +18170,9 @@ impl AppComposition {
                         "Rename proposal requires a non-empty replacement label".to_string(),
                     ));
                 }
-                let Some(range) = identifier_byte_range_at(&input.text, byte) else {
+                let Some(range) =
+                    identifier_byte_range_at(&input.text, position.byte_offset.unwrap_or(0))
+                else {
                     return Ok(self.language_tooling.record_proposal_failure(
                         &input,
                         kind,
@@ -17391,11 +18180,53 @@ impl AppComposition {
                             .to_string(),
                     ));
                 };
-                (range, replacement)
+                let target = ProposalAffectedTarget {
+                    target_id: format!("file:{}", input.metadata.identity.file_id.0),
+                    kind: ProposalTargetKind::OpenBuffer,
+                    workspace_id: Some(input.workspace_id),
+                    file_id: Some(input.metadata.identity.file_id),
+                    buffer_id: Some(buffer_id),
+                    path: Some(input.metadata.identity.canonical_path.clone()),
+                    terminal_session_id: None,
+                    plugin_id: None,
+                    remote_authority: None,
+                    collaboration_session_id: None,
+                    byte_ranges: vec![range],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                };
+                let workspace_edit = WorkspaceEditProposalPayload {
+                    workspace_id: input.workspace_id,
+                    edit_id: uuid::Uuid::now_v7(),
+                    title: title.clone(),
+                    source,
+                    target_coverage: ProposalTargetCoverage {
+                        coverage_kind: ProposalTargetCoverageKind::Complete,
+                        targets: vec![target],
+                        omitted_target_count: 0,
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                    },
+                    file_edits: vec![WorkspaceTextEdit {
+                        file: input.metadata.identity.clone(),
+                        buffer_id: Some(buffer_id),
+                        edits: EditBatch {
+                            edits: vec![ProtocolWorkspaceTextEdit {
+                                range: ProtocolEditTextRange::byte(range.start, range.end),
+                                replacement,
+                            }],
+                        },
+                        preconditions: preconditions.clone(),
+                    }],
+                    file_operations: Vec::new(),
+                    required_capability: capability.clone(),
+                    diagnostics: Vec::new(),
+                    schema_version: 1,
+                };
+                (workspace_edit, Vec::new())
             }
             LanguageProposalKind::Formatting
             | LanguageProposalKind::OrganizeImports
             | LanguageProposalKind::CodeAction => {
+                let mut diagnostics = Vec::new();
                 diagnostics.push(ProtocolDiagnostic {
                     code: "language_tooling.runtime_edit_unavailable".to_string(),
                     message: format!(
@@ -17405,52 +18236,49 @@ impl AppComposition {
                     path: Some(input.metadata.identity.canonical_path.clone()),
                     range: None,
                 });
-                (
-                    ByteRange::new(0, input.text.len() as u64),
-                    input.text.clone(),
-                )
-            }
-        };
-        let target = ProposalAffectedTarget {
-            target_id: format!("file:{}", input.metadata.identity.file_id.0),
-            kind: ProposalTargetKind::OpenBuffer,
-            workspace_id: Some(input.workspace_id),
-            file_id: Some(input.metadata.identity.file_id),
-            buffer_id: Some(buffer_id),
-            path: Some(input.metadata.identity.canonical_path.clone()),
-            terminal_session_id: None,
-            plugin_id: None,
-            remote_authority: None,
-            collaboration_session_id: None,
-            byte_ranges: vec![edit_range],
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-        };
-        let workspace_edit = WorkspaceEditProposalPayload {
-            workspace_id: input.workspace_id,
-            edit_id: uuid::Uuid::now_v7(),
-            title: title.clone(),
-            source,
-            target_coverage: ProposalTargetCoverage {
-                coverage_kind: ProposalTargetCoverageKind::Complete,
-                targets: vec![target],
-                omitted_target_count: 0,
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-            },
-            file_edits: vec![WorkspaceTextEdit {
-                file: input.metadata.identity.clone(),
-                buffer_id: Some(buffer_id),
-                edits: EditBatch {
-                    edits: vec![ProtocolWorkspaceTextEdit {
-                        range: ProtocolEditTextRange::byte(edit_range.start, edit_range.end),
-                        replacement,
+                let target = ProposalAffectedTarget {
+                    target_id: format!("file:{}", input.metadata.identity.file_id.0),
+                    kind: ProposalTargetKind::OpenBuffer,
+                    workspace_id: Some(input.workspace_id),
+                    file_id: Some(input.metadata.identity.file_id),
+                    buffer_id: Some(buffer_id),
+                    path: Some(input.metadata.identity.canonical_path.clone()),
+                    terminal_session_id: None,
+                    plugin_id: None,
+                    remote_authority: None,
+                    collaboration_session_id: None,
+                    byte_ranges: vec![ByteRange::new(0, input.text.len() as u64)],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                };
+                let workspace_edit = WorkspaceEditProposalPayload {
+                    workspace_id: input.workspace_id,
+                    edit_id: uuid::Uuid::now_v7(),
+                    title: title.clone(),
+                    source,
+                    target_coverage: ProposalTargetCoverage {
+                        coverage_kind: ProposalTargetCoverageKind::Complete,
+                        targets: vec![target],
+                        omitted_target_count: 0,
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                    },
+                    file_edits: vec![WorkspaceTextEdit {
+                        file: input.metadata.identity.clone(),
+                        buffer_id: Some(buffer_id),
+                        edits: EditBatch {
+                            edits: vec![ProtocolWorkspaceTextEdit {
+                                range: ProtocolEditTextRange::byte(0, input.text.len() as u64),
+                                replacement: input.text.clone(),
+                            }],
+                        },
+                        preconditions: preconditions.clone(),
                     }],
-                },
-                preconditions: preconditions.clone(),
-            }],
-            file_operations: Vec::new(),
-            required_capability: capability.clone(),
-            diagnostics: diagnostics.clone(),
-            schema_version: 1,
+                    file_operations: Vec::new(),
+                    required_capability: capability.clone(),
+                    diagnostics: diagnostics.clone(),
+                    schema_version: 1,
+                };
+                (workspace_edit, diagnostics)
+            }
         };
         let request = LspRequestCorrelation {
             request_id: legion_protocol::LspRequestId(uuid::Uuid::now_v7()),
@@ -17553,10 +18381,19 @@ impl AppComposition {
         }
 
         let text = self.editor.text(buffer_id)?;
+        let parsed = match parse_search_query(query) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return Ok(SearchBuildResult {
+                    validation_error: Some(message),
+                    ..SearchBuildResult::default()
+                });
+            }
+        };
         let mut result = SearchBuildResult::default();
         collect_search_results_for_text(SearchTextInput {
             query_id,
-            query,
+            pattern: &parsed.0,
             scope: SearchScopeProjection::ActiveFile,
             workspace_id: Some(metadata.identity.workspace_id),
             buffer_id: Some(buffer_id),
@@ -17588,6 +18425,15 @@ impl AppComposition {
                     height_px: 384,
                 },
             })?;
+        let parsed = match parse_search_query(query) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return Ok(SearchBuildResult {
+                    validation_error: Some(message),
+                    ..SearchBuildResult::default()
+                });
+            }
+        };
         let mut result = SearchBuildResult {
             degraded_limited: true,
             diagnostics: vec![
@@ -17600,7 +18446,7 @@ impl AppComposition {
         for slice in &viewport.line_slices {
             collect_search_results_for_line(SearchLineInput {
                 query_id,
-                query,
+                pattern: &parsed.0,
                 scope: SearchScopeProjection::ActiveFile,
                 workspace_id: Some(metadata.identity.workspace_id),
                 buffer_id: Some(buffer_id),
@@ -17624,64 +18470,66 @@ impl AppComposition {
         limit: usize,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let workspace_id = self.active_documents.require_workspace_id()?;
-        let tree = self.workspace.tree_snapshot()?;
+        let parsed = match parse_search_query(query) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return Ok(SearchBuildResult {
+                    validation_error: Some(message),
+                    ..SearchBuildResult::default()
+                });
+            }
+        };
         let mut result = SearchBuildResult::default();
+        let backend_query = WorkspaceSearchQuery {
+            workspace_id,
+            pattern: parsed.0,
+            filters: parsed.1,
+            result_limit: limit,
+            batch_size: 32,
+        };
 
-        for node in tree {
-            if !workspace_node_is_regular_file(&node) {
-                continue;
-            }
-            let Some(size_bytes) = node
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.size_bytes)
-            else {
-                result.omitted_file_count += 1;
-                result.diagnostics.push(format!(
-                    "Skipped {} because file size metadata is unavailable",
-                    node.identity.canonical_path.0
-                ));
-                continue;
-            };
-            if size_bytes > WORKSPACE_SEARCH_MAX_FILE_BYTES {
-                result.omitted_file_count += 1;
-                result.diagnostics.push(format!(
-                    "Skipped {} because {} bytes exceeds the workspace search bound",
-                    node.identity.canonical_path.0, size_bytes
-                ));
-                continue;
-            }
-
-            let text = match self
-                .workspace
-                .read_file_text(workspace_id, &node.identity.canonical_path.0)
-            {
-                Ok(text) => text,
-                Err(error) => {
-                    result.omitted_file_count += 1;
-                    result.diagnostics.push(format!(
-                        "Skipped {}: {error}",
-                        node.identity.canonical_path.0
-                    ));
-                    continue;
+        self.workspace
+            .search_workspace_stream(backend_query, |batch: WorkspaceSearchBatch| {
+                result.omitted_file_count = result
+                    .omitted_file_count
+                    .saturating_add(batch.omitted_file_count);
+                result.omitted_result_count = result
+                    .omitted_result_count
+                    .saturating_add(batch.omitted_hit_count);
+                result.diagnostics.extend(batch.diagnostics);
+                for hit in batch.hits {
+                    let byte_start = hit.byte_range.start as usize;
+                    let byte_end = hit.byte_range.end as usize;
+                    let character_start = count_chars_up_to(&hit.line_text, byte_start) as u32;
+                    let character_end = count_chars_up_to(&hit.line_text, byte_end) as u32;
+                    result.results.push(SearchResultProjection {
+                        query_id: query_id.to_string(),
+                        scope: SearchScopeProjection::Workspace,
+                        workspace_id: Some(workspace_id),
+                        buffer_id: self.editor.buffer_for_file(workspace_id, hit.file_id),
+                        file_id: Some(hit.file_id),
+                        file_path: Some(hit.canonical_path),
+                        line_number: hit.line_number,
+                        range: ProtocolTextRange {
+                            start: TextCoordinate {
+                                line: hit.line_number,
+                                character: character_start,
+                                byte_offset: Some(hit.byte_range.start),
+                                utf16_offset: Some(character_start as u64),
+                            },
+                            end: TextCoordinate {
+                                line: hit.line_number,
+                                character: character_end,
+                                byte_offset: Some(hit.byte_range.end),
+                                utf16_offset: Some(character_end as u64),
+                            },
+                        },
+                        snippet: hit.snippet,
+                        snippet_truncated: hit.snippet_truncated,
+                    });
                 }
-            };
-
-            collect_search_results_for_text(SearchTextInput {
-                query_id,
-                query,
-                scope: SearchScopeProjection::Workspace,
-                workspace_id: Some(workspace_id),
-                buffer_id: self
-                    .editor
-                    .buffer_for_file(workspace_id, node.identity.file_id),
-                file_id: Some(node.identity.file_id),
-                file_path: Some(node.identity.canonical_path),
-                text: &text,
-                limit,
-                result: &mut result,
-            });
-        }
+                true
+            })?;
 
         Ok(result)
     }
@@ -18416,6 +19264,15 @@ impl AppComposition {
             preview_warnings: Vec::new(),
             partial_failures: Vec::new(),
         };
+        plan.runtime_apply_disabled = self.batch_runtime_apply_disabled();
+        if plan.runtime_apply_disabled {
+            plan.preview_warnings.push(Self::batch_warning(
+                "proposal.batch_runtime_apply_requires_trusted_workspace",
+                ProposalPreviewWarningKind::PolicyWillDenyApply,
+                "runtime batch apply remains disabled until the active workspace is trusted",
+                None,
+            ));
+        }
 
         let ProposalPayload::Batch(batch) = &proposal.payload else {
             plan.diagnostics.push(AppProposalCoordinator::diagnostic(
@@ -18517,6 +19374,13 @@ impl AppComposition {
                 .iter()
                 .all(|failure| failure.diagnostics.is_empty());
         plan
+    }
+
+    fn batch_runtime_apply_disabled(&self) -> bool {
+        !matches!(
+            self.active_documents.active_workspace_trust,
+            Some(WorkspaceTrustState::Trusted)
+        )
     }
 
     /// Build the Stage 1E batch execution safety contract without executing the batch.

@@ -2616,6 +2616,7 @@ mod tests {
         TextEdit as ProtocolTextEdit, TextRange as ProtocolTextRange, ViewportDimensions,
         ViewportProjectionMode, ViewportScroll,
     };
+    use quickcheck::quickcheck;
 
     fn project(file_id: u128) -> ProjectInfo {
         ProjectInfo {
@@ -2647,6 +2648,84 @@ mod tests {
     }
 
     #[test]
+    fn engine_preserves_multiple_cursors_and_selections_in_projection() {
+        let mut engine = EditorEngine::new();
+        let buffer = engine
+            .open_buffer(
+                WorkspaceId(1),
+                FileId(12),
+                "src/multi.rs",
+                "alpha beta gamma\n",
+            )
+            .unwrap();
+
+        engine
+            .set_cursors(
+                buffer,
+                vec![
+                    Cursor {
+                        position: TextPosition::new(0, 2),
+                    },
+                    Cursor {
+                        position: TextPosition::new(0, 8),
+                    },
+                ],
+            )
+            .unwrap();
+        engine
+            .set_selections(
+                buffer,
+                vec![
+                    Selection {
+                        range: TextRange::new(TextPosition::new(0, 0), TextPosition::new(0, 5)),
+                    },
+                    Selection {
+                        range: TextRange::new(TextPosition::new(0, 6), TextPosition::new(0, 10)),
+                    },
+                ],
+            )
+            .unwrap();
+
+        let state = engine
+            .buffers
+            .get(&buffer)
+            .expect("buffer state should exist");
+        assert_eq!(state.cursors.len(), 2);
+        assert_eq!(state.cursors[0].position, TextPosition::new(0, 2));
+        assert_eq!(state.cursors[1].position, TextPosition::new(0, 8));
+        assert_eq!(state.selections.len(), 2);
+        assert_eq!(
+            state.selections[0].range,
+            TextRange::new(TextPosition::new(0, 0), TextPosition::new(0, 5))
+        );
+        assert_eq!(
+            state.selections[1].range,
+            TextRange::new(TextPosition::new(0, 6), TextPosition::new(0, 10))
+        );
+
+        let projection = engine
+            .viewport_projection(EditorViewportRequest {
+                buffer_id: buffer,
+                scroll: ViewportScroll {
+                    top_line: 0,
+                    left_column: 0,
+                },
+                dimensions: ViewportDimensions {
+                    width_px: 800,
+                    height_px: 16,
+                },
+            })
+            .expect("viewport projection");
+
+        assert_eq!(projection.cursor.line, 0);
+        assert_eq!(projection.cursor.character, 2);
+        assert_eq!(projection.selections.len(), 2);
+        assert_eq!(projection.selections[0].start.line, 0);
+        assert_eq!(projection.selections[0].start.character, 0);
+        assert_eq!(projection.selections[1].end.character, 10);
+    }
+
+    #[test]
     fn transaction_has_pre_post_snapshots_and_causality() {
         let mut engine = EditorEngine::new();
         let buffer = engine
@@ -2666,6 +2745,100 @@ mod tests {
         assert!(!tx.deltas.is_empty());
         assert_ne!(tx.transaction_id, tx.causality_trace_id);
         assert_eq!(engine.transaction_log().len(), 1);
+    }
+
+    #[test]
+    fn transaction_log_keeps_snapshot_anchors_through_arbitrary_edits() {
+        fn prop(seed: String, edits: Vec<(u8, u8, String)>) -> bool {
+            let seed: String = seed
+                .chars()
+                .filter(|c| c.is_ascii() && *c != '\0' && *c != '\n' && *c != '\r')
+                .take(96)
+                .collect();
+            let mut engine = EditorEngine::new();
+            let buffer = engine
+                .open_buffer(WorkspaceId(1), FileId(20), "main.rs", seed.as_str())
+                .unwrap();
+
+            let mut model = seed;
+            let mut expected_version = BufferVersion(0);
+            let mut correlation_seed = 1_u64;
+
+            for (start_seed, end_seed, replacement_seed) in edits.into_iter().take(12) {
+                let before = engine.current_snapshot(buffer).unwrap().clone();
+                assert_eq!(before.buffer_version, expected_version);
+                assert_eq!(engine.text(buffer).unwrap(), model);
+
+                let len = model.len();
+                let start = if len == 0 {
+                    0
+                } else {
+                    (start_seed as usize) % (len + 1)
+                };
+                let end = if len == 0 {
+                    0
+                } else {
+                    (end_seed as usize) % (len + 1)
+                };
+                let (start, end) = if start <= end {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
+                let replacement: String = replacement_seed
+                    .chars()
+                    .filter(|c| c.is_ascii() && *c != '\0' && *c != '\n' && *c != '\r')
+                    .take(24)
+                    .collect();
+                let replacement = if replacement.is_empty() {
+                    "x".to_string()
+                } else {
+                    replacement
+                };
+
+                model.replace_range(start..end, &replacement);
+                let tx = engine
+                    .apply_edit(
+                        buffer,
+                        TextEdit::new(
+                            TextRange::new(TextPosition::new(0, start), TextPosition::new(0, end)),
+                            replacement,
+                        ),
+                        TransactionSource::User,
+                        Some(Uuid::now_v7()),
+                        Some(CorrelationId(correlation_seed)),
+                    )
+                    .unwrap();
+                correlation_seed = correlation_seed.saturating_add(1);
+
+                assert_eq!(tx.pre_snapshot.snapshot_id, before.snapshot_id);
+                assert_eq!(tx.pre_snapshot.buffer_version, expected_version);
+                assert_eq!(tx.pre_snapshot.content_hash, before.content_hash);
+                assert_eq!(
+                    tx.post_snapshot.buffer_version,
+                    BufferVersion(expected_version.0 + 1)
+                );
+                assert_eq!(
+                    tx.post_snapshot,
+                    engine.current_snapshot(buffer).unwrap().clone()
+                );
+                assert_eq!(engine.text(buffer).unwrap(), model);
+                expected_version = BufferVersion(expected_version.0 + 1);
+            }
+
+            let log = engine.transaction_log();
+            if let Some(first) = log.first() {
+                assert_eq!(first.pre_snapshot.buffer_version, BufferVersion(0));
+                assert_eq!(
+                    first.pre_snapshot.snapshot_id,
+                    log[0].pre_snapshot.snapshot_id
+                );
+            }
+
+            true
+        }
+
+        quickcheck(prop as fn(String, Vec<(u8, u8, String)>) -> bool);
     }
 
     #[test]

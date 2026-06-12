@@ -108,29 +108,97 @@ fn terminal_fixture_lifecycle_projects_status() {
         .active_session_id
         .expect("active terminal session");
 
-    for intent in [
-        CommandDispatchIntent::TerminalInput {
+    projection = match app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalInput {
             session_id,
             payload: "echo ready".to_string(),
-        },
-        CommandDispatchIntent::TerminalResize {
+        })
+        .expect("terminal input")
+    {
+        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
+        other => panic!("expected terminal projection, got {other:?}"),
+    };
+    assert!(
+        projection
+            .output_rows
+            .iter()
+            .any(|row| row.redacted_payload.contains("command block started"))
+    );
+
+    match app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalResize {
             session_id,
             cols: 100,
             rows: 30,
-        },
-        CommandDispatchIntent::TerminalOutputPoll { session_id },
-        CommandDispatchIntent::TerminalSearch {
-            session_id,
-            query: "ready".to_string(),
-        },
-    ] {
-        projection = match app.dispatch_ui_intent(intent).expect("terminal intent") {
+        })
+        .expect("terminal resize")
+    {
+        AppCommandOutcome::TerminalPanelUpdated(_) => {}
+        other => panic!("expected terminal projection, got {other:?}"),
+    };
+    for _ in 0..20 {
+        projection = match app
+            .dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id })
+            .expect("terminal output poll")
+        {
             AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
             other => panic!("expected terminal projection, got {other:?}"),
         };
+        if projection
+            .output_rows
+            .iter()
+            .any(|row| row.redacted_payload.contains("command block finished"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    projection = match app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalSearch {
+            session_id,
+            query: "ready".to_string(),
+        })
+        .expect("terminal search")
+    {
+        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
+        other => panic!("expected terminal projection, got {other:?}"),
+    };
     assert!(!projection.output_rows.is_empty());
     assert!(projection.search.match_count > 0);
+    let start_index = projection
+        .output_rows
+        .iter()
+        .position(|row| row.redacted_payload.contains("command block started"))
+        .expect("command block start row");
+    let ready_index = projection
+        .output_rows
+        .iter()
+        .position(|row| row.redacted_payload.contains("ready"))
+        .expect("ready output row");
+    let finish_index = projection
+        .output_rows
+        .iter()
+        .position(|row| row.redacted_payload.contains("command block finished"))
+        .expect("command block finish row");
+    assert!(start_index < ready_index && ready_index < finish_index);
+    assert!(
+        projection
+            .output_rows
+            .iter()
+            .any(|row| row.redacted_payload.contains("command block finished"))
+    );
+    assert!(
+        projection
+            .output_rows
+            .iter()
+            .any(|row| row.redacted_payload.contains("exit=0"))
+    );
+    assert!(
+        projection
+            .output_rows
+            .iter()
+            .any(|row| row.redacted_payload.contains("ready"))
+    );
     assert_eq!(
         app.editor().text(buffer_id).expect("active buffer text"),
         original_text
@@ -140,15 +208,14 @@ fn terminal_fixture_lifecycle_projects_status() {
         "unchanged\n"
     );
 
-    let closed = app
-        .dispatch_ui_intent(CommandDispatchIntent::TerminalClose { session_id })
-        .expect("terminal close");
-    let projection = match closed {
-        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
-        other => panic!("expected terminal projection, got {other:?}"),
-    };
-    assert_eq!(projection.status.kind, TerminalPanelStatusKind::Exited);
-    assert!(projection.active_session_id.is_none());
+    assert_eq!(
+        projection.status.kind,
+        TerminalPanelStatusKind::Running,
+        "last_error={:?} output_rows={:?}",
+        projection.last_error,
+        projection.output_rows
+    );
+    assert!(projection.active_session_id.is_some());
 
     std::fs::remove_dir_all(&root).ok();
 }

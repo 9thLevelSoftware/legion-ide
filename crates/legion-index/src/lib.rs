@@ -3,13 +3,14 @@
 
 #![warn(missing_docs)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
 use legion_protocol::{
     ByteRange, CancellationTokenId, CanonicalPath, CapabilityId, EditBatch, FileContentVersion,
-    FileFingerprint, FileId, FileIdentity, LanguageId, LineIndexRange, LspDiagnosticSummary,
-    ProposalAffectedTarget, ProposalPayloadKind, ProposalPayloadSummary, ProposalTargetCoverage,
+    FileFingerprint, FileId, FileIdentity, LanguageId, LanguageOutlineSymbolProjection,
+    LanguageStickyScopeProjection, LineIndexRange, LspDiagnosticSummary, ProposalAffectedTarget,
+    ProposalPayloadKind, ProposalPayloadSummary, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
     ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolResult, ProtocolTextRange,
     RedactionHint, SemanticCancellationReason, SemanticCancellationToken,
@@ -286,7 +287,7 @@ pub struct IndexingActor {
     cancelled_tokens: HashMap<CancellationTokenId, SemanticCancellationReason>,
     latest_by_file: HashMap<(WorkspaceId, FileId), LatestWorkIdentity>,
     parser_cache: SyntaxTreeCache,
-    parser: LexicalFallbackParser,
+    parser: TreeSitterParser,
     index: SemanticIndex,
 }
 
@@ -301,7 +302,7 @@ impl IndexingActor {
             cancelled_tokens: HashMap::new(),
             latest_by_file: HashMap::new(),
             parser_cache: SyntaxTreeCache::new(),
-            parser: LexicalFallbackParser::new(),
+            parser: TreeSitterParser::new(),
             index: SemanticIndex::new(),
         }
     }
@@ -2463,6 +2464,52 @@ impl TreeSitterParser {
         }
         tree_sitter_highlight_captures(source)
     }
+
+    /// Returns a Rust outline projection derived from tree-sitter definition tags.
+    pub fn structural_outline(
+        &self,
+        document: &SourceDocument,
+    ) -> IndexResult<Vec<LanguageOutlineSymbolProjection>> {
+        let source = source_text(document).ok_or_else(|| IndexError::TextSnapshotUnavailable {
+            message: "tree-sitter outline extraction requires bounded source text".to_string(),
+        })?;
+        let invalidation_key = document.invalidation_key(None, None);
+        let symbols = rust_tree_sitter_symbol_records(document, source, &invalidation_key)?;
+        Ok(outline_projection_from_symbols(&symbols))
+    }
+
+    /// Returns Rust sticky scope rows derived from the tree-sitter outline projection.
+    pub fn sticky_scopes(
+        &self,
+        document: &SourceDocument,
+        position: TextCoordinate,
+    ) -> IndexResult<Vec<LanguageStickyScopeProjection>> {
+        let outline = self.structural_outline(document)?;
+        Ok(sticky_scope_projection_from_outline(&outline, position))
+    }
+
+    /// Returns tree-sitter-backed code chunk descriptors aligned to definition boundaries.
+    pub fn code_chunk_descriptors(
+        &self,
+        document: &SourceDocument,
+    ) -> IndexResult<Vec<TextChunkDescriptor>> {
+        let source = source_text(document).ok_or_else(|| IndexError::TextSnapshotUnavailable {
+            message: "tree-sitter chunk extraction requires bounded source text".to_string(),
+        })?;
+        self.code_chunk_descriptors_from_text(&document.language_id, source)
+    }
+
+    /// Returns tree-sitter-backed code chunk descriptors from transient text.
+    pub fn code_chunk_descriptors_from_text(
+        &self,
+        language_id: &LanguageId,
+        source: &str,
+    ) -> IndexResult<Vec<TextChunkDescriptor>> {
+        if !tree_sitter_supports_language(language_id) {
+            return Ok(Vec::new());
+        }
+        tree_sitter_code_chunk_descriptors(source)
+    }
 }
 
 impl ParserWorker for TreeSitterParser {
@@ -2488,6 +2535,38 @@ impl ParserWorker for TreeSitterParser {
             request.grammar_version.clone(),
             request.model_version.clone(),
         );
+        let invalidation_key = request.document.invalidation_key(
+            Some(request.grammar_version.clone()),
+            Some(request.model_version.clone()),
+        );
+        let tree_sitter_symbols =
+            rust_tree_sitter_symbol_records(&request.document, source, &invalidation_key)?;
+        if !tree_sitter_symbols.is_empty() {
+            let tree_sitter_display_names = tree_sitter_symbols
+                .iter()
+                .filter_map(|symbol| symbol.display_name.clone())
+                .collect::<std::collections::HashSet<_>>();
+            file_index.symbols.retain(|symbol| {
+                symbol
+                    .display_name
+                    .as_ref()
+                    .map(|label| !tree_sitter_display_names.contains(label))
+                    .unwrap_or(true)
+            });
+            let mut symbols_by_id = std::collections::HashMap::new();
+            for symbol in file_index.symbols.into_iter() {
+                symbols_by_id.insert(symbol.symbol_id.clone(), symbol);
+            }
+            for symbol in tree_sitter_symbols {
+                symbols_by_id.insert(symbol.symbol_id.clone(), symbol);
+            }
+            file_index.symbols = symbols_by_id.into_values().collect();
+            file_index.symbols.sort_by(|left, right| {
+                left.display_name
+                    .cmp(&right.display_name)
+                    .then_with(|| left.symbol_id.0.cmp(&right.symbol_id.0))
+            });
+        }
         let mut cache_key = SyntaxCacheKey::from_document(
             &request.document,
             &request.grammar_version,
@@ -2624,6 +2703,349 @@ fn tree_sitter_highlight_captures(source: &str) -> IndexResult<Vec<TreeSitterHig
             .then_with(|| left.capture_name.cmp(&right.capture_name))
     });
     Ok(results)
+}
+
+fn rust_tags_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(rust_tree_sitter_language(), tree_sitter_rust::TAGS_QUERY)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter Rust tags query failed: {message}"),
+        }),
+    }
+}
+
+fn protocol_range_for_node(node: tree_sitter::Node<'_>) -> ProtocolTextRange {
+    let start = node.start_position();
+    let end = node.end_position();
+    ProtocolTextRange {
+        start: TextCoordinate {
+            line: start.row as u32,
+            character: start.column as u32,
+            byte_offset: Some(node.start_byte() as u64),
+            utf16_offset: Some(start.column as u64),
+        },
+        end: TextCoordinate {
+            line: end.row as u32,
+            character: end.column as u32,
+            byte_offset: Some(node.end_byte() as u64),
+            utf16_offset: Some(end.column as u64),
+        },
+    }
+}
+
+fn tree_sitter_code_chunk_descriptors(source: &str) -> IndexResult<Vec<TextChunkDescriptor>> {
+    let tree = parse_tree_sitter_rust(source)?;
+    let query = rust_tags_query()?;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let capture_names = query.capture_names();
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+    let mut seen_ranges: HashSet<(u64, u64)> = HashSet::new();
+    let mut ranges = Vec::new();
+
+    matches.advance();
+    while let Some(query_match) = matches.get() {
+        for capture in query_match.captures.iter() {
+            let capture_name = capture_names
+                .get(capture.index as usize)
+                .copied()
+                .unwrap_or("unknown");
+            if !capture_name.starts_with("definition.") {
+                continue;
+            }
+            let range = protocol_range_for_node(capture.node);
+            let start = range.start.byte_offset.unwrap_or(0);
+            let end = range.end.byte_offset.unwrap_or(start);
+            if start < end && seen_ranges.insert((start, end)) {
+                ranges.push(range);
+            }
+            break;
+        }
+        matches.advance();
+    }
+
+    ranges.sort_by(|left, right| {
+        left.start
+            .byte_offset
+            .cmp(&right.start.byte_offset)
+            .then_with(|| left.end.byte_offset.cmp(&right.end.byte_offset))
+            .then_with(|| left.start.line.cmp(&right.start.line))
+    });
+
+    let mut chunks = ranges
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ordinal, range)| code_chunk_descriptor_from_range(source, range, ordinal))
+        .collect::<Vec<_>>();
+    if chunks.is_empty()
+        && !source.is_empty()
+        && let Some(chunk) = full_source_code_chunk_descriptor(source)
+    {
+        chunks.push(chunk);
+    }
+    Ok(chunks)
+}
+
+fn code_chunk_descriptor_from_range(
+    source: &str,
+    range: ProtocolTextRange,
+    ordinal: usize,
+) -> Option<TextChunkDescriptor> {
+    let start = range.start.byte_offset? as usize;
+    let end = range.end.byte_offset? as usize;
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+    let chunk_text = &source[start..end];
+    if chunk_text.trim().is_empty() {
+        return None;
+    }
+    Some(TextChunkDescriptor {
+        ordinal,
+        start_byte: start,
+        end_byte: end,
+        byte_len: end - start,
+        start_line: range.start.line as usize,
+        end_line: range.end.line as usize,
+        hash: sha256_fingerprint(chunk_text.as_bytes()).value,
+    })
+}
+
+fn full_source_code_chunk_descriptor(source: &str) -> Option<TextChunkDescriptor> {
+    if source.is_empty() {
+        return None;
+    }
+    Some(TextChunkDescriptor {
+        ordinal: 0,
+        start_byte: 0,
+        end_byte: source.len(),
+        byte_len: source.len(),
+        start_line: 0,
+        end_line: source.lines().count().saturating_sub(1),
+        hash: sha256_fingerprint(source.as_bytes()).value,
+    })
+}
+
+fn protocol_range_encloses(outer: ProtocolTextRange, inner: ProtocolTextRange) -> bool {
+    let starts_before = outer.start.line < inner.start.line
+        || (outer.start.line == inner.start.line && outer.start.character <= inner.start.character);
+    let ends_after = outer.end.line > inner.end.line
+        || (outer.end.line == inner.end.line && outer.end.character >= inner.end.character);
+    starts_before && ends_after
+}
+
+fn rust_tree_sitter_symbol_records(
+    document: &SourceDocument,
+    source: &str,
+    invalidation_key: &SemanticInvalidationKey,
+) -> IndexResult<Vec<SymbolFileMapRecord>> {
+    let tree = parse_tree_sitter_rust(source)?;
+    let query = rust_tags_query()?;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+    let capture_names = query.capture_names();
+    let provenance = tree_sitter_provenance();
+    let mut records_by_id: HashMap<SemanticSymbolId, SymbolFileMapRecord> = HashMap::new();
+
+    matches.advance();
+    while let Some(query_match) = matches.get() {
+        let mut kind_label = None;
+        let mut name_node = None;
+        let mut definition_node = None;
+        for capture in query_match.captures.iter() {
+            let capture_name = capture_names
+                .get(capture.index as usize)
+                .copied()
+                .unwrap_or("unknown");
+            if capture_name == "name" {
+                name_node = Some(capture.node);
+            } else if capture_name.starts_with("definition.") {
+                kind_label = Some(capture_name.to_string());
+                definition_node = Some(capture.node);
+            }
+        }
+        if let (Some(name_node), Some(definition_node), Some(kind_label)) =
+            (name_node, definition_node, kind_label)
+        {
+            let name = name_node
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                matches.advance();
+                continue;
+            }
+            let range = protocol_range_for_node(definition_node);
+            let candidate = SymbolCandidate {
+                name: name.clone(),
+                kind: kind_label.clone(),
+                range,
+                has_type_hint: false,
+                reference_ranges: Vec::new(),
+            };
+            let record = SymbolFileMapRecord {
+                symbol_id: symbol_id(document, &candidate),
+                symbol_name_hash: symbol_name_fingerprint(&candidate.name),
+                display_name: display_name_for_scope(
+                    &candidate.name,
+                    document.identity.privacy_scope,
+                ),
+                kind: candidate.kind.clone(),
+                workspace_id: document.identity.workspace_id,
+                file_id: document.identity.file_id,
+                path: document.identity.canonical_path.clone(),
+                language_id: document.language_id.clone(),
+                declaration_range: Some(candidate.range),
+                reference_ranges: Vec::new(),
+                invalidation_key: invalidation_key.clone(),
+                provenance: provenance.clone(),
+                schema_version: INDEX_SCHEMA_VERSION,
+            };
+            records_by_id
+                .entry(record.symbol_id.clone())
+                .and_modify(|existing| {
+                    let existing_priority = existing.kind.as_str();
+                    let new_priority = record.kind.as_str();
+                    let priority = |kind: &str| match kind {
+                        "definition.method" => 3,
+                        "definition.class" | "definition.module" | "definition.interface" => 2,
+                        "definition.function" => 1,
+                        _ => 0,
+                    };
+                    if priority(new_priority) > priority(existing_priority) {
+                        *existing = record.clone();
+                    }
+                })
+                .or_insert(record);
+        }
+        matches.advance();
+    }
+
+    let mut records = records_by_id.into_values().collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then_with(|| left.symbol_id.0.cmp(&right.symbol_id.0))
+    });
+    Ok(records)
+}
+
+fn outline_projection_from_symbols(
+    symbols: &[SymbolFileMapRecord],
+) -> Vec<LanguageOutlineSymbolProjection> {
+    let mut outline = symbols
+        .iter()
+        .map(|symbol| LanguageOutlineSymbolProjection {
+            symbol_id: symbol.symbol_id.0.clone(),
+            label: symbol
+                .display_name
+                .clone()
+                .unwrap_or_else(|| symbol.symbol_name_hash.value.clone()),
+            kind_label: symbol.kind.clone(),
+            range: symbol.declaration_range,
+            depth: 0,
+            children_omitted: false,
+            schema_version: 1,
+        })
+        .collect::<Vec<_>>();
+
+    outline.sort_by(|left, right| {
+        left.range
+            .as_ref()
+            .map(|range| {
+                (
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character,
+                )
+            })
+            .cmp(&right.range.as_ref().map(|range| {
+                (
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character,
+                )
+            }))
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+    });
+
+    let ranges = outline.iter().map(|row| row.range).collect::<Vec<_>>();
+    for (index, row) in outline.iter_mut().enumerate() {
+        let Some(range) = row.range else { continue };
+        row.depth = ranges
+            .iter()
+            .enumerate()
+            .filter(|(other_index, other)| {
+                *other_index != index
+                    && other
+                        .map(|outer| protocol_range_encloses(outer, range))
+                        .unwrap_or(false)
+            })
+            .count() as u16;
+    }
+    outline
+}
+
+fn sticky_scope_projection_from_outline(
+    outline: &[LanguageOutlineSymbolProjection],
+    position: TextCoordinate,
+) -> Vec<LanguageStickyScopeProjection> {
+    let mut rows = outline
+        .iter()
+        .filter(|row| {
+            row.range
+                .map(|range| range_contains(range, position))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| {
+        left.range
+            .as_ref()
+            .map(|range| {
+                (
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character,
+                )
+            })
+            .cmp(&right.range.as_ref().map(|range| {
+                (
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character,
+                )
+            }))
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+    });
+
+    let active_index = rows.len().saturating_sub(1);
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, symbol)| LanguageStickyScopeProjection {
+            scope_id: format!("sticky:{}", symbol.symbol_id),
+            label: symbol.label,
+            kind_label: symbol.kind_label,
+            range: symbol.range,
+            depth: index.min(u16::MAX as usize) as u16,
+            active: index == active_index,
+            source_label: "tree-sitter".to_string(),
+            schema_version: 1,
+        })
+        .collect()
 }
 
 fn count_tree_sitter_nodes(node: tree_sitter::Node<'_>) -> usize {

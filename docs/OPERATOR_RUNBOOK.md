@@ -111,3 +111,7 @@ The PR body must include:
 - security/authority boundary notes;
 - cloud/training operational notes;
 - no unsupported planned features in scope.
+
+## Git remote auth paths
+
+Legion's git remote actions shell out to the user's installed `git` binary without scrubbing the process environment. That means SSH-based remotes continue to use the caller's `SSH_AUTH_SOCK`/agent setup, and HTTPS remotes continue to use whatever credential helper is already configured for the host (for example the macOS keychain helper, Git Credential Manager, or a custom helper on `$PATH`).

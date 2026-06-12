@@ -3,9 +3,13 @@ use std::process::Command;
 
 use legion_lsp::{
     LspRuntimeError, LspServerProcessConfig, LspStdioProcess, LspStdioSession, LspStdioSpawner,
-    LspSupervisorConfig, LspTextDocumentIdentity, completion_request, definition_request,
-    hover_request, project_completion_response, project_hover_response, project_location_response,
-    references_request,
+    LspSupervisorConfig, LspTextDocumentIdentity, code_lens_request, completion_request,
+    declaration_request, definition_request, document_symbol_request, folding_range_request,
+    hover_request, implementation_request, inlay_hint_request, project_code_lens_response,
+    project_completion_response, project_document_symbol_response, project_hover_response,
+    project_inlay_hint_response, project_location_response, project_workspace_symbol_response,
+    references_request, semantic_tokens_full_request, signature_help_request,
+    type_definition_request, workspace_symbol_request,
 };
 use legion_protocol::{
     BufferId, BufferVersion, CancellationTokenId, CapabilityDecisionId, CapabilityId, CausalityId,
@@ -405,15 +409,103 @@ fn rust_analyzer_initializes_against_legion_repo_when_opted_in() {
         return;
     }
 
+    let temp_root = std::env::temp_dir().join(format!(
+        "legion-ra-smoke-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(temp_root.join("src")).unwrap();
+    let source = r#"pub struct Alpha;
+
+pub fn add(left: u32, right: u32) -> u32 {
+    left + right
+}
+
+pub fn add_one(value: u32) -> u32 {
+    add(value, 1)
+}
+
+pub fn completion_fixture() {
+    let _ = Alp;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smoke() {
+        assert_eq!(add(1, 2), 3);
+    }
+}
+"#;
+    std::fs::write(
+        temp_root.join("Cargo.toml"),
+        "[package]\nname = \"legion_ra_smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(temp_root.join("src/lib.rs"), source).unwrap();
+
+    let document = LspTextDocumentIdentity {
+        uri: format!("file://{}", temp_root.join("src/lib.rs").display()),
+        language_id: LanguageId("rust".to_string()),
+        workspace_id: WorkspaceId(55),
+        file_id: FileId(5),
+        snapshot_id: SnapshotId(6),
+        buffer_version: BufferVersion(7),
+        content_hash: Some(fingerprint("content")),
+    };
+
+    let position_of = |needle: &str| -> Utf16Position {
+        source
+            .lines()
+            .enumerate()
+            .find_map(|(line_index, line)| {
+                line.find(needle).map(|byte_index| Utf16Position {
+                    line: line_index as u32,
+                    character: line[..byte_index].chars().count() as u32,
+                })
+            })
+            .unwrap_or_else(|| panic!("missing `{needle}` in smoke fixture"))
+    };
+    let position_after = |needle: &str| -> Utf16Position {
+        source
+            .lines()
+            .enumerate()
+            .find_map(|(line_index, line)| {
+                line.find(needle).map(|byte_index| Utf16Position {
+                    line: line_index as u32,
+                    character: line[..byte_index + needle.len()].chars().count() as u32,
+                })
+            })
+            .unwrap_or_else(|| panic!("missing `{needle}` in smoke fixture"))
+    };
+
     let mut launcher = legion_lsp::LspStdioLauncher::new();
-    let mut session =
-        LspStdioSession::start(supervisor_config(ra, Vec::new()), &mut launcher).unwrap();
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut session = LspStdioSession::start(
+        LspSupervisorConfig {
+            launch_policy: launch_policy(WorkspaceTrustState::Trusted, true, true),
+            process: legion_lsp::LspServerProcessConfig {
+                command: ra,
+                args: Vec::new(),
+                cwd: Some(temp_root.clone()),
+                env: Vec::new(),
+            },
+            initial_backoff_ms: 25,
+            max_backoff_ms: 400,
+            max_restart_attempts: 3,
+        },
+        &mut launcher,
+    )
+    .unwrap();
     let response = session
         .initialize(
             json!({
                 "processId": null,
-                "rootUri": format!("file://{}", root.display()),
+                "rootUri": format!("file://{}", temp_root.display()),
                 "capabilities": {},
             }),
             operation_context(5, 10_000),
@@ -422,4 +514,193 @@ fn rust_analyzer_initializes_against_legion_repo_when_opted_in() {
 
     assert_eq!(response.status, LspResultStatus::Fresh);
     assert!(response.result["capabilities"].is_object());
+
+    session.send_notification("initialized", json!({})).unwrap();
+    session
+        .send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": document.uri,
+                    "languageId": "rust",
+                    "version": 1,
+                    "text": source,
+                }
+            }),
+        )
+        .unwrap();
+
+    let completion_pos = position_after("Alp");
+    let completion = completion_request(100, &document, completion_pos)
+        .params
+        .expect("completion params");
+    let response = session
+        .request(
+            "textDocument/completion",
+            completion,
+            operation_context(11, 15_000),
+        )
+        .expect("completion response");
+    let _completion_rows = project_completion_response(&response.result, 10);
+
+    let hover_pos = position_of("pub fn add(");
+    let call_pos = position_of("add(value, 1)");
+    let hover = hover_request(101, &document, hover_pos)
+        .params
+        .expect("hover params");
+    let response = session
+        .request("textDocument/hover", hover, operation_context(12, 15_000))
+        .expect("hover response");
+    let _hover = project_hover_response(&response.result, Some(document.file_id));
+
+    let definition = definition_request(102, &document, call_pos)
+        .params
+        .expect("definition params");
+    let response = session
+        .request(
+            "textDocument/definition",
+            definition,
+            operation_context(13, 15_000),
+        )
+        .expect("definition response");
+    let _definitions = project_location_response(&response.result, 10);
+
+    let references = references_request(103, &document, position_of("pub fn add("), true)
+        .params
+        .expect("references params");
+    let response = session
+        .request(
+            "textDocument/references",
+            references,
+            operation_context(14, 15_000),
+        )
+        .expect("references response");
+    let _references = project_location_response(&response.result, 10);
+
+    let declaration = declaration_request(104, &document, call_pos)
+        .params
+        .expect("declaration params");
+    let response = session
+        .request(
+            "textDocument/declaration",
+            declaration,
+            operation_context(15, 15_000),
+        )
+        .expect("declaration response");
+    let _locations = project_location_response(&response.result, 10);
+
+    let implementation = implementation_request(105, &document, call_pos)
+        .params
+        .expect("implementation params");
+    let response = session
+        .request(
+            "textDocument/implementation",
+            implementation,
+            operation_context(16, 15_000),
+        )
+        .expect("implementation response");
+    let _locations = project_location_response(&response.result, 10);
+
+    let type_definition = type_definition_request(106, &document, call_pos)
+        .params
+        .expect("type-definition params");
+    let response = session
+        .request(
+            "textDocument/typeDefinition",
+            type_definition,
+            operation_context(17, 15_000),
+        )
+        .expect("type-definition response");
+    let _locations = project_location_response(&response.result, 10);
+
+    let signature_help = signature_help_request(107, &document, call_pos)
+        .params
+        .expect("signature help params");
+    let response = session
+        .request(
+            "textDocument/signatureHelp",
+            signature_help,
+            operation_context(18, 15_000),
+        )
+        .expect("signature help response");
+    let _signature_help = response.result.get("signatures");
+
+    let response = session
+        .request(
+            "textDocument/documentSymbol",
+            document_symbol_request(108, &document)
+                .params
+                .expect("document symbol params"),
+            operation_context(19, 15_000),
+        )
+        .expect("document symbol response");
+    let _outline = project_document_symbol_response(&response.result, 20);
+
+    let response = session
+        .request(
+            "workspace/symbol",
+            workspace_symbol_request(109, "add")
+                .params
+                .expect("workspace symbol params"),
+            operation_context(20, 15_000),
+        )
+        .expect("workspace symbol response");
+    let _workspace_symbols = project_workspace_symbol_response(&response.result, 20);
+
+    let response = session
+        .request(
+            "textDocument/inlayHint",
+            inlay_hint_request(
+                110,
+                &document,
+                legion_protocol::Utf16Range {
+                    start: Utf16Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Utf16Position {
+                        line: 40,
+                        character: 0,
+                    },
+                },
+            )
+            .params
+            .expect("inlay hint params"),
+            operation_context(21, 15_000),
+        )
+        .expect("inlay hint response");
+    let _hints = project_inlay_hint_response(&response.result, "rust-analyzer", 20);
+
+    let response = session
+        .request(
+            "textDocument/codeLens",
+            code_lens_request(111, &document)
+                .params
+                .expect("code lens params"),
+            operation_context(22, 15_000),
+        )
+        .expect("code lens response");
+    let _lenses = project_code_lens_response(&response.result, "rust-analyzer", 20);
+
+    let response = session
+        .request(
+            "textDocument/foldingRange",
+            folding_range_request(112, &document)
+                .params
+                .expect("folding range params"),
+            operation_context(23, 15_000),
+        )
+        .expect("folding range response");
+    let _folding_ranges = response.result.as_array();
+
+    let response = session
+        .request(
+            "textDocument/semanticTokens/full",
+            semantic_tokens_full_request(113, &document)
+                .params
+                .expect("semantic tokens params"),
+            operation_context(24, 15_000),
+        )
+        .expect("semantic tokens response");
+    let _semantic_tokens = response.result.get("data").and_then(|data| data.as_array());
 }

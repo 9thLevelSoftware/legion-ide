@@ -11,3 +11,6 @@ legion-protocol = { workspace = true }
 legion-text = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+quickcheck = "1"

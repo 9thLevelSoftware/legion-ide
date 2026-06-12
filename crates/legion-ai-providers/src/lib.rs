@@ -36,6 +36,10 @@ pub const OLLAMA_PROVIDER_ID: &str = "ollama";
 pub const LLAMA_CPP_PROVIDER_ID: &str = "llama-cpp";
 /// OpenAI-compatible inline prediction provider slot.
 pub const OPENAI_COMPATIBLE_PROVIDER_ID: &str = "openai-compatible";
+/// Anthropic Messages API provider slot.
+pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const ANTHROPIC_STRUCTURED_OUTPUTS_BETA: &str = "structured-outputs-2025-11-13";
 /// GitHub Copilot NES inline prediction provider slot.
 pub const COPILOT_NES_PROVIDER_ID: &str = "copilot-nes";
 /// Mercury inline prediction provider slot.
@@ -53,6 +57,9 @@ pub fn make_provider_registry() -> legion_ai::ProviderRegistry {
     registry.register(Box::new(LlamaCppProvider::default()));
     registry.register(Box::new(OpenAiCompatibleProvider::from_env(
         OPENAI_COMPATIBLE_PROVIDER_ID,
+    )));
+    registry.register(Box::new(AnthropicMessagesClient::from_env(
+        ANTHROPIC_PROVIDER_ID,
     )));
     registry
 }
@@ -700,6 +707,542 @@ where
         Err(ProviderError::unavailable(
             request.provider,
             "llama.cpp inline prediction provider is not configured",
+        ))
+    }
+}
+
+/// Configured Anthropic Messages API client adapter.
+#[derive(Debug, Clone)]
+pub struct AnthropicMessagesClient<T = ReqwestProviderHttpTransport> {
+    id: ProviderId,
+    base_url: String,
+    api_key: Option<String>,
+    transport: T,
+}
+
+/// Anthropic-specific request extras used for strict tools, structured outputs, and thinking.
+#[derive(Debug, Clone, Default)]
+pub struct AnthropicRequestExtras {
+    /// Strict tool definitions passed through to the Messages API.
+    pub tools: Vec<Value>,
+    /// Structured output configuration passed through to `output_config`.
+    pub output_config: Option<Value>,
+    /// Optional thinking configuration passed through to the request body.
+    pub thinking: Option<Value>,
+}
+
+/// SSE event kinds emitted by the Anthropic Messages API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnthropicSseEvent {
+    /// The assistant message has started.
+    MessageStart,
+    /// A content block has started.
+    ContentBlockStart,
+    /// A text delta was emitted for the active content block.
+    ContentBlockDelta(String),
+    /// A content block has finished.
+    ContentBlockStop,
+    /// Top-level message metadata changed.
+    MessageDelta,
+    /// The assistant message has ended.
+    MessageStop,
+    /// A streaming event we do not currently interpret.
+    Unknown(String),
+}
+
+/// JSON Schema structured-output helper for Anthropic request bodies.
+pub fn anthropic_json_schema_output_config(name: impl Into<String>, schema: Value) -> Value {
+    json!({
+        "format": {
+            "type": "json_schema",
+            "name": name.into(),
+            "schema": schema,
+        }
+    })
+}
+
+/// Strict tool definition helper for Anthropic request bodies.
+pub fn anthropic_strict_tool_definition(
+    name: impl Into<String>,
+    description: impl Into<String>,
+    input_schema: Value,
+) -> Value {
+    json!({
+        "name": name.into(),
+        "description": description.into(),
+        "input_schema": input_schema,
+        "strict": true,
+    })
+}
+
+/// Shared HTTP transport abstraction for Anthropic Messages API calls.
+pub trait AnthropicMessagesTransport: Clone + Send + Sync + 'static {
+    /// POST a JSON payload and return the parsed JSON response.
+    fn post_json(
+        &self,
+        endpoint: &str,
+        api_key: Option<&str>,
+        beta_header: Option<&str>,
+        payload: Value,
+    ) -> Result<Value, ProviderError>;
+
+    /// POST a JSON payload and return the raw text response body.
+    fn post_text(
+        &self,
+        endpoint: &str,
+        api_key: Option<&str>,
+        beta_header: Option<&str>,
+        payload: Value,
+    ) -> Result<String, ProviderError>;
+}
+
+impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
+    fn post_json(
+        &self,
+        endpoint: &str,
+        api_key: Option<&str>,
+        beta_header: Option<&str>,
+        payload: Value,
+    ) -> Result<Value, ProviderError> {
+        let mut request = reqwest::blocking::Client::new()
+            .post(endpoint)
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .json(&payload);
+        if let Some(beta_header) = beta_header.filter(|value| !value.trim().is_empty()) {
+            request = request.header("anthropic-beta", beta_header);
+        }
+        if let Some(token) = api_key.filter(|token| !token.trim().is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .map_err(|error| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: error.to_string(),
+            })?;
+        if !response.status().is_success() {
+            return Err(ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: format!("{endpoint} returned {}", response.status()),
+            });
+        }
+        response
+            .json::<Value>()
+            .map_err(|error| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: error.to_string(),
+            })
+    }
+
+    fn post_text(
+        &self,
+        endpoint: &str,
+        bearer_token: Option<&str>,
+        beta_header: Option<&str>,
+        payload: Value,
+    ) -> Result<String, ProviderError> {
+        let mut request = reqwest::blocking::Client::new()
+            .post(endpoint)
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .json(&payload);
+        if let Some(beta_header) = beta_header.filter(|value| !value.trim().is_empty()) {
+            request = request.header("anthropic-beta", beta_header);
+        }
+        if let Some(token) = bearer_token.filter(|token| !token.trim().is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .map_err(|error| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: error.to_string(),
+            })?;
+        if !response.status().is_success() {
+            return Err(ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: format!("{endpoint} returned {}", response.status()),
+            });
+        }
+        response
+            .text()
+            .map_err(|error| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: error.to_string(),
+            })
+    }
+}
+
+impl Default for AnthropicMessagesClient<ReqwestProviderHttpTransport> {
+    fn default() -> Self {
+        Self::from_env(ANTHROPIC_PROVIDER_ID)
+    }
+}
+
+impl AnthropicMessagesClient<ReqwestProviderHttpTransport> {
+    /// Creates an Anthropic adapter from environment configuration.
+    pub fn from_env(id: impl Into<ProviderId>) -> Self {
+        let api_key = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_API_KEY")).ok(),
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_AUTH_TOKEN")).ok(),
+            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_API_KEY")).ok(),
+            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_AUTH_TOKEN")).ok(),
+            std::env::var("ANTHROPIC_API_KEY").ok(),
+            std::env::var("ANTHROPIC_AUTH_TOKEN").ok(),
+        ]);
+        let base_url = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
+            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
+            std::env::var("ANTHROPIC_BASE_URL").ok(),
+        ])
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+        Self::with_transport(id, base_url, api_key, ReqwestProviderHttpTransport)
+    }
+}
+
+impl<T> AnthropicMessagesClient<T>
+where
+    T: AnthropicMessagesTransport,
+{
+    /// Creates an Anthropic adapter with an injected transport.
+    pub fn with_transport(
+        id: impl Into<ProviderId>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        transport: T,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            base_url: normalize_base_url(base_url.into()),
+            api_key,
+            transport,
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    }
+
+    fn bearer_token(&self) -> Result<&str, ProviderError> {
+        self.api_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ProviderError::unavailable(
+                    self.id.clone(),
+                    "Anthropic API key or auth token is not configured",
+                )
+            })
+    }
+
+    fn request_messages(request: &ChatCompletionRequest) -> (Option<String>, Vec<Value>) {
+        let mut system_messages = Vec::new();
+        let mut messages = Vec::new();
+        for message in &request.messages {
+            match message.role {
+                ChatRole::System => system_messages.push(message.content.clone()),
+                ChatRole::User | ChatRole::Assistant => messages.push(json!({
+                    "role": chat_role_label(&message.role),
+                    "content": [{
+                        "type": "text",
+                        "text": message.content,
+                    }],
+                })),
+            }
+        }
+        let system = if system_messages.is_empty() {
+            None
+        } else {
+            Some(system_messages.join("\n"))
+        };
+        (system, messages)
+    }
+
+    fn completion_payload(
+        &self,
+        request: &ChatCompletionRequest,
+        stream: bool,
+        extras: &AnthropicRequestExtras,
+    ) -> Value {
+        let (system, messages) = Self::request_messages(request);
+        let mut payload = json!({
+            "model": request.model,
+            "max_tokens": request.max_tokens.unwrap_or(1024),
+            "messages": messages,
+            "stream": stream,
+        });
+        if let Some(system) = system {
+            payload["system"] = json!(system);
+        }
+        if let Some(temperature) = request.temperature {
+            payload["temperature"] = json!(temperature);
+        }
+        if !extras.tools.is_empty() {
+            payload["tools"] = json!(extras.tools);
+        }
+        if let Some(output_config) = extras.output_config.clone() {
+            payload["output_config"] = output_config;
+        }
+        if let Some(thinking) = extras.thinking.clone() {
+            payload["thinking"] = thinking;
+        }
+        payload
+    }
+
+    fn count_tokens_payload(
+        &self,
+        request: &ChatCompletionRequest,
+        extras: &AnthropicRequestExtras,
+    ) -> Value {
+        let (system, messages) = Self::request_messages(request);
+        let mut payload = json!({
+            "model": request.model,
+            "messages": messages,
+        });
+        if let Some(system) = system {
+            payload["system"] = json!(system);
+        }
+        if !extras.tools.is_empty() {
+            payload["tools"] = json!(extras.tools);
+        }
+        payload
+    }
+
+    fn beta_header_for_extras(extras: &AnthropicRequestExtras) -> Option<&'static str> {
+        let uses_strict_tools = extras
+            .tools
+            .iter()
+            .any(|tool| tool.get("strict").and_then(Value::as_bool) == Some(true));
+        if uses_strict_tools || extras.output_config.is_some() {
+            Some(ANTHROPIC_STRUCTURED_OUTPUTS_BETA)
+        } else {
+            None
+        }
+    }
+
+    fn extract_assistant_text(response: &Value) -> Result<String, ProviderError> {
+        let content = response
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ProviderError::RequestFailed {
+                provider: "anthropic".to_string(),
+                message: "Anthropic response missing content blocks".to_string(),
+            })?;
+        let mut text = String::new();
+        for block in content {
+            if block.get("type").and_then(Value::as_str) == Some("text")
+                && let Some(chunk) = block.get("text").and_then(Value::as_str)
+            {
+                text.push_str(chunk);
+            }
+        }
+        if text.is_empty() {
+            return Err(ProviderError::RequestFailed {
+                provider: "anthropic".to_string(),
+                message: "Anthropic response missing text content".to_string(),
+            });
+        }
+        Ok(text)
+    }
+
+    fn extract_input_tokens(response: &Value) -> Result<u32, ProviderError> {
+        response
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .ok_or_else(|| ProviderError::RequestFailed {
+                provider: "anthropic".to_string(),
+                message: "Anthropic token-count response missing input_tokens".to_string(),
+            })
+    }
+
+    fn parse_sse_events(body: &str) -> Result<Vec<AnthropicSseEvent>, ProviderError> {
+        let mut events = Vec::new();
+        let mut current_event: Option<String> = None;
+        let mut current_data = String::new();
+        let flush =
+            |events: &mut Vec<AnthropicSseEvent>, event: Option<String>, data: &mut String| {
+                let Some(event) = event else {
+                    data.clear();
+                    return Ok::<(), ProviderError>(());
+                };
+                if event == "ping" {
+                    data.clear();
+                    return Ok(());
+                }
+                let payload = if data.trim().is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str::<Value>(data).map_err(|error| {
+                        ProviderError::RequestFailed {
+                            provider: "anthropic".to_string(),
+                            message: error.to_string(),
+                        }
+                    })?
+                };
+                let parsed = match event.as_str() {
+                    "message_start" => AnthropicSseEvent::MessageStart,
+                    "content_block_start" => AnthropicSseEvent::ContentBlockStart,
+                    "content_block_delta" => {
+                        let text = payload
+                            .get("delta")
+                            .and_then(|delta| delta.get("text"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        AnthropicSseEvent::ContentBlockDelta(text)
+                    }
+                    "content_block_stop" => AnthropicSseEvent::ContentBlockStop,
+                    "message_delta" => AnthropicSseEvent::MessageDelta,
+                    "message_stop" => AnthropicSseEvent::MessageStop,
+                    other => AnthropicSseEvent::Unknown(other.to_string()),
+                };
+                events.push(parsed);
+                data.clear();
+                Ok(())
+            };
+
+        for line in body.lines() {
+            let line = line.trim_end();
+            if line.is_empty() {
+                flush(&mut events, current_event.take(), &mut current_data)?;
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("event:") {
+                current_event = Some(rest.trim().to_string());
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("data:") {
+                if !current_data.is_empty() {
+                    current_data.push('\n');
+                }
+                current_data.push_str(rest.trim_start());
+            }
+        }
+        flush(&mut events, current_event.take(), &mut current_data)?;
+        Ok(events)
+    }
+
+    /// Sends a completion request using the native Anthropic Messages API.
+    pub fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        self.complete_with_extras(request, AnthropicRequestExtras::default())
+    }
+
+    /// Sends a completion request with Anthropic-only extras.
+    pub fn complete_with_extras(
+        &self,
+        request: ChatCompletionRequest,
+        extras: AnthropicRequestExtras,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        let bearer_token = self.bearer_token()?;
+        let response = self.transport.post_json(
+            &self.endpoint("/v1/messages"),
+            Some(bearer_token),
+            Self::beta_header_for_extras(&extras),
+            self.completion_payload(&request, false, &extras),
+        )?;
+        let text = Self::extract_assistant_text(&response)?;
+        Ok(ChatCompletionResponse {
+            provider: self.id.clone(),
+            model: request.model,
+            text,
+            metadata: provider_metadata("anthropic", &self.base_url),
+        })
+    }
+
+    /// Streams a completion request and returns the parsed SSE event sequence.
+    pub fn stream_events_with_extras(
+        &self,
+        request: ChatCompletionRequest,
+        extras: AnthropicRequestExtras,
+    ) -> Result<Vec<AnthropicSseEvent>, ProviderError> {
+        let bearer_token = self.bearer_token()?;
+        let body = self.transport.post_text(
+            &self.endpoint("/v1/messages"),
+            Some(bearer_token),
+            Self::beta_header_for_extras(&extras),
+            self.completion_payload(&request, true, &extras),
+        )?;
+        Self::parse_sse_events(&body)
+    }
+
+    /// Streams a completion request and returns only text deltas, in arrival order.
+    pub fn stream_text_deltas_with_extras(
+        &self,
+        request: ChatCompletionRequest,
+        extras: AnthropicRequestExtras,
+    ) -> Result<Vec<String>, ProviderError> {
+        Ok(self
+            .stream_events_with_extras(request, extras)?
+            .into_iter()
+            .filter_map(|event| match event {
+                AnthropicSseEvent::ContentBlockDelta(text) => Some(text),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Counts the input tokens for a completion request using Anthropic's token-count endpoint.
+    pub fn count_tokens_with_extras(
+        &self,
+        request: ChatCompletionRequest,
+        extras: AnthropicRequestExtras,
+    ) -> Result<u32, ProviderError> {
+        let bearer_token = self.bearer_token()?;
+        let response = self.transport.post_json(
+            &self.endpoint("/v1/messages/count_tokens"),
+            Some(bearer_token),
+            Self::beta_header_for_extras(&extras),
+            self.count_tokens_payload(&request, &extras),
+        )?;
+        Self::extract_input_tokens(&response)
+    }
+
+    /// Counts the input tokens for a completion request using Anthropic's token-count endpoint.
+    pub fn count_tokens(&self, request: ChatCompletionRequest) -> Result<u32, ProviderError> {
+        self.count_tokens_with_extras(request, AnthropicRequestExtras::default())
+    }
+}
+
+impl<T> ModelProvider for AnthropicMessagesClient<T>
+where
+    T: AnthropicMessagesTransport,
+{
+    fn provider_id(&self) -> ProviderId {
+        self.id.clone()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: true,
+            embedding: false,
+            inline_prediction: false,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        AnthropicMessagesClient::complete(self, request)
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(
+            self.id.clone(),
+            format!("embed:{}", request.model),
+        ))
+    }
+
+    fn predict_inline(
+        &self,
+        request: InlinePredictionRequest,
+    ) -> Result<InlinePredictionResponse, ProviderError> {
+        Err(ProviderError::unsupported(
+            request.provider,
+            "predict_inline",
         ))
     }
 }
@@ -1586,6 +2129,7 @@ fn metadata_hash(algorithm: &str, value: &Value) -> FileFingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use legion_ai::ChatMessage;
     use legion_ai::InlinePredictionRequest;
     use legion_protocol::{
         AssistedAiOperationClass, AssistedAiProviderClass, AssistedAiProviderInvocationState,
@@ -1758,6 +2302,8 @@ mod tests {
     struct RecordedProviderCall {
         endpoint: String,
         bearer_token: Option<String>,
+        anthropic_version: Option<String>,
+        anthropic_beta: Option<String>,
         payload: Value,
     }
 
@@ -1780,6 +2326,8 @@ mod tests {
                 .push(RecordedProviderCall {
                     endpoint: endpoint.to_string(),
                     bearer_token: bearer_token.map(str::to_string),
+                    anthropic_version: None,
+                    anthropic_beta: None,
                     payload: payload.clone(),
                 });
             if endpoint.ends_with("/api/generate") {
@@ -1792,6 +2340,15 @@ mod tests {
                         { "message": { "content": "openai-compatible answer" } }
                     ]
                 }))
+            } else if endpoint.ends_with("/v1/messages/count_tokens") {
+                Ok(json!({ "input_tokens": 73 }))
+            } else if endpoint.ends_with("/v1/messages") {
+                Ok(json!({
+                    "content": [
+                        { "type": "text", "text": "anthropic answer" }
+                    ],
+                    "usage": { "input_tokens": 17, "output_tokens": 5 }
+                }))
             } else if endpoint.ends_with("/embeddings") {
                 Ok(json!({
                     "data": [
@@ -1802,6 +2359,83 @@ mod tests {
                 Err(ProviderError::RequestFailed {
                     provider: "recording".to_string(),
                     message: format!("unexpected endpoint {endpoint}"),
+                })
+            }
+        }
+    }
+
+    impl AnthropicMessagesTransport for RecordingProviderTransport {
+        fn post_json(
+            &self,
+            endpoint: &str,
+            bearer_token: Option<&str>,
+            beta_header: Option<&str>,
+            payload: Value,
+        ) -> Result<Value, ProviderError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(RecordedProviderCall {
+                    endpoint: endpoint.to_string(),
+                    bearer_token: bearer_token.map(str::to_string),
+                    anthropic_version: Some(ANTHROPIC_API_VERSION.to_string()),
+                    anthropic_beta: beta_header.map(str::to_string),
+                    payload: payload.clone(),
+                });
+            if endpoint.ends_with("/v1/messages/count_tokens") {
+                Ok(json!({ "input_tokens": 73 }))
+            } else if endpoint.ends_with("/v1/messages") {
+                Ok(json!({
+                    "content": [
+                        { "type": "text", "text": "anthropic answer" }
+                    ],
+                    "usage": { "input_tokens": 17, "output_tokens": 5 }
+                }))
+            } else {
+                Err(ProviderError::RequestFailed {
+                    provider: "recording".to_string(),
+                    message: format!("unexpected anthropic endpoint {endpoint}"),
+                })
+            }
+        }
+
+        fn post_text(
+            &self,
+            endpoint: &str,
+            bearer_token: Option<&str>,
+            beta_header: Option<&str>,
+            payload: Value,
+        ) -> Result<String, ProviderError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(RecordedProviderCall {
+                    endpoint: endpoint.to_string(),
+                    bearer_token: bearer_token.map(str::to_string),
+                    anthropic_version: Some(ANTHROPIC_API_VERSION.to_string()),
+                    anthropic_beta: beta_header.map(str::to_string),
+                    payload: payload.clone(),
+                });
+            if endpoint.ends_with("/v1/messages") {
+                Ok(concat!(
+                    "event: message_start\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-8\"}}\n\n",
+                    "event: content_block_start\n",
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "event: content_block_delta\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+                    "event: content_block_delta\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n",
+                    "event: message_delta\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":17,\"output_tokens\":5}}}\n\n",
+                    "event: message_stop\n",
+                    "data: {\"type\":\"message_stop\"}\n"
+                )
+                .to_string())
+            } else {
+                Err(ProviderError::RequestFailed {
+                    provider: "recording".to_string(),
+                    message: format!("unexpected text endpoint {endpoint}"),
                 })
             }
         }
@@ -1975,6 +2609,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                ANTHROPIC_PROVIDER_ID.to_string(),
                 DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
                 LLAMA_CPP_PROVIDER_ID.to_string(),
                 OLLAMA_PROVIDER_ID.to_string(),
@@ -1992,6 +2627,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                ANTHROPIC_PROVIDER_ID.to_string(),
                 CODESTRAL_PROVIDER_ID.to_string(),
                 COPILOT_NES_PROVIDER_ID.to_string(),
                 DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
@@ -2066,6 +2702,191 @@ mod tests {
         assert!(ghost_text.byte_len <= 16);
         legion_protocol::validate_inline_prediction_result(&response.result)
             .expect("deterministic result satisfies protocol validator");
+    }
+
+    #[test]
+    fn anthropic_messages_client_posts_native_messages_completion_count_tokens_and_streaming_requests()
+     {
+        let transport = RecordingProviderTransport::default();
+        let provider = AnthropicMessagesClient::with_transport(
+            ANTHROPIC_PROVIDER_ID,
+            "https://api.anthropic.com/",
+            Some("anthropic-key".to_string()),
+            transport.clone(),
+        );
+        let request = ChatCompletionRequest {
+            provider: ANTHROPIC_PROVIDER_ID.to_string(),
+            model: "claude-opus-4-8".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: "system prompt".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: "write a haiku".to_string(),
+                },
+            ],
+            max_tokens: Some(42),
+            temperature: Some(0.2),
+            metadata: std::collections::HashMap::from([(
+                "conversation_id".to_string(),
+                "anthropic-fixture".to_string(),
+            )]),
+        };
+        let extras = AnthropicRequestExtras {
+            tools: vec![anthropic_strict_tool_definition(
+                "lookup_docs",
+                "Lookup docs",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+            )],
+            output_config: Some(anthropic_json_schema_output_config(
+                "final_answer",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"],
+                    "additionalProperties": false
+                }),
+            )),
+            thinking: Some(json!({
+                "type": "enabled",
+                "budget_tokens": 64
+            })),
+        };
+
+        let completion = provider
+            .complete_with_extras(request.clone(), extras.clone())
+            .expect("anthropic completion parses");
+        let input_tokens = provider
+            .count_tokens_with_extras(request.clone(), extras.clone())
+            .expect("anthropic count_tokens parses");
+        let deltas = provider
+            .stream_text_deltas_with_extras(request.clone(), extras)
+            .expect("anthropic streaming parses");
+
+        assert_eq!(completion.provider, ANTHROPIC_PROVIDER_ID);
+        assert_eq!(completion.text, "anthropic answer");
+        assert_eq!(
+            completion.metadata.get("provider.kind"),
+            Some(&"anthropic".to_string())
+        );
+        assert_eq!(input_tokens, 73);
+        assert_eq!(deltas, vec!["Hello".to_string(), " world".to_string()]);
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 3);
+
+        assert_eq!(calls[0].endpoint, "https://api.anthropic.com/v1/messages");
+        assert_eq!(calls[0].bearer_token, Some("anthropic-key".to_string()));
+        assert_eq!(
+            calls[0].anthropic_version,
+            Some(ANTHROPIC_API_VERSION.to_string())
+        );
+        assert_eq!(
+            calls[0].anthropic_beta,
+            Some(ANTHROPIC_STRUCTURED_OUTPUTS_BETA.to_string())
+        );
+        assert_eq!(calls[0].payload["system"], "system prompt");
+        assert_eq!(calls[0].payload["messages"][0]["role"], "user");
+        assert_eq!(
+            calls[0].payload["messages"][0]["content"][0]["type"],
+            "text"
+        );
+        assert_eq!(
+            calls[0].payload["messages"][0]["content"][0]["text"],
+            "write a haiku"
+        );
+        assert_eq!(calls[0].payload["max_tokens"], 42);
+        assert_eq!(calls[0].payload["stream"], false);
+        assert_eq!(
+            calls[0].payload["output_config"]["format"]["type"],
+            "json_schema"
+        );
+        assert_eq!(calls[0].payload["tools"][0]["strict"], true);
+        assert_eq!(calls[0].payload["thinking"]["budget_tokens"], 64);
+
+        assert_eq!(
+            calls[1].endpoint,
+            "https://api.anthropic.com/v1/messages/count_tokens"
+        );
+        assert_eq!(calls[1].bearer_token, Some("anthropic-key".to_string()));
+        assert_eq!(
+            calls[1].anthropic_version,
+            Some(ANTHROPIC_API_VERSION.to_string())
+        );
+        assert_eq!(
+            calls[1].anthropic_beta,
+            Some(ANTHROPIC_STRUCTURED_OUTPUTS_BETA.to_string())
+        );
+        assert_eq!(calls[1].payload["system"], "system prompt");
+        assert!(calls[1].payload.get("max_tokens").is_none());
+        assert_eq!(calls[1].payload["messages"][0]["role"], "user");
+        assert_eq!(calls[1].payload["tools"][0]["strict"], true);
+
+        assert_eq!(calls[2].endpoint, "https://api.anthropic.com/v1/messages");
+        assert_eq!(calls[2].bearer_token, Some("anthropic-key".to_string()));
+        assert_eq!(
+            calls[2].anthropic_version,
+            Some(ANTHROPIC_API_VERSION.to_string())
+        );
+        assert_eq!(
+            calls[2].anthropic_beta,
+            Some(ANTHROPIC_STRUCTURED_OUTPUTS_BETA.to_string())
+        );
+        assert_eq!(calls[2].payload["stream"], true);
+        assert_eq!(
+            calls[2].payload["output_config"]["format"]["name"],
+            "final_answer"
+        );
+        assert_eq!(calls[2].payload["tools"][0]["name"], "lookup_docs");
+    }
+
+    #[test]
+    #[ignore]
+    fn anthropic_messages_client_live_smoke_round_trip() {
+        if std::env::var("ANTHROPIC_API_KEY").is_err()
+            && std::env::var("ANTHROPIC_AUTH_TOKEN").is_err()
+            && std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_API_KEY")).is_err()
+            && std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_AUTH_TOKEN")).is_err()
+        {
+            eprintln!(
+                "skipping Anthropic live smoke: no API key or auth token in the test environment"
+            );
+            return;
+        }
+
+        let provider = AnthropicMessagesClient::from_env(ANTHROPIC_PROVIDER_ID);
+        let model = std::env::var("ANTHROPIC_LIVE_MODEL")
+            .unwrap_or_else(|_| "claude-3-haiku-20240307".to_string());
+        let request = ChatCompletionRequest::new(
+            ANTHROPIC_PROVIDER_ID,
+            model,
+            "Reply with one short sentence.",
+        )
+        .with_max_tokens(1);
+
+        let tokens = provider
+            .count_tokens(request.clone())
+            .expect("live Anthropic token count");
+        let response = provider
+            .complete(request)
+            .expect("live Anthropic completion");
+
+        assert!(tokens > 0, "live token count must be non-zero");
+        assert!(
+            !response.text.trim().is_empty(),
+            "live completion must produce text"
+        );
     }
 
     #[test]

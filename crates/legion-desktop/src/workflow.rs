@@ -40,7 +40,10 @@ use crate::{
     session::DesktopSessionStore,
     smoke::{self, RendererSmokeConfig},
     theme,
-    view::{DesktopProjectionViewState, ProjectionView},
+    view::{
+        DesktopProjectionViewState, ImeCompositionProjection, ProjectionView,
+        ime_composition_state, ime_composition_state_id,
+    },
 };
 
 const WINDOW_TITLE: &str = PRODUCT_NAME;
@@ -1981,14 +1984,21 @@ impl DesktopEframeApp {
             }
 
             actions.extend(editor_text_input_actions(
+                ui,
                 &input.events,
                 &snapshot,
                 editor_input_enabled,
             ));
+            let ime_composition_active = snapshot
+                .active_buffer_projection
+                .buffer_id
+                .and_then(|buffer_id| ime_composition_state(ui, buffer_id))
+                .is_some_and(|composition| composition.active);
             actions.extend(editor_keyboard_control_actions(
                 input,
                 &snapshot,
                 editor_input_enabled,
+                ime_composition_active,
             ));
         });
 
@@ -2302,6 +2312,7 @@ fn projected_scroll(snapshot: &ShellProjectionSnapshot) -> ViewportScroll {
 }
 
 fn editor_text_input_actions(
+    ui: &egui::Ui,
     events: &[egui::Event],
     snapshot: &ShellProjectionSnapshot,
     editor_input_enabled: bool,
@@ -2310,7 +2321,16 @@ fn editor_text_input_actions(
         return Vec::new();
     }
 
+    let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id else {
+        return Vec::new();
+    };
     let at = projected_cursor(snapshot);
+    let composition_id = ime_composition_state_id(buffer_id);
+    let mut composition = ui.ctx().data_mut(|data| {
+        data.get_temp::<ImeCompositionProjection>(composition_id)
+            .unwrap_or_default()
+    });
+
     let mut actions = Vec::new();
     for event in events {
         match event {
@@ -2326,9 +2346,39 @@ fn editor_text_input_actions(
                     at,
                 });
             }
+            egui::Event::Ime(egui::ImeEvent::Enabled) => {
+                composition.active = true;
+            }
+            egui::Event::Ime(egui::ImeEvent::Preedit(preedit)) => {
+                composition.active = !preedit.is_empty();
+                composition.preedit = preedit.clone();
+            }
+            egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                if !text.is_empty() {
+                    actions.push(DesktopAction::ImeCommit {
+                        text: text.clone(),
+                        at,
+                    });
+                }
+                composition.active = false;
+                composition.preedit.clear();
+            }
+            egui::Event::Ime(egui::ImeEvent::Disabled) => {
+                composition.active = false;
+                composition.preedit.clear();
+            }
             _ => {}
         }
     }
+
+    ui.ctx().data_mut(|data| {
+        if composition.active || !composition.preedit.is_empty() {
+            data.insert_temp(composition_id, composition);
+        } else {
+            data.remove::<ImeCompositionProjection>(composition_id);
+        }
+    });
+
     actions
 }
 
@@ -2336,8 +2386,13 @@ fn editor_keyboard_control_actions(
     input: &egui::InputState,
     snapshot: &ShellProjectionSnapshot,
     editor_input_enabled: bool,
+    ime_composition_active: bool,
 ) -> Vec<DesktopAction> {
-    if !editor_input_enabled || input.modifiers.command {
+    // Local workaround for upstream IME issues in egui/winit:
+    // - egui#248 tracks composition events and candidate positioning
+    // - egui#7908 tracks composition-time key consumption bugs
+    // Keep editor shortcuts out of the way while the IME is active.
+    if !editor_input_enabled || input.modifiers.command || ime_composition_active {
         return Vec::new();
     }
 
@@ -2582,16 +2637,20 @@ mod tests {
             egui::Event::Paste("pasted/path.rs".to_string()),
         ];
 
-        assert!(
-            editor_text_input_actions(&events, &snapshot_with_active_buffer(), false).is_empty()
-        );
+        egui::__run_test_ui(|ui| {
+            assert!(
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), false)
+                    .is_empty()
+            );
+        });
     }
 
     #[test]
-    fn editor_text_input_routes_text_and_clipboard_paste() {
+    fn editor_text_input_routes_text_clipboard_and_ime_commit() {
         let events = vec![
             egui::Event::Text("x".to_string()),
             egui::Event::Paste("clip".to_string()),
+            egui::Event::Ime(egui::ImeEvent::Commit("漢".to_string())),
         ];
         let at = TextCoordinate {
             line: 0,
@@ -2600,19 +2659,25 @@ mod tests {
             utf16_offset: Some(0),
         };
 
-        assert_eq!(
-            editor_text_input_actions(&events, &snapshot_with_active_buffer(), true),
-            vec![
-                DesktopAction::InsertText {
-                    text: "x".to_string(),
-                    at,
-                },
-                DesktopAction::ClipboardPaste {
-                    text: "clip".to_string(),
-                    at,
-                },
-            ]
-        );
+        egui::__run_test_ui(|ui| {
+            assert_eq!(
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true),
+                vec![
+                    DesktopAction::InsertText {
+                        text: "x".to_string(),
+                        at,
+                    },
+                    DesktopAction::ClipboardPaste {
+                        text: "clip".to_string(),
+                        at,
+                    },
+                    DesktopAction::ImeCommit {
+                        text: "漢".to_string(),
+                        at,
+                    },
+                ]
+            );
+        });
     }
 
     #[test]
@@ -2630,10 +2695,129 @@ mod tests {
         };
         let events = vec![egui::Event::Text("x".to_string())];
 
-        assert!(close_dirty_prompt_active(&snapshot));
-        assert!(
-            editor_text_input_actions(&events, &snapshot, !close_dirty_prompt_active(&snapshot))
+        egui::__run_test_ui(|ui| {
+            assert!(close_dirty_prompt_active(&snapshot));
+            assert!(
+                editor_text_input_actions(
+                    ui,
+                    &events,
+                    &snapshot,
+                    !close_dirty_prompt_active(&snapshot),
+                )
                 .is_empty()
+            );
+        });
+    }
+
+    fn coordinate(line: u32, character: u32) -> TextCoordinate {
+        TextCoordinate {
+            line,
+            character,
+            byte_offset: None,
+            utf16_offset: Some(character as u64),
+        }
+    }
+
+    fn input_state_for_key(key: egui::Key, modifiers: egui::Modifiers) -> egui::InputState {
+        let mut input = egui::InputState::default();
+        input.modifiers = modifiers;
+        input.events = vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }];
+        input
+    }
+
+    #[test]
+    fn editor_keyboard_control_actions_move_cursor_and_extend_selection() {
+        let mut snapshot = snapshot_with_active_buffer();
+        snapshot.active_buffer_projection.viewport = Some(legion_protocol::ViewportProjection {
+            workspace_id: legion_protocol::WorkspaceId(1),
+            buffer_id: BufferId(1),
+            file_id: Some(FileId(1)),
+            snapshot_id: legion_protocol::SnapshotId(1),
+            buffer_version: legion_protocol::BufferVersion(1),
+            visible_range: ProtocolTextRange {
+                start: coordinate(0, 0),
+                end: coordinate(0, 12),
+            },
+            selections: vec![],
+            cursor: coordinate(7, 6),
+            scroll: ViewportScroll {
+                top_line: 0,
+                left_column: 0,
+            },
+            dimensions: legion_protocol::ViewportDimensions {
+                width_px: 800,
+                height_px: 600,
+            },
+            mode: legion_protocol::ViewportProjectionMode::default(),
+            line_slices: vec![],
+            line_metrics: vec![],
+            decoration_spans: vec![],
+            fold_ranges: vec![],
+            semantic_token_overlays: vec![],
+            large_file_status: None,
+            schema_version: 1,
+        });
+
+        let move_left = input_state_for_key(egui::Key::ArrowLeft, egui::Modifiers::default());
+        assert_eq!(
+            editor_keyboard_control_actions(&move_left, &snapshot, true, false),
+            vec![DesktopAction::SetCursor {
+                buffer_id: Some(BufferId(1)),
+                cursor: coordinate(7, 5),
+            }]
+        );
+
+        let shift_left = input_state_for_key(
+            egui::Key::ArrowLeft,
+            egui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            editor_keyboard_control_actions(&shift_left, &snapshot, true, false),
+            vec![DesktopAction::SetSelection {
+                buffer_id: Some(BufferId(1)),
+                range: ProtocolTextRange {
+                    start: coordinate(7, 5),
+                    end: coordinate(7, 6),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn editor_keyboard_control_actions_scrolls_with_page_keys() {
+        let snapshot = snapshot_with_active_buffer();
+
+        let page_up = input_state_for_key(egui::Key::PageUp, egui::Modifiers::default());
+        assert_eq!(
+            editor_keyboard_control_actions(&page_up, &snapshot, true, false),
+            vec![DesktopAction::SetViewportScroll {
+                buffer_id: Some(BufferId(1)),
+                scroll: ViewportScroll {
+                    top_line: 0,
+                    left_column: 0,
+                },
+            }]
+        );
+
+        let page_down = input_state_for_key(egui::Key::PageDown, egui::Modifiers::default());
+        assert_eq!(
+            editor_keyboard_control_actions(&page_down, &snapshot, true, false),
+            vec![DesktopAction::SetViewportScroll {
+                buffer_id: Some(BufferId(1)),
+                scroll: ViewportScroll {
+                    top_line: 25,
+                    left_column: 0,
+                },
+            }]
         );
     }
 

@@ -1145,6 +1145,124 @@ fn workspace_vfs_integration_rollback_lifecycle_emits_audit_before_success() {
 }
 
 #[test]
+fn workspace_vfs_integration_rollback_preserves_manual_edit_after_apply() {
+    let root = create_root();
+    let target = root.join("checkpoint-restore.txt");
+    std::fs::write(&target, "seed\n").expect("seed file");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+    let file_id = app
+        .open_file(target.to_string_lossy())
+        .expect("open target file");
+    let buffer_id = app.active_buffer_id().expect("active buffer id");
+    let node = workspace_node_by_name(&app, opened.workspace_id, "checkpoint-restore.txt");
+    let mut preconditions = file_preconditions(&node, opened.generation);
+    preconditions.buffer_version = Some(
+        app.editor()
+            .buffer_version(buffer_id)
+            .expect("buffer version"),
+    );
+    preconditions.snapshot_id = Some(
+        app.editor()
+            .current_snapshot(buffer_id)
+            .expect("current snapshot")
+            .snapshot_id,
+    );
+    let proposal = proposal_envelope_with(
+        ProposalId(704),
+        "editor.write",
+        ProposalPayload::TextEdit(legion_protocol::TextEditProposal {
+            file_id,
+            edits: EditBatch {
+                edits: vec![legion_protocol::TextEdit {
+                    range: TextRange::new(TextOffset::byte(0), TextOffset::byte(4)),
+                    replacement: "sprout".to_string(),
+                }],
+            },
+        }),
+        preconditions,
+    );
+
+    register_validate_preview(&mut app, &proposal);
+    assert!(matches!(
+        app.handle_proposal_request(ProposalRequest::Apply(proposal.clone()))
+            .expect("apply text edit proposal"),
+        ProposalResponse::Applied(_)
+    ));
+
+    assert_eq!(
+        app.editor()
+            .text(buffer_id)
+            .expect("buffer text after apply"),
+        "sprout\n"
+    );
+
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(1, 0), "manual\n"))
+        .expect("manual edit after apply");
+    assert_eq!(
+        app.editor()
+            .text(buffer_id)
+            .expect("buffer text after edit"),
+        "sprout\nmanual\n"
+    );
+
+    let rollback = ProposalLifecycleCommand {
+        proposal_id: proposal.proposal_id,
+        action: ProposalLifecycleAction::Rollback,
+        principal: proposal.principal.clone(),
+        capability: proposal.capability.clone(),
+        correlation_id: proposal.correlation_id,
+        causality_id: CausalityId(Uuid::now_v7()),
+        reason: Some(ProposalLifecycleCommandReason::Rollback(
+            ProposalRollbackReason::UserRequested,
+        )),
+        diagnostics: Vec::new(),
+        requested_at: TimestampMillis(3),
+        schema_version: 1,
+    };
+    let response = app
+        .handle_proposal_request(ProposalRequest::Rollback(rollback))
+        .expect("rollback proposal lifecycle");
+
+    assert!(matches!(response, ProposalResponse::RolledBack { .. }));
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read restored file"),
+        "seed\n"
+    );
+    assert_eq!(
+        app.editor()
+            .text(buffer_id)
+            .expect("buffer text after restore"),
+        "sprout\nmanual\n"
+    );
+    assert!(
+        app.editor()
+            .is_dirty(buffer_id)
+            .expect("dirty after restore")
+    );
+
+    let shell = app
+        .shell_projection_snapshot("checkpoint restore ledger")
+        .expect("shell projection after restore");
+    let row = shell
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .find(|row| row.proposal_id == proposal.proposal_id)
+        .expect("proposal ledger row after restore");
+    assert_eq!(row.lifecycle.state, ProposalLifecycleState::RolledBack);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn workspace_vfs_integration_rollback_audit_failure_records_failed_lifecycle() {
     let root = create_root();
     let target = root.join("rollback-audit-failure.txt");
@@ -2816,6 +2934,93 @@ fn workspace_vfs_integration_batch_preflight_plans_supported_routes_without_side
 }
 
 #[test]
+fn workspace_vfs_integration_batch_preflight_disables_runtime_apply_for_untrusted_workspace() {
+    let root = create_root();
+    let target = root.join("untrusted-runtime-apply.txt");
+
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Untrusted,
+            PrincipalId("untrusted".to_string()),
+        )
+        .expect("open untrusted workspace");
+    let batch = batch_payload_for_test(
+        ProposalBatchAtomicity::PrepareAllBeforeMutate,
+        ProposalBatchRollbackPolicy::NotRequired,
+        vec![preflight_target(
+            "target-create",
+            Some(opened.workspace_id),
+            None,
+            &target,
+            ProposalTargetKind::PathOnly,
+        )],
+        vec![ProposalBatchItem {
+            order: 0,
+            item_id: "create".to_string(),
+            payload: Box::new(ProposalPayload::CreateFile(
+                legion_protocol::CreateFileProposal {
+                    path: CanonicalPath(target.to_string_lossy().into_owned()),
+                    initial_content: Some("blocked".to_string()),
+                },
+            )),
+            target_ids: vec!["target-create".to_string()],
+            required_capability: CapabilityId("fs.write".to_string()),
+            rollback_step_ids: Vec::new(),
+        }],
+    );
+    let proposal = proposal_envelope_with(
+        ProposalId(735),
+        "fs.write",
+        ProposalPayload::Batch(batch),
+        workspace_preconditions(opened.generation),
+    );
+
+    let plan = app.preflight_batch_proposal(&proposal);
+    let contract = app.plan_batch_execution_contract(&proposal);
+    let journal = app.plan_batch_execution_journal(&proposal);
+
+    assert!(
+        plan.diagnostics.is_empty(),
+        "diagnostics: {:?}",
+        plan.diagnostics
+    );
+    assert!(plan.preflight_ok, "plan: {plan:?}");
+    assert!(plan.runtime_apply_disabled);
+    assert!(
+        plan.preview_warnings.iter().any(
+            |warning| warning.code == "proposal.batch_runtime_apply_requires_trusted_workspace"
+        )
+    );
+    assert!(contract.preflight.preflight_ok, "contract: {contract:?}");
+    assert!(contract.runtime_apply_disabled);
+    assert!(
+        contract.preview_warnings.iter().any(
+            |warning| warning.code == "proposal.batch_runtime_apply_requires_trusted_workspace"
+        )
+    );
+    assert!(!journal.mutation_allowed);
+    assert!(journal.runtime_apply_disabled);
+    assert!(
+        journal.preview_warnings.iter().any(
+            |warning| warning.code == "proposal.batch_runtime_apply_requires_trusted_workspace"
+        )
+    );
+    assert_eq!(
+        journal.items[0].state,
+        BatchExecutionJournalItemState::RuntimeMutationDisabled
+    );
+    assert_eq!(journal.stages[2].stage, BatchExecutionStage::Mutate);
+    assert_eq!(
+        journal.stages[2].state,
+        BatchExecutionJournalStageState::Ready
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn workspace_vfs_integration_batch_preflight_rejects_unresolved_parent_traversal_without_mutation()
 {
     let root = create_root();
@@ -3225,13 +3430,21 @@ fn workspace_vfs_integration_batch_preflight_rejects_missing_and_unknown_targets
 
 #[test]
 fn workspace_vfs_integration_batch_preflight_rejects_unproven_rollback_boundaries() {
-    let app = AppComposition::new();
-    let target_path = Path::new("C:/repo/new.txt");
+    let root = create_root();
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open trusted workspace");
+    let target_path = root.join("new.txt");
     let targets = vec![preflight_target(
         "target-create",
-        Some(WorkspaceId(11)),
+        Some(opened.workspace_id),
         None,
-        target_path,
+        &target_path,
         ProposalTargetKind::PathOnly,
     )];
     let item = ProposalBatchItem {
@@ -3286,9 +3499,9 @@ fn workspace_vfs_integration_batch_preflight_rejects_unproven_rollback_boundarie
         ProposalBatchRollbackPolicy::Required,
         vec![preflight_target(
             "target-create",
-            Some(WorkspaceId(11)),
+            Some(opened.workspace_id),
             None,
-            target_path,
+            &target_path,
             ProposalTargetKind::PathOnly,
         )],
         vec![ProposalBatchItem {

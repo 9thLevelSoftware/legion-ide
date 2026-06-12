@@ -17,10 +17,11 @@ use legion_protocol::{
     ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
-    ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode,
-    PaletteProjection, PaletteResultKind, PanelId, PanelRegistry, SearchScopeProjection,
-    SettingsProjection, ShellProjectionSnapshot, StatusSeverity, ThemePreferenceProjection,
-    ToastActionProjection, ToastStackProjection, ToastVerbosityProjection,
+    ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, GitBlameLineProjection,
+    GitHunkProjection, PaletteMode, PaletteProjection, PaletteResultKind, PanelId, PanelRegistry,
+    SearchScopeProjection, SettingsProjection, ShellProjectionSnapshot, StatusSeverity,
+    ThemePreferenceProjection, ToastActionProjection, ToastStackProjection,
+    ToastVerbosityProjection,
 };
 
 use crate::{
@@ -600,6 +601,20 @@ fn render_top_command_bar(
                     mode: PaletteMode::File,
                     query: String::new(),
                     scope: SearchScopeProjection::ActiveFile,
+                });
+            }
+            if soft_button(ui, "Symbols").clicked() {
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::Symbol,
+                    query: String::new(),
+                    scope: SearchScopeProjection::Workspace,
+                });
+            }
+            if soft_button(ui, "Recent").clicked() {
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::RecentBuffers,
+                    query: String::new(),
+                    scope: SearchScopeProjection::Workspace,
                 });
             }
             if soft_button(ui, "Search").clicked() {
@@ -1434,11 +1449,66 @@ fn render_code_lines(
             .as_ref()
             .map(|viewport| viewport.cursor)
             .unwrap_or_else(|| projected_cursor(snapshot));
+        let current_line_number = current_cursor.line + 1;
         let char_width = code_char_width();
         let ime_composition =
             active_buffer_id.and_then(|buffer_id| ime_composition_state(ui, buffer_id));
+        let active_git_relative_path = active_git_relative_path(snapshot);
+        let git_hunks = &snapshot.git_projection.hunks;
+        let git_blame_lines = &snapshot.git_projection.blame_lines;
+
+        ui.horizontal(|ui| {
+            if git_previous_hunk_cursor(
+                active_git_relative_path.as_deref(),
+                git_hunks,
+                current_line_number,
+            )
+            .is_some()
+                || git_next_hunk_cursor(
+                    active_git_relative_path.as_deref(),
+                    git_hunks,
+                    current_line_number,
+                )
+                .is_some()
+            {
+                ui.label(theme::code_muted("git"));
+                if let Some(prev_cursor) = git_previous_hunk_cursor(
+                    active_git_relative_path.as_deref(),
+                    git_hunks,
+                    current_line_number,
+                ) && soft_button(ui, "Prev hunk").clicked()
+                {
+                    actions.push(DesktopAction::SetCursor {
+                        buffer_id: active_buffer_id,
+                        cursor: prev_cursor,
+                    });
+                }
+                if let Some(next_cursor) = git_next_hunk_cursor(
+                    active_git_relative_path.as_deref(),
+                    git_hunks,
+                    current_line_number,
+                ) && soft_button(ui, "Next hunk").clicked()
+                {
+                    actions.push(DesktopAction::SetCursor {
+                        buffer_id: active_buffer_id,
+                        cursor: next_cursor,
+                    });
+                }
+            }
+        });
+
         for line in &model.active_buffer_code_lines {
             ui.horizontal(|ui| {
+                let git_marker = git_hunk_marker_for_line(
+                    active_git_relative_path.as_deref(),
+                    git_hunks,
+                    line.number,
+                )
+                .unwrap_or(" ");
+                ui.add_sized(
+                    [12.0, 18.0],
+                    egui::Label::new(theme::code_muted(git_marker)),
+                );
                 if show_line_numbers {
                     ui.add_sized(
                         [42.0, 18.0],
@@ -1502,7 +1572,13 @@ fn render_code_lines(
                                 range,
                             });
                         }
-                    } else if response.dragged() {
+                    } else if response.clicked() {
+                        actions.push(DesktopAction::SetCursor {
+                            buffer_id: Some(buffer_id),
+                            cursor: coordinate,
+                        });
+                    }
+                    if response.drag_started() || response.dragged() {
                         let anchor = response
                             .ctx
                             .data_mut(|data| data.get_temp::<TextCoordinate>(drag_anchor_id));
@@ -1510,53 +1586,12 @@ fn render_code_lines(
                             buffer_id: Some(buffer_id),
                             range: drag_selection_range(anchor, current_cursor, coordinate),
                         });
-                    } else if response.clicked() {
-                        let shift_pressed = response.ctx.input(|input| input.modifiers.shift);
-                        if shift_pressed {
-                            actions.push(DesktopAction::SetSelection {
-                                buffer_id: Some(buffer_id),
-                                range: ProtocolTextRange {
-                                    start: current_cursor,
-                                    end: coordinate,
-                                },
-                            });
-                        } else {
-                            response.request_focus();
-                            actions.push(DesktopAction::SetCursor {
-                                buffer_id: Some(buffer_id),
-                                cursor: coordinate,
-                            });
-                        }
                     }
                     if response.drag_stopped() {
                         response
                             .ctx
                             .data_mut(|data| data.remove::<TextCoordinate>(drag_anchor_id));
                     }
-                }
-                if let Some(buffer_id) = active_buffer_id {
-                    response.context_menu(|ui| {
-                        if ui.button("Copy Line").clicked() {
-                            response.ctx.copy_text(line.text.clone());
-                            ui.close();
-                        }
-                        if ui.button("Select Word").clicked() {
-                            if let Some(range) = word_range_for_coordinate(line, current_cursor) {
-                                actions.push(DesktopAction::SetSelection {
-                                    buffer_id: Some(buffer_id),
-                                    range,
-                                });
-                            }
-                            ui.close();
-                        }
-                        if ui.button("Select Line").clicked() {
-                            actions.push(DesktopAction::SetSelection {
-                                buffer_id: Some(buffer_id),
-                                range: line_range_for_code_line(line),
-                            });
-                            ui.close();
-                        }
-                    });
                 }
                 if highlight_current_line {
                     paint_current_line_highlight(ui, line, &response, current_cursor);
@@ -1571,6 +1606,16 @@ fn render_code_lines(
                         char_width,
                         ime_composition,
                     );
+                }
+                if line.number == current_line_number
+                    && let Some(label) = git_inline_blame_label(
+                        active_git_relative_path.as_deref(),
+                        git_blame_lines,
+                        line.number,
+                    )
+                {
+                    ui.add_space(8.0);
+                    ui.label(theme::code_muted(trim_middle(&label, 72)));
                 }
             });
         }
@@ -2847,7 +2892,10 @@ fn render_terminal_stream(
     theme::code_frame().show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::code_muted(format!("status={:?}", terminal.status.kind)));
+                ui.label(theme::code_muted(format!(
+                    "status={:?}",
+                    terminal.status.kind
+                )));
                 if let Some(session_id) = terminal.active_session_id {
                     ui.label(theme::code_muted(format!("session={}", session_id.0)));
                 }
@@ -2961,7 +3009,9 @@ fn terminal_text_segments(text: &str) -> Vec<TerminalTextSegment> {
         };
 
         if url_start > cursor {
-            segments.push(TerminalTextSegment::Text(text[cursor..url_start].to_string()));
+            segments.push(TerminalTextSegment::Text(
+                text[cursor..url_start].to_string(),
+            ));
         }
 
         let mut url_end = url_start;
@@ -2979,7 +3029,10 @@ fn terminal_text_segments(text: &str) -> Vec<TerminalTextSegment> {
             let Some(ch) = text[url_start..url_end].chars().next_back() else {
                 break;
             };
-            if matches!(ch, '.' | ',' | ';' | ':' | '!' | ')' | ']' | '}' | '>' | '"' | '\'') {
+            if matches!(
+                ch,
+                '.' | ',' | ';' | ':' | '!' | ')' | ']' | '}' | '>' | '"' | '\''
+            ) {
                 url_end -= ch.len_utf8();
             } else {
                 break;
@@ -2987,7 +3040,9 @@ fn terminal_text_segments(text: &str) -> Vec<TerminalTextSegment> {
         }
 
         if url_end > url_start {
-            segments.push(TerminalTextSegment::Url(text[url_start..url_end].to_string()));
+            segments.push(TerminalTextSegment::Url(
+                text[url_start..url_end].to_string(),
+            ));
         }
         cursor = url_end.max(url_start + 1);
     }
@@ -3018,6 +3073,18 @@ fn render_terminal_payload(ui: &mut egui::Ui, payload: &str) {
 }
 
 fn terminal_output_row_badges(row: &TerminalOutputRowProjection) -> Vec<String> {
+    if let Some((prefix, detail)) = row.redacted_payload.split_once(" • ")
+        && prefix.starts_with("command block ")
+    {
+        let mut badges = vec![
+            prefix
+                .replacen("command block ", "command-", 1)
+                .replace(' ', "-"),
+        ];
+        badges.extend(detail.split(" • ").map(|segment| segment.to_string()));
+        return badges;
+    }
+
     let mut badges = Vec::new();
     if row.is_stderr {
         badges.push("stderr".to_string());
@@ -4018,6 +4085,8 @@ fn command_palette_result_rows(
                 id: result.id.clone(),
                 kind_label: match result.kind {
                     PaletteResultKind::File => "File",
+                    PaletteResultKind::Symbol => "Symbol",
+                    PaletteResultKind::RecentBuffers => "Recent Buffers",
                     PaletteResultKind::Command => "Command",
                     PaletteResultKind::Search => "Search",
                     PaletteResultKind::StructuralSearch => "Structural Search",
@@ -4703,6 +4772,105 @@ fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCo
     }
 
     Vec::new()
+}
+
+fn git_relative_path(root_label: Option<&str>, file_path: Option<&str>) -> Option<String> {
+    let root = root_label?;
+    let file_path = file_path?;
+    let relative = file_path
+        .strip_prefix(root)?
+        .trim_start_matches(['/', '\\'])
+        .to_string();
+    (!relative.is_empty()).then_some(relative)
+}
+
+fn active_git_relative_path(snapshot: &ShellProjectionSnapshot) -> Option<String> {
+    git_relative_path(
+        snapshot.git_projection.root_label.as_deref(),
+        snapshot
+            .active_buffer_projection
+            .file_path
+            .as_ref()
+            .map(|path| path.0.as_str()),
+    )
+}
+
+fn git_hunk_marker_for_line(
+    relative_path: Option<&str>,
+    hunks: &[GitHunkProjection],
+    line_number: u32,
+) -> Option<&'static str> {
+    let relative_path = relative_path?;
+    hunks
+        .iter()
+        .filter(|hunk| hunk.path == relative_path)
+        .filter(|hunk| {
+            line_number >= hunk.new_start && line_number < hunk.new_start + hunk.new_lines
+        })
+        .map(
+            |hunk| match (hunk.added_lines > 0, hunk.deleted_lines > 0) {
+                (true, true) => "~",
+                (true, false) => "+",
+                (false, true) => "-",
+                (false, false) => "•",
+            },
+        )
+        .next()
+}
+
+fn git_inline_blame_label(
+    relative_path: Option<&str>,
+    blame_lines: &[GitBlameLineProjection],
+    line_number: u32,
+) -> Option<String> {
+    let relative_path = relative_path?;
+    blame_lines
+        .iter()
+        .find(|line| line.path == relative_path && line.line_number == line_number)
+        .map(|line| {
+            format!(
+                "{} {} {}",
+                line.commit_short,
+                trim_middle(&line.author, 20),
+                trim_middle(&line.summary, 36)
+            )
+        })
+}
+
+fn git_previous_hunk_cursor(
+    relative_path: Option<&str>,
+    hunks: &[GitHunkProjection],
+    current_line: u32,
+) -> Option<TextCoordinate> {
+    let relative_path = relative_path?;
+    hunks
+        .iter()
+        .filter(|hunk| hunk.path == relative_path && hunk.new_start < current_line)
+        .max_by_key(|hunk| hunk.new_start)
+        .map(|hunk| TextCoordinate {
+            line: hunk.new_start.saturating_sub(1),
+            character: 0,
+            byte_offset: None,
+            utf16_offset: None,
+        })
+}
+
+fn git_next_hunk_cursor(
+    relative_path: Option<&str>,
+    hunks: &[GitHunkProjection],
+    current_line: u32,
+) -> Option<TextCoordinate> {
+    let relative_path = relative_path?;
+    hunks
+        .iter()
+        .filter(|hunk| hunk.path == relative_path && hunk.new_start > current_line)
+        .min_by_key(|hunk| hunk.new_start)
+        .map(|hunk| TextCoordinate {
+            line: hunk.new_start.saturating_sub(1),
+            character: 0,
+            byte_offset: None,
+            utf16_offset: None,
+        })
 }
 
 fn semantic_highlights_for_line(
@@ -6343,9 +6511,10 @@ mod tests {
     use super::*;
     use legion_protocol::{
         CapabilityId, DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
-        DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass,
-        RedactionHint, TerminalOutputRowProjection, delegated_task_tool_permission_request,
+        DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass, RedactionHint,
+        TerminalOutputRowProjection, TextCoordinate, delegated_task_tool_permission_request,
     };
+    use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection};
 
     #[test]
     fn automate_permission_session_is_parsed_from_request_labels() {
@@ -6495,10 +6664,67 @@ mod tests {
     }
 
     #[test]
-    fn terminal_text_segments_split_urls_and_trailing_text() {
-        let segments = terminal_text_segments(
-            "open https://example.com/docs?ref=legion, then keep going",
+    fn git_code_canvas_projects_gutter_markers_inline_blame_and_hunk_navigation() {
+        let relative_path = Some("src/lib.rs");
+        let hunks = vec![GitHunkProjection {
+            hunk_id: "git-hunk:1".to_string(),
+            path: "src/lib.rs".to_string(),
+            stage: GitHunkStageProjection::Unstaged,
+            header: "@@ -1,3 +1,4 @@".to_string(),
+            old_start: 1,
+            old_lines: 3,
+            new_start: 2,
+            new_lines: 2,
+            added_lines: 1,
+            deleted_lines: 1,
+            context: Some("main".to_string()),
+        }];
+        let blame_lines = vec![GitBlameLineProjection {
+            path: "src/lib.rs".to_string(),
+            line_number: 2,
+            commit_short: "abc1234".to_string(),
+            author: "Ada Lovelace".to_string(),
+            summary: "refine gutter diff".to_string(),
+            line_preview: "let value = 1;".to_string(),
+        }];
+
+        assert_eq!(
+            git_relative_path(Some("/repo"), Some("/repo/src/lib.rs")),
+            Some("src/lib.rs".to_string())
         );
+        assert_eq!(git_hunk_marker_for_line(relative_path, &hunks, 1), None);
+        assert_eq!(
+            git_hunk_marker_for_line(relative_path, &hunks, 2),
+            Some("~")
+        );
+        assert_eq!(
+            git_inline_blame_label(relative_path, &blame_lines, 2),
+            Some("abc1234 Ada Lovelace refine gutter diff".to_string())
+        );
+        assert_eq!(
+            git_previous_hunk_cursor(relative_path, &hunks, 3),
+            Some(TextCoordinate {
+                line: 1,
+                character: 0,
+                byte_offset: None,
+                utf16_offset: None,
+            })
+        );
+        assert_eq!(
+            git_next_hunk_cursor(relative_path, &hunks, 1),
+            Some(TextCoordinate {
+                line: 1,
+                character: 0,
+                byte_offset: None,
+                utf16_offset: None,
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_text_segments_split_urls_and_trailing_text() {
+        let segments =
+            terminal_text_segments("open https://example.com/docs?ref=legion, then keep going");
         assert_eq!(
             segments,
             vec![
@@ -6529,6 +6755,31 @@ mod tests {
                 "truncated".to_string(),
                 "redacted=metadata-only".to_string(),
                 "42 bytes".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_output_row_badges_reflect_shell_command_markers() {
+        let row = TerminalOutputRowProjection {
+            session_id: legion_protocol::TerminalSessionId(11),
+            sequence: legion_protocol::EventSequence(7),
+            redacted_payload:
+                "command block finished • exit=0 • duration=15ms • cwd=/tmp/workspace".to_string(),
+            byte_count: 0,
+            is_stderr: false,
+            truncated: false,
+            redaction: RedactionHint::MetadataOnly,
+            schema_version: 1,
+        };
+
+        assert_eq!(
+            terminal_output_row_badges(&row),
+            vec![
+                "command-finished".to_string(),
+                "exit=0".to_string(),
+                "duration=15ms".to_string(),
+                "cwd=/tmp/workspace".to_string(),
             ]
         );
     }

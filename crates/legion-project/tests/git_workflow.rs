@@ -8,7 +8,8 @@ use std::{
 
 use legion_project::{
     GitConflictChoice, GitDiffStrategy, GitHunkStage, GitSnapshotOptions, collect_git_snapshot,
-    resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
+    commit_git_changes, resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
+    validate_git_commit_message,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -209,6 +210,45 @@ fn git_snapshot_projects_syntactic_diff_blame_graph_conflicts_and_hunk_staging()
     unstage_git_hunk(repo.path(), &staged_hunk).expect("hunk should unstage");
     let cached_after_unstage = run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"]);
     assert!(cached_after_unstage.trim().is_empty());
+}
+
+#[test]
+fn git_commit_validates_message_and_commits_staged_hunks() {
+    let repo = TempGitRepo::new();
+    let source_path = repo.write("src/lib.rs", "pub fn alpha() {\n    first();\n}\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "base"]);
+    repo.write("src/lib.rs", "pub fn alpha() {\n    first_changed();\n}\n");
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024,
+        max_hunks: 8,
+        max_blame_lines: 8,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(repo.path(), Some(&source_path), options)
+        .expect("git refresh should succeed");
+    let staged_hunk = snapshot
+        .hunks
+        .iter()
+        .find(|hunk| hunk.path == "src/lib.rs" && hunk.stage == GitHunkStage::Unstaged)
+        .expect("unstaged hunk should be projected")
+        .clone();
+    stage_git_hunk(repo.path(), &staged_hunk).expect("staging should succeed");
+
+    let err = validate_git_commit_message("   \n\n").expect_err("blank commit should fail");
+    assert!(err.to_string().contains("empty"));
+
+    commit_git_changes(repo.path(), "feat: update alpha").expect("commit should succeed");
+    let head = run_git(repo.path(), ["log", "-1", "--pretty=%s"]);
+    assert_eq!(head.trim(), "feat: update alpha");
+    let contents = fs::read_to_string(repo.path().join("src/lib.rs")).expect("file should read");
+    assert!(contents.contains("first_changed"));
+    assert!(
+        run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"])
+            .trim()
+            .is_empty()
+    );
 }
 
 #[test]

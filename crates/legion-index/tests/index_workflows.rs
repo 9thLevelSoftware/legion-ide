@@ -72,6 +72,20 @@ fn document_with(
     )
 }
 
+fn fixed_size_chunks(text: &str, chunk_size: usize) -> Vec<&str> {
+    if chunk_size == 0 {
+        return Vec::new();
+    }
+    text.as_bytes()
+        .chunks(chunk_size)
+        .map(|chunk| std::str::from_utf8(chunk).expect("fixture text is ASCII"))
+        .collect()
+}
+
+fn chunk_contains_all(text: &str, terms: &[&str]) -> bool {
+    terms.iter().all(|term| text.contains(term))
+}
+
 fn token(number: u128) -> legion_protocol::SemanticCancellationToken {
     semantic_cancellation_token(
         CancellationTokenId(Uuid::from_u128(number)),
@@ -2002,6 +2016,199 @@ fn tree_sitter_worker_reports_rust_parse_errors_as_diagnostics() {
         diagnostic.code == "index.tree_sitter.parse_error"
             && diagnostic.severity == ProtocolDiagnosticSeverity::Warning
     }));
+}
+
+#[test]
+fn tree_sitter_worker_projects_rust_outline_rows_from_tags_query() {
+    let document = document(
+        "/workspace/src/structural.rs",
+        1,
+        1,
+        "mod outer {
+    pub struct Demo;
+    impl Demo {
+        pub fn build() -> Self {
+            Self
+        }
+    }
+}
+
+pub fn root() {}
+",
+    );
+    let parser = TreeSitterParser::new();
+
+    let outline = parser.structural_outline(&document).unwrap();
+    assert_eq!(outline.len(), 4);
+    assert_eq!(outline[0].label, "outer");
+    assert_eq!(outline[0].kind_label, "definition.module");
+    assert_eq!(outline[0].depth, 0);
+    assert_eq!(outline[1].label, "Demo");
+    assert_eq!(outline[1].kind_label, "definition.class");
+    assert_eq!(outline[1].depth, 1);
+    assert_eq!(outline[2].label, "build");
+    assert_eq!(outline[2].kind_label, "definition.method");
+    assert_eq!(outline[2].depth, 1);
+    assert_eq!(outline[3].label, "root");
+    assert_eq!(outline[3].kind_label, "definition.function");
+    assert_eq!(outline[3].depth, 0);
+    assert!(outline.iter().all(|symbol| symbol.range.is_some()));
+}
+
+#[test]
+fn tree_sitter_worker_projects_rust_code_chunks_from_definition_boundaries_and_beats_fixed_size_baseline()
+ {
+    let auth_source = {
+        let padding = (0..24)
+            .map(|index| format!("        let audit_padding_{index:02} = \"pad\";"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "pub struct SessionToken {{\n    value: String,\n}}\n\nimpl SessionToken {{\n    pub fn issue_token(user_id: &str) -> String {{\n        let mut token = String::from(\"token\");\n{padding}\n        validate_session(&token);\n        token\n    }}\n}}\n",
+        )
+    };
+    let reports_source = {
+        let padding = (0..18)
+            .map(|index| format!("        let report_padding_{index:02} = \"pad\";"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "pub fn render_report() -> String {{\n    let mut report = String::from(\"summary\");\n{padding}\n    export_pdf(&report);\n    report\n}}\n",
+        )
+    };
+    let parser = TreeSitterParser::new();
+    let fixture_repo = [
+        (
+            "/workspace/fixture-repo/src/auth.rs",
+            auth_source.as_str(),
+            ["issue_token", "validate_session"],
+        ),
+        (
+            "/workspace/fixture-repo/src/reports.rs",
+            reports_source.as_str(),
+            ["render_report", "export_pdf"],
+        ),
+    ];
+
+    let mut ast_hits = 0usize;
+    let mut fixed_hits = 0usize;
+    for (path, source, terms) in fixture_repo {
+        let chunks = parser
+            .code_chunk_descriptors_from_text(&LanguageId("rust".to_string()), source)
+            .expect("code chunk descriptors should be available for rust");
+        assert!(
+            !chunks.is_empty(),
+            "tree-sitter chunker should produce code chunks for {path}"
+        );
+        assert!(chunks.iter().all(|chunk| {
+            chunk.byte_len > 0
+                && chunk.start_byte < chunk.end_byte
+                && !chunk.hash.is_empty()
+                && source.is_char_boundary(chunk.start_byte)
+                && source.is_char_boundary(chunk.end_byte)
+        }));
+
+        let ast_has_recall = chunks
+            .iter()
+            .map(|chunk| &source[chunk.start_byte..chunk.end_byte])
+            .any(|chunk_text| chunk_contains_all(chunk_text, &terms));
+        let fixed_has_recall = fixed_size_chunks(source, 96)
+            .iter()
+            .any(|chunk_text| chunk_contains_all(chunk_text, &terms));
+
+        ast_hits += usize::from(ast_has_recall);
+        fixed_hits += usize::from(fixed_has_recall);
+    }
+
+    println!("AST chunk recall: {ast_hits}/2; fixed-size chunk recall: {fixed_hits}/2");
+    assert_eq!(
+        ast_hits, 2,
+        "tree-sitter chunks should keep both fixture hits intact"
+    );
+    assert_eq!(
+        fixed_hits, 0,
+        "fixed-size chunks should split both fixture hits apart"
+    );
+}
+
+#[test]
+fn tree_sitter_worker_projects_rust_sticky_scopes_from_outline() {
+    let document = document(
+        "/workspace/src/structural.rs",
+        1,
+        1,
+        "mod outer {
+    pub struct Demo;
+    impl Demo {
+        pub fn build() -> Self {
+            Self
+        }
+    }
+}
+
+pub fn root() {}
+",
+    );
+    let parser = TreeSitterParser::new();
+
+    let sticky_scopes = parser
+        .sticky_scopes(
+            &document,
+            TextCoordinate {
+                line: 4,
+                character: 18,
+                byte_offset: None,
+                utf16_offset: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(sticky_scopes.len(), 2);
+    assert_eq!(sticky_scopes[0].label, "outer");
+    assert_eq!(sticky_scopes[0].depth, 0);
+    assert!(!sticky_scopes[0].active);
+    assert_eq!(sticky_scopes[1].label, "build");
+    assert_eq!(sticky_scopes[1].depth, 1);
+    assert!(sticky_scopes[1].active);
+    assert_eq!(sticky_scopes[1].source_label, "tree-sitter");
+}
+
+#[test]
+fn tree_sitter_worker_merges_rust_outline_symbols_into_parse_outcome() {
+    let document = document(
+        "/workspace/src/structural.rs",
+        1,
+        1,
+        "mod outer {
+    pub struct Demo;
+    impl Demo {
+        pub fn build() -> Self {
+            Self
+        }
+    }
+}
+
+pub fn root() {}
+",
+    );
+    let parser = TreeSitterParser::new();
+
+    let outcome = parser
+        .parse(legion_index::ParseRequest {
+            document,
+            grammar_version: SemanticGrammarVersion("tree-sitter-rust-0.24.2".to_string()),
+            model_version: SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        })
+        .unwrap();
+
+    let build_symbols = outcome
+        .file_index
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.display_name.as_deref() == Some("build"))
+        .collect::<Vec<_>>();
+    assert_eq!(build_symbols.len(), 1);
+    assert_eq!(build_symbols[0].kind, "definition.method");
+    assert!(build_symbols[0].declaration_range.is_some());
 }
 
 #[test]

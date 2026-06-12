@@ -11,9 +11,9 @@ use legion_protocol::{
     BufferVersion, EventId, EventSequence, FileFingerprint, FileId, LanguageCodeLensProjection,
     LanguageCompletionProjection, LanguageHoverProjection, LanguageId, LanguageInlayHintProjection,
     LanguageLocationProjection, LanguageOutlineSymbolProjection, LanguageProblemProjection,
-    LspDiagnosticSummary, LspHealthState, LspLaunchDisposition, LspLaunchPolicyDecision,
-    LspOperationContext, LspRequestId, LspRestartBackoffMetadata, LspResultStatus,
-    LspSupervisionEvent, LspSupervisionEventKind, LspSupervisionLifecycleState,
+    LspDiagnosticSummary, LspFormattingOptions, LspHealthState, LspLaunchDisposition,
+    LspLaunchPolicyDecision, LspOperationContext, LspRequestId, LspRestartBackoffMetadata,
+    LspResultStatus, LspSupervisionEvent, LspSupervisionEventKind, LspSupervisionLifecycleState,
     ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, SemanticFreshnessState,
     SemanticPrivacyScope, SnapshotId, TextCoordinate, Utf16Position, Utf16Range, WorkspaceId,
 };
@@ -878,6 +878,122 @@ pub fn definition_request(
     )
 }
 
+/// Builds a JSON-RPC `textDocument/prepareRename` request.
+pub fn prepare_rename_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    position: Utf16Position,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "position": {"line": position.line, "character": position.character},
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/rename` request.
+pub fn rename_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    position: Utf16Position,
+    new_name: impl Into<String>,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/rename",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "position": {"line": position.line, "character": position.character},
+            "newName": new_name.into(),
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/declaration` request.
+pub fn declaration_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    position: Utf16Position,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/declaration",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "position": {"line": position.line, "character": position.character},
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/implementation` request.
+pub fn implementation_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    position: Utf16Position,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/implementation",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "position": {"line": position.line, "character": position.character},
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/typeDefinition` request.
+pub fn type_definition_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    position: Utf16Position,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/typeDefinition",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "position": {"line": position.line, "character": position.character},
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/formatting` request.
+pub fn formatting_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    options: &LspFormattingOptions,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/formatting",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "options": options,
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/rangeFormatting` request.
+pub fn range_formatting_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    range: Utf16Range,
+    options: &LspFormattingOptions,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/rangeFormatting",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "range": utf16_range_to_lsp_json(range),
+            "options": options,
+        }),
+    )
+}
+
 /// Builds a JSON-RPC `textDocument/references` request.
 pub fn references_request(
     id: u64,
@@ -892,6 +1008,62 @@ pub fn references_request(
             "textDocument": {"uri": document.uri},
             "position": {"line": position.line, "character": position.character},
             "context": {"includeDeclaration": include_declaration},
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/codeAction` request.
+pub fn code_action_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    range: Utf16Range,
+    diagnostics: Vec<Value>,
+    only: Option<Vec<String>>,
+) -> JsonRpcEnvelope {
+    let mut context = serde_json::Map::new();
+    context.insert("diagnostics".to_string(), Value::Array(diagnostics));
+    if let Some(only) = only.filter(|only| !only.is_empty()) {
+        context.insert("only".to_string(), json!(only));
+    }
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "range": utf16_range_to_lsp_json(range),
+            "context": Value::Object(context),
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/codeAction` request for organize-imports actions.
+pub fn organize_imports_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    range: Utf16Range,
+    diagnostics: Vec<Value>,
+) -> JsonRpcEnvelope {
+    code_action_request(
+        id,
+        document,
+        range,
+        diagnostics,
+        Some(vec!["source.organizeImports".to_string()]),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/signatureHelp` request.
+pub fn signature_help_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    position: Utf16Position,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "position": {"line": position.line, "character": position.character},
         }),
     )
 }
@@ -1052,6 +1224,31 @@ pub fn inlay_hint_request(
         json!({
             "textDocument": {"uri": document.uri},
             "range": utf16_range_to_lsp_json(range),
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/foldingRange` request.
+pub fn folding_range_request(id: u64, document: &LspTextDocumentIdentity) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/foldingRange",
+        json!({
+            "textDocument": {"uri": document.uri},
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `textDocument/semanticTokens/full` request.
+pub fn semantic_tokens_full_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/semanticTokens/full",
+        json!({
+            "textDocument": {"uri": document.uri},
         }),
     )
 }
@@ -1789,6 +1986,17 @@ impl LspStdioSession {
         let pending = self.client.prepare_request(method, params, context);
         self.process.write_envelope(&pending.envelope)?;
         Ok(pending)
+    }
+
+    /// Sends a JSON-RPC notification envelope.
+    pub fn send_notification(
+        &mut self,
+        method: impl Into<String>,
+        params: Value,
+    ) -> LspRuntimeResult<()> {
+        self.process
+            .write_envelope(&JsonRpcEnvelope::notification(method, params))?;
+        Ok(())
     }
 
     /// Blocks until a response for a previously sent request arrives.

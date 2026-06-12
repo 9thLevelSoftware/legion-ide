@@ -38,6 +38,9 @@ impl TempWorkspace {
 
     fn write(&self, name: &str, content: &str) -> PathBuf {
         let path = self.root.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("temp parent dirs should be created");
+        }
         fs::write(&path, content).expect("temp file should be written");
         path
     }
@@ -142,6 +145,108 @@ fn daily_editing_search_workspace_scans_authorized_files() {
         fs::read_to_string(second).expect("second"),
         "prefix needle two\n"
     );
+}
+
+#[test]
+fn daily_editing_search_modes_support_regex_case_and_word() {
+    let regex_workspace = TempWorkspace::new();
+    let regex_target = regex_workspace.write("modes.txt", "alpha\nALPHA\nzzzz\n");
+    let mut regex_app = open_app(regex_workspace.path(), Some(&regex_target));
+
+    let regex_projection = run_search(
+        &mut regex_app,
+        SearchScopeProjection::ActiveFile,
+        "regex:alpha",
+        10,
+    );
+    assert_eq!(
+        regex_projection.status.kind,
+        SearchStatusKindProjection::Completed
+    );
+    assert_eq!(regex_projection.results.len(), 1);
+
+    let case_workspace = TempWorkspace::new();
+    let case_target = case_workspace.write("case.txt", "alpha\nALPHA\n");
+    let mut case_app = open_app(case_workspace.path(), Some(&case_target));
+
+    let nocase_projection = run_search(
+        &mut case_app,
+        SearchScopeProjection::ActiveFile,
+        "nocase alpha",
+        10,
+    );
+    assert_eq!(
+        nocase_projection.status.kind,
+        SearchStatusKindProjection::Completed
+    );
+    assert_eq!(nocase_projection.results.len(), 2);
+
+    let word_workspace = TempWorkspace::new();
+    let word_target = word_workspace.write("word.txt", "alpha\nalphabet\n");
+    let mut word_app = open_app(word_workspace.path(), Some(&word_target));
+
+    let word_projection = run_search(
+        &mut word_app,
+        SearchScopeProjection::ActiveFile,
+        "word:alpha",
+        10,
+    );
+    assert_eq!(
+        word_projection.status.kind,
+        SearchStatusKindProjection::Completed
+    );
+    assert_eq!(word_projection.results.len(), 1);
+    assert_eq!(word_projection.results[0].line_number, 0);
+}
+
+#[test]
+fn daily_editing_search_workspace_applies_include_and_exclude_globs() {
+    let workspace = TempWorkspace::new();
+    let included = workspace.write("src/match.rs", "needle included\n");
+    workspace.write("src/skip.rs", "needle skipped\n");
+    workspace.write("docs/readme.txt", "needle docs\n");
+    let mut app = open_app(workspace.path(), Some(&included));
+
+    let projection = run_search(
+        &mut app,
+        SearchScopeProjection::Workspace,
+        "include:src/**/*.rs exclude:src/skip.rs needle",
+        10,
+    );
+
+    assert_eq!(
+        projection.status.kind,
+        SearchStatusKindProjection::Completed
+    );
+    assert_eq!(projection.results.len(), 1);
+    assert!(
+        projection.results[0]
+            .file_path
+            .as_ref()
+            .is_some_and(|path| path.0.ends_with("src/match.rs"))
+    );
+}
+
+#[test]
+fn daily_editing_search_workspace_honors_gitignore() {
+    let workspace = TempWorkspace::new();
+    std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(workspace.path())
+        .status()
+        .expect("git init should run");
+    workspace.write(".gitignore", "ignored.txt\n");
+    workspace.write("ignored.txt", "needle ignored\n");
+    let mut app = open_app(workspace.path(), None);
+
+    let projection = run_search(&mut app, SearchScopeProjection::Workspace, "needle", 10);
+
+    assert_eq!(
+        projection.status.kind,
+        SearchStatusKindProjection::NoResults
+    );
+    assert!(projection.results.is_empty());
 }
 
 #[test]
