@@ -5793,6 +5793,7 @@ fn dto_contracts_provider_route_request_requires_complete_runtime_metadata() {
             "budget-1",
             AssistedAiTrustProjectionKind::PermissionBudget,
         ),
+        prompt_prefix: "workspace AGENTS.md\nuser rules".to_string(),
         proposal_intent: AssistedAiProposalTargetIntent {
             payload_kind: ProposalPayloadKind::TextEdit,
             target_coverage: ProposalTargetCoverage {

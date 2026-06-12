@@ -1115,6 +1115,7 @@ fn provider_route_request_from_worker(
         context_manifest: route_ref.clone(),
         privacy_inspector: route_ref.clone(),
         permission_budget: route_ref,
+        prompt_prefix: String::new(),
         proposal_intent: AssistedAiProposalTargetIntent {
             payload_kind: ProposalPayloadKind::CreateFile,
             target_coverage: ProposalTargetCoverage {

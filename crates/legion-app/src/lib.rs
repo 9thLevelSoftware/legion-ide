@@ -6834,6 +6834,7 @@ impl Phase4ContextAssemblyService {
         byte_len: u64,
         line_count: u32,
         generated_at: TimestampMillis,
+        instruction_manifest_items: Vec<legion_protocol::ContextManifestItem>,
     ) -> legion_protocol::ContextManifestProjection {
         let file_item = legion_protocol::ContextManifestItem {
             item_id: format!("phase4:{}:file", run_id.0),
@@ -6980,13 +6981,11 @@ impl Phase4ContextAssemblyService {
             privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
             risk_label: legion_protocol::ProposalRiskLabel::Low,
             egress: legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            items: vec![
-                file_item,
-                buffer_item,
-                selection_item,
-                route_item,
-                agent_item,
-            ],
+            items: vec![file_item, buffer_item]
+                .into_iter()
+                .chain(instruction_manifest_items)
+                .chain(vec![selection_item, route_item, agent_item])
+                .collect(),
             permissions: vec![permission],
             omitted_item_count: 0,
             stale_or_missing_metadata_risk_present: false,
@@ -7034,6 +7033,207 @@ impl Phase4ContextAssemblyService {
             redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
             schema_version: 1,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InstructionPrefixSource {
+    source_label: String,
+    scope_label: String,
+    path: std::path::PathBuf,
+    content: String,
+}
+
+#[derive(Debug, Clone)]
+struct InstructionPrefixBundle {
+    prompt_prefix: String,
+    manifest_items: Vec<legion_protocol::ContextManifestItem>,
+}
+
+fn instruction_prefix_bundle(
+    workspace_id: WorkspaceId,
+    generated_at: TimestampMillis,
+    workspace_root_path: Option<&std::path::Path>,
+    home_dir: Option<&std::path::Path>,
+) -> InstructionPrefixBundle {
+    let mut sources = Vec::new();
+    if let Some(workspace_root) = workspace_root_path {
+        collect_instruction_scope_sources("workspace", workspace_root, &mut sources);
+    }
+    if let Some(home_dir) = home_dir {
+        collect_instruction_scope_sources("user", home_dir, &mut sources);
+    }
+    sources.sort_by(|a, b| {
+        scope_rank(&a.scope_label)
+            .cmp(&scope_rank(&b.scope_label))
+            .then(source_kind_rank(&a.source_label).cmp(&source_kind_rank(&b.source_label)))
+            .then(a.path.cmp(&b.path))
+            .then(a.source_label.cmp(&b.source_label))
+    });
+    sources.dedup_by(|a, b| a.path == b.path);
+
+    let prompt_prefix = sources
+        .iter()
+        .map(render_instruction_source)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let manifest_items = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            instruction_source_manifest_item(workspace_id, generated_at, index, source)
+        })
+        .collect();
+
+    InstructionPrefixBundle {
+        prompt_prefix,
+        manifest_items,
+    }
+}
+
+fn collect_instruction_scope_sources(
+    scope_label: &str,
+    root: &std::path::Path,
+    sources: &mut Vec<InstructionPrefixSource>,
+) {
+    let agents_path = root.join("AGENTS.md");
+    if let Some(source) = instruction_source_from_file(scope_label, "agents", agents_path) {
+        sources.push(source);
+    }
+    let rules_dir = root.join(".legion/rules");
+    collect_instruction_rule_sources(scope_label, &rules_dir, sources);
+}
+
+fn collect_instruction_rule_sources(
+    scope_label: &str,
+    rules_dir: &std::path::Path,
+    sources: &mut Vec<InstructionPrefixSource>,
+) {
+    let Ok(entries) = std::fs::read_dir(rules_dir) else {
+        return;
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.path().cmp(&right.path()));
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_instruction_rule_sources(scope_label, &path, sources);
+            continue;
+        }
+        if path.is_file() {
+            if let Some(source) = instruction_source_from_file(scope_label, "rules", path) {
+                sources.push(source);
+            }
+        }
+    }
+}
+
+fn instruction_source_from_file(
+    scope_label: &str,
+    source_kind: &str,
+    path: std::path::PathBuf,
+) -> Option<InstructionPrefixSource> {
+    let content = std::fs::read_to_string(&path).ok()?;
+    Some(InstructionPrefixSource {
+        source_label: format!("{scope_label}-{source_kind}"),
+        scope_label: scope_label.to_string(),
+        path,
+        content,
+    })
+}
+
+fn render_instruction_source(source: &InstructionPrefixSource) -> String {
+    format!(
+        "source={}\npath={}\n{}",
+        source.source_label,
+        source.path.display(),
+        source.content
+    )
+}
+
+fn instruction_source_manifest_item(
+    workspace_id: WorkspaceId,
+    generated_at: TimestampMillis,
+    index: usize,
+    source: &InstructionPrefixSource,
+) -> legion_protocol::ContextManifestItem {
+    let content_fingerprint = metadata_fingerprint(
+        "instruction-source",
+        &format!(
+            "{}|{}|{}",
+            source.source_label,
+            source.path.display(),
+            source.content
+        ),
+    );
+    let byte_count = source.content.len().min(u32::MAX as usize) as u32;
+    let line_count = source.content.lines().count().min(u32::MAX as usize) as u32;
+    legion_protocol::ContextManifestItem {
+        item_id: format!("phase4:instruction:{}:{}", index, content_fingerprint.value),
+        kind: legion_protocol::ContextManifestItemKind::File,
+        inclusion: legion_protocol::ContextManifestInclusionState::Included,
+        workspace_id: Some(workspace_id),
+        file_id: None,
+        buffer_id: None,
+        proposal_id: None,
+        target_id: Some(source.path.display().to_string()),
+        path: Some(CanonicalPath(source.path.display().to_string())),
+        ranges: Vec::new(),
+        counts: vec![
+            legion_protocol::ContextManifestItemCount {
+                label: "file_bytes".to_string(),
+                count: byte_count,
+            },
+            legion_protocol::ContextManifestItemCount {
+                label: "lines".to_string(),
+                count: line_count,
+            },
+        ],
+        hashes: vec![content_fingerprint.clone()],
+        privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
+        privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+        risk_label: legion_protocol::ProposalRiskLabel::Low,
+        egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
+        freshness: Some(legion_protocol::ContextManifestFreshnessSummary {
+            state: legion_protocol::SemanticFreshnessState::Fresh,
+            freshness_key_present: true,
+            snapshot_id: None,
+            file_content_version: None,
+            workspace_generation: None,
+            content_hash: Some(content_fingerprint.clone()),
+            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
+            observed_at: Some(generated_at),
+            risk_label: legion_protocol::ProposalRiskLabel::Low,
+            risk_reasons: Vec::new(),
+            schema_version: 1,
+        }),
+        preconditions: None,
+        labels: vec![
+            "phase4.context.instruction_source".to_string(),
+            format!("phase4.context.instruction_scope:{}", source.scope_label),
+            format!("phase4.context.instruction_layer:{}", source.source_label),
+            format!("phase4.context.instruction_path:{}", source.path.display()),
+        ],
+        redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn source_kind_rank(source_label: &str) -> u8 {
+    if source_label.ends_with("-agents") {
+        0
+    } else if source_label.ends_with("-rules") {
+        1
+    } else {
+        2
+    }
+}
+
+fn scope_rank(scope_label: &str) -> u8 {
+    match scope_label {
+        "workspace" => 0,
+        "user" => 1,
+        _ => 2,
     }
 }
 
@@ -15817,6 +16017,17 @@ impl AppComposition {
             algorithm: "legion-text-snapshot".to_string(),
             value: snapshot.content_hash.clone(),
         };
+        let instruction_bundle = instruction_prefix_bundle(
+            context.workspace_id,
+            generated_at,
+            self.active_documents
+                .workspace_root_path
+                .as_ref()
+                .map(|path| std::path::Path::new(path.as_str())),
+            std::env::var_os("HOME")
+                .as_deref()
+                .map(std::path::Path::new),
+        );
         let context_manifest_projection = Phase4ContextAssemblyService::assemble_context_manifest(
             &context,
             &run_id,
@@ -15827,6 +16038,7 @@ impl AppComposition {
             snapshot.byte_len as u64,
             snapshot.line_count.min(u32::MAX as usize) as u32,
             generated_at,
+            instruction_bundle.manifest_items,
         );
         let privacy_inspector_projection =
             legion_protocol::privacy_inspector_from_context_manifest_projection(
@@ -15870,6 +16082,7 @@ impl AppComposition {
                 &permission_budget_projection.projection_id,
                 legion_protocol::AssistedAiTrustProjectionKind::PermissionBudget,
             ),
+            prompt_prefix: instruction_bundle.prompt_prefix,
             proposal_intent: legion_protocol::AssistedAiProposalTargetIntent {
                 payload_kind: legion_protocol::ProposalPayloadKind::TextEdit,
                 target_coverage: ProposalTargetCoverage {
@@ -17290,6 +17503,7 @@ impl AppComposition {
             context_manifest: context_reference,
             privacy_inspector: privacy_reference,
             permission_budget: permission_reference,
+            prompt_prefix: String::new(),
             proposal_intent: legion_protocol::AssistedAiProposalTargetIntent {
                 payload_kind: legion_protocol::ProposalPayloadKind::CodeAction,
                 target_coverage: ProposalTargetCoverage {
@@ -22632,6 +22846,19 @@ pub fn default_workspace_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("legion-{prefix}-{nanos}"));
+        fs::create_dir_all(&path).expect("create temp root");
+        path
+    }
 
     fn save_proposal(proposal_id: ProposalId) -> WorkspaceProposal {
         let file = FileIdentity {
@@ -22771,6 +22998,84 @@ mod tests {
                 max_output_bytes: 128,
             },
         }
+    }
+
+    #[test]
+    fn instruction_prefix_bundle_collects_workspace_and_user_layers_in_order() {
+        let workspace_root = unique_temp_dir("workspace");
+        let workspace_legion_rules = workspace_root.join(".legion/rules");
+        let user_root = unique_temp_dir("user-home");
+        let user_legion_rules = user_root.join(".legion/rules");
+
+        fs::create_dir_all(&workspace_legion_rules).expect("create workspace rules dir");
+        fs::create_dir_all(&user_legion_rules).expect("create user rules dir");
+        fs::write(
+            workspace_root.join("AGENTS.md"),
+            "workspace agent line 1\nworkspace agent line 2\n",
+        )
+        .expect("write workspace AGENTS.md");
+        fs::write(
+            workspace_legion_rules.join("b-rule.md"),
+            "workspace rule b\n",
+        )
+        .expect("write workspace rule b");
+        fs::write(
+            workspace_legion_rules.join("a-rule.md"),
+            "workspace rule a\n",
+        )
+        .expect("write workspace rule a");
+        fs::write(user_legion_rules.join("user-rule.md"), "user rule\n").expect("write user rule");
+
+        let bundle = instruction_prefix_bundle(
+            WorkspaceId(11),
+            TimestampMillis(1),
+            Some(workspace_root.as_path()),
+            Some(user_root.as_path()),
+        );
+
+        assert!(
+            bundle
+                .prompt_prefix
+                .starts_with("source=workspace-agents\npath=")
+        );
+        assert!(bundle.prompt_prefix.contains("workspace agent line 1"));
+        assert!(bundle.prompt_prefix.contains("workspace rule a"));
+        assert!(bundle.prompt_prefix.contains("workspace rule b"));
+        assert!(bundle.prompt_prefix.contains("user rule"));
+        assert_eq!(bundle.manifest_items.len(), 4);
+        assert_eq!(
+            bundle.manifest_items[0]
+                .path
+                .as_ref()
+                .map(|path| path.0.as_str()),
+            Some(
+                workspace_root
+                    .join("AGENTS.md")
+                    .to_str()
+                    .expect("workspace path text")
+            )
+        );
+        assert!(
+            bundle.manifest_items[0]
+                .labels
+                .iter()
+                .any(|label| label == "phase4.context.instruction_source")
+        );
+        assert_eq!(
+            bundle.manifest_items[3]
+                .path
+                .as_ref()
+                .map(|path| path.0.as_str()),
+            Some(
+                user_legion_rules
+                    .join("user-rule.md")
+                    .to_str()
+                    .expect("user path text")
+            )
+        );
+
+        let _ = fs::remove_dir_all(&workspace_root);
+        let _ = fs::remove_dir_all(&user_root);
     }
 
     fn assert_transition_diagnostic(response: &ProposalResponse, expected_code: &str) {

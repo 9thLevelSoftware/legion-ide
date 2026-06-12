@@ -6582,6 +6582,8 @@ pub struct AssistedAiProviderRouteRequest {
     pub privacy_inspector: AssistedAiTrustProjectionReference,
     /// Permission-budget reference required before invocation.
     pub permission_budget: AssistedAiTrustProjectionReference,
+    /// Deterministic instruction prefix prepended to provider prompts.
+    pub prompt_prefix: String,
     /// Proposal intent required to keep output proposal-only.
     pub proposal_intent: AssistedAiProposalTargetIntent,
     /// Capability decision id, if already decided.

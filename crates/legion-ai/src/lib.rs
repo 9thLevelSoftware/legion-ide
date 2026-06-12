@@ -621,7 +621,7 @@ fn allowed_route_decision() -> AssistedAiRouteDecision {
 }
 
 fn route_prompt(request: &AssistedAiProviderRouteRequest) -> String {
-    format!(
+    let prompt = format!(
         "operation={:?}\ncontext_ref={}\nprivacy_ref={}\npermission_ref={}\nintent_labels={}\ntarget_count={}\nredaction=metadata-only",
         request.operation_class,
         request.context_manifest.reference_id,
@@ -629,7 +629,12 @@ fn route_prompt(request: &AssistedAiProviderRouteRequest) -> String {
         request.permission_budget.reference_id,
         request.proposal_intent.labels.join(","),
         request.proposal_intent.target_coverage.targets.len(),
-    )
+    );
+    if request.prompt_prefix.is_empty() {
+        prompt
+    } else {
+        format!("{}\n\n{}", request.prompt_prefix, prompt)
+    }
 }
 
 fn route_output_labels(completion: &ChatCompletionResponse) -> Vec<String> {
@@ -774,6 +779,7 @@ mod tests {
                 AssistedAiTrustProjectionKind::PrivacyInspector,
             ),
             permission_budget: reference("budget", AssistedAiTrustProjectionKind::PermissionBudget),
+            prompt_prefix: String::new(),
             proposal_intent: AssistedAiProposalTargetIntent {
                 payload_kind: ProposalPayloadKind::TextEdit,
                 target_coverage: ProposalTargetCoverage {
@@ -929,6 +935,16 @@ mod tests {
     #[test]
     fn bounded_ascii_prefix_truncates_to_char_boundary_before_byte_limit() {
         assert_eq!(bounded_ascii_prefix("abcédef", 4), "abc");
+    }
+
+    #[test]
+    fn route_prompt_prepends_instruction_prefix() {
+        let mut request = route_request(AssistedAiProviderClass::LocalLoopback);
+        request.prompt_prefix = "workspace AGENTS.md\nbe precise".to_string();
+
+        let prompt = route_prompt(&request);
+
+        assert!(prompt.starts_with("workspace AGENTS.md\nbe precise\n\noperation=ProposeEdit"));
     }
 
     #[test]
