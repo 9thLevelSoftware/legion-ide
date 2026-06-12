@@ -3278,6 +3278,14 @@ fn dto_contracts_privacy_inspector_serializes_metadata_only_and_redacted() {
     assert_eq!(inspector.records.len(), 2);
     assert_eq!(inspector.denied_record_count, 1);
     assert_eq!(inspector.external_egress_record_count, 1);
+    assert_eq!(
+        inspector.records[0].egress,
+        projection.manifest.items[0].egress
+    );
+    assert_eq!(
+        inspector.records[1].egress,
+        projection.manifest.permissions[0].egress
+    );
     assert!(inspector.refusal.is_some());
 
     let value = serde_json::to_value(&inspector).expect("serialize privacy inspector");
@@ -4662,6 +4670,51 @@ fn assisted_ai_provider(provider_class: AssistedAiProviderClass) -> AssistedAiPr
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
+}
+
+#[test]
+fn dto_contracts_runtime_provider_capability_matrix_is_metadata_only() {
+    let capability = AssistedAiRuntimeProviderCapability {
+        provider_id: "provider:runtime-openai".to_string(),
+        provider_class: AssistedAiProviderClass::ByokRemote,
+        supports_streaming: true,
+        supports_structured_output: true,
+        sampling_labels: vec!["temperature".to_string(), "top_p".to_string()],
+        tool_labels: vec!["function_calling".to_string(), "built_in_tools".to_string()],
+        structured_output_labels: vec!["json_schema".to_string()],
+        vision_labels: vec!["image_input".to_string()],
+        context_length_label: "model-dependent".to_string(),
+        context_length_tokens: Some(128000),
+        embeddings_label: "unsupported".to_string(),
+        reranking_label: "unsupported".to_string(),
+        tool_planning_label: "deferred".to_string(),
+        context_window_label: "large".to_string(),
+        cost_label: "paid".to_string(),
+        supports_cancellation: true,
+        health_state_label: "healthy".to_string(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
+    let value = serde_json::to_value(&capability).expect("serialize capability matrix");
+    assert_eq!(value["sampling_labels"], json!(["temperature", "top_p"]));
+    assert_eq!(
+        value["tool_labels"],
+        json!(["function_calling", "built_in_tools"])
+    );
+    assert_eq!(value["structured_output_labels"], json!(["json_schema"]));
+    assert_eq!(value["vision_labels"], json!(["image_input"]));
+    assert_eq!(value["context_length_label"], "model-dependent");
+    assert_eq!(value["context_length_tokens"], json!(128000));
+
+    let roundtrip: AssistedAiRuntimeProviderCapability =
+        serde_json::from_value(value).expect("deserialize capability matrix");
+    assert_eq!(roundtrip.provider_id, "provider:runtime-openai");
+    assert_eq!(roundtrip.supports_streaming, true);
+    assert_eq!(
+        roundtrip.structured_output_labels,
+        vec!["json_schema".to_string()]
+    );
 }
 
 fn assisted_ai_ref(

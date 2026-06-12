@@ -2,7 +2,7 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, INDEX_SCHEMA_VERSION, IndexError,
     IndexWorkItem, IndexWorkKind, IndexingActor, LOCAL_RETRIEVAL_EMBEDDING_DIMENSIONS,
     LexicalFallbackParser, LexicalIndexer, ParserWorker, RETRIEVAL_CHUNK_SHA256_ALGORITHM,
-    RepositoryDiscoveryImporter, RetrievalQuery, SemanticFabricScheduler,
+    RepositoryDiscoveryImporter, RepositoryMapRequest, RetrievalQuery, SemanticFabricScheduler,
     SemanticFabricSchedulingPolicy, SemanticIndex, SemanticSourceInputKind, SemanticUpsertOutcome,
     SourceDocument, StructuralRewriteFileInput, StructuralSearchQuery, SyntaxCacheEventKind,
     SyntaxTreeCache, TREE_SITTER_EXTRACTION_VERSION, TreeSitterParser, WorkCompletionState,
@@ -36,6 +36,7 @@ use legion_protocol::{
     validate_lsp_edit_proposal_contract,
 };
 use legion_text::{DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, TextSnapshot};
+use serde::Deserialize;
 use uuid::Uuid;
 
 fn document(path: &str, version: u64, generation: u64, text: &str) -> SourceDocument {
@@ -2991,4 +2992,326 @@ fn structural_rewrite_payload_is_cross_file_proposal_only() {
         Some(first.identity.content_hash.clone())
     );
     assert!(payload.diagnostics.is_empty());
+}
+
+#[test]
+fn repository_map_ranks_the_right_files_for_scripted_queries() {
+    let indexer = LexicalIndexer::new();
+    let mut index = SemanticIndex::new();
+
+    let fixtures = [
+        (
+            "/workspace/crates/legion-app/src/lib.rs",
+            FileId(201),
+            "pub fn save_active_buffer() {}\n\npub struct SaveWorkflowService;\n\npub struct WorkspaceActor;\n",
+        ),
+        (
+            "/workspace/crates/legion-project/src/lib.rs",
+            FileId(202),
+            "pub fn semantic_discovery_snapshot() {}\n\npub struct WorkspaceDiscoverySnapshot;\n",
+        ),
+        (
+            "/workspace/crates/legion-index/src/lib.rs",
+            FileId(203),
+            "pub struct SemanticIndex;\n\npub struct RepositoryDiscoveryImporter;\n\npub struct SemanticFabricScheduler;\n",
+        ),
+        (
+            "/workspace/crates/legion-ui/src/lib.rs",
+            FileId(204),
+            "pub struct ProjectionOnlyUi;\n\npub fn emit_snapshot() {}\n",
+        ),
+        (
+            "/workspace/crates/legion-protocol/src/lib.rs",
+            FileId(205),
+            "pub struct WorkspaceDiscoveryRecord;\n\npub struct SemanticQueryRequest;\n",
+        ),
+        (
+            "/workspace/crates/legion-remote/src/lib.rs",
+            FileId(206),
+            "pub struct HttpJsonTransport;\n\npub struct CloudLaneTransport;\n",
+        ),
+        (
+            "/workspace/xtask/src/main.rs",
+            FileId(207),
+            "pub fn check_deps() {}\n\npub struct DependencyPolicyGate;\n\npub fn perf_harness() {}\n",
+        ),
+        (
+            "/workspace/crates/legion-tracker/src/lib.rs",
+            FileId(208),
+            "pub struct TrackerEvent;\n\npub fn audit_run() {}\n",
+        ),
+        (
+            "/workspace/crates/legion-memory/src/lib.rs",
+            FileId(209),
+            "pub struct MemoryStore;\n\npub fn consent_gate() {}\n",
+        ),
+        (
+            "/workspace/crates/legion-terminal/src/lib.rs",
+            FileId(210),
+            "pub struct PtyTerminal;\n\npub fn shell_session() {}\n",
+        ),
+    ];
+
+    for (path, file_id, text) in fixtures {
+        let document = document_with(
+            path,
+            file_id,
+            LanguageId("rust".to_string()),
+            1,
+            1,
+            SemanticPrivacyScope::Workspace,
+            text,
+        );
+        let file_index = indexer.index_document(
+            &document,
+            SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+            SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+        );
+        assert_eq!(index.upsert(file_index), SemanticUpsertOutcome::Applied);
+    }
+
+    let cases = [
+        (
+            "save proposal",
+            "/workspace/crates/legion-app/src/lib.rs",
+            "save_active_buffer",
+        ),
+        (
+            "workspace discovery snapshot",
+            "/workspace/crates/legion-project/src/lib.rs",
+            "semantic_discovery_snapshot",
+        ),
+        (
+            "semantic index",
+            "/workspace/crates/legion-index/src/lib.rs",
+            "SemanticIndex",
+        ),
+        (
+            "projection-only snapshot",
+            "/workspace/crates/legion-ui/src/lib.rs",
+            "ProjectionOnlyUi",
+        ),
+        (
+            "protocol dto contracts",
+            "/workspace/crates/legion-protocol/src/lib.rs",
+            "SemanticQueryRequest",
+        ),
+        (
+            "http transport",
+            "/workspace/crates/legion-remote/src/lib.rs",
+            "HttpJsonTransport",
+        ),
+        (
+            "dependency policy",
+            "/workspace/xtask/src/main.rs",
+            "DependencyPolicyGate",
+        ),
+        (
+            "tracker audit",
+            "/workspace/crates/legion-tracker/src/lib.rs",
+            "TrackerEvent",
+        ),
+        (
+            "memory consent",
+            "/workspace/crates/legion-memory/src/lib.rs",
+            "MemoryStore",
+        ),
+        (
+            "pty shell",
+            "/workspace/crates/legion-terminal/src/lib.rs",
+            "PtyTerminal",
+        ),
+    ];
+
+    for (query_text, expected_path, expected_signature) in cases {
+        let response = index.repository_map(&RepositoryMapRequest {
+            query_text: query_text.to_string(),
+            token_budget: 220,
+            limit: 3,
+        });
+
+        assert!(
+            !response.entries.is_empty(),
+            "query {query_text} returned no entries"
+        );
+        assert!(
+            response.token_estimate <= 220,
+            "query {query_text} exceeded the token budget: {}",
+            response.token_estimate
+        );
+        assert_eq!(
+            response.entries[0].path.0, expected_path,
+            "query {query_text}"
+        );
+        assert!(
+            response.entries[0]
+                .signatures
+                .iter()
+                .any(|signature| signature.display_name.as_deref() == Some(expected_signature)),
+            "query {query_text} missing signature {expected_signature}"
+        );
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HybridRetrievalEvalFixture {
+    cases: Vec<HybridRetrievalEvalCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HybridRetrievalEvalCase {
+    id: String,
+    query: String,
+    expected_path: String,
+    expected_symbol: String,
+    documents: Vec<HybridRetrievalEvalDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HybridRetrievalEvalDocument {
+    path: String,
+    file_id: u64,
+    text: String,
+}
+
+#[test]
+fn retrieval_hybrid_eval_fixture_beats_single_methods() {
+    let fixture: HybridRetrievalEvalFixture = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../evals/ws10_t4_hybrid.json"
+    )))
+    .expect("parse WS10.T4 hybrid retrieval eval fixture");
+
+    let indexer = LexicalIndexer::new();
+    let mut hybrid_wins = 0usize;
+    let mut vector_wins = 0usize;
+    let mut repo_wins = 0usize;
+    let mut lexical_wins = 0usize;
+
+    for case in &fixture.cases {
+        let mut index = SemanticIndex::new();
+        for document in &case.documents {
+            let source = document_with(
+                &document.path,
+                FileId(u128::from(document.file_id)),
+                LanguageId("rust".to_string()),
+                1,
+                1,
+                SemanticPrivacyScope::Workspace,
+                &document.text,
+            );
+            let file_index = indexer.index_document(
+                &source,
+                SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
+                SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
+            );
+            assert_eq!(index.upsert(file_index), SemanticUpsertOutcome::Applied);
+        }
+
+        let query = RetrievalQuery {
+            workspace_id: WorkspaceId(7),
+            query_text: case.query.clone(),
+            file_ids: Vec::new(),
+            paths: Vec::new(),
+            language_ids: Vec::new(),
+            privacy_scope: SemanticPrivacyScope::Workspace,
+            freshness_policy: SemanticQueryFreshnessPolicy::RequireFresh,
+            limit: 3,
+            schema_version: INDEX_SCHEMA_VERSION,
+        };
+        let vector_top = index
+            .search_retrieval(&query)
+            .results
+            .first()
+            .expect("vector retrieval should return a result")
+            .citation
+            .path
+            .0
+            .clone();
+        let hybrid_response = index.search_hybrid_retrieval(&query);
+        let hybrid_top = hybrid_response
+            .results
+            .first()
+            .expect("hybrid retrieval should return a result");
+        let repo_top = index
+            .repository_map(&RepositoryMapRequest {
+                query_text: case.query.clone(),
+                token_budget: 220,
+                limit: 3,
+            })
+            .entries
+            .first()
+            .expect("repository map should return a result")
+            .path
+            .0
+            .clone();
+        let lexical_top = lexical_eval_top_path(case);
+
+        assert_eq!(
+            hybrid_top.citation.path.0, case.expected_path,
+            "case {} expected the hybrid ranker to surface the intended path",
+            case.id
+        );
+        assert!(
+            hybrid_top.label.contains(&case.expected_symbol),
+            "case {} expected the hybrid ranker to surface symbol {}",
+            case.id,
+            case.expected_symbol
+        );
+
+        hybrid_wins += usize::from(hybrid_top.citation.path.0 == case.expected_path);
+        vector_wins += usize::from(vector_top == case.expected_path);
+        repo_wins += usize::from(repo_top == case.expected_path);
+        lexical_wins += usize::from(lexical_top == case.expected_path);
+    }
+
+    let total_cases = fixture.cases.len();
+    assert_eq!(
+        hybrid_wins, total_cases,
+        "hybrid should win every eval case"
+    );
+    assert!(
+        hybrid_wins > vector_wins,
+        "hybrid should beat vector-only retrieval"
+    );
+    assert!(
+        hybrid_wins > repo_wins,
+        "hybrid should beat repo-map-only retrieval"
+    );
+    assert!(
+        hybrid_wins > lexical_wins,
+        "hybrid should beat lexical-only retrieval"
+    );
+}
+
+fn lexical_eval_top_path(case: &HybridRetrievalEvalCase) -> String {
+    let query_terms = eval_terms(&case.query);
+    case.documents
+        .iter()
+        .map(|document| {
+            let score = lexical_eval_score(&query_terms, &document.text);
+            (score, document.path.as_str())
+        })
+        .max_by(|(left_score, left_path), (right_score, right_path)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| right_path.cmp(left_path))
+        })
+        .map(|(_, path)| path.to_string())
+        .expect("lexical evaluation should find at least one path")
+}
+
+fn lexical_eval_score(query_terms: &[String], text: &str) -> usize {
+    let haystack = text.to_lowercase();
+    query_terms
+        .iter()
+        .map(|term| haystack.matches(term).count())
+        .sum()
+}
+
+fn eval_terms(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_lowercase())
+        .collect()
 }

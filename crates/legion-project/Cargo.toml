@@ -12,6 +12,7 @@ legion-protocol = { workspace = true }
 legion-platform = { workspace = true }
 legion-security = { workspace = true }
 legion-observability = { workspace = true }
+legion-index = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

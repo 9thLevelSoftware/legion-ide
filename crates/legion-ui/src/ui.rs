@@ -2823,6 +2823,9 @@ pub enum ShellCommandError {
     /// A debug command requires an active debug session projection.
     #[error("active debug session projection is missing")]
     ActiveDebugSessionMissing,
+    /// A context-manifest command targeted an unknown item.
+    #[error("context manifest item is missing")]
+    ContextManifestItemMissing,
 }
 
 /// Projection-only IDE shell state.
@@ -3212,10 +3215,24 @@ impl Shell {
         }
         if !self.context_manifest_projection.manifest.items.is_empty() {
             let manifest = &self.context_manifest_projection.manifest;
+            let excluded_count = manifest
+                .items
+                .iter()
+                .filter(|item| {
+                    item.inclusion == legion_protocol::ContextManifestInclusionState::Excluded
+                })
+                .count();
+            let selected_item_id = self
+                .context_manifest_projection
+                .selected_item_id
+                .as_deref()
+                .unwrap_or("none");
             println!(
-                "Context manifest {} | items={} omitted={} risk={:?} privacy={:?} egress={:?}",
+                "Context manifest {} | items={} excluded={} selected={} omitted={} risk={:?} privacy={:?} egress={:?}",
                 manifest.manifest_id,
                 manifest.items.len(),
+                excluded_count,
+                selected_item_id,
                 manifest.omitted_item_count,
                 manifest.risk_label,
                 manifest.privacy_label,
@@ -3660,6 +3677,24 @@ impl Shell {
             return Ok(Some(
                 self.push_intent(CommandDispatchIntent::CloseTab { buffer_id }),
             ));
+        }
+        if let Some(item_id) = trimmed.strip_prefix(":context-manifest-select ") {
+            let item_id = item_id.trim();
+            if self
+                .context_manifest_projection
+                .manifest
+                .items
+                .iter()
+                .any(|item| item.item_id == item_id)
+            {
+                self.context_manifest_projection.selected_item_id = Some(item_id.to_string());
+                return Ok(None);
+            }
+            return Err(ShellCommandError::ContextManifestItemMissing);
+        }
+        if trimmed == ":context-manifest-clear" || trimmed == ":context-manifest-clear-selection" {
+            self.context_manifest_projection.selected_item_id = None;
+            return Ok(None);
         }
         if let Some(query) = trimmed.strip_prefix(":search ") {
             return Ok(Some(self.push_intent(CommandDispatchIntent::RunSearch {
@@ -5731,6 +5766,7 @@ mod tests {
         manifest.manifest.manifest_id = "manifest:trust-review".to_string();
         manifest.manifest.risk_label = ProposalRiskLabel::Medium;
         manifest.manifest.privacy_label = ProposalPrivacyLabel::WorkspaceMetadata;
+        manifest.selected_item_id = Some("semantic-job:0".to_string());
         manifest
             .manifest
             .items
@@ -5760,6 +5796,32 @@ mod tests {
                 freshness: None,
                 preconditions: None,
                 labels: vec!["semantic.fabric.metadata".to_string()],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        manifest
+            .manifest
+            .items
+            .push(legion_protocol::ContextManifestItem {
+                item_id: "lsp-diagnostics:0".to_string(),
+                kind: legion_protocol::ContextManifestItemKind::LspDiagnosticSummary,
+                inclusion: legion_protocol::ContextManifestInclusionState::Excluded,
+                workspace_id: Some(WorkspaceId(1)),
+                file_id: Some(FileId(10)),
+                buffer_id: Some(BufferId(3)),
+                proposal_id: Some(ProposalId(42)),
+                target_id: Some("target-buffer-secondary".to_string()),
+                path: Some(CanonicalPath("C:/repo/src/lib.rs".to_string())),
+                ranges: Vec::new(),
+                counts: Vec::new(),
+                hashes: Vec::new(),
+                privacy_scope: Some(legion_protocol::SemanticPrivacyScope::Workspace),
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                risk_label: ProposalRiskLabel::Medium,
+                egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
+                freshness: None,
+                preconditions: None,
+                labels: vec!["retrieval.excluded".to_string()],
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             });
@@ -5804,7 +5866,123 @@ mod tests {
 
         let snapshot = shell.projection_snapshot();
         assert_eq!(snapshot.context_manifest_projection, manifest);
-        assert_eq!(snapshot.context_manifest_projection.manifest.items.len(), 1);
+        assert_eq!(snapshot.context_manifest_projection.manifest.items.len(), 2);
+        assert_eq!(
+            snapshot
+                .context_manifest_projection
+                .selected_item_id
+                .as_deref(),
+            Some("semantic-job:0")
+        );
+        assert_eq!(
+            snapshot.context_manifest_projection.manifest.items[1].inclusion,
+            legion_protocol::ContextManifestInclusionState::Excluded
+        );
+        assert!(shell.command_dispatch_intents.is_empty());
+    }
+
+    #[test]
+    fn context_manifest_selection_commands_remain_projection_only() {
+        let mut manifest = empty_context_manifest_projection();
+        manifest
+            .manifest
+            .items
+            .push(legion_protocol::ContextManifestItem {
+                item_id: "semantic-job:0".to_string(),
+                kind: legion_protocol::ContextManifestItemKind::SemanticFabricJob,
+                inclusion: legion_protocol::ContextManifestInclusionState::Included,
+                workspace_id: Some(WorkspaceId(1)),
+                file_id: Some(FileId(9)),
+                buffer_id: Some(BufferId(2)),
+                proposal_id: Some(ProposalId(42)),
+                target_id: Some("target-buffer-main".to_string()),
+                path: Some(CanonicalPath("C:/repo/src/main.rs".to_string())),
+                ranges: vec![ByteRange::new(10, 20)],
+                counts: vec![legion_protocol::ContextManifestItemCount {
+                    label: "diagnostics".to_string(),
+                    count: 2,
+                }],
+                hashes: vec![FileFingerprint {
+                    algorithm: "sha256".to_string(),
+                    value: "content".to_string(),
+                }],
+                privacy_scope: Some(legion_protocol::SemanticPrivacyScope::Workspace),
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                risk_label: ProposalRiskLabel::Medium,
+                egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
+                freshness: None,
+                preconditions: None,
+                labels: vec!["semantic.fabric.metadata".to_string()],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+
+        let mut shell = Shell::new(ShellProjectionSnapshot {
+            product_mode: DockMode::Manual,
+            layout_projection: ShellLayoutProjection::plain("trust"),
+            explorer_projection: ExplorerProjection {
+                nodes: Vec::new(),
+                selection: None,
+            },
+            active_buffer_projection: ActiveBufferProjection::empty(),
+            status_messages: Vec::new(),
+            palette_projection: PaletteProjection::closed(),
+            command_registry_projection: empty_command_registry_projection(),
+            settings_projection: SettingsProjection::default(),
+            proposal_ledger_projection: test_proposal_ledger_projection(),
+            artifact_ledger_projection: empty_artifact_ledger_projection(),
+            verification_run_projection: empty_verification_run_projection(),
+            system_graph_projection: empty_system_graph_projection(),
+            context_manifest_projection: manifest,
+            privacy_inspector_projection: empty_privacy_inspector_projection(),
+            permission_budget_projection: empty_permission_budget_projection(),
+            approval_checklist_projection: empty_approval_checklist_projection(),
+            checkpoint_rollback_projection: empty_checkpoint_rollback_projection(),
+            assisted_ai_projection: empty_assisted_ai_projection(),
+            assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
+            delegated_task_projection: empty_delegated_task_projection(),
+            legion_workflow_projection: empty_legion_workflow_projection(),
+            plugin_contribution_projections: Vec::new(),
+            collaboration_presence_projections: Vec::new(),
+            collaboration_gui_projection: CollaborationGuiProjection::disabled(),
+            remote_gui_projection: RemoteGuiProjection::disabled(),
+            daily_editing_projection: DailyEditingProjection::empty(),
+            search_projection: SearchProjection::idle(),
+            structural_search_projection: StructuralSearchProjection::idle(),
+            git_projection: GitProjection::idle(),
+            debug_projection: DebugProjection::empty(),
+            language_tooling_projection: LanguageToolingProjection::empty(),
+            terminal_panel_projection: TerminalPanelProjection::empty(),
+        });
+
+        assert!(shell.command_dispatch_intents.is_empty());
+        assert!(
+            shell
+                .handle_command(":context-manifest-select semantic-job:0")
+                .expect("context manifest select should parse")
+                .is_none()
+        );
+        assert_eq!(
+            shell
+                .projection_snapshot()
+                .context_manifest_projection
+                .selected_item_id
+                .as_deref(),
+            Some("semantic-job:0")
+        );
+        assert!(
+            shell
+                .handle_command(":context-manifest-clear")
+                .expect("context manifest clear should parse")
+                .is_none()
+        );
+        assert_eq!(
+            shell
+                .projection_snapshot()
+                .context_manifest_projection
+                .selected_item_id,
+            None
+        );
         assert!(shell.command_dispatch_intents.is_empty());
     }
 

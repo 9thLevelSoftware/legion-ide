@@ -6641,7 +6641,7 @@ pub struct AssistedAiProviderRouteResponse {
     pub schema_version: u16,
 }
 
-/// Runtime-safe provider capability metadata for Phase 4 routing.
+/// Runtime-safe provider capability metadata and capability matrix for Phase 4 routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssistedAiRuntimeProviderCapability {
     /// Provider identifier.
@@ -6652,6 +6652,18 @@ pub struct AssistedAiRuntimeProviderCapability {
     pub supports_streaming: bool,
     /// Supports structured proposal-producing output.
     pub supports_structured_output: bool,
+    /// Sampling capability labels without provider payloads.
+    pub sampling_labels: Vec<String>,
+    /// Tool capability labels without provider payloads.
+    pub tool_labels: Vec<String>,
+    /// Structured-output capability labels without provider payloads.
+    pub structured_output_labels: Vec<String>,
+    /// Vision capability labels without provider payloads.
+    pub vision_labels: Vec<String>,
+    /// Context-length display label.
+    pub context_length_label: String,
+    /// Context length in tokens, when known.
+    pub context_length_tokens: Option<u32>,
     /// Embedding support label; vector persistence remains deferred.
     pub embeddings_label: String,
     /// Reranking support label; retrieval remains metadata-only.

@@ -10,10 +10,11 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use globset::GlobSet;
+use globset::{Glob, GlobSet};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
 
+use legion_index::{SourceDocument, TreeSitterParser, tree_sitter_supports_path};
 use legion_observability::{
     NoopEventSink, conflict_created_event, fallback_denied_event, open_file_read_failure_event,
     security_denial_event, stale_proposal_rejected_event, watcher_recovery_event,
@@ -28,17 +29,17 @@ use legion_protocol::{
     EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
     FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
     FileFingerprint as ProtocolFileFingerprint, FileId, FileIdentity, FileKind, FileMetadata,
-    FileTreeDelta, FileTreeDeltaOp, FileTreeNode, LanguageId, PrincipalId, ProjectId,
-    ProposalDenialReason, ProposalFailureReason, ProposalId, ProposalLifecycleState,
-    ProposalLifecycleTransition, ProposalResponse, ProposalStaleContext, ProposalStaleReason,
-    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
-    ProtocolResult, SemanticPrivacyScope, SnapshotId, TimestampMillis, WatcherEvent,
-    WatcherEventKind, WorkspaceCloseRequest, WorkspaceClosed, WorkspaceConfigSnapshot,
-    WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision, WorkspaceDiscoveryDelta,
-    WorkspaceDiscoveryPathPolicyResult, WorkspaceDiscoveryPolicyDecision, WorkspaceDiscoveryRecord,
-    WorkspaceDiscoverySkipReason, WorkspaceDiscoverySnapshot, WorkspaceDiscoveryTrustResult,
-    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspaceRequest,
-    WorkspaceResponse, WorkspaceRootId, WorkspaceTrustState,
+    FileTreeDelta, FileTreeDeltaOp, FileTreeNode, LanguageId, LanguageOutlineSymbolProjection,
+    PrincipalId, ProjectId, ProposalDenialReason, ProposalFailureReason, ProposalId,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProposalStaleContext,
+    ProposalStaleReason, ProposalVersionPreconditions, ProtocolDiagnostic,
+    ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult, SemanticPrivacyScope, SnapshotId,
+    TimestampMillis, WatcherEvent, WatcherEventKind, WorkspaceCloseRequest, WorkspaceClosed,
+    WorkspaceConfigSnapshot, WorkspaceDiscoveryChangeKind, WorkspaceDiscoveryDecision,
+    WorkspaceDiscoveryDelta, WorkspaceDiscoveryPathPolicyResult, WorkspaceDiscoveryPolicyDecision,
+    WorkspaceDiscoveryRecord, WorkspaceDiscoverySkipReason, WorkspaceDiscoverySnapshot,
+    WorkspaceDiscoveryTrustResult, WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest,
+    WorkspaceOpened, WorkspaceRequest, WorkspaceResponse, WorkspaceRootId, WorkspaceTrustState,
 };
 use legion_security::{DenyByDefaultBroker, TrustState};
 use thiserror::Error;
@@ -274,6 +275,24 @@ fn trust_to_protocol(state: TrustState) -> WorkspaceTrustState {
         TrustState::Untrusted => WorkspaceTrustState::Untrusted,
         TrustState::Unknown => WorkspaceTrustState::Unknown,
     }
+}
+
+fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
+    let lower = path.0.to_ascii_lowercase();
+    let language = if lower.ends_with(".rs") {
+        "rust"
+    } else if lower.ends_with(".ts") || lower.ends_with(".tsx") {
+        "typescript"
+    } else if lower.ends_with(".js") || lower.ends_with(".jsx") {
+        "javascript"
+    } else if lower.ends_with(".md") {
+        "markdown"
+    } else if lower.ends_with(".json") {
+        "json"
+    } else {
+        "text"
+    };
+    LanguageId(language.to_string())
 }
 
 #[derive(Debug, Error)]
@@ -3665,6 +3684,15 @@ impl WorkspaceActor {
             .map_err(WorkspaceError::Platform)
     }
 
+    /// Read file text through the harness-facing alias.
+    pub fn read_workspace_text(
+        &self,
+        workspace_id: WorkspaceId,
+        path: impl AsRef<str>,
+    ) -> WorkspaceResult<String> {
+        self.read_file_text(workspace_id, path)
+    }
+
     /// Search workspace files with bounded batches and gitignore-aware traversal.
     pub fn search_workspace_stream<F>(
         &self,
@@ -3900,6 +3928,137 @@ impl WorkspaceActor {
         }
 
         Ok(report)
+    }
+
+    /// Harness-facing glob over workspace file paths.
+    pub fn glob_workspace_files(
+        &self,
+        workspace_id: WorkspaceId,
+        pattern: impl AsRef<str>,
+    ) -> WorkspaceResult<Vec<FileIdentity>> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+
+        let pattern = pattern.as_ref().trim().to_string();
+        if pattern.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.decision_for_workspace(state, "fs.read", Some(&pattern))?;
+        let glob =
+            Glob::new(&pattern).map_err(|_| WorkspaceError::Internal("invalid glob pattern"))?;
+        let matcher = glob.compile_matcher();
+        let walker = WalkBuilder::new(&state.root_path)
+            .standard_filters(true)
+            .git_ignore(true)
+            .ignore(true)
+            .git_exclude(true)
+            .hidden(true)
+            .build();
+
+        let mut matches = Vec::new();
+        for entry in walker {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let Some(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            let relative_path = path.strip_prefix(&state.root_path).unwrap_or(path);
+            if !matcher.is_match(relative_path) {
+                continue;
+            }
+
+            let absolute_path = path.to_string_lossy().into_owned();
+            let Some(file_id) = state.file_id_by_path.get(&absolute_path).copied() else {
+                continue;
+            };
+            let metadata = state.file_metadata.get(&file_id).cloned();
+            matches.push(FileIdentity {
+                file_id,
+                workspace_id,
+                canonical_path: CanonicalPath(absolute_path),
+                content_version: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_version)
+                    .unwrap_or(FileContentVersion(0)),
+                content_hash: metadata.and_then(|metadata| metadata.hash),
+            });
+        }
+
+        Ok(matches)
+    }
+
+    /// Harness-facing outline projection for a workspace file.
+    pub fn outline_workspace_file(
+        &self,
+        workspace_id: WorkspaceId,
+        path: impl AsRef<str>,
+    ) -> WorkspaceResult<Vec<LanguageOutlineSymbolProjection>> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+
+        let path = self.canonicalize_candidate(state, path.as_ref())?;
+        let path_label = path.to_string_lossy().into_owned();
+        self.decision_for_workspace(state, "fs.read", Some(&path_label))?;
+        if !tree_sitter_supports_path(&path_label) {
+            return Ok(Vec::new());
+        }
+
+        let Some(file_id) = state.file_id_by_path.get(&path_label).copied() else {
+            return Err(WorkspaceError::Internal("workspace file metadata missing"));
+        };
+        let metadata = state.file_metadata.get(&file_id).cloned();
+        let text = self
+            .fs
+            .read_text_file(&path)
+            .map_err(WorkspaceError::Platform)?;
+        let content_version = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.content_version)
+            .unwrap_or(FileContentVersion(0));
+        let document = SourceDocument::with_versions(
+            workspace_id,
+            file_id,
+            CanonicalPath(path_label.clone()),
+            language_id_for_path(&CanonicalPath(path_label)),
+            content_version,
+            state.generation,
+            None,
+            SemanticPrivacyScope::File,
+            text,
+        );
+        TreeSitterParser::default()
+            .structural_outline(&document)
+            .map_err(|_| WorkspaceError::Internal("outline projection failed"))
+    }
+
+    /// Harness-facing alias for workspace search.
+    pub fn grep_workspace_stream<F>(
+        &self,
+        query: WorkspaceSearchQuery,
+        on_batch: F,
+    ) -> WorkspaceResult<WorkspaceSearchReport>
+    where
+        F: FnMut(WorkspaceSearchBatch) -> bool,
+    {
+        self.search_workspace_stream(query, on_batch)
     }
 
     /// Open an existing text file and return mandatory save-precondition metadata.

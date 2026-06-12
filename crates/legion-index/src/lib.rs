@@ -3353,6 +3353,60 @@ pub enum SemanticUpsertOutcome {
     IgnoredStale,
 }
 
+/// Request for the deterministic repository map fallback.
+#[derive(Debug, Clone)]
+pub struct RepositoryMapRequest {
+    /// Natural-language or scripted query text.
+    pub query_text: String,
+    /// Maximum number of file entries to return.
+    pub limit: usize,
+    /// Approximate token budget for the response payload.
+    pub token_budget: usize,
+}
+
+/// Signature surfaced by the repository map fallback.
+#[derive(Debug, Clone)]
+pub struct RepositoryMapSignature {
+    /// Stable symbol identifier.
+    pub symbol_id: SemanticSymbolId,
+    /// Optional bounded display name.
+    pub display_name: Option<String>,
+    /// Symbol kind label.
+    pub kind: String,
+    /// Rank contribution for this signature.
+    pub score_basis_points: u32,
+    /// Declaration range when available.
+    pub declaration_range: Option<ProtocolTextRange>,
+}
+
+/// File-level repository map entry.
+#[derive(Debug, Clone)]
+pub struct RepositoryMapEntry {
+    /// Canonical path for the ranked file.
+    pub path: CanonicalPath,
+    /// File score in basis points.
+    pub score_basis_points: u32,
+    /// File centrality score in basis points.
+    pub pagerank_basis_points: u32,
+    /// Estimated payload cost for this entry.
+    pub token_cost: usize,
+    /// Ranked signatures for the file.
+    pub signatures: Vec<RepositoryMapSignature>,
+}
+
+/// Deterministic repository map response.
+#[derive(Debug, Clone)]
+pub struct RepositoryMapResponse {
+    /// Ranked file entries within the request budget.
+    pub entries: Vec<RepositoryMapEntry>,
+    /// Number of files omitted because of the limit or budget.
+    pub omitted_entry_count: usize,
+    /// Estimated token usage for the returned payload.
+    pub token_estimate: usize,
+    /// Repository-map schema version.
+    pub schema_version: u16,
+}
+
 /// Low-latency in-memory semantic index over protocol DTO records.
 #[derive(Debug, Default, Clone)]
 pub struct SemanticIndex {
@@ -3412,6 +3466,83 @@ impl SemanticIndex {
         &self.retrieval_chunk_records
     }
 
+    /// Builds the deterministic repository map fallback from symbol and graph records.
+    pub fn repository_map(&self, request: &RepositoryMapRequest) -> RepositoryMapResponse {
+        let query_terms = repository_map_terms(&request.query_text);
+        let rank_by_file = repository_map_file_rank(self, &query_terms);
+        let mut candidates = self
+            .files()
+            .into_iter()
+            .map(|file| {
+                let file_terms = repository_map_terms(&file.identity.canonical_path.0);
+                let symbol_signatures = repository_map_signatures_for_file(file, &query_terms);
+                let pagerank_basis_points = *rank_by_file.get(&file.identity.file_id).unwrap_or(&0);
+                let path_score = repository_map_overlap_score(&query_terms, &file_terms);
+                let symbol_score = symbol_signatures
+                    .first()
+                    .map(|signature| signature.score_basis_points)
+                    .unwrap_or(0);
+                let score_basis_points = pagerank_basis_points
+                    .saturating_add(path_score)
+                    .saturating_add(symbol_score);
+                let token_cost =
+                    repository_map_token_cost(&file.identity.canonical_path, &symbol_signatures);
+                RepositoryMapEntry {
+                    path: file.identity.canonical_path.clone(),
+                    score_basis_points,
+                    pagerank_basis_points,
+                    token_cost,
+                    signatures: symbol_signatures,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort_by(|left, right| {
+            right
+                .score_basis_points
+                .cmp(&left.score_basis_points)
+                .then_with(|| right.pagerank_basis_points.cmp(&left.pagerank_basis_points))
+                .then_with(|| left.path.0.cmp(&right.path.0))
+        });
+
+        let limit = request.limit.max(1);
+        let total_candidates = candidates.len();
+        let mut entries = Vec::new();
+        let mut token_estimate = 0usize;
+        for candidate in candidates.into_iter().take(limit) {
+            let next_tokens = token_estimate.saturating_add(candidate.token_cost);
+            if token_estimate > 0 && next_tokens > request.token_budget {
+                break;
+            }
+            token_estimate = next_tokens;
+            entries.push(candidate);
+        }
+
+        if entries.is_empty()
+            && !self.files().is_empty()
+            && let Some(first) = self.files().into_iter().next()
+        {
+            let symbol_signatures = repository_map_signatures_for_file(first, &query_terms);
+            let token_cost =
+                repository_map_token_cost(&first.identity.canonical_path, &symbol_signatures);
+            entries.push(RepositoryMapEntry {
+                path: first.identity.canonical_path.clone(),
+                score_basis_points: 0,
+                pagerank_basis_points: 0,
+                token_cost,
+                signatures: symbol_signatures,
+            });
+            token_estimate = token_cost;
+        }
+
+        RepositoryMapResponse {
+            omitted_entry_count: total_candidates.saturating_sub(entries.len()),
+            token_estimate,
+            entries,
+            schema_version: INDEX_SCHEMA_VERSION,
+        }
+    }
+
     /// Runs deterministic local vector-style retrieval over metadata-only chunk records.
     pub fn search_retrieval(&self, request: &RetrievalQuery) -> RetrievalSearchResponse {
         let query_embedding = deterministic_local_embedding(&request.query_text);
@@ -3450,6 +3581,178 @@ impl SemanticIndex {
             .map(|(ordinal, (score, chunk))| RetrievalSearchResult {
                 result_id: SemanticRecordId(format!(
                     "retrieval-result:{}:{}:{ordinal}",
+                    chunk.chunk_id.0, score
+                )),
+                label: chunk.label.clone(),
+                score_basis_points: score,
+                citation: chunk.citation.clone(),
+                freshness: chunk.citation.freshness.clone(),
+                provenance: chunk.provenance.clone(),
+                schema_version: INDEX_SCHEMA_VERSION,
+            })
+            .collect::<Vec<_>>();
+
+        let status = if request.freshness_policy == SemanticQueryFreshnessPolicy::RequireFresh
+            && results
+                .iter()
+                .any(|result| result.freshness.state != SemanticFreshnessState::Fresh)
+        {
+            SemanticQueryStatus::Stale
+        } else if total > results.len() {
+            SemanticQueryStatus::Partial
+        } else {
+            SemanticQueryStatus::Fresh
+        };
+
+        RetrievalSearchResponse {
+            status,
+            results,
+            omitted_result_count: total.saturating_sub(limit),
+            diagnostics: Vec::new(),
+            schema_version: INDEX_SCHEMA_VERSION,
+        }
+    }
+
+    /// Runs deterministic hybrid retrieval that blends lexical, vector, and repo-map ranks.
+    pub fn search_hybrid_retrieval(&self, request: &RetrievalQuery) -> RetrievalSearchResponse {
+        let query_embedding = deterministic_local_embedding(&request.query_text);
+        let query_terms = repository_map_terms(&request.query_text);
+
+        let mut vector_scored = self
+            .retrieval_chunk_records
+            .iter()
+            .filter(|chunk| retrieval_chunk_in_scope(chunk, request))
+            .map(|chunk| {
+                let score = embedding_similarity_basis_points(&query_embedding, &chunk.embedding);
+                (score, chunk)
+            })
+            .collect::<Vec<_>>();
+        vector_scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.citation.path.0.cmp(&right.citation.path.0))
+                .then_with(|| {
+                    left.citation
+                        .byte_range
+                        .start
+                        .cmp(&right.citation.byte_range.start)
+                })
+                .then_with(|| left.chunk_id.0.cmp(&right.chunk_id.0))
+        });
+        let vector_rank_by_chunk = vector_scored
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (_, chunk))| (chunk.chunk_id.clone(), score_for_ordinal(ordinal)))
+            .collect::<HashMap<_, _>>();
+
+        let mut lexical_scored = self
+            .retrieval_chunk_records
+            .iter()
+            .filter(|chunk| retrieval_chunk_in_scope(chunk, request))
+            .map(|chunk| {
+                let mut terms = repository_map_terms(&chunk.label);
+                terms.extend(repository_map_terms(&chunk.citation.path.0));
+                let score = repository_map_overlap_score(&query_terms, &terms);
+                (score, chunk)
+            })
+            .collect::<Vec<_>>();
+        lexical_scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.citation.path.0.cmp(&right.citation.path.0))
+                .then_with(|| {
+                    left.citation
+                        .byte_range
+                        .start
+                        .cmp(&right.citation.byte_range.start)
+                })
+                .then_with(|| left.chunk_id.0.cmp(&right.chunk_id.0))
+        });
+        let lexical_rank_by_chunk = lexical_scored
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (_, chunk))| (chunk.chunk_id.clone(), score_for_ordinal(ordinal)))
+            .collect::<HashMap<_, _>>();
+
+        let repo_file_rank = repository_map_file_rank(self, &query_terms);
+        let mut repo_scored = self
+            .files()
+            .into_iter()
+            .map(|file| {
+                let pagerank_basis_points =
+                    *repo_file_rank.get(&file.identity.file_id).unwrap_or(&0);
+                let file_terms = repository_map_terms(&file.identity.canonical_path.0);
+                let symbol_signatures = repository_map_signatures_for_file(file, &query_terms);
+                let path_score = repository_map_overlap_score(&query_terms, &file_terms);
+                let symbol_score = symbol_signatures
+                    .first()
+                    .map(|signature| signature.score_basis_points)
+                    .unwrap_or(0);
+                let score_basis_points = pagerank_basis_points
+                    .saturating_add(path_score)
+                    .saturating_add(symbol_score);
+                (score_basis_points, file.identity.file_id)
+            })
+            .collect::<Vec<_>>();
+        repo_scored.sort_by(|(left_score, left_file_id), (right_score, right_file_id)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_file_id.0.cmp(&right_file_id.0))
+        });
+        let repo_rank_by_file = repo_scored
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (_, file_id))| (*file_id, score_for_ordinal(ordinal)))
+            .collect::<HashMap<_, _>>();
+
+        let mut scored = self
+            .retrieval_chunk_records
+            .iter()
+            .filter(|chunk| retrieval_chunk_in_scope(chunk, request))
+            .map(|chunk| {
+                let vector_rank = *vector_rank_by_chunk.get(&chunk.chunk_id).unwrap_or(&0);
+                let lexical_rank = *lexical_rank_by_chunk.get(&chunk.chunk_id).unwrap_or(&0);
+                let repo_rank = *repo_rank_by_file.get(&chunk.citation.file_id).unwrap_or(&0);
+                let score = vector_rank
+                    .saturating_mul(2)
+                    .saturating_add(lexical_rank.saturating_mul(2))
+                    .saturating_add(repo_rank);
+                (score, vector_rank, lexical_rank, repo_rank, chunk)
+            })
+            .collect::<Vec<_>>();
+
+        scored.sort_by(
+            |(left_score, left_vector, left_lexical, left_repo, left_chunk),
+             (right_score, right_vector, right_lexical, right_repo, right_chunk)| {
+                right_score
+                    .cmp(left_score)
+                    .then_with(|| right_vector.cmp(left_vector))
+                    .then_with(|| right_lexical.cmp(left_lexical))
+                    .then_with(|| right_repo.cmp(left_repo))
+                    .then_with(|| left_chunk.citation.path.0.cmp(&right_chunk.citation.path.0))
+                    .then_with(|| {
+                        left_chunk
+                            .citation
+                            .byte_range
+                            .start
+                            .cmp(&right_chunk.citation.byte_range.start)
+                    })
+                    .then_with(|| left_chunk.chunk_id.0.cmp(&right_chunk.chunk_id.0))
+            },
+        );
+
+        let total = scored.len();
+        let limit = normalize_retrieval_result_limit(request.limit);
+        if scored.len() > limit {
+            scored.truncate(limit);
+        }
+
+        let results = scored
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (score, _, _, _, chunk))| RetrievalSearchResult {
+                result_id: SemanticRecordId(format!(
+                    "hybrid-retrieval-result:{}:{}:{ordinal}",
                     chunk.chunk_id.0, score
                 )),
                 label: chunk.label.clone(),
@@ -5490,6 +5793,187 @@ fn privacy_visible(record: SemanticPrivacyScope, requested: SemanticPrivacyScope
 
 fn score_for_ordinal(ordinal: usize) -> u16 {
     10_000u16.saturating_sub((ordinal as u16).saturating_mul(50))
+}
+
+fn repository_map_terms(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for chunk in text.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut start = 0usize;
+        let chars = chunk.chars().collect::<Vec<_>>();
+        for (index, ch) in chars.iter().enumerate() {
+            let previous = index.checked_sub(1).and_then(|idx| chars.get(idx));
+            let split_on_camel = index > 0
+                && ch.is_ascii_uppercase()
+                && previous.is_some_and(|prev| prev.is_ascii_lowercase() || prev.is_ascii_digit());
+            if split_on_camel {
+                let token = chars[start..index]
+                    .iter()
+                    .collect::<String>()
+                    .to_lowercase();
+                if !token.is_empty() {
+                    terms.push(token);
+                }
+                start = index;
+            }
+        }
+        let token = chars[start..].iter().collect::<String>().to_lowercase();
+        if !token.is_empty() {
+            terms.push(token);
+        }
+    }
+    terms
+}
+
+fn repository_map_overlap_score(query_terms: &[String], candidate_terms: &[String]) -> u32 {
+    if query_terms.is_empty() || candidate_terms.is_empty() {
+        return 0;
+    }
+    let candidate_set = candidate_terms
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    query_terms
+        .iter()
+        .map(|term| u32::from(candidate_set.contains(term.as_str())))
+        .sum::<u32>()
+        .saturating_mul(2_500)
+}
+
+fn repository_map_symbol_score(symbol: &SymbolFileMapRecord, query_terms: &[String]) -> u32 {
+    let mut terms = repository_map_terms(symbol.display_name.as_deref().unwrap_or(&symbol.kind));
+    terms.extend(repository_map_terms(&symbol.kind));
+    terms.extend(repository_map_terms(&symbol.path.0));
+    let overlap = repository_map_overlap_score(query_terms, &terms);
+    let kind_boost = match symbol.kind.as_str() {
+        "function" | "struct" | "enum" | "trait" | "class" | "module" => 1_000,
+        "constant" | "static" | "variable" => 500,
+        _ => 250,
+    };
+    overlap.saturating_add(kind_boost)
+}
+
+fn repository_map_signatures_for_file(
+    file: &FileSemanticIndex,
+    query_terms: &[String],
+) -> Vec<RepositoryMapSignature> {
+    let mut signatures = file
+        .symbols
+        .iter()
+        .map(|symbol| RepositoryMapSignature {
+            symbol_id: symbol.symbol_id.clone(),
+            display_name: symbol.display_name.clone(),
+            kind: symbol.kind.clone(),
+            score_basis_points: repository_map_symbol_score(symbol, query_terms),
+            declaration_range: symbol.declaration_range,
+        })
+        .collect::<Vec<_>>();
+
+    signatures.sort_by(|left, right| {
+        right
+            .score_basis_points
+            .cmp(&left.score_basis_points)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.display_name.cmp(&right.display_name))
+            .then_with(|| left.symbol_id.0.cmp(&right.symbol_id.0))
+    });
+    signatures.truncate(3);
+    signatures
+}
+
+fn repository_map_token_cost(path: &CanonicalPath, signatures: &[RepositoryMapSignature]) -> usize {
+    let path_cost = repository_map_terms(&path.0).len().saturating_mul(4).max(8);
+    let signature_cost = signatures
+        .iter()
+        .map(|signature| {
+            let label = signature.display_name.as_deref().unwrap_or(&signature.kind);
+            6 + repository_map_terms(label).len().saturating_mul(3) + signature.kind.len() / 8
+        })
+        .sum::<usize>();
+    path_cost.saturating_add(signature_cost)
+}
+
+fn repository_map_file_rank(index: &SemanticIndex, query_terms: &[String]) -> HashMap<FileId, u32> {
+    let files = index.files();
+    if files.is_empty() {
+        return HashMap::new();
+    }
+
+    let file_ids = files
+        .iter()
+        .map(|file| file.identity.file_id)
+        .collect::<Vec<_>>();
+    let file_count = file_ids.len() as f64;
+    let mut ranks = file_ids
+        .iter()
+        .map(|file_id| (*file_id, 1.0 / file_count))
+        .collect::<HashMap<_, _>>();
+
+    let mut outgoing = HashMap::<FileId, Vec<FileId>>::new();
+    for record in index.graph_records() {
+        let Some(source_file_id) = record.source.file_id else {
+            continue;
+        };
+        let Some(target_file_id) = record.target.as_ref().and_then(|target| target.file_id) else {
+            continue;
+        };
+        if source_file_id != target_file_id {
+            outgoing
+                .entry(source_file_id)
+                .or_default()
+                .push(target_file_id);
+        }
+    }
+
+    let damping = 0.85_f64;
+    for _ in 0..12 {
+        let base = (1.0 - damping) / file_count;
+        let mut next = file_ids
+            .iter()
+            .map(|file_id| (*file_id, base))
+            .collect::<HashMap<_, _>>();
+        for source in &file_ids {
+            let source_rank = *ranks.get(source).unwrap_or(&0.0);
+            let targets = outgoing.get(source);
+            let share = match targets {
+                Some(targets) if !targets.is_empty() => source_rank / targets.len() as f64,
+                _ => source_rank / file_count,
+            };
+            let contributions = match targets {
+                Some(targets) if !targets.is_empty() => targets.as_slice(),
+                _ => file_ids.as_slice(),
+            };
+            for target in contributions {
+                if let Some(value) = next.get_mut(target) {
+                    *value += damping * share;
+                }
+            }
+        }
+        ranks = next;
+    }
+
+    let mut blended = HashMap::new();
+    for file in files {
+        let path_terms = repository_map_terms(&file.identity.canonical_path.0);
+        let path_score = repository_map_overlap_score(query_terms, &path_terms);
+        let symbol_score = file
+            .symbols
+            .iter()
+            .map(|symbol| repository_map_symbol_score(symbol, query_terms))
+            .max()
+            .unwrap_or(0);
+        let pagerank = ranks.get(&file.identity.file_id).copied().unwrap_or(0.0);
+        let pagerank_basis_points = (pagerank * 10_000.0).round().clamp(0.0, 10_000.0) as u32;
+        let score_basis_points = pagerank_basis_points
+            .saturating_mul(7)
+            .saturating_add(path_score)
+            .saturating_add(symbol_score);
+        blended.insert(file.identity.file_id, score_basis_points);
+    }
+
+    blended
 }
 
 fn declaration_from_line(trimmed: &str, leading: usize) -> Option<(String, String, usize)> {

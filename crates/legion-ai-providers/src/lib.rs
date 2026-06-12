@@ -34,6 +34,8 @@ pub const DETERMINISTIC_LOCAL_PROVIDER_ID: &str = "deterministic-local";
 pub const OLLAMA_PROVIDER_ID: &str = "ollama";
 /// llama.cpp OpenAI-compatible loopback provider slot.
 pub const LLAMA_CPP_PROVIDER_ID: &str = "llama-cpp";
+/// Native OpenAI Responses API provider slot.
+pub const OPENAI_PROVIDER_ID: &str = "openai";
 /// OpenAI-compatible inline prediction provider slot.
 pub const OPENAI_COMPATIBLE_PROVIDER_ID: &str = "openai-compatible";
 /// Anthropic Messages API provider slot.
@@ -55,6 +57,9 @@ pub fn make_provider_registry() -> legion_ai::ProviderRegistry {
     )));
     registry.register(Box::new(OllamaProvider::default()));
     registry.register(Box::new(LlamaCppProvider::default()));
+    registry.register(Box::new(OpenAiResponsesProvider::from_env(
+        OPENAI_PROVIDER_ID,
+    )));
     registry.register(Box::new(OpenAiCompatibleProvider::from_env(
         OPENAI_COMPATIBLE_PROVIDER_ID,
     )));
@@ -425,7 +430,239 @@ where
     }
 }
 
-/// Configured OpenAI-compatible BYOK provider adapter.
+/// Native OpenAI Responses API provider adapter.
+#[derive(Debug, Clone)]
+pub struct OpenAiResponsesProvider<T = ReqwestProviderHttpTransport> {
+    id: ProviderId,
+    base_url: String,
+    api_key: Option<String>,
+    transport: T,
+}
+
+impl Default for OpenAiResponsesProvider<ReqwestProviderHttpTransport> {
+    fn default() -> Self {
+        Self::from_env(OPENAI_PROVIDER_ID)
+    }
+}
+
+impl OpenAiResponsesProvider<ReqwestProviderHttpTransport> {
+    /// Creates a native OpenAI Responses adapter from environment configuration.
+    pub fn from_env(id: impl Into<ProviderId>) -> Self {
+        let api_key = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_OPENAI_API_KEY")).ok(),
+            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_OPENAI_API_KEY")).ok(),
+            std::env::var("OPENAI_API_KEY").ok(),
+        ]);
+        let base_url = first_configured_value([
+            std::env::var(format!("{PRODUCT_ENV_PREFIX}_OPENAI_BASE_URL")).ok(),
+            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_OPENAI_BASE_URL")).ok(),
+            std::env::var("OPENAI_BASE_URL").ok(),
+        ])
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        Self::with_transport(id, base_url, api_key, ReqwestProviderHttpTransport)
+    }
+}
+
+impl<T> OpenAiResponsesProvider<T>
+where
+    T: ProviderHttpTransport,
+{
+    /// Creates a native OpenAI Responses adapter with an injected transport.
+    pub fn with_transport(
+        id: impl Into<ProviderId>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        transport: T,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            base_url: normalize_base_url(base_url.into()),
+            api_key,
+            transport,
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    }
+
+    fn bearer_token(&self) -> Result<&str, ProviderError> {
+        self.api_key
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| {
+                ProviderError::unavailable(self.id.clone(), "OpenAI API key is not configured")
+            })
+    }
+
+    fn metadata_flag(metadata: &HashMap<String, String>, key: &str, default: bool) -> bool {
+        metadata
+            .get(key)
+            .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            })
+            .unwrap_or(default)
+    }
+
+    fn metadata_json(metadata: &HashMap<String, String>, key: &str) -> Option<Value> {
+        metadata.get(key).and_then(|value| {
+            if value.trim().is_empty() {
+                None
+            } else {
+                serde_json::from_str(value).ok()
+            }
+        })
+    }
+
+    fn request_parts(request: &ChatCompletionRequest) -> (Option<String>, Vec<Value>) {
+        let mut instructions = Vec::new();
+        let mut input = Vec::new();
+        for message in &request.messages {
+            match message.role {
+                ChatRole::System => instructions.push(message.content.clone()),
+                _ => input.push(json!({
+                    "role": chat_role_label(&message.role),
+                    "content": message.content,
+                })),
+            }
+        }
+        let instructions = (!instructions.is_empty()).then(|| instructions.join("\n\n"));
+        (instructions, input)
+    }
+
+    fn request_payload(&self, request: &ChatCompletionRequest) -> Value {
+        let (instructions, input) = Self::request_parts(request);
+        let mut payload = json!({
+            "model": request.model,
+            "input": input,
+            "store": Self::metadata_flag(&request.metadata, "openai.responses.store", true),
+        });
+        if let Some(max_tokens) = request.max_tokens {
+            payload["max_output_tokens"] = json!(max_tokens);
+        }
+        if let Some(temperature) = request.temperature {
+            payload["temperature"] = json!(temperature);
+        }
+        if let Some(instructions) = request
+            .metadata
+            .get("openai.responses.instructions")
+            .cloned()
+            .or(instructions)
+        {
+            payload["instructions"] = json!(instructions);
+        }
+        if let Some(previous_response_id) = request
+            .metadata
+            .get("openai.responses.previous_response_id")
+            .filter(|value| !value.trim().is_empty())
+        {
+            payload["previous_response_id"] = json!(previous_response_id);
+        }
+        if let Some(tools) = Self::metadata_json(&request.metadata, "openai.responses.tools_json") {
+            payload["tools"] = tools;
+        }
+        if let Some(response_format) =
+            Self::metadata_json(&request.metadata, "openai.responses.response_format_json")
+        {
+            payload["response_format"] = response_format;
+        }
+        payload
+    }
+
+    fn extract_output_text(response: &Value) -> Result<String, ProviderError> {
+        if let Some(text) = response.get("output_text").and_then(Value::as_str) {
+            return Ok(text.to_string());
+        }
+        let Some(output) = response.get("output").and_then(Value::as_array) else {
+            return Err(ProviderError::RequestFailed {
+                provider: "openai-responses".to_string(),
+                message: "OpenAI Responses response missing output_text and output".to_string(),
+            });
+        };
+        let mut text = String::new();
+        for item in output {
+            if item.get("type").and_then(Value::as_str) != Some("message") {
+                continue;
+            }
+            let Some(content) = item.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for entry in content {
+                if entry.get("type").and_then(Value::as_str) != Some("output_text") {
+                    continue;
+                }
+                if let Some(segment) = entry.get("text").and_then(Value::as_str) {
+                    text.push_str(segment);
+                }
+            }
+        }
+        if text.is_empty() {
+            Err(ProviderError::RequestFailed {
+                provider: "openai-responses".to_string(),
+                message: "OpenAI Responses response missing assistant text".to_string(),
+            })
+        } else {
+            Ok(text)
+        }
+    }
+}
+
+impl<T> ModelProvider for OpenAiResponsesProvider<T>
+where
+    T: ProviderHttpTransport,
+{
+    fn provider_id(&self) -> ProviderId {
+        self.id.clone()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: true,
+            embedding: false,
+            inline_prediction: false,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        let bearer_token = Some(self.bearer_token()?);
+        let response = self.transport.post_json(
+            &self.endpoint("/responses"),
+            bearer_token,
+            self.request_payload(&request),
+        )?;
+        let text = Self::extract_output_text(&response)?;
+        Ok(ChatCompletionResponse {
+            provider: self.id.clone(),
+            model: request.model,
+            text,
+            metadata: provider_metadata("openai-responses", &self.base_url),
+        })
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unavailable(
+            request.provider,
+            "OpenAI Responses API does not provide embeddings",
+        ))
+    }
+
+    fn predict_inline(
+        &self,
+        request: InlinePredictionRequest,
+    ) -> Result<InlinePredictionResponse, ProviderError> {
+        Err(ProviderError::unavailable(
+            request.provider,
+            "OpenAI Responses API is not configured for inline prediction",
+        ))
+    }
+}
+
+/// Configured OpenAI-compatible dialect provider adapter.
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleProvider<T = ReqwestProviderHttpTransport> {
     id: ProviderId,
@@ -969,6 +1206,7 @@ where
             "max_tokens": request.max_tokens.unwrap_or(1024),
             "messages": messages,
             "stream": stream,
+            "cache_control": Self::cache_control(),
         });
         if let Some(system) = system {
             payload["system"] = json!(system);
@@ -997,6 +1235,7 @@ where
         let mut payload = json!({
             "model": request.model,
             "messages": messages,
+            "cache_control": Self::cache_control(),
         });
         if let Some(system) = system {
             payload["system"] = json!(system);
@@ -1005,6 +1244,34 @@ where
             payload["tools"] = json!(extras.tools);
         }
         payload
+    }
+
+    fn cache_control() -> Value {
+        json!({"type": "ephemeral"})
+    }
+
+    fn usage_metadata(response: &Value) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        let Some(usage) = response.get("usage") else {
+            return metadata;
+        };
+        for (field, label) in [
+            ("input_tokens", "provider.usage.input_tokens"),
+            ("output_tokens", "provider.usage.output_tokens"),
+            (
+                "cache_creation_input_tokens",
+                "provider.usage.cache_creation_input_tokens",
+            ),
+            (
+                "cache_read_input_tokens",
+                "provider.usage.cache_read_input_tokens",
+            ),
+        ] {
+            if let Some(value) = usage.get(field).and_then(Value::as_u64) {
+                metadata.insert(label.to_string(), value.to_string());
+            }
+        }
+        metadata
     }
 
     fn beta_header_for_extras(extras: &AnthropicRequestExtras) -> Option<&'static str> {
@@ -1144,11 +1411,13 @@ where
             self.completion_payload(&request, false, &extras),
         )?;
         let text = Self::extract_assistant_text(&response)?;
+        let mut metadata = provider_metadata("anthropic", &self.base_url);
+        metadata.extend(Self::usage_metadata(&response));
         Ok(ChatCompletionResponse {
             provider: self.id.clone(),
             model: request.model,
             text,
-            metadata: provider_metadata("anthropic", &self.base_url),
+            metadata,
         })
     }
 
@@ -2340,6 +2609,19 @@ mod tests {
                         { "message": { "content": "openai-compatible answer" } }
                     ]
                 }))
+            } else if endpoint.ends_with("/responses") {
+                Ok(json!({
+                    "id": "resp_123",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                { "type": "output_text", "text": "responses answer" }
+                            ]
+                        }
+                    ]
+                }))
             } else if endpoint.ends_with("/v1/messages/count_tokens") {
                 Ok(json!({ "input_tokens": 73 }))
             } else if endpoint.ends_with("/v1/messages") {
@@ -2347,7 +2629,12 @@ mod tests {
                     "content": [
                         { "type": "text", "text": "anthropic answer" }
                     ],
-                    "usage": { "input_tokens": 17, "output_tokens": 5 }
+                    "usage": {
+                        "input_tokens": 17,
+                        "output_tokens": 5,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 17
+                    }
                 }))
             } else if endpoint.ends_with("/embeddings") {
                 Ok(json!({
@@ -2389,7 +2676,12 @@ mod tests {
                     "content": [
                         { "type": "text", "text": "anthropic answer" }
                     ],
-                    "usage": { "input_tokens": 17, "output_tokens": 5 }
+                    "usage": {
+                        "input_tokens": 17,
+                        "output_tokens": 5,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 17
+                    }
                 }))
             } else {
                 Err(ProviderError::RequestFailed {
@@ -2529,6 +2821,103 @@ mod tests {
     }
 
     #[test]
+    fn openai_responses_provider_posts_stateful_requests_and_parses_output_text() {
+        let transport = RecordingProviderTransport::default();
+        let provider = OpenAiResponsesProvider::with_transport(
+            OPENAI_PROVIDER_ID,
+            "https://provider.example/v1/",
+            Some("test-key".to_string()),
+            transport.clone(),
+        );
+
+        let request = ChatCompletionRequest {
+            provider: OPENAI_PROVIDER_ID.to_string(),
+            model: "gpt-test".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: "You are a careful assistant.".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: "Hello, responses.".to_string(),
+                },
+            ],
+            max_tokens: Some(64),
+            temperature: Some(0.15),
+            metadata: std::collections::HashMap::from([
+                (
+                    "openai.responses.previous_response_id".to_string(),
+                    "resp_prev_123".to_string(),
+                ),
+                ("openai.responses.store".to_string(), "false".to_string()),
+                (
+                    "openai.responses.tools_json".to_string(),
+                    json!([
+                        {
+                            "type": "function",
+                            "name": "lookup_docs",
+                            "description": "Lookup docs",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": { "type": "string" }
+                                },
+                                "required": ["query"],
+                                "additionalProperties": false
+                            }
+                        }
+                    ])
+                    .to_string(),
+                ),
+                (
+                    "openai.responses.response_format_json".to_string(),
+                    json!({
+                        "type": "json_schema",
+                        "name": "final_answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "answer": { "type": "string" }
+                            },
+                            "required": ["answer"],
+                            "additionalProperties": false
+                        }
+                    })
+                    .to_string(),
+                ),
+            ]),
+        };
+
+        let completion = provider
+            .complete(request)
+            .expect("OpenAI Responses completion parses");
+        assert_eq!(completion.text, "responses answer");
+        assert_eq!(
+            completion.metadata.get("provider.kind"),
+            Some(&"openai-responses".to_string())
+        );
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].endpoint, "https://provider.example/v1/responses");
+        assert_eq!(calls[0].bearer_token, Some("test-key".to_string()));
+        assert_eq!(calls[0].payload["model"], "gpt-test");
+        assert_eq!(calls[0].payload["store"], false);
+        assert_eq!(calls[0].payload["max_output_tokens"], 64);
+        assert!(calls[0].payload.get("temperature").is_some());
+        assert_eq!(calls[0].payload["previous_response_id"], "resp_prev_123");
+        assert_eq!(
+            calls[0].payload["instructions"],
+            "You are a careful assistant."
+        );
+        assert_eq!(calls[0].payload["input"][0]["role"], "user");
+        assert_eq!(calls[0].payload["input"][0]["content"], "Hello, responses.");
+        assert_eq!(calls[0].payload["tools"][0]["type"], "function");
+        assert_eq!(calls[0].payload["response_format"]["type"], "json_schema");
+    }
+
+    #[test]
     fn llama_cpp_provider_posts_loopback_requests_without_bearer_by_default() {
         let transport = RecordingProviderTransport::default();
         let provider = LlamaCppProvider::with_transport(
@@ -2613,6 +3002,7 @@ mod tests {
                 DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
                 LLAMA_CPP_PROVIDER_ID.to_string(),
                 OLLAMA_PROVIDER_ID.to_string(),
+                OPENAI_PROVIDER_ID.to_string(),
                 OPENAI_COMPATIBLE_PROVIDER_ID.to_string(),
             ]
         );
@@ -2634,6 +3024,7 @@ mod tests {
                 LLAMA_CPP_PROVIDER_ID.to_string(),
                 MERCURY_PROVIDER_ID.to_string(),
                 OLLAMA_PROVIDER_ID.to_string(),
+                OPENAI_PROVIDER_ID.to_string(),
                 OPENAI_COMPATIBLE_PROVIDER_ID.to_string(),
             ]
         );
@@ -2780,6 +3171,22 @@ mod tests {
             completion.metadata.get("provider.kind"),
             Some(&"anthropic".to_string())
         );
+        assert_eq!(
+            completion.metadata.get("provider.usage.input_tokens"),
+            Some(&"17".to_string())
+        );
+        assert_eq!(
+            completion
+                .metadata
+                .get("provider.usage.cache_read_input_tokens"),
+            Some(&"17".to_string())
+        );
+        assert_eq!(
+            completion
+                .metadata
+                .get("provider.usage.cache_creation_input_tokens"),
+            Some(&"0".to_string())
+        );
         assert_eq!(input_tokens, 73);
         assert_eq!(deltas, vec!["Hello".to_string(), " world".to_string()]);
 
@@ -2808,6 +3215,7 @@ mod tests {
         );
         assert_eq!(calls[0].payload["max_tokens"], 42);
         assert_eq!(calls[0].payload["stream"], false);
+        assert_eq!(calls[0].payload["cache_control"]["type"], "ephemeral");
         assert_eq!(
             calls[0].payload["output_config"]["format"]["type"],
             "json_schema"
@@ -2830,6 +3238,7 @@ mod tests {
         );
         assert_eq!(calls[1].payload["system"], "system prompt");
         assert!(calls[1].payload.get("max_tokens").is_none());
+        assert_eq!(calls[1].payload["cache_control"]["type"], "ephemeral");
         assert_eq!(calls[1].payload["messages"][0]["role"], "user");
         assert_eq!(calls[1].payload["tools"][0]["strict"], true);
 
@@ -2849,6 +3258,76 @@ mod tests {
             "final_answer"
         );
         assert_eq!(calls[2].payload["tools"][0]["name"], "lookup_docs");
+    }
+
+    #[test]
+    fn anthropic_completion_payload_serialization_is_byte_stable_for_equivalent_requests() {
+        let transport = RecordingProviderTransport::default();
+        let provider = AnthropicMessagesClient::with_transport(
+            ANTHROPIC_PROVIDER_ID,
+            "https://api.anthropic.com/",
+            Some("anthropic-key".to_string()),
+            transport,
+        );
+        let request = ChatCompletionRequest {
+            provider: ANTHROPIC_PROVIDER_ID.to_string(),
+            model: "claude-opus-4-8".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: "system prompt".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: "write a haiku".to_string(),
+                },
+            ],
+            max_tokens: Some(42),
+            temperature: Some(0.2),
+            metadata: std::collections::HashMap::from([(
+                "conversation_id".to_string(),
+                "anthropic-fixture".to_string(),
+            )]),
+        };
+        let extras = AnthropicRequestExtras {
+            tools: vec![anthropic_strict_tool_definition(
+                "lookup_docs",
+                "Lookup docs",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+            )],
+            output_config: Some(anthropic_json_schema_output_config(
+                "final_answer",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"],
+                    "additionalProperties": false
+                }),
+            )),
+            thinking: Some(json!({
+                "type": "enabled",
+                "budget_tokens": 64
+            })),
+        };
+
+        let first = provider.completion_payload(&request, false, &extras);
+        let second = provider.completion_payload(&request, false, &extras);
+
+        let first_bytes = serde_json::to_string(&first).expect("serialize first payload");
+        let second_bytes = serde_json::to_string(&second).expect("serialize second payload");
+
+        assert_eq!(first_bytes, second_bytes);
+        assert_eq!(first["cache_control"]["type"], "ephemeral");
+        assert_eq!(first["messages"][0]["role"], "user");
     }
 
     #[test]

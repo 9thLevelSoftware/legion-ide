@@ -2348,6 +2348,8 @@ version = "0.1.0"
 dependencies = [
  "legion-protocol",
  "legion-text",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tree-sitter",
  "tree-sitter-rust",
@@ -2416,6 +2418,7 @@ version = "0.1.0"
 dependencies = [
  "globset",
  "ignore",
+ "legion-index",
  "legion-observability",
  "legion-platform",
  "legion-protocol",

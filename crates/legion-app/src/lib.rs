@@ -4513,7 +4513,7 @@ impl LanguageToolingWorkflow {
     }
 
     fn search_retrieval(&self, query: &RetrievalQuery) -> Vec<RetrievalSearchResult> {
-        self.semantic_index.search_retrieval(query).results
+        self.semantic_index.search_hybrid_retrieval(query).results
     }
 
     fn cancel_operation(&mut self, operation_id: String, event_context: EventContext) {

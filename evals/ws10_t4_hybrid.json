@@ -1,0 +1,73 @@
+{
+  "cases": [
+    {
+      "id": "session_token_validation",
+      "query": "session token validation",
+      "expected_path": "/workspace/crates/legion-context/src/session_token_validation_bridge.rs",
+      "expected_symbol": "session_token_validation_bridge",
+      "documents": [
+        {
+          "path": "/workspace/crates/legion-context/src/session_token_validation_bridge.rs",
+          "file_id": 401,
+          "text": "pub fn session_token_validation_bridge() {\n    let bridge = \"session token validation bridge\";\n    validate_bridge(bridge);\n}\n"
+        },
+        {
+          "path": "/workspace/crates/legion-context/src/notes.rs",
+          "file_id": 402,
+          "text": "pub fn notes() {\n    let notes = \"session token validation session token validation session token validation\";\n    println!(\"{notes}\");\n}\n"
+        },
+        {
+          "path": "/workspace/crates/legion-context/src/session_validation.rs",
+          "file_id": 403,
+          "text": "pub fn validate_session_token() {\n    let marker = 1;\n    println!(\"ready\");\n}\n"
+        }
+      ]
+    },
+    {
+      "id": "workspace_discovery_snapshot",
+      "query": "workspace discovery snapshot",
+      "expected_path": "/workspace/crates/legion-project/src/workspace_discovery_snapshot_bridge.rs",
+      "expected_symbol": "workspace_discovery_snapshot_bridge",
+      "documents": [
+        {
+          "path": "/workspace/crates/legion-project/src/workspace_discovery_snapshot_bridge.rs",
+          "file_id": 501,
+          "text": "pub fn workspace_discovery_snapshot_bridge() {\n    let bridge = \"workspace discovery snapshot workspace discovery snapshot bridge\";\n    bridge_snapshot(bridge);\n}\n"
+        },
+        {
+          "path": "/workspace/crates/legion-project/src/notes.rs",
+          "file_id": 502,
+          "text": "pub fn notes() {\n    let notes = \"workspace discovery snapshot workspace discovery snapshot workspace discovery snapshot\";\n    println!(\"{notes}\");\n}\n"
+        },
+        {
+          "path": "/workspace/crates/legion-project/src/workspace_discovery_snapshot.rs",
+          "file_id": 503,
+          "text": "pub fn workspace_discovery_snapshot() {\n    let marker = 1;\n    println!(\"ready\");\n}\n"
+        }
+      ]
+    },
+    {
+      "id": "dependency_policy_gate",
+      "query": "dependency policy gate",
+      "expected_path": "/workspace/xtask/src/dependency_policy_gate_bridge.rs",
+      "expected_symbol": "dependency_policy_gate_bridge",
+      "documents": [
+        {
+          "path": "/workspace/xtask/src/dependency_policy_gate_bridge.rs",
+          "file_id": 601,
+          "text": "pub fn dependency_policy_gate_bridge() {\n    let bridge = \"dependency policy gate dependency policy gate bridge\";\n    bridge_gate(bridge);\n}\n"
+        },
+        {
+          "path": "/workspace/xtask/src/notes.rs",
+          "file_id": 602,
+          "text": "pub fn notes() {\n    let notes = \"dependency policy gate dependency policy gate dependency policy gate\";\n    println!(\"{notes}\");\n}\n"
+        },
+        {
+          "path": "/workspace/xtask/src/dependency_policy_gate.rs",
+          "file_id": 603,
+          "text": "pub fn dependency_policy_gate() {\n    let marker = 1;\n    println!(\"ready\");\n}\n"
+        }
+      ]
+    }
+  ]
+}
