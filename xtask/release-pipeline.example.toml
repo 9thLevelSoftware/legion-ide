@@ -7,6 +7,18 @@
 # reports signer_status = "dry-run/no-production-signer" and sha256 = "pending"
 # and the verify-release-pipeline command records verifier_status =
 # "dry-run/unchecked".
+#
+# Non-committed signer reference (documentation only; no private material in repo):
+# - source = "env": reference an exported environment variable name only.
+# - source = "keyring": reference an OS keyring service/account entry only.
+# - source = "kms": reference a deployment-supplied KMS adapter plus key URI/ARN only.
+# - source = "ci-secret": reference the CI secret name or variable only.
+#
+# Example shape for operators (keep the values as references, not secrets):
+# [signing]
+# source = "keyring"
+# reference = "legion-release/signing-profile"
+# identity = "release-signing-profile"
 package_name = "legion-desktop"
 dist_tool = "cargo-dist"
 
