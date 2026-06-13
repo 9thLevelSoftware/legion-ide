@@ -1893,13 +1893,44 @@ pub fn desktop_native_options(title: &str) -> eframe::NativeOptions {
     }
 }
 
-struct DesktopEframeApp {
+/// Renderer-backed eframe app wrapping a [`DesktopRuntime`].
+///
+/// This is the adapter-local root widget. It is intentionally public so the
+/// headless input harness in `tests/headless_input.rs` can drive the same
+/// keyboard handler that production uses, without spinning up a real
+/// `winit` window.
+pub struct DesktopEframeApp {
     runtime: DesktopRuntime,
 }
 
 impl DesktopEframeApp {
-    fn new(runtime: DesktopRuntime) -> Self {
+    /// Build a desktop eframe app around an already-opened runtime.
+    pub fn new(runtime: DesktopRuntime) -> Self {
         Self { runtime }
+    }
+
+    /// Return a clone of the current app-owned shell projection snapshot.
+    ///
+    /// Used by the headless input harness to assert that synthetic input
+    /// flowed through to app-owned state without ever touching workspace
+    /// storage directly.
+    pub fn runtime_snapshot(&self) -> legion_ui::ShellProjectionSnapshot {
+        self.runtime.projection_snapshot()
+    }
+
+    /// Drive a synthetic [`egui::RawInput`] through the same keyboard handler
+    /// that production uses, then return the `egui::FullOutput` produced by
+    /// the frame.
+    ///
+    /// This is the headless test seam for `P1.F1`: it lets a CI test push a
+    /// keystroke into a real `egui::Context` and observe the resulting
+    /// app-owned projection without needing a native window. Renderer output
+    /// is discarded; the harness asserts through the projection snapshot.
+    pub fn run_headless_input(&mut self, raw_input: egui::RawInput) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        ctx.run_ui(raw_input, |ui| {
+            self.handle_keyboard(ui);
+        })
     }
 
     fn handle_keyboard(&mut self, ui: &egui::Ui) {
