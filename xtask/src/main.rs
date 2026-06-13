@@ -554,6 +554,12 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         strict: bool,
     },
+    /// Validate the machine-readable Kanban backlog file.
+    VerifyKanbanBacklog {
+        /// Path to the Kanban backlog TOML.
+        #[arg(long, default_value = xtask::kanban_backlog::DEFAULT_BACKLOG_PATH)]
+        backlog: String,
+    },
 }
 
 fn main() {
@@ -587,6 +593,9 @@ fn main() {
         }
         Commands::VerifyLegionBench { out, strict } => {
             run_verify_legion_bench_command(&out, strict)
+        }
+        Commands::VerifyKanbanBacklog { backlog } => {
+            run_verify_kanban_backlog_command(&backlog)
         }
     };
 
@@ -980,6 +989,33 @@ fn run_verify_legion_bench_command(out: &str, strict: bool) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("kanban backlog verify failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let path = workspace_root.join(backlog_path);
+    match xtask::kanban_backlog::run_verify_kanban_backlog(&path) {
+        Ok(summary) => {
+            println!(
+                "kanban backlog ok: {} epic(s), {} feature(s), {} task(s) at {}",
+                summary.epics,
+                summary.features,
+                summary.tasks,
+                path.display()
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("kanban backlog verify failed: {err}");
+            1
+        }
     }
 }
 
