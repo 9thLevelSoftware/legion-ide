@@ -27,6 +27,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../ENGINEERING_STATUS.md` — historical audit status snapshot (date, branch, HEAD) for the prior engineering audit cycle. **Historical**; do not treat it as a current status report. See the "Current Status" section of `../README.md` and `../plans/product-readiness-ledger.md` for the current state.
 - `../plans/` — phase plans, evidence packages, ADRs, and the product-readiness ledger.
 - `../plans/legion-production-master-plan-v0.1.md` — the production master plan: current-state assessment, 2026 market/technology gap analysis, ADR queue (ADR-0032..0040), workstreams WS-01..WS-20, and milestones M0..M6 from validated substrate to product GA.
+- `../plans/legion-customizable-autonomy-continuation-plan-v0.1.md` — continuation plan re-centering the path forward on three pillars: an old-school manual IDE, deep customizability (config-as-code, keymaps, themes, layouts, profiles), and a configurable autonomy continuum (ADR-0041..0045, WS-21..WS-29, milestones C1..C5) scaling from zero AI to a gated full-automation envelope.
 - `../audit-reports/` — durable audit artifacts.
 
 ## How to use this index
