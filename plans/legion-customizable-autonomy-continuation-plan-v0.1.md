@@ -50,7 +50,7 @@ Status legend: REAL (working runtime) · ACTIVATION (substrate built, not switch
 | WS-14 | Trust / review surfaces | PARTIAL | audit gates real; diff-review UI + graduated approvals absent |
 | WS-15..20 | plugins/remote/dist/perf/evals/security | PARTIAL/FIXTURE | per master plan; release-pipeline + perf-harness skeletons live |
 | — | **Settings / customization** | PARTIAL | `legion-ui` `SettingsProjection` (font/zoom/flags) + panel; **no theme system, no keymap engine** |
-| — | **Autonomy model** | DISCRETE | `ProductMode` {Manual, Assist, Delegates, Automate}; `DockMode` panel filtering; **no per-capability policy; autonomous apply forbidden** |
+| — | **Autonomy model** | DISCRETE | `ProductMode` variants `{Manual, Assist, Delegates, Automate}` (the runtime enum variant is `Delegates`; `docs/MODES.md` prose calls the mode "Delegate"); `DockMode` panel filtering; **no per-capability policy; autonomous apply forbidden** |
 
 **The activation insight:** WS-03 and WS-05 are each one focused task away from real (spawn the server / swap the fixture for the PTY path), and WS-06 needs the ripgrep crates dropped into an existing search seam. These three plus WS-04 (real CodeLLDB) and WS-08 depth convert "projection of an IDE" into "an IDE." They are the spine of Pillar A and the prerequisite for everything else.
 
@@ -86,14 +86,14 @@ Goal: with autonomy at zero, Legion is a fast, complete, keyboard-driven IDE a p
 
 The "old school" depth that makes a manual IDE beloved. **Crates:** `legion-editor`, `legion-ui`, `legion-desktop`, `legion-protocol` (DTOs). All projection-only in the UI; editor authority stays in `EditorEngine`.
 
-- WS25.T1 **Split panes & editor groups.** Horizontal/vertical splits, editor groups with independent active buffers, drag/keyboard move between groups, grid layout persisted. *Accept:* 2×2 split editing four buffers; layout restored on reopen.
-- WS25.T2 **Tab & buffer management.** Pinned tabs, preview tabs, recently-used cycling, "close others/right", split-from-tab; per-group tab strips. *Accept:* tab operations e2e; keyboard-only.
-- WS25.T3 **Multi-cursor & column selection depth.** Add-cursor-above/below, add-next-occurrence, select-all-occurrences, column (box) selection, cursor-per-line on selection — over the existing multi-cursor data model. *Accept:* multi-cursor conformance suite.
-- WS25.T4 **Snippets engine.** Tab-stop/placeholder/choice/variable snippets (LSP-snippet-compatible syntax), per-language snippet sets, user-defined snippets (config-as-code from WS-21), snippet picker. *Accept:* insert a multi-stop snippet; tab through stops; user snippet from settings works.
-- WS25.T5 **Macro record/replay & command repeat.** Record a sequence of commands/edits, replay N times, named macros saved to config; "repeat last action". *Accept:* record a refactor edit, replay across 10 sites deterministically.
-- WS25.T6 **Advanced navigation.** Go-to-line/column, go-to-symbol (file + workspace, from WS-02/03), breadcrumb scope bar, jumplist (back/forward), bookmarks/marks, "go to matching bracket", expand/shrink selection by syntax node (tree-sitter). *Accept:* navigation conformance suite; jumplist survives edits via anchors (WS-01.T6).
-- WS25.T7 **Folding, comparison & focus.** Syntax-aware folding UX, fold-by-level, file/diff compare view (reuses WS-14 diff surface), distraction-free/zen layout, whitespace/indent guides. *Accept:* fold/compare/zen e2e; settings-gated.
-- WS25.T8 **Registers/clipboard ring & paste transforms.** Clipboard history ring, named registers (also the Vim register backend in WS-22), paste-and-indent, paste-from-history picker. *Accept:* clipboard-ring picker; register round-trip.
+- WS-25.T1 **Split panes & editor groups.** Horizontal/vertical splits, editor groups with independent active buffers, drag/keyboard move between groups, grid layout persisted. *Accept:* 2×2 split editing four buffers; layout restored on reopen.
+- WS-25.T2 **Tab & buffer management.** Pinned tabs, preview tabs, recently-used cycling, "close others/right", split-from-tab; per-group tab strips. *Accept:* tab operations e2e; keyboard-only.
+- WS-25.T3 **Multi-cursor & column selection depth.** Add-cursor-above/below, add-next-occurrence, select-all-occurrences, column (box) selection, cursor-per-line on selection — over the existing multi-cursor data model. *Accept:* multi-cursor conformance suite.
+- WS-25.T4 **Snippets engine.** Tab-stop/placeholder/choice/variable snippets (LSP-snippet-compatible syntax), per-language snippet sets, user-defined snippets (config-as-code from WS-21), snippet picker. *Accept:* insert a multi-stop snippet; tab through stops; user snippet from settings works.
+- WS-25.T5 **Macro record/replay & command repeat.** Record a sequence of commands/edits, replay N times, named macros saved to config; "repeat last action". *Accept:* record a refactor edit, replay across 10 sites deterministically.
+- WS-25.T6 **Advanced navigation.** Go-to-line/column, go-to-symbol (file + workspace, from WS-02/03), breadcrumb scope bar, jumplist (back/forward), bookmarks/marks, "go to matching bracket", expand/shrink selection by syntax node (tree-sitter). *Accept:* navigation conformance suite; jumplist survives edits via anchors (WS-01.T6).
+- WS-25.T7 **Folding, comparison & focus.** Syntax-aware folding UX, fold-by-level, file/diff compare view (reuses WS-14 diff surface), distraction-free/zen layout, whitespace/indent guides. *Accept:* fold/compare/zen e2e; settings-gated.
+- WS-25.T8 **Registers/clipboard ring & paste transforms.** Clipboard history ring, named registers (also the Vim register backend in WS-22), paste-and-indent, paste-from-history picker. *Accept:* clipboard-ring picker; register round-trip.
 
 ---
 
@@ -105,50 +105,50 @@ Goal: everything visible and behavioral is configurable, as code and through UI,
 
 **Crates:** `legion-app` (owns config), `legion-storage` (persistence), `legion-protocol` (schema DTOs), `legion-ui`/`legion-desktop` (projection + editor).
 
-- WS21.T1 **Layered config model.** Resolution order default → user → workspace → profile → session, with per-key provenance ("this value comes from workspace"). Deep-merge semantics; arrays replace, maps merge. *Accept:* provenance shown per key; override precedence tests.
-- WS21.T2 **`settings.json` + JSON-schema.** Canonical on-disk format (`~/.config/legion/settings.json` user; `.legion/settings.json` workspace), a published JSON-schema for validation + autocomplete-in-Legion, graceful handling of unknown/invalid keys (warn, don't crash). *Accept:* schema validates; invalid file degrades to defaults with a toast.
-- WS21.T3 **Two-way settings UI binding.** The existing settings panel reads the projection and writes through change intents that the app persists; editing `settings.json` live-reloads the UI and vice-versa. *Accept:* change a value in JSON → UI updates < 500ms; change in UI → JSON rewritten minimally (preserves comments/order where feasible).
-- WS21.T4 **Settings search & registry.** Every setting registered with id/type/default/scope/description/category; searchable settings UI (design.md command-palette feel). *Accept:* settings coverage report; search finds any registered key.
-- WS21.T5 **Live reload & hot-apply.** Categorize settings by apply-cost (instant / reopen-buffer / restart) and hot-apply the instant ones (fonts, theme, keymap, layout). *Accept:* font/theme/keymap changes apply without restart.
-- WS21.T6 **Migration & defaults.** Versioned settings schema with migrations; `derive settings defaults` (already landed) becomes the default source of truth; reset-to-default per key/section. *Accept:* old settings file migrates; reset works.
+- WS-21.T1 **Layered config model.** Resolution order default → user → workspace → profile → session, with per-key provenance ("this value comes from workspace"). Deep-merge semantics; arrays replace, maps merge. *Accept:* provenance shown per key; override precedence tests.
+- WS-21.T2 **`settings.json` + JSON-schema.** Canonical on-disk format (`~/.config/legion/settings.json` user; `.legion/settings.json` workspace), a published JSON-schema for validation + autocomplete-in-Legion, graceful handling of unknown/invalid keys (warn, don't crash). *Accept:* schema validates; invalid file degrades to defaults with a toast.
+- WS-21.T3 **Two-way settings UI binding.** The existing settings panel reads the projection and writes through change intents that the app persists; editing `settings.json` live-reloads the UI and vice-versa. *Accept:* change a value in JSON → UI updates < 500ms; change in UI → JSON rewritten minimally (preserves comments/order where feasible).
+- WS-21.T4 **Settings search & registry.** Every setting registered with id/type/default/scope/description/category; searchable settings UI (design.md command-palette feel). *Accept:* settings coverage report; search finds any registered key.
+- WS-21.T5 **Live reload & hot-apply.** Categorize settings by apply-cost (instant / reopen-buffer / restart) and hot-apply the instant ones (fonts, theme, keymap, layout). *Accept:* font/theme/keymap changes apply without restart.
+- WS-21.T6 **Migration & defaults.** Versioned settings schema with migrations; `derive settings defaults` (already landed) becomes the default source of truth; reset-to-default per key/section. *Accept:* old settings file migrates; reset works.
 
 ### 5.2 WS-22 — Keymap & Input Customization (new) · ADR-0042
 
 **Crates:** `legion-protocol` (keymap DTOs — extend the existing `KeyBinding` types), `legion-app` (keymap resolution + command dispatch), `legion-ui`/`legion-desktop` (capture + editor). The current `KeyBinding` parsing exists only for VS Code-manifest ingestion; this builds a first-class engine.
 
-- WS22.T1 **Keymap engine.** Bindings map `(key-chord, when-context) → command-id`; full command registry (every `CommandDispatchIntent`); multi-key chords; context predicates (focus, mode, selection, language, autonomy level). *Accept:* chord + context resolution suite; conflicts detected and reported.
-- WS22.T2 **Keymap schemes.** Bundled schemes: Legion default, VS Code, Sublime, JetBrains; user override layer on top. Per-OS chord normalization (⌘/Ctrl). *Accept:* switch scheme at runtime; per-OS smoke.
-- WS22.T3 **Modal editing layer (Vim).** Normal/insert/visual/visual-line/visual-block/operator-pending states, motions, operators, counts, registers (WS-25.T8), marks, `.`-repeat, ex-command subset; implemented as a first-class input mode, not an emulation hack, gated by a setting. *Accept:* a curated Vim conformance subset; round-trips with multi-cursor and snippets.
-- WS22.T4 **Emacs scheme.** Prefix-key (C-x/C-c) chords, mark/region, kill-ring (clipboard ring), incremental search bindings. *Accept:* Emacs binding subset suite.
-- WS22.T5 **Keybinding editor UI.** Searchable command list, record-a-chord capture, conflict highlighting, per-scheme diff, export/import as `keybindings.json`. *Accept:* rebind a command via UI; persists to config; conflict surfaced.
-- WS22.T6 **Which-key / discoverability.** Optional chord-continuation hint overlay; command palette shows bindings (design.md ⌘K). *Accept:* setting-gated overlay; palette shows current binding per command.
+- WS-22.T1 **Keymap engine.** Bindings map `(key-chord, when-context) → command-id`; full command registry (every `CommandDispatchIntent`); multi-key chords; context predicates (focus, mode, selection, language, autonomy level). *Accept:* chord + context resolution suite; conflicts detected and reported.
+- WS-22.T2 **Keymap schemes.** Bundled schemes: Legion default, VS Code, Sublime, JetBrains; user override layer on top. Per-OS chord normalization (⌘/Ctrl). *Accept:* switch scheme at runtime; per-OS smoke.
+- WS-22.T3 **Modal editing layer (Vim).** Normal/insert/visual/visual-line/visual-block/operator-pending states, motions, operators, counts, registers (WS-25.T8), marks, `.`-repeat, ex-command subset; implemented as a first-class input mode, not an emulation hack, gated by a setting. *Accept:* a curated Vim conformance subset; round-trips with multi-cursor and snippets.
+- WS-22.T4 **Emacs scheme.** Prefix-key (C-x/C-c) chords, mark/region, kill-ring (clipboard ring), incremental search bindings. *Accept:* Emacs binding subset suite.
+- WS-22.T5 **Keybinding editor UI.** Searchable command list, record-a-chord capture, conflict highlighting, per-scheme diff, export/import as `keybindings.json`. *Accept:* rebind a command via UI; persists to config; conflict surfaced.
+- WS-22.T6 **Which-key / discoverability.** Optional chord-continuation hint overlay; command palette shows bindings (design.md ⌘K). *Accept:* setting-gated overlay; palette shows current binding per command.
 
 ### 5.3 WS-23 — Theming & Visual Customization (new) · ADR-0043
 
 **Crates:** `legion-desktop` (theme application — the only crate allowed renderer deps), `legion-protocol` (theme token DTOs), `legion-app` (theme resolution/persistence). Today theming is hardcoded dark/light token maps; this makes them data.
 
-- WS23.T1 **Theme format.** A theme = UI token set (the `mockups/design.md` token vocabulary) + syntax token set (tree-sitter capture → color/style) + terminal palette. Themes are data files validated by schema; bundled set (≥1 dark, ≥1 light, high-contrast). *Accept:* swap theme at runtime; high-contrast meets WCAG AA (PR-UI-001 tie-in).
-- WS23.T2 **Custom theme authoring + live reload.** User themes in config dir; edit → live reload; "duplicate built-in to customize". *Accept:* author a theme, see it apply on save.
-- WS23.T3 **VS Code theme import.** Convert VS Code theme JSON (tokenColors + workbench colors) → Legion tokens with a documented mapping + fallback for unmapped scopes. *Accept:* a popular VS Code theme imports and renders recognizably.
-- WS23.T4 **Typography & rendering config.** Font family/size/weight/line-height/letter-spacing, ligatures toggle, per-UI vs per-editor fonts, font fallback chains (CJK coverage, WS-01.T5 tie-in). *Accept:* font settings hot-apply; ligature toggle works.
-- WS23.T5 **Icon themes & per-language overrides.** File-icon theme, syntax color overrides per language/scope, semantic-token vs tree-sitter precedence control. *Accept:* icon theme swap; per-language override respected.
+- WS-23.T1 **Theme format.** A theme = UI token set (the `mockups/design.md` token vocabulary) + syntax token set (tree-sitter capture → color/style) + terminal palette. Themes are data files validated by schema; bundled set (≥1 dark, ≥1 light, high-contrast). *Accept:* swap theme at runtime; high-contrast meets WCAG AA (PR-UI-001 tie-in).
+- WS-23.T2 **Custom theme authoring + live reload.** User themes in config dir; edit → live reload; "duplicate built-in to customize". *Accept:* author a theme, see it apply on save.
+- WS-23.T3 **VS Code theme import.** Convert VS Code theme JSON (tokenColors + workbench colors) → Legion tokens with a documented mapping + fallback for unmapped scopes. *Accept:* a popular VS Code theme imports and renders recognizably.
+- WS-23.T4 **Typography & rendering config.** Font family/size/weight/line-height/letter-spacing, ligatures toggle, per-UI vs per-editor fonts, font fallback chains (CJK coverage, WS-01.T5 tie-in). *Accept:* font settings hot-apply; ligature toggle works.
+- WS-23.T5 **Icon themes & per-language overrides.** File-icon theme, syntax color overrides per language/scope, semantic-token vs tree-sitter precedence control. *Accept:* icon theme swap; per-language override respected.
 
 ### 5.4 WS-24 — Layout, Panes & Workspace Customization (new)
 
 **Crates:** `legion-ui` (dock/layout projection — already has `DockLayout`/`DockMode`), `legion-app` (layout state ownership/persistence), `legion-desktop` (render).
 
-- WS24.T1 **Dockable, movable panels.** Move any panel to any side/area, tabbed panel groups, detach (multi-window tie-in WS-18.T4), show/hide, resize with persisted splitters — over the existing `DockLayout`. *Accept:* relocate a panel; layout persists.
-- WS24.T2 **Perspectives (saved layouts).** Named layouts bound to autonomy level/mode (Manual emphasizes editor+tree; higher levels surface directive/fleet per design.md §7); switch perspective from palette. *Accept:* per-mode perspective restores on mode switch.
-- WS24.T3 **Activity/status bar customization.** Configurable activity-bar items, status-bar segments (git branch, LSP status, autonomy badge, cursor/encoding), reorder/hide. *Accept:* status-bar config respected.
-- WS24.T4 **Workspace-scoped UI state.** Per-workspace open editors, layout, expanded tree nodes, active perspective (extends the existing session-restore). *Accept:* reopen workspace restores full UI state.
+- WS-24.T1 **Dockable, movable panels.** Move any panel to any side/area, tabbed panel groups, detach (multi-window tie-in WS-18.T4), show/hide, resize with persisted splitters — over the existing `DockLayout`. *Accept:* relocate a panel; layout persists.
+- WS-24.T2 **Perspectives (saved layouts).** Named layouts bound to autonomy level/mode (Manual emphasizes editor+tree; higher levels surface directive/fleet per design.md §7); switch perspective from palette. *Accept:* per-mode perspective restores on mode switch.
+- WS-24.T3 **Activity/status bar customization.** Configurable activity-bar items, status-bar segments (git branch, LSP status, autonomy badge, cursor/encoding), reorder/hide. *Accept:* status-bar config respected.
+- WS-24.T4 **Workspace-scoped UI state.** Per-workspace open editors, layout, expanded tree nodes, active perspective (extends the existing session-restore). *Accept:* reopen workspace restores full UI state.
 
 ### 5.5 WS-29 — Profiles & Settings Sync (new)
 
 **Crates:** `legion-app`, `legion-storage`, `legion-retention` (encrypted sync, post-GA).
 
-- WS29.T1 **Profiles.** A named profile bundles settings + keymap + theme + layout + enabled extensions + **default autonomy profile** (Pillar C). Per-workspace profile binding; quick-switch. *Accept:* switch profile changes all five layers atomically.
-- WS29.T2 **Export/import & reset.** Export a profile to a shareable file; import with conflict review; reset-to-factory. *Accept:* round-trip a profile between two installs.
-- WS29.T3 **Settings sync (post-GA, opt-in, encrypted).** Optional sync via `legion-retention` keyring/encryption; metadata-first; explicit consent; no raw secrets synced. *Accept:* consented sync round-trip; air-gap denies.
+- WS-29.T1 **Profiles.** A named profile bundles settings + keymap + theme + layout + enabled extensions + **default autonomy profile** (Pillar C). Per-workspace profile binding; quick-switch. *Accept:* switch profile changes all five layers atomically.
+- WS-29.T2 **Export/import & reset.** Export a profile to a shareable file; import with conflict review; reset-to-factory. *Accept:* round-trip a profile between two installs.
+- WS-29.T3 **Settings sync (post-GA, opt-in, encrypted).** Optional sync via `legion-retention` keyring/encryption; metadata-first; explicit consent; no raw secrets synced. *Accept:* consented sync round-trip; air-gap denies.
 
 ---
 
@@ -177,10 +177,10 @@ Users dial autonomy by picking a preset *or* customizing any cell of the lattice
 
 **Crates:** `legion-security` (the broker already gates capabilities — extend it to evaluate the lattice), `legion-protocol` (Autonomy Profile DTOs generalizing `ProductMode`), `legion-app` (resolution + persistence), `legion-ui` (projection).
 
-- WS26.T1 **Autonomy Profile DTOs.** Lattice schema; presets; per-cell override; scope binding; serialization (config-as-code via WS-21). `ProductMode` becomes a derived coarse label. *Accept:* preset → lattice expansion tests; round-trip serialization.
-- WS26.T2 **Broker evaluation.** Every capability decision consults the active Autonomy Profile + risk tier → disposition; deny-by-default preserved; decision recorded with the governing cell + risk citation. *Accept:* lattice decision suite; Manual preset proves zero network/provider/worker surfaces (MODES.md completion requirement).
-- WS26.T3 **Scope resolution & precedence.** Resolve the effective profile from global/workspace/session/task layers with provenance. *Accept:* precedence tests; task-scoped tighten-only rule (a task can restrict but not exceed its session's grant).
-- WS26.T4 **Autonomy projection.** A `legion-ui` projection exposing the active profile, per-cell disposition, scope, and the governing reason — for the control surfaces (WS-28). *Accept:* projection matches broker decisions byte-for-byte in tests.
+- WS-26.T1 **Autonomy Profile DTOs.** Lattice schema; presets; per-cell override; scope binding; serialization (config-as-code via WS-21). `ProductMode` becomes a derived coarse label. *Accept:* preset → lattice expansion tests; round-trip serialization.
+- WS-26.T2 **Broker evaluation.** Every capability decision consults the active Autonomy Profile + risk tier → disposition; deny-by-default preserved; decision recorded with the governing cell + risk citation. *Accept:* lattice decision suite; Manual preset proves zero network/provider/worker surfaces (MODES.md completion requirement).
+- WS-26.T3 **Scope resolution & precedence.** Resolve the effective profile from global/workspace/session/task layers with provenance. *Accept:* precedence tests; task-scoped tighten-only rule (a task can restrict but not exceed its session's grant).
+- WS-26.T4 **Autonomy projection.** A `legion-ui` projection exposing the active profile, per-cell disposition, scope, and the governing reason — for the control surfaces (WS-28). *Accept:* projection matches broker decisions byte-for-byte in tests.
 
 ### 6.3 WS-14.T4 (elevated) — Graduated, classifier-mediated approvals
 
@@ -193,21 +193,21 @@ From the master plan, elevated to a Pillar-C keystone.
 The gated terminal autonomy state. **This is the one place this plan amends `MODES.md`** (Automate currently forbids autonomous apply). The amendment is narrow and defensible: full automation is **auto-approval within a pre-authorized, signed, scoped envelope**, not unmediated mutation.
 
 Mandatory envelope components (all required; absence = fail-closed to `propose`):
-- WS27.T1 **Signed policy envelope.** An explicitly user- or enterprise-signed Autonomy Profile with a risk ceiling, allowed capability classes, path scope, network allowlist, and budget. Unsigned/expired ⇒ no auto. *Accept:* tampered/expired envelope denies auto; signature verified via `legion-retention`/`legion-security`.
-- WS27.T2 **Standing kill switch + budget/risk ceilings.** Always-available halt that reaps sandboxed processes < 2s (reuses WS-13.T3); hard budget and risk-tier ceilings that drop to `propose` when exceeded. *Accept:* kill halts a running automation < 2s; ceiling breach pauses.
-- WS27.T3 **Checkpoints & one-click rollback.** Auto-checkpoint before every auto-applied change (WS-07.T3); the whole automation run is reversible as a unit. *Accept:* full run rolled back to pre-run state; manual edits made during the run preserved where non-conflicting.
-- WS27.T4 **Sandbox requirement.** Auto terminal/edit execution requires the OS sandbox (ADR-0038 / WS-12.T2); no sandbox ⇒ no auto. *Accept:* sandbox-absent denies auto; escape-attempt suite fails closed.
-- WS27.T5 **Evidence & replay.** Every auto decision is metadata-audited and the run replayable from the existing replay manifests; egress matches the context manifest. *Accept:* run replays from metadata; manifest-equals-egress test green.
-- WS27.T6 **`MODES.md` + ADR amendment.** Amend `docs/MODES.md` Automate section and extend ADR-0016/ADR-0031 so "autonomous apply" is permitted *only* under a conforming envelope; record the reconciliation with the proposal-mediated invariant explicitly. *Accept:* docs-hygiene green; authority-boundaries doc updated; reviewers sign off.
+- WS-27.T1 **Signed policy envelope.** An explicitly user- or enterprise-signed Autonomy Profile with a risk ceiling, allowed capability classes, path scope, network allowlist, and budget. Unsigned/expired ⇒ no auto. *Accept:* tampered/expired envelope denies auto; signature verified via `legion-retention`/`legion-security`.
+- WS-27.T2 **Standing kill switch + budget/risk ceilings.** Always-available halt that reaps sandboxed processes < 2s (reuses WS-13.T3); hard budget and risk-tier ceilings that drop to `propose` when exceeded. *Accept:* kill halts a running automation < 2s; ceiling breach pauses.
+- WS-27.T3 **Checkpoints & one-click rollback.** Auto-checkpoint before every auto-applied change (WS-07.T3); the whole automation run is reversible as a unit. *Accept:* full run rolled back to pre-run state; manual edits made during the run preserved where non-conflicting.
+- WS-27.T4 **Sandbox requirement.** Auto terminal/edit execution requires the OS sandbox (ADR-0038 / WS-12.T2); no sandbox ⇒ no auto. *Accept:* sandbox-absent denies auto; escape-attempt suite fails closed.
+- WS-27.T5 **Evidence & replay.** Every auto decision is metadata-audited and the run replayable from the existing replay manifests; egress matches the context manifest. *Accept:* run replays from metadata; manifest-equals-egress test green.
+- WS-27.T6 **`MODES.md` + ADR amendment.** Amend `docs/MODES.md` Automate section and extend ADR-0016/ADR-0031 so "autonomous apply" is permitted *only* under a conforming envelope; record the reconciliation with the proposal-mediated invariant explicitly. *Accept:* docs-hygiene green; authority-boundaries doc updated; reviewers sign off.
 
 ### 6.5 WS-28 — Autonomy Control Surfaces (new)
 
 **Crates:** `legion-ui` (projection-only), `legion-desktop` (render). Makes the dial legible and controllable.
 
-- WS28.T1 **The autonomy dial.** A continuum selector (presets + "custom") plus an expandable per-capability × per-risk matrix editor; live preview of "what this allows"; scope picker (global/workspace/session/task). *Accept:* dialing changes broker behavior immediately; matrix edits persist via config.
-- WS28.T2 **Always-visible autonomy/trust strip.** Current level, scope, active grants, egress status, and a prominent kill switch (design.md §2.3, §8). Manual hides all AI chrome. *Accept:* strip reflects the live profile; Manual zero-egress test green.
-- WS28.T3 **Approval & risk console.** The graduated-approval queue (action, owner, risk badge + governing rule, files, approve/review/reject), risk monitor, and per-run budget/cost (WS-09.T5) — reuses WS-13/WS-14 surfaces. *Accept:* a medium-risk action pauses for approval with its rule cited.
-- WS28.T4 **Activity & intervention feed.** The Agent Comm Stream (design.md §10.9) with PLAN/WRITE/TEST/REVIEW/ERROR/APPROVAL/COMPLETE tags; intervene/pause/scope-down controls mid-run. *Accept:* pause mid-run, tighten scope, resume.
+- WS-28.T1 **The autonomy dial.** A continuum selector (presets + "custom") plus an expandable per-capability × per-risk matrix editor; live preview of "what this allows"; scope picker (global/workspace/session/task). *Accept:* dialing changes broker behavior immediately; matrix edits persist via config.
+- WS-28.T2 **Always-visible autonomy/trust strip.** Current level, scope, active grants, egress status, and a prominent kill switch (design.md §2.3, §8). Manual hides all AI chrome. *Accept:* strip reflects the live profile; Manual zero-egress test green.
+- WS-28.T3 **Approval & risk console.** The graduated-approval queue (action, owner, risk badge + governing rule, files, approve/review/reject), risk monitor, and per-run budget/cost (WS-09.T5) — reuses WS-13/WS-14 surfaces. *Accept:* a medium-risk action pauses for approval with its rule cited.
+- WS-28.T4 **Activity & intervention feed.** The Agent Comm Stream (design.md §10.9) with PLAN/WRITE/TEST/REVIEW/ERROR/APPROVAL/COMPLETE tags; intervene/pause/scope-down controls mid-run. *Accept:* pause mid-run, tighten scope, resume.
 
 ### 6.6 Continuation of WS-12 / WS-13 (autonomy requires real execution)
 
