@@ -8446,6 +8446,84 @@ pub fn product_mode_allows_runtime_surface(
     }
 }
 
+/// Canonical user-facing v1 product mode taxonomy (P0.F1).
+///
+/// This struct is the public product contract for the four canonical modes
+/// the user sees in the UI, the command palette, the keyboard reference,
+/// the user guide, and the mode policy doc. Each entry must carry:
+///
+/// * a stable `label` that appears in user-facing surfaces,
+/// * a `shortcut_label` that the keyboard reference renders,
+/// * a `docs_anchor` that points at the matching section in `docs/MODES.md`,
+/// * a one-line `policy_summary` that the policy table surfaces can render.
+///
+/// Code that needs to reason about runtime surface policy or capabilities
+/// continues to use `ProductMode` + `product_mode_allows_runtime_surface`;
+/// the canonical taxonomy only constrains the user-facing labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalProductMode {
+    /// Underlying `ProductMode` variant this canonical entry projects to.
+    pub variant: ProductMode,
+    /// Stable user-facing label rendered in the UI, docs, and shortcuts.
+    pub label: &'static str,
+    /// Shortcut label rendered in the keyboard reference for this mode.
+    pub shortcut_label: &'static str,
+    /// Canonical `docs/MODES.md` anchor (path + `#section`) for this mode.
+    pub docs_anchor: &'static str,
+    /// One-line policy summary for surfaces that render the policy table.
+    pub policy_summary: &'static str,
+}
+
+/// Canonical v1 product mode taxonomy (P0.F1). Exactly four entries.
+///
+/// The list is the public product contract for the user-facing mode labels.
+/// Adding or renaming a mode requires updating this list, `docs/MODES.md`,
+/// `docs/KEYBOARD_REFERENCE.md`, `docs/USER_GUIDE.md`, and the
+/// `docs-hygiene` mode-taxonomy rule, in the same change.
+pub const CANONICAL_PRODUCT_MODES: &[CanonicalProductMode] = &[
+    CanonicalProductMode {
+        variant: ProductMode::Manual,
+        label: "Manual",
+        shortcut_label: "M",
+        docs_anchor: "docs/MODES.md#manual",
+        policy_summary: "Deterministic local IDE only; AI/network/cloud/worker surfaces denied.",
+    },
+    CanonicalProductMode {
+        variant: ProductMode::Assist,
+        label: "Assist",
+        shortcut_label: "A",
+        docs_anchor: "docs/MODES.md#assist",
+        policy_summary: "Human-in-control AI help; proposal-only edits, gated provider routes.",
+    },
+    CanonicalProductMode {
+        variant: ProductMode::Delegates,
+        label: "Delegate",
+        shortcut_label: "D",
+        docs_anchor: "docs/MODES.md#delegate",
+        policy_summary: "Bounded worker execution in disposable lanes; proposals + evidence, no direct workspace mutation.",
+    },
+    CanonicalProductMode {
+        variant: ProductMode::LegionWorkflows,
+        label: "Legion Workflows",
+        shortcut_label: "W",
+        docs_anchor: "docs/MODES.md#legion-workflows",
+        policy_summary: "Multi-step workflow orchestration with task graphs, validation gates, and human sign-off.",
+    },
+];
+
+/// Returns the canonical user-facing label for a `ProductMode` variant if
+/// the variant is part of the canonical v1 taxonomy, otherwise `None`.
+///
+/// Use this when rendering user-facing mode labels instead of
+/// `ProductMode::label`, so non-canonical internal/legacy wording (for
+/// example `Automate`) never reaches the user.
+pub fn canonical_product_mode_label(variant: ProductMode) -> Option<&'static str> {
+    CANONICAL_PRODUCT_MODES
+        .iter()
+        .find(|entry| entry.variant == variant)
+        .map(|entry| entry.label)
+}
+
 /// Classify a capability id into the product-mode runtime surface it needs.
 pub fn product_runtime_surface_for_capability(capability: &CapabilityId) -> ProductRuntimeSurface {
     let capability = capability.0.as_str();

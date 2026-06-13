@@ -22,7 +22,7 @@ The product mode switch is currently exposed as labeled pills rather than keyboa
 
 - `M` — Manual
 - `A` — Assist
-- `D` — Delegates
+- `D` — Delegate
 - `W` — Legion Workflows
 
 ## Where the labels come from
