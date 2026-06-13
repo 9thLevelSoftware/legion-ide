@@ -5,22 +5,23 @@ use legion_desktop::view::{
     DesktopProjectionViewState, drag_anchor_for_line_pointer, drag_selection_range,
     editor_coordinate_from_pointer, line_range_for_code_line, word_range_for_coordinate,
 };
+use legion_protocol::LanguageCodeLensProjection;
 use legion_protocol::{
     ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow, BufferId, BufferVersion, ByteRange,
     CanonicalPath, CapabilityId, CollaborationParticipantId, CollaborationPresenceProjection,
     CollaborationSessionId, CommandDescriptor, CommandRegistryProjection, CommandRiskLabel,
     ContextManifestEgressStatus, ContextManifestInclusionState, ContextManifestItem,
     ContextManifestItemCount, ContextManifestItemKind, FileFingerprint, FileId,
-    PluginCommandDescriptor, PluginContribution, PluginContributionProjection, PluginId,
-    PrincipalId, ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind,
-    ProposalId, ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
-    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
-    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
-    ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId, SystemGraphEdge,
-    SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis, Utf16Position,
-    Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
-    ViewportDimensions, ViewportLineSlice, ViewportLineTruncationState, ViewportProjection,
-    ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
+    LanguageStickyScopeProjection, PluginCommandDescriptor, PluginContribution,
+    PluginContributionProjection, PluginId, PrincipalId, ProposalContextManifestSummary,
+    ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
+    ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
+    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId,
+    SystemGraphEdge, SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis,
+    Utf16Position, Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
+    ViewportDimensions, ViewportFoldRange, ViewportLineSlice, ViewportLineTruncationState,
+    ViewportProjection, ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay, WorkspaceId,
 };
 use legion_ui::ui::{
@@ -289,6 +290,16 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     };
+    snapshot.language_tooling_projection.code_lenses = vec![LanguageCodeLensProjection {
+        lens_id: "lens:test-run".to_string(),
+        title: "Run test".to_string(),
+        command_label: "rust-analyzer.runSingle".to_string(),
+        kind_label: "lsp.codelens.runnable".to_string(),
+        range: Some(range(0, 3)),
+        data_label: Some("kind=runnable".to_string()),
+        source_label: "rust-analyzer".to_string(),
+        schema_version: 1,
+    }];
     snapshot.system_graph_projection = SystemGraphProjection {
         projection_id: "system-graph:test".to_string(),
         nodes: vec![SystemGraphNode {
@@ -529,6 +540,8 @@ fn assist_inline_prediction_snapshot() -> legion_ui::ShellProjectionSnapshot {
         rows: Vec::new(),
         request_in_flight: false,
         stale_prediction_count: 1,
+        after_edit_prediction_attempts: 0,
+        after_edit_prediction_accepts: 0,
         generated_at: TimestampMillis(150),
         schema_version: 1,
     };
@@ -643,6 +656,22 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             .iter()
             .any(|row| row.contains("assisted ai"))
     );
+    assert!(model.test_rows.iter().any(|row| {
+        row.contains("test explorer: verification_runs=1")
+            && row.contains("runnable_lenses=1")
+            && row.contains("projection=verification-runs:test")
+    }));
+    assert!(
+        model
+            .test_rows
+            .iter()
+            .any(|row| { row.contains("run verification:test") && row.contains("state=Planned") })
+    );
+    assert!(model.test_rows.iter().any(|row| {
+        row.contains("runnable lens")
+            && row.contains("Run test")
+            && row.contains("rust-analyzer.runSingle")
+    }));
     assert!(model.plugin_rows.iter().any(|row| row.contains("plugin 4")));
     assert!(
         model
@@ -1037,7 +1066,16 @@ fn projection_rendering_projects_workbench_settings_model() {
         editor: legion_ui::EditorSettingsProjection {
             line_numbers_visible: false,
             current_line_highlight: false,
+            sticky_headers_visible: false,
+            code_folding_visible: true,
+            minimap_visible: false,
+            whitespace_guides_visible: true,
+            indent_guides_visible: true,
+            smooth_scrolling_enabled: true,
         },
+        telemetry: legion_protocol::WorkbenchTelemetryConsent::default(),
+        indexed_workspace_search_enabled: false,
+        next_edit_prediction_enabled: false,
         schema_version: 0,
     };
 
@@ -1063,7 +1101,85 @@ fn projection_rendering_projects_workbench_settings_model() {
     assert_eq!(model.settings.toast_verbosity_label, "All statuses");
     assert!(!model.settings.line_numbers_visible);
     assert!(!model.settings.current_line_highlight);
+    assert!(!model.settings.sticky_headers_visible);
+    assert!(model.settings.code_folding_visible);
+    assert!(!model.settings.minimap_visible);
+    assert!(model.settings.whitespace_guides_visible);
+    assert!(model.settings.indent_guides_visible);
+    assert!(model.settings.smooth_scrolling_enabled);
+    assert!(!model.settings.crash_reports_enabled);
+    assert_eq!(model.settings.telemetry_label, "local-only");
+    assert!(
+        model
+            .main_canvas_rows
+            .iter()
+            .any(|row| row.contains("editor polish:"))
+    );
     assert_eq!(model.settings.schema_version, 1);
+}
+
+#[test]
+fn projection_rendering_projects_editor_polish_summary_rows() {
+    let mut snapshot = Shell::empty("Editor polish").projection_snapshot();
+    snapshot.settings_projection.editor.sticky_headers_visible = true;
+    snapshot.settings_projection.editor.code_folding_visible = true;
+    snapshot.settings_projection.editor.minimap_visible = true;
+    snapshot
+        .settings_projection
+        .editor
+        .whitespace_guides_visible = true;
+    snapshot.settings_projection.editor.indent_guides_visible = true;
+    snapshot.settings_projection.editor.smooth_scrolling_enabled = false;
+    snapshot.language_tooling_projection.sticky_scopes = vec![LanguageStickyScopeProjection {
+        scope_id: "scope:fn".to_string(),
+        label: "fn render_editor_polish()".to_string(),
+        kind_label: "function".to_string(),
+        range: None,
+        depth: 0,
+        active: true,
+        source_label: "test".to_string(),
+        schema_version: 1,
+    }];
+    snapshot.active_buffer_projection.viewport = Some(ViewportProjection {
+        workspace_id: WorkspaceId(1),
+        buffer_id: BufferId(1),
+        file_id: None,
+        snapshot_id: SnapshotId(1),
+        buffer_version: BufferVersion(1),
+        visible_range: range(0, 1),
+        selections: Vec::new(),
+        cursor: coord(0, 0, 0),
+        scroll: ViewportScroll {
+            top_line: 0,
+            left_column: 0,
+        },
+        dimensions: ViewportDimensions {
+            width_px: 80,
+            height_px: 24,
+        },
+        mode: ViewportProjectionMode::Normal,
+        line_slices: Vec::new(),
+        line_metrics: Vec::new(),
+        decoration_spans: Vec::new(),
+        fold_ranges: vec![ViewportFoldRange::default()],
+        semantic_token_overlays: Vec::new(),
+        large_file_status: None,
+        schema_version: 1,
+    });
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(model.main_canvas_rows.iter().any(|row| {
+        row.contains("editor polish:")
+            && row.contains("sticky_headers=true")
+            && row.contains("code_folding=true")
+            && row.contains("minimap=true")
+            && row.contains("whitespace_guides=true")
+            && row.contains("indent_guides=true")
+            && row.contains("smooth_scrolling=false")
+            && row.contains("fold_ranges=1")
+            && row.contains("sticky_scopes=1")
+    }));
 }
 
 #[test]

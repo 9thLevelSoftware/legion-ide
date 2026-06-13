@@ -5,9 +5,10 @@ use legion_app::{
     AppSaveOutcome,
 };
 use legion_editor::{TextEdit, TextPosition};
+use legion_memory::{MemoryCandidateRecord, MemoryConsentState, MemoryService};
 use legion_protocol::{
-    PrincipalId, ProtocolTextRange, TextCoordinate, ViewportScroll, ViewportSemanticTokenKind,
-    WorkspaceTrustState,
+    AgentRunId, CausalityId, CorrelationId, PrincipalId, ProtocolTextRange, TextCoordinate,
+    ViewportScroll, ViewportSemanticTokenKind, WorkspaceTrustState,
 };
 use legion_ui::{CommandDispatchIntent, ShellLayoutProjection};
 
@@ -553,6 +554,45 @@ fn daily_editing_contracts_session_record_is_metadata_only() {
             .daily_editing_projection
             .session_record
             .is_some()
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn daily_editing_contracts_session_record_restores_memory_snapshot() {
+    let root = create_root();
+    let mut app = trusted_app(&root);
+
+    let mut memory_service = MemoryService::new();
+    memory_service
+        .retain(MemoryCandidateRecord {
+            candidate_id: "memory-candidate-restore".to_string(),
+            run_id: Some(AgentRunId("memory-run-restore".to_string())),
+            consent: MemoryConsentState::ProjectLongTerm,
+            labels: vec!["memory.metadata_only".to_string()],
+            correlation_id: CorrelationId(77),
+            causality_id: CausalityId(uuid::Uuid::from_u128(77)),
+            event_sequence: legion_protocol::EventSequence(77),
+        })
+        .expect("retain memory candidate");
+    let memory_snapshot_json =
+        serde_json::to_string(&memory_service.snapshot()).expect("serialize memory snapshot");
+
+    let mut record = app
+        .capture_workspace_session_record()
+        .expect("capture session record");
+    record.memory_snapshot_json = Some(memory_snapshot_json.clone());
+
+    app.restore_workspace_session_record(&record)
+        .expect("restore session record");
+
+    let restored = app
+        .capture_workspace_session_record()
+        .expect("capture restored record");
+    assert_eq!(
+        restored.memory_snapshot_json.as_deref(),
+        Some(memory_snapshot_json.as_str())
     );
 
     let _ = std::fs::remove_dir_all(&root);

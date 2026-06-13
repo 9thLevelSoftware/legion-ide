@@ -13,8 +13,12 @@ Legion is not yet a general-availability desktop product. The current repo is be
 Use these docs first:
 
 - `AGENTS.md` — concise agent/developer invariants and required gates.
-- `docs/INDEX.md` — entry point for the canonical documentation set (architecture boundaries, pivot, modes, runbook, rename history).
+- `docs/INDEX.md` — entry point for the canonical documentation set.
+- `docs/USER_GUIDE.md` — end-user guide for the current product paths.
+- `docs/KEYBOARD_REFERENCE.md` — projected shortcut labels that are currently surfaced by the product UI.
+- `docs/TROUBLESHOOTING.md` — diagnostics bundle guidance for smoke, package, and release failures.
 - `docs/ARCHITECTURE_AUTHORITY_BOUNDARIES.md` — canonical ownership rules (UI projection-only, app composition, workspace authority, AI/provider boundary).
+- `docs/SECURITY.md` — public-facing security model, egress policy, plugin isolation, and disclosure policy.
 - `docs/LEGION_PIVOT.md` — product direction and pivot context.
 - `docs/MODES.md` — Manual, Assist, Delegate, and Legion Workflow mode boundaries.
 - `docs/OPERATOR_RUNBOOK.md` — operator-oriented gate/runbook notes.

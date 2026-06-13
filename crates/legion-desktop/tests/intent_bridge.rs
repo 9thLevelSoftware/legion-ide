@@ -150,6 +150,8 @@ fn snapshot_with_assist_inline_prediction() -> legion_ui::ShellProjectionSnapsho
         rows: Vec::new(),
         request_in_flight: false,
         stale_prediction_count: 0,
+        after_edit_prediction_attempts: 0,
+        after_edit_prediction_accepts: 0,
         generated_at: TimestampMillis(150),
         schema_version: 1,
     };
@@ -834,6 +836,44 @@ fn intent_bridge_routes_settings_actions() {
         translate(DesktopAction::SetCurrentLineHighlight { enabled: false }),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::SetCurrentLineHighlight {
             enabled: false,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetStickyHeadersVisible { visible: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetStickyHeadersVisible {
+            visible: true
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetCodeFoldingVisible { visible: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetCodeFoldingVisible { visible: true })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetMinimapVisible { visible: false }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetMinimapVisible { visible: false })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetWhitespaceGuidesVisible { visible: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetWhitespaceGuidesVisible {
+            visible: true,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetIndentGuidesVisible { visible: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetIndentGuidesVisible {
+            visible: true
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetSmoothScrollingEnabled { enabled: false }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetSmoothScrollingEnabled {
+            enabled: false,
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetCrashReportsEnabled { enabled: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetCrashReportsEnabled {
+            enabled: true,
         })
     );
     assert_eq!(

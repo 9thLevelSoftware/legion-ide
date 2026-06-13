@@ -13,6 +13,7 @@ offline = ["legion-app/offline"]
 [dependencies]
 anyhow = { workspace = true }
 legion-app = { workspace = true, default-features = false }
+legion-project = { workspace = true }
 legion-protocol = { workspace = true }
 legion-ui = { workspace = true }
 eframe = { workspace = true }

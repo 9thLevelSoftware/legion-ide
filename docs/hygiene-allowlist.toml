@@ -9,4 +9,5 @@ allowlisted_paths = [
   "docs/LEGION_RENAME.md",
   "plans/foundational-core-ide-platform-implementation-plan-v0.1.md",
   "plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md",
+  "plans/evidence/production/M5/WS18-T3-platform-parity-matrix.md",
 ]

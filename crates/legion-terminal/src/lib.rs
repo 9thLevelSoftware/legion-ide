@@ -5,7 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -21,7 +21,7 @@ use legion_protocol::{
     TerminalSessionId, TextCoordinate, WorkspaceTrustState, validate_debug_adapter_audit_record,
     validate_terminal_audit_record, validate_terminal_close_request, validate_terminal_input,
     validate_terminal_kill_request, validate_terminal_launch_policy_contract,
-    validate_terminal_resize,
+    validate_terminal_output_chunk, validate_terminal_resize,
 };
 use thiserror::Error;
 
@@ -118,12 +118,16 @@ pub struct DapAdapterFixtureOutcome {
 #[derive(Debug, Clone)]
 pub struct DapAdapterFixtureRuntime {
     config: DapAdapterFixtureConfig,
+    session_adapter_types: Arc<Mutex<HashMap<DebugSessionId, String>>>,
 }
 
 impl DapAdapterFixtureRuntime {
     /// Construct a runtime from configuration.
     pub fn new(config: DapAdapterFixtureConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            session_adapter_types: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Launch a deterministic paused debug session.
@@ -147,6 +151,10 @@ impl DapAdapterFixtureRuntime {
             "debug:{}:{}",
             request.workspace_id.0, request.configuration_id.0
         ));
+        self.session_adapter_types
+            .lock()
+            .expect("DAP adapter fixture session map should be lockable")
+            .insert(session_id.clone(), request.adapter_type.clone());
         let sequence = EventSequence(1);
         let audit = DebugAdapterAuditRecord {
             session_id: session_id.clone(),
@@ -252,10 +260,17 @@ impl DapAdapterFixtureRuntime {
             DebugStepKind::Out => "out",
             DebugStepKind::Back => "back",
         };
+        let adapter_type = self
+            .session_adapter_types
+            .lock()
+            .expect("DAP adapter fixture session map should be lockable")
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(|| "lldb-dap".to_string());
         let audit = DebugAdapterAuditRecord {
             session_id: session_id.clone(),
             state: DebugSessionState::Paused,
-            adapter_type: "lldb-dap".to_string(),
+            adapter_type: adapter_type.clone(),
             event_sequence: EventSequence(2),
             correlation_id: CorrelationId(2),
             causality_id: CausalityId(uuid_from_value(2)),
@@ -294,7 +309,7 @@ impl DapAdapterFixtureRuntime {
             console: vec![DebugConsoleEntry {
                 session_id,
                 category: DebugConsoleCategory::Adapter,
-                message_label: format!("step={label} state=paused"),
+                message_label: format!("step={label} state=paused adapter={adapter_type}"),
                 sequence: EventSequence(2),
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
@@ -471,7 +486,7 @@ impl TerminalFixtureRuntime {
                 reason: "terminal output exceeds configured byte limit".to_string(),
             });
         }
-        Ok(TerminalOutputChunk {
+        let output = TerminalOutputChunk {
             session_id: record.session_id,
             sequence: record.event_sequence,
             redacted_payload,
@@ -479,7 +494,11 @@ impl TerminalFixtureRuntime {
             truncated: byte_count == self.config.max_output_bytes,
             redaction: RedactionHint::MetadataOnly,
             schema_version: 1,
-        })
+        };
+        validate_terminal_output_chunk(&output).map_err(|err| TerminalFixtureError::Denied {
+            reason: err.message,
+        })?;
+        Ok(output)
     }
 
     /// Produce a deterministic exit audit record.
@@ -596,18 +615,27 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_audit_record(&audit).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        Ok(TerminalRuntimeLaunchOutcome {
-            output: TerminalOutputChunk {
-                session_id: audit.session_id,
-                sequence: audit.event_sequence,
-                redacted_payload: redacted,
-                byte_count,
-                truncated: session.output.len() as u64 > self.config.max_output_bytes,
-                redaction: RedactionHint::MetadataOnly,
-                schema_version: 1,
+        let output = TerminalRuntimeLaunchOutcome {
+            output: {
+                let output = TerminalOutputChunk {
+                    session_id: audit.session_id,
+                    sequence: audit.event_sequence,
+                    redacted_payload: redacted,
+                    byte_count,
+                    truncated: session.output.len() as u64 > self.config.max_output_bytes,
+                    redaction: RedactionHint::MetadataOnly,
+                    schema_version: 1,
+                };
+                validate_terminal_output_chunk(&output).map_err(|err| {
+                    TerminalRuntimeError::Denied {
+                        reason: err.message,
+                    }
+                })?;
+                output
             },
             audit,
-        })
+        };
+        Ok(output)
     }
 
     /// Write bounded input into a running terminal session.
@@ -712,19 +740,28 @@ impl<P: PtyService> TerminalRuntime<P> {
                 read.exit_code
             ),
         )?;
-        Ok(TerminalRuntimeOutputPollOutcome {
-            output: TerminalOutputChunk {
-                session_id: audit.session_id,
-                sequence: audit.event_sequence,
-                redacted_payload: redacted,
-                byte_count,
-                truncated: read.truncated
-                    || read.output.len() as u64 > self.config.max_output_bytes,
-                redaction: RedactionHint::MetadataOnly,
-                schema_version: 1,
+        let output = TerminalRuntimeOutputPollOutcome {
+            output: {
+                let output = TerminalOutputChunk {
+                    session_id: audit.session_id,
+                    sequence: audit.event_sequence,
+                    redacted_payload: redacted,
+                    byte_count,
+                    truncated: read.truncated
+                        || read.output.len() as u64 > self.config.max_output_bytes,
+                    redaction: RedactionHint::MetadataOnly,
+                    schema_version: 1,
+                };
+                validate_terminal_output_chunk(&output).map_err(|err| {
+                    TerminalRuntimeError::Denied {
+                        reason: err.message,
+                    }
+                })?;
+                output
             },
             audit,
-        })
+        };
+        Ok(output)
     }
 
     /// Close a running terminal session.
@@ -972,7 +1009,20 @@ fn missing_session_error(session_id: TerminalSessionId) -> TerminalRuntimeError 
 }
 
 fn redact_terminal_projection(output: &str, limit: u64) -> String {
-    let mut projected = output.replace("secret", "[redacted]");
+    let mut projected = output.to_string();
+    for (needle, replacement) in [
+        ("OPENAI_API_KEY", "[redacted]"),
+        ("aws_secret_access_key", "[redacted]"),
+        ("Authorization: Bearer", "Authorization: [redacted]"),
+        ("authorization: bearer", "authorization: [redacted]"),
+        ("ghp_", "[redacted]"),
+        ("gho_", "[redacted]"),
+        ("xoxb-", "[redacted]"),
+        ("sk-", "[redacted]"),
+        ("secret", "[redacted]"),
+    ] {
+        projected = projected.replace(needle, replacement);
+    }
     let limit = limit as usize;
     if projected.len() > limit {
         let mut end = limit;

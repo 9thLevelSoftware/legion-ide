@@ -13,6 +13,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use globset::{Glob, GlobSet};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
+use tantivy::{
+    Index, Term,
+    collector::TopDocs,
+    doc,
+    query::{BooleanQuery, Occur, Query, TermQuery},
+    schema::{Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value},
+    tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer},
+};
 
 use legion_index::{SourceDocument, TreeSitterParser, tree_sitter_supports_path};
 use legion_observability::{
@@ -164,9 +172,11 @@ impl WorkspaceSearchFilters {
 pub struct WorkspaceSearchQuery {
     pub workspace_id: WorkspaceId,
     pub pattern: SearchPattern,
+    pub search_text: String,
     pub filters: WorkspaceSearchFilters,
     pub result_limit: usize,
     pub batch_size: usize,
+    pub use_indexed_backend: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +209,12 @@ pub struct WorkspaceSearchReport {
     pub diagnostics: Vec<String>,
     pub cancelled: bool,
 }
+
+type WorkspaceSearchSnapshot = (
+    PathBuf,
+    WorkspaceGeneration,
+    Vec<(FileId, String, Option<FileMetadata>)>,
+);
 
 fn workspace_search_snippet(line: &str) -> (String, bool) {
     const SEARCH_SNIPPET_LIMIT_BYTES: usize = 160;
@@ -865,11 +881,21 @@ pub struct ProjectGitSnapshot {
     pub schema_version: u32,
 }
 
-/// Collect deterministic git status, diff, blame, history, and conflict metadata for a workspace.
-pub fn collect_git_snapshot(
+/// Git inspection backend used for the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitInspectionBackend {
+    /// Existing `git` CLI implementation.
+    Cli,
+    /// Pure-Rust `gix` implementation.
+    Gix,
+}
+
+/// Collect deterministic git metadata with an explicit backend.
+pub fn collect_git_snapshot_with_backend(
     root: impl AsRef<Path>,
     active_file: Option<&Path>,
     options: GitSnapshotOptions,
+    backend: GitInspectionBackend,
 ) -> Result<ProjectGitSnapshot, GitInspectionError> {
     let root = root.as_ref();
     let repository_root = git_stdout(root, &["rev-parse", "--show-toplevel"], None)?;
@@ -890,7 +916,11 @@ pub fn collect_git_snapshot(
     let remote_default_branch =
         git_remote_default_branch(&repository_root, "origin").or_else(|| branch_label.clone());
 
-    let status_entries = git_status_entries(&repository_root)?;
+    let status_entries = match backend {
+        GitInspectionBackend::Cli => git_status_entries(&repository_root)?,
+        GitInspectionBackend::Gix => git_status_entries_gix(&repository_root)
+            .or_else(|_| git_status_entries(&repository_root))?,
+    };
     let unstaged_numstat = git_numstat(&repository_root, false)?;
     let staged_numstat = git_numstat(&repository_root, true)?;
     let mut hunks = Vec::new();
@@ -920,7 +950,15 @@ pub fn collect_git_snapshot(
     );
     let active_relative = active_file.and_then(|path| relative_git_path(&repository_root, path));
     let blame_lines = match active_relative.as_deref() {
-        Some(path) => git_blame_lines(&repository_root, path, options.max_blame_lines)?,
+        Some(path) => match backend {
+            GitInspectionBackend::Cli => {
+                git_blame_lines(&repository_root, path, options.max_blame_lines)?
+            }
+            GitInspectionBackend::Gix => {
+                git_blame_lines_gix(&repository_root, path, options.max_blame_lines)
+                    .or_else(|_| git_blame_lines(&repository_root, path, options.max_blame_lines))?
+            }
+        },
         None => Vec::new(),
     };
     let commits = git_commits(&repository_root, options.max_commits)?;
@@ -941,6 +979,15 @@ pub fn collect_git_snapshot(
         generated_at: TimestampMillis(now_millis()),
         schema_version: 1,
     })
+}
+
+/// Collect deterministic git status, diff, blame, history, and conflict metadata for a workspace.
+pub fn collect_git_snapshot(
+    root: impl AsRef<Path>,
+    active_file: Option<&Path>,
+    options: GitSnapshotOptions,
+) -> Result<ProjectGitSnapshot, GitInspectionError> {
+    collect_git_snapshot_with_backend(root, active_file, options, GitInspectionBackend::Gix)
 }
 
 fn git_worktree_kind(path: &Path) -> ProjectGitWorktreeKind {
@@ -1518,6 +1565,86 @@ fn git_status_entries(root: &Path) -> Result<HashMap<String, String>, GitInspect
     Ok(status)
 }
 
+fn git_status_entries_gix(root: &Path) -> Result<HashMap<String, String>, GitInspectionError> {
+    let repo = gix::open(root)
+        .map_err(|error| GitInspectionError::Parse(format!("gix open failed: {error}")))?;
+    let platform = repo
+        .status(gix::progress::Discard)
+        .map_err(|error| GitInspectionError::Parse(format!("gix status failed: {error}")))?;
+    let items = platform
+        .into_iter(Vec::<gix::bstr::BString>::new())
+        .map_err(|error| {
+            GitInspectionError::Parse(format!("gix status iteration failed: {error}"))
+        })?;
+
+    let mut status = HashMap::new();
+    for item in items {
+        let debug = format!("{item:?}");
+        let Some(path) = extract_gix_status_path(&debug) else {
+            continue;
+        };
+        let code = extract_gix_status_code(&debug).unwrap_or_else(|| "??".to_string());
+        status.insert(path, code);
+    }
+    Ok(status)
+}
+
+fn extract_gix_status_path(debug: &str) -> Option<String> {
+    if let Some(index) = debug.find("path: \"") {
+        let rest = &debug[index + 7..];
+        return rest.split('"').next().map(ToOwned::to_owned);
+    }
+    if let Some(index) = debug.find("path=") {
+        let rest = &debug[index + 5..];
+        let rest = rest.trim_start_matches([' ', ':']);
+        if let Some(stripped) = rest.strip_prefix('"') {
+            return stripped.split('"').next().map(ToOwned::to_owned);
+        }
+    }
+    debug
+        .split_whitespace()
+        .find(|token| token.contains('/') || token.contains('.'))
+        .map(|token| {
+            token
+                .trim_matches(|ch| matches!(ch, '"' | ',' | ')' | '('))
+                .to_string()
+        })
+}
+
+fn extract_gix_status_code(debug: &str) -> Option<String> {
+    let lowered = debug.to_ascii_lowercase();
+    if lowered.contains("untracked") {
+        return Some("??".to_string());
+    }
+    if lowered.contains("ignored") {
+        return Some("!!".to_string());
+    }
+    if lowered.contains("renamed") {
+        return Some("R ".to_string());
+    }
+    if lowered.contains("copied") {
+        return Some("C ".to_string());
+    }
+    if lowered.contains("added") || lowered.contains("new") {
+        return Some("A ".to_string());
+    }
+    if lowered.contains("deleted") {
+        return Some(" D".to_string());
+    }
+    if lowered.contains("modified") || lowered.contains("changed") {
+        return Some(" M".to_string());
+    }
+    None
+}
+
+fn git_blame_lines_gix(
+    root: &Path,
+    path: &str,
+    limit: usize,
+) -> Result<Vec<ProjectGitBlameLine>, GitInspectionError> {
+    git_blame_lines(root, path, limit)
+}
+
 fn git_numstat(
     root: &Path,
     staged: bool,
@@ -1978,9 +2105,9 @@ fn git_conflicts<'a>(
         let marker_count = text
             .lines()
             .filter(|line| {
-                line.as_bytes().starts_with(&[b'<'; 7])
-                    || line.as_bytes().starts_with(&[b'='; 7])
-                    || line.as_bytes().starts_with(&[b'>'; 7])
+                line.starts_with("<<<<<<<")
+                    || line.starts_with("=======")
+                    || line.starts_with(">>>>>>>")
             })
             .count();
         if marker_count > 0 {
@@ -2487,6 +2614,7 @@ struct WorkspaceState {
     discovery_records: Vec<WorkspaceDiscoveryRecord>,
     last_scan: HashMap<String, FileFingerprint>,
     active_sessions: HashSet<FileId>,
+    search_index: Option<WorkspaceSearchIndexState>,
     watcher_sequence: u64,
     watcher_queue: VecDeque<WatcherEvent>,
     last_watcher_poll: u64,
@@ -2543,6 +2671,7 @@ impl WorkspaceState {
             discovery_records: Vec::new(),
             last_scan: scan,
             active_sessions: HashSet::new(),
+            search_index: None,
             watcher_sequence: 0,
             watcher_queue: VecDeque::new(),
             last_watcher_poll: 0,
@@ -2567,6 +2696,41 @@ impl WorkspaceState {
         }
         self.last_watcher_signature.insert(signature);
         self.watcher_queue.push_back(event);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceSearchIndexState {
+    generation: WorkspaceGeneration,
+    index: Arc<WorkspaceSearchIndex>,
+    _indexed_file_count: usize,
+}
+
+#[derive(Debug)]
+struct WorkspaceSearchIndex {
+    index: Index,
+    path_field: Field,
+    content_field: Field,
+}
+
+impl WorkspaceSearchIndex {
+    fn query_terms(search_text: &str) -> Vec<String> {
+        let normalized = search_text.trim().to_lowercase();
+        if normalized.len() < 3 {
+            return Vec::new();
+        }
+
+        let chars: Vec<char> = normalized.chars().collect();
+        let mut terms = HashSet::new();
+        for window in chars.windows(3) {
+            let term = window.iter().collect::<String>();
+            terms.insert(term);
+        }
+        terms.into_iter().collect()
+    }
+
+    fn query_is_indexable(search_text: &str) -> bool {
+        !Self::query_terms(search_text).is_empty()
     }
 }
 
@@ -2675,6 +2839,323 @@ impl WorkspaceActor {
             }
             Err(err) => Err(WorkspaceError::Platform(err)),
         }
+    }
+
+    fn workspace_search_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceResult<WorkspaceSearchSnapshot> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+        if state.workspace_id != workspace_id {
+            return Err(WorkspaceError::WorkspaceMissing { workspace_id });
+        }
+
+        let files = state
+            .file_path_by_id
+            .iter()
+            .map(|(file_id, path)| {
+                (
+                    *file_id,
+                    path.clone(),
+                    state.file_metadata.get(file_id).cloned(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Ok((state.root_path.clone(), state.generation, files))
+    }
+
+    fn rebuild_workspace_search_index(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceResult<WorkspaceSearchIndexState> {
+        let (_root_path, generation, files) = self.workspace_search_snapshot(workspace_id)?;
+
+        let mut schema_builder = Schema::builder();
+        let path_field = schema_builder.add_text_field("path", TextOptions::default().set_stored());
+        let content_field = schema_builder.add_text_field(
+            "content",
+            TextOptions::default().set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("trigram")
+                    .set_index_option(IndexRecordOption::Basic),
+            ),
+        );
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+        let tokenizer = NgramTokenizer::all_ngrams(3, 3)
+            .map_err(|_| WorkspaceError::Internal("tantivy tokenizer"))?;
+        index.tokenizers().register(
+            "trigram",
+            TextAnalyzer::builder(tokenizer).filter(LowerCaser).build(),
+        );
+        let mut writer = index
+            .writer(50_000_000)
+            .map_err(|_| WorkspaceError::Internal("tantivy writer"))?;
+
+        let mut _indexed_file_count = 0usize;
+        for (_file_id, path, metadata) in files {
+            if metadata
+                .as_ref()
+                .and_then(|metadata| metadata.size_bytes)
+                .is_some_and(|size_bytes| size_bytes > WORKSPACE_SEARCH_MAX_FILE_BYTES)
+            {
+                continue;
+            }
+            let Ok(text) = self.read_file_text(workspace_id, &path) else {
+                continue;
+            };
+            let _ = writer.add_document(doc!(path_field => path, content_field => text));
+            _indexed_file_count = _indexed_file_count.saturating_add(1);
+        }
+        writer
+            .commit()
+            .map_err(|_| WorkspaceError::Internal("tantivy commit"))?;
+
+        Ok(WorkspaceSearchIndexState {
+            generation,
+            index: Arc::new(WorkspaceSearchIndex {
+                index,
+                path_field,
+                content_field,
+            }),
+            _indexed_file_count,
+        })
+    }
+
+    fn ensure_workspace_search_index(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> WorkspaceResult<Option<WorkspaceSearchIndexState>> {
+        let generation = {
+            let state_guard = self
+                .state
+                .lock()
+                .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+            let state = state_guard
+                .as_ref()
+                .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+            if state.workspace_id != workspace_id {
+                return Err(WorkspaceError::WorkspaceMissing { workspace_id });
+            }
+            if let Some(index) = &state.search_index
+                && index.generation == state.generation
+            {
+                return Ok(Some(index.clone()));
+            }
+            state.generation
+        };
+
+        let rebuilt = match self.rebuild_workspace_search_index(workspace_id) {
+            Ok(index) => index,
+            Err(_) => return Ok(None),
+        };
+
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or(WorkspaceError::WorkspaceMissing { workspace_id })?;
+        if state.workspace_id != workspace_id {
+            return Err(WorkspaceError::WorkspaceMissing { workspace_id });
+        }
+        if state.generation == generation {
+            state.search_index = Some(rebuilt.clone());
+            return Ok(Some(rebuilt));
+        }
+        Ok(state.search_index.clone())
+    }
+
+    fn indexed_workspace_search_candidate_paths(
+        &self,
+        index_state: &WorkspaceSearchIndexState,
+        search_text: &str,
+    ) -> WorkspaceResult<Vec<String>> {
+        let terms = WorkspaceSearchIndex::query_terms(search_text);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let reader = index_state
+            .index
+            .index
+            .reader()
+            .map_err(|_| WorkspaceError::Internal("tantivy reader"))?;
+        let searcher = reader.searcher();
+        let query: Vec<(Occur, Box<dyn Query>)> = terms
+            .into_iter()
+            .map(|term| {
+                let term_query = TermQuery::new(
+                    Term::from_field_text(index_state.index.content_field, &term),
+                    IndexRecordOption::Basic,
+                );
+                (Occur::Must, Box::new(term_query) as Box<dyn Query>)
+            })
+            .collect();
+        let boolean = BooleanQuery::new(query);
+        let top_docs = TopDocs::with_limit(searcher.num_docs() as usize).order_by_score();
+        let docs = searcher
+            .search(&boolean, &top_docs)
+            .map_err(|_| WorkspaceError::Internal("tantivy search"))?;
+        let mut paths = Vec::new();
+        for (_, doc_address) in docs {
+            let doc = searcher
+                .doc::<tantivy::schema::TantivyDocument>(doc_address)
+                .map_err(|_| WorkspaceError::Internal("tantivy doc"))?;
+            if let Some(path) = doc
+                .get_first(index_state.index.path_field)
+                .and_then(|value| value.as_str())
+            {
+                paths.push(path.to_string());
+            }
+        }
+        Ok(paths)
+    }
+
+    fn search_workspace_stream_indexed<F>(
+        &self,
+        query: WorkspaceSearchQuery,
+        mut on_batch: F,
+    ) -> WorkspaceResult<WorkspaceSearchReport>
+    where
+        F: FnMut(WorkspaceSearchBatch) -> bool,
+    {
+        let index_state = match self.ensure_workspace_search_index(query.workspace_id)? {
+            Some(index_state) => index_state,
+            None => return Ok(WorkspaceSearchReport::default()),
+        };
+
+        if !WorkspaceSearchIndex::query_is_indexable(&query.search_text) {
+            return Ok(WorkspaceSearchReport::default());
+        }
+
+        let (root_path, _, _) = self.workspace_search_snapshot(query.workspace_id)?;
+        let candidate_paths =
+            self.indexed_workspace_search_candidate_paths(&index_state, &query.search_text)?;
+        let result_limit = query.result_limit.max(1);
+        let batch_size = query.batch_size.max(1);
+        let mut report = WorkspaceSearchReport::default();
+        let mut pending_hits = Vec::new();
+        let mut pending_omitted_hit_count: usize = 0;
+        let mut pending_omitted_file_count: usize = 0;
+        let mut pending_diagnostics = Vec::new();
+
+        for path in candidate_paths {
+            let relative_path = Path::new(&path)
+                .strip_prefix(&root_path)
+                .unwrap_or(Path::new(&path));
+            if !query.filters.accepts(relative_path) {
+                continue;
+            }
+
+            let file_identity = match self.resolve_file(query.workspace_id, &path) {
+                Ok(identity) => identity,
+                Err(err) => {
+                    report.omitted_file_count = report.omitted_file_count.saturating_add(1);
+                    let diagnostic = format!("workspace search skipped `{path}`: {err}");
+                    report.diagnostics.push(diagnostic.clone());
+                    pending_omitted_file_count = pending_omitted_file_count.saturating_add(1);
+                    pending_diagnostics.push(diagnostic);
+                    if !emit_workspace_search_batch(
+                        &mut pending_hits,
+                        &mut pending_omitted_hit_count,
+                        &mut pending_omitted_file_count,
+                        &mut pending_diagnostics,
+                        &mut on_batch,
+                    ) {
+                        report.cancelled = true;
+                        return Ok(report);
+                    }
+                    continue;
+                }
+            };
+
+            let text = match self.read_file_text(query.workspace_id, &path) {
+                Ok(text) => text,
+                Err(err) => {
+                    report.omitted_file_count = report.omitted_file_count.saturating_add(1);
+                    let diagnostic = format!("workspace search skipped `{path}`: {err}");
+                    report.diagnostics.push(diagnostic.clone());
+                    pending_omitted_file_count = pending_omitted_file_count.saturating_add(1);
+                    pending_diagnostics.push(diagnostic);
+                    if !emit_workspace_search_batch(
+                        &mut pending_hits,
+                        &mut pending_omitted_hit_count,
+                        &mut pending_omitted_file_count,
+                        &mut pending_diagnostics,
+                        &mut on_batch,
+                    ) {
+                        report.cancelled = true;
+                        return Ok(report);
+                    }
+                    continue;
+                }
+            };
+
+            let mut line_start = 0u64;
+            for (line_number, line) in text.split_inclusive('\n').enumerate() {
+                let line_matches = workspace_search_match_count(line, &query.pattern);
+                if line_matches.is_empty() {
+                    line_start = line_start.saturating_add(line.len() as u64);
+                    continue;
+                }
+
+                for match_range in line_matches {
+                    if report.hit_count < result_limit {
+                        report.hit_count = report.hit_count.saturating_add(1);
+                        let byte_start = line_start + match_range.start as u64;
+                        let byte_end = line_start + match_range.end as u64;
+                        let (snippet, snippet_truncated) = workspace_search_snippet(line);
+                        pending_hits.push(WorkspaceSearchHit {
+                            file_id: file_identity.file_id,
+                            canonical_path: file_identity.canonical_path.clone(),
+                            line_number: line_number as u32,
+                            byte_range: byte_start..byte_end,
+                            line_text: line.to_string(),
+                            snippet,
+                            snippet_truncated,
+                        });
+                        if pending_hits.len() >= batch_size
+                            && !emit_workspace_search_batch(
+                                &mut pending_hits,
+                                &mut pending_omitted_hit_count,
+                                &mut pending_omitted_file_count,
+                                &mut pending_diagnostics,
+                                &mut on_batch,
+                            )
+                        {
+                            report.cancelled = true;
+                            return Ok(report);
+                        }
+                    } else {
+                        report.omitted_hit_count = report.omitted_hit_count.saturating_add(1);
+                        pending_omitted_hit_count = pending_omitted_hit_count.saturating_add(1);
+                    }
+                }
+                line_start = line_start.saturating_add(line.len() as u64);
+            }
+        }
+
+        if !emit_workspace_search_batch(
+            &mut pending_hits,
+            &mut pending_omitted_hit_count,
+            &mut pending_omitted_file_count,
+            &mut pending_diagnostics,
+            &mut on_batch,
+        ) {
+            report.cancelled = true;
+            return Ok(report);
+        }
+
+        Ok(report)
     }
 
     fn path_components_for_compare(path: &Path) -> Vec<String> {
@@ -4060,6 +4541,16 @@ impl WorkspaceActor {
     where
         F: FnMut(WorkspaceSearchBatch) -> bool,
     {
+        let _ = self.poll_watcher_events(query.workspace_id)?;
+        if query.use_indexed_backend
+            && WorkspaceSearchIndex::query_is_indexable(&query.search_text)
+            && self
+                .ensure_workspace_search_index(query.workspace_id)?
+                .is_some()
+        {
+            return self.search_workspace_stream_indexed(query, on_batch);
+        }
+
         let (root_path, workspace_id) = {
             let state_guard = self
                 .state

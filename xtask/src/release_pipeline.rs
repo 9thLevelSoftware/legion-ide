@@ -273,11 +273,10 @@ pub fn write_descriptors(
 }
 
 /// Walk the on-disk descriptors, cross-check that each plan descriptor has a
-/// written file, and record the verifier status. Until real artifacts exist,
-/// the verifier reports `dry-run/unchecked` for every entry — the same fail
-/// posture as the dry-run signer status. The signature is stable so that
-/// WS17.T2 (signing) and WS17.T3 (auto-update) can replace the body with real
-/// SHA-256 / signature checks without changing callers.
+/// written file, and record the verifier status. The current verifier is a
+/// fail-closed integrity check: missing files or on-disk tampering cause a hard
+/// rejection so the dry-run surface still proves descriptor integrity before
+/// real signing / checksum manifests land.
 pub fn verify_descriptors(
     _workspace_root: &Path,
     plan: &ReleasePipelinePlan,
@@ -290,18 +289,30 @@ pub fn verify_descriptors(
         ));
     }
 
+    let written_stamp = read_written_version_stamp(out_dir)?;
+    let mut expected_stamp = plan.version_stamp.clone();
+    expected_stamp.built_at_utc = written_stamp.built_at_utc.clone();
+    if expected_stamp != written_stamp {
+        return Err(format!(
+            "release pipeline version stamp at `{}` does not match the planned descriptor metadata",
+            out_dir.join(VERSION_STAMP_FILE).display()
+        ));
+    }
+
     let mut entries = Vec::with_capacity(plan.descriptors.len());
     let mut summary = VerificationSummary::default();
     for descriptor in &plan.descriptors {
         let descriptor_path =
             out_dir.join(format!("{}.toml", descriptor_file_stem(&descriptor.name)));
-        let exists = descriptor_path.is_file();
-        let (verifier_status, verifier_message) = if exists {
-            (
-                DRY_RUN_VERIFIER_STATUS.to_string(),
-                DRY_RUN_VERIFIER_MESSAGE.to_string(),
+        let mut expected_descriptor = descriptor.clone();
+        expected_descriptor.version_stamp = written_stamp.clone();
+        let expected_text = toml::to_string_pretty(&expected_descriptor).map_err(|err| {
+            format!(
+                "unable to serialize expected descriptor `{}` for verification: {err}",
+                descriptor.name
             )
-        } else {
+        })?;
+        let (verifier_status, verifier_message) = if !descriptor_path.is_file() {
             (
                 "failed/missing-descriptor".to_string(),
                 format!(
@@ -309,6 +320,27 @@ pub fn verify_descriptors(
                     descriptor_path.display()
                 ),
             )
+        } else {
+            let actual_text = fs::read_to_string(&descriptor_path).map_err(|err| {
+                format!(
+                    "unable to read release pipeline descriptor `{}`: {err}",
+                    descriptor_path.display()
+                )
+            })?;
+            if actual_text == expected_text {
+                (
+                    DRY_RUN_VERIFIER_STATUS.to_string(),
+                    DRY_RUN_VERIFIER_MESSAGE.to_string(),
+                )
+            } else {
+                (
+                    "failed/tampered-descriptor".to_string(),
+                    format!(
+                        "descriptor `{}` failed integrity comparison; on-disk bytes differ from the planned checksum manifest",
+                        descriptor_path.display()
+                    ),
+                )
+            }
         };
         if verifier_status == DRY_RUN_VERIFIER_STATUS {
             summary.unchecked += 1;
@@ -354,6 +386,22 @@ pub fn verify_descriptors(
     })?;
 
     Ok(report)
+}
+
+fn read_written_version_stamp(out_dir: &Path) -> Result<VersionStamp, String> {
+    let stamp_path = out_dir.join(VERSION_STAMP_FILE);
+    let stamp_text = fs::read_to_string(&stamp_path).map_err(|err| {
+        format!(
+            "unable to read release pipeline version stamp `{}`: {err}",
+            stamp_path.display()
+        )
+    })?;
+    toml::from_str(&stamp_text).map_err(|err| {
+        format!(
+            "unable to parse release pipeline version stamp `{}`: {err}",
+            stamp_path.display()
+        )
+    })
 }
 
 fn build_version_stamp(

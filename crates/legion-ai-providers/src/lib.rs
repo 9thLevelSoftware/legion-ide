@@ -10,9 +10,9 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use legion_ai::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatRole, EmbeddingRequest, EmbeddingResponse,
-    InlinePredictionRequest, InlinePredictionResponse, ModelProvider, ProviderCapabilities,
-    ProviderError, ProviderId,
+    BatchJobRequest, BatchJobResponse, ChatCompletionRequest, ChatCompletionResponse, ChatRole,
+    EmbeddingRequest, EmbeddingResponse, InlinePredictionRequest, InlinePredictionResponse,
+    ModelProvider, ProviderCapabilities, ProviderError, ProviderId,
 };
 use legion_protocol::{
     AssistedAiOperationClass, AssistedAiProviderAvailabilityState, AssistedAiProviderCapability,
@@ -159,6 +159,7 @@ impl ModelProvider for DeterministicLocalProvider {
         ProviderCapabilities {
             completion: true,
             embedding: true,
+            batch: true,
             inline_prediction: true,
         }
     }
@@ -203,6 +204,33 @@ impl ModelProvider for DeterministicLocalProvider {
             metadata: HashMap::from([
                 ("embedding".to_string(), "deterministic-local".to_string()),
                 ("redaction".to_string(), "metadata-only".to_string()),
+            ]),
+        })
+    }
+
+    fn batch_complete(&self, request: BatchJobRequest) -> Result<BatchJobResponse, ProviderError> {
+        let BatchJobRequest {
+            provider: _,
+            model,
+            batch_id,
+            job_type,
+            requests,
+            metadata: _,
+        } = request;
+        let batch_job_type = job_type.clone();
+        let responses = requests
+            .into_iter()
+            .map(|request| self.complete(request))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(BatchJobResponse {
+            provider: self.id.clone(),
+            model,
+            batch_id,
+            job_type,
+            responses,
+            metadata: HashMap::from([
+                ("batch.mode".to_string(), "deterministic-local".to_string()),
+                ("batch.job_type".to_string(), batch_job_type),
             ]),
         })
     }
@@ -362,6 +390,7 @@ where
         ProviderCapabilities {
             completion: true,
             embedding: true,
+            batch: false,
             inline_prediction: false,
         }
     }
@@ -621,6 +650,7 @@ where
         ProviderCapabilities {
             completion: true,
             embedding: false,
+            batch: true,
             inline_prediction: false,
         }
     }
@@ -649,6 +679,33 @@ where
             request.provider,
             "OpenAI Responses API does not provide embeddings",
         ))
+    }
+
+    fn batch_complete(&self, request: BatchJobRequest) -> Result<BatchJobResponse, ProviderError> {
+        let BatchJobRequest {
+            provider: _,
+            model,
+            batch_id,
+            job_type,
+            requests,
+            metadata: _,
+        } = request;
+        let batch_job_type = job_type.clone();
+        let responses = requests
+            .into_iter()
+            .map(|request| self.complete(request))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(BatchJobResponse {
+            provider: self.id.clone(),
+            model,
+            batch_id,
+            job_type,
+            responses,
+            metadata: HashMap::from([
+                ("batch.mode".to_string(), "openai-responses".to_string()),
+                ("batch.job_type".to_string(), batch_job_type),
+            ]),
+        })
     }
 
     fn predict_inline(
@@ -772,6 +829,7 @@ where
         ProviderCapabilities {
             completion: true,
             embedding: true,
+            batch: false,
             inline_prediction: false,
         }
     }
@@ -1487,6 +1545,7 @@ where
         ProviderCapabilities {
             completion: true,
             embedding: false,
+            batch: true,
             inline_prediction: false,
         }
     }
@@ -1496,6 +1555,33 @@ where
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, ProviderError> {
         AnthropicMessagesClient::complete(self, request)
+    }
+
+    fn batch_complete(&self, request: BatchJobRequest) -> Result<BatchJobResponse, ProviderError> {
+        let BatchJobRequest {
+            provider: _,
+            model,
+            batch_id,
+            job_type,
+            requests,
+            metadata: _,
+        } = request;
+        let batch_job_type = job_type.clone();
+        let responses = requests
+            .into_iter()
+            .map(|request| AnthropicMessagesClient::complete(self, request))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(BatchJobResponse {
+            provider: self.id.clone(),
+            model,
+            batch_id,
+            job_type,
+            responses,
+            metadata: HashMap::from([
+                ("batch.mode".to_string(), "anthropic-messages".to_string()),
+                ("batch.job_type".to_string(), batch_job_type),
+            ]),
+        })
     }
 
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
@@ -1622,6 +1708,7 @@ impl ModelProvider for UnavailableInlineProvider {
         ProviderCapabilities {
             completion: false,
             embedding: false,
+            batch: false,
             inline_prediction: true,
         }
     }
@@ -1798,10 +1885,18 @@ pub struct StreamableHttpMcpTransportConfig {
 }
 
 /// Process-backed MCP stdio transport.
-#[derive(Clone)]
 pub struct StdioMcpTransport {
     config: StdioMcpTransportConfig,
     session: Arc<Mutex<Option<StdioMcpSession>>>,
+}
+
+impl Clone for StdioMcpTransport {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            session: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl fmt::Debug for StdioMcpTransport {
@@ -1931,6 +2026,19 @@ pub struct StreamableHttpMcpTransport {
     config: StreamableHttpMcpTransportConfig,
 }
 
+fn ensure_rustls_crypto_provider() -> Result<(), McpClientError> {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(()) => Ok(()),
+        Err(_) if rustls::crypto::CryptoProvider::get_default().is_some() => Ok(()),
+        Err(error) => Err(McpClientError::Transport(format!(
+            "failed to install rustls crypto provider: {error:?}"
+        ))),
+    }
+}
+
 impl StreamableHttpMcpTransport {
     /// Create a Streamable HTTP transport from endpoint metadata.
     pub fn new(config: StreamableHttpMcpTransportConfig) -> Self {
@@ -1942,6 +2050,7 @@ impl McpTransport for StreamableHttpMcpTransport {
     fn send(&self, envelope: &McpJsonRpcEnvelope) -> Result<Value, McpClientError> {
         validate_mcp_json_rpc_envelope(envelope)
             .map_err(|error| McpClientError::InvalidEnvelope(error.message))?;
+        ensure_rustls_crypto_provider()?;
         if self.config.endpoint.trim().is_empty() {
             return Err(McpClientError::Transport(
                 "Streamable HTTP MCP endpoint must not be empty".to_string(),
@@ -3258,6 +3367,84 @@ mod tests {
             "final_answer"
         );
         assert_eq!(calls[2].payload["tools"][0]["name"], "lookup_docs");
+    }
+
+    #[test]
+    fn openai_and_anthropic_batch_jobs_round_trip_repo_summary_requests() {
+        let openai_transport = RecordingProviderTransport::default();
+        let openai = OpenAiResponsesProvider::with_transport(
+            OPENAI_PROVIDER_ID,
+            "https://api.openai.com/v1/",
+            Some("openai-key".to_string()),
+            openai_transport.clone(),
+        );
+        let anthropic_transport = RecordingProviderTransport::default();
+        let anthropic = AnthropicMessagesClient::with_transport(
+            ANTHROPIC_PROVIDER_ID,
+            "https://api.anthropic.com/",
+            Some("anthropic-key".to_string()),
+            anthropic_transport.clone(),
+        );
+
+        let batch_request = BatchJobRequest::new(
+            OPENAI_PROVIDER_ID,
+            "batch-model",
+            "batch-repo-summary-2",
+            "repo-summary",
+            vec![
+                ChatCompletionRequest::new(
+                    OPENAI_PROVIDER_ID,
+                    "batch-model",
+                    "summarize repo chunk one",
+                ),
+                ChatCompletionRequest::new(
+                    OPENAI_PROVIDER_ID,
+                    "batch-model",
+                    "summarize repo chunk two",
+                ),
+            ],
+        )
+        .with_metadata("source", "ws10");
+
+        let openai_response = openai
+            .batch_complete(batch_request.clone())
+            .expect("openai batch job succeeds");
+        let anthropic_response = anthropic
+            .batch_complete(BatchJobRequest {
+                provider: ANTHROPIC_PROVIDER_ID.to_string(),
+                ..batch_request
+            })
+            .expect("anthropic batch job succeeds");
+
+        assert_eq!(openai_response.batch_id, "batch-repo-summary-2");
+        assert_eq!(openai_response.job_type, "repo-summary");
+        assert_eq!(openai_response.responses.len(), 2);
+        assert_eq!(
+            openai_response.metadata.get("batch.mode"),
+            Some(&"openai-responses".to_string())
+        );
+        assert_eq!(anthropic_response.batch_id, "batch-repo-summary-2");
+        assert_eq!(anthropic_response.job_type, "repo-summary");
+        assert_eq!(anthropic_response.responses.len(), 2);
+        assert_eq!(
+            anthropic_response.metadata.get("batch.mode"),
+            Some(&"anthropic-messages".to_string())
+        );
+
+        let openai_calls = openai_transport.calls();
+        assert_eq!(openai_calls.len(), 2);
+        assert!(
+            openai_calls
+                .iter()
+                .all(|call| call.endpoint == "https://api.openai.com/v1/responses")
+        );
+        let anthropic_calls = anthropic_transport.calls();
+        assert_eq!(anthropic_calls.len(), 2);
+        assert!(
+            anthropic_calls
+                .iter()
+                .all(|call| call.endpoint == "https://api.anthropic.com/v1/messages")
+        );
     }
 
     #[test]

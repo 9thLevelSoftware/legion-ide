@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use legion_project::git_pull_request_url;
 use legion_protocol::{
     AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, DebugConfigurationId,
     DebugSessionId, DelegatedTaskPlanId, DelegatedTaskProposalHunkDisposition,
@@ -88,6 +89,8 @@ pub enum DesktopAction {
         /// Projected toast identifier.
         toast_id: u64,
     },
+    /// Dismiss the first-run onboarding card in adapter-local view state.
+    DismissOnboarding,
     /// Invoke a foreground toast action through existing command authority.
     InvokeToastAction {
         /// Intent attached to the projected toast action.
@@ -125,6 +128,51 @@ pub enum DesktopAction {
         /// Whether current-line highlighting is enabled.
         enabled: bool,
     },
+    /// Toggle sticky headers through app authority.
+    SetStickyHeadersVisible {
+        /// Whether sticky headers should be visible.
+        visible: bool,
+    },
+    /// Toggle code folding indicators through app authority.
+    SetCodeFoldingVisible {
+        /// Whether code folding indicators should be visible.
+        visible: bool,
+    },
+    /// Toggle the minimap through app authority.
+    SetMinimapVisible {
+        /// Whether the minimap should be visible.
+        visible: bool,
+    },
+    /// Toggle whitespace guides through app authority.
+    SetWhitespaceGuidesVisible {
+        /// Whether whitespace guides should be visible.
+        visible: bool,
+    },
+    /// Toggle indent guides through app authority.
+    SetIndentGuidesVisible {
+        /// Whether indent guides should be visible.
+        visible: bool,
+    },
+    /// Toggle smooth scrolling through app authority.
+    SetSmoothScrollingEnabled {
+        /// Whether smooth scrolling should be enabled.
+        enabled: bool,
+    },
+    /// Toggle indexed workspace search through app authority.
+    SetIndexedWorkspaceSearchEnabled {
+        /// Whether workspace search should use the optional indexed backend.
+        enabled: bool,
+    },
+    /// Toggle next-edit prediction through app authority.
+    SetNextEditPredictionEnabled {
+        /// Whether next-edit prediction should auto-trigger after edits.
+        enabled: bool,
+    },
+    /// Toggle crash reports through app authority.
+    SetCrashReportsEnabled {
+        /// Whether crash reports should be enabled.
+        enabled: bool,
+    },
     /// Reset workbench settings through app authority.
     ResetSettings,
     /// Ask the workflow layer to open a workspace root.
@@ -136,6 +184,37 @@ pub enum DesktopAction {
     RefreshExplorer,
     /// Refresh git status, syntactic diff, blame, graph, and conflict projections.
     RefreshGit,
+    /// Switch to an existing git branch.
+    SwitchGitBranch {
+        /// Branch label.
+        branch: String,
+    },
+    /// Create and switch to a new git branch.
+    CreateGitBranch {
+        /// Branch label.
+        branch: String,
+    },
+    /// Delete a git branch.
+    DeleteGitBranch {
+        /// Branch label.
+        branch: String,
+    },
+    /// Stash local git changes.
+    StashGitChanges {
+        /// Optional stash message.
+        message: Option<String>,
+    },
+    /// Push the current branch to the default remote.
+    PushGitRemote,
+    /// Open the branch's forge pull-request URL.
+    OpenGitPullRequestUrl,
+    /// Prune orphaned worktree metadata.
+    PruneGitWorktrees,
+    /// Remove a worktree by path.
+    RemoveGitWorktree {
+        /// Worktree path.
+        path: String,
+    },
     /// Refresh debug launch configurations and persisted breakpoints.
     RefreshDebugConfigurations,
     /// Toggle a breakpoint for the active projected buffer.
@@ -602,6 +681,11 @@ pub enum DesktopAppRequest {
         /// Canonical path represented by the explorer row.
         path: String,
     },
+    /// Open an external URL in the system browser.
+    OpenExternalUrl {
+        /// URL to open.
+        url: String,
+    },
     /// Cancel an app-owned dirty-close prompt.
     CancelDirtyClose {
         /// Prompt buffer identifier.
@@ -713,6 +797,18 @@ pub enum DesktopBridgeError {
     /// The current projection has no active buffer id.
     #[error("active buffer is required for this desktop action")]
     MissingActiveBuffer,
+    /// Git pull-request flow requires a remote URL projection.
+    #[error("git remote URL is unavailable in the current projection")]
+    MissingGitRemoteUrl,
+    /// Git pull-request flow requires a projected branch label.
+    #[error("git branch label is unavailable in the current projection")]
+    MissingGitBranchLabel,
+    /// Git pull-request flow does not support the projected remote URL.
+    #[error("unsupported git forge remote: {remote_url}")]
+    UnsupportedGitForgeRemote {
+        /// Remote URL that could not be mapped.
+        remote_url: String,
+    },
     /// Target buffer was not present in the projected tab list.
     #[error("unknown tab buffer: {buffer_id:?}")]
     UnknownTab {
@@ -1009,6 +1105,7 @@ impl DesktopCommandBridge {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::DispatchPaletteSelection)
             }
             DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,
+            DesktopAction::DismissOnboarding => DesktopBridgeOutput::Noop,
             DesktopAction::InvokeToastAction { intent } => DesktopBridgeOutput::Intent(intent),
             DesktopAction::OpenSettings => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
@@ -1039,6 +1136,49 @@ impl DesktopCommandBridge {
                     enabled,
                 })
             }
+            DesktopAction::SetStickyHeadersVisible { visible } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetStickyHeadersVisible {
+                    visible,
+                })
+            }
+            DesktopAction::SetCodeFoldingVisible { visible } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetCodeFoldingVisible {
+                    visible,
+                })
+            }
+            DesktopAction::SetMinimapVisible { visible } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetMinimapVisible { visible })
+            }
+            DesktopAction::SetWhitespaceGuidesVisible { visible } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetWhitespaceGuidesVisible {
+                    visible,
+                })
+            }
+            DesktopAction::SetIndentGuidesVisible { visible } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetIndentGuidesVisible {
+                    visible,
+                })
+            }
+            DesktopAction::SetSmoothScrollingEnabled { enabled } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetSmoothScrollingEnabled {
+                    enabled,
+                })
+            }
+            DesktopAction::SetIndexedWorkspaceSearchEnabled { enabled } => {
+                DesktopBridgeOutput::Intent(
+                    CommandDispatchIntent::SetIndexedWorkspaceSearchEnabled { enabled },
+                )
+            }
+            DesktopAction::SetNextEditPredictionEnabled { enabled } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetNextEditPredictionEnabled {
+                    enabled,
+                })
+            }
+            DesktopAction::SetCrashReportsEnabled { enabled } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetCrashReportsEnabled {
+                    enabled,
+                })
+            }
             DesktopAction::ResetSettings => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::ResetSettings)
             }
@@ -1050,6 +1190,50 @@ impl DesktopCommandBridge {
             }
             DesktopAction::RefreshGit => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshGit)
+            }
+            DesktopAction::PushGitRemote => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::PushGitRemote {
+                    remote: "origin".to_string(),
+                })
+            }
+            DesktopAction::OpenGitPullRequestUrl => {
+                let Some(remote_url) = snapshot.git_projection.remote_url.as_deref() else {
+                    return DesktopBridgeOutput::Error(DesktopBridgeError::MissingGitRemoteUrl);
+                };
+                let Some(branch_label) = snapshot.git_projection.branch_label.as_deref() else {
+                    return DesktopBridgeOutput::Error(DesktopBridgeError::MissingGitBranchLabel);
+                };
+                let base_branch = snapshot
+                    .git_projection
+                    .remote_default_branch
+                    .as_deref()
+                    .unwrap_or(branch_label);
+                let Some(url) = git_pull_request_url(remote_url, base_branch, branch_label) else {
+                    return DesktopBridgeOutput::Error(
+                        DesktopBridgeError::UnsupportedGitForgeRemote {
+                            remote_url: remote_url.to_string(),
+                        },
+                    );
+                };
+                DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenExternalUrl { url })
+            }
+            DesktopAction::SwitchGitBranch { branch } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SwitchGitBranch { branch })
+            }
+            DesktopAction::CreateGitBranch { branch } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::CreateGitBranch { branch })
+            }
+            DesktopAction::DeleteGitBranch { branch } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::DeleteGitBranch { branch })
+            }
+            DesktopAction::StashGitChanges { message } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::StashGitChanges { message })
+            }
+            DesktopAction::PruneGitWorktrees => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::PruneGitWorktrees)
+            }
+            DesktopAction::RemoveGitWorktree { path } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::RemoveGitWorktree { path })
             }
             DesktopAction::RefreshDebugConfigurations => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshDebugConfigurations)

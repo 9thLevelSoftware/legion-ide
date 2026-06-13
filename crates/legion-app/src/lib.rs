@@ -34,8 +34,8 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
     StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
-    build_structural_rewrite_preview_payload, run_structural_search as index_run_structural_search,
-    tree_sitter_supports_path,
+    build_structural_rewrite_preview_payload, register_plugin_tree_sitter_grammars,
+    run_structural_search as index_run_structural_search, tree_sitter_supports_path,
 };
 use legion_memory::{
     LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryCompactionPolicy,
@@ -142,16 +142,16 @@ use legion_protocol::{
     TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
     Utf16Position, Utf16Range, VersionContext, ViewportLineSlice, ViewportProjection,
     ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay, WorkbenchSettingsRecord, WorkspaceCloseRequest,
-    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
-    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
-    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
-    delegated_task_tool_permission_request, inline_prediction_projection_from_results,
-    validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
-    validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
-    validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
-    validate_mcp_registry_snapshot, validate_terminal_input, validate_terminal_kill_request,
-    validate_terminal_resize,
+    ViewportSemanticTokenOverlay, WorkbenchSettingsRecord, WorkbenchTelemetryConsent,
+    WorkspaceCloseRequest, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
+    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
+    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
+    WorkspaceTextEdit, WorkspaceTrustState, delegated_task_tool_permission_request,
+    inline_prediction_projection_from_results, validate_inline_prediction_lifecycle_command,
+    validate_legion_cloud_lane_projection, validate_legion_cloud_lane_task_request,
+    validate_legion_workflow_decision_feed_entry, validate_legion_workflow_kill_switch,
+    validate_legion_workflow_risk_monitor_snapshot, validate_mcp_registry_snapshot,
+    validate_terminal_input, validate_terminal_kill_request, validate_terminal_resize,
 };
 use legion_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
@@ -7568,6 +7568,51 @@ pub enum AppCommandRequest {
         /// Whether current-line highlighting is enabled.
         enabled: bool,
     },
+    /// Toggle sticky headers.
+    SetStickyHeadersVisible {
+        /// Whether sticky headers should be visible.
+        visible: bool,
+    },
+    /// Toggle code folding indicators.
+    SetCodeFoldingVisible {
+        /// Whether code folding indicators should be visible.
+        visible: bool,
+    },
+    /// Toggle the minimap.
+    SetMinimapVisible {
+        /// Whether the minimap should be visible.
+        visible: bool,
+    },
+    /// Toggle whitespace guides.
+    SetWhitespaceGuidesVisible {
+        /// Whether whitespace guides should be visible.
+        visible: bool,
+    },
+    /// Toggle indent guides.
+    SetIndentGuidesVisible {
+        /// Whether indent guides should be visible.
+        visible: bool,
+    },
+    /// Toggle smooth scrolling.
+    SetSmoothScrollingEnabled {
+        /// Whether smooth scrolling should be enabled.
+        enabled: bool,
+    },
+    /// Toggle indexed workspace search.
+    SetIndexedWorkspaceSearchEnabled {
+        /// Whether workspace search should use the optional indexed backend.
+        enabled: bool,
+    },
+    /// Toggle next-edit prediction after edits.
+    SetNextEditPredictionEnabled {
+        /// Whether next-edit prediction should auto-trigger after edits.
+        enabled: bool,
+    },
+    /// Toggle crash reports.
+    SetCrashReportsEnabled {
+        /// Whether crash reports should be enabled.
+        enabled: bool,
+    },
     /// Reset app-owned settings to defaults.
     ResetSettings,
     /// Run bounded lexical search through app authority.
@@ -8158,6 +8203,15 @@ impl CommandExecutionService {
             | AppCommandRequest::SetToastVerbosity { .. }
             | AppCommandRequest::SetLineNumbersVisible { .. }
             | AppCommandRequest::SetCurrentLineHighlight { .. }
+            | AppCommandRequest::SetStickyHeadersVisible { .. }
+            | AppCommandRequest::SetCodeFoldingVisible { .. }
+            | AppCommandRequest::SetMinimapVisible { .. }
+            | AppCommandRequest::SetWhitespaceGuidesVisible { .. }
+            | AppCommandRequest::SetIndentGuidesVisible { .. }
+            | AppCommandRequest::SetSmoothScrollingEnabled { .. }
+            | AppCommandRequest::SetIndexedWorkspaceSearchEnabled { .. }
+            | AppCommandRequest::SetNextEditPredictionEnabled { .. }
+            | AppCommandRequest::SetCrashReportsEnabled { .. }
             | AppCommandRequest::ResetSettings
             | AppCommandRequest::RunSearch { .. }
             | AppCommandRequest::RunStructuralSearch { .. }
@@ -8369,6 +8423,33 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::SetCurrentLineHighlight { enabled } => {
                 Ok(AppCommandRequest::SetCurrentLineHighlight { enabled })
+            }
+            CommandDispatchIntent::SetStickyHeadersVisible { visible } => {
+                Ok(AppCommandRequest::SetStickyHeadersVisible { visible })
+            }
+            CommandDispatchIntent::SetCodeFoldingVisible { visible } => {
+                Ok(AppCommandRequest::SetCodeFoldingVisible { visible })
+            }
+            CommandDispatchIntent::SetMinimapVisible { visible } => {
+                Ok(AppCommandRequest::SetMinimapVisible { visible })
+            }
+            CommandDispatchIntent::SetWhitespaceGuidesVisible { visible } => {
+                Ok(AppCommandRequest::SetWhitespaceGuidesVisible { visible })
+            }
+            CommandDispatchIntent::SetIndentGuidesVisible { visible } => {
+                Ok(AppCommandRequest::SetIndentGuidesVisible { visible })
+            }
+            CommandDispatchIntent::SetSmoothScrollingEnabled { enabled } => {
+                Ok(AppCommandRequest::SetSmoothScrollingEnabled { enabled })
+            }
+            CommandDispatchIntent::SetIndexedWorkspaceSearchEnabled { enabled } => {
+                Ok(AppCommandRequest::SetIndexedWorkspaceSearchEnabled { enabled })
+            }
+            CommandDispatchIntent::SetNextEditPredictionEnabled { enabled } => {
+                Ok(AppCommandRequest::SetNextEditPredictionEnabled { enabled })
+            }
+            CommandDispatchIntent::SetCrashReportsEnabled { enabled } => {
+                Ok(AppCommandRequest::SetCrashReportsEnabled { enabled })
             }
             CommandDispatchIntent::ResetSettings => Ok(AppCommandRequest::ResetSettings),
             CommandDispatchIntent::RunSearch {
@@ -9821,6 +9902,15 @@ fn workbench_settings_record_from_projection(
         toast_verbosity: settings.toast_verbosity.as_str().to_string(),
         line_numbers_visible: settings.editor.line_numbers_visible,
         current_line_highlight: settings.editor.current_line_highlight,
+        sticky_headers_visible: settings.editor.sticky_headers_visible,
+        code_folding_visible: settings.editor.code_folding_visible,
+        minimap_visible: settings.editor.minimap_visible,
+        whitespace_guides_visible: settings.editor.whitespace_guides_visible,
+        indent_guides_visible: settings.editor.indent_guides_visible,
+        smooth_scrolling_enabled: settings.editor.smooth_scrolling_enabled,
+        indexed_workspace_search_enabled: settings.indexed_workspace_search_enabled,
+        next_edit_prediction_enabled: settings.next_edit_prediction_enabled,
+        telemetry: settings.telemetry.clone(),
         schema_version: settings.schema_version,
     }
 }
@@ -9838,7 +9928,22 @@ fn settings_projection_from_workbench_record(
         editor: legion_ui::ui::EditorSettingsProjection {
             line_numbers_visible: record.line_numbers_visible,
             current_line_highlight: record.current_line_highlight,
+            sticky_headers_visible: record.sticky_headers_visible,
+            code_folding_visible: record.code_folding_visible,
+            minimap_visible: record.minimap_visible,
+            whitespace_guides_visible: record.whitespace_guides_visible,
+            indent_guides_visible: record.indent_guides_visible,
+            smooth_scrolling_enabled: record.smooth_scrolling_enabled,
         },
+        telemetry: WorkbenchTelemetryConsent {
+            enabled: record.telemetry.enabled,
+            crash_reports_enabled: record.telemetry.crash_reports_enabled,
+            raw_source_allowed: false,
+            consent_label: record.telemetry.consent_label.clone(),
+            schema_version: record.telemetry.schema_version,
+        },
+        indexed_workspace_search_enabled: record.indexed_workspace_search_enabled,
+        next_edit_prediction_enabled: record.next_edit_prediction_enabled,
         schema_version: record.schema_version,
     }
     .normalized()
@@ -11240,7 +11345,9 @@ struct SearchLineInput<'a> {
     result: &'a mut SearchBuildResult,
 }
 
-fn parse_search_query(query: &str) -> Result<(SearchPattern, WorkspaceSearchFilters), String> {
+fn parse_search_query(
+    query: &str,
+) -> Result<(SearchPattern, WorkspaceSearchFilters, String, bool), String> {
     let mut mode = SearchPatternKind::Literal;
     let mut case_sensitive = true;
     let mut whole_word = false;
@@ -11324,6 +11431,8 @@ fn parse_search_query(query: &str) -> Result<(SearchPattern, WorkspaceSearchFilt
     Ok((
         compiled_pattern,
         WorkspaceSearchFilters { include, exclude },
+        pattern,
+        matches!(mode, SearchPatternKind::Literal),
     ))
 }
 
@@ -12725,6 +12834,15 @@ pub struct AppComposition {
     terminal_workflow: TerminalWorkflow,
 }
 
+struct InlinePredictionRequestArgs<'a> {
+    snapshot_id: legion_protocol::SnapshotId,
+    buffer_version: BufferVersion,
+    content_hash: &'a str,
+    cursor: TextCoordinate,
+    trigger: InlinePredictionTriggerKind,
+    event_context: EventContext,
+}
+
 impl AppComposition {
     /// Build composition with native platform adapters and default-deny security broker.
     pub fn new() -> Self {
@@ -13015,9 +13133,69 @@ impl AppComposition {
         let buffer_id = self.active_documents.require_active_buffer()?;
         let correlation_id = self.correlation_generator.next();
         let descriptor =
-            self.apply_edit_to_buffer_with_correlation(buffer_id, edit, correlation_id)?;
+            self.apply_edit_to_buffer_with_correlation(buffer_id, edit.clone(), correlation_id)?;
         self.emit_transaction_event(&descriptor);
+        let _ = self.maybe_request_next_edit_prediction_after_edit(
+            buffer_id,
+            edit.range.start.line as u32,
+            edit.range.start.column as u32,
+            &edit.new_text,
+        );
         Ok(descriptor)
+    }
+
+    fn next_edit_prediction_target(
+        &self,
+        line: u32,
+        column: u32,
+        new_text: &str,
+    ) -> TextCoordinate {
+        let mut line = line;
+        let mut character = column;
+        if new_text.is_empty() {
+            return TextCoordinate {
+                line,
+                character,
+                byte_offset: None,
+                utf16_offset: None,
+            };
+        }
+        let newline_count = new_text.chars().filter(|ch| *ch == '\n').count() as u32;
+        if newline_count == 0 {
+            character = character.saturating_add(new_text.chars().count() as u32);
+        } else {
+            line = line.saturating_add(newline_count);
+            character = new_text
+                .rsplit('\n')
+                .next()
+                .map(|segment| segment.chars().count() as u32)
+                .unwrap_or(0);
+        }
+        TextCoordinate {
+            line,
+            character,
+            byte_offset: None,
+            utf16_offset: None,
+        }
+    }
+
+    fn maybe_request_next_edit_prediction_after_edit(
+        &mut self,
+        buffer_id: BufferId,
+        line: u32,
+        column: u32,
+        new_text: &str,
+    ) -> Result<(), AppCompositionError> {
+        if !self.settings.next_edit_prediction_enabled || !self.product_mode.allows_assist() {
+            return Ok(());
+        }
+        let target = self.next_edit_prediction_target(line, column, new_text);
+        let _ = self.request_assist_inline_prediction(
+            buffer_id,
+            target,
+            InlinePredictionTriggerKind::AfterEdit,
+        )?;
+        Ok(())
     }
 
     fn proposal_intent_id(intent: &CommandDispatchIntent) -> Option<ProposalId> {
@@ -13213,6 +13391,59 @@ impl AppComposition {
 
     fn set_current_line_highlight(&mut self, enabled: bool) -> SettingsProjection {
         self.settings.editor.current_line_highlight = enabled;
+        self.settings_projection()
+    }
+
+    fn set_sticky_headers_visible(&mut self, visible: bool) -> SettingsProjection {
+        self.settings.editor.sticky_headers_visible = visible;
+        self.settings_projection()
+    }
+
+    fn set_code_folding_visible(&mut self, visible: bool) -> SettingsProjection {
+        self.settings.editor.code_folding_visible = visible;
+        self.settings_projection()
+    }
+
+    fn set_minimap_visible(&mut self, visible: bool) -> SettingsProjection {
+        self.settings.editor.minimap_visible = visible;
+        self.settings_projection()
+    }
+
+    fn set_whitespace_guides_visible(&mut self, visible: bool) -> SettingsProjection {
+        self.settings.editor.whitespace_guides_visible = visible;
+        self.settings_projection()
+    }
+
+    fn set_indent_guides_visible(&mut self, visible: bool) -> SettingsProjection {
+        self.settings.editor.indent_guides_visible = visible;
+        self.settings_projection()
+    }
+
+    fn set_smooth_scrolling_enabled(&mut self, enabled: bool) -> SettingsProjection {
+        self.settings.editor.smooth_scrolling_enabled = enabled;
+        self.settings_projection()
+    }
+
+    fn set_indexed_workspace_search_enabled(&mut self, enabled: bool) -> SettingsProjection {
+        self.settings.indexed_workspace_search_enabled = enabled;
+        self.settings_projection()
+    }
+
+    fn set_next_edit_prediction_enabled(&mut self, enabled: bool) -> SettingsProjection {
+        self.settings.next_edit_prediction_enabled = enabled;
+        self.settings_projection()
+    }
+
+    fn set_crash_reports_enabled(&mut self, enabled: bool) -> SettingsProjection {
+        self.settings.telemetry.enabled = enabled;
+        self.settings.telemetry.crash_reports_enabled = enabled;
+        self.settings.telemetry.raw_source_allowed = false;
+        self.settings.telemetry.consent_label = if enabled {
+            "crash-reports".to_string()
+        } else {
+            "local-only".to_string()
+        };
+        self.settings = self.settings_projection();
         self.settings_projection()
     }
 
@@ -13720,6 +13951,35 @@ impl AppComposition {
             AppCommandRequest::SetCurrentLineHighlight { enabled } => Ok(
                 AppCommandOutcome::SettingsUpdated(self.set_current_line_highlight(enabled)),
             ),
+            AppCommandRequest::SetStickyHeadersVisible { visible } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_sticky_headers_visible(visible)),
+            ),
+            AppCommandRequest::SetCodeFoldingVisible { visible } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_code_folding_visible(visible)),
+            ),
+            AppCommandRequest::SetMinimapVisible { visible } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_minimap_visible(visible)),
+            ),
+            AppCommandRequest::SetWhitespaceGuidesVisible { visible } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_whitespace_guides_visible(visible)),
+            ),
+            AppCommandRequest::SetIndentGuidesVisible { visible } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_indent_guides_visible(visible)),
+            ),
+            AppCommandRequest::SetSmoothScrollingEnabled { enabled } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_smooth_scrolling_enabled(enabled)),
+            ),
+            AppCommandRequest::SetIndexedWorkspaceSearchEnabled { enabled } => {
+                Ok(AppCommandOutcome::SettingsUpdated(
+                    self.set_indexed_workspace_search_enabled(enabled),
+                ))
+            }
+            AppCommandRequest::SetNextEditPredictionEnabled { enabled } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_next_edit_prediction_enabled(enabled)),
+            ),
+            AppCommandRequest::SetCrashReportsEnabled { enabled } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_crash_reports_enabled(enabled)),
+            ),
             AppCommandRequest::ResetSettings => {
                 Ok(AppCommandOutcome::SettingsUpdated(self.reset_settings()))
             }
@@ -13894,7 +14154,11 @@ impl AppComposition {
                 buffer_id,
                 position,
             } => Ok(AppCommandOutcome::AssistInlinePredictionUpdated(
-                self.request_assist_inline_prediction(buffer_id, position)?,
+                self.request_assist_inline_prediction(
+                    buffer_id,
+                    position,
+                    InlinePredictionTriggerKind::Explicit,
+                )?,
             )),
             AppCommandRequest::AcceptAssistInlinePrediction {
                 buffer_id,
@@ -14289,8 +14553,9 @@ impl AppComposition {
         };
         let plugin_id = self
             .plugin_runtime
-            .load_manifest(manifest)
+            .load_manifest(manifest.clone())
             .map_err(AppCompositionError::Protocol)?;
+        register_plugin_tree_sitter_grammars(plugin_id, &manifest.contributions);
         self.plugin_contribution_projections.push(projection);
         Ok(plugin_id)
     }
@@ -18317,6 +18582,7 @@ impl AppComposition {
         &mut self,
         buffer_id: BufferId,
         position: TextCoordinate,
+        trigger: InlinePredictionTriggerKind,
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
@@ -18325,11 +18591,14 @@ impl AppComposition {
         let event_context = self.next_event_context();
         let metadata = self.inline_prediction_request_metadata(
             &context,
-            snapshot.snapshot_id,
-            snapshot.buffer_version,
-            snapshot.content_hash.as_str(),
-            position,
-            event_context,
+            InlinePredictionRequestArgs {
+                snapshot_id: snapshot.snapshot_id,
+                buffer_version: snapshot.buffer_version,
+                content_hash: snapshot.content_hash.as_str(),
+                cursor: position,
+                trigger,
+                event_context,
+            },
         );
         metadata
             .validate()
@@ -18449,32 +18718,28 @@ impl AppComposition {
     fn inline_prediction_request_metadata(
         &mut self,
         context: &ActiveSaveContext,
-        snapshot_id: legion_protocol::SnapshotId,
-        buffer_version: BufferVersion,
-        content_hash: &str,
-        cursor: TextCoordinate,
-        event_context: EventContext,
+        args: InlinePredictionRequestArgs<'_>,
     ) -> InlinePredictionRequestMetadata {
         let language_id = language_id_for_path(&context.metadata.identity.canonical_path);
         let requested_at = TimestampMillis::now();
         InlinePredictionRequestMetadata {
             request_id: InlinePredictionRequestId(format!(
                 "assist-inline:req:{}:{}",
-                event_context.correlation_id.0, snapshot_id.0
+                args.event_context.correlation_id.0, args.snapshot_id.0
             )),
             workspace_id: context.workspace_id,
             buffer_id: context.buffer_id,
             file_id: Some(context.metadata.identity.file_id),
             language_id,
-            cursor,
+            cursor: args.cursor,
             selection: None,
             visible_range: None,
-            trigger: InlinePredictionTriggerKind::Explicit,
+            trigger: args.trigger,
             fingerprint: self.inline_prediction_fingerprint(
                 context,
-                snapshot_id,
-                buffer_version,
-                content_hash,
+                args.snapshot_id,
+                args.buffer_version,
+                args.content_hash,
             ),
             provider: InlinePredictionProviderMetadata {
                 provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
@@ -18500,8 +18765,8 @@ impl AppComposition {
             required_capability: CapabilityId("ai.inline_prediction.invoke".to_string()),
             principal_id: context.principal.clone(),
             workspace_trust_state: context.trust.clone(),
-            correlation_id: event_context.correlation_id,
-            causality_id: event_context.causality_id,
+            correlation_id: args.event_context.correlation_id,
+            causality_id: args.event_context.causality_id,
             event_sequence: self.event_sequence_generator.next(),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
@@ -18823,6 +19088,31 @@ impl AppComposition {
             .iter()
             .map(|result| self.inline_prediction_row(result))
             .collect();
+        let after_edit_prediction_attempts = projection
+            .results
+            .iter()
+            .filter(|result| {
+                self.assist_inline_prediction_state
+                    .requests
+                    .get(&result.request_id)
+                    .is_some_and(|request| {
+                        request.trigger == InlinePredictionTriggerKind::AfterEdit
+                    })
+            })
+            .count();
+        let after_edit_prediction_accepts = projection
+            .results
+            .iter()
+            .filter(|result| {
+                self.assist_inline_prediction_state
+                    .requests
+                    .get(&result.request_id)
+                    .is_some_and(|request| {
+                        request.trigger == InlinePredictionTriggerKind::AfterEdit
+                            && result.state == InlinePredictionResultState::Accepted
+                    })
+            })
+            .count();
         let active_prediction = projection
             .active_request_id
             .as_ref()
@@ -18840,6 +19130,8 @@ impl AppComposition {
         AssistInlinePredictionProjection {
             active_prediction,
             stale_prediction_count: projection.stale_count as usize,
+            after_edit_prediction_attempts,
+            after_edit_prediction_accepts,
             rows,
             request_in_flight,
             generated_at: projection.generated_at,
@@ -19256,9 +19548,11 @@ impl AppComposition {
         let backend_query = WorkspaceSearchQuery {
             workspace_id,
             pattern: parsed.0,
+            search_text: parsed.2,
             filters: parsed.1,
             result_limit: limit,
             batch_size: 32,
+            use_indexed_backend: self.settings.indexed_workspace_search_enabled && parsed.3,
         };
 
         self.workspace

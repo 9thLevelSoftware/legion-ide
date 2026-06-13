@@ -5,7 +5,7 @@ use std::{
 };
 
 use legion_app::{AppCommandOutcome, AppComposition};
-use legion_desktop::view::DesktopProjectionViewModel;
+use legion_desktop::view::{DesktopProjectionViewModel, DesktopProjectionViewState};
 use legion_protocol::{PrincipalId, WorkspaceTrustState};
 use legion_ui::{CommandDispatchIntent, DockMode};
 
@@ -175,6 +175,91 @@ fn trust_details_render_manifest_privacy_budget_approval_rollback_rows() {
 }
 
 #[test]
+fn trust_details_render_privacy_egress_redaction_and_consent_rows() {
+    let (_workspace, mut app) = app_with_open_file(WorkspaceTrustState::Trusted, "privacy.rs");
+    start_proposal(&mut app);
+
+    let snapshot = app
+        .shell_projection_snapshot("control trust")
+        .expect("shell projection");
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    let privacy_row = model
+        .trust_rows
+        .iter()
+        .find(|row| row.contains("privacy record"))
+        .expect("privacy row should be present");
+    assert!(privacy_row.contains("egress=LocalOnly"));
+    assert!(privacy_row.contains("MetadataOnly"));
+
+    let budget_row = model
+        .trust_rows
+        .iter()
+        .find(|row| row.contains("permission budget "))
+        .expect("permission budget row should be present");
+    assert!(budget_row.contains("consent=NotRequired"));
+}
+
+#[test]
+fn onboarding_rows_render_first_run_guidance_and_mode_tour() {
+    let (_workspace, mut app) = app_with_open_file(WorkspaceTrustState::Trusted, "onboarding.rs");
+    start_proposal(&mut app);
+
+    let snapshot = app
+        .shell_projection_snapshot("control trust")
+        .expect("shell projection");
+    let state = DesktopProjectionViewState {
+        first_run_onboarding_visible: true,
+        ..Default::default()
+    };
+    let model = DesktopProjectionViewModel::from_snapshot_with_state(&snapshot, &state);
+
+    assert!(
+        model
+            .onboarding_rows
+            .iter()
+            .any(|row| row.contains("workspace trust"))
+    );
+    assert!(
+        model
+            .onboarding_rows
+            .iter()
+            .any(|row| row.contains("telemetry and crash consent"))
+    );
+    assert!(
+        model
+            .onboarding_rows
+            .iter()
+            .any(|row| row.contains("provider setup"))
+    );
+    assert!(
+        model
+            .onboarding_rows
+            .iter()
+            .any(|row| row.contains("keybinding scheme"))
+    );
+    assert!(
+        model
+            .onboarding_rows
+            .iter()
+            .any(|row| row.contains("mode switch tour"))
+    );
+}
+
+#[test]
+fn onboarding_rows_stay_hidden_when_first_run_is_dismissed() {
+    let (_workspace, mut app) = app_with_open_file(WorkspaceTrustState::Trusted, "dismissed.rs");
+    start_proposal(&mut app);
+
+    let snapshot = app
+        .shell_projection_snapshot("control trust")
+        .expect("shell projection");
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(model.onboarding_rows.is_empty());
+}
+
+#[test]
 fn assisted_ai_details_render_provider_request_refusal_preview_rows() {
     let (_trusted_workspace, mut trusted) =
         app_with_open_file(WorkspaceTrustState::Trusted, "assistant.rs");
@@ -201,7 +286,25 @@ fn assisted_ai_details_render_provider_request_refusal_preview_rows() {
         trusted_model
             .assistant_rows
             .iter()
-            .any(|row| row.contains("assisted request"))
+            .any(|row| row.contains("assisted ai:") && row.contains("budget evals"))
+    );
+    assert!(
+        trusted_model
+            .assistant_rows
+            .iter()
+            .any(|row| row.contains("assisted request") && row.contains("budget_evals="))
+    );
+    assert!(
+        trusted_model
+            .assistant_rows
+            .iter()
+            .any(|row| row.contains("assisted request") && row.contains("cost="))
+    );
+    assert!(
+        trusted_model
+            .assistant_rows
+            .iter()
+            .any(|row| row.contains("assisted preview") && row.contains("cost="))
     );
     assert!(
         trusted_model

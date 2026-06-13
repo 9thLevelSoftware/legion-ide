@@ -4,6 +4,7 @@ use std::{
     collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Result, anyhow};
@@ -468,6 +469,7 @@ pub struct DesktopRuntime {
     dock_layouts: Vec<DockLayout>,
     session_state_path: Option<PathBuf>,
     diagnostics_export_path: Option<PathBuf>,
+    onboarding_visible: bool,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
     last_status_details: Vec<StatusMessageProjection>,
@@ -542,6 +544,7 @@ impl DesktopRuntime {
             dock_layouts,
             session_state_path: config.session_state,
             diagnostics_export_path: config.diagnostics_export,
+            onboarding_visible: session_record.is_none(),
             quit_requested: false,
             last_status: Some(status),
             last_status_details: status_details,
@@ -553,36 +556,46 @@ impl DesktopRuntime {
 
     /// Handle a desktop action through bridge and app-owned authority.
     pub fn handle_action(&mut self, action: DesktopAction) -> Result<DesktopWorkflowOutcome> {
-        if let DesktopAction::DismissToast { toast_id } = action {
-            self.dismissed_toast_ids.insert(toast_id);
-            self.refresh_projection()?;
-            self.last_outcome = DesktopWorkflowOutcome::Noop;
-            self.persist_diagnostics_if_configured();
-            return Ok(DesktopWorkflowOutcome::Noop);
+        match action {
+            DesktopAction::DismissToast { toast_id } => {
+                self.dismissed_toast_ids.insert(toast_id);
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::DismissOnboarding => {
+                self.onboarding_visible = false;
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            action => {
+                let snapshot = self.shell.projection_snapshot();
+                let bridge_output = self.bridge.translate(action, &snapshot);
+                let outcome = match bridge_output {
+                    DesktopBridgeOutput::Intent(CommandDispatchIntent::Quit) => {
+                        self.quit_requested = true;
+                        self.set_status(StatusSeverity::Info, "Quit requested");
+                        DesktopWorkflowOutcome::QuitRequested
+                    }
+                    DesktopBridgeOutput::Intent(intent) => self.dispatch_intent(intent)?,
+                    DesktopBridgeOutput::AppRequest(request) => self.handle_app_request(request)?,
+                    DesktopBridgeOutput::Noop => {
+                        self.set_status(StatusSeverity::Info, "No action");
+                        DesktopWorkflowOutcome::Noop
+                    }
+                    DesktopBridgeOutput::Error(error) => self.handle_bridge_error(error),
+                };
+
+                self.persist_session_if_configured();
+                self.refresh_projection()?;
+                self.last_outcome = outcome.clone();
+                self.persist_diagnostics_if_configured();
+                Ok(outcome)
+            }
         }
-
-        let snapshot = self.shell.projection_snapshot();
-        let bridge_output = self.bridge.translate(action, &snapshot);
-        let outcome = match bridge_output {
-            DesktopBridgeOutput::Intent(CommandDispatchIntent::Quit) => {
-                self.quit_requested = true;
-                self.set_status(StatusSeverity::Info, "Quit requested");
-                DesktopWorkflowOutcome::QuitRequested
-            }
-            DesktopBridgeOutput::Intent(intent) => self.dispatch_intent(intent)?,
-            DesktopBridgeOutput::AppRequest(request) => self.handle_app_request(request)?,
-            DesktopBridgeOutput::Noop => {
-                self.set_status(StatusSeverity::Info, "No action");
-                DesktopWorkflowOutcome::Noop
-            }
-            DesktopBridgeOutput::Error(error) => self.handle_bridge_error(error),
-        };
-
-        self.persist_session_if_configured();
-        self.refresh_projection()?;
-        self.last_outcome = outcome.clone();
-        self.persist_diagnostics_if_configured();
-        Ok(outcome)
     }
 
     /// Returns whether the adapter has requested shutdown.
@@ -750,6 +763,7 @@ impl DesktopRuntime {
             selected_explorer_file: None,
             dock_layouts: self.dock_layouts.clone(),
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
+            first_run_onboarding_visible: self.onboarding_visible,
         }
     }
 
@@ -790,6 +804,11 @@ impl DesktopRuntime {
                 }
                 self.set_status(StatusSeverity::Info, format!("Explorer toggled {path}"));
                 Ok(DesktopWorkflowOutcome::ExplorerPathToggled(path))
+            }
+            DesktopAppRequest::OpenExternalUrl { url } => {
+                open_url_in_system_browser(&url)?;
+                self.set_status(StatusSeverity::Info, format!("Opened {url}"));
+                Ok(DesktopWorkflowOutcome::Opened)
             }
             DesktopAppRequest::CancelDirtyClose { buffer_id } => {
                 match self.app.cancel_dirty_close(buffer_id) {
@@ -2177,11 +2196,16 @@ fn palette_visible_result_start(total: usize, selected_index: usize) -> usize {
 fn settings_status_label(projection: &SettingsProjection) -> String {
     let settings = projection.clone().normalized();
     format!(
-        "Settings: theme={} zoom={}% font={}pt toasts={}",
+        "Settings: theme={} zoom={}% font={}pt toasts={} crash_reports={}",
         settings.theme_preference.label(),
         settings.zoom_percent,
         settings.editor_font_size_pt,
-        settings.toast_verbosity.label()
+        settings.toast_verbosity.label(),
+        if settings.telemetry.crash_reports_enabled {
+            "on"
+        } else {
+            "off"
+        }
     )
 }
 
@@ -2545,6 +2569,27 @@ fn ordered_range(first: TextCoordinate, second: TextCoordinate) -> ProtocolTextR
             start: second,
             end: first,
         }
+    }
+}
+
+fn open_url_in_system_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("start").arg("");
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let mut command = Command::new("open");
+    let status = command.arg(url).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("browser opener exited with status {status}"))
     }
 }
 

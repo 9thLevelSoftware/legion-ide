@@ -8,7 +8,9 @@ publish.workspace = true
 [dependencies]
 legion-protocol = { workspace = true }
 legion-storage = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 uuid = { workspace = true }

@@ -316,6 +316,73 @@ fn release_pipeline_verify_descriptors_marks_dry_run_verifiers_unchecked() {
 }
 
 #[test]
+fn release_pipeline_verify_descriptors_uses_written_version_stamp() {
+    let repo = TempRepo::new("verify-version-stamp");
+    let config = test_config();
+
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+        .expect("plan release pipeline");
+    let out_dir = repo.path("target/release-pipeline");
+    write_descriptors(&plan, &out_dir).expect("write descriptors");
+
+    let mut stale_plan = plan.clone();
+    stale_plan.version_stamp.built_at_utc = "2099-01-01T00:00:00Z".to_string();
+    for descriptor in &mut stale_plan.descriptors {
+        descriptor.version_stamp.built_at_utc = stale_plan.version_stamp.built_at_utc.clone();
+    }
+
+    let report = verify_descriptors(&repo.root, &stale_plan, &out_dir).expect("verify descriptors");
+
+    assert_eq!(report.summary.failed, 0);
+    assert_eq!(report.summary.unchecked, stale_plan.descriptors.len());
+    assert_eq!(report.summary.total, stale_plan.descriptors.len());
+}
+
+#[test]
+fn release_pipeline_verify_descriptors_rejects_tampered_descriptor_bytes() {
+    let repo = TempRepo::new("verify-tamper");
+    let config = test_config();
+
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+        .expect("plan release pipeline");
+    let out_dir = repo.path("target/release-pipeline");
+    let written = write_descriptors(&plan, &out_dir).expect("write descriptors");
+
+    let tampered_path = written
+        .iter()
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == "toml")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name != "version_stamp.toml")
+        })
+        .expect("descriptor path should exist")
+        .clone();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&tampered_path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, b"\n# tampered\n"))
+        .expect("tamper descriptor bytes");
+
+    let report = verify_descriptors(&repo.root, &plan, &out_dir).expect("verify descriptors");
+    let tampered_entry = report
+        .descriptors
+        .iter()
+        .find(|entry| entry.descriptor_path == tampered_path)
+        .expect("tampered entry should be reported");
+
+    assert_eq!(tampered_entry.verifier_status, "failed/tampered-descriptor");
+    assert!(
+        tampered_entry
+            .verifier_message
+            .contains("integrity comparison")
+    );
+    assert_eq!(report.summary.failed, 1);
+    assert_eq!(report.summary.unchecked, plan.descriptors.len() - 1);
+    assert_eq!(report.summary.total, plan.descriptors.len());
+}
+
+#[test]
 fn release_pipeline_verify_descriptors_aggregates_summary_counts() {
     let repo = TempRepo::new("verify-summary");
     let config = test_config();

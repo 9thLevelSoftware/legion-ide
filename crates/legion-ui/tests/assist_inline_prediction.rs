@@ -65,6 +65,8 @@ fn shell_carries_assist_inline_prediction_projection_and_routes_commands_without
         rows: vec![row],
         request_in_flight: true,
         stale_prediction_count: 1,
+        after_edit_prediction_attempts: 0,
+        after_edit_prediction_accepts: 0,
         generated_at: TimestampMillis(150),
         schema_version: 1,
     };

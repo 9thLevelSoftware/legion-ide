@@ -40,6 +40,24 @@ EVALS = [
     },
 ]
 
+REVIEWER_EVALS = [
+    {
+        "id": "known-bad-patch-detection",
+        "metric": "seeded_bug_flagged",
+        "requires_network": False,
+    },
+    {
+        "id": "risk-classification",
+        "metric": "high_risk_label_detected",
+        "requires_network": False,
+    },
+    {
+        "id": "needs-human-escalation",
+        "metric": "needs_human_label_detected",
+        "requires_network": False,
+    },
+]
+
 
 def _load_jsonl(path: Path, max_examples: int | None) -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
@@ -99,6 +117,26 @@ def _call_endpoint(
         raise SystemExit(f"endpoint request failed: {exc}") from exc
 
 
+def _rate(results: list[dict[str, Any]], key: str) -> float:
+    """Compute the fraction of results with a truthy field."""
+    total = len(results)
+    if not total:
+        return 0.0
+    return sum(1 for r in results if r.get(key)) / total
+
+
+def _subset_rate(
+    results: list[dict[str, Any]],
+    subset_key: str,
+    outcome_key: str,
+) -> float:
+    """Compute the fraction of a filtered subset with a truthy outcome."""
+    subset = [r for r in results if r.get(subset_key)]
+    if not subset:
+        return 0.0
+    return sum(1 for r in subset if r.get(outcome_key)) / len(subset)
+
+
 def _run_offline(examples: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute metrics from fixture expectations without network access."""
     results = []
@@ -121,21 +159,50 @@ def _run_offline(examples: list[dict[str, Any]]) -> dict[str, Any]:
         "mode": "offline-fixture",
         "eval_count": total,
         "summary": {
-            "schema_compliance_rate": (
-                sum(1 for r in results if r["schema_compliance"]) / total if total else 0.0
+            "schema_compliance_rate": _rate(results, "schema_compliance"),
+            "patch_apply_rate": _rate(results, "proposal_patch_applies"),
+            "verification_pass_rate": _rate(results, "verification_pass"),
+            "regression_rate": _rate(results, "regression"),
+            "refusal_rate": _rate(results, "refusal"),
+            "latency_ms_placeholder": True,
+            "cost_usd_placeholder": True,
+        },
+        "results": results,
+    }
+
+
+def _run_reviewer_fixture(examples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Score reviewer-specialist fixtures with seeded bugs and risk labels."""
+    results = []
+    for ex in examples:
+        label = str(ex.get("expected_review_label", "needs-human"))
+        seeded_bug = bool(ex.get("seeded_bug", False))
+        high_risk = bool(ex.get("high_risk", False)) or label == "high-risk"
+        needs_human = label == "needs-human"
+        result = {
+            "example_id": ex.get("id", "unknown"),
+            "seeded_bug": seeded_bug,
+            "seeded_bug_flagged": seeded_bug and label in {"rejected", "high-risk"},
+            "high_risk": high_risk,
+            "high_risk_label": label == "high-risk",
+            "needs_human": needs_human,
+            "needs_human_label": needs_human,
+            "latency_ms": None,
+            "cost_usd": None,
+            "model": "fixture",
+        }
+        results.append(result)
+
+    total = len(results)
+    return {
+        "mode": "reviewer-fixture",
+        "eval_count": total,
+        "summary": {
+            "seeded_bug_detection_rate": _subset_rate(
+                results, "seeded_bug", "seeded_bug_flagged"
             ),
-            "patch_apply_rate": (
-                sum(1 for r in results if r["proposal_patch_applies"]) / total if total else 0.0
-            ),
-            "verification_pass_rate": (
-                sum(1 for r in results if r["verification_pass"]) / total if total else 0.0
-            ),
-            "regression_rate": (
-                sum(1 for r in results if r["regression"]) / total if total else 0.0
-            ),
-            "refusal_rate": (
-                sum(1 for r in results if r["refusal"]) / total if total else 0.0
-            ),
+            "high_risk_label_rate": _rate(results, "high_risk_label"),
+            "needs_human_label_rate": _rate(results, "needs_human_label"),
             "latency_ms_placeholder": True,
             "cost_usd_placeholder": True,
         },
@@ -213,6 +280,7 @@ def main() -> int:
     parser.add_argument("--output", default="")
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--offline-fixture", action="store_true")
+    parser.add_argument("--reviewer-fixture", action="store_true")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -245,6 +313,24 @@ def main() -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
 
+    if args.reviewer_fixture:
+        if not args.dataset:
+            raise SystemExit("--dataset is required for --reviewer-fixture mode")
+        dataset_path = Path(args.dataset)
+        if not dataset_path.exists():
+            raise SystemExit(f"dataset does not exist: {dataset_path}")
+        examples = _load_jsonl(dataset_path, args.max_examples)
+        result = _run_reviewer_fixture(examples)
+        result["suite"] = args.suite
+        result["dataset"] = str(dataset_path)
+        result["max_examples"] = args.max_examples
+        if args.output:
+            Path(args.output).write_text(
+                json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+            )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
     if args.endpoint:
         if not args.dataset:
             raise SystemExit("--dataset is required for endpoint mode")
@@ -265,7 +351,7 @@ def main() -> int:
         return 0
 
     raise SystemExit(
-        "Specify one mode: --dry-run, --offline-fixture, or --endpoint"
+        "Specify one mode: --dry-run, --offline-fixture, --reviewer-fixture, or --endpoint"
     )
 
 

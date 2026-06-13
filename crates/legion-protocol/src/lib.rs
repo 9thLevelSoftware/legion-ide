@@ -3022,6 +3022,8 @@ pub enum HostedTelemetryCategory {
     Diagnostics,
     /// Performance metrics metadata.
     Performance,
+    /// Next-edit prediction precision metadata.
+    NextEditPrediction,
     /// Security audit metadata.
     SecurityAudit,
     /// Crash or failure summary metadata.
@@ -7705,6 +7707,8 @@ pub struct DelegatedTaskAuditLinkageRecord {
     pub proposal_preview_links: Vec<DelegatedTaskProposalPreviewLink>,
     /// Trust projection references used by readiness classification.
     pub trust_projection_references: Vec<AssistedAiTrustProjectionReference>,
+    /// Delegated-task lineage metadata for fan-out.
+    pub lineage: Option<DelegatedTaskLineage>,
     /// Assisted-AI audit references used by readiness classification.
     pub assisted_ai_audit_references: Vec<DelegatedTaskAssistedAiAuditReference>,
     /// Proposal identifiers linked by preview or audit metadata only.
@@ -7742,6 +7746,19 @@ impl DelegatedTaskAuditLinkageRecord {
     }
 }
 
+/// Parent/child lineage metadata for delegated-task fan-out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskLineage {
+    /// Optional parent plan identifier.
+    pub parent_plan_id: Option<DelegatedTaskPlanId>,
+    /// Optional parent audit linkage identifier.
+    pub parent_audit_id: Option<String>,
+    /// Permission budget projection inherited from the parent task, when any.
+    pub inherited_permission_budget_projection: Option<AssistedAiTrustProjectionReference>,
+    /// Lineage schema version.
+    pub schema_version: u16,
+}
+
 /// Metadata-only delegated-task planning contract; this is plan-only and encodes no execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegatedTaskPlanContract {
@@ -7767,6 +7784,8 @@ pub struct DelegatedTaskPlanContract {
     pub checkpoint_rollback: Option<AssistedAiTrustProjectionReference>,
     /// Assisted-AI projection reference.
     pub assisted_ai_projection: Option<AssistedAiTrustProjectionReference>,
+    /// Delegated-task lineage metadata for fan-out.
+    pub lineage: Option<DelegatedTaskLineage>,
     /// Metadata-only affected target summaries.
     pub affected_targets: Vec<DelegatedTaskAffectedTargetSummary>,
     /// Proposed step graph represented as metadata only.
@@ -9813,7 +9832,7 @@ impl AssistedAiEditProposalOutput {
             });
         }
 
-        Ok(WorkspaceProposal {
+        let proposal = WorkspaceProposal {
             proposal_id: self.proposal_id,
             principal: self.principal.clone(),
             capability: self.capability.clone(),
@@ -9823,7 +9842,14 @@ impl AssistedAiEditProposalOutput {
             preview: self.preview.clone(),
             expires_at: self.expires_at,
             created_at: self.created_at,
-        })
+        };
+        validate_workspace_proposal_redaction(&proposal).map_err(|err| {
+            AssistedAiContractError::InvalidProposalMetadata {
+                reason: err.message,
+            }
+        })?;
+
+        Ok(proposal)
     }
 }
 
@@ -10800,6 +10826,31 @@ pub fn validate_delegated_task_audit_linkage_record(
     for label in &record.runtime_activation_labels {
         validate_assisted_ai_audit_string("runtime_activation_labels", label)?;
     }
+    if let Some(lineage) = &record.lineage {
+        if lineage.schema_version == 0 {
+            return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+                field: "lineage.schema_version".to_string(),
+                reason: "schema.zero".to_string(),
+            });
+        }
+        if lineage
+            .parent_plan_id
+            .as_ref()
+            .map(|plan_id| plan_id.0.is_empty())
+            .unwrap_or(false)
+        {
+            return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+                field: "lineage.parent_plan_id".to_string(),
+                reason: "lineage.parent_plan_id.empty".to_string(),
+            });
+        }
+        if lineage.parent_audit_id.as_deref().unwrap_or("").is_empty() {
+            return Err(AssistedAiContractError::NonMetadataOnlyAuditRecord {
+                field: "lineage.parent_audit_id".to_string(),
+                reason: "lineage.parent_audit_id.empty".to_string(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -10880,6 +10931,7 @@ pub fn delegated_task_audit_linkage_record(
         step_ids: plan.steps.iter().map(|step| step.step_id.clone()).collect(),
         proposal_preview_links: plan.proposal_preview_links.clone(),
         trust_projection_references,
+        lineage: plan.lineage.clone(),
         assisted_ai_audit_references: audit_references.clone(),
         proposal_ids,
         blockers: plan.blockers.clone(),
@@ -11936,6 +11988,7 @@ pub fn delegated_task_plan_from_boundary_input(
         approval_checklist: input.approval_checklist,
         checkpoint_rollback: input.checkpoint_rollback,
         assisted_ai_projection: input.assisted_ai_projection,
+        lineage: None,
         affected_targets: input.affected_targets,
         steps: input.steps,
         proposal_preview_links: input.proposal_preview_links,
@@ -18217,12 +18270,35 @@ pub struct DapMatchedResponse {
     pub success: bool,
 }
 
+/// DAP client lifecycle phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DapClientPhase {
+    /// Session has not sent initialize yet.
+    Configured,
+    /// Initialize has been sent and a response is pending.
+    Initializing,
+    /// Initialize completed and the client may launch or attach.
+    Ready,
+    /// Launch or attach has been sent and a response is pending.
+    Launching,
+    /// Target is running.
+    Running,
+    /// Target is paused.
+    Paused,
+    /// Session terminated.
+    Terminated,
+}
+
 /// Minimal deterministic DAP client state for sequence tracking.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DapClientState {
     session_id: DebugSessionId,
     next_seq: u64,
     pending: HashMap<u64, String>,
+    phase: DapClientPhase,
+    capabilities: Option<serde_json::Value>,
+    last_event: Option<String>,
+    last_stop_reason: Option<String>,
 }
 
 impl DapClientState {
@@ -18232,12 +18308,36 @@ impl DapClientState {
             session_id,
             next_seq: 1,
             pending: HashMap::new(),
+            phase: DapClientPhase::Configured,
+            capabilities: None,
+            last_event: None,
+            last_stop_reason: None,
         }
     }
 
     /// Return the session identifier associated with this DAP client.
     pub fn session_id(&self) -> &DebugSessionId {
         &self.session_id
+    }
+
+    /// Current client lifecycle phase.
+    pub fn phase(&self) -> DapClientPhase {
+        self.phase
+    }
+
+    /// Last accepted initialize capabilities payload.
+    pub fn capabilities(&self) -> Option<&serde_json::Value> {
+        self.capabilities.as_ref()
+    }
+
+    /// Last accepted DAP event name.
+    pub fn last_event(&self) -> Option<&str> {
+        self.last_event.as_deref()
+    }
+
+    /// Last stop reason from a paused event, if any.
+    pub fn last_stop_reason(&self) -> Option<&str> {
+        self.last_stop_reason.as_deref()
     }
 
     /// Number of pending requests awaiting responses.
@@ -18264,6 +18364,106 @@ impl DapClientState {
         Ok(DapProtocolMessage::request(seq, command, arguments))
     }
 
+    fn ensure_phase(&self, allowed: &[DapClientPhase], action: &str) -> ProtocolResult<()> {
+        if allowed.contains(&self.phase) {
+            Ok(())
+        } else {
+            Err(ProtocolError {
+                code: "dap_client_phase_invalid".to_string(),
+                message: format!(
+                    "DAP {action} is not allowed while phase is {:?}",
+                    self.phase
+                ),
+            })
+        }
+    }
+
+    fn prepare_phase_request(
+        &mut self,
+        command: impl Into<String>,
+        arguments: serde_json::Value,
+        next_phase: DapClientPhase,
+    ) -> ProtocolResult<DapProtocolMessage> {
+        let request = self.prepare_request(command, arguments)?;
+        self.phase = next_phase;
+        Ok(request)
+    }
+
+    /// Prepare an initialize request.
+    pub fn prepare_initialize(
+        &mut self,
+        client_name: impl Into<String>,
+        adapter_type: impl Into<String>,
+    ) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Configured], "initialize")?;
+        self.prepare_phase_request(
+            "initialize",
+            serde_json::json!({
+                "clientID": client_name.into(),
+                "adapterID": adapter_type.into(),
+            }),
+            DapClientPhase::Initializing,
+        )
+    }
+
+    /// Prepare a launch request.
+    pub fn prepare_launch(
+        &mut self,
+        arguments: serde_json::Value,
+    ) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Ready], "launch")?;
+        self.prepare_phase_request("launch", arguments, DapClientPhase::Launching)
+    }
+
+    /// Prepare an attach request.
+    pub fn prepare_attach(
+        &mut self,
+        arguments: serde_json::Value,
+    ) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Ready], "attach")?;
+        self.prepare_phase_request("attach", arguments, DapClientPhase::Launching)
+    }
+
+    /// Prepare a continue request.
+    pub fn prepare_continue(&mut self, thread_id: u64) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Paused], "continue")?;
+        self.prepare_phase_request(
+            "continue",
+            serde_json::json!({ "threadId": thread_id }),
+            DapClientPhase::Running,
+        )
+    }
+
+    /// Prepare a threads request.
+    pub fn prepare_threads(&mut self) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Paused], "threads")?;
+        self.prepare_request("threads", serde_json::json!({}))
+    }
+
+    /// Prepare a stackTrace request.
+    pub fn prepare_stack_trace(&mut self, thread_id: u64) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Paused], "stackTrace")?;
+        self.prepare_request("stackTrace", serde_json::json!({ "threadId": thread_id }))
+    }
+
+    /// Prepare a scopes request.
+    pub fn prepare_scopes(&mut self, frame_id: u64) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Paused], "scopes")?;
+        self.prepare_request("scopes", serde_json::json!({ "frameId": frame_id }))
+    }
+
+    /// Prepare a variables request.
+    pub fn prepare_variables(
+        &mut self,
+        variables_reference: u64,
+    ) -> ProtocolResult<DapProtocolMessage> {
+        self.ensure_phase(&[DapClientPhase::Paused], "variables")?;
+        self.prepare_request(
+            "variables",
+            serde_json::json!({ "variablesReference": variables_reference }),
+        )
+    }
+
     /// Match a DAP response to a previously prepared request.
     pub fn match_response(
         &mut self,
@@ -18286,7 +18486,7 @@ impl DapClientState {
                 code: "dap_response_unmatched".to_string(),
                 message: format!("DAP response has no pending request for seq {request_seq}"),
             })?;
-        let actual = response.command.unwrap_or_default();
+        let actual = response.command.clone().unwrap_or_default();
         if actual != expected {
             return Err(ProtocolError {
                 code: "dap_response_command_mismatch".to_string(),
@@ -18295,11 +18495,91 @@ impl DapClientState {
                 ),
             });
         }
+
+        self.apply_response_state(
+            &expected,
+            response.success.unwrap_or(false),
+            response.body.as_ref(),
+        );
+
         Ok(DapMatchedResponse {
             request_seq,
             command: expected,
             success: response.success.unwrap_or(false),
         })
+    }
+
+    /// Apply a DAP event to the client lifecycle state.
+    pub fn apply_event(&mut self, event: DapProtocolMessage) -> ProtocolResult<()> {
+        if event.message_type != DapMessageType::Event {
+            return Err(ProtocolError {
+                code: "dap_event_invalid".to_string(),
+                message: "DAP message is not an event".to_string(),
+            });
+        }
+        let event_name = event.event.clone().ok_or_else(|| ProtocolError {
+            code: "dap_event_invalid".to_string(),
+            message: "DAP event is missing event name".to_string(),
+        })?;
+        self.last_event = Some(event_name.clone());
+        match event_name.as_str() {
+            "initialized" if self.phase == DapClientPhase::Initializing => {
+                self.phase = DapClientPhase::Ready;
+            }
+            "initialized" => {}
+            "stopped" => {
+                self.phase = DapClientPhase::Paused;
+                self.last_stop_reason = event
+                    .arguments
+                    .as_ref()
+                    .and_then(|value| value.get("reason"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+            }
+            "continued" => {
+                self.phase = DapClientPhase::Running;
+                self.last_stop_reason = None;
+            }
+            "terminated" => {
+                self.phase = DapClientPhase::Terminated;
+                self.last_stop_reason = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn apply_response_state(
+        &mut self,
+        command: &str,
+        success: bool,
+        body: Option<&serde_json::Value>,
+    ) {
+        match command {
+            "initialize" => {
+                if success {
+                    self.phase = DapClientPhase::Ready;
+                    self.capabilities = body.cloned();
+                } else {
+                    self.phase = DapClientPhase::Configured;
+                }
+            }
+            "launch" | "attach" => {
+                if success {
+                    self.phase = DapClientPhase::Running;
+                } else {
+                    self.phase = DapClientPhase::Ready;
+                }
+            }
+            "continue" => {
+                if success {
+                    self.phase = DapClientPhase::Running;
+                } else {
+                    self.phase = DapClientPhase::Paused;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -19213,6 +19493,18 @@ pub struct WorkbenchTelemetryConsent {
     pub schema_version: u16,
 }
 
+impl Default for WorkbenchTelemetryConsent {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            crash_reports_enabled: false,
+            raw_source_allowed: false,
+            consent_label: "local-only".to_string(),
+            schema_version: 1,
+        }
+    }
+}
+
 /// Workbench provider routing settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkbenchProviderRoutingSettings {
@@ -19243,6 +19535,27 @@ pub struct WorkbenchSettingsRecord {
     pub line_numbers_visible: bool,
     /// Whether the active editor line is highlighted.
     pub current_line_highlight: bool,
+    /// Whether sticky function/scope headers are visible.
+    pub sticky_headers_visible: bool,
+    /// Whether code folding indicators are visible.
+    pub code_folding_visible: bool,
+    /// Whether the minimap is visible.
+    pub minimap_visible: bool,
+    /// Whether whitespace guides are visible.
+    pub whitespace_guides_visible: bool,
+    /// Whether indent guides are visible.
+    pub indent_guides_visible: bool,
+    /// Whether smooth scrolling is enabled.
+    pub smooth_scrolling_enabled: bool,
+    /// Whether workspace search may use the optional indexed backend.
+    #[serde(default)]
+    pub indexed_workspace_search_enabled: bool,
+    /// Whether next-edit prediction should auto-trigger after edits.
+    #[serde(default)]
+    pub next_edit_prediction_enabled: bool,
+    /// Telemetry consent state.
+    #[serde(default)]
+    pub telemetry: WorkbenchTelemetryConsent,
     /// DTO schema version.
     pub schema_version: u16,
 }
@@ -19256,6 +19569,15 @@ impl Default for WorkbenchSettingsRecord {
             toast_verbosity: "warnings_and_errors".to_string(),
             line_numbers_visible: true,
             current_line_highlight: true,
+            sticky_headers_visible: true,
+            code_folding_visible: true,
+            minimap_visible: false,
+            whitespace_guides_visible: false,
+            indent_guides_visible: false,
+            smooth_scrolling_enabled: true,
+            indexed_workspace_search_enabled: false,
+            next_edit_prediction_enabled: false,
+            telemetry: WorkbenchTelemetryConsent::default(),
             schema_version: 1,
         }
     }
@@ -19456,6 +19778,8 @@ pub enum PluginContribution {
     EditorDecoration(PluginEditorDecorationContribution),
     /// Snippet contribution.
     Snippet(PluginSnippetContribution),
+    /// Tree-sitter grammar artifact loaded through the plugin channel.
+    TreeSitterGrammar(PluginTreeSitterGrammarContribution),
     /// Language-provider availability.
     LanguageProvider(PluginLanguageProviderContribution),
     /// Formatter availability.
@@ -19515,6 +19839,21 @@ pub struct PluginSnippetContribution {
     pub language_id: LanguageId,
     /// Snippet label.
     pub label: String,
+}
+
+/// Tree-sitter grammar contribution projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginTreeSitterGrammarContribution {
+    /// Language id supplied by the plugin artifact.
+    pub language_id: LanguageId,
+    /// Grammar label used for projections and audits.
+    pub grammar_name: String,
+    /// Artifact URI for the compiled grammar module.
+    pub artifact_uri: String,
+    /// Artifact integrity hash for deterministic trust decisions.
+    pub artifact_hash: String,
+    /// Capability required to activate the grammar artifact.
+    pub required_capability: CapabilityId,
 }
 
 /// Language provider contribution projection.
@@ -20746,6 +21085,9 @@ pub struct WorkspaceSessionRecord {
     /// Persisted workbench UI settings.
     #[serde(default)]
     pub workbench_settings: WorkbenchSettingsRecord,
+    /// Durable memory snapshot used to restore workspace memory across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_snapshot_json: Option<String>,
     /// Dirty indicators.
     pub dirty_indicators: Vec<SessionDirtyIndicator>,
     /// Last saved timestamp.
@@ -21033,6 +21375,31 @@ pub fn validate_plugin_manifest(
             code: "plugin_manifest_invalid".to_string(),
             message: "plugin capability contains forbidden payload marker".to_string(),
         });
+    }
+    for contribution in &manifest.contributions {
+        if let PluginContribution::TreeSitterGrammar(grammar) = contribution {
+            if grammar.language_id.0.trim().is_empty()
+                || grammar.grammar_name.trim().is_empty()
+                || grammar.artifact_uri.trim().is_empty()
+                || grammar.artifact_hash.trim().is_empty()
+            {
+                return Err(ProtocolError {
+                    code: "plugin_manifest_invalid".to_string(),
+                    message: "tree-sitter grammar contribution must declare language, name, artifact URI, and artifact hash".to_string(),
+                });
+            }
+            if !manifest
+                .requested_capabilities
+                .iter()
+                .any(|capability| capability == &grammar.required_capability)
+            {
+                return Err(ProtocolError {
+                    code: "plugin_grammar_capability_missing".to_string(),
+                    message: "tree-sitter grammar contribution requires a declared capability"
+                        .to_string(),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -21504,6 +21871,39 @@ pub fn validate_terminal_audit_record(record: &TerminalAuditRecord) -> ProtocolR
         return Err(ProtocolError {
             code: "terminal_audit_invalid".to_string(),
             message: "terminal audit metadata contains forbidden raw output marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a terminal output excerpt before it is retained or exported.
+pub fn validate_terminal_output_chunk(chunk: &TerminalOutputChunk) -> ProtocolResult<()> {
+    if chunk.session_id.0 == 0
+        || chunk.sequence.0 == 0
+        || chunk.schema_version == 0
+        || chunk.redaction != RedactionHint::MetadataOnly
+    {
+        return Err(ProtocolError {
+            code: "terminal_output_invalid".to_string(),
+            message: "terminal output chunk must be metadata-only with valid event identity"
+                .to_string(),
+        });
+    }
+    if contains_forbidden_phase8_payload(&chunk.redacted_payload) {
+        return Err(ProtocolError {
+            code: "terminal_output_invalid".to_string(),
+            message: "terminal output excerpt contains forbidden raw payload marker".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate workspace proposal payload metadata before it is retained or exported.
+pub fn validate_workspace_proposal_redaction(proposal: &WorkspaceProposal) -> ProtocolResult<()> {
+    if contains_forbidden_phase8_payload(&format!("{proposal:?}")) {
+        return Err(ProtocolError {
+            code: "workspace_proposal_invalid".to_string(),
+            message: "workspace proposal content contains forbidden raw payload marker".to_string(),
         });
     }
     Ok(())
@@ -22414,8 +22814,10 @@ fn contains_forbidden_phase8_payload(value: &str) -> bool {
         "raw_source",
         "raw_transcript",
         "terminal_output",
+        "terminal_excerpt",
         "process_output",
         "transport_payload",
+        "proposal_content",
         "raw_prompt",
         "provider_response",
         "full_snapshot",
@@ -22423,6 +22825,13 @@ fn contains_forbidden_phase8_payload(value: &str) -> bool {
         "token",
         "password",
         "api_key",
+        "sk-",
+        "xoxb-",
+        "gho_",
+        "ghp_",
+        "openai_api_key",
+        "aws_secret_access_key",
+        "authorization: bearer",
         "unbounded_payload",
     ]
     .iter()
@@ -23876,6 +24285,12 @@ pub struct LegionWorkflowMergeReadiness {
 pub struct LegionWorkflowProjectionRow {
     /// Stable session id.
     pub session_id: LegionWorkflowSessionId,
+    /// Linked directive artifact id.
+    pub directive_artifact_id: Option<String>,
+    /// Linked spec artifact id.
+    pub spec_artifact_id: Option<String>,
+    /// Linked task-graph artifact id.
+    pub task_graph_artifact_id: Option<String>,
     /// Lifecycle state.
     pub lifecycle_state: LegionWorkflowState,
     /// Number of workers in the session.
@@ -25190,6 +25605,9 @@ pub fn legion_workflow_projection_from_sessions(
 
             LegionWorkflowProjectionRow {
                 session_id: session.session_id.clone(),
+                directive_artifact_id: session.directive_artifact_id.clone(),
+                spec_artifact_id: session.spec_artifact_id.clone(),
+                task_graph_artifact_id: session.task_graph_artifact_id.clone(),
                 lifecycle_state: session.lifecycle_state,
                 worker_count: session.worker_assignments.len() as u32,
                 provider_route_required_count,
@@ -25337,6 +25755,54 @@ mod tests {
             }
             _ => panic!("unexpected payload"),
         }
+    }
+
+    #[test]
+    fn workspace_proposal_rejects_secret_markers_in_payload_content() {
+        let proposal = WorkspaceProposal {
+            proposal_id: ProposalId(7),
+            principal: PrincipalId("user-a".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(7),
+            payload: ProposalPayload::CreateFile(CreateFileProposal {
+                path: CanonicalPath("/tmp/notes.txt".to_string()),
+                initial_content: Some("seeded secret sk-test-123 should not survive".to_string()),
+            }),
+            preconditions: ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
+            },
+            preview: PreviewSummary {
+                summary: "create file".to_string(),
+                details: vec!["metadata-only".to_string()],
+            },
+            expires_at: None,
+            created_at: TimestampMillis(1),
+        };
+
+        assert!(validate_workspace_proposal_redaction(&proposal).is_err());
+    }
+
+    #[test]
+    fn terminal_output_chunk_rejects_secret_markers_in_excerpt() {
+        let chunk = TerminalOutputChunk {
+            session_id: TerminalSessionId(44),
+            sequence: EventSequence(1),
+            redacted_payload: "excerpt includes sk-test-123 and should fail".to_string(),
+            byte_count: 48,
+            truncated: false,
+            redaction: RedactionHint::MetadataOnly,
+            schema_version: 1,
+        };
+
+        assert!(validate_terminal_output_chunk(&chunk).is_err());
     }
 
     #[test]

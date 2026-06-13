@@ -32,6 +32,7 @@ const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml"
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
 const DEFAULT_PERF_HARNESS_OUTPUT_PATH: &str = "target/perf-harness";
+const DEFAULT_BENCH_OUTPUT_PATH: &str = "target/legion-bench";
 const DEFAULT_PHASE6_EVIDENCE_PATH: &str =
     "plans/evidence/phase-6/collaboration-architecture-map.md";
 const DEFAULT_PHASE7_EVIDENCE_PATH: &str = "plans/evidence/phase-7/remote-architecture-map.md";
@@ -526,6 +527,30 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_PERF_HARNESS_OUTPUT_PATH)]
         out: String,
         /// Treat any failed skeleton as a CI failure (default: true).
+        /// Set `--no-strict` to keep the report-only behavior even when
+        /// measurements exceed the configured budget.
+        #[arg(long, default_value_t = true)]
+        strict: bool,
+    },
+    /// Run the Legion-Bench v0 eval suite and write a bench report.
+    LegionBench {
+        /// Output directory for the bench report.
+        #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
+        out: String,
+        /// Run mode for the baseline. Recorded is the offline CI default;
+        /// live is reserved for the weekly external run.
+        #[arg(long, default_value = "recorded")]
+        mode: String,
+        /// Treat any failed task as a CI failure.
+        #[arg(long, default_value_t = true)]
+        strict: bool,
+    },
+    /// Verify a previously-written Legion-Bench report.
+    VerifyLegionBench {
+        /// Output directory holding the bench report.
+        #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
+        out: String,
+        /// Treat any failed task as a CI failure.
         #[arg(long, default_value_t = true)]
         strict: bool,
     },
@@ -556,6 +581,12 @@ fn main() {
         Commands::PerfHarness { out, strict } => run_perf_harness_command(&out, strict),
         Commands::VerifyPerfHarness { out, strict } => {
             run_verify_perf_harness_command(&out, strict)
+        }
+        Commands::LegionBench { out, mode, strict } => {
+            run_legion_bench_command(&out, &mode, strict)
+        }
+        Commands::VerifyLegionBench { out, strict } => {
+            run_verify_legion_bench_command(&out, strict)
         }
     };
 
@@ -860,6 +891,109 @@ fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn run_legion_bench_command(out: &str, mode: &str, strict: bool) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("legion bench failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let mode = match parse_legion_bench_mode(mode) {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("legion bench failed: {err}");
+            return 1;
+        }
+    };
+    let suite = xtask::legion_bench::plan_default_legion_bench_suite();
+    let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
+    let report =
+        xtask::legion_bench::plan_legion_bench_report("legion-desktop", &git_sha, mode, &suite);
+    let path = match xtask::legion_bench::write_report(&out_dir, &report) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("legion bench failed: {err}");
+            return 1;
+        }
+    };
+    println!(
+        "legion bench: total={} passed={} failed={} regressed={} report={} strict={} mode={} provider={} fingerprint={}",
+        report.summary.total,
+        report.summary.passed,
+        report.summary.failed,
+        report.summary.regressed,
+        path.display(),
+        strict,
+        report.mode.as_str(),
+        report.provider_profile,
+        report.suite_fingerprint,
+    );
+    if strict && report.summary.failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn run_verify_legion_bench_command(out: &str, strict: bool) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("legion bench verify failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let report_path = out_dir.join(xtask::legion_bench::BENCH_REPORT_FILE);
+    let report = match xtask::legion_bench::read_report(&report_path) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!(
+                "legion bench verify failed: {err} (run `cargo run -p xtask -- legion-bench` first)"
+            );
+            return 1;
+        }
+    };
+    let suite = xtask::legion_bench::plan_default_legion_bench_suite();
+    if let Err(err) = xtask::legion_bench::verify_legion_bench_report(&report, &suite) {
+        eprintln!("legion bench verify failed: {err}");
+        return 1;
+    }
+    println!(
+        "legion bench verify: total={} passed={} failed={} regressed={} report={} strict={} mode={} provider={} fingerprint={}",
+        report.summary.total,
+        report.summary.passed,
+        report.summary.failed,
+        report.summary.regressed,
+        report_path.display(),
+        strict,
+        report.mode.as_str(),
+        report.provider_profile,
+        report.suite_fingerprint,
+    );
+    if strict && report.summary.failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBenchRunMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "recorded" | "recorded_offline" | "offline" => {
+            Ok(xtask::legion_bench::LegionBenchRunMode::RecordedOffline)
+        }
+        "live" | "live_weekly" | "weekly" => {
+            Ok(xtask::legion_bench::LegionBenchRunMode::LiveWeekly)
+        }
+        other => Err(format!(
+            "unknown legion-bench mode `{other}`; expected recorded or live"
+        )),
     }
 }
 

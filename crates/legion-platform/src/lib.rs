@@ -990,12 +990,13 @@ impl ProcessService for NativeProcessService {
         let started = Instant::now();
         let mut command = Command::new(&request.command);
         command.args(&request.args);
+        command.env_clear();
 
         if let Some(cwd) = &request.cwd {
             command.current_dir(cwd);
         }
 
-        for (key, value) in &request.env {
+        for (key, value) in child_environment_vars(&request.env) {
             command.env(key, value);
         }
 
@@ -1100,8 +1101,12 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
 
     let mut command = Command::new(&request.command);
     command.args(&request.args);
+    command.env_clear();
     if let Some(cwd) = &request.cwd {
         command.current_dir(cwd);
+    }
+    for (key, value) in child_environment_vars(&[]) {
+        command.env(key, value);
     }
     command
         .stdin(Stdio::from(stdin))
@@ -1242,6 +1247,7 @@ fn spawn_windows_conpty(request: &PtyRequest) -> Result<WindowsPtySessionHandle,
             .as_ref()
             .map(|cwd| PCWSTR(cwd.as_ptr()))
             .unwrap_or(PCWSTR(ptr::null()));
+        let env_block = windows_environment_block(&child_environment_vars(&[]));
 
         let spawn_result = CreateProcessW(
             PCWSTR(ptr::null()),
@@ -1250,7 +1256,7 @@ fn spawn_windows_conpty(request: &PtyRequest) -> Result<WindowsPtySessionHandle,
             None,
             false,
             EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP,
-            None,
+            Some(env_block.as_ptr().cast::<core::ffi::c_void>()),
             current_dir_ptr,
             (&startup.StartupInfo) as *const _,
             &mut process_info,
@@ -1508,6 +1514,16 @@ fn push_windows_backslashes(output: &mut String, count: usize) {
     for _ in 0..count {
         output.push('\\');
     }
+}
+
+#[cfg(windows)]
+fn windows_environment_block(vars: &[(String, String)]) -> Vec<u16> {
+    let mut block = Vec::new();
+    for (key, value) in vars {
+        block.extend(wide_null(&format!("{key}={value}")));
+    }
+    block.push(0);
+    block
 }
 
 #[cfg(windows)]
@@ -1956,9 +1972,53 @@ impl EnvironmentService for NativeEnvironmentService {
 
     fn normalized_vars(&self, vars: &[(String, String)]) -> Vec<(String, String)> {
         vars.iter()
+            .filter(|(key, _)| !env_key_looks_secret(key))
             .map(|(key, value)| (key.to_ascii_lowercase(), value.clone()))
             .collect()
     }
+}
+
+fn env_key_looks_secret(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "secret",
+        "token",
+        "password",
+        "passwd",
+        "api_key",
+        "apikey",
+        "auth",
+        "credential",
+        "private",
+        "cookie",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
+}
+
+fn sanitized_child_env<I>(vars: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    vars.into_iter()
+        .filter(|(key, _)| !env_key_looks_secret(key))
+        .collect()
+}
+
+fn child_environment_vars(extra: &[(String, String)]) -> Vec<(String, String)> {
+    let env_service = NativeEnvironmentService;
+    let mut vars = sanitized_child_env(env_service.vars());
+    for (key, value) in sanitized_child_env(extra.iter().cloned()) {
+        if let Some((_, existing_value)) = vars
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing_value = value;
+        } else {
+            vars.push((key, value));
+        }
+    }
+    vars
 }
 
 impl TimeService for NativeTimeService {
@@ -2108,6 +2168,52 @@ mod tests {
         });
 
         assert!(matches!(result, Err(PlatformError::Cancelled { .. })));
+    }
+
+    #[test]
+    fn environment_service_strips_secret_like_vars_from_normalized_map() {
+        let env_service = NativeEnvironmentService;
+        let vars = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("OPENAI_API_KEY".to_string(), "sk-secret".to_string()),
+            ("TeamToken".to_string(), "redacted".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+        ];
+
+        let normalized = env_service.normalized_vars(&vars);
+
+        assert!(normalized.contains(&("path".to_string(), "/usr/bin".to_string())));
+        assert!(normalized.contains(&("term".to_string(), "xterm-256color".to_string())));
+        assert!(
+            normalized
+                .iter()
+                .all(|(key, _)| !key.contains("token") && !key.contains("api"))
+        );
+    }
+
+    #[test]
+    fn process_execution_strips_secret_like_env_vars() {
+        let process = NativeProcessService;
+        let result = process
+            .execute(&ProcessRequest {
+                command: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "printf '%s|%s' \"$KEEP_ME\" \"${OPENAI_API_KEY:-}\"".to_string(),
+                ],
+                cwd: None,
+                env: vec![
+                    ("KEEP_ME".to_string(), "visible".to_string()),
+                    ("OPENAI_API_KEY".to_string(), "sk-secret".to_string()),
+                ],
+                timeout: None,
+                cancelled: false,
+            })
+            .expect("execute process");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "visible|");
+        assert!(!result.stdout.contains("sk-secret"));
     }
 
     #[test]

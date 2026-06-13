@@ -7,16 +7,17 @@ use legion_desktop::{
     view::DesktopProjectionViewModel,
 };
 use legion_protocol::{
-    CapabilityId, CausalityId, CorrelationId, DelegatedTaskToolPermissionDecision,
-    DelegatedTaskToolPermissionProfile, EventSequence, FileFingerprint,
-    LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId, LegionWorkflowDecisionKind,
-    LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState,
-    LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessBlocker,
-    LegionWorkflowMergeReadinessState, LegionWorkflowProjection, LegionWorkflowProjectionRow,
-    LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot,
-    LegionWorkflowRiskMonitorState, LegionWorkflowSessionId, LegionWorkflowState, McpPrimitiveKind,
-    McpRegistrySnapshot, McpServerDescriptor, McpServerId, McpToolDescriptor, McpToolName,
-    McpTransportKind, PermissionBudgetActionClass, PrincipalId, ProposalAffectedTarget,
+    CapabilityId, CausalityId, CorrelationId, DelegatedTaskRuntimeActivationState,
+    DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile, EventSequence,
+    FileFingerprint, LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId,
+    LegionWorkflowDecisionKind, LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId,
+    LegionWorkflowKillSwitchState, LegionWorkflowMergeReadiness,
+    LegionWorkflowMergeReadinessBlocker, LegionWorkflowMergeReadinessState,
+    LegionWorkflowProjection, LegionWorkflowProjectionRow, LegionWorkflowRiskHaltReason,
+    LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState,
+    LegionWorkflowSessionId, LegionWorkflowState, McpPrimitiveKind, McpRegistrySnapshot,
+    McpServerDescriptor, McpServerId, McpToolDescriptor, McpToolName, McpTransportKind,
+    PermissionBudgetActionClass, PrincipalId, ProposalAffectedTarget,
     ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
     ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
     ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
@@ -141,6 +142,9 @@ fn legion_projection(state: LegionWorkflowMergeReadinessState) -> LegionWorkflow
         projection_id: "legion-workflow:test-command-center".to_string(),
         rows: vec![LegionWorkflowProjectionRow {
             session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
+            directive_artifact_id: Some("artifact:directive:legion:alpha".to_string()),
+            spec_artifact_id: Some("artifact:spec:legion:alpha".to_string()),
+            task_graph_artifact_id: Some("artifact:task-graph:legion:alpha".to_string()),
             lifecycle_state: if blocked {
                 LegionWorkflowState::Blocked
             } else {
@@ -466,6 +470,12 @@ fn legion_workflow_ready_state_is_proposal_mediated_not_autonomous_apply() {
             .any(|row| row.contains("proposal-mediated"))
     );
     assert!(
+        model
+            .legion_workflow_rows
+            .iter()
+            .any(|row| row.contains("spec_artifact=artifact:spec:legion:alpha"))
+    );
+    assert!(
         !model
             .legion_workflow_rows
             .iter()
@@ -511,6 +521,20 @@ fn legion_workflow_automate_rows_show_mcp_decisions_risk_kill_and_permissions() 
             .iter()
             .any(|row| row.contains("tool permission"))
     );
+}
+
+#[test]
+fn delegated_task_rows_show_runtime_activation_in_the_assistant_surface() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    snapshot.delegated_task_projection.runtime_activation =
+        DelegatedTaskRuntimeActivationState::SandboxAllocated;
+    snapshot.delegated_task_projection.plan_count = 1;
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(model.assistant_rows.iter().any(|row| {
+        row.contains("delegated task command center") && row.contains("runtime=SandboxAllocated")
+    }));
 }
 
 #[test]

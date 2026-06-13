@@ -118,6 +118,65 @@ fn settings_intents_update_projection_and_clamp_numeric_values() {
     );
     assert!(!settings.editor.current_line_highlight);
 
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetStickyHeadersVisible { visible: false })
+            .expect("sticky header setting should update"),
+    );
+    assert!(!settings.editor.sticky_headers_visible);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetCodeFoldingVisible { visible: false })
+            .expect("code folding setting should update"),
+    );
+    assert!(!settings.editor.code_folding_visible);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetMinimapVisible { visible: true })
+            .expect("minimap setting should update"),
+    );
+    assert!(settings.editor.minimap_visible);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetWhitespaceGuidesVisible { visible: true })
+            .expect("whitespace guides setting should update"),
+    );
+    assert!(settings.editor.whitespace_guides_visible);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetIndentGuidesVisible { visible: true })
+            .expect("indent guides setting should update"),
+    );
+    assert!(settings.editor.indent_guides_visible);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetSmoothScrollingEnabled { enabled: false })
+            .expect("smooth scrolling setting should update"),
+    );
+    assert!(!settings.editor.smooth_scrolling_enabled);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetIndexedWorkspaceSearchEnabled {
+            enabled: true,
+        })
+        .expect("indexed search setting should update"),
+    );
+    assert!(settings.indexed_workspace_search_enabled);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetNextEditPredictionEnabled {
+            enabled: true,
+        })
+        .expect("next-edit prediction setting should update"),
+    );
+    assert!(settings.next_edit_prediction_enabled);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetCrashReportsEnabled { enabled: true })
+            .expect("crash reports setting should update"),
+    );
+    assert!(settings.telemetry.crash_reports_enabled);
+    assert_eq!(settings.telemetry.consent_label, "crash-reports");
+
     let snapshot = app
         .shell_projection_snapshot("settings")
         .expect("projection should build");

@@ -7,7 +7,7 @@ use std::{
 };
 
 use legion_desktop::{
-    bridge::DesktopAction,
+    bridge::{DesktopAction, DesktopAppRequest, DesktopBridgeOutput, DesktopCommandBridge},
     view::DesktopProjectionViewModel,
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
@@ -146,6 +146,12 @@ fn desktop_git_workflow_projects_diff_blame_graph_and_hunk_actions() {
             .iter()
             .any(|row| row.contains("git commit") && row.contains("initial"))
     );
+    assert!(
+        model
+            .git_rows
+            .iter()
+            .any(|row| row.contains("git worktree"))
+    );
 
     let hunk_id = snapshot
         .git_projection
@@ -260,5 +266,110 @@ fn desktop_git_workflow_resolves_conflicts_through_bridge_actions() {
     assert!(
         !unmerged.contains("src/lib.rs"),
         "src/lib.rs should no longer be in unmerged state after resolution"
+    );
+}
+
+#[test]
+fn desktop_git_workflow_pushes_current_branch_to_origin() {
+    let repo = TempGitRepo::new();
+    let remote_root = repo
+        .path()
+        .parent()
+        .expect("repo parent should exist")
+        .join("legion-desktop-git-remote.git");
+    if remote_root.exists() {
+        fs::remove_dir_all(&remote_root).expect("stale remote should be removable");
+    }
+    fs::create_dir_all(&remote_root).expect("remote root should be creatable");
+    run_git(remote_root.as_path(), ["init", "--bare"]);
+
+    repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {}
+",
+    );
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    run_git(
+        repo.path(),
+        [
+            "remote",
+            "add",
+            "origin",
+            remote_root.to_str().expect("utf8"),
+        ],
+    );
+
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        repo.path().to_path_buf(),
+        Some(
+            repo.path()
+                .join("src/lib.rs")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ))
+    .expect("desktop runtime should open git workspace");
+    runtime
+        .handle_action(DesktopAction::RefreshGit)
+        .expect("refresh should route");
+
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::PushGitRemote)
+            .expect("push should route"),
+        DesktopWorkflowOutcome::GitUpdated
+    );
+
+    let pushed = run_git(&remote_root, ["log", "--oneline", "master"]);
+    assert!(
+        pushed.contains("initial"),
+        "remote should receive the pushed commit"
+    );
+
+    fs::remove_dir_all(&remote_root).expect("remote should be removable");
+}
+
+#[test]
+fn desktop_git_workflow_translates_open_pr_url_from_remote_metadata() {
+    let repo = TempGitRepo::new();
+    repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {}
+",
+    );
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    run_git(
+        repo.path(),
+        [
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:legion/example-repo.git",
+        ],
+    );
+
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        repo.path().to_path_buf(),
+        Some(
+            repo.path()
+                .join("src/lib.rs")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ))
+    .expect("desktop runtime should open git workspace");
+    runtime
+        .handle_action(DesktopAction::RefreshGit)
+        .expect("refresh should route");
+    let snapshot = runtime.projection_snapshot();
+    let bridge = DesktopCommandBridge::new();
+
+    assert_eq!(
+        bridge.translate(DesktopAction::OpenGitPullRequestUrl, &snapshot),
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenExternalUrl {
+            url: "https://github.com/legion/example-repo/compare/master...master".to_string(),
+        })
     );
 }

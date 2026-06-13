@@ -7,8 +7,9 @@ use std::{
 };
 
 use legion_project::{
-    GitConflictChoice, GitDiffStrategy, GitHunkStage, GitSnapshotOptions, collect_git_snapshot,
-    commit_git_changes, resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
+    GitConflictChoice, GitDiffStrategy, GitHunkStage, GitInspectionBackend, GitSnapshotOptions,
+    collect_git_snapshot, collect_git_snapshot_with_backend, commit_git_changes, git_forge_kind,
+    git_pull_request_url, resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
     validate_git_commit_message,
 };
 
@@ -210,6 +211,130 @@ fn git_snapshot_projects_syntactic_diff_blame_graph_conflicts_and_hunk_staging()
     unstage_git_hunk(repo.path(), &staged_hunk).expect("hunk should unstage");
     let cached_after_unstage = run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"]);
     assert!(cached_after_unstage.trim().is_empty());
+}
+
+#[test]
+fn git_snapshot_gix_backend_matches_cli_backend() {
+    let repo = TempGitRepo::new();
+    let source_path = repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {\n    first();\n}\n\n\npub fn beta() {\n    second();\n}\n",
+    );
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+
+    repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {\n    first_changed();\n}\n\n\npub fn beta() {\n    second_changed();\n}\n",
+    );
+    repo.write("src/conflict.rs", &conflict_marker_text());
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let cli = collect_git_snapshot_with_backend(
+        repo.path(),
+        Some(&source_path),
+        options.clone(),
+        GitInspectionBackend::Cli,
+    )
+    .expect("cli git snapshot should collect");
+    let gix = collect_git_snapshot_with_backend(
+        repo.path(),
+        Some(&source_path),
+        options,
+        GitInspectionBackend::Gix,
+    )
+    .expect("gix git snapshot should collect");
+
+    assert_eq!(cli.branch_label, gix.branch_label);
+    assert_eq!(cli.head_short, gix.head_short);
+    assert_eq!(cli.remote_url, gix.remote_url);
+    assert_eq!(cli.remote_default_branch, gix.remote_default_branch);
+    assert_eq!(cli.changed_files, gix.changed_files);
+    assert_eq!(cli.hunks, gix.hunks);
+    assert_eq!(cli.blame_lines, gix.blame_lines);
+    assert_eq!(cli.commits, gix.commits);
+    assert_eq!(cli.conflicts, gix.conflicts);
+    assert_eq!(cli.worktrees, gix.worktrees);
+}
+
+#[test]
+fn git_snapshot_projects_worktrees_and_orphan_prunable_entries() {
+    let repo = TempGitRepo::new();
+    repo.write("src/lib.rs", "pub fn alpha() {}\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+
+    let worktree_path = repo
+        .path()
+        .parent()
+        .expect("repo parent")
+        .join("legion-git-worktree");
+    if worktree_path.exists() {
+        std::fs::remove_dir_all(&worktree_path).expect("stale worktree path should be removable");
+    }
+    run_git(
+        repo.path(),
+        [
+            "worktree",
+            "add",
+            worktree_path.to_str().expect("utf8"),
+            "-b",
+            "feature",
+        ],
+    );
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 4,
+        max_blame_lines: 4,
+        max_commits: 4,
+    };
+    let snapshot = collect_git_snapshot(repo.path(), None, options.clone())
+        .expect("git snapshot should collect");
+    let repo_root = repo
+        .path()
+        .canonicalize()
+        .expect("repo root should canonicalize");
+    let worktree_root = worktree_path
+        .canonicalize()
+        .expect("worktree root should canonicalize");
+    assert!(
+        snapshot
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.path == repo_root.display().to_string())
+    );
+    assert!(
+        snapshot
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.path == worktree_root.display().to_string())
+    );
+    assert!(
+        snapshot
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.branch_label.as_deref() == Some("feature"))
+    );
+
+    std::fs::remove_dir_all(&worktree_path).expect("worktree directory should be removable");
+
+    let prunable_snapshot = collect_git_snapshot(repo.path(), None, options)
+        .expect("git refresh should collect after orphaning worktree");
+    let orphan = prunable_snapshot
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.path.ends_with("legion-git-worktree"))
+        .expect("orphaned worktree should still be projected before prune");
+    assert!(
+        orphan.prunable,
+        "orphaned worktree should be flagged as prunable"
+    );
 }
 
 #[test]
@@ -893,4 +1018,72 @@ fn git_conflict_resolves_custom_marker_size() {
     assert!(!resolved2.contains(&incoming));
     assert!(resolved2.contains("line1\n"));
     assert!(resolved2.contains("line2\n"));
+}
+
+#[test]
+fn git_snapshot_projects_origin_remote_url() {
+    let repo = TempGitRepo::new();
+    repo.write(
+        "src/lib.rs",
+        "pub fn alpha() {}
+",
+    );
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    run_git(
+        repo.path(),
+        [
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:legion/example-repo.git",
+        ],
+    );
+
+    let snapshot = collect_git_snapshot(repo.path(), None, GitSnapshotOptions::default())
+        .expect("snapshot should include remote metadata");
+    assert_eq!(
+        snapshot.remote_url.as_deref(),
+        Some("git@github.com:legion/example-repo.git")
+    );
+}
+
+#[test]
+fn git_pull_request_url_builds_github_and_gitlab_links() {
+    assert_eq!(
+        git_forge_kind("git@github.com:legion/example-repo.git"),
+        Some(legion_project::GitForgeKind::GitHub)
+    );
+    assert_eq!(
+        git_pull_request_url(
+            "git@github.com:legion/example-repo.git",
+            "master",
+            "feature/pr-flow"
+        )
+        .as_deref(),
+        Some("https://github.com/legion/example-repo/compare/master...feature/pr-flow")
+    );
+    assert_eq!(
+        git_forge_kind("https://gitlab.com/legion/example-repo.git"),
+        Some(legion_project::GitForgeKind::GitLab)
+    );
+    assert_eq!(
+        git_pull_request_url(
+            "https://gitlab.com/legion/example-repo.git",
+            "main",
+            "feature/pr-flow"
+        )
+        .as_deref(),
+        Some(
+            "https://gitlab.com/legion/example-repo/-/merge_requests/new?merge_request[source_branch]=feature%2Fpr-flow&merge_request[target_branch]=main"
+        )
+    );
+    assert_eq!(
+        git_pull_request_url(
+            "https://example.com/legion/example-repo.git",
+            "main",
+            "feature"
+        ),
+        None
+    );
 }

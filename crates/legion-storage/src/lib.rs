@@ -2703,6 +2703,7 @@ mod tests {
             )],
             proposal_preview_links: Vec::new(),
             trust_projection_references: Vec::new(),
+            lineage: None,
             assisted_ai_audit_references: vec![
                 legion_protocol::DelegatedTaskAssistedAiAuditReference {
                     audit_id: "assist:audit:req-1:77".to_string(),

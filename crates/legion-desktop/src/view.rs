@@ -42,6 +42,8 @@ pub struct DesktopProjectionViewState {
     pub dock_layouts: Vec<DockLayout>,
     /// Adapter-local toast ids dismissed by the renderer.
     pub dismissed_toast_ids: BTreeSet<u64>,
+    /// Whether the first-run onboarding card should be rendered.
+    pub first_run_onboarding_visible: bool,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -51,6 +53,7 @@ impl Default for DesktopProjectionViewState {
             selected_explorer_file: None,
             dock_layouts: DockLayout::standard_all_modes(),
             dismissed_toast_ids: BTreeSet::new(),
+            first_run_onboarding_visible: false,
         }
     }
 }
@@ -254,6 +257,26 @@ pub struct DesktopSettingsViewModel {
     pub line_numbers_visible: bool,
     /// Whether current-line highlighting is enabled.
     pub current_line_highlight: bool,
+    /// Whether sticky headers are visible.
+    pub sticky_headers_visible: bool,
+    /// Whether code folding indicators are visible.
+    pub code_folding_visible: bool,
+    /// Whether the minimap is visible.
+    pub minimap_visible: bool,
+    /// Whether whitespace guides are visible.
+    pub whitespace_guides_visible: bool,
+    /// Whether indent guides are visible.
+    pub indent_guides_visible: bool,
+    /// Whether workspace search may use the optional indexed backend.
+    pub indexed_workspace_search_enabled: bool,
+    /// Whether next-edit prediction should auto-trigger after edits.
+    pub next_edit_prediction_enabled: bool,
+    /// Whether smooth scrolling is enabled.
+    pub smooth_scrolling_enabled: bool,
+    /// Whether crash reports are enabled.
+    pub crash_reports_enabled: bool,
+    /// Telemetry consent display label.
+    pub telemetry_label: String,
     /// Projection schema version.
     pub schema_version: u16,
 }
@@ -270,6 +293,16 @@ impl DesktopSettingsViewModel {
             toast_verbosity_label: normalized.toast_verbosity.label().to_string(),
             line_numbers_visible: normalized.editor.line_numbers_visible,
             current_line_highlight: normalized.editor.current_line_highlight,
+            sticky_headers_visible: normalized.editor.sticky_headers_visible,
+            code_folding_visible: normalized.editor.code_folding_visible,
+            minimap_visible: normalized.editor.minimap_visible,
+            whitespace_guides_visible: normalized.editor.whitespace_guides_visible,
+            indent_guides_visible: normalized.editor.indent_guides_visible,
+            indexed_workspace_search_enabled: normalized.indexed_workspace_search_enabled,
+            next_edit_prediction_enabled: normalized.next_edit_prediction_enabled,
+            smooth_scrolling_enabled: normalized.editor.smooth_scrolling_enabled,
+            crash_reports_enabled: normalized.telemetry.crash_reports_enabled,
+            telemetry_label: normalized.telemetry.consent_label.clone(),
             schema_version: normalized.schema_version,
         }
     }
@@ -302,6 +335,8 @@ pub struct DesktopProjectionViewModel {
     pub main_canvas_rows: Vec<String>,
     /// Right dock directive and trust summary rows.
     pub directive_panel_rows: Vec<String>,
+    /// First-run onboarding rows.
+    pub onboarding_rows: Vec<String>,
     /// Bottom operational console rows.
     pub bottom_console_rows: Vec<String>,
     /// Mode-specific bottom tab rows.
@@ -346,6 +381,8 @@ pub struct DesktopProjectionViewModel {
     pub git_rows: Vec<String>,
     /// Terminal panel summary rows.
     pub terminal_rows: Vec<String>,
+    /// Test explorer summary rows.
+    pub test_rows: Vec<String>,
     /// Debugger summary rows.
     pub debug_rows: Vec<String>,
     /// Operational health summary rows.
@@ -402,6 +439,7 @@ impl DesktopProjectionViewModel {
         let command_palette_rows = command_palette_rows(snapshot);
         let dock_rows = dock_rows(snapshot, state);
         let dock_panel_rows = dock_panel_rows(snapshot, state);
+        let onboarding_rows = onboarding_rows(snapshot, state);
         Self {
             layout_title: snapshot.layout_projection.layout.title.clone(),
             top_bar_rows: top_bar_rows(snapshot, &flags),
@@ -415,6 +453,7 @@ impl DesktopProjectionViewModel {
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
             directive_panel_rows: directive_panel_rows(snapshot),
+            onboarding_rows,
             bottom_console_rows: bottom_console_rows(snapshot),
             bottom_tab_rows: bottom_tab_rows(snapshot),
             dock_rows,
@@ -437,6 +476,7 @@ impl DesktopProjectionViewModel {
             structural_search_rows: structural_search_rows(snapshot),
             git_rows: git_rows(snapshot),
             terminal_rows: terminal_rows(snapshot),
+            test_rows: test_rows(snapshot),
             debug_rows: debug_rows(snapshot),
             operational_health_rows: operational_health_rows(snapshot),
             manual_control_rows: manual_control_rows(snapshot),
@@ -552,6 +592,7 @@ impl ProjectionView {
                 render_right_dock(
                     ui,
                     snapshot,
+                    state,
                     &model,
                     &mut self.show_trust,
                     &mut self.show_auxiliary,
@@ -740,6 +781,18 @@ fn render_left_sidebar(
     if !model.git_rows.is_empty() {
         section_label(ui, "Git", Some(theme::tokens().accent.green));
         render_compact_rows(ui, &model.git_rows, "No projected git rows", 5);
+        if snapshot.git_projection.branch_label.is_some() {
+            ui.horizontal(|ui| {
+                if soft_button(ui, "Push").clicked() {
+                    actions.push(DesktopAction::PushGitRemote);
+                }
+                if snapshot.git_projection.remote_url.is_some()
+                    && soft_button(ui, "Open PR").clicked()
+                {
+                    actions.push(DesktopAction::OpenGitPullRequestUrl);
+                }
+            });
+        }
     }
 
     if !snapshot.git_projection.conflicts.is_empty() {
@@ -797,6 +850,7 @@ fn render_code_canvas(
 fn render_right_dock(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
     model: &DesktopProjectionViewModel,
     show_trust: &mut bool,
     _show_auxiliary: &mut bool,
@@ -823,6 +877,7 @@ fn render_right_dock(
         }
         DesktopProductMode::LegionWorkflows => render_fleet_console(ui, snapshot, model, actions),
     }
+    render_onboarding_panel(ui, snapshot, state, model, actions);
     render_settings_panel(ui, model, actions);
 }
 
@@ -1070,6 +1125,98 @@ fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapsho
     });
 }
 
+fn render_excerpt_surface(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let surface = &snapshot.excerpt_surface_projection;
+    if surface.sections.is_empty() {
+        return;
+    }
+
+    section_label(ui, "Excerpts", Some(theme::tokens().accent.cyan));
+    theme::small_card_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(theme::muted(format!(
+                "{} buffers projected",
+                surface.sections.len()
+            )));
+            if let Some(active_id) = surface.active_excerpt_id.as_deref() {
+                ui.label(theme::accent(
+                    format!("active {active_id}"),
+                    theme::tokens().accent.green,
+                ));
+            }
+        });
+        for section in &surface.sections {
+            ui.separator();
+            let is_active =
+                surface.active_excerpt_id.as_deref() == Some(section.excerpt_id.as_str());
+            ui.horizontal(|ui| {
+                let mut title = section.title.clone();
+                if section.dirty {
+                    title.push_str(" *");
+                }
+                let response = ui.add(
+                    egui::Button::new(theme::code(title))
+                        .fill(if is_active {
+                            theme::tokens().bg.code
+                        } else {
+                            theme::tokens().bg.panel
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if is_active {
+                                theme::tokens().border.default
+                            } else {
+                                theme::tokens().bg.panel
+                            },
+                        ))
+                        .corner_radius(egui::CornerRadius::same(5)),
+                );
+                if response.clicked()
+                    && let Some(buffer_id) = section.buffer_id
+                {
+                    actions.push(DesktopAction::SwitchTab { buffer_id });
+                }
+                ui.label(theme::muted(format!(
+                    "lines={} cursor={}",
+                    section.lines.len(),
+                    section
+                        .cursor
+                        .map(|cursor| format!("{}:{}", cursor.line + 1, cursor.character + 1))
+                        .unwrap_or_else(|| "-".to_string())
+                )));
+            });
+            for line in section.lines.iter().take(4) {
+                let label = format!("{:>4}: {}", line.line_number + 1, line.visible_text);
+                let response = ui.selectable_label(false, theme::code(label));
+                if response.clicked()
+                    && let Some(buffer_id) = section.buffer_id
+                {
+                    actions.push(DesktopAction::SetCursor {
+                        buffer_id: Some(buffer_id),
+                        cursor: TextCoordinate {
+                            line: line.line_number,
+                            character: 0,
+                            byte_offset: None,
+                            utf16_offset: None,
+                        },
+                    });
+                    actions.push(DesktopAction::SwitchTab { buffer_id });
+                }
+            }
+            if section.lines.len() > 4 {
+                ui.label(theme::muted(format!(
+                    "… {} more lines",
+                    section.lines.len() - 4
+                )));
+            }
+        }
+    });
+}
+
 fn render_window_controls(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         status_dot(ui, theme::tokens().accent.red);
@@ -1079,12 +1226,11 @@ fn render_window_controls(ui: &mut egui::Ui) {
 }
 
 fn render_branch_pill(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
-    let path = current_path(snapshot);
-    let label = if path == "<none>" {
-        "workspace"
-    } else {
-        path.rsplit(['/', '\\']).next().unwrap_or(path)
-    };
+    let label = snapshot
+        .git_projection
+        .branch_label
+        .as_deref()
+        .unwrap_or("workspace");
     pill(
         ui,
         &format!("branch - {label}"),
@@ -1315,6 +1461,7 @@ fn render_editor_canvas(
                 painter.paint_lines(ui, snapshot, model, actions);
             });
     });
+    render_excerpt_surface(ui, snapshot, actions);
     if level == DesktopProductMode::Assist {
         render_assisted_suggestion_panel(ui, snapshot, model, actions);
     }
@@ -1494,6 +1641,43 @@ fn render_code_lines(
                         cursor: next_cursor,
                     });
                 }
+            }
+        });
+
+        let viewport = snapshot.active_buffer_projection.viewport.as_ref();
+        let sticky_scopes = &snapshot.language_tooling_projection.sticky_scopes;
+        let fold_ranges = viewport
+            .map(|viewport| viewport.fold_ranges.as_slice())
+            .unwrap_or(&[]);
+        ui.horizontal_wrapped(|ui| {
+            if model.settings.sticky_headers_visible {
+                ui.label(theme::label("sticky headers"));
+                if let Some(scope) = sticky_scopes.iter().find(|scope| scope.active) {
+                    ui.label(theme::code(&scope.label));
+                    ui.label(theme::code_muted(&scope.kind_label));
+                } else {
+                    ui.label(theme::muted("<none>"));
+                }
+            }
+            if model.settings.code_folding_visible {
+                ui.label(theme::label("folding"));
+                ui.label(theme::code(format!("{} ranges", fold_ranges.len())));
+            }
+            if model.settings.minimap_visible {
+                ui.label(theme::label("minimap"));
+                ui.label(theme::muted(format!(
+                    "{} lines",
+                    model.active_buffer_code_lines.len()
+                )));
+            }
+            if model.settings.whitespace_guides_visible {
+                ui.label(theme::label("whitespace guides"));
+            }
+            if model.settings.indent_guides_visible {
+                ui.label(theme::label("indent guides"));
+            }
+            if model.settings.smooth_scrolling_enabled {
+                ui.label(theme::label("smooth scrolling"));
             }
         });
 
@@ -1963,6 +2147,23 @@ fn render_assisted_suggestion_panel(
                 }
             });
         }
+        let attempts = snapshot
+            .assist_inline_prediction_projection
+            .after_edit_prediction_attempts;
+        if attempts > 0 {
+            let accepts = snapshot
+                .assist_inline_prediction_projection
+                .after_edit_prediction_accepts;
+            let precision = (accepts.saturating_mul(100)) / attempts.max(1);
+            ui.horizontal_wrapped(|ui| {
+                pill(
+                    ui,
+                    &format!("next-edit precision: {accepts}/{attempts} ({precision}%)"),
+                    theme::tokens().accent.orange,
+                    true,
+                );
+            });
+        }
         section_label(ui, "Context Chips", Some(theme::tokens().accent.violet));
         theme::small_card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -2338,7 +2539,7 @@ fn render_task_board(
                         "TESTING"
                     },
                     theme::tokens().accent.violet,
-                    model.language_rows.iter().take(4).cloned().collect(),
+                    model.test_rows.iter().take(4).cloned().collect(),
                     actions,
                 );
                 task_column(
@@ -2412,6 +2613,13 @@ fn render_manual_context_inspector(
     )));
     section_label(ui, "Symbols", None);
     render_compact_rows(ui, &model.language_rows, "No language symbols", 5);
+    section_label(ui, "Tests", Some(theme::tokens().accent.green));
+    render_compact_rows(ui, &model.test_rows, "No projected test explorer", 6);
+    if soft_button(ui, "Run cargo test").clicked() {
+        actions.push(DesktopAction::TerminalLaunch {
+            command_label: "cargo test".to_string(),
+        });
+    }
     section_label(ui, "Problems", None);
     ui.label(theme::muted(format!(
         "{} problems",
@@ -2453,6 +2661,68 @@ fn render_manual_context_inspector(
         if soft_button(ui, "Save All").clicked() {
             actions.push(DesktopAction::SaveAll);
         }
+    });
+}
+
+fn render_onboarding_panel(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if !state.first_run_onboarding_visible {
+        return;
+    }
+
+    section_label(
+        ui,
+        "First-run onboarding",
+        Some(theme::tokens().accent.orange),
+    );
+    theme::small_card_frame().show(ui, |ui| {
+        ui.label(theme::body(
+            "Quick start: trust, telemetry, provider setup, keybindings, and mode tour.",
+        ));
+        render_compact_rows(
+            ui,
+            &model.onboarding_rows,
+            "No first-run guidance projected",
+            6,
+        );
+        ui.horizontal_wrapped(|ui| {
+            if soft_button(ui, "Open Settings").clicked() {
+                actions.push(DesktopAction::OpenSettings);
+            }
+            if soft_button(ui, "Manual").clicked() {
+                actions.push(DesktopAction::SetProductMode {
+                    mode: DockMode::Manual,
+                });
+            }
+            if soft_button(ui, "Assist").clicked() {
+                actions.push(DesktopAction::SetProductMode {
+                    mode: DockMode::Assist,
+                });
+            }
+            if soft_button(ui, "Delegates").clicked() {
+                actions.push(DesktopAction::SetProductMode {
+                    mode: DockMode::Delegate,
+                });
+            }
+            if soft_button(ui, "Legion Workflows").clicked() {
+                actions.push(DesktopAction::SetProductMode {
+                    mode: DockMode::Automate,
+                });
+            }
+            if soft_button(ui, "Dismiss").clicked() {
+                actions.push(DesktopAction::DismissOnboarding);
+            }
+        });
+        ui.separator();
+        ui.label(theme::muted(format!(
+            "workspace trust: review the workspace prompt before enabling remote or delegated flows; active mode is {}",
+            projected_product_mode(snapshot).label()
+        )));
     });
 }
 
@@ -2561,6 +2831,79 @@ fn render_settings_panel(
                 enabled: current_line_highlight,
             });
         }
+        let mut sticky_headers_visible = model.settings.sticky_headers_visible;
+        if ui
+            .checkbox(&mut sticky_headers_visible, "Sticky headers")
+            .changed()
+        {
+            actions.push(DesktopAction::SetStickyHeadersVisible {
+                visible: sticky_headers_visible,
+            });
+        }
+        let mut code_folding_visible = model.settings.code_folding_visible;
+        if ui
+            .checkbox(&mut code_folding_visible, "Code folding")
+            .changed()
+        {
+            actions.push(DesktopAction::SetCodeFoldingVisible {
+                visible: code_folding_visible,
+            });
+        }
+        let mut minimap_visible = model.settings.minimap_visible;
+        if ui.checkbox(&mut minimap_visible, "Minimap").changed() {
+            actions.push(DesktopAction::SetMinimapVisible {
+                visible: minimap_visible,
+            });
+        }
+        let mut whitespace_guides_visible = model.settings.whitespace_guides_visible;
+        if ui
+            .checkbox(&mut whitespace_guides_visible, "Whitespace guides")
+            .changed()
+        {
+            actions.push(DesktopAction::SetWhitespaceGuidesVisible {
+                visible: whitespace_guides_visible,
+            });
+        }
+        let mut indent_guides_visible = model.settings.indent_guides_visible;
+        if ui
+            .checkbox(&mut indent_guides_visible, "Indent guides")
+            .changed()
+        {
+            actions.push(DesktopAction::SetIndentGuidesVisible {
+                visible: indent_guides_visible,
+            });
+        }
+        let mut smooth_scrolling_enabled = model.settings.smooth_scrolling_enabled;
+        if ui
+            .checkbox(&mut smooth_scrolling_enabled, "Smooth scrolling")
+            .changed()
+        {
+            actions.push(DesktopAction::SetSmoothScrollingEnabled {
+                enabled: smooth_scrolling_enabled,
+            });
+        }
+        let mut next_edit_prediction_enabled = model.settings.next_edit_prediction_enabled;
+        if ui
+            .checkbox(&mut next_edit_prediction_enabled, "Next-edit prediction")
+            .changed()
+        {
+            actions.push(DesktopAction::SetNextEditPredictionEnabled {
+                enabled: next_edit_prediction_enabled,
+            });
+        }
+        let mut crash_reports_enabled = model.settings.crash_reports_enabled;
+        if ui
+            .checkbox(&mut crash_reports_enabled, "Crash reports")
+            .changed()
+        {
+            actions.push(DesktopAction::SetCrashReportsEnabled {
+                enabled: crash_reports_enabled,
+            });
+        }
+        ui.label(theme::muted(format!(
+            "Telemetry consent: {}",
+            model.settings.telemetry_label
+        )));
         ui.horizontal(|ui| {
             ui.label(theme::muted(format!(
                 "schema v{} - {} - {}",
@@ -4457,7 +4800,32 @@ fn main_canvas_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             snapshot.language_tooling_projection.definitions.len(),
             snapshot.language_tooling_projection.references.len()
         ),
-        format!("search strip: {}", search.header),
+        format!(
+            "editor polish: sticky_headers={} code_folding={} minimap={} whitespace_guides={} indent_guides={} smooth_scrolling={} fold_ranges={} sticky_scopes={}",
+            snapshot.settings_projection.editor.sticky_headers_visible,
+            snapshot.settings_projection.editor.code_folding_visible,
+            snapshot.settings_projection.editor.minimap_visible,
+            snapshot.settings_projection.editor.whitespace_guides_visible,
+            snapshot.settings_projection.editor.indent_guides_visible,
+            snapshot.settings_projection.editor.smooth_scrolling_enabled,
+            snapshot.active_buffer_projection.viewport.as_ref().map(|viewport| viewport.fold_ranges.len()).unwrap_or(0),
+            snapshot.language_tooling_projection.sticky_scopes.len(),
+        ),
+        "keyboard: Tab accepts completion; Enter opens quick fixes; arrows move between results; Escape dismisses hover".to_string(),
+        format!(
+            "search strip: {}",
+            search.header
+        ),
+        format!(
+            "excerpt surface: sections={} lines={}",
+            snapshot.excerpt_surface_projection.sections.len(),
+            snapshot
+                .excerpt_surface_projection
+                .sections
+                .iter()
+                .map(|section| section.lines.len())
+                .sum::<usize>()
+        ),
         format!(
             "structural search strip: status={:?} matches={} proposal={:?}",
             snapshot.structural_search_projection.status.kind,
@@ -5515,13 +5883,30 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             .map(inline_prediction_row),
     );
     let assisted = &snapshot.assisted_ai_projection;
-    if assisted.provider_count > 0 || assisted.request_count > 0 || assisted.refusal_count > 0 {
+    let budget_evaluation_count: u32 = assisted
+        .requests
+        .iter()
+        .map(|request| request.permission_budget_evaluation_count)
+        .sum();
+    let refused_budget_evaluation_count: u32 = assisted
+        .requests
+        .iter()
+        .map(|request| request.refused_permission_budget_evaluation_count)
+        .sum();
+    if assisted.provider_count > 0
+        || assisted.request_count > 0
+        || assisted.refusal_count > 0
+        || budget_evaluation_count > 0
+        || refused_budget_evaluation_count > 0
+    {
         rows.push(format!(
-            "assisted ai: {} providers, {} requests, {} refusals, {} previews",
+            "assisted ai: {} providers, {} requests, {} refusals, {} previews, {} budget evals ({} refused)",
             assisted.provider_count,
             assisted.request_count,
             assisted.refusal_count,
-            assisted.preview_ready_count
+            assisted.preview_ready_count,
+            budget_evaluation_count,
+            refused_budget_evaluation_count
         ));
     }
     rows.extend(assisted.providers.iter().take(8).map(|provider| {
@@ -5580,13 +5965,16 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     );
     rows.extend(assisted.requests.iter().take(8).map(|request| {
         format!(
-            "assisted request {}: op={:?} payload={:?} targets={} omitted={} capability={} route={:?} refs={}/{}/{} approval={} checkpoint={} labels={}",
+            "assisted request {}: op={:?} payload={:?} targets={} omitted={} capability={} cost={} budget_evals={}/{} route={:?} refs={}/{}/{} approval={} checkpoint={} labels={}",
             request.request_id,
             request.operation_class,
             request.proposal_payload_kind,
             request.proposal_target_count,
             request.omitted_target_count,
             request.required_capability.0,
+            request.provider.cost_budget_label,
+            request.permission_budget_evaluation_count,
+            request.refused_permission_budget_evaluation_count,
             request.route_decision.disposition,
             request.context_manifest.reference_id,
             request.privacy_inspector.reference_id,
@@ -5601,8 +5989,21 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         )
     }));
     rows.extend(assisted.proposal_previews.iter().take(8).map(|preview| {
+        let request = assisted
+            .requests
+            .iter()
+            .find(|request| request.request_id == preview.request_id);
+        let request_cost = request
+            .map(|request| request.provider.cost_budget_label.as_str())
+            .unwrap_or("<unknown>");
+        let request_budget_evals = request
+            .map(|request| request.permission_budget_evaluation_count)
+            .unwrap_or(0);
+        let request_budget_refusals = request
+            .map(|request| request.refused_permission_budget_evaluation_count)
+            .unwrap_or(0);
         format!(
-            "assisted preview {}: proposal={} readiness={:?} preview_ready={} approval_ready={} apply_ready={} ledger={} diff={:?} targets={} risk={:?} privacy={:?}",
+            "assisted preview {}: proposal={} readiness={:?} preview_ready={} approval_ready={} apply_ready={} ledger={} diff={:?} targets={} cost={} budget_evals={}/{} risk={:?} privacy={:?}",
             preview.preview_id,
             preview.proposal_id.0,
             preview.readiness,
@@ -5612,6 +6013,9 @@ fn assistant_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             preview.ledger_row_present,
             preview.diff_summary.kind,
             preview.target_coverage.targets.len(),
+            request_cost,
+            request_budget_evals,
+            request_budget_refusals,
             preview.risk_label,
             preview.privacy_label
         )
@@ -5918,7 +6322,7 @@ fn legion_workflow_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     )];
     rows.extend(workflows.rows.iter().map(|row| {
         format!(
-            "legion workflow session {}: state={:?} workers={} provider_routes={} dependencies={} conflicts={} verification={}/{} signoff={}/{} proposals={} merge={:?} blockers={} labels={}",
+            "workflow {}: state={:?} workers={} provider_routes={} dependencies={} conflicts={} verification={}/{} signoff={}/{} proposals={} directive_artifact={} spec_artifact={} task_graph_artifact={} merge={:?} labels={}",
             row.session_id.0,
             row.lifecycle_state,
             row.worker_count,
@@ -5930,9 +6334,11 @@ fn legion_workflow_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             row.signed_off_count,
             row.sign_off_count,
             row.linked_proposals.len(),
+            row.directive_artifact_id.as_deref().unwrap_or("<none>"),
+            row.spec_artifact_id.as_deref().unwrap_or("<none>"),
+            row.task_graph_artifact_id.as_deref().unwrap_or("<none>"),
             row.merge_readiness.state,
-            row.merge_readiness.blockers.len(),
-            bounded_join(&row.display_safe_labels)
+            row.display_safe_labels.join("|")
         )
     }));
     rows.extend(workflows.rows.iter().flat_map(|row| {
@@ -6040,6 +6446,49 @@ fn bounded_join(values: &[String]) -> String {
     }
 }
 
+fn onboarding_rows(
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+) -> Vec<String> {
+    if !state.first_run_onboarding_visible {
+        return Vec::new();
+    }
+
+    let settings = DesktopSettingsViewModel::from_projection(&snapshot.settings_projection);
+    let assisted = &snapshot.assisted_ai_projection;
+    let level = projected_product_mode(snapshot);
+    let mut rows = vec![
+        format!(
+            "workspace trust: review the workspace prompt before enabling remote or delegated flows; current mode is {}",
+            level.label()
+        ),
+        format!(
+            "telemetry and crash consent: crash_reports={} telemetry={}",
+            settings.crash_reports_enabled, settings.telemetry_label
+        ),
+        format!(
+            "provider setup: local-first defaults with {} projected providers; use the model picker for BYOK or local provider setup",
+            assisted.provider_count
+        ),
+        format!(
+            "keybinding scheme: keep the keyboard reference handy and pick the shortcut workflow that matches your muscle memory"
+        ),
+        format!(
+            "mode switch tour: Manual -> Assist -> Delegates -> Automate; active mode is {}",
+            level.label()
+        ),
+    ];
+
+    if assisted.provider_count == 0 {
+        rows.push(
+            "model picker: no providers are projected yet; configure a local provider before using Assist or Delegates"
+                .to_string(),
+        );
+    }
+
+    rows
+}
+
 fn manual_control_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let level = projected_product_mode(snapshot);
     let language = &snapshot.language_tooling_projection;
@@ -6121,8 +6570,30 @@ fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         ));
     }
     if let Some(hover) = &language.hover {
-        rows.push(format!("hover: {} {}", hover.label, hover.summary));
+        rows.push(format!("hover {} {}", hover.hover_id, hover.label));
+        rows.push(format!("hover docs {} {}", hover.label, hover.summary));
     }
+    rows.extend(language.problems.iter().take(12).map(|problem| {
+        let location = problem
+            .path
+            .as_ref()
+            .map(|path| {
+                if let Some(range) = &problem.range {
+                    format!("{}:{}..{}", path.0, range.start.line, range.end.line)
+                } else {
+                    path.0.clone()
+                }
+            })
+            .unwrap_or_else(|| "<unknown-path>".to_string());
+        format!(
+            "problem {} severity={:?} code={} source={} {}",
+            location,
+            problem.severity,
+            problem.code_label.as_deref().unwrap_or("<none>"),
+            problem.source_label.as_deref().unwrap_or("<none>"),
+            problem.message
+        )
+    }));
     rows.extend(language.quick_fixes.iter().take(10).map(|quick_fix| {
         format!(
             "quick fix {} {} severity={:?} proposal={:?}",
@@ -6168,6 +6639,51 @@ fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             lens.kind_label,
             lens.data_label,
             lens.source_label
+        )
+    }));
+    rows.extend(language.completions.iter().take(20).map(|completion| {
+        format!(
+            "completion {} {} kind={} score={} detail={} degraded={}",
+            completion.completion_id,
+            completion.label,
+            completion.kind_label,
+            completion.score_basis_points,
+            completion.detail_label.as_deref().unwrap_or("<none>"),
+            completion.degraded
+        )
+    }));
+    rows.extend(language.definitions.iter().take(12).map(|definition| {
+        let location = definition
+            .path
+            .as_ref()
+            .map(|path| {
+                if let Some(range) = &definition.range {
+                    format!("{}:{}", path.0, range.start.line)
+                } else {
+                    path.0.clone()
+                }
+            })
+            .unwrap_or_else(|| "<unknown-path>".to_string());
+        format!(
+            "definition {} {} {} degraded={}",
+            definition.location_id, location, definition.label, definition.degraded
+        )
+    }));
+    rows.extend(language.references.iter().take(12).map(|reference| {
+        let location = reference
+            .path
+            .as_ref()
+            .map(|path| {
+                if let Some(range) = &reference.range {
+                    format!("{}:{}", path.0, range.start.line)
+                } else {
+                    path.0.clone()
+                }
+            })
+            .unwrap_or_else(|| "<unknown-path>".to_string());
+        format!(
+            "reference {} {} {} degraded={}",
+            reference.location_id, location, reference.label, reference.degraded
         )
     }));
     rows.extend(language.operations.iter().map(|operation| {
@@ -6247,15 +6763,17 @@ fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         || !git.blame_lines.is_empty()
         || !git.commits.is_empty()
         || !git.conflicts.is_empty()
+        || !git.worktrees.is_empty()
         || !git.diagnostics.is_empty()
     {
         rows.push(format!(
-            "git: branch={} head={} changes={} hunks={} conflicts={}",
+            "git: branch={} head={} changes={} hunks={} conflicts={} worktrees={}",
             git.branch_label.as_deref().unwrap_or("<none>"),
             git.head_short.as_deref().unwrap_or("<none>"),
             git.changed_files.len(),
             git.hunks.len(),
-            git.conflicts.len()
+            git.conflicts.len(),
+            git.worktrees.len()
         ));
     }
     rows.extend(git.changed_files.iter().take(16).map(|file| {
@@ -6298,6 +6816,16 @@ fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             conflict.path,
             conflict.marker_count,
             bounded_join(&conflict.actions)
+        )
+    }));
+    rows.extend(git.worktrees.iter().take(12).map(|worktree| {
+        format!(
+            "git worktree {} branch={} head={} kind={:?} prunable={}",
+            worktree.path,
+            worktree.branch_label.as_deref().unwrap_or("<detached>"),
+            worktree.head_short.as_deref().unwrap_or("<none>"),
+            worktree.kind,
+            worktree.prunable
         )
     }));
     rows.extend(
@@ -6418,6 +6946,69 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             .take(8)
             .map(|diagnostic| format!("debug diagnostic {diagnostic}")),
     );
+    rows
+}
+
+fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let verification = &snapshot.verification_run_projection;
+    let runnable_lenses = snapshot
+        .language_tooling_projection
+        .code_lenses
+        .iter()
+        .filter(|lens| lens.kind_label.contains("runnable"))
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    if !verification.rows.is_empty() || !runnable_lenses.is_empty() {
+        rows.push(format!(
+            "test explorer: verification_runs={} runnable_lenses={} omitted={} projection={}",
+            verification.rows.len(),
+            runnable_lenses.len(),
+            verification.omitted_row_count,
+            verification.projection_id
+        ));
+    }
+    rows.extend(verification.rows.iter().take(12).map(|row| {
+        let targets = if row.target_labels.is_empty() {
+            "<none>".to_string()
+        } else {
+            row.target_labels.join(",")
+        };
+        let exit_code = row
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "pending".to_string());
+        format!(
+            "run {}: label={} state={:?} class={} targets={} exit={} evidence={} body_redacted={}",
+            row.run_id,
+            row.label,
+            row.state,
+            row.command_class_label,
+            targets,
+            exit_code,
+            row.evidence_artifact_id.as_deref().unwrap_or("<none>"),
+            row.command_body_redacted
+        )
+    }));
+    rows.extend(runnable_lenses.into_iter().take(12).map(|lens| {
+        let range_label = lens.range.as_ref().map_or_else(
+            || "<none>".to_string(),
+            |range| {
+                format!(
+                    "{}:{}..{}:{}",
+                    range.start.line, range.start.character, range.end.line, range.end.character
+                )
+            },
+        );
+        format!(
+            "runnable lens {}: title={} command={} source={} range={} data={}",
+            lens.lens_id,
+            lens.title,
+            lens.command_label,
+            lens.source_label,
+            range_label,
+            lens.data_label.as_deref().unwrap_or("<none>")
+        )
+    }));
     rows
 }
 

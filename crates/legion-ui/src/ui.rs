@@ -16,8 +16,9 @@ use legion_protocol::{
     ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
     ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
     RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
-    TerminalSessionId, TextCoordinate, TimestampMillis, VerificationRunProjection, ViewportScroll,
-    WorkspaceId, product_mode_allows_runtime_surface,
+    TerminalSessionId, TextCoordinate, TimestampMillis, Utf16Range, VerificationRunProjection,
+    ViewportLineTruncationState, ViewportScroll, WorkbenchTelemetryConsent, WorkspaceId,
+    product_mode_allows_runtime_surface,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -939,6 +940,10 @@ pub struct AssistInlinePredictionProjection {
     pub request_in_flight: bool,
     /// Number of omitted or stale prediction rows represented by metadata.
     pub stale_prediction_count: usize,
+    /// After-edit prediction attempts represented in the current projection.
+    pub after_edit_prediction_attempts: usize,
+    /// After-edit prediction accepts represented in the current projection.
+    pub after_edit_prediction_accepts: usize,
     /// Projection generation timestamp.
     pub generated_at: TimestampMillis,
     /// Projection schema version.
@@ -953,6 +958,8 @@ impl AssistInlinePredictionProjection {
             rows: Vec::new(),
             request_in_flight: false,
             stale_prediction_count: 0,
+            after_edit_prediction_attempts: 0,
+            after_edit_prediction_accepts: 0,
             generated_at: TimestampMillis(0),
             schema_version: 1,
         }
@@ -1070,6 +1077,74 @@ pub struct DailyEditingProjection {
     pub viewport_states: Vec<EditorViewportStateProjection>,
     /// Metadata-only session summary for restore surfaces.
     pub session_record: Option<WorkspaceSessionRecordProjection>,
+}
+
+/// One excerpt row in a multibuffer excerpt surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcerptSurfaceLineProjection {
+    /// Zero-based source line number.
+    pub line_number: u32,
+    /// Visible excerpt text.
+    pub visible_text: String,
+    /// Source range for the visible excerpt.
+    pub range: Utf16Range,
+    /// Truncation state for the visible excerpt slice.
+    pub truncation_state: ViewportLineTruncationState,
+}
+
+/// One excerpt section composed from a source buffer snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcerptSurfaceSectionProjection {
+    /// Stable excerpt section identifier.
+    pub excerpt_id: String,
+    /// Owning workspace identifier when available.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Source buffer identifier when available.
+    pub buffer_id: Option<BufferId>,
+    /// Source file identifier when available.
+    pub file_id: Option<FileId>,
+    /// Canonical source path when available.
+    pub file_path: Option<CanonicalPath>,
+    /// Display title for the source buffer.
+    pub title: String,
+    /// Whether the source buffer currently has unsaved edits.
+    pub dirty: bool,
+    /// Whether the source buffer remains directly editable.
+    pub editable: bool,
+    /// Snapshot identifier used to produce this excerpt section.
+    pub snapshot_id: Option<SnapshotId>,
+    /// Projected cursor for the source buffer when available.
+    pub cursor: Option<TextCoordinate>,
+    /// Visible lines from the source buffer snapshot.
+    pub lines: Vec<ExcerptSurfaceLineProjection>,
+}
+
+/// Projection-only multibuffer excerpt surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcerptSurfaceProjection {
+    /// Ordered excerpt sections projected from open buffers.
+    pub sections: Vec<ExcerptSurfaceSectionProjection>,
+    /// Active excerpt section identifier when one is focused.
+    pub active_excerpt_id: Option<String>,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl ExcerptSurfaceProjection {
+    /// Construct an empty excerpt surface projection.
+    pub fn empty() -> Self {
+        Self {
+            sections: Vec::new(),
+            active_excerpt_id: None,
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for ExcerptSurfaceProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl DailyEditingProjection {
@@ -1433,6 +1508,30 @@ pub enum GitConflictChoiceProjection {
     AcceptIncoming,
 }
 
+/// Projected git worktree classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitWorktreeKindProjection {
+    /// Worktree used for delegated agent isolation.
+    Agent,
+    /// Human-managed worktree.
+    Manual,
+}
+
+/// Projected git worktree row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitWorktreeProjection {
+    /// Worktree path.
+    pub path: String,
+    /// Current branch label when available.
+    pub branch_label: Option<String>,
+    /// Current short HEAD hash when available.
+    pub head_short: Option<String>,
+    /// Worktree category.
+    pub kind: GitWorktreeKindProjection,
+    /// Whether git considers the worktree prunable/orphaned.
+    pub prunable: bool,
+}
+
 /// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProjection {
@@ -1442,6 +1541,10 @@ pub struct GitProjection {
     pub branch_label: Option<String>,
     /// Current short HEAD hash.
     pub head_short: Option<String>,
+    /// Repository origin remote URL.
+    pub remote_url: Option<String>,
+    /// Origin default branch label.
+    pub remote_default_branch: Option<String>,
     /// Changed files.
     pub changed_files: Vec<GitFileProjection>,
     /// Staged and unstaged hunks.
@@ -1452,6 +1555,8 @@ pub struct GitProjection {
     pub commits: Vec<GitCommitProjection>,
     /// Conflict marker rows.
     pub conflicts: Vec<GitConflictProjection>,
+    /// Projected worktree rows.
+    pub worktrees: Vec<GitWorktreeProjection>,
     /// Display-safe diagnostics.
     pub diagnostics: Vec<String>,
     /// Generated timestamp.
@@ -1467,11 +1572,14 @@ impl GitProjection {
             root_label: None,
             branch_label: None,
             head_short: None,
+            remote_url: None,
+            remote_default_branch: None,
             changed_files: Vec::new(),
             hunks: Vec::new(),
             blame_lines: Vec::new(),
             commits: Vec::new(),
             conflicts: Vec::new(),
+            worktrees: Vec::new(),
             diagnostics: Vec::new(),
             generated_at: TimestampMillis(0),
             schema_version: 1,
@@ -1944,6 +2052,18 @@ pub struct EditorSettingsProjection {
     pub line_numbers_visible: bool,
     /// Whether the active line receives a background highlight.
     pub current_line_highlight: bool,
+    /// Whether sticky function/scope headers are visible.
+    pub sticky_headers_visible: bool,
+    /// Whether code folding indicators are visible.
+    pub code_folding_visible: bool,
+    /// Whether the minimap is visible.
+    pub minimap_visible: bool,
+    /// Whether whitespace guides are visible.
+    pub whitespace_guides_visible: bool,
+    /// Whether indent guides are visible.
+    pub indent_guides_visible: bool,
+    /// Whether smooth scrolling is enabled.
+    pub smooth_scrolling_enabled: bool,
 }
 
 impl Default for EditorSettingsProjection {
@@ -1951,6 +2071,12 @@ impl Default for EditorSettingsProjection {
         Self {
             line_numbers_visible: true,
             current_line_highlight: true,
+            sticky_headers_visible: true,
+            code_folding_visible: true,
+            minimap_visible: false,
+            whitespace_guides_visible: false,
+            indent_guides_visible: false,
+            smooth_scrolling_enabled: true,
         }
     }
 }
@@ -1968,6 +2094,12 @@ pub struct SettingsProjection {
     pub toast_verbosity: ToastVerbosityProjection,
     /// Editor options.
     pub editor: EditorSettingsProjection,
+    /// Telemetry consent state.
+    pub telemetry: WorkbenchTelemetryConsent,
+    /// Whether workspace search may use the optional indexed backend.
+    pub indexed_workspace_search_enabled: bool,
+    /// Whether next-edit prediction should auto-trigger after edits.
+    pub next_edit_prediction_enabled: bool,
     /// Projection schema version.
     pub schema_version: u16,
 }
@@ -1990,6 +2122,13 @@ impl SettingsProjection {
         self.editor_font_size_pt = self
             .editor_font_size_pt
             .clamp(Self::MIN_EDITOR_FONT_SIZE_PT, Self::MAX_EDITOR_FONT_SIZE_PT);
+        self.telemetry.enabled = self.telemetry.crash_reports_enabled;
+        self.telemetry.raw_source_allowed = false;
+        self.telemetry.consent_label = if self.telemetry.crash_reports_enabled {
+            "crash-reports".to_string()
+        } else {
+            "local-only".to_string()
+        };
         if self.schema_version == 0 {
             self.schema_version = 1;
         }
@@ -2005,6 +2144,9 @@ impl Default for SettingsProjection {
             editor_font_size_pt: 12,
             toast_verbosity: ToastVerbosityProjection::WarningsAndErrors,
             editor: EditorSettingsProjection::default(),
+            telemetry: WorkbenchTelemetryConsent::default(),
+            indexed_workspace_search_enabled: false,
+            next_edit_prediction_enabled: false,
             schema_version: 1,
         }
     }
@@ -2149,10 +2291,55 @@ pub enum CommandDispatchIntent {
     },
     /// Toggle current-line highlighting.
     SetCurrentLineHighlight {
-        /// Whether the current line should be highlighted.
+        /// Whether current-line highlighting is enabled.
         enabled: bool,
     },
-    /// Reset app-owned workbench settings to defaults.
+    /// Toggle sticky headers.
+    SetStickyHeadersVisible {
+        /// Whether sticky headers should be visible.
+        visible: bool,
+    },
+    /// Toggle code folding indicators.
+    SetCodeFoldingVisible {
+        /// Whether code folding indicators should be visible.
+        visible: bool,
+    },
+    /// Toggle the minimap.
+    SetMinimapVisible {
+        /// Whether the minimap should be visible.
+        visible: bool,
+    },
+    /// Toggle whitespace guides.
+    SetWhitespaceGuidesVisible {
+        /// Whether whitespace guides should be visible.
+        visible: bool,
+    },
+    /// Toggle indent guides.
+    SetIndentGuidesVisible {
+        /// Whether indent guides should be visible.
+        visible: bool,
+    },
+    /// Toggle smooth scrolling.
+    SetSmoothScrollingEnabled {
+        /// Whether smooth scrolling should be enabled.
+        enabled: bool,
+    },
+    /// Toggle workspace search using the optional indexed backend.
+    SetIndexedWorkspaceSearchEnabled {
+        /// Whether workspace search should use the optional indexed backend.
+        enabled: bool,
+    },
+    /// Toggle next-edit prediction after buffer edits.
+    SetNextEditPredictionEnabled {
+        /// Whether next-edit prediction should auto-trigger after edits.
+        enabled: bool,
+    },
+    /// Toggle crash report consent.
+    SetCrashReportsEnabled {
+        /// Whether crash reports should be enabled.
+        enabled: bool,
+    },
+    /// Reset app-owned settings to defaults.
     ResetSettings,
     /// Run bounded lexical search through app authority.
     RunSearch {
@@ -2202,6 +2389,38 @@ pub enum CommandDispatchIntent {
     CommitGitChanges {
         /// Commit message entered in the git editor.
         message: String,
+    },
+    /// Switch to an existing git branch.
+    SwitchGitBranch {
+        /// Branch label entered by the user.
+        branch: String,
+    },
+    /// Create and switch to a new git branch.
+    CreateGitBranch {
+        /// New branch label entered by the user.
+        branch: String,
+    },
+    /// Delete a git branch.
+    DeleteGitBranch {
+        /// Branch label entered by the user.
+        branch: String,
+    },
+    /// Stash local git changes.
+    StashGitChanges {
+        /// Optional stash message.
+        message: Option<String>,
+    },
+    /// Push the current branch to a remote.
+    PushGitRemote {
+        /// Remote name.
+        remote: String,
+    },
+    /// Prune orphaned worktree metadata.
+    PruneGitWorktrees,
+    /// Remove a projected worktree by path.
+    RemoveGitWorktree {
+        /// Projected worktree path.
+        path: String,
     },
     /// Refresh debugger configuration projections.
     RefreshDebugConfigurations,
@@ -2790,11 +3009,13 @@ pub struct ShellProjectionSnapshot {
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Collaboration GUI summary projection supplied by the application layer.
     pub collaboration_gui_projection: CollaborationGuiProjection,
-    /// Remote workspace GUI summary projection supplied by the application layer.
+    /// Static remote workspace GUI summary projection.
     pub remote_gui_projection: RemoteGuiProjection,
-    /// Daily-editing projection supplied by the application layer.
+    /// Static daily-editing projection.
     pub daily_editing_projection: DailyEditingProjection,
-    /// Search projection supplied by the application layer.
+    /// Static multibuffer excerpt projection.
+    pub excerpt_surface_projection: ExcerptSurfaceProjection,
+    /// Static search projection.
     pub search_projection: SearchProjection,
     /// Structural search projection supplied by the application layer.
     pub structural_search_projection: StructuralSearchProjection,
@@ -2883,6 +3104,8 @@ pub struct Shell {
     pub remote_gui_projection: RemoteGuiProjection,
     /// Static daily-editing projection.
     pub daily_editing_projection: DailyEditingProjection,
+    /// Static multibuffer excerpt projection.
+    pub excerpt_surface_projection: ExcerptSurfaceProjection,
     /// Static search projection.
     pub search_projection: SearchProjection,
     /// Static structural search projection.
@@ -2929,6 +3152,7 @@ impl Shell {
             collaboration_gui_projection: snapshot.collaboration_gui_projection,
             remote_gui_projection: snapshot.remote_gui_projection,
             daily_editing_projection: snapshot.daily_editing_projection,
+            excerpt_surface_projection: snapshot.excerpt_surface_projection,
             search_projection: snapshot.search_projection,
             structural_search_projection: snapshot.structural_search_projection,
             git_projection: snapshot.git_projection,
@@ -2971,6 +3195,7 @@ impl Shell {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -3009,6 +3234,7 @@ impl Shell {
             collaboration_gui_projection: self.collaboration_gui_projection.clone(),
             remote_gui_projection: self.remote_gui_projection.clone(),
             daily_editing_projection: self.daily_editing_projection.clone(),
+            excerpt_surface_projection: self.excerpt_surface_projection.clone(),
             search_projection: self.search_projection.clone(),
             structural_search_projection: self.structural_search_projection.clone(),
             git_projection: self.git_projection.clone(),
@@ -3046,6 +3272,7 @@ impl Shell {
         self.collaboration_gui_projection = snapshot.collaboration_gui_projection;
         self.remote_gui_projection = snapshot.remote_gui_projection;
         self.daily_editing_projection = snapshot.daily_editing_projection;
+        self.excerpt_surface_projection = snapshot.excerpt_surface_projection;
         self.search_projection = snapshot.search_projection;
         self.structural_search_projection = snapshot.structural_search_projection;
         self.git_projection = snapshot.git_projection;
@@ -3467,7 +3694,7 @@ impl Shell {
             );
             for row in &workflows.rows {
                 println!(
-                    "- workflow {} state={:?} workers={} provider_routes={} dependencies={} conflicts={} verification={}/{} signoff={}/{} proposals={} merge={:?} labels={}",
+                    "- workflow {} state={:?} workers={} provider_routes={} dependencies={} conflicts={} verification={}/{} signoff={}/{} proposals={} directive_artifact={} spec_artifact={} task_graph_artifact={} merge={:?} labels={}",
                     row.session_id.0,
                     row.lifecycle_state,
                     row.worker_count,
@@ -3479,6 +3706,9 @@ impl Shell {
                     row.signed_off_count,
                     row.sign_off_count,
                     row.linked_proposals.len(),
+                    row.directive_artifact_id.as_deref().unwrap_or("<none>"),
+                    row.spec_artifact_id.as_deref().unwrap_or("<none>"),
+                    row.task_graph_artifact_id.as_deref().unwrap_or("<none>"),
                     row.merge_readiness.state,
                     row.display_safe_labels.join("|")
                 );
@@ -3816,6 +4046,54 @@ impl Shell {
         }
         if trimmed == ":git-refresh" {
             return Ok(Some(self.push_intent(CommandDispatchIntent::RefreshGit)));
+        }
+        if let Some(branch) = trimmed.strip_prefix(":git-switch-branch ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::SwitchGitBranch {
+                    branch: branch.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(branch) = trimmed.strip_prefix(":git-create-branch ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::CreateGitBranch {
+                    branch: branch.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(branch) = trimmed.strip_prefix(":git-delete-branch ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::DeleteGitBranch {
+                    branch: branch.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(message) = trimmed.strip_prefix(":git-stash ") {
+            let message = message.trim();
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::StashGitChanges {
+                    message: (!message.is_empty()).then(|| message.to_string()),
+                },
+            )));
+        }
+        if trimmed == ":git-push" {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::PushGitRemote {
+                    remote: "origin".to_string(),
+                },
+            )));
+        }
+        if trimmed == ":git-prune-worktrees" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::PruneGitWorktrees),
+            ));
+        }
+        if let Some(path) = trimmed.strip_prefix(":git-remove-worktree ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RemoveGitWorktree {
+                    path: path.trim().to_string(),
+                },
+            )));
         }
         if let Some(hunk_id) = trimmed.strip_prefix(":git-stage-hunk ") {
             return Ok(Some(self.push_intent(
@@ -4860,7 +5138,16 @@ mod tests {
             editor: EditorSettingsProjection {
                 line_numbers_visible: false,
                 current_line_highlight: false,
+                sticky_headers_visible: true,
+                code_folding_visible: true,
+                minimap_visible: false,
+                whitespace_guides_visible: false,
+                indent_guides_visible: false,
+                smooth_scrolling_enabled: true,
             },
+            telemetry: WorkbenchTelemetryConsent::default(),
+            indexed_workspace_search_enabled: false,
+            next_edit_prediction_enabled: false,
             schema_version: 0,
         }
         .normalized();
@@ -4874,6 +5161,8 @@ mod tests {
         assert_eq!(settings.toast_verbosity, ToastVerbosityProjection::All);
         assert!(!settings.editor.line_numbers_visible);
         assert!(!settings.editor.current_line_highlight);
+        assert!(!settings.telemetry.crash_reports_enabled);
+        assert_eq!(settings.telemetry.consent_label, "local-only");
         assert_eq!(settings.schema_version, 1);
     }
 
@@ -4940,6 +5229,9 @@ mod tests {
             projection_id: "legion-workflow:test".to_string(),
             rows: vec![legion_protocol::LegionWorkflowProjectionRow {
                 session_id: LegionWorkflowSessionId("session:legion:test".to_string()),
+                directive_artifact_id: Some("artifact:directive:legion:test".to_string()),
+                spec_artifact_id: Some("artifact:spec:legion:test".to_string()),
+                task_graph_artifact_id: Some("artifact:task-graph:legion:test".to_string()),
                 lifecycle_state: legion_protocol::LegionWorkflowState::WaitingForApproval,
                 worker_count: 3,
                 provider_route_required_count: 1,
@@ -5200,6 +5492,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -5313,6 +5606,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -5484,6 +5778,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -5555,6 +5850,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -5620,6 +5916,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -5856,6 +6153,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -5947,6 +6245,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -6073,6 +6372,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -6161,6 +6461,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -6313,6 +6614,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
@@ -6413,6 +6715,7 @@ mod tests {
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
             daily_editing_projection: DailyEditingProjection::empty(),
+            excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),

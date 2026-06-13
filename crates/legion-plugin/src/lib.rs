@@ -277,9 +277,10 @@ pub fn plugin_namespace(plugin_id: PluginId, namespace: impl Into<String>) -> Pl
 mod tests {
     use super::*;
     use legion_protocol::{
-        CapabilityId, CausalityId, CorrelationId, EventSequence, PluginActivationEvent,
+        CapabilityId, CausalityId, CorrelationId, EventSequence, LanguageId, PluginActivationEvent,
         PluginCommandDescriptor, PluginContribution, PluginHostCallKind, PluginQuotaDeclaration,
-        PluginTrustDecision, PluginTrustMetadata, PluginTrustSource,
+        PluginTreeSitterGrammarContribution, PluginTrustDecision, PluginTrustMetadata,
+        PluginTrustSource,
     };
     use uuid::Uuid;
 
@@ -300,12 +301,24 @@ mod tests {
             },
             signature: None,
             activation_events: vec![PluginActivationEvent::Startup],
-            contributions: vec![PluginContribution::Command(PluginCommandDescriptor {
-                command_id: "phase5.run".to_string(),
-                title: "Phase 5 Run".to_string(),
-                required_capability: CapabilityId("plugin.command".to_string()),
-            })],
-            requested_capabilities: vec![CapabilityId("plugin.command".to_string())],
+            contributions: vec![
+                PluginContribution::Command(PluginCommandDescriptor {
+                    command_id: "phase5.run".to_string(),
+                    title: "Phase 5 Run".to_string(),
+                    required_capability: CapabilityId("plugin.command".to_string()),
+                }),
+                PluginContribution::TreeSitterGrammar(PluginTreeSitterGrammarContribution {
+                    language_id: LanguageId("rust-plugin".to_string()),
+                    grammar_name: "rust-plugin-grammar".to_string(),
+                    artifact_uri: "file:///tmp/rust-plugin-grammar.wasm".to_string(),
+                    artifact_hash: "sha256:rust-plugin-grammar".to_string(),
+                    required_capability: CapabilityId("plugin.grammar.tree_sitter".to_string()),
+                }),
+            ],
+            requested_capabilities: vec![
+                CapabilityId("plugin.command".to_string()),
+                CapabilityId("plugin.grammar.tree_sitter".to_string()),
+            ],
             storage_namespace: plugin_namespace(PluginId(7), "state"),
             quotas: PluginQuotaDeclaration {
                 max_fuel: 1000,
@@ -341,6 +354,20 @@ mod tests {
             host.plugin_state(plugin_id),
             Some(PluginRuntimeState::Loaded)
         );
+    }
+
+    #[test]
+    fn plugin_runtime_rejects_grammar_without_declared_capability() {
+        let mut host = PluginRuntimeHost::new();
+        let mut manifest = manifest();
+        manifest
+            .requested_capabilities
+            .retain(|capability| capability.0 != "plugin.grammar.tree_sitter");
+
+        let error = host
+            .load_manifest(manifest)
+            .expect_err("missing grammar capability should reject load");
+        assert_eq!(error.code, "plugin_grammar_capability_missing");
     }
 
     #[test]

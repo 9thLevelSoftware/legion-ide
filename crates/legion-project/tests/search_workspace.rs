@@ -5,7 +5,8 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    thread::sleep,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use legion_platform::{NativeFileSystem, NativeWatcherService};
@@ -77,9 +78,11 @@ fn workspace_search_stream_emits_batches_and_cancels() {
             WorkspaceSearchQuery {
                 workspace_id: opened.workspace_id,
                 pattern: SearchPattern::literal("needle", true, false).expect("literal search"),
+                search_text: "needle".to_string(),
                 filters: WorkspaceSearchFilters::default(),
                 result_limit: 10,
                 batch_size: 2,
+                use_indexed_backend: false,
             },
             |batch| {
                 batches.push(batch);
@@ -94,5 +97,115 @@ fn workspace_search_stream_emits_batches_and_cancels() {
     assert_eq!(batches[0].hits.len(), 2);
     assert_eq!(batches[0].omitted_hit_count, 0);
     assert_eq!(report.omitted_hit_count, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn indexed_workspace_search_matches_live_scan() {
+    let root = create_temp_workspace();
+    fs::write(root.join("indexed.txt"), "needle one\nneedle two\n").expect("write file");
+    fs::write(root.join("other.txt"), "irrelevant\n").expect("write file");
+
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    let query = WorkspaceSearchQuery {
+        workspace_id: opened.workspace_id,
+        pattern: SearchPattern::literal("needle", true, false).expect("literal search"),
+        search_text: "needle".to_string(),
+        filters: WorkspaceSearchFilters::default(),
+        result_limit: 10,
+        batch_size: 2,
+        use_indexed_backend: true,
+    };
+
+    let live = actor
+        .search_workspace_stream(query.clone(), |_| true)
+        .expect("live search should succeed");
+    let indexed = actor
+        .search_workspace_stream(query, |_| true)
+        .expect("indexed search should succeed");
+
+    assert_eq!(indexed.hit_count, live.hit_count);
+    assert_eq!(indexed.omitted_hit_count, live.omitted_hit_count);
+    assert_eq!(indexed.omitted_file_count, live.omitted_file_count);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn indexed_workspace_search_refreshes_after_file_changes() {
+    let root = create_temp_workspace();
+    let file = root.join("refresh.txt");
+    fs::write(&file, "needle one\n").expect("write file");
+
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    let query = WorkspaceSearchQuery {
+        workspace_id: opened.workspace_id,
+        pattern: SearchPattern::literal("needle", true, false).expect("literal search"),
+        search_text: "needle".to_string(),
+        filters: WorkspaceSearchFilters::default(),
+        result_limit: 10,
+        batch_size: 2,
+        use_indexed_backend: true,
+    };
+
+    let first = actor
+        .search_workspace_stream(query.clone(), |_| true)
+        .expect("first search");
+    assert_eq!(first.hit_count, 1);
+
+    fs::write(&file, "nothing to see here\n").expect("overwrite file");
+    sleep(Duration::from_millis(120));
+    let _ = actor
+        .poll_watcher_events(opened.workspace_id)
+        .expect("poll watcher events");
+
+    let second = actor
+        .search_workspace_stream(query, |_| true)
+        .expect("second search");
+    assert_eq!(second.hit_count, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore]
+fn indexed_workspace_search_benchmark_large_fixture() {
+    let root = create_temp_workspace();
+    let needle = "needle needle needle\n";
+    for index in 0..500 {
+        fs::write(root.join(format!("file-{index:04}.txt")), needle).expect("write file");
+    }
+
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    let live_query = WorkspaceSearchQuery {
+        workspace_id: opened.workspace_id,
+        pattern: SearchPattern::literal("needle", true, false).expect("literal search"),
+        search_text: "needle".to_string(),
+        filters: WorkspaceSearchFilters::default(),
+        result_limit: 10,
+        batch_size: 2,
+        use_indexed_backend: false,
+    };
+    let indexed_query = WorkspaceSearchQuery {
+        use_indexed_backend: true,
+        ..live_query.clone()
+    };
+
+    let _warmup = actor
+        .search_workspace_stream(indexed_query.clone(), |_| true)
+        .expect("warm up indexed search");
+
+    let live_start = Instant::now();
+    let live = actor
+        .search_workspace_stream(live_query, |_| true)
+        .expect("live search");
+    let live_elapsed = live_start.elapsed();
+
+    let indexed_start = Instant::now();
+    let indexed = actor
+        .search_workspace_stream(indexed_query, |_| true)
+        .expect("indexed search");
+    let indexed_elapsed = indexed_start.elapsed();
+
+    println!("live={:?} indexed={:?}", live_elapsed, indexed_elapsed);
+    assert_eq!(indexed.hit_count, live.hit_count);
     let _ = fs::remove_dir_all(root);
 }

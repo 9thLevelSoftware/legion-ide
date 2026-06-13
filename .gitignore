@@ -1,6 +1,7 @@
 /target
 /target-clippy/
 /target-clippy-stable/
+**/target/
 /mockups/node_modules/
 /mockups/dist/
 

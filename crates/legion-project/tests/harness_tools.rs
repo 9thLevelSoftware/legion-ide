@@ -68,9 +68,11 @@ fn grep_alias_matches_workspace_search() {
     let query = WorkspaceSearchQuery {
         workspace_id: opened.workspace_id,
         pattern: SearchPattern::literal("needle", true, false).expect("literal search"),
+        search_text: "needle".to_string(),
         filters: WorkspaceSearchFilters::default(),
         result_limit: 10,
         batch_size: 2,
+        use_indexed_backend: false,
     };
 
     let search_report = actor

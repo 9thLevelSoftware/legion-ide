@@ -343,7 +343,6 @@ fn ci_large_file_degraded_open_and_viewport_are_bounded() {
 }
 
 #[test]
-#[ignore = "performance suite: 100MB degraded-mode measurement"]
 fn large_file_100mb_degraded_mode_measurement() {
     let mut engine = EditorEngine::new();
     let size = 100 * 1024 * 1024;

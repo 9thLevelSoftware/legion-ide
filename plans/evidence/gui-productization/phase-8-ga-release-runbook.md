@@ -17,6 +17,27 @@ This runbook covers the GUI Phase 8 productization track only. It does not repla
 - Delegated task command center: approval-gated in `phase-8-delegated-task-command-center.md`.
 - Phase 7 local beta: accepted in `phase-7-local-ide-beta.md`.
 
+## Package Commands And Artifacts
+
+The GA runbook stays open until the release packaging path is evidenced, not just described.
+
+### Commands
+
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -DryRun`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Release`
+- `cargo run -p legion-cli -- evidence check --phase gui-phase8`
+- `cargo run -p legion-cli -- evidence check --phase phase8`
+
+### Expected package outputs
+
+- default package directory: `target/gui-phase6-package/`
+- packaged executable: `target/gui-phase6-package/legion-desktop.exe`
+- package manifest: `target/gui-phase6-package/legion-desktop-package-manifest.txt`
+- GUI smoke diagnostics exports: `target/gui-phase6-diagnostics.md`, `target/gui-phase7-diagnostics.md`, `target/gui-phase8-diagnostics.md`
+- matching GUI smoke session-state files under `target/`
+
+If a release candidate uses a custom `-OutDir`, record that path in the release evidence and keep the manifest plus executable together.
+
 ## Release Prerequisites
 
 Before a GUI Phase 8 GA release can be promoted:

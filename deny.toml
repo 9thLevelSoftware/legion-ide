@@ -23,6 +23,7 @@ wildcards = "allow"
 # Phase 2 renderer review notes:
 # - BSD-2-Clause, BSL-1.0, Zlib, and CC0-1.0 are OSI/FSF-compatible transitive licenses in the reviewed eframe/egui renderer graph.
 # - OFL-1.1 and Ubuntu-font-1.0 are used by epaint's bundled default fonts; they are display assets only and do not expand runtime authority.
+# - MPL-2.0 is required by uluru v3.1.0 in the reviewed gix-pack -> gix -> legion-project -> legion-app -> legion-desktop chain; it is OSI/FSF-approved copyleft and is accepted for the cargo-deny phase gate.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -34,6 +35,7 @@ allow = [
     "ISC",
     "LGPL-2.1-or-later",
     "MIT",
+    "MPL-2.0",
     "OFL-1.1",
     "Unicode-3.0",
     "Unlicense",

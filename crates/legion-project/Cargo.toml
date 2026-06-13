@@ -14,5 +14,7 @@ legion-security = { workspace = true }
 legion-observability = { workspace = true }
 legion-index = { workspace = true }
 regex = { workspace = true }
+tantivy = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+gix = "0.84.0"

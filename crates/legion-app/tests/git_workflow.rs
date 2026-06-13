@@ -132,6 +132,17 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
             .iter()
             .any(|commit| commit.summary == "initial")
     );
+    let repo_root = repo
+        .path()
+        .canonicalize()
+        .expect("repo root should canonicalize");
+    assert_eq!(projection.worktrees.len(), 1);
+    assert!(
+        projection
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.path == repo_root.display().to_string())
+    );
     assert_eq!(
         app.shell_projection_snapshot("git")
             .expect("snapshot")

@@ -149,6 +149,66 @@ pub struct EmbeddingResponse {
     pub metadata: HashMap<String, String>,
 }
 
+/// Request payload for offline batch jobs that bundle multiple completion requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchJobRequest {
+    /// Provider selected for the batch job.
+    pub provider: ProviderId,
+    /// Model name or alias expected by the provider.
+    pub model: String,
+    /// Stable batch identifier used to round-trip offline work.
+    pub batch_id: String,
+    /// Logical batch job type, such as `repo-summary`.
+    pub job_type: String,
+    /// Ordered completion requests to execute as part of the batch.
+    pub requests: Vec<ChatCompletionRequest>,
+    /// Optional provider-specific request metadata.
+    pub metadata: HashMap<String, String>,
+}
+
+impl BatchJobRequest {
+    /// Creates a minimal batch request for a provider, model, batch id, and job type.
+    pub fn new(
+        provider: impl Into<ProviderId>,
+        model: impl Into<String>,
+        batch_id: impl Into<String>,
+        job_type: impl Into<String>,
+        requests: Vec<ChatCompletionRequest>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            batch_id: batch_id.into(),
+            job_type: job_type.into(),
+            requests,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Replaces or inserts an arbitrary key/value metadata pair.
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+}
+
+/// Response payload for offline batch jobs that bundle multiple completion responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchJobResponse {
+    /// Provider identifier that produced the batch response.
+    pub provider: ProviderId,
+    /// Model identifier used by the provider.
+    pub model: String,
+    /// Stable batch identifier used to round-trip offline work.
+    pub batch_id: String,
+    /// Logical batch job type, such as `repo-summary`.
+    pub job_type: String,
+    /// Ordered completion responses produced for the batch.
+    pub responses: Vec<ChatCompletionResponse>,
+    /// Provider-side metadata without raw prompt or source bodies.
+    pub metadata: HashMap<String, String>,
+}
+
 /// Request payload for inline next-edit prediction providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InlinePredictionRequest {
@@ -180,6 +240,8 @@ pub struct ProviderCapabilities {
     pub completion: bool,
     /// Supports vector embedding generation.
     pub embedding: bool,
+    /// Supports offline batch jobs that round-trip multiple completions.
+    pub batch: bool,
     /// Supports inline next-edit prediction distinct from chat/proposal output.
     pub inline_prediction: bool,
 }
@@ -189,6 +251,7 @@ impl Default for ProviderCapabilities {
         Self {
             completion: true,
             embedding: false,
+            batch: false,
             inline_prediction: false,
         }
     }
@@ -269,6 +332,14 @@ pub trait ModelProvider {
     /// Sends an embedding request to the provider implementation.
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError>;
 
+    /// Sends an offline batch job to the provider implementation.
+    fn batch_complete(&self, request: BatchJobRequest) -> Result<BatchJobResponse, ProviderError> {
+        Err(ProviderError::unsupported(
+            request.provider,
+            "batch_complete",
+        ))
+    }
+
     /// Sends an inline prediction request to the provider implementation.
     fn predict_inline(
         &self,
@@ -302,6 +373,7 @@ impl ModelProvider for DeterministicInlinePredictionProvider {
         ProviderCapabilities {
             completion: false,
             embedding: false,
+            batch: false,
             inline_prediction: true,
         }
     }
@@ -735,6 +807,7 @@ mod tests {
             ProviderCapabilities {
                 completion: false,
                 embedding: false,
+                batch: false,
                 inline_prediction: false,
             }
         }
@@ -1126,5 +1199,35 @@ mod tests {
             error,
             ProviderError::RequestRejected { message } if message.contains("health_labels")
         ));
+    }
+
+    #[test]
+    fn batch_job_request_round_trips_repo_summary_metadata() {
+        let request = BatchJobRequest::new(
+            "provider-id",
+            "model-a",
+            "batch-repo-summary-3",
+            "repo-summary",
+            vec![ChatCompletionRequest::new(
+                "provider-id",
+                "model-a",
+                "summarize this repository",
+            )],
+        )
+        .with_metadata("pipeline", "ws10");
+
+        let json = serde_json::to_value(&request).expect("batch request serializes");
+        let decoded: BatchJobRequest = serde_json::from_value(json).expect("batch request decodes");
+
+        assert_eq!(decoded.provider, "provider-id");
+        assert_eq!(decoded.model, "model-a");
+        assert_eq!(decoded.batch_id, "batch-repo-summary-3");
+        assert_eq!(decoded.job_type, "repo-summary");
+        assert_eq!(decoded.requests.len(), 1);
+        assert_eq!(
+            decoded.requests[0].messages[0].content,
+            "summarize this repository"
+        );
+        assert_eq!(decoded.metadata.get("pipeline"), Some(&"ws10".to_string()));
     }
 }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use legion_protocol::{BufferVersion, SnapshotId};
+use memchr::memchr;
 use ropey::Rope;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -303,6 +304,22 @@ impl TextSnapshot {
         full_text_cache: Option<Arc<String>>,
     ) -> TextResult<Self> {
         let line_index = Arc::new(LineIndex::from_rope(rope.clone()));
+        Self::from_rope_parts_with_line_index(
+            rope,
+            buffer_version,
+            retention_pin_reason,
+            full_text_cache,
+            line_index,
+        )
+    }
+
+    fn from_rope_parts_with_line_index(
+        rope: Arc<Rope>,
+        buffer_version: BufferVersion,
+        retention_pin_reason: RetentionPinReason,
+        full_text_cache: Option<Arc<String>>,
+        line_index: Arc<LineIndex>,
+    ) -> TextResult<Self> {
         let descriptor = TextSnapshotDescriptor {
             snapshot_id: SnapshotId(NEXT_SNAPSHOT_ID.fetch_add(1, AtomicOrdering::Relaxed) as u128),
             buffer_version,
@@ -675,6 +692,64 @@ impl LineIndex {
         }
     }
 
+    fn rebuild_from_simple_edit(
+        &self,
+        rope: Arc<Rope>,
+        edit_start: usize,
+        edit_end: usize,
+        replacement_text: &str,
+        removed_utf16_len: usize,
+    ) -> Option<Self> {
+        if replacement_text.contains('\n') || replacement_text.contains('\r') {
+            return None;
+        }
+
+        let edit_line_index = self.line_for_offset_context(edit_start);
+        let edit_chunk_index = self.rebuild_start_chunk_index(edit_start);
+        let byte_delta =
+            replacement_text.len() as isize - (edit_end as isize - edit_start as isize);
+        let replacement_utf16_len = replacement_text.chars().map(char::len_utf16).sum::<usize>();
+        let utf16_delta = replacement_utf16_len as isize - removed_utf16_len as isize;
+
+        let mut lines = self.inner.lines.clone();
+        if let Some(line) = lines.get_mut(edit_line_index) {
+            line.content_end_byte = shift_usize(line.content_end_byte, byte_delta);
+            line.end_byte = shift_usize(line.end_byte, byte_delta);
+            line.byte_len = shift_usize(line.byte_len, byte_delta);
+            line.utf16_len = shift_usize(line.utf16_len, utf16_delta);
+        } else {
+            return None;
+        }
+
+        for line in lines.iter_mut().skip(edit_line_index + 1) {
+            line.start_byte = shift_usize(line.start_byte, byte_delta);
+            line.content_end_byte = shift_usize(line.content_end_byte, byte_delta);
+            line.end_byte = shift_usize(line.end_byte, byte_delta);
+        }
+
+        let mut chunks = self.inner.chunks.clone();
+        if let Some(chunk) = chunks.get_mut(edit_chunk_index) {
+            chunk.end_byte = shift_usize(chunk.end_byte, byte_delta);
+            chunk.byte_len = shift_usize(chunk.byte_len, byte_delta);
+            chunk.hash = chunk_hash_for_byte_range(rope.as_ref(), chunk.start_byte, chunk.end_byte);
+        } else {
+            return None;
+        }
+
+        for chunk in chunks.iter_mut().skip(edit_chunk_index + 1) {
+            chunk.start_byte = shift_usize(chunk.start_byte, byte_delta);
+            chunk.end_byte = shift_usize(chunk.end_byte, byte_delta);
+        }
+
+        Some(Self {
+            inner: ChunkedLineIndex {
+                rope,
+                lines,
+                chunks,
+            },
+        })
+    }
+
     /// Return the number of logical lines. Empty text has one line.
     pub fn line_count(&self) -> usize {
         self.inner.lines.len()
@@ -937,7 +1012,7 @@ impl LineIndex {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextBuffer {
     rope: Rope,
-    line_index: LineIndex,
+    line_index: Arc<LineIndex>,
     version: BufferVersion,
     full_text_cache: Option<String>,
     allow_full_cache: bool,
@@ -990,7 +1065,7 @@ impl TextBuffer {
         allow_full_cache: bool,
         source_text: Option<String>,
     ) -> TextResult<Self> {
-        let line_index = LineIndex::from_rope(Arc::new(rope.clone()));
+        let line_index = Arc::new(LineIndex::from_rope(Arc::new(rope.clone())));
         let full_text_cache = if allow_full_cache {
             match source_text {
                 Some(text) if text.len() <= DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES => Some(text),
@@ -1186,6 +1261,14 @@ impl TextBuffer {
             .len()
             .saturating_sub(end.saturating_sub(start))
             .saturating_add(text.len());
+        let removed_utf16_len = utf16_len_for_byte_range(&self.rope, start, end);
+        let simple_edit = !text.contains('\n')
+            && !text.contains('\r')
+            && !self
+                .rope
+                .slice(self.rope.byte_to_char(start)..self.rope.byte_to_char(end))
+                .chars()
+                .any(|ch| ch == '\n' || ch == '\r');
 
         let start_char = self.rope.byte_to_char(start);
         let end_char = self.rope.byte_to_char(end);
@@ -1199,6 +1282,17 @@ impl TextBuffer {
             }
         } else {
             self.full_text_cache = None;
+        }
+
+        if simple_edit {
+            let rope = Arc::new(self.rope.clone());
+            if let Some(line_index) =
+                self.line_index
+                    .rebuild_from_simple_edit(rope, start, end, text, removed_utf16_len)
+            {
+                self.line_index = Arc::new(line_index);
+                return Ok(());
+            }
         }
 
         self.refresh_cache_and_index(rebuild_chunk_index)?;
@@ -1239,11 +1333,13 @@ impl TextBuffer {
         reason: RetentionPinReason,
     ) -> TextResult<TextSnapshot> {
         let full_text_cache = self.full_text_cache.clone().map(Arc::new);
-        TextSnapshot::from_rope_parts(
+        let line_index = Arc::clone(&self.line_index);
+        TextSnapshot::from_rope_parts_with_line_index(
             Arc::new(self.rope.clone()),
             self.version,
             reason,
             full_text_cache,
+            line_index,
         )
     }
 
@@ -1268,9 +1364,10 @@ impl TextBuffer {
     }
 
     fn refresh_cache_and_index(&mut self, rebuild_chunk_index: usize) -> TextResult<()> {
-        self.line_index = self
-            .line_index
-            .rebuild_from_chunk(Arc::new(self.rope.clone()), rebuild_chunk_index);
+        self.line_index = Arc::new(
+            self.line_index
+                .rebuild_from_chunk(Arc::new(self.rope.clone()), rebuild_chunk_index),
+        );
         Ok(())
     }
 }
@@ -1339,72 +1436,190 @@ fn scan_line_metrics_from_byte(rope: &Rope, start_byte: usize) -> Vec<LineMetric
 
     let mut lines = Vec::new();
     let mut line_start = start_byte.min(total_bytes);
+    let mut current_utf16 = 0usize;
     let mut absolute = start_byte.min(total_bytes);
     let mut pending_cr: Option<usize> = None;
 
     for chunk in slice.chunks() {
-        let bytes = chunk.as_bytes();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            let byte = bytes[i];
-            let offset = absolute + i;
+        if chunk.is_ascii() {
+            let bytes = chunk.as_bytes();
+
+            if pending_cr.is_none() && memchr(b'\r', bytes).is_none() {
+                let mut start = 0usize;
+                while let Some(newline_rel) = memchr(b'\n', &bytes[start..]) {
+                    let newline = start + newline_rel;
+                    let offset = absolute + newline;
+                    current_utf16 += newline.saturating_sub(start);
+                    push_line_metric(&mut lines, line_start, offset, offset + 1, 1, current_utf16);
+                    line_start = offset + 1;
+                    current_utf16 = 0;
+                    start = newline + 1;
+                }
+
+                current_utf16 += bytes.len().saturating_sub(start);
+                absolute += bytes.len();
+                continue;
+            }
+
+            let mut i = 0usize;
+            while i < bytes.len() {
+                let byte = bytes[i];
+                let offset = absolute + i;
+
+                if let Some(cr_offset) = pending_cr {
+                    if byte == b'\n' {
+                        push_line_metric(
+                            &mut lines,
+                            line_start,
+                            cr_offset,
+                            offset + 1,
+                            2,
+                            current_utf16,
+                        );
+                        line_start = offset + 1;
+                        current_utf16 = 0;
+                        pending_cr = None;
+                        i += 1;
+                        continue;
+                    }
+
+                    push_line_metric(
+                        &mut lines,
+                        line_start,
+                        cr_offset,
+                        cr_offset + 1,
+                        1,
+                        current_utf16,
+                    );
+                    line_start = cr_offset + 1;
+                    current_utf16 = 0;
+                    pending_cr = None;
+                }
+
+                match byte {
+                    b'\r' => {
+                        pending_cr = Some(offset);
+                        i += 1;
+                    }
+                    b'\n' => {
+                        push_line_metric(
+                            &mut lines,
+                            line_start,
+                            offset,
+                            offset + 1,
+                            1,
+                            current_utf16,
+                        );
+                        line_start = offset + 1;
+                        current_utf16 = 0;
+                        i += 1;
+                    }
+                    _ => {
+                        current_utf16 += 1;
+                        i += 1;
+                    }
+                }
+            }
+
+            absolute += bytes.len();
+            continue;
+        }
+
+        for (rel_offset, ch) in chunk.char_indices() {
+            let offset = absolute + rel_offset;
 
             if let Some(cr_offset) = pending_cr {
-                if byte == b'\n' {
-                    push_line_metric(rope, &mut lines, line_start, cr_offset, offset + 1, 2);
-                    line_start = offset + 1;
+                if ch == '\n' {
+                    push_line_metric(
+                        &mut lines,
+                        line_start,
+                        cr_offset,
+                        offset + ch.len_utf8(),
+                        2,
+                        current_utf16,
+                    );
+                    line_start = offset + ch.len_utf8();
+                    current_utf16 = 0;
                     pending_cr = None;
-                    i += 1;
                     continue;
                 }
 
-                push_line_metric(rope, &mut lines, line_start, cr_offset, cr_offset + 1, 1);
+                push_line_metric(
+                    &mut lines,
+                    line_start,
+                    cr_offset,
+                    cr_offset + 1,
+                    1,
+                    current_utf16,
+                );
                 line_start = cr_offset + 1;
+                current_utf16 = 0;
                 pending_cr = None;
             }
 
-            match byte {
-                b'\r' => {
+            match ch {
+                '\r' => {
                     pending_cr = Some(offset);
-                    i += 1;
                 }
-                b'\n' => {
-                    push_line_metric(rope, &mut lines, line_start, offset, offset + 1, 1);
-                    line_start = offset + 1;
-                    i += 1;
+                '\n' => {
+                    push_line_metric(
+                        &mut lines,
+                        line_start,
+                        offset,
+                        offset + ch.len_utf8(),
+                        1,
+                        current_utf16,
+                    );
+                    line_start = offset + ch.len_utf8();
+                    current_utf16 = 0;
                 }
                 _ => {
-                    i += 1;
+                    current_utf16 += ch.len_utf16();
                 }
             }
         }
 
-        absolute += bytes.len();
+        absolute += chunk.len();
     }
 
     if let Some(cr_offset) = pending_cr {
-        push_line_metric(rope, &mut lines, line_start, cr_offset, cr_offset + 1, 1);
+        push_line_metric(
+            &mut lines,
+            line_start,
+            cr_offset,
+            cr_offset + 1,
+            1,
+            current_utf16,
+        );
         line_start = cr_offset + 1;
+        current_utf16 = 0;
     }
 
-    push_line_metric(rope, &mut lines, line_start, total_bytes, total_bytes, 0);
+    push_line_metric(
+        &mut lines,
+        line_start,
+        total_bytes,
+        total_bytes,
+        0,
+        current_utf16,
+    );
     lines
 }
 
 fn push_line_metric(
-    rope: &Rope,
     lines: &mut Vec<LineMetric>,
     start_byte: usize,
     content_end_byte: usize,
     end_byte: usize,
     line_ending_bytes: usize,
+    utf16_len: usize,
 ) {
     lines.push(LineMetric {
         start_byte,
         content_end_byte,
         end_byte,
         byte_len: content_end_byte.saturating_sub(start_byte),
-        utf16_len: utf16_len_for_byte_range(rope, start_byte, content_end_byte),
+        utf16_len,
         line_ending_bytes,
     });
 }
@@ -1475,7 +1690,6 @@ fn build_chunk_descriptors(
             (forced_end, end_line)
         };
 
-        let text = rope_string_from_byte_range(rope, chunk_start, chunk_end);
         descriptors.push(TextChunkDescriptor {
             ordinal,
             start_byte: chunk_start,
@@ -1483,7 +1697,7 @@ fn build_chunk_descriptors(
             byte_len: chunk_end.saturating_sub(chunk_start),
             start_line,
             end_line,
-            hash: chunk_hash(&text),
+            hash: chunk_hash_for_byte_range(rope, chunk_start, chunk_end),
         });
 
         chunk_start = chunk_end;
@@ -1534,9 +1748,22 @@ fn chunk_index_for_offset(chunks: &[TextChunkDescriptor], offset: usize) -> Opti
             Ordering::Equal
         }
     }) {
-        Ok(idx) => Some(idx),
+        Ok(mut idx) => {
+            while idx + 1 < chunks.len() && offset >= chunks[idx].end_byte {
+                idx += 1;
+            }
+            Some(idx)
+        }
         Err(idx) if idx > 0 => Some(idx - 1),
         Err(_) => Some(0),
+    }
+}
+
+fn shift_usize(base: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        base.saturating_add(delta as usize)
+    } else {
+        base.saturating_sub((-delta) as usize)
     }
 }
 
@@ -1591,8 +1818,19 @@ fn content_hash(text: &str) -> String {
     hash_with_domain(b"legion-text:content:v1\0", text.as_bytes())
 }
 
-fn chunk_hash(text: &str) -> String {
-    hash_with_domain(b"legion-text:chunk:v1\0", text.as_bytes())
+fn chunk_hash_for_byte_range(rope: &Rope, start_byte: usize, end_byte: usize) -> String {
+    if start_byte >= end_byte {
+        return hash_with_domain(b"legion-text:chunk:v1\0", b"");
+    }
+
+    let start_char = rope.byte_to_char(start_byte);
+    let end_char = rope.byte_to_char(end_byte);
+    let mut hasher = Sha256::new();
+    hasher.update(b"legion-text:chunk:v1\0");
+    for chunk in rope.slice(start_char..end_char).chunks() {
+        hasher.update(chunk.as_bytes());
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn snapshot_content_hash(chunks: &[TextChunkDescriptor]) -> String {

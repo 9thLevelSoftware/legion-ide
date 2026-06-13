@@ -312,6 +312,7 @@ impl LanguageServerAdapterPlan {
     }
 
     /// Creates a policy-gated artifact-backed adapter entry.
+    #[allow(clippy::too_many_arguments)]
     pub fn downloaded_artifact(
         server_id: legion_protocol::LanguageServerId,
         workspace_id: legion_protocol::WorkspaceId,

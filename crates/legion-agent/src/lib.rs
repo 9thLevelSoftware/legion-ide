@@ -1680,6 +1680,47 @@ mod tests {
     }
 
     #[test]
+    fn legion_workflow_three_task_dag_with_one_dependency_schedules_two_parallel_workers() {
+        let mut session = workflow_session();
+        session.worker_assignments = vec![
+            workflow_worker(
+                "worker:root",
+                LegionWorkflowModelBackend::Local,
+                "crates/legion-agent/src/root.rs",
+            ),
+            workflow_worker(
+                "worker:left",
+                LegionWorkflowModelBackend::Local,
+                "crates/legion-agent/src/left.rs",
+            ),
+            workflow_worker(
+                "worker:right",
+                LegionWorkflowModelBackend::Local,
+                "crates/legion-agent/src/right.rs",
+            ),
+        ];
+        session.dependency_edges = vec![LegionWorkflowDependency {
+            dependency_id: LegionWorkflowDependencyId("dependency:root-left".to_string()),
+            predecessor_worker_id: LegionWorkflowWorkerId("worker:root".to_string()),
+            successor_worker_id: LegionWorkflowWorkerId("worker:left".to_string()),
+            state: LegionWorkflowDependencyState::Pending,
+            label: "root before left".to_string(),
+            schema_version: 1,
+        }];
+
+        let coordinator = LegionWorkflowCoordinator::new(session).expect("valid workflow");
+        let ready = coordinator.next_ready_workers();
+
+        assert_eq!(ready.len(), 2);
+        let ready_ids = ready
+            .into_iter()
+            .map(|worker| worker.worker_id.0)
+            .collect::<Vec<_>>();
+        assert!(ready_ids.contains(&"worker:root".to_string()));
+        assert!(ready_ids.contains(&"worker:right".to_string()));
+    }
+
+    #[test]
     fn legion_workflow_resume_uses_persisted_worker_and_dependency_state() {
         let mut session = workflow_session();
         session.worker_assignments = vec![

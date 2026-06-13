@@ -18,6 +18,27 @@ cargo deny check
 
 If any command fails, save exact output under `plans/evidence/legion-e2e/` before fixing. Documentation hygiene allowlists live in `docs/hygiene-allowlist.toml`; keep entries narrow and historical-only.
 
+## GUI packaging and support artifacts
+
+The current package-and-support path is intentionally explicit so release notes and issue triage can point at concrete files instead of assumptions.
+
+### Packaging commands
+
+- Dry-run Windows package: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -DryRun`
+- Live Windows package: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Release`
+- GUI smoke dry-run: `sh scripts/gui-smoke.sh --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -DryRun`
+- GUI beta dry-run: `sh scripts/gui-smoke.sh --beta --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun`
+- GUI Phase 8 dry-run: `sh scripts/gui-smoke.sh --phase-8 --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Phase8 -DryRun`
+
+### Expected artifacts
+
+- Windows package directory: `target/gui-phase6-package/`
+- Packaged executable: `target/gui-phase6-package/legion-desktop.exe`
+- Package manifest: `target/gui-phase6-package/legion-desktop-package-manifest.txt`
+- GUI smoke session state and diagnostics exports: `target/gui-phase6-session.json`, `target/gui-phase6-diagnostics.md`, `target/gui-phase7-session.json`, `target/gui-phase7-diagnostics.md`, `target/gui-phase8-session.json`, `target/gui-phase8-diagnostics.md`
+
+A release runbook is only considered closed once the packaging command, the expected artifacts, and the matching evidence files all exist for the release candidate under review.
+
 ### Supply-chain gate prerequisite
 
 The `cargo deny check` gate above requires `cargo-deny` on the local machine. Install it with:

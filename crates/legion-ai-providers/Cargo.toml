@@ -10,5 +10,6 @@ legion-ai = { workspace = true }
 legion-protocol = { workspace = true }
 legion-security = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -9,11 +9,11 @@ use std::sync::OnceLock;
 use legion_protocol::{
     ByteRange, CancellationTokenId, CanonicalPath, CapabilityId, EditBatch, FileContentVersion,
     FileFingerprint, FileId, FileIdentity, LanguageId, LanguageOutlineSymbolProjection,
-    LanguageStickyScopeProjection, LineIndexRange, LspDiagnosticSummary, ProposalAffectedTarget,
-    ProposalPayloadKind, ProposalPayloadSummary, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
-    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolResult, ProtocolTextRange,
-    RedactionHint, SemanticCancellationReason, SemanticCancellationToken,
+    LanguageStickyScopeProjection, LineIndexRange, LspDiagnosticSummary, PluginContribution,
+    PluginId, ProposalAffectedTarget, ProposalPayloadKind, ProposalPayloadSummary,
+    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
+    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolResult,
+    ProtocolTextRange, RedactionHint, SemanticCancellationReason, SemanticCancellationToken,
     SemanticFabricDescriptorReference, SemanticFabricInvalidationCause, SemanticFabricJobRequest,
     SemanticFabricPriority, SemanticFabricPrivacyLabel, SemanticFabricSchedulePlan,
     SemanticFabricSchedulingAction, SemanticFabricSchedulingDecision,
@@ -2617,9 +2617,10 @@ pub fn tree_sitter_capture_kind(capture_name: &str) -> ViewportSemanticTokenKind
     }
 }
 
-/// Returns whether the bundled tree-sitter runtime supports a language identifier.
+/// Returns whether the bundled tree-sitter runtime or a registered plugin artifact supports a language identifier.
 pub fn tree_sitter_supports_language(language_id: &LanguageId) -> bool {
     matches!(language_id.0.as_str(), "rust" | "rs")
+        || plugin_tree_sitter_grammar_is_registered(language_id)
 }
 
 /// Returns whether the bundled tree-sitter runtime supports a source path.
@@ -2628,6 +2629,68 @@ pub fn tree_sitter_supports_path(path: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PluginTreeSitterGrammarRegistration {
+    plugin_id: PluginId,
+    language_id: LanguageId,
+    grammar_name: String,
+    artifact_uri: String,
+    artifact_hash: String,
+}
+
+static PLUGIN_TREE_SITTER_GRAMMAR_REGISTRY: OnceLock<
+    std::sync::Mutex<HashMap<LanguageId, PluginTreeSitterGrammarRegistration>>,
+> = OnceLock::new();
+
+fn plugin_tree_sitter_grammar_registry()
+-> &'static std::sync::Mutex<HashMap<LanguageId, PluginTreeSitterGrammarRegistration>> {
+    PLUGIN_TREE_SITTER_GRAMMAR_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Register plugin-backed tree-sitter grammars after the Phase 5 plugin channel accepts a manifest.
+pub fn register_plugin_tree_sitter_grammars(
+    plugin_id: PluginId,
+    contributions: &[PluginContribution],
+) -> usize {
+    let mut registry = plugin_tree_sitter_grammar_registry()
+        .lock()
+        .expect("plugin tree-sitter grammar registry should not be poisoned");
+    let mut loaded = 0usize;
+    for contribution in contributions {
+        let PluginContribution::TreeSitterGrammar(grammar) = contribution else {
+            continue;
+        };
+        registry.insert(
+            grammar.language_id.clone(),
+            PluginTreeSitterGrammarRegistration {
+                plugin_id,
+                language_id: grammar.language_id.clone(),
+                grammar_name: grammar.grammar_name.clone(),
+                artifact_uri: grammar.artifact_uri.clone(),
+                artifact_hash: grammar.artifact_hash.clone(),
+            },
+        );
+        loaded += 1;
+    }
+    loaded
+}
+
+fn plugin_tree_sitter_grammar_is_registered(language_id: &LanguageId) -> bool {
+    plugin_tree_sitter_grammar_registry()
+        .lock()
+        .expect("plugin tree-sitter grammar registry should not be poisoned")
+        .contains_key(language_id)
+}
+
+/// Clears the plugin grammar registry.
+pub fn reset_plugin_tree_sitter_grammar_registry_for_tests() {
+    plugin_tree_sitter_grammar_registry()
+        .lock()
+        .expect("plugin tree-sitter grammar registry should not be poisoned")
+        .clear();
 }
 
 fn rust_tree_sitter_language() -> &'static tree_sitter::Language {

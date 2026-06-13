@@ -260,6 +260,27 @@ fn session_restore_persists_workbench_settings_projection() {
     runtime
         .handle_action(DesktopAction::SetCurrentLineHighlight { enabled: false })
         .expect("current line setting should update");
+    runtime
+        .handle_action(DesktopAction::SetStickyHeadersVisible { visible: false })
+        .expect("sticky header setting should update");
+    runtime
+        .handle_action(DesktopAction::SetCodeFoldingVisible { visible: false })
+        .expect("code folding setting should update");
+    runtime
+        .handle_action(DesktopAction::SetMinimapVisible { visible: true })
+        .expect("minimap setting should update");
+    runtime
+        .handle_action(DesktopAction::SetWhitespaceGuidesVisible { visible: true })
+        .expect("whitespace guides setting should update");
+    runtime
+        .handle_action(DesktopAction::SetIndentGuidesVisible { visible: true })
+        .expect("indent guides setting should update");
+    runtime
+        .handle_action(DesktopAction::SetSmoothScrollingEnabled { enabled: false })
+        .expect("smooth scrolling setting should update");
+    runtime
+        .handle_action(DesktopAction::SetCrashReportsEnabled { enabled: true })
+        .expect("crash reports setting should update");
     runtime.save_session_state().expect("save session");
 
     let saved = DesktopSessionStore::load(&session_state)
@@ -267,6 +288,19 @@ fn session_restore_persists_workbench_settings_projection() {
         .expect("saved session should exist");
     assert_eq!(saved.workbench_settings.theme_preference, "light");
     assert_eq!(saved.workbench_settings.zoom_percent, 125);
+    assert!(!saved.workbench_settings.line_numbers_visible);
+    assert!(!saved.workbench_settings.current_line_highlight);
+    assert!(!saved.workbench_settings.sticky_headers_visible);
+    assert!(!saved.workbench_settings.code_folding_visible);
+    assert!(saved.workbench_settings.minimap_visible);
+    assert!(saved.workbench_settings.whitespace_guides_visible);
+    assert!(saved.workbench_settings.indent_guides_visible);
+    assert!(!saved.workbench_settings.smooth_scrolling_enabled);
+    assert!(saved.workbench_settings.telemetry.crash_reports_enabled);
+    assert_eq!(
+        saved.workbench_settings.telemetry.consent_label,
+        "crash-reports"
+    );
 
     let restored = open_runtime(workspace.path(), None, &session_state);
     let settings = restored.projection_snapshot().settings_projection;
@@ -274,6 +308,14 @@ fn session_restore_persists_workbench_settings_projection() {
     assert_eq!(settings.zoom_percent, 125);
     assert!(!settings.editor.line_numbers_visible);
     assert!(!settings.editor.current_line_highlight);
+    assert!(!settings.editor.sticky_headers_visible);
+    assert!(!settings.editor.code_folding_visible);
+    assert!(settings.editor.minimap_visible);
+    assert!(settings.editor.whitespace_guides_visible);
+    assert!(settings.editor.indent_guides_visible);
+    assert!(!settings.editor.smooth_scrolling_enabled);
+    assert!(settings.telemetry.crash_reports_enabled);
+    assert_eq!(settings.telemetry.consent_label, "crash-reports");
 }
 
 #[test]
@@ -352,6 +394,7 @@ fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
         },
         dock_layouts: Vec::new(),
         workbench_settings: WorkbenchSettingsRecord::default(),
+        memory_snapshot_json: None,
         dirty_indicators: Vec::new(),
         saved_at: TimestampMillis::now(),
         schema_version: 1,

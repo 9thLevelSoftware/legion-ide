@@ -3897,6 +3897,7 @@ fn dto_contracts_session_record_schema_golden() {
             schema_version: 1,
         }],
         workbench_settings: WorkbenchSettingsRecord::default(),
+        memory_snapshot_json: None,
         dirty_indicators: vec![SessionDirtyIndicator {
             buffer_id: BufferId(22),
             file_id: Some(FileId(33)),
@@ -3963,6 +3964,21 @@ fn dto_contracts_session_record_schema_golden() {
             "toast_verbosity": "warnings_and_errors",
             "line_numbers_visible": true,
             "current_line_highlight": true,
+            "sticky_headers_visible": true,
+            "code_folding_visible": true,
+            "minimap_visible": false,
+            "whitespace_guides_visible": false,
+            "indent_guides_visible": false,
+            "indexed_workspace_search_enabled": false,
+            "next_edit_prediction_enabled": false,
+            "smooth_scrolling_enabled": true,
+            "telemetry": {
+                "enabled": false,
+                "crash_reports_enabled": false,
+                "raw_source_allowed": false,
+                "consent_label": "local-only",
+                "schema_version": 1
+            },
             "schema_version": 1
         },
         "dirty_indicators": [{
@@ -4485,12 +4501,24 @@ fn dto_contracts_plugin_manifest_requires_abi_trust_capabilities_and_quota_metad
         activation_events: vec![PluginActivationEvent::OnCommand {
             command: "phase5.run".to_string(),
         }],
-        contributions: vec![PluginContribution::Command(PluginCommandDescriptor {
-            command_id: "phase5.run".to_string(),
-            title: "Phase 5 Run".to_string(),
-            required_capability: CapabilityId("plugin.command".to_string()),
-        })],
-        requested_capabilities: vec![CapabilityId("plugin.command".to_string())],
+        contributions: vec![
+            PluginContribution::Command(PluginCommandDescriptor {
+                command_id: "phase5.run".to_string(),
+                title: "Phase 5 Run".to_string(),
+                required_capability: CapabilityId("plugin.command".to_string()),
+            }),
+            PluginContribution::TreeSitterGrammar(PluginTreeSitterGrammarContribution {
+                language_id: LanguageId("rust-plugin".to_string()),
+                grammar_name: "rust-plugin-grammar".to_string(),
+                artifact_uri: "file:///tmp/rust-plugin-grammar.wasm".to_string(),
+                artifact_hash: "sha256:rust-plugin-grammar".to_string(),
+                required_capability: CapabilityId("plugin.grammar.tree_sitter".to_string()),
+            }),
+        ],
+        requested_capabilities: vec![
+            CapabilityId("plugin.command".to_string()),
+            CapabilityId("plugin.grammar.tree_sitter".to_string()),
+        ],
         storage_namespace: PluginStateNamespace {
             plugin_id: PluginId(7),
             namespace: "state".to_string(),
@@ -4710,7 +4738,7 @@ fn dto_contracts_runtime_provider_capability_matrix_is_metadata_only() {
     let roundtrip: AssistedAiRuntimeProviderCapability =
         serde_json::from_value(value).expect("deserialize capability matrix");
     assert_eq!(roundtrip.provider_id, "provider:runtime-openai");
-    assert_eq!(roundtrip.supports_streaming, true);
+    assert!(roundtrip.supports_streaming);
     assert_eq!(
         roundtrip.structured_output_labels,
         vec!["json_schema".to_string()]
@@ -9711,6 +9739,18 @@ fn dto_contracts_legion_workflow_session_roundtrips_and_projects_metadata_only()
     assert_eq!(projection.total_session_count, 1);
     assert_eq!(projection.rows[0].worker_count, 2);
     assert_eq!(projection.rows[0].provider_route_required_count, 0);
+    assert_eq!(
+        projection.rows[0].directive_artifact_id.as_deref(),
+        Some("artifact:directive:legion:1")
+    );
+    assert_eq!(
+        projection.rows[0].spec_artifact_id.as_deref(),
+        Some("artifact:spec:legion:1")
+    );
+    assert_eq!(
+        projection.rows[0].task_graph_artifact_id.as_deref(),
+        Some("artifact:task-graph:legion:1")
+    );
     assert_eq!(
         projection.rows[0].merge_readiness.state,
         LegionWorkflowMergeReadinessState::Ready

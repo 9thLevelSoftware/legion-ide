@@ -7,6 +7,7 @@ use legion_protocol::{
     FileFingerprint, LegionWorkflowModelBackend, LegionWorkflowSession, Phase4RuntimeAuditRecord,
     PrivacyClassification, RedactionHint, TimestampMillis, validate_phase4_runtime_audit_record,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Memory service errors.
@@ -24,7 +25,7 @@ pub enum MemoryError {
 }
 
 /// Consent state for a memory candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryConsentState {
     /// No consent has been granted.
     NotGranted,
@@ -35,7 +36,7 @@ pub enum MemoryConsentState {
 }
 
 /// Metadata-only memory candidate proposed by AI and reviewed by a user/app authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryCandidateRecord {
     /// Stable candidate identifier.
     pub candidate_id: String,
@@ -54,7 +55,7 @@ pub struct MemoryCandidateRecord {
 }
 
 /// Consent state for Legion trace collection and model-flywheel exports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegionTraceConsentState {
     /// No trace retention or export consent has been granted.
     NotGranted,
@@ -67,7 +68,7 @@ pub enum LegionTraceConsentState {
 }
 
 /// Phase 8 trace record category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegionTraceKind {
     /// Prompt or context-manifest trace metadata.
     PromptContext,
@@ -82,7 +83,7 @@ pub enum LegionTraceKind {
 }
 
 /// Consent-gated trace record used by the model-flywheel path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegionTraceRecord {
     /// Stable trace identifier.
     pub trace_id: String,
@@ -121,7 +122,7 @@ pub struct LegionTraceRecord {
 }
 
 /// Metadata-only manifest for JSONL trace export.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegionTraceExportManifest {
     /// Stable export identifier.
     pub export_id: String,
@@ -153,10 +154,137 @@ pub struct MemoryService {
     trace_retained: Vec<LegionTraceRecord>,
 }
 
+/// Durable metadata-only snapshot of retained memory state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryServiceSnapshot {
+    /// Retained candidate records.
+    pub retained: Vec<MemoryCandidateRecord>,
+    /// Retained workflow outcome candidates.
+    pub workflow_retained: Vec<LegionWorkflowOutcomeCandidate>,
+    /// Retained trace records.
+    pub trace_retained: Vec<LegionTraceRecord>,
+    /// Snapshot schema version.
+    pub schema_version: u16,
+}
+
+/// Compaction policy for long-lived memory snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryCompactionPolicy {
+    /// Maximum retained candidate records to keep.
+    pub retained_candidates: usize,
+    /// Maximum retained workflow outcome candidates to keep.
+    pub workflow_retained_candidates: usize,
+    /// Maximum retained trace records to keep.
+    pub trace_records: usize,
+}
+
+impl Default for MemoryCompactionPolicy {
+    fn default() -> Self {
+        Self {
+            retained_candidates: 64,
+            workflow_retained_candidates: 64,
+            trace_records: 256,
+        }
+    }
+}
+
+trait HasEventSequence {
+    fn event_sequence_value(&self) -> u64;
+}
+
+impl HasEventSequence for MemoryCandidateRecord {
+    fn event_sequence_value(&self) -> u64 {
+        self.event_sequence.0
+    }
+}
+
+impl HasEventSequence for LegionWorkflowOutcomeCandidate {
+    fn event_sequence_value(&self) -> u64 {
+        self.event_sequence.0
+    }
+}
+
+impl HasEventSequence for LegionTraceRecord {
+    fn event_sequence_value(&self) -> u64 {
+        self.event_sequence.0
+    }
+}
+
+fn compact_recent_by_sequence<T>(mut records: Vec<T>, keep_latest: usize) -> Vec<T>
+where
+    T: HasEventSequence,
+{
+    if keep_latest == 0 {
+        return Vec::new();
+    }
+    if records.len() <= keep_latest {
+        return records;
+    }
+    records.sort_by_key(|record| record.event_sequence_value());
+    records.split_off(records.len() - keep_latest)
+}
+
 impl MemoryService {
     /// Creates an empty memory service.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Capture a durable metadata-only snapshot for restart restore.
+    pub fn snapshot(&self) -> MemoryServiceSnapshot {
+        MemoryServiceSnapshot {
+            retained: self.retained.clone(),
+            workflow_retained: self.workflow_retained.clone(),
+            trace_retained: self.trace_retained.clone(),
+            schema_version: 1,
+        }
+    }
+
+    /// Restore a memory service from a durable metadata-only snapshot.
+    pub fn from_snapshot(snapshot: MemoryServiceSnapshot) -> Result<Self, MemoryError> {
+        let service = Self {
+            retained: snapshot.retained,
+            workflow_retained: snapshot.workflow_retained,
+            trace_retained: snapshot.trace_retained,
+        };
+        for candidate in &service.retained {
+            validate_memory_candidate(candidate)?;
+        }
+        for candidate in &service.workflow_retained {
+            validate_legion_workflow_candidate(candidate)?;
+        }
+        for record in &service.trace_retained {
+            validate_legion_trace_record(record)?;
+        }
+        Ok(service)
+    }
+
+    /// Return a compacted restart snapshot that keeps the most recent metadata.
+    pub fn compacted_snapshot(&self, policy: MemoryCompactionPolicy) -> MemoryServiceSnapshot {
+        MemoryServiceSnapshot {
+            retained: compact_recent_by_sequence(self.retained.clone(), policy.retained_candidates),
+            workflow_retained: compact_recent_by_sequence(
+                self.workflow_retained.clone(),
+                policy.workflow_retained_candidates,
+            ),
+            trace_retained: compact_recent_by_sequence(
+                self.trace_retained.clone(),
+                policy.trace_records,
+            ),
+            schema_version: 1,
+        }
+    }
+
+    /// Apply a compaction policy in-place.
+    pub fn compact(&mut self, policy: MemoryCompactionPolicy) {
+        self.retained =
+            compact_recent_by_sequence(self.retained.clone(), policy.retained_candidates);
+        self.workflow_retained = compact_recent_by_sequence(
+            self.workflow_retained.clone(),
+            policy.workflow_retained_candidates,
+        );
+        self.trace_retained =
+            compact_recent_by_sequence(self.trace_retained.clone(), policy.trace_records);
     }
 
     /// Proposes a candidate without retaining it.
@@ -474,7 +602,7 @@ fn contains_sensitive_prefix_marker(lower: &str, marker: &str) -> bool {
 }
 
 /// Consent-aware metadata-only candidate for Legion workflow outcome learning.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegionWorkflowOutcomeCandidate {
     /// Stable candidate identifier.
     pub candidate_id: String,
@@ -688,6 +816,60 @@ mod tests {
         assert!(service.delete("memory-candidate"));
         assert!(service.retained().is_empty());
         assert!(!service.delete("memory-candidate"));
+    }
+
+    #[test]
+    fn memory_snapshot_roundtrip_survives_restart() {
+        let mut service = MemoryService::new();
+        service
+            .retain(candidate(MemoryConsentState::ProjectLongTerm))
+            .expect("retain memory candidate");
+        let workflow_candidate = LegionWorkflowOutcomeCandidate::from_session_metadata(
+            &legion_workflow_session(),
+            MemoryConsentState::SessionOnly,
+            workflow_hash("workflow-snapshot"),
+        )
+        .expect("build workflow candidate");
+        service
+            .retain_legion_workflow_candidate(workflow_candidate.clone())
+            .expect("retain workflow candidate");
+        let trace = trace_record(LegionTraceConsentState::MetadataOnly);
+        service
+            .retain_trace_record(trace.clone())
+            .expect("retain trace record");
+
+        let snapshot_json = serde_json::to_string(&service.snapshot()).expect("serialize snapshot");
+        let restored_snapshot: MemoryServiceSnapshot =
+            serde_json::from_str(&snapshot_json).expect("deserialize snapshot");
+        let mut restored =
+            MemoryService::from_snapshot(restored_snapshot).expect("restore snapshot");
+
+        assert_eq!(restored.retained().len(), 1);
+        assert_eq!(restored.retained_legion_workflow_candidates().len(), 1);
+        assert_eq!(restored.retained_trace_records().len(), 1);
+        assert!(restored.delete("memory-candidate"));
+        assert!(restored.delete_legion_workflow_candidate("legion-memory:session:legion:memory"));
+        assert!(restored.delete_trace_record(&trace.trace_id));
+    }
+
+    #[test]
+    fn memory_compaction_keeps_latest_metadata_only() {
+        let mut service = MemoryService::new();
+        for sequence in 1..=3 {
+            let mut record = candidate(MemoryConsentState::ProjectLongTerm);
+            record.candidate_id = format!("memory-candidate-{sequence}");
+            record.event_sequence = EventSequence(sequence);
+            service.retain(record).expect("retain candidate");
+        }
+
+        service.compact(MemoryCompactionPolicy {
+            retained_candidates: 1,
+            workflow_retained_candidates: 0,
+            trace_records: 0,
+        });
+
+        assert_eq!(service.retained().len(), 1);
+        assert_eq!(service.retained()[0].candidate_id, "memory-candidate-3");
     }
 
     #[test]

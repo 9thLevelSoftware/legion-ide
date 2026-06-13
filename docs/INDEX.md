@@ -7,15 +7,23 @@ This index is the canonical entry point for the Legion IDE documentation set und
 | If you are a… | Start here |
 | --- | --- |
 | New agent or contributor | `AGENTS.md` at the repo root, then this index |
+| End user or product reader | `USER_GUIDE.md` |
 | Architect / reviewer | `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` |
+| Security reviewer / vulnerability reporter | `SECURITY.md` |
 | Operator running the gates | `OPERATOR_RUNBOOK.md` |
+| Keyboard reference reader | `KEYBOARD_REFERENCE.md` |
+| Support / triage responder | `TROUBLESHOOTING.md` |
 | Product / roadmap reader | `LEGION_PIVOT.md` |
 | Mode-policy reader (Manual / Assist / Delegate / Legion Workflow) | `MODES.md` |
 | Reading the rename / historical naming | `LEGION_RENAME.md` |
 
 ## Canonical documents
 
+- `USER_GUIDE.md` — end-user entry point for the current product paths, support surfaces, and where to go next.
+- `KEYBOARD_REFERENCE.md` — the projected shortcut labels that are currently surfaced by the product UI.
+- `TROUBLESHOOTING.md` — diagnostic bundle guidance for smoke failures, package failures, and release support.
 - `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` — canonical ownership rules across the UI, app composition, workspace/project, AI/provider, and other layers. Read this before making any change that crosses a layer boundary.
+- `SECURITY.md` — public-facing security model, platform caveats, egress policy, secret-handling posture, plugin isolation, and responsible-disclosure policy.
 - `LEGION_PIVOT.md` — product direction, pivot context, and the boundaries between the current validated substrate and the eventual product surface.
 - `MODES.md` — semantics and boundaries of the Manual, Assist, Delegate, and Legion Workflow modes; includes what each mode permits and forbids.
 - `OPERATOR_RUNBOOK.md` — operator-oriented gate list, subagent execution pattern, safety checks, and Phase 8 dry-run procedures. The runbook is the day-to-day reference for running the phase gates and dispatching work.
