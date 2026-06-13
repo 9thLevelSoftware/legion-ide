@@ -5215,6 +5215,208 @@ mod tests {
         assert_ne!(manual.right.pinned_default, automate.right.pinned_default);
     }
 
+    // --- P1.F2.T1: Manual-mode panel filtering regression suite ---
+    //
+    // These tests are the construction-time guarantee that Manual mode cannot
+    // expose any AI / provider / cloud / worker / delegation / collaboration
+    // / hosted-telemetry surface. They are intentionally written against the
+    // projection structures (PanelCapability, PanelRegistry, DockLayout) rather
+    // than against hard-coded panel id lists, so adding a new AI panel in the
+    // future without updating the mode filter will fail these tests.
+
+    use ProductRuntimeSurface::{
+        AssistedAi, Automation, CloudProvider, Collaboration as CollaborationSurface,
+        DelegatedTask, HostedTelemetry, ManualIde, NetworkEgress, PluginManagement, PluginRuntime,
+        RemoteWorkspace as RemoteSurface, WorkerRuntime,
+    };
+
+    /// Runtime surfaces that Manual mode MUST NOT expose under any panel.
+    const FORBIDDEN_MANUAL_SURFACES: &[ProductRuntimeSurface] = &[
+        AssistedAi,
+        CloudProvider,
+        NetworkEgress,
+        HostedTelemetry,
+        DelegatedTask,
+        WorkerRuntime,
+        Automation,
+        CollaborationSurface,
+        RemoteSurface,
+        PluginRuntime,
+    ];
+
+    /// Panels that the Manual dock layout MUST NOT reference.
+    const FORBIDDEN_MANUAL_PANEL_IDS: &[PanelId] = &[
+        PanelId::Assistant,
+        PanelId::Delegation,
+        PanelId::ApprovalQueue,
+        PanelId::AgentFleet,
+        PanelId::DecisionFeed,
+        PanelId::AgentLogs,
+        PanelId::Workflow,
+        PanelId::Collaboration,
+        PanelId::RemoteWorkspace,
+    ];
+
+    #[test]
+    fn manual_mode_allows_exactly_manual_ide_and_plugin_management() {
+        use ProductRuntimeSurface::{ManualIde, PluginManagement};
+        let allowed = [
+            ProductRuntimeSurface::ManualIde,
+            ProductRuntimeSurface::PluginManagement,
+        ];
+        for surface in [
+            ManualIde,
+            PluginManagement,
+            AssistedAi,
+            CloudProvider,
+            NetworkEgress,
+            HostedTelemetry,
+            DelegatedTask,
+            WorkerRuntime,
+            Automation,
+            CollaborationSurface,
+            RemoteSurface,
+            PluginRuntime,
+        ] {
+            let expected = allowed.contains(&surface);
+            let actual = product_mode_allows_runtime_surface(ProductMode::Manual, surface);
+            assert_eq!(
+                actual, expected,
+                "Manual mode filter for {surface:?} drifted from the construction-time allow-list"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_registry_visibility_matches_capability_allow_list() {
+        let registry = PanelRegistry::standard();
+        // Every forbidden surface in the standard registry must be hidden
+        // from Manual mode by construction, regardless of panel id.
+        for panel in registry.panels() {
+            let visible_in_manual = registry.is_visible_in(panel.id, DockMode::Manual);
+            let has_forbidden_capability = panel
+                .capabilities
+                .iter()
+                .any(|capability| FORBIDDEN_MANUAL_SURFACES.contains(capability));
+            assert!(
+                !(visible_in_manual && has_forbidden_capability),
+                "panel `{}` ({:?}) leaked into Manual mode despite capabilities {:?}",
+                panel.id.as_str(),
+                panel.title,
+                panel.capabilities,
+            );
+            // Conversely, every panel whose only capabilities are ManualIde
+            // (or empty, which defaults to ManualIde) must be visible in Manual.
+            let only_manual_capable = panel
+                .capabilities
+                .iter()
+                .all(|capability| matches!(capability, ManualIde | PluginManagement));
+            assert_eq!(
+                visible_in_manual,
+                only_manual_capable,
+                "panel `{}` ({:?}) visibility disagrees with its capability set {:?}",
+                panel.id.as_str(),
+                panel.title,
+                panel.capabilities,
+            );
+        }
+    }
+
+    #[test]
+    fn manual_dock_layout_never_references_forbidden_panels() {
+        let registry = PanelRegistry::standard();
+        let manual = DockLayout::standard(DockMode::Manual);
+
+        for side in [DockSide::Left, DockSide::Right, DockSide::Bottom] {
+            for panel_id in manual.visible_panel_ids(side, &registry) {
+                assert!(
+                    !FORBIDDEN_MANUAL_PANEL_IDS.contains(&panel_id),
+                    "Manual {side:?} layout exposed forbidden panel {panel_id:?}"
+                );
+                assert!(
+                    registry.is_visible_in(panel_id, DockMode::Manual),
+                    "Manual {side:?} layout referenced panel {panel_id:?} \
+                     that is not constructible in Manual mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn manual_visible_for_returns_only_ai_free_panels_and_nonempty() {
+        let registry = PanelRegistry::standard();
+        let visible: Vec<_> = registry
+            .visible_for(DockMode::Manual)
+            .into_iter()
+            .map(|panel| panel.id)
+            .collect();
+
+        // Manual must still have a usable baseline of editor / workspace
+        // surfaces — the filter is "hide AI chrome", not "hide everything".
+        assert!(
+            !visible.is_empty(),
+            "Manual mode filtered out every panel; nothing left to render"
+        );
+        for required in [
+            PanelId::ProjectExplorer,
+            PanelId::Terminal,
+            PanelId::Settings,
+        ] {
+            assert!(
+                visible.contains(&required),
+                "Manual mode is missing baseline panel {required:?}; visible={visible:?}"
+            );
+        }
+        for forbidden in FORBIDDEN_MANUAL_PANEL_IDS {
+            assert!(
+                !visible.contains(forbidden),
+                "Manual visible_for leaked forbidden panel {forbidden:?}; visible={visible:?}"
+            );
+        }
+        // And the AI-flag must agree with the capability set, so no
+        // requires_ai=true panel can sneak in.
+        for panel in registry.visible_for(DockMode::Manual) {
+            assert!(
+                !panel.requires_ai,
+                "panel `{}` ({:?}) has requires_ai=true but was visible in Manual",
+                panel.id.as_str(),
+                panel.title,
+            );
+        }
+    }
+
+    #[test]
+    fn manual_shell_projection_carries_no_forbidden_capability() {
+        // Build the standard Manual shell projection snapshot. The Shell
+        // itself is projection-only — this test asserts that the
+        // construction pipeline cannot produce a Manual shell whose
+        // dock-panel catalog references any AI/provider/cloud/worker
+        // surface, treating the registry + layout as the contract surface
+        // for "Manual mode chrome".
+        let registry = PanelRegistry::standard();
+        let layout = DockLayout::standard(DockMode::Manual);
+        let all_visible: Vec<PanelId> = [DockSide::Left, DockSide::Right, DockSide::Bottom]
+            .iter()
+            .flat_map(|side| layout.visible_panel_ids(*side, &registry))
+            .collect();
+
+        for panel_id in &all_visible {
+            let descriptor = registry
+                .panel(*panel_id)
+                .unwrap_or_else(|| panic!("layout referenced unknown panel {panel_id:?}"));
+            for capability in &descriptor.capabilities {
+                assert!(
+                    !FORBIDDEN_MANUAL_SURFACES.contains(capability),
+                    "Manual shell projection surface for panel `{}` carries \
+                     forbidden capability {capability:?}; \
+                     capabilities={:?}",
+                    descriptor.id.as_str(),
+                    descriptor.capabilities,
+                );
+            }
+        }
+    }
+
     fn test_coordinate(line: u32, character: u32) -> TextCoordinate {
         TextCoordinate {
             line,
