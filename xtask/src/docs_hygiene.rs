@@ -377,7 +377,7 @@ fn markdown_section_label(line: &str) -> Option<&str> {
     }
     let label = after_hashes.trim();
     // Strip optional trailing closing ATX sequence (`###`).
-    let label = label.trim_end_matches(|ch: char| ch == '#');
+    let label = label.trim_end_matches('#');
     let label = label.trim();
     if label.is_empty() { None } else { Some(label) }
 }
