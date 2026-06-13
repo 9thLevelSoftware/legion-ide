@@ -240,6 +240,327 @@ pub struct LspServerProcessConfig {
     pub env: Vec<(String, String)>,
 }
 
+/// Binary-resolution metadata for one language-server adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspServerBinarySource {
+    /// Resolve the server from the system PATH.
+    SystemPath {
+        /// Binary name to look up in PATH.
+        binary_name: String,
+    },
+    /// Resolve the server from a policy-gated downloaded artifact.
+    DownloadedArtifact {
+        /// Binary name used once the artifact is materialized.
+        binary_name: String,
+        /// Artifact URI or catalog entry.
+        artifact_uri: String,
+        /// Artifact checksum recorded by the supply-chain policy.
+        checksum_sha256: String,
+        /// Policy gate that authorizes the download path.
+        policy_gate: String,
+    },
+}
+
+/// One per-language adapter entry in the server registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageServerAdapterPlan {
+    /// Stable language-server identifier.
+    pub server_id: legion_protocol::LanguageServerId,
+    /// Owning workspace.
+    pub workspace_id: legion_protocol::WorkspaceId,
+    /// Language served by this adapter.
+    pub language_id: legion_protocol::LanguageId,
+    /// Human-readable adapter name.
+    pub display_name: String,
+    /// Binary-resolution metadata.
+    pub binary_source: LspServerBinarySource,
+    /// Materialized process launch configuration.
+    pub process: LspServerProcessConfig,
+    /// Whether this adapter is the primary choice for the language.
+    pub is_primary: bool,
+}
+
+impl LanguageServerAdapterPlan {
+    /// Creates a system-path-backed adapter entry.
+    pub fn system_path(
+        server_id: legion_protocol::LanguageServerId,
+        workspace_id: legion_protocol::WorkspaceId,
+        language_id: legion_protocol::LanguageId,
+        display_name: impl Into<String>,
+        binary_name: impl Into<String>,
+        args: Vec<String>,
+        is_primary: bool,
+    ) -> Self {
+        let display_name = display_name.into();
+        let binary_name = binary_name.into();
+        Self {
+            server_id,
+            workspace_id,
+            language_id,
+            display_name,
+            binary_source: LspServerBinarySource::SystemPath {
+                binary_name: binary_name.clone(),
+            },
+            process: LspServerProcessConfig {
+                command: binary_name,
+                args,
+                cwd: None,
+                env: Vec::new(),
+            },
+            is_primary,
+        }
+    }
+
+    /// Creates a policy-gated artifact-backed adapter entry.
+    pub fn downloaded_artifact(
+        server_id: legion_protocol::LanguageServerId,
+        workspace_id: legion_protocol::WorkspaceId,
+        language_id: legion_protocol::LanguageId,
+        display_name: impl Into<String>,
+        binary_name: impl Into<String>,
+        artifact_uri: impl Into<String>,
+        checksum_sha256: impl Into<String>,
+        policy_gate: impl Into<String>,
+        args: Vec<String>,
+        is_primary: bool,
+    ) -> Self {
+        let display_name = display_name.into();
+        let binary_name = binary_name.into();
+        Self {
+            server_id,
+            workspace_id,
+            language_id,
+            display_name,
+            binary_source: LspServerBinarySource::DownloadedArtifact {
+                binary_name: binary_name.clone(),
+                artifact_uri: artifact_uri.into(),
+                checksum_sha256: checksum_sha256.into(),
+                policy_gate: policy_gate.into(),
+            },
+            process: LspServerProcessConfig {
+                command: binary_name,
+                args,
+                cwd: None,
+                env: Vec::new(),
+            },
+            is_primary,
+        }
+    }
+
+    /// Returns the materialized process configuration.
+    pub fn process_config(&self) -> LspServerProcessConfig {
+        self.process.clone()
+    }
+}
+
+/// Binary-manifest entry describing a language-server adapter for one workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspServerBinaryManifestEntry {
+    /// Stable language-server identifier.
+    pub server_id: legion_protocol::LanguageServerId,
+    /// Owning workspace.
+    pub workspace_id: legion_protocol::WorkspaceId,
+    /// Language served by this adapter.
+    pub language_id: legion_protocol::LanguageId,
+    /// Human-readable adapter name.
+    pub display_name: String,
+    /// Binary-resolution metadata.
+    pub binary_source: LspServerBinarySource,
+    /// Optional workspace-level version pin recorded for the manifest audit.
+    pub workspace_version_pin: Option<String>,
+    /// Whether this adapter is the primary choice for the language.
+    pub is_primary: bool,
+}
+
+/// Metadata-only manifest audit for the server-binary supply chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspServerBinaryManifest {
+    /// Workspace covered by the manifest audit.
+    pub workspace_id: legion_protocol::WorkspaceId,
+    /// Language covered by the manifest audit.
+    pub language_id: legion_protocol::LanguageId,
+    /// Whether the audit ran under air-gap policy.
+    pub air_gap: bool,
+    /// Download attempts denied by the policy gate.
+    pub denied_downloads: Vec<String>,
+    /// Adapters retained for this workspace/language pair.
+    pub entries: Vec<LspServerBinaryManifestEntry>,
+}
+
+/// Registry of per-language adapter plans.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanguageServerAdapterRegistry {
+    adapters_by_language: HashMap<legion_protocol::LanguageId, Vec<LanguageServerAdapterPlan>>,
+}
+
+impl LanguageServerAdapterRegistry {
+    /// Creates an empty adapter registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers one adapter entry.
+    pub fn register(&mut self, adapter: LanguageServerAdapterPlan) {
+        let language_id = adapter.language_id.clone();
+        let adapters = self.adapters_by_language.entry(language_id).or_default();
+        adapters.push(adapter);
+        adapters.sort_by_key(|entry| {
+            (
+                std::cmp::Reverse(entry.is_primary),
+                entry.display_name.clone(),
+                entry.server_id.0,
+            )
+        });
+    }
+
+    /// Returns all adapters for one language in registry order.
+    pub fn adapters_for_language(
+        &self,
+        language_id: &legion_protocol::LanguageId,
+    ) -> Vec<&LanguageServerAdapterPlan> {
+        self.adapters_by_language
+            .get(language_id)
+            .map(|adapters| adapters.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Returns the launch configs for one workspace/language pair.
+    pub fn process_configs_for_workspace_language(
+        &self,
+        workspace_id: legion_protocol::WorkspaceId,
+        language_id: &legion_protocol::LanguageId,
+    ) -> Vec<LspServerProcessConfig> {
+        self.adapters_for_language(language_id)
+            .into_iter()
+            .filter(|adapter| adapter.workspace_id == workspace_id)
+            .map(LanguageServerAdapterPlan::process_config)
+            .collect()
+    }
+
+    /// Returns a metadata-only manifest audit for one workspace/language pair.
+    pub fn binary_manifest_for_workspace_language(
+        &self,
+        workspace_id: legion_protocol::WorkspaceId,
+        language_id: &legion_protocol::LanguageId,
+        air_gap: bool,
+    ) -> LspServerBinaryManifest {
+        let mut denied_downloads = Vec::new();
+        let entries = self
+            .adapters_for_language(language_id)
+            .into_iter()
+            .filter(|adapter| adapter.workspace_id == workspace_id)
+            .filter_map(|adapter| {
+                let workspace_version_pin = Some(format!("workspace/{}", workspace_id.0));
+                match &adapter.binary_source {
+                    LspServerBinarySource::SystemPath { .. } => {
+                        Some(LspServerBinaryManifestEntry {
+                            server_id: adapter.server_id,
+                            workspace_id: adapter.workspace_id,
+                            language_id: adapter.language_id.clone(),
+                            display_name: adapter.display_name.clone(),
+                            binary_source: adapter.binary_source.clone(),
+                            workspace_version_pin: None,
+                            is_primary: adapter.is_primary,
+                        })
+                    }
+                    LspServerBinarySource::DownloadedArtifact {
+                        binary_name,
+                        artifact_uri,
+                        checksum_sha256,
+                        policy_gate,
+                    } => {
+                        if air_gap {
+                            denied_downloads.push(format!(
+                                "{}:{} denied by {} ({})",
+                                adapter.display_name, artifact_uri, policy_gate, checksum_sha256
+                            ));
+                            None
+                        } else {
+                            Some(LspServerBinaryManifestEntry {
+                                server_id: adapter.server_id,
+                                workspace_id: adapter.workspace_id,
+                                language_id: adapter.language_id.clone(),
+                                display_name: adapter.display_name.clone(),
+                                binary_source: LspServerBinarySource::DownloadedArtifact {
+                                    binary_name: binary_name.clone(),
+                                    artifact_uri: artifact_uri.clone(),
+                                    checksum_sha256: checksum_sha256.clone(),
+                                    policy_gate: policy_gate.clone(),
+                                },
+                                workspace_version_pin,
+                                is_primary: adapter.is_primary,
+                            })
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        LspServerBinaryManifest {
+            workspace_id,
+            language_id: language_id.clone(),
+            air_gap,
+            denied_downloads,
+            entries,
+        }
+    }
+
+    /// Returns the stable tier-2 adapter registry used by the smoke tests.
+    pub fn tier_two() -> Self {
+        let workspace_id = legion_protocol::WorkspaceId(1);
+        let mut registry = Self::new();
+        registry.register(LanguageServerAdapterPlan::system_path(
+            legion_protocol::LanguageServerId(101),
+            workspace_id,
+            legion_protocol::LanguageId("rust".to_string()),
+            "rust-analyzer",
+            "rust-analyzer",
+            Vec::new(),
+            true,
+        ));
+        registry.register(LanguageServerAdapterPlan::system_path(
+            legion_protocol::LanguageServerId(102),
+            workspace_id,
+            legion_protocol::LanguageId("typescript".to_string()),
+            "typescript-language-server",
+            "typescript-language-server",
+            vec!["--stdio".to_string()],
+            true,
+        ));
+        registry.register(LanguageServerAdapterPlan::system_path(
+            legion_protocol::LanguageServerId(103),
+            workspace_id,
+            legion_protocol::LanguageId("typescript".to_string()),
+            "tailwindcss-language-server",
+            "tailwindcss-language-server",
+            vec!["--stdio".to_string()],
+            false,
+        ));
+        registry.register(LanguageServerAdapterPlan::downloaded_artifact(
+            legion_protocol::LanguageServerId(104),
+            workspace_id,
+            legion_protocol::LanguageId("python".to_string()),
+            "pyright",
+            "pyright-langserver",
+            "https://registry.example.invalid/pyright-1.1.400.tgz",
+            "sha256:pyright-1.1.400",
+            "policy://lsp-download/pyright",
+            vec!["--stdio".to_string()],
+            true,
+        ));
+        registry.register(LanguageServerAdapterPlan::system_path(
+            legion_protocol::LanguageServerId(105),
+            workspace_id,
+            legion_protocol::LanguageId("go".to_string()),
+            "gopls",
+            "gopls",
+            Vec::new(),
+            true,
+        ));
+        registry
+    }
+}
+
 /// Abstract handle for a launched language-server process.
 pub trait LspProcessHandle: Send {
     /// Returns whether the process is still running.
