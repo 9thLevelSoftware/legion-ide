@@ -78,18 +78,10 @@ pub struct KanbanBacklog {
 
 impl KanbanBacklog {
     pub fn from_file(path: &Path) -> Result<Self, String> {
-        let text = fs::read_to_string(path).map_err(|err| {
-            format!(
-                "unable to read kanban backlog `{}`: {err}",
-                path.display()
-            )
-        })?;
-        toml::from_str(&text).map_err(|err| {
-            format!(
-                "unable to parse kanban backlog `{}`: {err}",
-                path.display()
-            )
-        })
+        let text = fs::read_to_string(path)
+            .map_err(|err| format!("unable to read kanban backlog `{}`: {err}", path.display()))?;
+        toml::from_str(&text)
+            .map_err(|err| format!("unable to parse kanban backlog `{}`: {err}", path.display()))
     }
 
     /// Return every epic, feature, and task id in the backlog in a stable
@@ -111,9 +103,17 @@ impl KanbanBacklog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KanbanBacklogValidationError {
-    DuplicateId { id: String },
-    MissingRequiredField { card_id: String, field: &'static str },
-    UnknownDependency { card_id: String, dependency: String },
+    DuplicateId {
+        id: String,
+    },
+    MissingRequiredField {
+        card_id: String,
+        field: &'static str,
+    },
+    UnknownDependency {
+        card_id: String,
+        dependency: String,
+    },
 }
 
 impl std::fmt::Display for KanbanBacklogValidationError {
@@ -122,10 +122,9 @@ impl std::fmt::Display for KanbanBacklogValidationError {
             KanbanBacklogValidationError::DuplicateId { id } => {
                 write!(f, "duplicate card id `{id}` in backlog")
             }
-            KanbanBacklogValidationError::MissingRequiredField { card_id, field } => write!(
-                f,
-                "card `{card_id}` is missing required field `{field}`"
-            ),
+            KanbanBacklogValidationError::MissingRequiredField { card_id, field } => {
+                write!(f, "card `{card_id}` is missing required field `{field}`")
+            }
             KanbanBacklogValidationError::UnknownDependency {
                 card_id,
                 dependency,
@@ -180,7 +179,10 @@ pub fn validate_backlog(backlog: &KanbanBacklog) -> Result<(), KanbanBacklogVali
     Ok(())
 }
 
-fn check_unique(id: String, seen: &mut BTreeSet<String>) -> Result<(), KanbanBacklogValidationError> {
+fn check_unique(
+    id: String,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), KanbanBacklogValidationError> {
     if !seen.insert(id.clone()) {
         return Err(KanbanBacklogValidationError::DuplicateId { id });
     }

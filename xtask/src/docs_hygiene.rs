@@ -361,7 +361,10 @@ fn markdown_section_label(line: &str) -> Option<&str> {
         return None;
     }
     // Count leading '#' characters.
-    let hashes = trimmed_start.bytes().take_while(|byte| *byte == b'#').count();
+    let hashes = trimmed_start
+        .bytes()
+        .take_while(|byte| *byte == b'#')
+        .count();
     if !(1..=6).contains(&hashes) {
         return None;
     }
@@ -376,9 +379,5 @@ fn markdown_section_label(line: &str) -> Option<&str> {
     // Strip optional trailing closing ATX sequence (`###`).
     let label = label.trim_end_matches(|ch: char| ch == '#');
     let label = label.trim();
-    if label.is_empty() {
-        None
-    } else {
-        Some(label)
-    }
+    if label.is_empty() { None } else { Some(label) }
 }

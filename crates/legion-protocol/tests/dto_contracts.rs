@@ -84,10 +84,7 @@ fn dto_contracts_canonical_product_mode_taxonomy_is_complete_and_consistent() {
         );
         // Every canonical mode must map back to a known ProductMode variant.
         assert!(
-            product_mode_allows_runtime_surface(
-                entry.variant,
-                ProductRuntimeSurface::ManualIde
-            ),
+            product_mode_allows_runtime_surface(entry.variant, ProductRuntimeSurface::ManualIde),
             "canonical mode `{}` must allow ManualIde runtime surface",
             entry.label
         );

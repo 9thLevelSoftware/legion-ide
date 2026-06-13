@@ -19,8 +19,7 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before epoch")
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("legion-kanban-backlog-{name}-{stamp}"));
+        let root = std::env::temp_dir().join(format!("legion-kanban-backlog-{name}-{stamp}"));
         fs::create_dir_all(&root).expect("create temp dir");
         Self { root }
     }
@@ -74,26 +73,24 @@ stop_condition = "Manual mode policy still forbids AI"
 fn parse_minimal_valid_backlog_succeeds() {
     let dir = TempDir::new("minimal-valid");
     let path = dir.write("backlog.toml", minimal_valid_backlog_toml());
-    let backlog =
-        KanbanBacklog::from_file(&path).expect("minimal valid backlog should parse");
-    assert_eq!(backlog.meta.plan, ".hermes/plans/2026-06-13_173122-legion-current-to-ga-kanban-plan.md");
+    let backlog = KanbanBacklog::from_file(&path).expect("minimal valid backlog should parse");
+    assert_eq!(
+        backlog.meta.plan,
+        ".hermes/plans/2026-06-13_173122-legion-current-to-ga-kanban-plan.md"
+    );
     assert_eq!(backlog.meta.milestone, "M0");
     assert_eq!(backlog.epics.len(), 1);
     assert_eq!(backlog.epics[0].id, "P0");
     assert_eq!(backlog.epics[0].features.len(), 1);
     assert_eq!(backlog.epics[0].features[0].tasks.len(), 1);
-    assert_eq!(
-        backlog.epics[0].features[0].tasks[0].id,
-        "P0.F1.T1"
-    );
+    assert_eq!(backlog.epics[0].features[0].tasks[0].id, "P0.F1.T1");
 }
 
 #[test]
 fn validate_passes_for_minimal_backlog() {
     let dir = TempDir::new("validate-minimal");
     let path = dir.write("backlog.toml", minimal_valid_backlog_toml());
-    let backlog =
-        KanbanBacklog::from_file(&path).expect("minimal valid backlog should parse");
+    let backlog = KanbanBacklog::from_file(&path).expect("minimal valid backlog should parse");
     let result = validate_backlog(&backlog);
     assert!(
         result.is_ok(),
@@ -105,8 +102,8 @@ fn validate_passes_for_minimal_backlog() {
 #[test]
 fn validate_rejects_missing_required_task_field() {
     // Drop the `acceptance` field from the only task.
-    let toml_src = minimal_valid_backlog_toml()
-        .replace("acceptance = [\"One mode table exists\"]\n", "");
+    let toml_src =
+        minimal_valid_backlog_toml().replace("acceptance = [\"One mode table exists\"]\n", "");
     let dir = TempDir::new("missing-acceptance");
     let path = dir.write("backlog.toml", &toml_src);
     let backlog = KanbanBacklog::from_file(&path)
@@ -129,10 +126,9 @@ fn validate_rejects_unknown_dependency() {
         .replace("dependencies = []", "dependencies = [\"P9.F99.T99\"]");
     let dir = TempDir::new("unknown-dep");
     let path = dir.write("backlog.toml", &toml_src);
-    let backlog =
-        KanbanBacklog::from_file(&path).expect("backlog should still parse");
-    let err = validate_backlog(&backlog)
-        .expect_err("validation should fail when dependency is unknown");
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should still parse");
+    let err =
+        validate_backlog(&backlog).expect_err("validation should fail when dependency is unknown");
     match err {
         KanbanBacklogValidationError::UnknownDependency {
             card_id,
@@ -164,8 +160,7 @@ stop_condition = ""
     let dir = TempDir::new("duplicate-ids");
     let path = dir.write("backlog.toml", &combined);
     let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
-    let err = validate_backlog(&backlog)
-        .expect_err("validation should fail on duplicate ids");
+    let err = validate_backlog(&backlog).expect_err("validation should fail on duplicate ids");
     match err {
         KanbanBacklogValidationError::DuplicateId { id } => {
             assert_eq!(id, "P0.F1.T1");
@@ -219,8 +214,7 @@ fn collect_all_ids_returns_feature_and_task_ids() {
 fn from_file_reports_read_error() {
     let dir = TempDir::new("missing-file");
     let path = dir.root.join("does-not-exist.toml");
-    let err = KanbanBacklog::from_file(&path)
-        .expect_err("loading a missing file must fail");
+    let err = KanbanBacklog::from_file(&path).expect_err("loading a missing file must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("unable to read kanban backlog"),
@@ -232,8 +226,7 @@ fn from_file_reports_read_error() {
 fn from_file_reports_parse_error() {
     let dir = TempDir::new("parse-error");
     let path = dir.write("backlog.toml", "this is = = not valid toml ===\n");
-    let err = KanbanBacklog::from_file(&path)
-        .expect_err("malformed toml must fail to parse");
+    let err = KanbanBacklog::from_file(&path).expect_err("malformed toml must fail to parse");
     let msg = err.to_string();
     assert!(
         msg.contains("unable to parse kanban backlog"),

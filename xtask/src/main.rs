@@ -594,9 +594,7 @@ fn main() {
         Commands::VerifyLegionBench { out, strict } => {
             run_verify_legion_bench_command(&out, strict)
         }
-        Commands::VerifyKanbanBacklog { backlog } => {
-            run_verify_kanban_backlog_command(&backlog)
-        }
+        Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
     };
 
     process::exit(code);
