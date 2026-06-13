@@ -24,7 +24,6 @@ Use these docs first:
 - `docs/OPERATOR_RUNBOOK.md` — operator-oriented gate/runbook notes.
 - `plans/product-readiness-ledger.md` — readiness matrix and remaining product gaps.
 - `plans/legion-production-master-plan-v0.1.md` — the production master plan (current-state assessment, 2026 market/technology gap analysis, ADR queue, workstreams, milestones to GA).
-- `plans/legion-customizable-autonomy-continuation-plan-v0.1.md` — continuation plan: an old-school customizable manual IDE with a configurable autonomy continuum from zero AI to gated full automation (ADR-0041..0045, WS-21..WS-29, milestones C1..C5).
 - `.almanac/pages/getting-started.md` — local Almanac wiki entry point, if the wiki is checked out locally.
 
 ## Architecture at a Glance
