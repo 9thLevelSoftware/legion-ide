@@ -4,8 +4,9 @@ use legion_app::{AppComposition, AppDelegatedTaskExecutionOutcome, AppProductMod
 use legion_protocol::{
     CausalityId, CorrelationId, DelegatedTaskPlanContract, DelegatedTaskPlanId,
     DelegatedTaskPlanningBoundaryInput, DelegatedTaskProposalHunkDisposition,
-    DelegatedTaskToolPermissionDecision, FileFingerprint, PrincipalId, ProposalPayload,
-    TimestampMillis, WorkspaceId, WorkspaceTrustState, delegated_task_plan_from_boundary_input,
+    DelegatedTaskRuntimeActivationState, DelegatedTaskToolPermissionDecision, FileFingerprint,
+    PrincipalId, ProposalPayload, TimestampMillis, WorkspaceId, WorkspaceTrustState,
+    delegated_task_plan_from_boundary_input,
 };
 
 fn delegated_plan_contract(plan_id: DelegatedTaskPlanId) -> DelegatedTaskPlanContract {
@@ -84,6 +85,13 @@ fn execute_delegated_task_waits_for_write_permission_before_sandbox_allocation()
     let mut app = AppComposition::new();
     app.set_product_mode(AppProductMode::Delegate);
     let plan_id = unique_plan_id("waiting-plan");
+    let workspace_root = temp_workspace("waiting-plan");
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId(format!("delegate-test:{}", plan_id.0)),
+    )
+    .expect("workspace opens for projection snapshot");
     app.seed_delegated_task_plan_contracts(vec![delegated_plan_contract(plan_id.clone())]);
 
     let outcome = app
@@ -99,6 +107,13 @@ fn execute_delegated_task_waits_for_write_permission_before_sandbox_allocation()
             assert!(!request.runtime_allowed);
             assert!(request.human_approval_required);
             assert!(!sandbox_path(&plan_id).exists());
+            let snapshot = app
+                .shell_projection_snapshot("Legion")
+                .expect("projection snapshot is available");
+            assert_eq!(
+                snapshot.delegated_task_projection.runtime_activation,
+                DelegatedTaskRuntimeActivationState::Planned
+            );
         }
         other => panic!("expected WaitingForToolPermission, got {other:?}"),
     }
@@ -164,6 +179,13 @@ fn execute_delegated_task_returns_proposal_after_explicit_write_allow() {
     let mut app = AppComposition::new();
     app.set_product_mode(AppProductMode::Delegate);
     let plan_id = unique_plan_id("approved-plan");
+    let workspace_root = temp_workspace("approved-plan");
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId(format!("delegate-test:{}", plan_id.0)),
+    )
+    .expect("workspace opens for projection snapshot");
     app.seed_delegated_task_plan_contracts(vec![delegated_plan_contract(plan_id.clone())]);
     let request_id = match app
         .execute_delegated_task(&plan_id)
@@ -186,7 +208,7 @@ fn execute_delegated_task_returns_proposal_after_explicit_write_allow() {
         .expect("approved execution succeeds");
     match outcome {
         AppDelegatedTaskExecutionOutcome::ProposalReady(proposal) => {
-            assert_eq!(proposal.correlation_id.0, 1);
+            assert!(proposal.correlation_id.0 > 0);
             assert!(!proposal.causality_id.0.is_nil());
             assert_ne!(proposal.provider_id, "provider-auto");
             assert_ne!(proposal.principal.0, "principal-auto");
@@ -207,64 +229,113 @@ fn execute_delegated_task_returns_proposal_after_explicit_write_allow() {
                 other => panic!("expected CreateFile proposal, got {other:?}"),
             }
             assert!(!sandbox_path(&plan_id).exists());
+            let snapshot = app
+                .shell_projection_snapshot("Legion")
+                .expect("projection snapshot is available");
+            assert_eq!(
+                snapshot.delegated_task_projection.runtime_activation,
+                DelegatedTaskRuntimeActivationState::WaitingForApproval
+            );
         }
         other => panic!("expected ProposalReady, got {other:?}"),
     }
 }
 
 #[test]
-fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
-    let root = temp_workspace("chat");
-    fs::write(
-        root.join("lib.rs"),
-        "pub fn delegated_marker() -> u32 {\n    42\n}\n",
-    )
-    .expect("fixture file should be written");
+fn execute_delegated_task_uses_acp_host_command_and_projects_comm_stream() {
     let mut app = AppComposition::new();
-    app.open_workspace(
-        &root,
-        WorkspaceTrustState::Trusted,
-        PrincipalId("delegate-chat-test".to_string()),
-    )
-    .expect("workspace should open");
-    app.open_file("lib.rs").expect("fixture file should open");
     app.set_product_mode(AppProductMode::Delegate);
+    let plan_id = unique_plan_id("acp-host");
+    let workspace_root = temp_workspace("acp-host");
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId(format!("delegate-test:{}", plan_id.0)),
+    )
+    .expect("workspace opens for projection snapshot");
+    app.seed_delegated_task_plan_contracts(vec![delegated_plan_contract(plan_id.clone())]);
+    app.set_acp_host_command(
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".to_string(),
+            r#"mkdir -p "$(dirname "$LEGION_ACP_TARGET_PATH")"; printf 'external-agent=claude-code\nplan=%s\n' "$LEGION_ACP_PLAN_ID" > "$LEGION_ACP_TARGET_PATH""#
+                .to_string(),
+        ],
+    );
+
+    let request_id = match app
+        .execute_delegated_task(&plan_id)
+        .expect("permission wait is structured")
+    {
+        AppDelegatedTaskExecutionOutcome::WaitingForToolPermission { request } => {
+            request.request_id
+        }
+        other => panic!("expected WaitingForToolPermission, got {other:?}"),
+    };
+
+    app.record_delegate_tool_permission_decision(
+        request_id,
+        DelegatedTaskToolPermissionDecision::Allow,
+    )
+    .expect("allow decision is recorded");
 
     let outcome = app
-        .send_delegate_chat("explain delegated_marker")
-        .expect("delegate chat should complete");
+        .execute_delegated_task(&plan_id)
+        .expect("approved external host execution succeeds");
+    match outcome {
+        AppDelegatedTaskExecutionOutcome::ProposalReady(proposal) => {
+            assert!(proposal.correlation_id.0 > 0);
+            assert!(!proposal.causality_id.0.is_nil());
+            match &proposal.payload {
+                ProposalPayload::CreateFile(create_file) => {
+                    let content = create_file
+                        .initial_content
+                        .as_ref()
+                        .expect("proposal content is derived from the host output");
+                    assert!(content.contains("external-agent=claude-code"));
+                    assert!(content.contains(&plan_id.0));
+                }
+                other => panic!("expected CreateFile proposal, got {other:?}"),
+            }
+            assert!(!sandbox_path(&plan_id).exists());
+            let snapshot = app
+                .shell_projection_snapshot("Legion")
+                .expect("projection snapshot is available");
+            assert!(
+                snapshot
+                    .delegated_task_projection
+                    .chat_messages
+                    .iter()
+                    .any(|message| {
+                        message.role == legion_protocol::DelegatedTaskChatRole::System
+                            && message.content_label.contains("acp.host.connect")
+                    })
+            );
+            assert!(
+                snapshot
+                    .delegated_task_projection
+                    .chat_messages
+                    .iter()
+                    .any(|message| {
+                        message.role == legion_protocol::DelegatedTaskChatRole::System
+                            && message.content_label.contains("acp.host.spawn")
+                    })
+            );
+            assert!(
+                snapshot
+                    .delegated_task_projection
+                    .chat_messages
+                    .iter()
+                    .any(|message| {
+                        message.role == legion_protocol::DelegatedTaskChatRole::System
+                            && message.content_label.contains("acp.host.terminate success")
+                    })
+            );
+        }
+        other => panic!("expected ProposalReady, got {other:?}"),
+    }
 
-    assert_eq!(outcome.projection.chat_message_count, 2);
-    assert!(outcome.citation_count > 0);
-    assert!(outcome.projection.chat_messages.iter().any(|message| {
-        message.role == legion_protocol::DelegatedTaskChatRole::Assistant
-            && message
-                .content_label
-                .contains("Delegate provider answer ready")
-    }));
-    let citation = outcome
-        .projection
-        .context_citations
-        .first()
-        .expect("at least one citation should be projected");
-    assert!(
-        citation
-            .path
-            .as_ref()
-            .is_some_and(|path| path.0.ends_with("lib.rs"))
-    );
-    assert!(citation.byte_range.is_some());
-    assert!(citation.chunk_hash.is_some());
-    assert!(
-        outcome
-            .projection
-            .context_citations
-            .iter()
-            .all(|citation| !citation.metadata_label.contains("42"))
-    );
-    assert_eq!(outcome.projection.tool_permission_request_count, 1);
-
-    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(workspace_root);
 }
 
 #[test]
@@ -342,6 +413,61 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
         )
         .is_err()
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
+    let root = temp_workspace("chat");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn delegated_marker() -> u32 {\n    42\n}\n",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-chat-test".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let outcome = app
+        .send_delegate_chat("explain delegated_marker")
+        .expect("delegate chat should complete");
+
+    assert_eq!(outcome.projection.chat_message_count, 2);
+    assert!(outcome.citation_count > 0);
+    assert!(outcome.projection.chat_messages.iter().any(|message| {
+        message.role == legion_protocol::DelegatedTaskChatRole::Assistant
+            && message
+                .content_label
+                .contains("Delegate provider answer ready")
+    }));
+    let citation = outcome
+        .projection
+        .context_citations
+        .first()
+        .expect("at least one citation should be projected");
+    assert!(
+        citation
+            .path
+            .as_ref()
+            .is_some_and(|path| path.0.ends_with("lib.rs"))
+    );
+    assert!(citation.byte_range.is_some());
+    assert!(citation.chunk_hash.is_some());
+    assert!(
+        outcome
+            .projection
+            .context_citations
+            .iter()
+            .all(|citation| !citation.metadata_label.contains("42"))
+    );
+    assert_eq!(outcome.projection.tool_permission_request_count, 1);
 
     let _ = fs::remove_dir_all(root);
 }

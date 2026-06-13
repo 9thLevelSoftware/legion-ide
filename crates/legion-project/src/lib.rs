@@ -629,6 +629,209 @@ pub struct ProjectGitConflict {
     pub actions: Vec<String>,
 }
 
+/// Projected git worktree classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectGitWorktreeKind {
+    /// Worktree used for delegated agent isolation.
+    Agent,
+    /// Human-managed worktree.
+    Manual,
+}
+
+/// Forge family detected from a git remote URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitForgeKind {
+    /// GitHub remote/compare URL shape.
+    GitHub,
+    /// GitLab remote/merge-request URL shape.
+    GitLab,
+}
+
+/// Forge-agnostic PR URL builder.
+pub trait GitForge {
+    /// Return the forge kind handled by this builder.
+    fn kind(&self) -> GitForgeKind;
+
+    /// Build a pull-request/merge-request URL for the remote and branches.
+    fn pull_request_url(
+        &self,
+        remote_url: &str,
+        base_branch: &str,
+        head_branch: &str,
+    ) -> Option<String>;
+}
+
+/// GitHub compare/PR URL builder.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GitHubForge;
+
+impl GitForge for GitHubForge {
+    fn kind(&self) -> GitForgeKind {
+        GitForgeKind::GitHub
+    }
+
+    fn pull_request_url(
+        &self,
+        remote_url: &str,
+        base_branch: &str,
+        head_branch: &str,
+    ) -> Option<String> {
+        let repo = git_forge_repository(remote_url, GitForgeKind::GitHub)?;
+        Some(format!(
+            "https://github.com/{}/compare/{}...{}",
+            repo,
+            percent_encode_path_segment(base_branch),
+            percent_encode_path_segment(head_branch)
+        ))
+    }
+}
+
+/// GitLab merge-request URL builder.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GitLabForge;
+
+impl GitForge for GitLabForge {
+    fn kind(&self) -> GitForgeKind {
+        GitForgeKind::GitLab
+    }
+
+    fn pull_request_url(
+        &self,
+        remote_url: &str,
+        base_branch: &str,
+        head_branch: &str,
+    ) -> Option<String> {
+        let repo = git_forge_repository(remote_url, GitForgeKind::GitLab)?;
+        Some(format!(
+            "https://gitlab.com/{}/-/merge_requests/new?merge_request[source_branch]={}&merge_request[target_branch]={}",
+            repo,
+            percent_encode_query_value(head_branch),
+            percent_encode_query_value(base_branch)
+        ))
+    }
+}
+
+/// Detect the forge family for a remote URL.
+pub fn git_forge_kind(remote_url: &str) -> Option<GitForgeKind> {
+    let host = git_remote_host(remote_url)?;
+    if host.eq_ignore_ascii_case("github.com") {
+        Some(GitForgeKind::GitHub)
+    } else if host.eq_ignore_ascii_case("gitlab.com") {
+        Some(GitForgeKind::GitLab)
+    } else {
+        None
+    }
+}
+
+/// Build a pull-request/merge-request URL for a supported remote URL.
+pub fn git_pull_request_url(
+    remote_url: &str,
+    base_branch: &str,
+    head_branch: &str,
+) -> Option<String> {
+    match git_forge_kind(remote_url)? {
+        GitForgeKind::GitHub => GitHubForge.pull_request_url(remote_url, base_branch, head_branch),
+        GitForgeKind::GitLab => GitLabForge.pull_request_url(remote_url, base_branch, head_branch),
+    }
+}
+
+fn git_forge_repository(remote_url: &str, kind: GitForgeKind) -> Option<String> {
+    let (host, path) = git_remote_host_and_path(remote_url)?;
+    let expected_host = match kind {
+        GitForgeKind::GitHub => "github.com",
+        GitForgeKind::GitLab => "gitlab.com",
+    };
+    if !host.eq_ignore_ascii_case(expected_host) {
+        return None;
+    }
+    Some(path)
+}
+
+fn git_remote_host(remote_url: &str) -> Option<String> {
+    git_remote_host_and_path(remote_url).map(|(host, _)| host)
+}
+
+fn git_remote_host_and_path(remote_url: &str) -> Option<(String, String)> {
+    let remote_url = remote_url.trim();
+    if remote_url.is_empty() {
+        return None;
+    }
+
+    let remote_url = remote_url.strip_prefix("git+").unwrap_or(remote_url).trim();
+
+    if let Some((scheme, rest)) = remote_url.split_once("://")
+        && matches!(scheme, "http" | "https" | "ssh")
+    {
+        let rest = rest.trim_start_matches('/');
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host = host.rsplit_once('@').map(|(_, host)| host).unwrap_or(host);
+        return Some((host.to_string(), normalize_repo_path(path)));
+    }
+
+    if let Some((host_and_user, path)) = remote_url.split_once(':')
+        && host_and_user.contains('@')
+        && !host_and_user.contains('/')
+    {
+        let host = host_and_user
+            .rsplit_once('@')
+            .map(|(_, host)| host)
+            .unwrap_or(host_and_user)
+            .to_string();
+        return Some((host, normalize_repo_path(path)));
+    }
+
+    let (host, path) = remote_url.split_once('/')?;
+    Some((host.to_string(), normalize_repo_path(path)))
+}
+
+fn normalize_repo_path(path: &str) -> String {
+    path.trim_start_matches('/')
+        .trim_start_matches(':')
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string()
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    percent_encode(value, false)
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    percent_encode(value, true)
+}
+
+fn percent_encode(value: &str, encode_slash: bool) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let keep = matches!(
+            byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
+        ) || (!encode_slash && byte == b'/');
+        if keep {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(&mut encoded, "%{:02X}", byte);
+        }
+    }
+    encoded
+}
+
+/// Projected git worktree row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGitWorktree {
+    /// Worktree path.
+    pub path: String,
+    /// Current branch label when available.
+    pub branch_label: Option<String>,
+    /// Current short HEAD hash when available.
+    pub head_short: Option<String>,
+    /// Worktree category.
+    pub kind: ProjectGitWorktreeKind,
+    /// Whether git considers the worktree prunable/orphaned.
+    pub prunable: bool,
+}
+
 /// Full git projection collected for a workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectGitSnapshot {
@@ -638,6 +841,10 @@ pub struct ProjectGitSnapshot {
     pub branch_label: Option<String>,
     /// Current short HEAD hash when available.
     pub head_short: Option<String>,
+    /// Repository origin remote URL when available.
+    pub remote_url: Option<String>,
+    /// Origin default branch label when available.
+    pub remote_default_branch: Option<String>,
     /// Changed files.
     pub changed_files: Vec<ProjectGitChangedFile>,
     /// Staged and unstaged hunks.
@@ -648,6 +855,8 @@ pub struct ProjectGitSnapshot {
     pub commits: Vec<ProjectGitCommit>,
     /// Conflict marker projections.
     pub conflicts: Vec<ProjectGitConflict>,
+    /// Projected worktree rows.
+    pub worktrees: Vec<ProjectGitWorktree>,
     /// Display-safe diagnostics.
     pub diagnostics: Vec<String>,
     /// Snapshot timestamp.
@@ -677,6 +886,9 @@ pub fn collect_git_snapshot(
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let remote_url = git_remote_url(&repository_root, "origin");
+    let remote_default_branch =
+        git_remote_default_branch(&repository_root, "origin").or_else(|| branch_label.clone());
 
     let status_entries = git_status_entries(&repository_root)?;
     let unstaged_numstat = git_numstat(&repository_root, false)?;
@@ -696,6 +908,7 @@ pub fn collect_git_snapshot(
     }
 
     let conflicts = git_conflicts(&repository_root, status_entries.keys())?;
+    let worktrees = git_worktrees(&repository_root)?;
     let changed_files = git_changed_files(
         &repository_root,
         status_entries,
@@ -716,15 +929,160 @@ pub fn collect_git_snapshot(
         root: CanonicalPath(repository_root.to_string_lossy().into_owned()),
         branch_label,
         head_short,
+        remote_url,
+        remote_default_branch,
         changed_files,
         hunks,
         blame_lines,
         commits,
         conflicts,
+        worktrees,
         diagnostics: Vec::new(),
         generated_at: TimestampMillis(now_millis()),
         schema_version: 1,
     })
+}
+
+fn git_worktree_kind(path: &Path) -> ProjectGitWorktreeKind {
+    let path = path.to_string_lossy();
+    if path.contains("target/delegated-tasks/task-") {
+        ProjectGitWorktreeKind::Agent
+    } else {
+        ProjectGitWorktreeKind::Manual
+    }
+}
+
+fn git_remote_url(root: &Path, remote: &str) -> Option<String> {
+    git_stdout(root, &["remote", "get-url", remote], None)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn git_remote_default_branch(root: &Path, remote: &str) -> Option<String> {
+    let head_ref = format!("refs/remotes/{remote}/HEAD");
+    git_stdout(
+        root,
+        &["symbolic-ref", "--quiet", "--short", &head_ref],
+        None,
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .map(|value| {
+        value
+            .strip_prefix(&format!("{remote}/"))
+            .unwrap_or(&value)
+            .to_string()
+    })
+}
+
+fn git_worktrees(root: &Path) -> Result<Vec<ProjectGitWorktree>, GitInspectionError> {
+    let output = git_stdout(root, &["worktree", "list", "--porcelain"], None)?;
+    let mut worktrees = Vec::new();
+    let mut current: Option<ProjectGitWorktree> = None;
+
+    let flush = |worktrees: &mut Vec<ProjectGitWorktree>,
+                 current: &mut Option<ProjectGitWorktree>| {
+        if let Some(worktree) = current.take() {
+            worktrees.push(worktree);
+        }
+    };
+
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            flush(&mut worktrees, &mut current);
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("worktree ") {
+            flush(&mut worktrees, &mut current);
+            let path = PathBuf::from(path.trim());
+            current = Some(ProjectGitWorktree {
+                path: path.to_string_lossy().into_owned(),
+                branch_label: None,
+                head_short: None,
+                kind: git_worktree_kind(&path),
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(worktree) = current.as_mut() else {
+            continue;
+        };
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            worktree.head_short = Some(head.trim().to_string());
+            continue;
+        }
+        if let Some(branch) = line.strip_prefix("branch ") {
+            let branch = branch.trim();
+            worktree.branch_label = branch
+                .strip_prefix("refs/heads/")
+                .map(|label| label.to_string())
+                .or_else(|| {
+                    if branch.contains("detached") {
+                        None
+                    } else {
+                        Some(branch.to_string())
+                    }
+                });
+            continue;
+        }
+        if line.starts_with("prunable ") {
+            worktree.prunable = true;
+        }
+    }
+
+    flush(&mut worktrees, &mut current);
+    Ok(worktrees)
+}
+
+/// Switch to an existing branch.
+pub fn switch_git_branch(root: impl AsRef<Path>, branch: &str) -> Result<(), GitInspectionError> {
+    git_stdout(root.as_ref(), &["switch", branch], None).map(|_| ())
+}
+
+/// Create and switch to a new branch.
+pub fn create_git_branch(root: impl AsRef<Path>, branch: &str) -> Result<(), GitInspectionError> {
+    git_stdout(root.as_ref(), &["switch", "-c", branch], None).map(|_| ())
+}
+
+/// Delete a branch that has been merged.
+pub fn delete_git_branch(root: impl AsRef<Path>, branch: &str) -> Result<(), GitInspectionError> {
+    git_stdout(root.as_ref(), &["branch", "-d", branch], None).map(|_| ())
+}
+
+/// Stash tracked and untracked changes.
+pub fn stash_git_changes(
+    root: impl AsRef<Path>,
+    message: Option<&str>,
+) -> Result<(), GitInspectionError> {
+    let mut args = vec![
+        "stash".to_string(),
+        "push".to_string(),
+        "--include-untracked".to_string(),
+    ];
+    if let Some(message) = message {
+        args.push("-m".to_string());
+        args.push(message.to_string());
+    }
+    git_stdout_owned(root.as_ref(), &args, None).map(|_| ())
+}
+
+/// Remove a worktree by path.
+pub fn remove_git_worktree(root: impl AsRef<Path>, path: &Path) -> Result<(), GitInspectionError> {
+    let path = path.to_string_lossy().into_owned();
+    let args = vec![
+        "worktree".to_string(),
+        "remove".to_string(),
+        "--force".to_string(),
+        path,
+    ];
+    git_stdout_owned(root.as_ref(), &args, None).map(|_| ())
+}
+
+/// Prune orphaned git worktree metadata.
+pub fn prune_git_worktrees(root: impl AsRef<Path>) -> Result<(), GitInspectionError> {
+    git_stdout(root.as_ref(), &["worktree", "prune"], None).map(|_| ())
 }
 
 /// Stage one projected unstaged git hunk.
@@ -4044,7 +4402,7 @@ impl WorkspaceActor {
             SemanticPrivacyScope::File,
             text,
         );
-        TreeSitterParser::default()
+        TreeSitterParser
             .structural_outline(&document)
             .map_err(|_| WorkspaceError::Internal("outline projection failed"))
     }

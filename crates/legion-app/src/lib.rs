@@ -7,6 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -37,7 +38,8 @@ use legion_index::{
     tree_sitter_supports_path,
 };
 use legion_memory::{
-    LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryConsentState, MemoryService,
+    LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryCompactionPolicy,
+    MemoryConsentState, MemoryService, MemoryServiceSnapshot,
 };
 use legion_observability::{
     SharedEventSink, agent_replay_manifest_recorded_event, collaboration_audit_recorded_event,
@@ -58,8 +60,9 @@ use legion_project::{
     WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
     WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
     WorkspaceSearchBatch, WorkspaceSearchFilters, WorkspaceSearchQuery, collect_git_snapshot,
-    commit_git_changes, discover_cargo_debug_configurations, git_repository_root,
-    resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
+    commit_git_changes, create_git_branch, delete_git_branch, discover_cargo_debug_configurations,
+    git_repository_root, prune_git_worktrees, push_git_remote, remove_git_worktree,
+    resolve_git_conflict, stage_git_hunk, stash_git_changes, switch_git_branch, unstage_git_hunk,
 };
 use legion_protocol::{
     AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
@@ -81,12 +84,12 @@ use legion_protocol::{
     DelegatedTaskChatMessage, DelegatedTaskChatRole, DelegatedTaskContextCitation,
     DelegatedTaskPlanContract, DelegatedTaskPlanId, DelegatedTaskProjection,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalHunkReview,
-    DelegatedTaskProposalReview, DelegatedTaskToolPermissionDecision,
-    DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequest,
-    DelegatedTaskToolPermissionRequestInput, EditBatch, EditorApplyTransactionRequest,
-    EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest, FileConflictContext,
-    FileConflictLifecycleState, FileConflictReason, FileConflictState, FileContentVersion,
-    FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode,
+    DelegatedTaskProposalReview, DelegatedTaskRuntimeActivationState,
+    DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
+    DelegatedTaskToolPermissionRequest, DelegatedTaskToolPermissionRequestInput, EditBatch,
+    EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest,
+    FileConflictContext, FileConflictLifecycleState, FileConflictReason, FileConflictState,
+    FileContentVersion, FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode,
     INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES, InlinePredictionAcceptanceId,
     InlinePredictionDismissalId, InlinePredictionFingerprintMetadata, InlinePredictionFreshness,
     InlinePredictionFreshnessState, InlinePredictionLatencyMetadata,
@@ -173,13 +176,15 @@ use legion_ui::ui::{
     DebugInlineValueProjection, DebugProjection, DebugStackFrameProjection,
     DebugStatusKindProjection, DebugStatusProjection, DebugStepKindProjection,
     DebugVariableProjection, DebugWatchProjection, EditorTabProjection, EditorTabsProjection,
-    EditorViewportStateProjection, GitBlameLineProjection, GitCommitProjection,
+    EditorViewportStateProjection, ExcerptSurfaceLineProjection, ExcerptSurfaceProjection,
+    ExcerptSurfaceSectionProjection, GitBlameLineProjection, GitCommitProjection,
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-    GitHunkStageProjection, GitProjection, PaletteMode, PaletteProjection, PaletteResult,
-    PaletteResultKind, SearchProjection, SearchResultProjection, SearchScopeProjection,
-    SearchStatusKindProjection, SearchStatusProjection, SettingsProjection,
-    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
-    ThemePreferenceProjection, ToastVerbosityProjection, WorkspaceSessionRecordProjection,
+    GitHunkStageProjection, GitProjection, GitWorktreeKindProjection, GitWorktreeProjection,
+    PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection,
+    SearchResultProjection, SearchScopeProjection, SearchStatusKindProjection,
+    SearchStatusProjection, SettingsProjection, StructuralSearchCaptureProjection,
+    StructuralSearchMatchProjection, StructuralSearchProjection, ThemePreferenceProjection,
+    ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, CommandDispatchIntent, DockMode, ExplorerNodeProjection,
@@ -498,6 +503,99 @@ mod daily_editing_save_all_internal_tests {
         assert_eq!(metadata.response_kind, "MetadataMissing");
         assert_eq!(metadata.diagnostic_codes, vec!["save_all.metadata_missing"]);
     }
+
+    #[test]
+    fn excerpt_surface_projection_carries_source_buffer_anchors() {
+        let mut app = AppComposition::new();
+
+        let buffer_a = app
+            .editor
+            .open_buffer(
+                WorkspaceId(7),
+                FileId(11),
+                "src/alpha.rs",
+                "alpha\nfn alpha() {}\n",
+            )
+            .expect("open first buffer");
+        let opened_a = OpenedFileText {
+            identity: FileIdentity {
+                file_id: FileId(11),
+                workspace_id: WorkspaceId(7),
+                canonical_path: CanonicalPath("src/alpha.rs".to_string()),
+                content_version: FileContentVersion(1),
+                content_hash: Some("hash-alpha".to_string()),
+            },
+            text: "alpha\nfn alpha() {}\n".to_string(),
+            fingerprint: FileFingerprint {
+                algorithm: "test".to_string(),
+                value: "alpha".to_string(),
+            },
+            file_content_version: FileContentVersion(1),
+            workspace_generation: WorkspaceGeneration(1),
+            modified_at: None,
+            file_length: Some(21),
+            is_new_file: false,
+        };
+        app.active_documents.bind_opened_file(&opened_a, buffer_a);
+
+        let buffer_b = app
+            .editor
+            .open_buffer(
+                WorkspaceId(7),
+                FileId(12),
+                "src/beta.rs",
+                "beta\nfn beta() {}\n",
+            )
+            .expect("open second buffer");
+        let opened_b = OpenedFileText {
+            identity: FileIdentity {
+                file_id: FileId(12),
+                workspace_id: WorkspaceId(7),
+                canonical_path: CanonicalPath("src/beta.rs".to_string()),
+                content_version: FileContentVersion(1),
+                content_hash: Some("hash-beta".to_string()),
+            },
+            text: "beta\nfn beta() {}\n".to_string(),
+            fingerprint: FileFingerprint {
+                algorithm: "test".to_string(),
+                value: "beta".to_string(),
+            },
+            file_content_version: FileContentVersion(1),
+            workspace_generation: WorkspaceGeneration(1),
+            modified_at: None,
+            file_length: Some(18),
+            is_new_file: false,
+        };
+        app.active_documents.bind_opened_file(&opened_b, buffer_b);
+
+        let surface =
+            ProjectionBuilder::excerpt_surface_projection(&app.active_documents, &app.editor);
+
+        assert_eq!(surface.active_excerpt_id.as_deref(), Some("buffer:2"));
+        assert_eq!(surface.sections.len(), 2);
+
+        let first = &surface.sections[0];
+        assert_eq!(first.excerpt_id, "buffer:1");
+        assert_eq!(first.buffer_id, Some(buffer_a));
+        assert_eq!(
+            first.file_path.as_ref().map(|path| path.0.as_str()),
+            Some("src/alpha.rs")
+        );
+        assert!(!first.dirty);
+        assert!(!first.lines.is_empty());
+        assert_eq!(first.lines[0].visible_text, "alpha");
+        assert_eq!(first.lines[0].range.start.line, 0);
+
+        let second = &surface.sections[1];
+        assert_eq!(second.excerpt_id, "buffer:2");
+        assert_eq!(second.buffer_id, Some(buffer_b));
+        assert_eq!(
+            second.file_path.as_ref().map(|path| path.0.as_str()),
+            Some("src/beta.rs")
+        );
+        assert!(!second.dirty);
+        assert!(!second.lines.is_empty());
+    }
     #[test]
     fn terminal_shell_output_parser_strips_markers_and_extracts_metadata() {
         let parsed = parse_terminal_shell_output(
@@ -580,19 +678,63 @@ pub struct AppDelegateChatOutcome {
     pub citation_count: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct DelegateWorkflowState {
     chat_messages: Vec<DelegatedTaskChatMessage>,
     context_citations: Vec<DelegatedTaskContextCitation>,
     hunk_decisions: HashMap<(ProposalId, String), DelegatedTaskProposalHunkDisposition>,
     tool_permission_requests: HashMap<String, DelegatedTaskToolPermissionRequest>,
+    runtime_activation: DelegatedTaskRuntimeActivationState,
     next_message_sequence: u64,
+}
+
+impl Default for DelegateWorkflowState {
+    fn default() -> Self {
+        Self {
+            chat_messages: Vec::new(),
+            context_citations: Vec::new(),
+            hunk_decisions: HashMap::new(),
+            tool_permission_requests: HashMap::new(),
+            runtime_activation: DelegatedTaskRuntimeActivationState::NotEncoded,
+            next_message_sequence: 0,
+        }
+    }
 }
 
 impl DelegateWorkflowState {
     fn next_message_id(&mut self, role: DelegatedTaskChatRole) -> String {
         self.next_message_sequence = self.next_message_sequence.saturating_add(1);
         format!("delegate:{role:?}:{}", self.next_message_sequence)
+    }
+
+    fn set_runtime_activation(&mut self, runtime_activation: DelegatedTaskRuntimeActivationState) {
+        self.runtime_activation = runtime_activation;
+    }
+
+    fn record_system_message(
+        &mut self,
+        content_label: impl Into<String>,
+        plan_id: Option<DelegatedTaskPlanId>,
+        proposal_id: Option<ProposalId>,
+        correlation_id: CorrelationId,
+        causality_id: CausalityId,
+    ) -> String {
+        let message_id = self.next_message_id(DelegatedTaskChatRole::System);
+        self.chat_messages.push(DelegatedTaskChatMessage {
+            message_id: message_id.clone(),
+            role: DelegatedTaskChatRole::System,
+            content_label: content_label.into(),
+            plan_id,
+            proposal_id,
+            citation_ids: Vec::new(),
+            tool_permission_request_ids: Vec::new(),
+            correlation_id,
+            causality_id,
+            created_at: TimestampMillis::now(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+        message_id
     }
 
     fn record_tool_permission(&mut self, request: DelegatedTaskToolPermissionRequest) {
@@ -646,6 +788,7 @@ impl DelegateWorkflowState {
                 .cmp(&right.request_id)
                 .then_with(|| format!("{:?}", left.profile).cmp(&format!("{:?}", right.profile)))
         });
+        projection.runtime_activation = self.runtime_activation;
         projection.chat_message_count = projection.chat_messages.len() as u32;
         projection.context_citation_count = projection.context_citations.len() as u32;
         projection.proposal_review_count = projection.proposal_reviews.len() as u32;
@@ -788,6 +931,48 @@ pub trait AppAutomateMcpToolRuntime: Send + Sync {
         &self,
         invocation: &AppAutomateMcpToolInvocation,
     ) -> Result<AppAutomateMcpToolInvocationReceipt, AppAutomateMcpToolRuntimeError>;
+}
+
+/// ACP host command configured by the app.
+#[derive(Debug, Clone)]
+struct AcpHostCommand {
+    program: PathBuf,
+    args: Vec<String>,
+}
+
+impl AcpHostCommand {
+    fn new(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+        }
+    }
+
+    fn run(
+        &self,
+        sandbox_path: &Path,
+        target_path: &Path,
+        plan_id: &str,
+    ) -> std::io::Result<std::process::Output> {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        command.current_dir(sandbox_path);
+        command.env("LEGION_ACP_PLAN_ID", plan_id);
+        command.env("LEGION_ACP_SANDBOX_PATH", sandbox_path);
+        command.env("LEGION_ACP_TARGET_PATH", target_path);
+        command.env(
+            "LEGION_ACP_TARGET_DIR",
+            target_path.parent().unwrap_or(sandbox_path),
+        );
+        command.env(
+            "LEGION_ACP_TARGET_FILE",
+            target_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("proposal.txt"),
+        );
+        command.output()
+    }
 }
 
 /// App adapter that invokes a `legion-ai-providers` MCP client from Automate workflows.
@@ -7113,17 +7298,17 @@ fn collect_instruction_rule_sources(
         return;
     };
     let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.path().cmp(&right.path()));
+    entries.sort_by_key(|entry| entry.path());
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
             collect_instruction_rule_sources(scope_label, &path, sources);
             continue;
         }
-        if path.is_file() {
-            if let Some(source) = instruction_source_from_file(scope_label, "rules", path) {
-                sources.push(source);
-            }
+        if path.is_file()
+            && let Some(source) = instruction_source_from_file(scope_label, "rules", path)
+        {
+            sources.push(source);
         }
     }
 }
@@ -7437,6 +7622,38 @@ pub enum AppCommandRequest {
     CommitGitChanges {
         /// Commit message entered in the git editor.
         message: String,
+    },
+    /// Switch to an existing git branch.
+    SwitchGitBranch {
+        /// Branch label entered by the user.
+        branch: String,
+    },
+    /// Create and switch to a new git branch.
+    CreateGitBranch {
+        /// Branch label entered by the user.
+        branch: String,
+    },
+    /// Delete a git branch.
+    DeleteGitBranch {
+        /// Branch label entered by the user.
+        branch: String,
+    },
+    /// Stash local git changes.
+    StashGitChanges {
+        /// Optional stash message.
+        message: Option<String>,
+    },
+    /// Push the current branch to the selected remote.
+    PushGitRemote {
+        /// Remote name entered by the user.
+        remote: String,
+    },
+    /// Prune orphaned worktree metadata.
+    PruneGitWorktrees,
+    /// Remove a projected worktree by path.
+    RemoveGitWorktree {
+        /// Worktree path.
+        path: String,
     },
     /// Request hover data through app-owned language tooling.
     RequestHover {
@@ -7950,6 +8167,13 @@ impl CommandExecutionService {
             | AppCommandRequest::UnstageGitHunk { .. }
             | AppCommandRequest::ResolveGitConflict { .. }
             | AppCommandRequest::CommitGitChanges { .. }
+            | AppCommandRequest::SwitchGitBranch { .. }
+            | AppCommandRequest::CreateGitBranch { .. }
+            | AppCommandRequest::DeleteGitBranch { .. }
+            | AppCommandRequest::StashGitChanges { .. }
+            | AppCommandRequest::PushGitRemote { .. }
+            | AppCommandRequest::PruneGitWorktrees
+            | AppCommandRequest::RemoveGitWorktree { .. }
             | AppCommandRequest::RefreshDebugConfigurations
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
@@ -8194,6 +8418,25 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::CommitGitChanges { message } => {
                 Ok(AppCommandRequest::CommitGitChanges { message })
+            }
+            CommandDispatchIntent::SwitchGitBranch { branch } => {
+                Ok(AppCommandRequest::SwitchGitBranch { branch })
+            }
+            CommandDispatchIntent::CreateGitBranch { branch } => {
+                Ok(AppCommandRequest::CreateGitBranch { branch })
+            }
+            CommandDispatchIntent::DeleteGitBranch { branch } => {
+                Ok(AppCommandRequest::DeleteGitBranch { branch })
+            }
+            CommandDispatchIntent::StashGitChanges { message } => {
+                Ok(AppCommandRequest::StashGitChanges { message })
+            }
+            CommandDispatchIntent::PushGitRemote { remote } => {
+                Ok(AppCommandRequest::PushGitRemote { remote })
+            }
+            CommandDispatchIntent::PruneGitWorktrees => Ok(AppCommandRequest::PruneGitWorktrees),
+            CommandDispatchIntent::RemoveGitWorktree { path } => {
+                Ok(AppCommandRequest::RemoveGitWorktree { path })
             }
             CommandDispatchIntent::RefreshDebugConfigurations => {
                 Ok(AppCommandRequest::RefreshDebugConfigurations)
@@ -9493,6 +9736,65 @@ impl ProjectionBuilder {
                 }),
         }
     }
+
+    fn excerpt_surface_projection(
+        active: &ActiveDocumentController,
+        editor: &EditorEngine,
+    ) -> ExcerptSurfaceProjection {
+        let sections = active
+            .open_tabs
+            .iter()
+            .filter_map(|buffer_id| {
+                let metadata = active.metadata_for_buffer(*buffer_id)?;
+                let viewport = editor
+                    .viewport_projection(legion_protocol::EditorViewportRequest {
+                        buffer_id: *buffer_id,
+                        scroll: active.viewport_scroll_for(*buffer_id),
+                        dimensions: legion_protocol::ViewportDimensions {
+                            width_px: 800,
+                            height_px: 384,
+                        },
+                    })
+                    .ok();
+                let lines = viewport
+                    .as_ref()
+                    .map(|projection| {
+                        projection
+                            .line_slices
+                            .iter()
+                            .map(|slice| ExcerptSurfaceLineProjection {
+                                line_number: slice.line_number,
+                                visible_text: slice.visible_text.clone(),
+                                range: slice.utf16_range,
+                                truncation_state: slice.truncation_state,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Some(ExcerptSurfaceSectionProjection {
+                    excerpt_id: tab_id_for_buffer(*buffer_id),
+                    workspace_id: Some(metadata.identity.workspace_id),
+                    buffer_id: Some(*buffer_id),
+                    file_id: Some(metadata.identity.file_id),
+                    file_path: Some(metadata.identity.canonical_path.clone()),
+                    title: tab_title(&metadata.identity.canonical_path),
+                    dirty: editor.is_dirty(*buffer_id).unwrap_or_else(|_| {
+                        editor.buffer_metadata(*buffer_id).is_ok_and(|m| m.dirty)
+                    }),
+                    editable: true,
+                    snapshot_id: viewport.as_ref().map(|projection| projection.snapshot_id),
+                    cursor: viewport.as_ref().map(|projection| projection.cursor),
+                    lines,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        ExcerptSurfaceProjection {
+            active_excerpt_id: active.active_buffer_id.map(tab_id_for_buffer),
+            sections,
+            schema_version: 1,
+        }
+    }
 }
 
 fn tab_title(path: &CanonicalPath) -> String {
@@ -9613,6 +9915,7 @@ fn capture_workspace_session_record(
         },
         dock_layouts: Vec::new(),
         workbench_settings: WorkbenchSettingsRecord::default(),
+        memory_snapshot_json: None,
         dirty_indicators,
         saved_at: TimestampMillis::now(),
         schema_version: 1,
@@ -11164,6 +11467,8 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
         root_label: Some(snapshot.root.0),
         branch_label: snapshot.branch_label,
         head_short: snapshot.head_short,
+        remote_url: snapshot.remote_url,
+        remote_default_branch: snapshot.remote_default_branch,
         changed_files: snapshot
             .changed_files
             .into_iter()
@@ -11229,6 +11534,24 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
                 path: conflict.path,
                 marker_count: conflict.marker_count,
                 actions: conflict.actions,
+            })
+            .collect(),
+        worktrees: snapshot
+            .worktrees
+            .into_iter()
+            .map(|worktree| GitWorktreeProjection {
+                path: worktree.path,
+                branch_label: worktree.branch_label,
+                head_short: worktree.head_short,
+                kind: match worktree.kind {
+                    legion_project::ProjectGitWorktreeKind::Agent => {
+                        GitWorktreeKindProjection::Agent
+                    }
+                    legion_project::ProjectGitWorktreeKind::Manual => {
+                        GitWorktreeKindProjection::Manual
+                    }
+                },
+                prunable: worktree.prunable,
             })
             .collect(),
         diagnostics: snapshot.diagnostics,
@@ -11441,6 +11764,42 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "git-switch-branch",
+            title: "Git: Switch Branch",
+            detail: "Use the palette query as the target branch",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-create-branch",
+            title: "Git: Create Branch",
+            detail: "Create and switch to the palette query branch",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-delete-branch",
+            title: "Git: Delete Branch",
+            detail: "Delete the palette query branch",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-stash",
+            title: "Git: Stash Changes",
+            detail: "Stash local changes using the palette query as the message",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-prune-worktrees",
+            title: "Git: Prune Worktrees",
+            detail: "Remove orphaned worktree metadata",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-remove-worktree",
+            title: "Git: Remove Worktree",
+            detail: "Remove the palette query worktree path",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
             id: "git-commit",
             title: "Git: Commit Staged Changes",
             detail: "Use the palette query as the commit message",
@@ -11496,6 +11855,15 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "save-all" => Some(CommandDispatchIntent::SaveAll),
         "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
         "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
+        "git-switch-branch" => None,
+        "git-create-branch" => None,
+        "git-delete-branch" => None,
+        "git-stash" => None,
+        "git-push" => Some(CommandDispatchIntent::PushGitRemote {
+            remote: "origin".to_string(),
+        }),
+        "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
+        "git-remove-worktree" => None,
         "close-palette" => Some(CommandDispatchIntent::ClosePalette),
         "preferences-open" => Some(CommandDispatchIntent::OpenSettings),
         "preferences-theme-dark" => Some(CommandDispatchIntent::SetThemePreference {
@@ -12344,6 +12712,7 @@ pub struct AppComposition {
     legion_cloud_lane: LegionCloudLaneComposition,
     delegate_workflow: DelegateWorkflowState,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
+    acp_host_command: Option<AcpHostCommand>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
@@ -12401,6 +12770,7 @@ impl AppComposition {
             legion_cloud_lane: LegionCloudLaneComposition::default(),
             delegate_workflow: DelegateWorkflowState::default(),
             delegated_task_plan_contracts: Vec::new(),
+            acp_host_command: None,
             legion_workflow_sessions: Vec::new(),
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
@@ -12432,8 +12802,13 @@ impl AppComposition {
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
         self.product_mode = mode;
         if !mode.allows_assist() {
-            self.assist_inline_prediction_state = AssistInlinePredictionState::default();
+            self.phase4_projection_state.assisted_ai_projection = None;
         }
+    }
+
+    /// Configure the optional ACP host command used by delegated tasks.
+    pub fn set_acp_host_command(&mut self, program: impl Into<PathBuf>, args: Vec<String>) {
+        self.acp_host_command = Some(AcpHostCommand::new(program, args));
     }
 
     /// Current app-owned product mode.
@@ -13172,6 +13547,48 @@ impl AppComposition {
                             (!message.is_empty())
                                 .then_some(CommandDispatchIntent::CommitGitChanges { message })
                         }
+                        "git-switch-branch" => {
+                            let branch =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            (!branch.is_empty())
+                                .then_some(CommandDispatchIntent::SwitchGitBranch { branch })
+                        }
+                        "git-create-branch" => {
+                            let branch =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            (!branch.is_empty())
+                                .then_some(CommandDispatchIntent::CreateGitBranch { branch })
+                        }
+                        "git-delete-branch" => {
+                            let branch =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            (!branch.is_empty())
+                                .then_some(CommandDispatchIntent::DeleteGitBranch { branch })
+                        }
+                        "git-stash" => {
+                            let message =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            Some(CommandDispatchIntent::StashGitChanges {
+                                message: (!message.is_empty()).then_some(message),
+                            })
+                        }
+                        "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
+                        "git-remove-worktree" => {
+                            let path =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            (!path.is_empty())
+                                .then_some(CommandDispatchIntent::RemoveGitWorktree { path })
+                        }
                         _ => palette_command_intent(command_id),
                     })
             }
@@ -13397,6 +13814,67 @@ impl AppComposition {
                     return Err(AppCompositionError::WorkspaceNotOpen);
                 };
                 commit_git_changes(Path::new(root_path), &message)
+                    .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::SwitchGitBranch { branch } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                switch_git_branch(Path::new(root_path), &branch)
+                    .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::CreateGitBranch { branch } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                create_git_branch(Path::new(root_path), &branch)
+                    .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::DeleteGitBranch { branch } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                delete_git_branch(Path::new(root_path), &branch)
+                    .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::StashGitChanges { message } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                stash_git_changes(Path::new(root_path), message.as_deref())
+                    .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::PushGitRemote { remote } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                let branch = self.git_projection.branch_label.clone().ok_or_else(|| {
+                    git_protocol_error(
+                        "git_branch_missing",
+                        "git branch label unavailable for push",
+                    )
+                })?;
+                push_git_remote(Path::new(root_path), &remote, &branch)
+                    .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::PruneGitWorktrees => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                prune_git_worktrees(Path::new(root_path)).map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::RemoveGitWorktree { path } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                remove_git_worktree(Path::new(root_path), Path::new(&path))
                     .map_err(git_inspection_protocol_error)?;
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
             }
@@ -14278,11 +14756,15 @@ impl AppComposition {
                 )
             });
         if permission.deny_overrides {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Blocked);
             return Ok(AppDelegatedTaskExecutionOutcome::Denied {
                 request: permission,
             });
         }
         if !permission.runtime_allowed {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Planned);
             return Ok(AppDelegatedTaskExecutionOutcome::WaitingForToolPermission {
                 request: permission,
             });
@@ -14335,11 +14817,13 @@ impl AppComposition {
         orchestrator.initialize(&permission).map_err(|e| {
             AppCompositionError::AiRuntime(format!("Failed to initialize sandbox: {e}"))
         })?;
+        self.delegate_workflow
+            .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
         let sandbox_path = orchestrator.sandbox_path().to_path_buf();
 
-        let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
         let target_file = sandbox_path.join(delegated_task_proposal_relative_path(&contract));
-        let proposal_content = delegated_task_proposal_content(&contract, &permission);
+        let target_file_absolute = std::env::current_dir().unwrap().join(&target_file);
+        let mut proposal_content = delegated_task_proposal_content(&contract, &permission);
         let proposal_id = self.proposal_coordinator.next_id();
         let proposal_event_sequence = self.event_sequence_generator.next();
         let principal = self
@@ -14364,6 +14848,63 @@ impl AppComposition {
             )
         });
 
+        if let Some(acp_host_command) = self.acp_host_command.as_ref() {
+            let _connect_message_id = self.delegate_workflow.record_system_message(
+                format!(
+                    "acp.host.connect program={}",
+                    acp_host_command.program.display()
+                ),
+                Some(contract.plan_id.clone()),
+                None,
+                correlation_id,
+                causality_id,
+            );
+            let host_output = acp_host_command
+                .run(&sandbox_path, &target_file_absolute, &contract.plan_id.0)
+                .map_err(|e| {
+                    AppCompositionError::AiRuntime(format!("ACP host command failed to start: {e}"))
+                })?;
+            let stdout_label = String::from_utf8_lossy(&host_output.stdout);
+            let stderr_label = String::from_utf8_lossy(&host_output.stderr);
+            let _spawn_message_id = self.delegate_workflow.record_system_message(
+                format!(
+                    "acp.host.spawn status={} stdout_bytes={} stderr_bytes={}",
+                    host_output.status,
+                    host_output.stdout.len(),
+                    host_output.stderr.len()
+                ),
+                Some(contract.plan_id.clone()),
+                None,
+                correlation_id,
+                causality_id,
+            );
+            if !host_output.status.success() {
+                let _terminate_message_id = self.delegate_workflow.record_system_message(
+                    format!(
+                        "acp.host.terminate failure stdout={} stderr={}",
+                        stdout_label.trim(),
+                        stderr_label.trim()
+                    ),
+                    Some(contract.plan_id.clone()),
+                    None,
+                    correlation_id,
+                    causality_id,
+                );
+                let cleanup_res = orchestrator.cleanup(&permission);
+                cleanup_res.map_err(|e| {
+                    AppCompositionError::AiRuntime(format!("Sandbox cleanup failed: {e}"))
+                })?;
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "ACP host command exited unsuccessfully: {}",
+                    stderr_label.trim()
+                )));
+            }
+            proposal_content = std::fs::read_to_string(&target_file_absolute).map_err(|e| {
+                AppCompositionError::AiRuntime(format!("Failed to read ACP host proposal: {e}"))
+            })?;
+        }
+
+        let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
         let proposal_result = generator.generate_proposal(DelegatedTaskProposalInput {
             target_path: &target_file,
             modified_content: &proposal_content,
@@ -14392,6 +14933,20 @@ impl AppComposition {
         cleanup_res
             .map_err(|e| AppCompositionError::AiRuntime(format!("Sandbox cleanup failed: {e}")))?;
 
+        if self.acp_host_command.is_some() {
+            self.delegate_workflow.record_system_message(
+                format!(
+                    "acp.host.terminate success proposal={} sandbox={}",
+                    proposal.proposal_id.0,
+                    sandbox_path.display()
+                ),
+                Some(contract.plan_id.clone()),
+                Some(proposal.proposal_id),
+                correlation_id,
+                causality_id,
+            );
+        }
+
         // Proposing -> WaitingForApproval
         agent_runtime
             .transition(
@@ -14402,6 +14957,8 @@ impl AppComposition {
                 self.event_sequence_generator.next(),
             )
             .map_err(|e| AppCompositionError::AiRuntime(e.to_string()))?;
+        self.delegate_workflow
+            .set_runtime_activation(DelegatedTaskRuntimeActivationState::WaitingForApproval);
 
         Ok(AppDelegatedTaskExecutionOutcome::ProposalReady(Box::new(
             proposal,
@@ -16962,6 +17519,7 @@ impl AppComposition {
             self.git_projection = GitProjection {
                 diagnostics: vec!["git.workspace_not_open".to_string()],
                 generated_at: TimestampMillis::now(),
+                worktrees: Vec::new(),
                 ..GitProjection::idle()
             };
             return self.git_projection.clone();
@@ -16990,6 +17548,7 @@ impl AppComposition {
                     root_label: Some(root_path.to_string()),
                     diagnostics: vec![format!("git.refresh_failed: {error}")],
                     generated_at: TimestampMillis::now(),
+                    worktrees: Vec::new(),
                     ..GitProjection::idle()
                 };
             }
@@ -19061,6 +19620,14 @@ impl AppComposition {
     ) -> Result<WorkspaceSessionRecord, AppCompositionError> {
         let mut record = capture_workspace_session_record(&self.active_documents, &self.editor)?;
         record.workbench_settings = workbench_settings_record_from_projection(&self.settings);
+        record.memory_snapshot_json = Some(
+            serde_json::to_string(
+                &self
+                    .memory_service
+                    .compacted_snapshot(MemoryCompactionPolicy::default()),
+            )
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?,
+        );
         Ok(record)
     }
 
@@ -19070,6 +19637,12 @@ impl AppComposition {
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
+        if let Some(memory_snapshot_json) = &record.memory_snapshot_json {
+            let snapshot: MemoryServiceSnapshot = serde_json::from_str(memory_snapshot_json)
+                .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+            self.memory_service = MemoryService::from_snapshot(snapshot)
+                .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        }
         let mut restored_file_ids = Vec::new();
         let mut skipped_tabs = Vec::new();
         for tab in &record.open_tabs {
@@ -19401,6 +19974,10 @@ impl AppComposition {
             collaboration_gui_projection: self.collaboration.gui_projection(),
             remote_gui_projection,
             daily_editing_projection: ProjectionBuilder::daily_editing_projection(
+                &self.active_documents,
+                &self.editor,
+            ),
+            excerpt_surface_projection: ProjectionBuilder::excerpt_surface_projection(
                 &self.active_documents,
                 &self.editor,
             ),

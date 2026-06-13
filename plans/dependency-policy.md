@@ -35,6 +35,7 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `legion-security`
 
 - `legion-project` may depend on:
+  - `legion-index`
   - `legion-observability`
   - `legion-platform`
   - `legion-protocol`
@@ -76,10 +77,11 @@ Every current workspace crate must have an explicit internal dependency policy e
 
 - `legion-desktop` may depend on:
   - `legion-app`
+  - `legion-project`
   - `legion-protocol`
   - `legion-ui`
 
-`legion-desktop` is the active Phase 2 crate authorized to host GUI renderer dependencies. Phase 2 may use `eframe` and `egui` for the Windows-first desktop foundation proof, including their renderer/windowing/accessibility integration stack such as `egui-winit`, `egui-wgpu`, `winit`, `wgpu`, and `accesskit` when pulled in by or needed for the adapter. Slint is an explicit fallback candidate for native panel rendering if Phase 2 evidence shows the egui path cannot satisfy IME, clipboard, focus, accessibility, or high-DPI requirements. Tauri/WRY/TAO and GPUI are not approved for the core editor shell in Phase 2; Tauri/WRY remain auxiliary-only unless a later ADR supersedes ADR-0002, and GPUI remains a long-term architecture influence until its official Windows-first support is suitable for this project.
+`legion-desktop` is the active Phase 2 crate authorized to host GUI renderer dependencies and project/workspace projection helpers. Phase 2 may use `eframe` and `egui` for the Windows-first desktop foundation proof, including their renderer/windowing/accessibility integration stack such as `egui-winit`, `egui-wgpu`, `winit`, `wgpu`, and `accesskit` when pulled in by or needed for the adapter. Slint is an explicit fallback candidate for native panel rendering if Phase 2 evidence shows the egui path cannot satisfy IME, clipboard, focus, accessibility, or high-DPI requirements. Tauri/WRY/TAO and GPUI are not approved for the core editor shell in Phase 2; Tauri/WRY remain auxiliary-only unless a later ADR supersedes ADR-0002, and GPUI remains a long-term architecture influence until its official Windows-first support is suitable for this project.
 
 Renderer crates are adapter-only. They must not appear in `legion-ui`, app/editor/project/protocol/storage/security/observability/provider/runtime crates, or any core substrate crate until a later ADR and dependency-policy update explicitly authorize that edge.
 
