@@ -16,17 +16,27 @@
 
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use legion_desktop::workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime};
+use legion_desktop::{
+    bridge::DesktopAction,
+    workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
+};
+use legion_ui::{DockMode, PaletteMode, SearchScopeProjection, SearchStatusKindProjection};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn headless_input_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 struct TempWorkspace {
-    root: std::path::PathBuf,
+    root: PathBuf,
 }
 
 impl TempWorkspace {
@@ -50,6 +60,12 @@ impl TempWorkspace {
     fn path(&self) -> &Path {
         &self.root
     }
+
+    fn write(&self, name: &str, content: &str) -> PathBuf {
+        let path = self.root.join(name);
+        fs::write(&path, content).expect("temp file should be written");
+        path
+    }
 }
 
 impl Drop for TempWorkspace {
@@ -69,28 +85,16 @@ fn open_runtime(root: &Path) -> DesktopRuntime {
         .expect("desktop runtime should open workspace")
 }
 
-/// Drive a synthetic Cmd+P keypress through `DesktopEframeApp::run_headless_input`
-/// and verify the projection flips the palette into its open state. The
-/// runtime/app boundary is preserved: the test only inspects the app-owned
-/// projection snapshot.
-#[test]
-fn headless_input_cmd_p_opens_palette_through_real_egui_context() {
-    let workspace = TempWorkspace::new();
-    let runtime = open_runtime(workspace.path());
-    let mut app = DesktopEframeApp::new(runtime);
-
-    // Palette starts closed.
-    assert!(!app.runtime_snapshot().palette_projection.open);
-
-    let raw_input = egui::RawInput {
+fn command_key_input(key: egui::Key) -> egui::RawInput {
+    egui::RawInput {
         focused: true,
         modifiers: egui::Modifiers {
             command: true,
             ..egui::Modifiers::default()
         },
         events: vec![egui::Event::Key {
-            key: egui::Key::P,
-            physical_key: Some(egui::Key::P),
+            key,
+            physical_key: Some(key),
             pressed: true,
             repeat: false,
             modifiers: egui::Modifiers {
@@ -99,124 +103,254 @@ fn headless_input_cmd_p_opens_palette_through_real_egui_context() {
             },
         }],
         ..egui::RawInput::default()
-    };
-
-    let _output = app.run_headless_input(raw_input);
-
-    assert!(
-        app.runtime_snapshot().palette_projection.open,
-        "synthetic Cmd+P input should open the command palette projection"
-    );
+    }
 }
 
-/// Sanity check: an unbound keystroke (F1, no modifier) must not open the
-/// palette. If this test ever fails, the headless harness is dispatching
-/// the wrong event or the keyboard handler is mis-routing keys.
-#[test]
-fn headless_input_unbound_keystroke_does_not_open_palette() {
-    let workspace = TempWorkspace::new();
-    let runtime = open_runtime(workspace.path());
-    let mut app = DesktopEframeApp::new(runtime);
+fn command_alt_key_input(key: egui::Key) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        modifiers: egui::Modifiers {
+            command: true,
+            alt: true,
+            ..egui::Modifiers::default()
+        },
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: true,
+                alt: true,
+                ..egui::Modifiers::default()
+            },
+        }],
+        ..egui::RawInput::default()
+    }
+}
 
-    let raw_input = egui::RawInput {
+fn text_input(text: &str) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        events: vec![egui::Event::Text(text.to_string())],
+        ..egui::RawInput::default()
+    }
+}
+
+fn enter_input() -> egui::RawInput {
+    egui::RawInput {
         focused: true,
         events: vec![egui::Event::Key {
-            key: egui::Key::F1,
-            physical_key: Some(egui::Key::F1),
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
             pressed: true,
             repeat: false,
             modifiers: egui::Modifiers::default(),
         }],
         ..egui::RawInput::default()
-    };
-
-    let _ = app.run_headless_input(raw_input);
-
-    assert!(
-        !app.runtime_snapshot().palette_projection.open,
-        "F1 without modifier must not open the palette"
-    );
+    }
 }
 
-/// Mouse-only frame: feeding a synthetic mouse-move + primary-click into the
-/// harness must not panic and must not falsely open the palette. Mouse
-/// handling happens inside the view widget tree, not in the keyboard handler,
-/// so the projection here must remain at-rest.
+fn open_file_via_palette(app: &mut DesktopEframeApp, relative_path: &str) {
+    let _ = app.run_headless_input(command_key_input(egui::Key::O));
+    assert!(
+        app.runtime_snapshot().palette_projection.open,
+        "Cmd+O should open the file palette"
+    );
+
+    let _ = app.run_headless_input(text_input(relative_path));
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.query,
+        relative_path,
+        "typing into the palette should update the projected query"
+    );
+
+    let _ = app.run_headless_input(enter_input());
+}
+
+fn open_search_via_palette(app: &mut DesktopEframeApp, query: &str) {
+    let _ = app.run_headless_input(command_key_input(egui::Key::F));
+    assert!(
+        app.runtime_snapshot().palette_projection.open,
+        "Cmd+F should open the search palette"
+    );
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.mode,
+        PaletteMode::Search,
+        "Cmd+F should open the search palette in search mode"
+    );
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.scope,
+        SearchScopeProjection::ActiveFile,
+        "Cmd+F should default to active-file search scope"
+    );
+
+    let _ = app.run_headless_input(text_input(query));
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.query,
+        format!("/{}", query),
+        "typing into the search palette should update the projected query body"
+    );
+
+    let _ = app.run_headless_input(enter_input());
+}
+
 #[test]
-fn headless_input_mouse_event_does_not_panic_and_keeps_palette_closed() {
+fn headless_input_cmd_f_runs_search_through_real_egui_context() {
+    let _guard = headless_input_test_guard();
     let workspace = TempWorkspace::new();
+    let file_path = workspace.write("search_me.txt", "needle\nother needle\n");
     let runtime = open_runtime(workspace.path());
     let mut app = DesktopEframeApp::new(runtime);
 
-    let raw_input = egui::RawInput {
-        focused: true,
-        events: vec![
-            egui::Event::PointerMoved(egui::pos2(120.0, 80.0)),
-            egui::Event::PointerButton {
-                pos: egui::pos2(120.0, 80.0),
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::default(),
-            },
-            egui::Event::PointerButton {
-                pos: egui::pos2(120.0, 80.0),
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::default(),
-            },
-        ],
-        ..egui::RawInput::default()
-    };
-
-    let output = app.run_headless_input(raw_input);
-    // No repaint request should be hanging in the harness output.
-    let _ = output;
+    open_file_via_palette(&mut app, "search_me.txt");
     assert!(
-        !app.runtime_snapshot().palette_projection.open,
-        "mouse-only frame must not open the palette projection"
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .file_path
+            .as_ref()
+            .is_some_and(|path| path.0.ends_with("search_me.txt")),
+        "the palette should open the file before search runs"
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("seed file should remain readable"),
+        "needle\nother needle\n"
+    );
+
+    open_search_via_palette(&mut app, "needle");
+
+    let snapshot = app.runtime_snapshot();
+    assert!(!snapshot.palette_projection.open);
+    assert_eq!(
+        snapshot.search_projection.status.kind,
+        SearchStatusKindProjection::Completed,
+        "Cmd+F search selection should dispatch through app authority"
+    );
+    assert_eq!(
+        snapshot.search_projection.results.len(),
+        2,
+        "the active-file search should return both matching rows"
     );
 }
 
-/// Drive a synthetic 'q' character text event into a freshly opened palette
-/// and verify the projected query advances, proving that text input flows from
-/// the synthetic `egui::Context` all the way to the projection.
 #[test]
-fn headless_input_text_event_updates_palette_query_projection() {
+fn headless_input_cmd_alt_m_switches_product_mode_through_real_egui_context() {
+    let _guard = headless_input_test_guard();
     let workspace = TempWorkspace::new();
+    let file_path = workspace.write("mode_switch.txt", "mode stay untouched\n");
     let runtime = open_runtime(workspace.path());
     let mut app = DesktopEframeApp::new(runtime);
 
-    // Open the palette with Cmd+P.
-    let open = egui::RawInput {
-        focused: true,
-        modifiers: egui::Modifiers {
-            command: true,
-            ..egui::Modifiers::default()
-        },
-        events: vec![egui::Event::Key {
-            key: egui::Key::P,
-            physical_key: Some(egui::Key::P),
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers {
-                command: true,
-                ..egui::Modifiers::default()
-            },
-        }],
-        ..egui::RawInput::default()
-    };
-    let _ = app.run_headless_input(open);
-    assert!(app.runtime_snapshot().palette_projection.open);
+    app.handle_action(DesktopAction::SetProductMode {
+        mode: DockMode::Assist,
+    })
+    .expect("setup mode should switch to Assist");
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Assist);
 
-    // Type a 'q' character. The palette overlay does not run in the headless
-    // harness (we are testing the keyboard/action path, not the overlay's
-    // text field), so this should be a no-op on the projection. We still
-    // verify the harness dispatches the input without panicking.
-    let type_q = egui::RawInput {
-        focused: true,
-        events: vec![egui::Event::Text("q".to_string())],
-        ..egui::RawInput::default()
-    };
-    let _ = app.run_headless_input(type_q);
-    assert!(app.runtime_snapshot().palette_projection.open);
+    let _ = app.run_headless_input(command_alt_key_input(egui::Key::M));
+
+    assert_eq!(
+        app.runtime_snapshot().product_mode,
+        DockMode::Manual,
+        "Cmd+Alt+M should switch the projection back to Manual"
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("mode switch file should remain readable"),
+        "mode stay untouched\n",
+        "this limited regression only verifies the projection-level mode transition"
+    );
+}
+
+#[test]
+fn headless_input_cmd_o_opens_workspace_file_through_real_egui_context() {
+    let _guard = headless_input_test_guard();
+    let workspace = TempWorkspace::new();
+
+    let file_path = workspace.write("open_me.txt", "open me\n");
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    assert!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .buffer_id
+            .is_none()
+    );
+
+    open_file_via_palette(&mut app, "open_me.txt");
+
+    let snapshot = app.runtime_snapshot();
+    assert!(!snapshot.palette_projection.open);
+    assert!(
+        snapshot
+            .active_buffer_projection
+            .file_path
+            .as_ref()
+            .is_some_and(|path| path.0.ends_with("open_me.txt")),
+        "Cmd+O should open the selected workspace file through app authority"
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("opened file should remain readable"),
+        "open me\n",
+        "opening a file must not mutate disk contents"
+    );
+}
+
+#[test]
+fn headless_input_text_event_marks_open_file_dirty() {
+    let _guard = headless_input_test_guard();
+    let workspace = TempWorkspace::new();
+    let file_path = workspace.write("edit_me.txt", "alpha\n");
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    open_file_via_palette(&mut app, "edit_me.txt");
+
+    assert!(!app.runtime_snapshot().active_buffer_projection.dirty);
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("seed file should be readable"),
+        "alpha\n",
+        "opening a file must not mutate disk contents"
+    );
+
+    let _ = app.run_headless_input(text_input("!"));
+
+    assert!(
+        app.runtime_snapshot().active_buffer_projection.dirty,
+        "typing through the headless harness should mark the projected buffer dirty"
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("seed file should still be readable"),
+        "alpha\n",
+        "typing through the harness must not write to disk until save runs"
+    );
+}
+
+#[test]
+fn headless_input_cmd_s_saves_dirty_file_through_real_egui_context() {
+    let _guard = headless_input_test_guard();
+    let workspace = TempWorkspace::new();
+    let file_path = workspace.write("save_me.txt", "beta\n");
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    open_file_via_palette(&mut app, "save_me.txt");
+    let _ = app.run_headless_input(text_input("!"));
+
+    assert!(
+        app.runtime_snapshot().active_buffer_projection.dirty,
+        "editing before save should mark the projection dirty"
+    );
+
+    let _ = app.run_headless_input(command_key_input(egui::Key::S));
+
+    let saved = fs::read_to_string(&file_path).expect("saved file should be readable");
+    assert_eq!(
+        saved, "!beta\n",
+        "Cmd+S should persist the edited buffer through the real save path"
+    );
+    assert!(
+        !app.runtime_snapshot().active_buffer_projection.dirty,
+        "saving through the harness should clear the dirty projection"
+    );
 }
