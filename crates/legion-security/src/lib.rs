@@ -20,6 +20,11 @@ use legion_protocol::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Deterministic approval-risk evaluation helpers.
+pub mod policy;
+pub use policy::{BatchRuntimeApplyPolicy, ProposalApplyGate, ProposalAutoApprovalPolicy};
+pub mod risk;
+
 /// Trust state accepted by policy for workspace-sensitive decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustState {
@@ -284,6 +289,11 @@ pub fn scan_payload_for_sensitive_markers(
         ("api_key=", "generic-api-key-assignment"),
         ("authorization: bearer", "bearer-token-header"),
         ("ghp_", "github-token-prefix"),
+        ("proposal_content", "raw-proposal-content"),
+        ("terminal_excerpt", "raw-terminal-excerpt"),
+        ("terminal_excerpts", "raw-terminal-excerpts"),
+        ("retained_context", "retained-context"),
+        ("ejected_context", "ejected-context"),
         ("source_body", "raw-source-body"),
         ("provider_payload", "raw-provider-payload"),
         ("raw prompt", "raw-prompt"),
@@ -465,6 +475,28 @@ impl Default for LspLaunchPolicy {
     }
 }
 
+/// Debug adapter launch policy controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugAdapterLaunchPolicy {
+    /// Trusted workspaces only by default.
+    pub require_trusted_workspace: bool,
+}
+
+impl Default for DebugAdapterLaunchPolicy {
+    fn default() -> Self {
+        Self {
+            require_trusted_workspace: true,
+        }
+    }
+}
+
+impl DebugAdapterLaunchPolicy {
+    /// Returns true when adapter discovery is allowed for the given workspace trust.
+    pub fn allows_resolution(&self, trust: WorkspaceTrustState) -> bool {
+        !self.require_trusted_workspace || trust == WorkspaceTrustState::Trusted
+    }
+}
+
 /// Plugin capability policy controls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginCapabilityPolicy {
@@ -492,6 +524,7 @@ impl Default for PluginCapabilityPolicy {
                 "plugin.event.emit".to_string(),
                 "plugin.cancel.check".to_string(),
                 "plugin.storage".to_string(),
+                "plugin.grammar.tree_sitter".to_string(),
             ]),
             namespace_required: true,
             allow_in_untrusted_workspace: false,
@@ -834,6 +867,9 @@ pub struct SecurityPolicy {
     pub retention_policy: RawSourceRetentionSecurityPolicy,
     /// Storage migration and repair policy.
     pub storage_migration_policy: StorageMigrationSecurityPolicy,
+    /// Proposal auto-approval envelope policy.
+    #[serde(default)]
+    pub proposal_auto_approval_policy: ProposalAutoApprovalPolicy,
 }
 
 /// Signed, versioned org policy bundle for admin distribution.
@@ -3566,6 +3602,14 @@ mod tests {
         assert!(
             matches!(untrusted, SecurityDecision::Deny(reason) if reason.contains("untrusted"))
         );
+    }
+
+    #[test]
+    fn debug_adapter_launch_policy_requires_trusted_workspace_by_default() {
+        let policy = DebugAdapterLaunchPolicy::default();
+        assert!(policy.allows_resolution(WorkspaceTrustState::Trusted));
+        assert!(!policy.allows_resolution(WorkspaceTrustState::Untrusted));
+        assert!(!policy.allows_resolution(WorkspaceTrustState::Unknown));
     }
 
     #[test]
