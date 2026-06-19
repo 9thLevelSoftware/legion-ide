@@ -319,6 +319,19 @@ fn perf_harness_default_report_includes_line_galley_gate() {
 }
 
 #[test]
+fn perf_harness_manual_renderer_budget_constants_match_ws_manual_01() {
+    assert_eq!(
+        xtask::perf_harness::MANUAL_RENDERER_PERF_REPORT_FILE,
+        "manual_renderer_perf.toml"
+    );
+    let budgets = xtask::perf_harness::manual_renderer_budgets();
+    assert_eq!(budgets.keypress_p50_millis, 16);
+    assert_eq!(budgets.keypress_p95_millis, 32);
+    assert_eq!(budgets.scroll_p95_millis, 32);
+    assert_eq!(budgets.sample_count, 16);
+}
+
+#[test]
 fn perf_harness_resolve_workspace_git_sha_returns_unknown_for_missing_repo() {
     let temp = TempDir::new("no-git");
     let sha = resolve_workspace_git_sha(&temp.root);

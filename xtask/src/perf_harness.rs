@@ -43,11 +43,33 @@ const SKELETON_DEFAULT_BUDGET_MILLIS: u64 = 250;
 const LINE_GALLEY_FIXTURE_LINES: usize = 10_000;
 const LINE_GALLEY_VISIBLE_ROWS: usize = 80;
 const LINE_GALLEY_DEFAULT_BUDGET_MILLIS: u64 = 2;
+const MANUAL_RENDERER_KEYPRESS_P50_BUDGET_MILLIS: u64 = 16;
+const MANUAL_RENDERER_KEYPRESS_P95_BUDGET_MILLIS: u64 = 32;
+const MANUAL_RENDERER_SCROLL_P95_BUDGET_MILLIS: u64 = 32;
+const MANUAL_RENDERER_SAMPLE_COUNT: usize = 16;
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
+pub const MANUAL_RENDERER_PERF_REPORT_FILE: &str = "manual_renderer_perf.toml";
 
 /// Environment variable that, when set to a positive millisecond count,
 /// overrides the per-skeleton budget. Used by the failing-gate CI leg.
 pub const FAIL_ON_BUDGET_ENV: &str = "LEGION_PERF_FAIL_ON_BUDGET_MS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManualRendererBudgets {
+    pub keypress_p50_millis: u64,
+    pub keypress_p95_millis: u64,
+    pub scroll_p95_millis: u64,
+    pub sample_count: usize,
+}
+
+pub fn manual_renderer_budgets() -> ManualRendererBudgets {
+    ManualRendererBudgets {
+        keypress_p50_millis: MANUAL_RENDERER_KEYPRESS_P50_BUDGET_MILLIS,
+        keypress_p95_millis: MANUAL_RENDERER_KEYPRESS_P95_BUDGET_MILLIS,
+        scroll_p95_millis: MANUAL_RENDERER_SCROLL_P95_BUDGET_MILLIS,
+        sample_count: MANUAL_RENDERER_SAMPLE_COUNT,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
