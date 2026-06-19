@@ -142,3 +142,17 @@ fn deterministic_renderer_evidence_covers_core_editor_states() {
         }));
     }
 }
+
+#[test]
+fn manual_renderer_evidence_names_zero_egress_trust_boundary() {
+    let mut snapshot = Shell::empty("Manual").projection_snapshot();
+    snapshot.product_mode = legion_ui::DockMode::Manual;
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(model.manual_control_rows.iter().any(|row| {
+        row.contains("manual trust boundary")
+            && row.contains("no provider dispatch")
+            && row.contains("no agent context")
+    }));
+}

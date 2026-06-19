@@ -26,7 +26,7 @@ Current branch history already contains `a6666ff docs: add WS-MANUAL-01 implemen
 | MANUAL.09 line wrapping policy | To be created in MANUAL.09: `cargo test -p legion-desktop --test manual_renderer_evidence line_wrapping_policy_keeps_viewport_math_stable -- --exact` |
 | MANUAL.10 degraded-mode banner | To be created in MANUAL.10: `cargo test -p legion-desktop --test large_file_guardrails large_file_guardrails_degraded_banner_names_capability_reduction -- --exact` |
 | MANUAL.11 deterministic renderer evidence | To be created in MANUAL.11: `cargo test -p legion-desktop --test manual_renderer_evidence deterministic_renderer_evidence_covers_core_editor_states -- --exact` |
-| MANUAL.12 zero-egress smoke | To be created in MANUAL.12: `crates/legion-app/tests/manual_zero_egress.rs`; `plans/evidence/production/WS-MANUAL-01/manual-mode-zero-egress.md` |
+| MANUAL.12 zero-egress smoke | `crates/legion-app/tests/manual_zero_egress.rs`; `plans/evidence/production/WS-MANUAL-01/manual-mode-zero-egress.md`; `cargo test -p legion-app --test manual_zero_egress` |
 
 ## MANUAL.06 Decision
 
