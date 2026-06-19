@@ -2508,10 +2508,10 @@ fn editor_text_input_actions(
                     at,
                 });
             }
-            egui::Event::Copy => {
+            egui::Event::Copy if !composition.active && composition.preedit.is_empty() => {
                 actions.push(DesktopAction::ClipboardCopy);
             }
-            egui::Event::Cut => {
+            egui::Event::Cut if !composition.active && composition.preedit.is_empty() => {
                 actions.push(DesktopAction::ClipboardCut);
             }
             egui::Event::Ime(egui::ImeEvent::Enabled) => {
@@ -2878,6 +2878,28 @@ mod tests {
                         at,
                     },
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn editor_text_input_suppresses_copy_cut_during_ime_composition() {
+        let events = vec![egui::Event::Copy, egui::Event::Cut];
+
+        egui::__run_test_ui(|ui| {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    ime_composition_state_id(BufferId(1)),
+                    ImeCompositionProjection {
+                        active: true,
+                        preedit: "kana".to_string(),
+                    },
+                );
+            });
+
+            assert!(
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true)
+                    .is_empty()
             );
         });
     }
