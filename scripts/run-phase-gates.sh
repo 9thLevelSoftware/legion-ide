@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Plan Phase 0: governance and CI truth lock.
+# Plan Phase 0: governance and local gate truth lock.
 # Runs the documented repository gate sequence from AGENTS.md and plans/dependency-policy.md.
 
 set -eu

@@ -1,5 +1,7 @@
 # Legion IDE — Production Master Plan v0.1
 
+> Historical status: this v0.1 plan was superseded by `plans/legion-production-master-plan-v0.2.md` on 2026-06-19. It is retained for audit traceability. Do not treat its current-state assessment as authoritative without checking v0.2 and `plans/product-readiness-ledger.md`.
+
 - Status: Proposed (for ratification)
 - Date: 2026-06-09
 - Supersedes: nothing; this plan composes on top of `plans/phase-status-ledger.md`, `plans/product-readiness-ledger.md`, and `plans/remaining-implementation-tasks-plan-v0.1.md`. Where this plan and the ledgers disagree about *current state*, the ledgers win; where they disagree about *future sequencing*, this plan (once ratified) wins.

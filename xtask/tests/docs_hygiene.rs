@@ -89,8 +89,9 @@ fn docs_hygiene_accepts_existing_relative_markdown_link_with_line_suffix() {
     let repo = TempRepo::new("line-suffix-link");
     repo.write(
         "README.md",
-        "# Test\n\nSee [source](crates/legion-app/src/lib.rs:123).\n",
+        "# Test\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n\nSee [source](crates/legion-app/src/lib.rs:123).\n",
     );
+    repo.write("plans/legion-production-master-plan-v0.2.md", "# Plan\n");
     repo.write("crates/legion-app/src/lib.rs", "pub fn example() {}\n");
 
     run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
@@ -127,6 +128,64 @@ fn docs_hygiene_allows_devil_reference_in_allowlisted_path() {
 }
 
 #[test]
+fn docs_hygiene_requires_readme_to_reference_latest_production_master_plan() {
+    let repo = TempRepo::new("readme-latest-production-plan");
+    repo.write(
+        "README.md",
+        "# Test\n\n- `plans/legion-production-master-plan-v0.1.md` - current production master plan.\n",
+    );
+
+    let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
+    let violations = result.expect_err("expected stale production plan reference violation");
+
+    assert!(violations.iter().any(|violation| {
+        violation.path == Path::new("README.md")
+            && violation
+                .message
+                .contains("legion-production-master-plan-v0.2.md")
+    }));
+}
+
+#[test]
+fn docs_hygiene_requires_docs_index_to_reference_latest_production_master_plan() {
+    let repo = TempRepo::new("index-latest-production-plan");
+    repo.write(
+        "README.md",
+        "# Test\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n",
+    );
+    repo.write(
+        "docs/INDEX.md",
+        "# Index\n\n- `../plans/legion-production-master-plan-v0.1.md` - historical production master plan.\n",
+    );
+
+    let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
+    let violations = result.expect_err("expected docs index latest-plan violation");
+
+    assert!(violations.iter().any(|violation| {
+        violation.path == Path::new("docs/INDEX.md")
+            && violation
+                .message
+                .contains("legion-production-master-plan-v0.2.md")
+    }));
+}
+
+#[test]
+fn docs_hygiene_accepts_current_production_master_plan_entrypoints() {
+    let repo = TempRepo::new("current-production-plan-entrypoints");
+    repo.write(
+        "README.md",
+        "# Test\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n- `plans/legion-production-master-plan-v0.1.md` - historical production master plan.\n",
+    );
+    repo.write(
+        "docs/INDEX.md",
+        "# Index\n\n- `../plans/legion-production-master-plan-v0.2.md` - current production master plan.\n- `../plans/legion-production-master-plan-v0.1.md` - historical production master plan.\n",
+    );
+
+    run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
+        .expect("current production plan entrypoints should pass");
+}
+
+#[test]
 fn docs_hygiene_loads_allowlist_from_toml() {
     let repo = TempRepo::new("allowlist-toml");
     repo.write(
@@ -150,7 +209,11 @@ fn docs_hygiene_skips_git_target_almanac_directories() {
     repo.write(".almanac/cache.md", "unused\n");
     repo.write(".hermes/plans/local.md", "unused\n");
     repo.write(".serena/memory.md", "unused\n");
-    repo.write("README.md", "# Visible\n");
+    repo.write(
+        "README.md",
+        "# Visible\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n",
+    );
+    repo.write("plans/legion-production-master-plan-v0.2.md", "# Plan\n");
 
     let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
     // Should pass: skipped dirs not visited, README has no broken link/devil marker
@@ -166,7 +229,11 @@ fn docs_hygiene_checks_untracked_markdown_in_git_repo() {
         .arg(&repo.root)
         .output()
         .expect("git init should run");
-    repo.write("README.md", "# Clean\n");
+    repo.write(
+        "README.md",
+        "# Clean\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n",
+    );
+    repo.write("plans/legion-production-master-plan-v0.2.md", "# Plan\n");
     Command::new("git")
         .arg("-C")
         .arg(&repo.root)

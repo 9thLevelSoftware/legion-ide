@@ -23,7 +23,8 @@ Use these docs first:
 - `docs/MODES.md` — Manual, Assist, Delegate, and Legion Workflow mode boundaries.
 - `docs/OPERATOR_RUNBOOK.md` — operator-oriented gate/runbook notes.
 - `plans/product-readiness-ledger.md` — readiness matrix and remaining product gaps.
-- `plans/legion-production-master-plan-v0.1.md` — the production master plan (current-state assessment, 2026 market/technology gap analysis, ADR queue, workstreams, milestones to GA).
+- `plans/legion-production-master-plan-v0.2.md` — the current production master plan (current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, milestones to production utility).
+- `plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking the v0.2 rebaseline and product-readiness ledger.
 - `plans/legion-customizable-autonomy-continuation-plan-v0.1.md` — continuation plan: an old-school customizable manual IDE with a configurable autonomy continuum from zero AI to gated full automation (ADR-0041..0045, WS-21..WS-29, milestones C1..C5).
 - `.almanac/pages/getting-started.md` — local Almanac wiki entry point, if the wiki is checked out locally.
 
@@ -69,7 +70,7 @@ cargo deny --version
 
 If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
-CI runs cargo-deny through `EmbarkStudios/cargo-deny-action` on the Linux matrix leg, so local developer machines must install the CLI separately before using `scripts/run-phase-gates.*`.
+No GitHub Actions CI workflow is currently configured. Local developer machines must install the CLI before using `scripts/run-phase-gates.*`; those local gates are the active verification source.
 
 ## CLI Proof
 

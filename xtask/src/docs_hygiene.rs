@@ -9,7 +9,11 @@ use serde::Deserialize;
 pub enum DocsHygieneViolationKind {
     BrokenRelativeLink,
     StaleDevilReference,
+    StaleProductionPlanReference,
 }
+
+const LATEST_PRODUCTION_MASTER_PLAN: &str = "legion-production-master-plan-v0.2.md";
+const PRODUCTION_PLAN_ENTRYPOINTS: [&str; 2] = ["README.md", "docs/INDEX.md"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocsHygieneViolation {
@@ -94,6 +98,7 @@ pub fn run_docs_hygiene(
         };
         check_markdown_links(workspace_root, &path, &text, &mut violations);
         check_stale_devil_references(workspace_root, &path, &text, &mut violations);
+        check_current_production_plan_reference(workspace_root, &path, &text, &mut violations);
     }
 
     if violations.is_empty() {
@@ -285,6 +290,30 @@ fn check_stale_devil_references(
             });
         }
     }
+}
+
+fn check_current_production_plan_reference(
+    root: &Path,
+    file: &Path,
+    text: &str,
+    violations: &mut Vec<DocsHygieneViolation>,
+) {
+    let relative_path = repo_relative_path(file.strip_prefix(root).unwrap_or(file));
+    if !PRODUCTION_PLAN_ENTRYPOINTS.contains(&relative_path.as_str()) {
+        return;
+    }
+    if text.contains(LATEST_PRODUCTION_MASTER_PLAN) {
+        return;
+    }
+
+    violations.push(DocsHygieneViolation {
+        path: PathBuf::from(relative_path),
+        line: 1,
+        kind: DocsHygieneViolationKind::StaleProductionPlanReference,
+        message: format!(
+            "current documentation entrypoint must reference latest production master plan `{LATEST_PRODUCTION_MASTER_PLAN}`"
+        ),
+    });
 }
 
 fn first_devil_token(line: &str) -> Option<&str> {

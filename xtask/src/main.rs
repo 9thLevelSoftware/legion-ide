@@ -248,7 +248,6 @@ const GUI_PHASE7_REQUIRED_ARTIFACTS: &[&str] = &[
     ".planning/phases/07-fully-functional-local-ide-beta/07-05-RESULT.md",
     "scripts/gui-smoke.ps1",
     "scripts/gui-smoke.sh",
-    ".github/workflows/ci.yml",
 ];
 const GUI_PHASE7_REQUIRED_COMMAND_MARKERS: &[&str] = &[
     "cargo run -p xtask -- check-deps",
@@ -291,7 +290,6 @@ const GUI_PHASE8_REQUIRED_ARTIFACTS: &[&str] = &[
     ".planning/phases/08-advanced-platform-gui-ga/08-07-RESULT.md",
     "scripts/gui-smoke.ps1",
     "scripts/gui-smoke.sh",
-    ".github/workflows/ci.yml",
 ];
 const GUI_PHASE8_REQUIRED_COMMAND_MARKERS: &[&str] = &[
     "cargo run -p xtask -- check-deps",
