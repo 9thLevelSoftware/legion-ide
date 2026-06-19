@@ -71,3 +71,7 @@ Rectangular selection is intentionally deferred out of the v1 product-workflow g
 - Native OS IME, clipboard, focus, high-DPI, and accessibility evidence must name the host OS where it was observed.
 - Renderer-backed perf can still be blocked on machines without a native window or GPU path; blocked runs must be recorded as blocked, not passed.
 - WS-MANUAL-02 owns full large-workspace and 100MB streaming performance; WS-MANUAL-01 only improves visible capability reduction and renderer/input evidence.
+
+## Deterministic Renderer Evidence
+
+Core Manual editor states are represented by `DesktopProjectionViewModel::deterministic_editor_evidence()`. The evidence rows are textual, stable, and metadata-only: title, editor status, viewport metadata, flags, code-line lengths, truncation state, and large-file capability rows. They do not persist raw source or full clipboard/IME payloads.

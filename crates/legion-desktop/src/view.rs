@@ -482,6 +482,41 @@ pub struct DesktopProjectionViewModel {
 }
 
 impl DesktopProjectionViewModel {
+    /// Emits stable, metadata-only rows for renderer evidence without raw source payloads.
+    pub fn deterministic_editor_evidence(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        rows.push(format!("title={}", self.layout_title));
+        rows.extend(
+            self.editor_status_rows
+                .iter()
+                .map(|row| format!("editor_status={row}")),
+        );
+        rows.extend(
+            self.viewport_metadata_rows
+                .iter()
+                .map(|row| format!("viewport={row}")),
+        );
+        rows.extend(
+            self.empty_or_degraded_flags
+                .iter()
+                .map(|flag| format!("flag={flag}")),
+        );
+        rows.extend(self.active_buffer_code_lines.iter().take(8).map(|line| {
+            format!(
+                "code_line={} len={} truncation={:?}",
+                line.number,
+                line.text.chars().count(),
+                line.truncation_state
+            )
+        }));
+        rows.extend(
+            self.large_file_banner_rows
+                .iter()
+                .map(|row| format!("large_file={row}")),
+        );
+        rows
+    }
+
     /// Builds a display model from a projection snapshot without taking product-state ownership.
     pub fn from_snapshot(snapshot: &ShellProjectionSnapshot) -> Self {
         Self::from_snapshot_with_state(snapshot, &DesktopProjectionViewState::default())
