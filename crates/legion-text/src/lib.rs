@@ -13,6 +13,9 @@ use ropey::Rope;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod binary;
+pub use binary::{BinaryDetectionResult, detect_binary, detect_binary_with_window};
+
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
 
 const DEFAULT_LEAF_TARGET_BYTES: usize = 1024;
