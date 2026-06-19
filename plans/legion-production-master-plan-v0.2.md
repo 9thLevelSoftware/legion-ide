@@ -1068,3 +1068,16 @@ Every task packet should include:
 - Rollback/failure behavior
 - Commands run and results
 
+## Appendix D - What Changed Since v0.1
+
+v0.2 is a rebaseline, not a replacement for the historical evidence corpus. The major changes since v0.1 are:
+
+| Area | v0.1 posture | v0.2 correction |
+| --- | --- | --- |
+| Current-state diagnosis | Described most IDE verbs as simulated. | Recognizes real substrate progress while keeping product-readiness gates open. |
+| Milestone evidence | Treated M0-M6 as future production milestones. | Preserves accepted M0-M6 evidence and requires explicit mapping to remaining product gates. |
+| Plan authority | v0.1 was the production planning entry point. | v0.2 is the current master plan; v0.1 is historical audit material. |
+| Product-readiness posture | Mixed future architecture and current gaps in one plan. | Separates accepted substrate evidence from product workflow validation through the readiness ledger. |
+| Market posture | Used the mid-2026 market snapshot to justify the architecture direction. | Keeps that market direction but focuses execution on daily-driver product utility and evidence drift control. |
+| Evidence caveats | Dirty-worktree caveats were present in acceptance files but not summarized. | WS-P0 adds an explicit caveat audit and clean-rerun decision record. |
+| Dogfooding | M1 dogfooding was named as a high-leverage gate. | WS-P0 adds a weekly Legion-on-Legion journal template so dogfooding becomes repeatable evidence. |

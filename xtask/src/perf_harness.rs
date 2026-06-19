@@ -2,7 +2,7 @@
 //!
 //! The full WS18.T1 implementation will exercise the Legion editor, indexer,
 //! and protocol layers across the reference workloads described in
-//! `plans/legion-production-master-plan-v0.1.md` §11 (input-to-paint p50/p95,
+//! `plans/legion-production-master-plan-v0.2.md` quality bars (input-to-paint p50/p95,
 //! scroll jank, startup, memory ceiling on the Legion repo, 100K-file fixture,
 //! 100MB file). The M0 acceptance is a **skeleton** that lands in CI, emits a
 //! dashboard report, and demonstrates a failing-gate. The full per-OS
