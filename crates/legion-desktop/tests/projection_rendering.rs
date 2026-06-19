@@ -12,14 +12,15 @@ use legion_protocol::{
     CollaborationSessionId, CommandDescriptor, CommandRegistryProjection, CommandRiskLabel,
     ContextManifestEgressStatus, ContextManifestInclusionState, ContextManifestItem,
     ContextManifestItemCount, ContextManifestItemKind, FileFingerprint, FileId,
-    LanguageStickyScopeProjection, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, PluginId, PrincipalId, ProposalContextManifestSummary,
-    ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
-    ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
-    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId,
-    SystemGraphEdge, SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis,
-    Utf16Position, Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
+    LanguageStickyScopeProjection, LargeFileStatus, LineWrappingPolicy, PluginCommandDescriptor,
+    PluginContribution, PluginContributionProjection, PluginId, PrincipalId,
+    ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
+    ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
+    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
+    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
+    ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId, SystemGraphEdge,
+    SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis, Utf16Position,
+    Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
     ViewportDimensions, ViewportFoldRange, ViewportLineSlice, ViewportLineTruncationState,
     ViewportProjection, ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay, WorkspaceId,
@@ -402,7 +403,18 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
             decoration_spans: Vec::new(),
             fold_ranges: Vec::new(),
             semantic_token_overlays: Vec::new(),
-            large_file_status: None,
+            large_file_status: Some(LargeFileStatus {
+                threshold_bytes: 16,
+                byte_len: 64,
+                disabled_overlay_reasons: vec![
+                    "semantic overlays disabled".to_string(),
+                    "C:\\Windows\\Fonts\\malgun.ttf\nHIDDEN_NEEDLE_AFTER_VIEWPORT".to_string(),
+                    "/System/Library/Fonts/PingFang.ttc\u{0000}".to_string(),
+                    "/usr/share/fonts/noto/NotoSansCJK.ttc".to_string(),
+                ],
+                bounded_search_enabled: true,
+                message: "degraded large file".to_string(),
+            }),
             schema_version: 1,
         }),
         degraded: true,
@@ -1295,6 +1307,20 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             .iter()
             .any(|row| row.contains("DegradedLargeFile"))
     );
+    assert!(
+        degraded_model
+            .large_file_banner_rows
+            .iter()
+            .any(|row| row.contains("capability reduced: semantic overlays disabled"))
+    );
+    assert!(degraded_model.large_file_banner_rows.iter().all(|row| {
+        !row.contains("HIDDEN_NEEDLE_AFTER_VIEWPORT")
+            && !row.contains("\\Windows\\Fonts")
+            && !row.contains("/System/Library/Fonts")
+            && !row.contains("/usr/share/fonts")
+            && !row.contains('\n')
+            && !row.contains('\0')
+    }));
 }
 
 #[test]

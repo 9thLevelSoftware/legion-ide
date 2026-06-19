@@ -5334,9 +5334,33 @@ fn large_file_banner_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         status
             .disabled_overlay_reasons
             .iter()
-            .map(|reason| format!("capability reduced: {reason}")),
+            .map(|reason| format!("capability reduced: {}", sanitize_large_file_reason(reason))),
     );
     rows
+}
+
+fn sanitize_large_file_reason(value: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() || looks_like_local_path(label) {
+        return "metadata-redacted".to_string();
+    }
+
+    let normalized = label
+        .chars()
+        .filter(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.' | ':' | ',' | '=')
+        })
+        .take(96)
+        .collect::<String>();
+    if normalized.trim().is_empty() {
+        "metadata-redacted".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn looks_like_local_path(value: &str) -> bool {
+    value.contains('\\') || value.contains('/') || value.contains(":\\")
 }
 
 fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCodeLineViewModel> {
