@@ -486,11 +486,12 @@ impl DesktopProjectionViewModel {
     pub fn deterministic_editor_evidence(&self) -> Vec<String> {
         let mut rows = Vec::new();
         rows.push(format!("title={}", self.layout_title));
-        rows.extend(
-            self.editor_status_rows
-                .iter()
-                .map(|row| format!("editor_status={row}")),
-        );
+        rows.extend(self.editor_status_rows.iter().map(|row| {
+            format!(
+                "editor_status={}",
+                Self::evidence_safe_editor_status_row(row)
+            )
+        }));
         rows.extend(
             self.viewport_metadata_rows
                 .iter()
@@ -515,6 +516,37 @@ impl DesktopProjectionViewModel {
                 .map(|row| format!("large_file={row}")),
         );
         rows
+    }
+
+    fn evidence_safe_editor_status_row(row: &str) -> String {
+        let Some((prefix, path)) = row.split_once(" path=") else {
+            return row.to_string();
+        };
+        format!("{prefix} path={}", Self::evidence_safe_path_label(path))
+    }
+
+    fn evidence_safe_path_label(path: &str) -> String {
+        if path == "<untitled>" || path.is_empty() {
+            return path.to_string();
+        }
+
+        let Some(file_name) = path
+            .rsplit(['\\', '/'])
+            .find(|segment| !segment.trim().is_empty())
+        else {
+            return "metadata-redacted".to_string();
+        };
+
+        let sanitized = file_name
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+            .take(64)
+            .collect::<String>();
+        if sanitized.trim().is_empty() {
+            "metadata-redacted".to_string()
+        } else {
+            sanitized
+        }
     }
 
     /// Builds a display model from a projection snapshot without taking product-state ownership.

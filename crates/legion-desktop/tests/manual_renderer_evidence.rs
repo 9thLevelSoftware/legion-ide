@@ -104,33 +104,41 @@ fn deterministic_renderer_evidence_covers_core_editor_states() {
             .all(|row| !row.contains("raw_source="))
     );
 
-    let mut active_snapshot = Shell::empty("Evidence Active").projection_snapshot();
-    active_snapshot.active_buffer_projection = ActiveBufferProjection {
-        workspace_id: Some(WorkspaceId(1)),
-        buffer_id: Some(BufferId(2)),
-        file_id: Some(FileId(3)),
-        file_path: Some(CanonicalPath("src/evidence.rs".to_string())),
-        viewport: None,
-        degraded: false,
-        small_buffer_preview: Some(
-            "let super_secret = 42;\nprintln!(\"hidden payload\");".to_string(),
-        ),
-        dirty: false,
-    };
-    let active_model = DesktopProjectionViewModel::from_snapshot(&active_snapshot);
+    for path in [
+        "C:\\Users\\ada\\secret\\evidence.rs",
+        "/home/ada/secret/evidence.rs",
+        "/System/Volumes/Data/Users/ada/secret/evidence.rs",
+    ] {
+        let mut active_snapshot = Shell::empty("Evidence Active").projection_snapshot();
+        active_snapshot.active_buffer_projection = ActiveBufferProjection {
+            workspace_id: Some(WorkspaceId(1)),
+            buffer_id: Some(BufferId(2)),
+            file_id: Some(FileId(3)),
+            file_path: Some(CanonicalPath(path.to_string())),
+            viewport: None,
+            degraded: false,
+            small_buffer_preview: Some(
+                "let super_secret = 42;\nprintln!(\"hidden payload\");".to_string(),
+            ),
+            dirty: false,
+        };
+        let active_model = DesktopProjectionViewModel::from_snapshot(&active_snapshot);
 
-    let active_evidence = active_model.deterministic_editor_evidence();
+        let active_evidence = active_model.deterministic_editor_evidence();
 
-    assert!(
-        active_evidence
-            .iter()
-            .any(|row| row == "code_line=1 len=22 truncation=None")
-    );
-    assert!(
-        active_evidence
-            .iter()
-            .all(|row| !row.contains("super_secret")
+        assert!(
+            active_evidence
+                .iter()
+                .any(|row| row == "code_line=1 len=22 truncation=None")
+        );
+        assert!(active_evidence.iter().all(|row| {
+            !row.contains("super_secret")
                 && !row.contains("hidden payload")
-                && !row.contains("raw_source="))
-    );
+                && !row.contains("raw_source=")
+                && !row.contains("C:\\Users")
+                && !row.contains("/home/ada")
+                && !row.contains("/System/Volumes")
+                && !row.contains("secret")
+        }));
+    }
 }
