@@ -48,6 +48,8 @@ const MANUAL_RENDERER_KEYPRESS_P95_BUDGET_MILLIS: u64 = 32;
 const MANUAL_RENDERER_SCROLL_P95_BUDGET_MILLIS: u64 = 32;
 const MANUAL_RENDERER_SAMPLE_COUNT: usize = 16;
 const MANUAL_RENDERER_SCENARIO: &str = "manual_editor_input_to_paint";
+const MEMORY_CEILING_FIXTURE_BYTES: usize = 1024 * 1024; // 1MB
+const MEMORY_CEILING_DEFAULT_BUDGET_BYTES: usize = 10 * 1024 * 1024; // 10MB ceiling for 1MB doc
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
 pub const MANUAL_RENDERER_PERF_REPORT_FILE: &str = "manual_renderer_perf.toml";
 
@@ -92,6 +94,11 @@ pub enum SkeletonKind {
     /// the `legion-desktop --manual-perf` subprocess.
     #[serde(rename = "renderer_backed_manual_input_to_paint")]
     RendererBackedManualInputToPaint,
+    /// Memory ceiling measurement for a reference-size text buffer.
+    /// Creates a 1MB `TextBuffer` and asserts the memory footprint stays
+    /// below a configurable ceiling.
+    #[serde(rename = "memory_ceiling_1mb", alias = "memoryceiling1mb")]
+    MemoryCeiling1MB,
 }
 
 impl SkeletonKind {
@@ -100,6 +107,7 @@ impl SkeletonKind {
             Self::InputToPaintMicrobenchmark => "input_to_paint_microbenchmark",
             Self::LineGalleyShapingCache => "line_galley_shaping_cache",
             Self::RendererBackedManualInputToPaint => "renderer_backed_manual_input_to_paint",
+            Self::MemoryCeiling1MB => "memory_ceiling_1mb",
         }
     }
 }
@@ -148,6 +156,22 @@ impl SkeletonDescriptor {
                 "WS01.T2 line-galley shaping-cache gate: represents a ",
                 "10K-line editor buffer where only visible viewport rows ",
                 "are shaped/looked up for a frame; strict budget is <2ms."
+            )
+            .to_string(),
+        }
+    }
+
+    pub fn m2_memory_ceiling_1mb() -> Self {
+        Self {
+            name: "m2.memory_ceiling_1mb".to_string(),
+            kind: SkeletonKind::MemoryCeiling1MB,
+            fixture_bytes: MEMORY_CEILING_FIXTURE_BYTES,
+            sample_count: 1,
+            budget_millis: 0, // report-only by default (measured in bytes, not millis)
+            note: concat!(
+                "WS-MANUAL-02 SCALE.09 memory ceiling gate: creates a 1MB TextBuffer ",
+                "and asserts the memory_footprint_bytes() stays below 10MB. The budget ",
+                "field is unused (measurement is byte-based, not time-based).",
             )
             .to_string(),
         }
@@ -246,6 +270,9 @@ impl std::error::Error for PerfHarnessError {}
 /// Plan a deterministic skeleton run. Pure function: no I/O, no clock.
 pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
     let samples = match skeleton.kind {
+        SkeletonKind::MemoryCeiling1MB => {
+            return run_memory_ceiling_1mb(skeleton.fixture_bytes);
+        }
         SkeletonKind::InputToPaintMicrobenchmark => {
             run_input_to_paint_microbenchmark(skeleton.fixture_bytes, skeleton.sample_count)
         }
@@ -385,6 +412,61 @@ fn run_line_galley_shaping_cache_microbenchmark(
         samples.push(start.elapsed());
     }
     samples
+}
+
+fn run_memory_ceiling_1mb(fixture_bytes: usize) -> SkeletonMeasurement {
+    use legion_protocol::BufferVersion;
+    use legion_text::TextBuffer;
+
+    // Generate a fixture of repeating ASCII lines
+    let line = "abcdefghijklmnopqrstuvwxyz0123456789_|\n"; // 39 bytes
+    let line_count = fixture_bytes / line.len();
+    let mut text = String::with_capacity(line_count * line.len());
+    for _ in 0..line_count {
+        text.push_str(line);
+    }
+
+    let buf = TextBuffer::try_with_version(text, BufferVersion(0))
+        .expect("TextBuffer creation should succeed for 1MB");
+    let footprint = buf.memory_footprint_bytes();
+
+    let ceiling = MEMORY_CEILING_DEFAULT_BUDGET_BYTES;
+    let (status, message) = if footprint <= ceiling {
+        (
+            SkeletonStatus::Passed,
+            format!(
+                "memory footprint {} bytes ({:.2} MB) within ceiling {} bytes ({} MB)",
+                footprint,
+                footprint as f64 / (1024.0 * 1024.0),
+                ceiling,
+                ceiling / (1024 * 1024)
+            ),
+        )
+    } else {
+        (
+            SkeletonStatus::Failed,
+            format!(
+                "memory footprint {} bytes ({:.2} MB) exceeds ceiling {} bytes ({} MB)",
+                footprint,
+                footprint as f64 / (1024.0 * 1024.0),
+                ceiling,
+                ceiling / (1024 * 1024)
+            ),
+        )
+    };
+
+    SkeletonMeasurement {
+        name: "m2.memory_ceiling_1mb".to_string(),
+        kind: SkeletonKind::MemoryCeiling1MB,
+        fixture_bytes,
+        sample_count: 1,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis: 0,
+        status,
+        message,
+    }
 }
 
 fn percentile_micros(sorted: &[Duration], pct: f64) -> u64 {

@@ -108,6 +108,14 @@ pub enum EditorError {
         /// Actual leased buffer version.
         actual_buffer_version: BufferVersion,
     },
+    /// File was detected as binary and cannot be opened as a text buffer.
+    #[error("file {path:?} detected as binary (NUL byte at offset {nul_offset}); preview refused")]
+    BinaryFileRefused {
+        /// Path of the binary file.
+        path: String,
+        /// Offset of the first NUL byte found.
+        nul_offset: usize,
+    },
 }
 
 /// Cursor state for a single caret.
@@ -610,6 +618,14 @@ impl EditorEngine {
         self.next_buffer_id += 1;
 
         let initial_text = initial_text.into();
+        let file_path = file_path.into();
+        let detection = legion_text::detect_binary(initial_text.as_bytes());
+        if let legion_text::BinaryDetectionResult::Binary { first_nul_offset } = detection {
+            return Err(EditorError::BinaryFileRefused {
+                path: file_path.clone(),
+                nul_offset: first_nul_offset,
+            });
+        }
         let mode = self.mode_for_byte_len(initial_text.len());
         let state = EditorBufferState::new(
             workspace_id,
@@ -876,6 +892,10 @@ impl EditorEngine {
             conflict: state.conflict_state.clone(),
             undo_len: state.undo_stack.len(),
             redo_len: state.redo_stack.len(),
+            file_size_classification: match state.mode {
+                BufferMode::Normal => legion_protocol::FileSizeClassification::Normal,
+                BufferMode::Degraded => legion_protocol::FileSizeClassification::Large,
+            },
             schema_version: 1,
         })
     }
