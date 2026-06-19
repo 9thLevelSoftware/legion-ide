@@ -5393,15 +5393,19 @@ fn large_file_banner_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         return Vec::new();
     };
 
+    let size_mb = status.byte_len as f64 / (1024.0 * 1024.0);
     let mut rows = vec![format!(
-        "large-file degraded: bytes={} threshold={} bounded_search={}",
-        status.byte_len, status.threshold_bytes, status.bounded_search_enabled
+        "\u{26a0} Large file ({:.1} MB) \u{2014} some features disabled",
+        size_mb
     )];
+    if !status.message.is_empty() {
+        rows.push(status.message.clone());
+    }
     rows.extend(
         status
             .disabled_overlay_reasons
             .iter()
-            .map(|reason| format!("capability reduced: {}", sanitize_large_file_reason(reason))),
+            .map(|reason| format!("  \u{2022} {}", sanitize_large_file_reason(reason))),
     );
     rows
 }
