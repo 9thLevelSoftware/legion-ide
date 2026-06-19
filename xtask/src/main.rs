@@ -1008,7 +1008,12 @@ fn manual_renderer_environment_blocked(output_text: &str) -> bool {
         || lower.contains("unavailable")
         || lower.contains("not available")
         || lower.contains("headless")
-        || lower.contains("display");
+        || lower.contains("display not set")
+        || lower.contains("no display")
+        || lower.contains("no available display")
+        || lower.contains("renderer unavailable")
+        || lower.contains("native window unavailable")
+        || lower.contains("gpu unavailable");
     renderer_context && blocked_context
 }
 

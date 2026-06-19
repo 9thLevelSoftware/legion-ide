@@ -79,9 +79,14 @@ pub enum SkeletonKind {
     /// fixed-size in-memory byte buffer. Mirrors the hot path the editor
     /// p50/p95 input-to-paint budget will gate against, but does not
     /// require `legion-editor` as an `xtask` dependency.
+    #[serde(
+        rename = "input_to_paint_microbenchmark",
+        alias = "inputtopaintmicrobenchmark"
+    )]
     InputToPaintMicrobenchmark,
     /// Synthetic line-galley shaping-cache frame: a 10K-line fixture with
     /// only the visible viewport rows looked up/shaped per frame.
+    #[serde(rename = "line_galley_shaping_cache", alias = "linegalleyshapingcache")]
     LineGalleyShapingCache,
     /// Renderer-backed Manual editor input-to-paint measurement supplied by
     /// the `legion-desktop --manual-perf` subprocess.
@@ -485,7 +490,9 @@ pub fn manual_renderer_perf_measurement(report: &ManualRendererPerfToml) -> Skel
         kind: SkeletonKind::RendererBackedManualInputToPaint,
         fixture_bytes: 0,
         sample_count: report.sample_count,
-        total_micros: p95_micros,
+        total_micros: report
+            .keypress_p95_micros
+            .saturating_add(report.scroll_p95_micros),
         p50_micros: report.keypress_p50_micros,
         p95_micros,
         budget_millis: report

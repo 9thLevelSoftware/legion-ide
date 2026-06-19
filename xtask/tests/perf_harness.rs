@@ -362,7 +362,7 @@ fn manual_renderer_perf_report_maps_to_perf_measurement() {
     assert_eq!(measurement.sample_count, 16);
     assert_eq!(measurement.p50_micros, 1_200);
     assert_eq!(measurement.p95_micros, 20_000);
-    assert_eq!(measurement.total_micros, 20_000);
+    assert_eq!(measurement.total_micros, 28_000);
     assert_eq!(measurement.budget_millis, 32);
     assert_eq!(measurement.status, SkeletonStatus::Passed);
     assert!(measurement.message.contains("Manual latency budgets"));
@@ -465,6 +465,54 @@ fn perf_harness_skeleton_measurement_serializes_stably() {
         message: "ok".to_string(),
     };
     let text = toml::to_string_pretty(&measurement).expect("serialize");
+    assert!(
+        text.contains("kind = \"input_to_paint_microbenchmark\""),
+        "input-to-paint kind should serialize as stable snake_case, got:\n{text}"
+    );
     let round_trip: SkeletonMeasurement = toml::from_str(&text).expect("deserialize");
     assert_eq!(round_trip, measurement);
+}
+
+#[test]
+fn perf_harness_skeleton_kind_serializes_stable_snake_case() {
+    let cases = [
+        (
+            SkeletonKind::InputToPaintMicrobenchmark,
+            "input_to_paint_microbenchmark",
+            "inputtopaintmicrobenchmark",
+        ),
+        (
+            SkeletonKind::LineGalleyShapingCache,
+            "line_galley_shaping_cache",
+            "linegalleyshapingcache",
+        ),
+        (
+            SkeletonKind::RendererBackedManualInputToPaint,
+            "renderer_backed_manual_input_to_paint",
+            "renderer_backed_manual_input_to_paint",
+        ),
+    ];
+    for (kind, expected, legacy) in cases {
+        let measurement = SkeletonMeasurement {
+            name: "kind-test".to_string(),
+            kind,
+            fixture_bytes: 0,
+            sample_count: 1,
+            total_micros: 0,
+            p50_micros: 0,
+            p95_micros: 0,
+            budget_millis: 0,
+            status: SkeletonStatus::Skipped,
+            message: "kind serialization test".to_string(),
+        };
+        let serialized = toml::to_string(&measurement).expect("serialize skeleton measurement");
+        assert!(
+            serialized.contains(expected),
+            "kind {kind:?} should serialize as {expected}, got {serialized}"
+        );
+        let legacy = serialized.replace(expected, legacy);
+        let parsed: SkeletonMeasurement =
+            toml::from_str(&legacy).expect("legacy skeleton kind should deserialize");
+        assert_eq!(parsed.kind, kind);
+    }
 }
