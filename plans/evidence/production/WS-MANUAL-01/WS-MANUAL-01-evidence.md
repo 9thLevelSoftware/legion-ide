@@ -52,7 +52,8 @@ Rectangular selection is intentionally deferred out of the v1 product-workflow g
 | `cargo run -p xtask -- no-egui-textedit` | Pass | MANUAL.03 keeps the custom Manual editor path covered by the no-`egui::TextEdit` xtask gate and companion test. |
 | `cargo test -p legion-desktop --test manual_perf` | Pass | MANUAL.02 added the renderer-backed Manual edit perf test and metadata-only report path in `crates/legion-desktop/tests/manual_perf.rs`. |
 | `cargo test -p legion-desktop --test manual_input_conformance` | Pass | MANUAL.04, MANUAL.05, MANUAL.06, and MANUAL.07 are covered by Manual focus, IME, clipboard, copy/cut composition suppression, and selection-scope tests. |
-| `cargo test -p legion-desktop --test manual_renderer_evidence` | Pass | MANUAL.08, MANUAL.09, MANUAL.10, MANUAL.11, and the renderer zero-egress trust-boundary check are covered by `manual_renderer_evidence` and large-file evidence tests. |
+| `cargo test -p legion-desktop --test manual_renderer_evidence` | Pass | MANUAL.08, MANUAL.09, MANUAL.11, and the renderer zero-egress trust-boundary check are covered by `manual_renderer_evidence`. |
+| `cargo test -p legion-desktop --test large_file_guardrails large_file_guardrails_degraded_banner_names_capability_reduction -- --exact` | Pass | MANUAL.10 degraded-mode banner evidence is covered by the focused large-file guardrail test. |
 | `cargo test -p legion-app --test manual_zero_egress` | Pass | MANUAL.12 app-level open/edit/save/search zero-egress smoke is recorded in `manual-mode-zero-egress.md` and strengthened by commits `98f0b6b` and `64b3a85`. |
 | `cargo run -p xtask -- check-deps` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
 | `cargo run -p xtask -- docs-hygiene` | Pass | Phase 9 docs-hygiene command passed after the ledger/evidence updates. |
