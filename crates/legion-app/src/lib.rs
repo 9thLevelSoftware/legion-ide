@@ -13995,16 +13995,16 @@ impl AppComposition {
             AppCommandRequest::ClipboardCut { buffer_id } => {
                 let (metadata, selection) =
                     self.clipboard_metadata_for_selection(*buffer_id, true)?;
-                if metadata.byte_len > 0 {
-                    if let Some(selection) = selection {
-                        let descriptor = self.apply_edit_to_buffer_with_correlation(
-                            *buffer_id,
-                            TextEdit::delete(CommandDispatcher::editor_range(selection)),
-                            event_context.correlation_id,
-                        )?;
-                        self.set_buffer_cursor(*buffer_id, selection.start)?;
-                        self.emit_transaction_event(&descriptor);
-                    }
+                if metadata.byte_len > 0
+                    && let Some(selection) = selection
+                {
+                    let descriptor = self.apply_edit_to_buffer_with_correlation(
+                        *buffer_id,
+                        TextEdit::delete(CommandDispatcher::editor_range(selection)),
+                        event_context.correlation_id,
+                    )?;
+                    self.set_buffer_cursor(*buffer_id, selection.start)?;
+                    self.emit_transaction_event(&descriptor);
                 }
                 return Ok(AppCommandOutcome::ClipboardUpdated(metadata));
             }
