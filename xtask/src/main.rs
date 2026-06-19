@@ -820,7 +820,8 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     }
     let package_name = "legion-desktop".to_string();
     let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
-    let report = xtask::perf_harness::plan_perf_skeletons(&package_name, &git_sha, &skeletons);
+    let mut report = xtask::perf_harness::plan_perf_skeletons(&package_name, &git_sha, &skeletons);
+    append_manual_renderer_measurement(&workspace_root, &out_dir, &mut report);
     let path = match xtask::perf_harness::write_report(&out_dir, &report) {
         Ok(path) => path,
         Err(err) => {
@@ -855,6 +856,165 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     } else {
         0
     }
+}
+
+fn append_manual_renderer_measurement(
+    workspace_root: &Path,
+    out_dir: &Path,
+    report: &mut xtask::perf_harness::PerfReport,
+) {
+    let manual_report_path = out_dir.join(xtask::perf_harness::MANUAL_RENDERER_PERF_REPORT_FILE);
+    match fs::remove_file(&manual_report_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            report.skeletons.push(manual_renderer_placeholder_measurement(
+                xtask::perf_harness::SkeletonStatus::Failed,
+                format!(
+                    "renderer-backed Manual measurement failed: unable to clear stale report `{}`: {err}",
+                    manual_report_path.display()
+                ),
+            ));
+            report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
+            return;
+        }
+    }
+
+    let budgets = xtask::perf_harness::manual_renderer_budgets();
+    let sample_count = budgets.sample_count.to_string();
+    let output = process::Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "legion-desktop",
+            "--no-default-features",
+            "--features",
+            "offline",
+            "--",
+            "--manual-perf",
+            "--workspace",
+            ".",
+            "--file",
+            "Cargo.toml",
+            "--perf-report",
+        ])
+        .arg(&manual_report_path)
+        .args(["--perf-samples", &sample_count])
+        .output();
+
+    let measurement = match output {
+        Err(err) => manual_renderer_placeholder_measurement(
+            xtask::perf_harness::SkeletonStatus::Skipped,
+            format!(
+                "renderer-backed Manual measurement blocked: unable to spawn cargo release/offline desktop subprocess: {err}"
+            ),
+        ),
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "perf harness: Manual renderer subprocess exited with status {}",
+                    output.status
+                );
+            }
+            match xtask::perf_harness::read_manual_renderer_perf_report(&manual_report_path) {
+                Ok(manual_report) => {
+                    xtask::perf_harness::manual_renderer_perf_measurement(&manual_report)
+                }
+                Err(read_err) => {
+                    eprintln!("perf harness: {read_err}");
+                    let output_text = process_output_text(&output);
+                    if !output.status.success() && manual_renderer_environment_blocked(&output_text)
+                    {
+                        manual_renderer_placeholder_measurement(
+                            xtask::perf_harness::SkeletonStatus::Skipped,
+                            format!(
+                                "renderer-backed Manual measurement blocked: {}",
+                                truncate_report_message(&output_text)
+                            ),
+                        )
+                    } else {
+                        manual_renderer_placeholder_measurement(
+                            xtask::perf_harness::SkeletonStatus::Failed,
+                            format!(
+                                "renderer-backed Manual measurement failed: {read_err}{}",
+                                command_output_suffix(&output_text)
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    };
+
+    report.skeletons.push(measurement);
+    report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
+}
+
+fn manual_renderer_placeholder_measurement(
+    status: xtask::perf_harness::SkeletonStatus,
+    message: String,
+) -> xtask::perf_harness::SkeletonMeasurement {
+    let budgets = xtask::perf_harness::manual_renderer_budgets();
+    xtask::perf_harness::SkeletonMeasurement {
+        name: "manual.renderer_input_to_paint".to_string(),
+        kind: xtask::perf_harness::SkeletonKind::RendererBackedManualInputToPaint,
+        fixture_bytes: 0,
+        sample_count: budgets.sample_count,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis: budgets.keypress_p95_millis.max(budgets.scroll_p95_millis),
+        status,
+        message,
+    }
+}
+
+fn process_output_text(output: &process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!("stdout:\n{stdout}\nstderr:\n{stderr}")
+}
+
+fn command_output_suffix(output_text: &str) -> String {
+    let output_text = truncate_report_message(output_text);
+    if output_text.is_empty() {
+        String::new()
+    } else {
+        format!("; subprocess output: {output_text}")
+    }
+}
+
+fn truncate_report_message(message: &str) -> String {
+    let normalized = message.replace("\r\n", "\n");
+    let trimmed = normalized.trim();
+    const LIMIT: usize = 800;
+    if trimmed.chars().count() <= LIMIT {
+        trimmed.to_string()
+    } else {
+        format!("{}...", trimmed.chars().take(LIMIT).collect::<String>())
+    }
+}
+
+fn manual_renderer_environment_blocked(output_text: &str) -> bool {
+    let lower = output_text.to_ascii_lowercase();
+    let renderer_context = lower.contains("renderer")
+        || lower.contains("native")
+        || lower.contains("window")
+        || lower.contains("display")
+        || lower.contains("gpu");
+    let blocked_context = lower.contains("blocked")
+        || lower.contains("unavailable")
+        || lower.contains("not available")
+        || lower.contains("headless")
+        || lower.contains("display not set")
+        || lower.contains("no display")
+        || lower.contains("no available display")
+        || lower.contains("renderer unavailable")
+        || lower.contains("native window unavailable")
+        || lower.contains("gpu unavailable");
+    renderer_context && blocked_context
 }
 
 fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {

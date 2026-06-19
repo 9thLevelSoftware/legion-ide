@@ -84,6 +84,12 @@ fn run_git<const N: usize>(root: &Path, args: [&str; N]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn projected_path_matches(path: &str, expected: &Path) -> bool {
+    Path::new(path)
+        .canonicalize()
+        .is_ok_and(|actual| actual == expected)
+}
+
 fn conflict_marker_text() -> String {
     format!(
         "{} ours\nfn current() {{}}\n{}\nfn incoming() {{}}\n{} theirs\n",
@@ -307,13 +313,13 @@ fn git_snapshot_projects_worktrees_and_orphan_prunable_entries() {
         snapshot
             .worktrees
             .iter()
-            .any(|worktree| worktree.path == repo_root.display().to_string())
+            .any(|worktree| projected_path_matches(&worktree.path, &repo_root))
     );
     assert!(
         snapshot
             .worktrees
             .iter()
-            .any(|worktree| worktree.path == worktree_root.display().to_string())
+            .any(|worktree| projected_path_matches(&worktree.path, &worktree_root))
     );
     assert!(
         snapshot
@@ -1042,10 +1048,8 @@ fn git_snapshot_projects_origin_remote_url() {
 
     let snapshot = collect_git_snapshot(repo.path(), None, GitSnapshotOptions::default())
         .expect("snapshot should include remote metadata");
-    assert_eq!(
-        snapshot.remote_url.as_deref(),
-        Some("git@github.com:legion/example-repo.git")
-    );
+    let expected = run_git(repo.path(), ["remote", "get-url", "origin"]);
+    assert_eq!(snapshot.remote_url.as_deref(), Some(expected.trim()));
 }
 
 #[test]

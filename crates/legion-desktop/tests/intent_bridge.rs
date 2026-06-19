@@ -695,6 +695,18 @@ fn intent_bridge_routes_assist_inline_prediction_actions() {
 fn intent_bridge_preserves_clipboard_and_ime_text() {
     let at = coord(1, 0, 7);
     assert_eq!(
+        translate(DesktopAction::ClipboardCopy),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ClipboardCopy {
+            buffer_id: BufferId(9),
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::ClipboardCut),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ClipboardCut {
+            buffer_id: BufferId(9),
+        })
+    );
+    assert_eq!(
         translate(DesktopAction::ClipboardPaste {
             text: "clip ñ".to_string(),
             at,
@@ -714,6 +726,12 @@ fn intent_bridge_preserves_clipboard_and_ime_text() {
             buffer_id: BufferId(9),
             at,
             text: "入力".to_string(),
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::SelectAll { buffer_id: None }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SelectAll {
+            buffer_id: BufferId(9),
         })
     );
 }
@@ -923,6 +941,8 @@ fn intent_bridge_rejects_buffer_actions_without_active_buffer() {
             replacement: "x".to_string(),
         },
         DesktopAction::DeleteRange { range: range(0, 1) },
+        DesktopAction::ClipboardCopy,
+        DesktopAction::ClipboardCut,
         DesktopAction::Undo,
         DesktopAction::Redo,
         DesktopAction::SetCursor {
@@ -933,6 +953,7 @@ fn intent_bridge_rejects_buffer_actions_without_active_buffer() {
             buffer_id: None,
             range: range(0, 1),
         },
+        DesktopAction::SelectAll { buffer_id: None },
         DesktopAction::SetViewportScroll {
             buffer_id: None,
             scroll: ViewportScroll {

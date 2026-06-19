@@ -11,10 +11,11 @@ use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 
 use legion_protocol::{
     BufferId, DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
-    PRODUCT_NAME, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    ProposalId, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, RedactionHint,
-    TerminalOutputRowProjection, TextCoordinate, ViewportLineTruncationState,
-    ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
+    PluginContributionProjection, ProposalId, ProposalRejectionReason, ProposalRiskLabel,
+    ProtocolTextRange, RedactionHint, TerminalOutputRowProjection, TextCoordinate,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, GitBlameLineProjection,
@@ -249,6 +250,10 @@ pub struct DesktopSettingsViewModel {
     pub zoom_percent: u16,
     /// Editor font size in points.
     pub editor_font_size_pt: u16,
+    /// Editor font family label.
+    pub editor_font_family: String,
+    /// Metadata-only font fallback diagnostic rows.
+    pub font_fallback_rows: Vec<String>,
     /// Toast verbosity preference.
     pub toast_verbosity: ToastVerbosityProjection,
     /// Toast verbosity display label.
@@ -273,6 +278,12 @@ pub struct DesktopSettingsViewModel {
     pub next_edit_prediction_enabled: bool,
     /// Whether smooth scrolling is enabled.
     pub smooth_scrolling_enabled: bool,
+    /// Editor line wrapping policy.
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column.
+    pub wrap_column: Option<u32>,
+    /// Stable wrapping policy row for deterministic renderer evidence.
+    pub wrapping_row: String,
     /// Whether crash reports are enabled.
     pub crash_reports_enabled: bool,
     /// Telemetry consent display label.
@@ -284,11 +295,22 @@ pub struct DesktopSettingsViewModel {
 impl DesktopSettingsViewModel {
     fn from_projection(projection: &SettingsProjection) -> Self {
         let normalized = projection.clone().normalized();
+        let font_fallback_rows = font_fallback_rows(&normalized);
+        let wrapping_row = match normalized.editor.line_wrapping_policy {
+            LineWrappingPolicy::Off => "wrapping: off".to_string(),
+            LineWrappingPolicy::Viewport => "wrapping: viewport".to_string(),
+            LineWrappingPolicy::FixedColumn => format!(
+                "wrapping: fixed_column {}",
+                normalized.editor.wrap_column.unwrap_or(120)
+            ),
+        };
         Self {
             theme_preference: normalized.theme_preference,
             theme_label: normalized.theme_preference.label().to_string(),
             zoom_percent: normalized.zoom_percent,
             editor_font_size_pt: normalized.editor_font_size_pt,
+            editor_font_family: normalized.editor_font_family.clone(),
+            font_fallback_rows,
             toast_verbosity: normalized.toast_verbosity,
             toast_verbosity_label: normalized.toast_verbosity.label().to_string(),
             line_numbers_visible: normalized.editor.line_numbers_visible,
@@ -301,11 +323,69 @@ impl DesktopSettingsViewModel {
             indexed_workspace_search_enabled: normalized.indexed_workspace_search_enabled,
             next_edit_prediction_enabled: normalized.next_edit_prediction_enabled,
             smooth_scrolling_enabled: normalized.editor.smooth_scrolling_enabled,
+            line_wrapping_policy: normalized.editor.line_wrapping_policy,
+            wrap_column: normalized.editor.wrap_column,
+            wrapping_row,
             crash_reports_enabled: normalized.telemetry.crash_reports_enabled,
             telemetry_label: normalized.telemetry.consent_label.clone(),
             schema_version: normalized.schema_version,
         }
     }
+}
+
+fn font_fallback_rows(projection: &SettingsProjection) -> Vec<String> {
+    if projection.font_fallback_diagnostics.is_empty() {
+        return vec![format!(
+            "font fallback: requested={} resolved={} coverage={} found={} message={}",
+            sanitize_font_fallback_label(&projection.editor_font_family, "monospace"),
+            "unreported",
+            "cjk",
+            false,
+            "diagnostic-unreported"
+        )];
+    }
+
+    projection
+        .font_fallback_diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "font fallback: requested={} resolved={} coverage={} found={}",
+                sanitize_font_fallback_label(
+                    &diagnostic.requested_family_label,
+                    "redacted-requested-font"
+                ),
+                sanitize_font_fallback_label(
+                    &diagnostic.resolved_family_label,
+                    "redacted-resolved-font"
+                ),
+                sanitize_font_fallback_label(&diagnostic.coverage_label, "unknown"),
+                diagnostic.fallback_found
+            )
+        })
+        .collect()
+}
+
+fn sanitize_font_fallback_label(value: &str, fallback: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() || looks_like_font_path(label) {
+        return fallback.to_string();
+    }
+
+    let normalized = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+        .take(64)
+        .collect::<String>();
+    if normalized.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn looks_like_font_path(value: &str) -> bool {
+    value.contains('\\') || value.contains('/') || value.contains(':')
 }
 
 /// Testable display model derived only from a shell projection snapshot.
@@ -363,6 +443,8 @@ pub struct DesktopProjectionViewModel {
     pub close_prompt_rows: Vec<String>,
     /// Per-buffer viewport metadata rows.
     pub viewport_metadata_rows: Vec<String>,
+    /// Large-file degraded-mode capability banner rows.
+    pub large_file_banner_rows: Vec<String>,
     /// Status rows.
     pub status_rows: Vec<String>,
     /// Proposal ledger summary rows.
@@ -400,6 +482,73 @@ pub struct DesktopProjectionViewModel {
 }
 
 impl DesktopProjectionViewModel {
+    /// Emits stable, metadata-only rows for renderer evidence without raw source payloads.
+    pub fn deterministic_editor_evidence(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        rows.push(format!("title={}", self.layout_title));
+        rows.extend(self.editor_status_rows.iter().map(|row| {
+            format!(
+                "editor_status={}",
+                Self::evidence_safe_editor_status_row(row)
+            )
+        }));
+        rows.extend(
+            self.viewport_metadata_rows
+                .iter()
+                .map(|row| format!("viewport={row}")),
+        );
+        rows.extend(
+            self.empty_or_degraded_flags
+                .iter()
+                .map(|flag| format!("flag={flag}")),
+        );
+        rows.extend(self.active_buffer_code_lines.iter().take(8).map(|line| {
+            format!(
+                "code_line={} len={} truncation={:?}",
+                line.number,
+                line.text.chars().count(),
+                line.truncation_state
+            )
+        }));
+        rows.extend(
+            self.large_file_banner_rows
+                .iter()
+                .map(|row| format!("large_file={row}")),
+        );
+        rows
+    }
+
+    fn evidence_safe_editor_status_row(row: &str) -> String {
+        let Some((prefix, path)) = row.split_once(" path=") else {
+            return row.to_string();
+        };
+        format!("{prefix} path={}", Self::evidence_safe_path_label(path))
+    }
+
+    fn evidence_safe_path_label(path: &str) -> String {
+        if path == "<untitled>" || path.is_empty() {
+            return path.to_string();
+        }
+
+        let Some(file_name) = path
+            .rsplit(['\\', '/'])
+            .find(|segment| !segment.trim().is_empty())
+        else {
+            return "metadata-redacted".to_string();
+        };
+
+        let sanitized = file_name
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+            .take(64)
+            .collect::<String>();
+        if sanitized.trim().is_empty() {
+            "metadata-redacted".to_string()
+        } else {
+            sanitized
+        }
+    }
+
     /// Builds a display model from a projection snapshot without taking product-state ownership.
     pub fn from_snapshot(snapshot: &ShellProjectionSnapshot) -> Self {
         Self::from_snapshot_with_state(snapshot, &DesktopProjectionViewState::default())
@@ -467,6 +616,7 @@ impl DesktopProjectionViewModel {
             editor_status_rows: editor_status_rows(snapshot),
             close_prompt_rows: close_prompt_rows(snapshot),
             viewport_metadata_rows: viewport_metadata_rows(snapshot),
+            large_file_banner_rows: large_file_banner_rows(snapshot),
             status_rows: status_rows(snapshot),
             proposal_rows: proposal_rows(snapshot),
             trust_rows: trust_rows(snapshot),
@@ -1452,6 +1602,17 @@ fn render_editor_canvas(
     let level = projected_product_mode(snapshot);
     render_tab_strip(ui, snapshot, actions);
     render_breadcrumb_bar(ui, snapshot, level);
+    if !model.large_file_banner_rows.is_empty() {
+        theme::card_frame_tinted(theme::tokens().bg.card, theme::tokens().accent.orange).show(
+            ui,
+            |ui| {
+                for row in &model.large_file_banner_rows {
+                    ui.label(theme::code_muted(row));
+                }
+            },
+        );
+        ui.add_space(6.0);
+    }
     theme::code_frame().show(ui, |ui| {
         egui::ScrollArea::both()
             .id_salt("legion_desktop_code_canvas_scroll")
@@ -1715,7 +1876,7 @@ fn render_code_lines(
                     active_buffer_id,
                     snapshot_id,
                     line,
-                    ui.available_width(),
+                    code_line_wrap_width(model, ui.available_width()),
                 );
                 let response =
                     ui.add(egui::Label::new(galley).sense(egui::Sense::click_and_drag()));
@@ -1821,6 +1982,17 @@ fn render_code_lines(
 
 fn code_char_width() -> f32 {
     theme::tokens().typography.code as f32 * 0.62
+}
+
+fn code_line_wrap_width(model: &DesktopProjectionViewModel, available_width: f32) -> f32 {
+    match model.settings.line_wrapping_policy {
+        LineWrappingPolicy::Off => f32::INFINITY,
+        LineWrappingPolicy::Viewport => available_width.max(1.0),
+        LineWrappingPolicy::FixedColumn => {
+            let column = model.settings.wrap_column.unwrap_or(120).max(1);
+            column as f32 * code_char_width()
+        }
+    }
 }
 
 const CODE_LINE_GALLEY_CACHE_LIMIT: usize = 512;
@@ -2781,8 +2953,8 @@ fn render_settings_panel(
                 });
             }
             ui.label(theme::code(format!(
-                "{} pt",
-                model.settings.editor_font_size_pt
+                "{} / {} pt",
+                model.settings.editor_font_family, model.settings.editor_font_size_pt
             )));
             if soft_button(ui, "+").clicked() {
                 actions.push(DesktopAction::SetEditorFontSize {
@@ -2904,6 +3076,9 @@ fn render_settings_panel(
             "Telemetry consent: {}",
             model.settings.telemetry_label
         )));
+        for row in &model.settings.font_fallback_rows {
+            ui.label(theme::muted(row));
+        }
         ui.horizontal(|ui| {
             ui.label(theme::muted(format!(
                 "schema v{} - {} - {}",
@@ -5208,6 +5383,51 @@ fn active_buffer_lines(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     }
 
     vec!["<active buffer has no visible text>".to_string()]
+}
+
+fn large_file_banner_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let Some(viewport) = &snapshot.active_buffer_projection.viewport else {
+        return Vec::new();
+    };
+    let Some(status) = &viewport.large_file_status else {
+        return Vec::new();
+    };
+
+    let mut rows = vec![format!(
+        "large-file degraded: bytes={} threshold={} bounded_search={}",
+        status.byte_len, status.threshold_bytes, status.bounded_search_enabled
+    )];
+    rows.extend(
+        status
+            .disabled_overlay_reasons
+            .iter()
+            .map(|reason| format!("capability reduced: {}", sanitize_large_file_reason(reason))),
+    );
+    rows
+}
+
+fn sanitize_large_file_reason(value: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() || looks_like_local_path(label) {
+        return "metadata-redacted".to_string();
+    }
+
+    let normalized = label
+        .chars()
+        .filter(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.' | ':' | ',' | '=')
+        })
+        .take(96)
+        .collect::<String>();
+    if normalized.trim().is_empty() {
+        "metadata-redacted".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn looks_like_local_path(value: &str) -> bool {
+    value.contains('\\') || value.contains('/') || value.contains(":\\")
 }
 
 fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCodeLineViewModel> {

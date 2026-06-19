@@ -59,6 +59,10 @@ fn open_workspace(
     (actor, opened)
 }
 
+fn path_ends_with(path: &str, suffix: &str) -> bool {
+    path.replace('\\', "/").ends_with(suffix)
+}
+
 #[test]
 fn grep_alias_matches_workspace_search() {
     let root = create_temp_workspace();
@@ -107,8 +111,12 @@ fn glob_tool_returns_matching_paths() {
         .iter()
         .map(|identity| identity.canonical_path.0.clone())
         .collect();
-    assert!(paths.iter().any(|path| path.ends_with("src/lib.rs")));
-    assert!(paths.iter().any(|path| path.ends_with("src/nested/mod.rs")));
+    assert!(paths.iter().any(|path| path_ends_with(path, "src/lib.rs")));
+    assert!(
+        paths
+            .iter()
+            .any(|path| path_ends_with(path, "src/nested/mod.rs"))
+    );
     assert!(!paths.iter().any(|path| path.ends_with("notes.txt")));
     let _ = fs::remove_dir_all(root);
 }

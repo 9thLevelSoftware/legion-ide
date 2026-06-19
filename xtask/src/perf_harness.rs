@@ -43,11 +43,34 @@ const SKELETON_DEFAULT_BUDGET_MILLIS: u64 = 250;
 const LINE_GALLEY_FIXTURE_LINES: usize = 10_000;
 const LINE_GALLEY_VISIBLE_ROWS: usize = 80;
 const LINE_GALLEY_DEFAULT_BUDGET_MILLIS: u64 = 2;
+const MANUAL_RENDERER_KEYPRESS_P50_BUDGET_MILLIS: u64 = 16;
+const MANUAL_RENDERER_KEYPRESS_P95_BUDGET_MILLIS: u64 = 32;
+const MANUAL_RENDERER_SCROLL_P95_BUDGET_MILLIS: u64 = 32;
+const MANUAL_RENDERER_SAMPLE_COUNT: usize = 16;
+const MANUAL_RENDERER_SCENARIO: &str = "manual_editor_input_to_paint";
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
+pub const MANUAL_RENDERER_PERF_REPORT_FILE: &str = "manual_renderer_perf.toml";
 
 /// Environment variable that, when set to a positive millisecond count,
 /// overrides the per-skeleton budget. Used by the failing-gate CI leg.
 pub const FAIL_ON_BUDGET_ENV: &str = "LEGION_PERF_FAIL_ON_BUDGET_MS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManualRendererBudgets {
+    pub keypress_p50_millis: u64,
+    pub keypress_p95_millis: u64,
+    pub scroll_p95_millis: u64,
+    pub sample_count: usize,
+}
+
+pub fn manual_renderer_budgets() -> ManualRendererBudgets {
+    ManualRendererBudgets {
+        keypress_p50_millis: MANUAL_RENDERER_KEYPRESS_P50_BUDGET_MILLIS,
+        keypress_p95_millis: MANUAL_RENDERER_KEYPRESS_P95_BUDGET_MILLIS,
+        scroll_p95_millis: MANUAL_RENDERER_SCROLL_P95_BUDGET_MILLIS,
+        sample_count: MANUAL_RENDERER_SAMPLE_COUNT,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,10 +79,19 @@ pub enum SkeletonKind {
     /// fixed-size in-memory byte buffer. Mirrors the hot path the editor
     /// p50/p95 input-to-paint budget will gate against, but does not
     /// require `legion-editor` as an `xtask` dependency.
+    #[serde(
+        rename = "input_to_paint_microbenchmark",
+        alias = "inputtopaintmicrobenchmark"
+    )]
     InputToPaintMicrobenchmark,
     /// Synthetic line-galley shaping-cache frame: a 10K-line fixture with
     /// only the visible viewport rows looked up/shaped per frame.
+    #[serde(rename = "line_galley_shaping_cache", alias = "linegalleyshapingcache")]
     LineGalleyShapingCache,
+    /// Renderer-backed Manual editor input-to-paint measurement supplied by
+    /// the `legion-desktop --manual-perf` subprocess.
+    #[serde(rename = "renderer_backed_manual_input_to_paint")]
+    RendererBackedManualInputToPaint,
 }
 
 impl SkeletonKind {
@@ -67,6 +99,7 @@ impl SkeletonKind {
         match self {
             Self::InputToPaintMicrobenchmark => "input_to_paint_microbenchmark",
             Self::LineGalleyShapingCache => "line_galley_shaping_cache",
+            Self::RendererBackedManualInputToPaint => "renderer_backed_manual_input_to_paint",
         }
     }
 }
@@ -182,6 +215,21 @@ pub struct PerfReport {
     pub skeletons: Vec<SkeletonMeasurement>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ManualRendererPerfToml {
+    pub schema_version: u32,
+    pub scenario: String,
+    pub status: String,
+    pub sample_count: usize,
+    pub keypress_p50_micros: u64,
+    pub keypress_p95_micros: u64,
+    pub scroll_p95_micros: u64,
+    pub keypress_p50_budget_ms: u64,
+    pub keypress_p95_budget_ms: u64,
+    pub scroll_p95_budget_ms: u64,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PerfHarnessError {
     pub message: String,
@@ -205,6 +253,22 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
             skeleton.fixture_bytes,
             skeleton.sample_count,
         ),
+        SkeletonKind::RendererBackedManualInputToPaint => {
+            return SkeletonMeasurement {
+                name: skeleton.name.clone(),
+                kind: skeleton.kind,
+                fixture_bytes: skeleton.fixture_bytes,
+                sample_count: skeleton.sample_count,
+                total_micros: 0,
+                p50_micros: 0,
+                p95_micros: 0,
+                budget_millis: skeleton.budget_millis,
+                status: SkeletonStatus::Skipped,
+                message:
+                    "renderer-backed Manual measurement is supplied by legion-desktop subprocess"
+                        .to_string(),
+            };
+        }
     };
     let total = samples.iter().copied().sum::<Duration>();
     let mut sorted = samples.clone();
@@ -339,20 +403,15 @@ pub fn plan_m0_skeletons(
     skeleton: &SkeletonDescriptor,
 ) -> PerfReport {
     let measurement = plan_perf_harness(skeleton);
-    let mut summary = PerfSummary::default();
-    summary.total += 1;
-    match measurement.status {
-        SkeletonStatus::Passed => summary.passed += 1,
-        SkeletonStatus::Failed => summary.failed += 1,
-        SkeletonStatus::Skipped => summary.skipped += 1,
-    }
+    let skeletons = vec![measurement];
+    let summary = summarize_measurements(&skeletons);
     PerfReport {
         schema_version: 1,
         package_name: package_name.to_string(),
         measured_at_utc: current_utc_rfc3339(),
         git_sha: git_sha.to_string(),
         summary,
-        skeletons: vec![measurement],
+        skeletons,
     }
 }
 
@@ -362,17 +421,7 @@ pub fn plan_perf_skeletons(
     skeletons: &[SkeletonDescriptor],
 ) -> PerfReport {
     let measurements = skeletons.iter().map(plan_perf_harness).collect::<Vec<_>>();
-    let mut summary = PerfSummary {
-        total: measurements.len(),
-        ..PerfSummary::default()
-    };
-    for measurement in &measurements {
-        match measurement.status {
-            SkeletonStatus::Passed => summary.passed += 1,
-            SkeletonStatus::Failed => summary.failed += 1,
-            SkeletonStatus::Skipped => summary.skipped += 1,
-        }
-    }
+    let summary = summarize_measurements(&measurements);
     PerfReport {
         schema_version: 1,
         package_name: package_name.to_string(),
@@ -380,6 +429,81 @@ pub fn plan_perf_skeletons(
         git_sha: git_sha.to_string(),
         summary,
         skeletons: measurements,
+    }
+}
+
+pub fn summarize_measurements(measurements: &[SkeletonMeasurement]) -> PerfSummary {
+    let mut summary = PerfSummary {
+        total: measurements.len(),
+        ..PerfSummary::default()
+    };
+    for measurement in measurements {
+        match measurement.status {
+            SkeletonStatus::Passed => summary.passed += 1,
+            SkeletonStatus::Failed => summary.failed += 1,
+            SkeletonStatus::Skipped => summary.skipped += 1,
+        }
+    }
+    summary
+}
+
+pub fn read_manual_renderer_perf_report(path: &Path) -> Result<ManualRendererPerfToml, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "unable to read Manual renderer perf report `{}`: {err}",
+            path.display()
+        )
+    })?;
+    let report: ManualRendererPerfToml = toml::from_str(&text).map_err(|err| {
+        format!(
+            "unable to parse Manual renderer perf report `{}`: {err}",
+            path.display()
+        )
+    })?;
+    if report.schema_version != 1 {
+        return Err(format!(
+            "Manual renderer perf report `{}` uses unsupported schema_version {}",
+            path.display(),
+            report.schema_version
+        ));
+    }
+    if report.scenario != MANUAL_RENDERER_SCENARIO {
+        return Err(format!(
+            "Manual renderer perf report `{}` has unexpected scenario `{}` (expected `{}`)",
+            path.display(),
+            report.scenario,
+            MANUAL_RENDERER_SCENARIO
+        ));
+    }
+    Ok(report)
+}
+
+pub fn manual_renderer_perf_measurement(report: &ManualRendererPerfToml) -> SkeletonMeasurement {
+    let status = match report.status.as_str() {
+        "passed" => SkeletonStatus::Passed,
+        "skipped" => SkeletonStatus::Skipped,
+        _ => SkeletonStatus::Failed,
+    };
+    let p95_micros = report.keypress_p95_micros.max(report.scroll_p95_micros);
+    SkeletonMeasurement {
+        name: "manual.renderer_input_to_paint".to_string(),
+        kind: SkeletonKind::RendererBackedManualInputToPaint,
+        fixture_bytes: 0,
+        sample_count: report.sample_count,
+        total_micros: report
+            .keypress_p95_micros
+            .saturating_add(report.scroll_p95_micros),
+        p50_micros: report.keypress_p50_micros,
+        p95_micros,
+        budget_millis: report
+            .keypress_p95_budget_ms
+            .max(report.scroll_p95_budget_ms),
+        status,
+        message: if report.message.trim().is_empty() {
+            format!("Manual renderer report status `{}`", report.status)
+        } else {
+            report.message.clone()
+        },
     }
 }
 

@@ -1293,9 +1293,9 @@ impl InMemoryStorage {
                 ))
             }
             StorageRepositoryRequest::ReadSessionRecord { session_id } => {
-                Ok(StorageRepositoryResponse::SessionRecord(
+                Ok(StorageRepositoryResponse::SessionRecord(Box::new(
                     self.protocol_sessions.get(&session_id).cloned(),
-                ))
+                )))
             }
             StorageRepositoryRequest::ReadTrustRecord {
                 workspace_id,

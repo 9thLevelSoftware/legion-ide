@@ -110,6 +110,34 @@ fn large_file_guardrails_degraded_rendering_uses_viewport() {
 }
 
 #[test]
+fn large_file_guardrails_degraded_banner_names_capability_reduction() {
+    let workspace = TempWorkspace::new();
+    let large = write_large_file(workspace.path());
+    let runtime = open_runtime(workspace.path(), &large);
+    let snapshot = runtime.projection_snapshot();
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(
+        model
+            .large_file_banner_rows
+            .iter()
+            .any(|row| row.contains("large-file degraded"))
+    );
+    assert!(
+        model
+            .large_file_banner_rows
+            .iter()
+            .any(|row| row.contains("capability reduced"))
+    );
+    assert!(
+        model
+            .large_file_banner_rows
+            .iter()
+            .all(|row| !row.contains("HIDDEN_NEEDLE_AFTER_VIEWPORT"))
+    );
+}
+
+#[test]
 fn large_file_guardrails_search_is_bounded() {
     let workspace = TempWorkspace::new();
     let large = write_large_file(workspace.path());
