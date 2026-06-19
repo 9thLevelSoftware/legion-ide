@@ -6,9 +6,10 @@ use std::{
 };
 
 use xtask::perf_harness::{
-    FAIL_ON_BUDGET_ENV, PERF_REPORT_FILE, PerfReport, SkeletonDescriptor, SkeletonKind,
-    SkeletonMeasurement, SkeletonStatus, apply_fail_on_budget_override, plan_m0_skeletons,
-    plan_perf_harness, plan_perf_skeletons, read_report, resolve_workspace_git_sha, write_report,
+    FAIL_ON_BUDGET_ENV, ManualRendererPerfToml, PERF_REPORT_FILE, PerfReport, SkeletonDescriptor,
+    SkeletonKind, SkeletonMeasurement, SkeletonStatus, apply_fail_on_budget_override,
+    manual_renderer_perf_measurement, plan_m0_skeletons, plan_perf_harness, plan_perf_skeletons,
+    read_manual_renderer_perf_report, read_report, resolve_workspace_git_sha, write_report,
 };
 
 struct TempDir {
@@ -318,6 +319,23 @@ fn perf_harness_default_report_includes_line_galley_gate() {
     );
 }
 
+fn manual_renderer_report(status: &str) -> ManualRendererPerfToml {
+    ManualRendererPerfToml {
+        schema_version: 1,
+        scenario: "manual_editor_input_to_paint".to_string(),
+        status: status.to_string(),
+        sample_count: 16,
+        keypress_p50_micros: 1_200,
+        keypress_p95_micros: 20_000,
+        scroll_p95_micros: 8_000,
+        keypress_p50_budget_ms: 16,
+        keypress_p95_budget_ms: 32,
+        scroll_p95_budget_ms: 24,
+        message: "desktop egui projection render path stayed within Manual latency budgets"
+            .to_string(),
+    }
+}
+
 #[test]
 fn perf_harness_manual_renderer_budget_constants_match_ws_manual_01() {
     assert_eq!(
@@ -329,6 +347,100 @@ fn perf_harness_manual_renderer_budget_constants_match_ws_manual_01() {
     assert_eq!(budgets.keypress_p95_millis, 32);
     assert_eq!(budgets.scroll_p95_millis, 32);
     assert_eq!(budgets.sample_count, 16);
+}
+
+#[test]
+fn manual_renderer_perf_report_maps_to_perf_measurement() {
+    let report = manual_renderer_report("passed");
+    let measurement = manual_renderer_perf_measurement(&report);
+
+    assert_eq!(measurement.name, "manual.renderer_input_to_paint");
+    assert_eq!(
+        measurement.kind,
+        SkeletonKind::RendererBackedManualInputToPaint
+    );
+    assert_eq!(measurement.sample_count, 16);
+    assert_eq!(measurement.p50_micros, 1_200);
+    assert_eq!(measurement.p95_micros, 20_000);
+    assert_eq!(measurement.total_micros, 20_000);
+    assert_eq!(measurement.budget_millis, 32);
+    assert_eq!(measurement.status, SkeletonStatus::Passed);
+    assert!(measurement.message.contains("Manual latency budgets"));
+}
+
+#[test]
+fn manual_renderer_perf_report_failed_status_fails_measurement() {
+    let mut report = manual_renderer_report("failed");
+    report.message = "Manual renderer measurement exceeded budget".to_string();
+
+    let measurement = manual_renderer_perf_measurement(&report);
+
+    assert_eq!(measurement.status, SkeletonStatus::Failed);
+    assert!(measurement.message.contains("exceeded budget"));
+}
+
+#[test]
+fn manual_renderer_perf_report_skipped_status_skips_measurement() {
+    let mut report = manual_renderer_report("skipped");
+    report.message = "renderer backend unavailable".to_string();
+
+    let measurement = manual_renderer_perf_measurement(&report);
+
+    assert_eq!(measurement.status, SkeletonStatus::Skipped);
+    assert!(measurement.message.contains("renderer backend unavailable"));
+}
+
+#[test]
+fn manual_renderer_direct_plan_is_subprocess_supplied_skip() {
+    let skeleton = SkeletonDescriptor {
+        name: "manual.renderer_input_to_paint".to_string(),
+        kind: SkeletonKind::RendererBackedManualInputToPaint,
+        fixture_bytes: 0,
+        sample_count: 16,
+        budget_millis: 32,
+        note: "manual renderer subprocess fixture".to_string(),
+    };
+
+    let measurement = plan_perf_harness(&skeleton);
+
+    assert_eq!(
+        measurement.kind,
+        SkeletonKind::RendererBackedManualInputToPaint
+    );
+    assert_eq!(measurement.status, SkeletonStatus::Skipped);
+    assert_eq!(
+        measurement.message,
+        "renderer-backed Manual measurement is supplied by legion-desktop subprocess"
+    );
+}
+
+#[test]
+fn manual_renderer_perf_report_read_round_trip() {
+    let temp = TempDir::new("manual-renderer-report");
+    let path = temp.path("manual_renderer_perf.toml");
+    fs::write(
+        &path,
+        r#"schema_version = 1
+scenario = "manual_editor_input_to_paint"
+status = "passed"
+workspace_root = "C:\\workspace"
+initial_file = "Cargo.toml"
+report_path = "target/perf-harness/manual_renderer_perf.toml"
+sample_count = 16
+keypress_p50_micros = 1200
+keypress_p95_micros = 20000
+scroll_p95_micros = 8000
+keypress_p50_budget_ms = 16
+keypress_p95_budget_ms = 32
+scroll_p95_budget_ms = 24
+message = "desktop egui projection render path stayed within Manual latency budgets"
+"#,
+    )
+    .expect("write manual renderer report fixture");
+
+    let report = read_manual_renderer_perf_report(&path).expect("parse manual renderer report");
+
+    assert_eq!(report, manual_renderer_report("passed"));
 }
 
 #[test]
