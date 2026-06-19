@@ -812,6 +812,31 @@ impl DesktopRuntime {
         }
     }
 
+    /// Render one projection frame through the same persistent view/state path used by native runs.
+    pub(crate) fn render_projection_once_for_perf(
+        &mut self,
+        context: &egui::Context,
+    ) -> Result<()> {
+        let snapshot = self.projection_snapshot();
+        let view_state = self.projection_view_state();
+        let mut rendered_output = None;
+        let full_output = context.run_ui(egui::RawInput::default(), |ui| {
+            rendered_output = Some(self.view.render_with_state(ui, &snapshot, &view_state));
+        });
+        std::hint::black_box(full_output);
+        let output = rendered_output
+            .ok_or_else(|| anyhow!("manual perf renderer did not produce a projection frame"))?;
+
+        let needs_repaint = output.needs_repaint;
+        for action in output.actions {
+            self.handle_action(action)?;
+        }
+        if needs_repaint {
+            context.request_repaint();
+        }
+        Ok(())
+    }
+
     fn projection_view_state(&self) -> DesktopProjectionViewState {
         DesktopProjectionViewState {
             expanded_explorer_paths: self.explorer_expansion.clone(),

@@ -3,7 +3,6 @@
 use std::{
     fmt::Write as _,
     fs,
-    hint::black_box,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -15,7 +14,6 @@ use legion_ui::ShellProjectionSnapshot;
 
 use crate::{
     bridge::DesktopAction,
-    view::{DesktopProjectionViewState, ProjectionView},
     workflow::{DesktopLaunchConfig, DesktopRuntime},
 };
 
@@ -268,7 +266,8 @@ fn measure_manual_perf(config: &ManualPerfConfig) -> Result<ManualPerfMeasuremen
             .map(|path| path.to_string_lossy().into_owned()),
     ))?;
     runtime.set_product_mode(AppProductMode::Manual)?;
-    render_once(&runtime.projection_snapshot());
+    let renderer = ManualPerfRenderer::default();
+    renderer.render_once(&mut runtime)?;
 
     let mut keypress_samples = Vec::with_capacity(config.sample_count);
     for sample_index in 0..config.sample_count {
@@ -280,7 +279,7 @@ fn measure_manual_perf(config: &ManualPerfConfig) -> Result<ManualPerfMeasuremen
             text: input,
             at: cursor,
         })?;
-        render_once(&runtime.projection_snapshot());
+        renderer.render_once(&mut runtime)?;
         keypress_samples.push(started_at.elapsed());
     }
 
@@ -296,7 +295,7 @@ fn measure_manual_perf(config: &ManualPerfConfig) -> Result<ManualPerfMeasuremen
                 left_column: 0,
             },
         })?;
-        render_once(&runtime.projection_snapshot());
+        renderer.render_once(&mut runtime)?;
         scroll_samples.push(started_at.elapsed());
     }
 
@@ -310,14 +309,15 @@ fn measure_manual_perf(config: &ManualPerfConfig) -> Result<ManualPerfMeasuremen
     })
 }
 
-fn render_once(snapshot: &ShellProjectionSnapshot) {
-    let context = egui::Context::default();
-    let mut view = ProjectionView::new();
-    let state = DesktopProjectionViewState::default();
-    let full_output = context.run_ui(egui::RawInput::default(), |ui| {
-        black_box(view.render_with_state(ui, snapshot, &state));
-    });
-    black_box(full_output);
+#[derive(Default)]
+struct ManualPerfRenderer {
+    context: egui::Context,
+}
+
+impl ManualPerfRenderer {
+    fn render_once(&self, runtime: &mut DesktopRuntime) -> Result<()> {
+        runtime.render_projection_once_for_perf(&self.context)
+    }
 }
 
 fn active_buffer(snapshot: &ShellProjectionSnapshot) -> Result<BufferId> {

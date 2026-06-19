@@ -92,14 +92,10 @@ fn manual_perf_runs_renderer_backed_edit_and_writes_metadata_report() {
     assert!(contents.contains("keypress_p95_budget_ms = 10000"));
     assert!(contents.contains("scroll_p95_budget_ms = 10000"));
     assert!(contents.contains("message = "));
-    assert!(
-        contents.contains("status = \"passed\"")
-            || contents.contains("status = \"failed\"")
-            || contents.contains("status = \"skipped\"")
-    );
-    if contents.contains("status = \"skipped\"") {
-        assert!(contents.contains("blocked") || contents.contains("unavailable"));
-    }
+    assert!(contents.contains("status = \"passed\""));
+    assert!(toml_u64(&contents, "keypress_p50_micros") > 0);
+    assert!(toml_u64(&contents, "keypress_p95_micros") > 0);
+    assert!(toml_u64(&contents, "scroll_p95_micros") > 0);
 }
 
 #[test]
@@ -149,4 +145,14 @@ fn manual_perf_launch_config_rejects_smoke_combinations() {
     ])
     .expect_err("manual perf and beta smoke must be mutually exclusive");
     assert!(beta_error.to_string().contains("--manual-perf"));
+}
+
+fn toml_u64(contents: &str, key: &str) -> u64 {
+    let prefix = format!("{key} = ");
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("{key} should be present"))
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("{key} should parse as u64: {error}"))
 }

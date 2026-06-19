@@ -627,7 +627,8 @@
 
 - [ ] Modify `xtask/src/main.rs::run_perf_harness_command` to:
   - Plan the two existing synthetic skeletons.
-  - Run `cargo run -p legion-desktop --no-default-features --features offline -- --manual-perf --workspace . --file Cargo.toml --perf-report target/perf-harness/manual_renderer_perf.toml --perf-samples 16`.
+  - Run `cargo run --release -p legion-desktop --no-default-features --features offline -- --manual-perf --workspace . --file Cargo.toml --perf-report target/perf-harness/manual_renderer_perf.toml --perf-samples 16`.
+  - Treat the 16/32/32 ms Manual renderer budgets as release-profile latency budgets. Debug-profile CLI runs still write strict reports, but are not the phase-gate evidence path for WS-MANUAL-01 latency.
   - Read `target/perf-harness/manual_renderer_perf.toml`.
   - Append `manual_renderer_perf_measurement(&manual_report)` to the report before writing `target/perf-harness/perf_report.toml`.
   - If the subprocess fails to launch because native rendering is unavailable, append a `Skipped` measurement with message `renderer-backed Manual measurement blocked: <reason>`. If it runs and reports `failed`, keep the measurement failed.
