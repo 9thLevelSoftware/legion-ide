@@ -7635,6 +7635,11 @@ pub enum AppCommandRequest {
         /// Requested editor font size in points.
         font_size_pt: u16,
     },
+    /// Update the app-owned editor font family.
+    SetEditorFontFamily {
+        /// Requested editor font family label.
+        family: String,
+    },
     /// Update app-owned toast verbosity.
     SetToastVerbosity {
         /// Requested toast verbosity.
@@ -8285,6 +8290,7 @@ impl CommandExecutionService {
             | AppCommandRequest::SetThemePreference { .. }
             | AppCommandRequest::SetZoomPercent { .. }
             | AppCommandRequest::SetEditorFontSize { .. }
+            | AppCommandRequest::SetEditorFontFamily { .. }
             | AppCommandRequest::SetToastVerbosity { .. }
             | AppCommandRequest::SetLineNumbersVisible { .. }
             | AppCommandRequest::SetCurrentLineHighlight { .. }
@@ -8511,6 +8517,9 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::SetEditorFontSize { font_size_pt } => {
                 Ok(AppCommandRequest::SetEditorFontSize { font_size_pt })
+            }
+            CommandDispatchIntent::SetEditorFontFamily { family } => {
+                Ok(AppCommandRequest::SetEditorFontFamily { family })
             }
             CommandDispatchIntent::SetToastVerbosity { verbosity } => {
                 Ok(AppCommandRequest::SetToastVerbosity { verbosity })
@@ -9995,6 +10004,7 @@ fn workbench_settings_record_from_projection(
     WorkbenchSettingsRecord {
         theme_preference: settings.theme_preference.as_str().to_string(),
         zoom_percent: settings.zoom_percent,
+        editor_font_family: settings.editor_font_family.clone(),
         editor_font_size_pt: settings.editor_font_size_pt,
         toast_verbosity: settings.toast_verbosity.as_str().to_string(),
         line_numbers_visible: settings.editor.line_numbers_visible,
@@ -10019,7 +10029,9 @@ fn settings_projection_from_workbench_record(
         theme_preference: ThemePreferenceProjection::parse(&record.theme_preference)
             .unwrap_or_default(),
         zoom_percent: record.zoom_percent,
+        editor_font_family: record.editor_font_family.clone(),
         editor_font_size_pt: record.editor_font_size_pt,
+        font_fallback_diagnostics: Vec::new(),
         toast_verbosity: ToastVerbosityProjection::parse(&record.toast_verbosity)
             .unwrap_or_default(),
         editor: legion_ui::ui::EditorSettingsProjection {
@@ -13491,6 +13503,12 @@ impl AppComposition {
         self.settings_projection()
     }
 
+    fn set_editor_font_family(&mut self, family: String) -> SettingsProjection {
+        self.settings.editor_font_family = family;
+        self.settings = self.settings_projection();
+        self.settings_projection()
+    }
+
     fn set_toast_verbosity(&mut self, verbosity: ToastVerbosityProjection) -> SettingsProjection {
         self.settings.toast_verbosity = verbosity;
         self.settings_projection()
@@ -14082,6 +14100,9 @@ impl AppComposition {
             ),
             AppCommandRequest::SetEditorFontSize { font_size_pt } => Ok(
                 AppCommandOutcome::SettingsUpdated(self.set_editor_font_size(font_size_pt)),
+            ),
+            AppCommandRequest::SetEditorFontFamily { family } => Ok(
+                AppCommandOutcome::SettingsUpdated(self.set_editor_font_family(family)),
             ),
             AppCommandRequest::SetToastVerbosity { verbosity } => Ok(
                 AppCommandOutcome::SettingsUpdated(self.set_toast_verbosity(verbosity)),

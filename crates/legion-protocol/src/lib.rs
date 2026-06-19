@@ -19463,6 +19463,23 @@ pub struct WorkbenchFontSettings {
     pub schema_version: u16,
 }
 
+/// Metadata-only font fallback diagnostic surfaced by the desktop renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchFontFallbackDiagnostic {
+    /// Requested family label, never a raw filesystem path.
+    pub requested_family_label: String,
+    /// Resolved family label, never a raw filesystem path.
+    pub resolved_family_label: String,
+    /// Script or glyph coverage label.
+    pub coverage_label: String,
+    /// Whether a host fallback was found.
+    pub fallback_found: bool,
+    /// Display-safe diagnostic message.
+    pub message: String,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
 /// Workbench layout settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkbenchLayoutSettings {
@@ -19527,6 +19544,9 @@ pub struct WorkbenchSettingsRecord {
     pub theme_preference: String,
     /// UI zoom percentage.
     pub zoom_percent: u16,
+    /// Editor font family label.
+    #[serde(default = "default_editor_font_family")]
+    pub editor_font_family: String,
     /// Editor font size in points.
     pub editor_font_size_pt: u16,
     /// Toast verbosity label.
@@ -19560,11 +19580,16 @@ pub struct WorkbenchSettingsRecord {
     pub schema_version: u16,
 }
 
+fn default_editor_font_family() -> String {
+    "monospace".to_string()
+}
+
 impl Default for WorkbenchSettingsRecord {
     fn default() -> Self {
         Self {
             theme_preference: "dark".to_string(),
             zoom_percent: 100,
+            editor_font_family: default_editor_font_family(),
             editor_font_size_pt: 12,
             toast_verbosity: "warnings_and_errors".to_string(),
             line_numbers_visible: true,

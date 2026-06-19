@@ -249,6 +249,10 @@ pub struct DesktopSettingsViewModel {
     pub zoom_percent: u16,
     /// Editor font size in points.
     pub editor_font_size_pt: u16,
+    /// Editor font family label.
+    pub editor_font_family: String,
+    /// Metadata-only font fallback diagnostic rows.
+    pub font_fallback_rows: Vec<String>,
     /// Toast verbosity preference.
     pub toast_verbosity: ToastVerbosityProjection,
     /// Toast verbosity display label.
@@ -284,11 +288,14 @@ pub struct DesktopSettingsViewModel {
 impl DesktopSettingsViewModel {
     fn from_projection(projection: &SettingsProjection) -> Self {
         let normalized = projection.clone().normalized();
+        let font_fallback_rows = font_fallback_rows(&normalized);
         Self {
             theme_preference: normalized.theme_preference,
             theme_label: normalized.theme_preference.label().to_string(),
             zoom_percent: normalized.zoom_percent,
             editor_font_size_pt: normalized.editor_font_size_pt,
+            editor_font_family: normalized.editor_font_family.clone(),
+            font_fallback_rows,
             toast_verbosity: normalized.toast_verbosity,
             toast_verbosity_label: normalized.toast_verbosity.label().to_string(),
             line_numbers_visible: normalized.editor.line_numbers_visible,
@@ -306,6 +313,34 @@ impl DesktopSettingsViewModel {
             schema_version: normalized.schema_version,
         }
     }
+}
+
+fn font_fallback_rows(projection: &SettingsProjection) -> Vec<String> {
+    if projection.font_fallback_diagnostics.is_empty() {
+        let probe = theme::font_fallback_probe(&projection.editor_font_family);
+        return vec![format!(
+            "font fallback: requested={} resolved={} coverage={} found={} message={}",
+            probe.requested_family_label,
+            probe.resolved_family_label,
+            probe.coverage_label,
+            probe.fallback_found,
+            probe.message
+        )];
+    }
+
+    projection
+        .font_fallback_diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "font fallback: requested={} resolved={} coverage={} found={}",
+                diagnostic.requested_family_label,
+                diagnostic.resolved_family_label,
+                diagnostic.coverage_label,
+                diagnostic.fallback_found
+            )
+        })
+        .collect()
 }
 
 /// Testable display model derived only from a shell projection snapshot.
@@ -2781,8 +2816,8 @@ fn render_settings_panel(
                 });
             }
             ui.label(theme::code(format!(
-                "{} pt",
-                model.settings.editor_font_size_pt
+                "{} / {} pt",
+                model.settings.editor_font_family, model.settings.editor_font_size_pt
             )));
             if soft_button(ui, "+").clicked() {
                 actions.push(DesktopAction::SetEditorFontSize {
@@ -2904,6 +2939,9 @@ fn render_settings_panel(
             "Telemetry consent: {}",
             model.settings.telemetry_label
         )));
+        for row in &model.settings.font_fallback_rows {
+            ui.label(theme::muted(row));
+        }
         ui.horizontal(|ui| {
             ui.label(theme::muted(format!(
                 "schema v{} - {} - {}",

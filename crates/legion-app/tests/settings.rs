@@ -99,6 +99,14 @@ fn settings_intents_update_projection_and_clamp_numeric_values() {
     );
 
     let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetEditorFontFamily {
+            family: "  JetBrains Mono<script>\n".to_string(),
+        })
+        .expect("editor font family should update"),
+    );
+    assert_eq!(settings.editor_font_family, "JetBrains Monoscript");
+
+    let settings = settings_from_outcome(
         app.dispatch_ui_intent(CommandDispatchIntent::SetToastVerbosity {
             verbosity: ToastVerbosityProjection::All,
         })

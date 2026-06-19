@@ -1061,7 +1061,9 @@ fn projection_rendering_projects_workbench_settings_model() {
     snapshot.settings_projection = SettingsProjection {
         theme_preference: ThemePreferenceProjection::System,
         zoom_percent: 220,
+        editor_font_family: "  JetBrains Mono<script>\n".to_string(),
         editor_font_size_pt: 8,
+        font_fallback_diagnostics: Vec::new(),
         toast_verbosity: ToastVerbosityProjection::All,
         editor: legion_ui::EditorSettingsProjection {
             line_numbers_visible: false,
@@ -1094,6 +1096,7 @@ fn projection_rendering_projects_workbench_settings_model() {
         model.settings.editor_font_size_pt,
         SettingsProjection::MIN_EDITOR_FONT_SIZE_PT
     );
+    assert_eq!(model.settings.editor_font_family, "JetBrains Monoscript");
     assert_eq!(
         model.settings.toast_verbosity,
         ToastVerbosityProjection::All

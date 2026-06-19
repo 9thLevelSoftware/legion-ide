@@ -17,8 +17,8 @@ use legion_protocol::{
     ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
     RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
     TerminalSessionId, TextCoordinate, TimestampMillis, Utf16Range, VerificationRunProjection,
-    ViewportLineTruncationState, ViewportScroll, WorkbenchTelemetryConsent, WorkspaceId,
-    product_mode_allows_runtime_surface,
+    ViewportLineTruncationState, ViewportScroll, WorkbenchFontFallbackDiagnostic,
+    WorkbenchTelemetryConsent, WorkspaceId, product_mode_allows_runtime_surface,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2088,8 +2088,14 @@ pub struct SettingsProjection {
     pub theme_preference: ThemePreferenceProjection,
     /// UI zoom percentage.
     pub zoom_percent: u16,
+    /// Editor font family label.
+    #[serde(default = "default_editor_font_family_label")]
+    pub editor_font_family: String,
     /// Editor font size in points.
     pub editor_font_size_pt: u16,
+    /// Metadata-only renderer fallback diagnostics.
+    #[serde(default)]
+    pub font_fallback_diagnostics: Vec<WorkbenchFontFallbackDiagnostic>,
     /// Toast verbosity.
     pub toast_verbosity: ToastVerbosityProjection,
     /// Editor options.
@@ -2119,9 +2125,11 @@ impl SettingsProjection {
         self.zoom_percent = self
             .zoom_percent
             .clamp(Self::MIN_ZOOM_PERCENT, Self::MAX_ZOOM_PERCENT);
+        self.editor_font_family = normalize_font_family_label(&self.editor_font_family);
         self.editor_font_size_pt = self
             .editor_font_size_pt
             .clamp(Self::MIN_EDITOR_FONT_SIZE_PT, Self::MAX_EDITOR_FONT_SIZE_PT);
+        self.font_fallback_diagnostics.truncate(8);
         self.telemetry.enabled = self.telemetry.crash_reports_enabled;
         self.telemetry.raw_source_allowed = false;
         self.telemetry.consent_label = if self.telemetry.crash_reports_enabled {
@@ -2136,12 +2144,36 @@ impl SettingsProjection {
     }
 }
 
+fn normalize_font_family_label(value: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() {
+        return default_editor_font_family_label();
+    }
+
+    let normalized = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+        .take(64)
+        .collect::<String>();
+    if normalized.trim().is_empty() {
+        default_editor_font_family_label()
+    } else {
+        normalized
+    }
+}
+
+fn default_editor_font_family_label() -> String {
+    "monospace".to_string()
+}
+
 impl Default for SettingsProjection {
     fn default() -> Self {
         Self {
             theme_preference: ThemePreferenceProjection::Dark,
             zoom_percent: 100,
+            editor_font_family: default_editor_font_family_label(),
             editor_font_size_pt: 12,
+            font_fallback_diagnostics: Vec::new(),
             toast_verbosity: ToastVerbosityProjection::WarningsAndErrors,
             editor: EditorSettingsProjection::default(),
             telemetry: WorkbenchTelemetryConsent::default(),
@@ -2293,6 +2325,11 @@ pub enum CommandDispatchIntent {
     SetEditorFontSize {
         /// Requested editor font size in points.
         font_size_pt: u16,
+    },
+    /// Update the app-owned editor font family.
+    SetEditorFontFamily {
+        /// Requested editor font family label.
+        family: String,
     },
     /// Update app-owned toast verbosity.
     SetToastVerbosity {
@@ -5147,7 +5184,18 @@ mod tests {
             theme_preference: ThemePreferenceProjection::parse("System")
                 .expect("theme label should parse"),
             zoom_percent: 999,
+            editor_font_family: "  JetBrains Mono<script>\n".to_string(),
             editor_font_size_pt: 1,
+            font_fallback_diagnostics: (0..9)
+                .map(|index| WorkbenchFontFallbackDiagnostic {
+                    requested_family_label: "JetBrains Mono".to_string(),
+                    resolved_family_label: "legion-cjk-fallback".to_string(),
+                    coverage_label: format!("cjk-{index}"),
+                    fallback_found: true,
+                    message: "CJK fallback loaded from host font catalog".to_string(),
+                    schema_version: 1,
+                })
+                .collect(),
             toast_verbosity: ToastVerbosityProjection::parse("All statuses")
                 .expect("toast label should parse"),
             editor: EditorSettingsProjection {
@@ -5169,10 +5217,12 @@ mod tests {
 
         assert_eq!(settings.theme_preference, ThemePreferenceProjection::System);
         assert_eq!(settings.zoom_percent, SettingsProjection::MAX_ZOOM_PERCENT);
+        assert_eq!(settings.editor_font_family, "JetBrains Monoscript");
         assert_eq!(
             settings.editor_font_size_pt,
             SettingsProjection::MIN_EDITOR_FONT_SIZE_PT
         );
+        assert_eq!(settings.font_fallback_diagnostics.len(), 8);
         assert_eq!(settings.toast_verbosity, ToastVerbosityProjection::All);
         assert!(!settings.editor.line_numbers_visible);
         assert!(!settings.editor.current_line_highlight);
