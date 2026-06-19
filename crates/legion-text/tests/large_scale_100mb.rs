@@ -29,7 +29,11 @@ fn generate_100mb_text() -> String {
 fn scale_100mb_buffer_creation_under_budget() {
     let text = generate_100mb_text();
     let text_len = text.len();
-    eprintln!("Generated text: {} bytes ({} MB)", text_len, text_len / (1024 * 1024));
+    eprintln!(
+        "Generated text: {} bytes ({} MB)",
+        text_len,
+        text_len / (1024 * 1024)
+    );
 
     let t0 = Instant::now();
     let buf = TextBuffer::try_with_version(text, BufferVersion(0))
@@ -51,13 +55,20 @@ fn scale_100mb_buffer_creation_under_budget() {
         DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES
     );
     assert!(
-        matches!(buf.try_full_text(), Err(TextError::FullCacheBudgetExceeded { .. })),
+        matches!(
+            buf.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ),
         "expected FullCacheBudgetExceeded for 100MB buffer"
     );
 
     // Byte length approximately 100MB
     let byte_len = buf.len();
-    eprintln!("Buffer byte length: {} bytes ({} MB)", byte_len, byte_len / (1024 * 1024));
+    eprintln!(
+        "Buffer byte length: {} bytes ({} MB)",
+        byte_len,
+        byte_len / (1024 * 1024)
+    );
     assert!(
         byte_len >= 90 * 1024 * 1024,
         "expected byte_len >= 90MB, got {} bytes",
@@ -104,20 +115,13 @@ fn scale_100mb_viewport_slice_under_budget() {
         elapsed
     );
 
-    assert_eq!(
-        slices.len(),
-        40,
-        "expected 40 slices, got {}",
-        slices.len()
-    );
+    assert_eq!(slices.len(), 40, "expected 40 slices, got {}", slices.len());
 
     for (i, slice) in slices.iter().enumerate() {
         assert!(
             !slice.truncated,
             "slice[{}] (line {}) unexpectedly truncated; line content len = {}",
-            i,
-            slice.line,
-            slice.line_content_byte_len
+            i, slice.line, slice.line_content_byte_len
         );
     }
 
@@ -205,7 +209,9 @@ fn scale_100mb_snapshot_creation_and_chunk_iteration() {
     let buf = TextBuffer::try_with_version(text, BufferVersion(0))
         .expect("buffer creation should succeed");
 
-    let snapshot = buf.try_snapshot().expect("snapshot creation should succeed");
+    let snapshot = buf
+        .try_snapshot()
+        .expect("snapshot creation should succeed");
 
     let chunks = snapshot.chunk_descriptors();
     eprintln!("Chunk count: {}", chunks.len());
@@ -232,11 +238,9 @@ fn scale_100mb_snapshot_creation_and_chunk_iteration() {
     // Verify the last chunk ends at the document end
     let last = chunks.last().expect("chunk list should be non-empty");
     assert_eq!(
-        last.end_byte,
-        doc_len,
+        last.end_byte, doc_len,
         "last chunk end_byte ({}) != document length ({})",
-        last.end_byte,
-        doc_len
+        last.end_byte, doc_len
     );
 
     eprintln!(

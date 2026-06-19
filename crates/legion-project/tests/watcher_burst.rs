@@ -42,9 +42,7 @@ fn security_policy_for_root(root: &Path) -> SecurityPolicy {
     policy
 }
 
-fn open_workspace_for_watcher(
-    root: &Path,
-) -> (WorkspaceActor, legion_protocol::WorkspaceOpened) {
+fn open_workspace_for_watcher(root: &Path) -> (WorkspaceActor, legion_protocol::WorkspaceOpened) {
     let policy = security_policy_for_root(root);
     let actor = WorkspaceActor::new(
         Arc::new(NativeFileSystem),
@@ -99,7 +97,10 @@ fn watcher_burst_debounces_rapid_modifications() {
         events.len() <= 3,
         "expected <= 3 events from 50 writes to same file, got {} events: {:?}",
         events.len(),
-        events.iter().map(|e| format!("{:?}", e.kind)).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| format!("{:?}", e.kind))
+            .collect::<Vec<_>>()
     );
 
     let _ = fs::remove_dir_all(&root);

@@ -51,10 +51,7 @@ fn open_workspace(root: &Path) -> (WorkspaceActor, legion_protocol::WorkspaceOpe
     let actor = WorkspaceActor::new(
         Arc::new(NativeFileSystem),
         Arc::new(NativeWatcherService),
-        DenyByDefaultBroker::new(
-            policy,
-            CapabilityNamespace("cancel-tests".to_string()),
-        ),
+        DenyByDefaultBroker::new(policy, CapabilityNamespace("cancel-tests".to_string())),
     );
     let opened = actor
         .open_workspace(WorkspaceOpenRequest {
@@ -189,11 +186,7 @@ fn search_cancellation_immediate_returns_cancelled() {
     let root = create_temp_workspace("cancel-immediate");
 
     for i in 0..10 {
-        fs::write(
-            root.join(format!("file-{:04}.txt", i)),
-            "needle here\n",
-        )
-        .expect("write file");
+        fs::write(root.join(format!("file-{:04}.txt", i)), "needle here\n").expect("write file");
     }
 
     let (actor, opened) = open_workspace(&root);
@@ -237,11 +230,7 @@ fn search_full_completion_sets_cancelled_false() {
 
     let file_count: usize = 10;
     for i in 0..file_count {
-        fs::write(
-            root.join(format!("file-{:04}.txt", i)),
-            "needle content\n",
-        )
-        .expect("write file");
+        fs::write(root.join(format!("file-{:04}.txt", i)), "needle content\n").expect("write file");
     }
 
     let (actor, opened) = open_workspace(&root);
@@ -273,8 +262,7 @@ fn search_full_completion_sets_cancelled_false() {
     assert_eq!(
         report.hit_count, file_count,
         "expected one hit per file (got {}), report: {:?}",
-        report.hit_count,
-        report.cancelled
+        report.hit_count, report.cancelled
     );
     assert_eq!(
         total_hits, file_count,

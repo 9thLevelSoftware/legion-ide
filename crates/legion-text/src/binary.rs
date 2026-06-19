@@ -112,7 +112,9 @@ mod tests {
     fn nul_byte_at_start_is_binary() {
         assert_eq!(
             detect_binary(b"\x00some data after"),
-            BinaryDetectionResult::Binary { first_nul_offset: 0 }
+            BinaryDetectionResult::Binary {
+                first_nul_offset: 0
+            }
         );
     }
 
@@ -120,7 +122,9 @@ mod tests {
     fn nul_byte_in_middle_is_binary() {
         assert_eq!(
             detect_binary(b"before\x00after"),
-            BinaryDetectionResult::Binary { first_nul_offset: 6 }
+            BinaryDetectionResult::Binary {
+                first_nul_offset: 6
+            }
         );
     }
 
@@ -152,7 +156,9 @@ mod tests {
         let data = b"hello\x00world!!";
         assert_eq!(
             detect_binary_with_window(data, 10),
-            BinaryDetectionResult::Binary { first_nul_offset: 5 }
+            BinaryDetectionResult::Binary {
+                first_nul_offset: 5
+            }
         );
 
         // Same data but window of 4 — NUL is outside, should be text.

@@ -165,12 +165,15 @@ fn stale_snapshot_lease_after_large_file_edit() {
     let stale_result = engine.read_snapshot_lease_chunk(
         lease.lease_id,
         lease.buffer_id,
-        current.snapshot_id,        // wrong: this is the post-edit snapshot
-        current.buffer_version,     // wrong: post-edit version
+        current.snapshot_id,    // wrong: this is the post-edit snapshot
+        current.buffer_version, // wrong: post-edit version
         0,
     );
     assert!(
-        matches!(stale_result, Err(legion_editor::EditorError::SnapshotLeaseStale { .. })),
+        matches!(
+            stale_result,
+            Err(legion_editor::EditorError::SnapshotLeaseStale { .. })
+        ),
         "reading with post-edit snapshot id must return SnapshotLeaseStale, got: {stale_result:?}"
     );
 
@@ -201,7 +204,10 @@ fn large_file_edit_preserves_degraded_mode() {
     let buffer = engine
         .open_buffer(WorkspaceId(1), FileId(4), "persist.rs", text)
         .expect("open buffer");
-    assert_eq!(engine.buffer_mode(buffer).expect("mode"), BufferMode::Degraded);
+    assert_eq!(
+        engine.buffer_mode(buffer).expect("mode"),
+        BufferMode::Degraded
+    );
 
     engine
         .apply_edit(
@@ -276,9 +282,7 @@ fn large_file_undo_redo_round_trips_content() {
         .expect("apply edit");
 
     let expected_after_edit = format!("{INSERT}{original}");
-    let save_after_edit = engine
-        .request_save(buffer, None)
-        .expect("save after edit");
+    let save_after_edit = engine.request_save(buffer, None).expect("save after edit");
     assert_eq!(
         save_after_edit.text, expected_after_edit,
         "save after edit must include the inserted text"
@@ -286,9 +290,7 @@ fn large_file_undo_redo_round_trips_content() {
 
     // Undo and verify save reverts to original content.
     engine.undo(buffer, None).expect("undo");
-    let save_after_undo = engine
-        .request_save(buffer, None)
-        .expect("save after undo");
+    let save_after_undo = engine.request_save(buffer, None).expect("save after undo");
     assert_eq!(
         save_after_undo.text, original,
         "save after undo must match original content"
@@ -296,9 +298,7 @@ fn large_file_undo_redo_round_trips_content() {
 
     // Redo and verify save returns to edited content.
     engine.redo(buffer, None).expect("redo");
-    let save_after_redo = engine
-        .request_save(buffer, None)
-        .expect("save after redo");
+    let save_after_redo = engine.request_save(buffer, None).expect("save after redo");
     assert_eq!(
         save_after_redo.text, expected_after_edit,
         "save after redo must match edited content"
@@ -310,12 +310,7 @@ fn large_file_undo_redo_round_trips_content() {
 fn binary_file_open_is_refused() {
     let mut engine = EditorEngine::new();
     let binary_content = "hello\x00world binary content";
-    let result = engine.open_buffer(
-        WorkspaceId(1),
-        FileId(1),
-        "image.png",
-        binary_content,
-    );
+    let result = engine.open_buffer(WorkspaceId(1), FileId(1), "image.png", binary_content);
     assert!(result.is_err(), "binary file should be refused");
     let err = result.unwrap_err();
     let err_msg = format!("{err}");
@@ -335,5 +330,9 @@ fn text_file_with_no_nul_opens_normally() {
         "clean.rs",
         "fn main() {\n    println!(\"hello\");\n}\n",
     );
-    assert!(result.is_ok(), "clean text file should open: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "clean text file should open: {:?}",
+        result.err()
+    );
 }

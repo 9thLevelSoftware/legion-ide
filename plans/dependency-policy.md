@@ -11,6 +11,8 @@ This document defines the required internal crate dependency direction and runti
 Every current workspace crate must have an explicit internal dependency policy entry, even when the allowed internal dependency set is empty.
 
 - `xtask` may depend on:
+  - `legion-protocol`
+  - `legion-text`
 
 - `legion-protocol` may depend on:
 
