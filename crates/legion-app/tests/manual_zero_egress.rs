@@ -8,8 +8,9 @@ use std::{
 use legion_app::{AppCommandOutcome, AppComposition, AppProductMode, AppSaveOutcome};
 use legion_protocol::{
     AssistedAiProviderInvocationState, ContextManifestEgressStatus, ContextManifestItemKind,
-    ContextManifestPermissionKind, PrincipalId, SemanticPrivacyScope, TerminalPanelStatusKind,
-    TextCoordinate, WorkspaceTrustState,
+    ContextManifestPermissionKind, DelegatedTaskProposalHunkDisposition,
+    DelegatedTaskRuntimeActivationState, PrincipalId, SemanticPrivacyScope,
+    TerminalPanelStatusKind, TextCoordinate, WorkspaceTrustState,
 };
 use legion_ui::{CommandDispatchIntent, SearchScopeProjection, SearchStatusKindProjection};
 
@@ -155,14 +156,93 @@ fn manual_mode_open_edit_save_search_records_no_hosted_egress() {
             .assist_inline_prediction_projection
             .request_in_flight
     );
+    assert_eq!(
+        snapshot
+            .assist_inline_prediction_projection
+            .stale_prediction_count,
+        0
+    );
+    assert_eq!(
+        snapshot
+            .assist_inline_prediction_projection
+            .after_edit_prediction_attempts,
+        0
+    );
+    assert_eq!(
+        snapshot
+            .assist_inline_prediction_projection
+            .after_edit_prediction_accepts,
+        0
+    );
     assert_eq!(snapshot.delegated_task_projection.plan_count, 0);
+    assert_eq!(snapshot.delegated_task_projection.blocked_plan_count, 0);
+    assert_eq!(snapshot.delegated_task_projection.refused_plan_count, 0);
+    assert_eq!(
+        snapshot.delegated_task_projection.runtime_activation,
+        DelegatedTaskRuntimeActivationState::NotEncoded
+    );
     assert!(snapshot.delegated_task_projection.plan_rows.is_empty());
+    assert!(snapshot.delegated_task_projection.step_summaries.is_empty());
+    assert!(snapshot.delegated_task_projection.blockers.is_empty());
+    assert!(snapshot.delegated_task_projection.refusals.is_empty());
+    assert!(
+        snapshot
+            .delegated_task_projection
+            .required_approvals
+            .is_empty()
+    );
+    assert!(
+        snapshot
+            .delegated_task_projection
+            .proposal_preview_links
+            .is_empty()
+    );
+    assert!(
+        snapshot
+            .delegated_task_projection
+            .audit_readiness
+            .is_empty()
+    );
     assert!(snapshot.delegated_task_projection.chat_messages.is_empty());
     assert!(
         snapshot
             .delegated_task_projection
             .context_citations
             .is_empty()
+    );
+    assert!(
+        snapshot
+            .delegated_task_projection
+            .proposal_reviews
+            .iter()
+            .all(|review| review.human_approval_required
+                && !review.ready_for_apply
+                && !review.filtered_apply_required
+                && review.accepted_hunk_count == 0
+                && review.rejected_hunk_count == 0
+                && review.pending_hunk_count == review.hunks.len() as u32
+                && review
+                    .hunks
+                    .iter()
+                    .all(|hunk| hunk.disposition == DelegatedTaskProposalHunkDisposition::Pending))
+    );
+    assert!(
+        snapshot
+            .delegated_task_projection
+            .tool_permission_requests
+            .is_empty()
+    );
+    assert_eq!(snapshot.delegated_task_projection.chat_message_count, 0);
+    assert_eq!(snapshot.delegated_task_projection.context_citation_count, 0);
+    assert_eq!(
+        snapshot.delegated_task_projection.proposal_review_count,
+        snapshot.delegated_task_projection.proposal_reviews.len() as u32
+    );
+    assert_eq!(
+        snapshot
+            .delegated_task_projection
+            .tool_permission_request_count,
+        0
     );
     assert_eq!(
         snapshot.context_manifest_projection.manifest.egress,
