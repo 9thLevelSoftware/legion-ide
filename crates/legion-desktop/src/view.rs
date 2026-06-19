@@ -443,6 +443,8 @@ pub struct DesktopProjectionViewModel {
     pub close_prompt_rows: Vec<String>,
     /// Per-buffer viewport metadata rows.
     pub viewport_metadata_rows: Vec<String>,
+    /// Large-file degraded-mode capability banner rows.
+    pub large_file_banner_rows: Vec<String>,
     /// Status rows.
     pub status_rows: Vec<String>,
     /// Proposal ledger summary rows.
@@ -547,6 +549,7 @@ impl DesktopProjectionViewModel {
             editor_status_rows: editor_status_rows(snapshot),
             close_prompt_rows: close_prompt_rows(snapshot),
             viewport_metadata_rows: viewport_metadata_rows(snapshot),
+            large_file_banner_rows: large_file_banner_rows(snapshot),
             status_rows: status_rows(snapshot),
             proposal_rows: proposal_rows(snapshot),
             trust_rows: trust_rows(snapshot),
@@ -1532,6 +1535,17 @@ fn render_editor_canvas(
     let level = projected_product_mode(snapshot);
     render_tab_strip(ui, snapshot, actions);
     render_breadcrumb_bar(ui, snapshot, level);
+    if !model.large_file_banner_rows.is_empty() {
+        theme::card_frame_tinted(theme::tokens().bg.card, theme::tokens().accent.orange).show(
+            ui,
+            |ui| {
+                for row in &model.large_file_banner_rows {
+                    ui.label(theme::code_muted(row));
+                }
+            },
+        );
+        ui.add_space(6.0);
+    }
     theme::code_frame().show(ui, |ui| {
         egui::ScrollArea::both()
             .id_salt("legion_desktop_code_canvas_scroll")
@@ -5302,6 +5316,27 @@ fn active_buffer_lines(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     }
 
     vec!["<active buffer has no visible text>".to_string()]
+}
+
+fn large_file_banner_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let Some(viewport) = &snapshot.active_buffer_projection.viewport else {
+        return Vec::new();
+    };
+    let Some(status) = &viewport.large_file_status else {
+        return Vec::new();
+    };
+
+    let mut rows = vec![format!(
+        "large-file degraded: bytes={} threshold={} bounded_search={}",
+        status.byte_len, status.threshold_bytes, status.bounded_search_enabled
+    )];
+    rows.extend(
+        status
+            .disabled_overlay_reasons
+            .iter()
+            .map(|reason| format!("capability reduced: {reason}")),
+    );
+    rows
 }
 
 fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCodeLineViewModel> {
