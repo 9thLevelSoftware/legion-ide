@@ -295,6 +295,17 @@ pub enum DesktopWorkflowOutcome {
     Opened,
     /// App authority applied an editor transaction.
     Edited,
+    /// App-owned clipboard metadata changed without exposing copied text.
+    ClipboardUpdated {
+        /// Buffer whose selection was copied or cut.
+        buffer_id: BufferId,
+        /// UTF-8 byte length of the selected text.
+        byte_len: usize,
+        /// Selected line count.
+        line_count: usize,
+        /// Whether the action also cut text from the buffer.
+        cut: bool,
+    },
     /// Save completed through app/workspace authority.
     Saved,
     /// Save-all completed through app/workspace authority.
@@ -628,6 +639,17 @@ impl DesktopRuntime {
             }
             action => {
                 let snapshot = self.shell.projection_snapshot();
+                if editor_text_action_blocked_by_palette(&action, &snapshot) {
+                    self.set_status(
+                        StatusSeverity::Info,
+                        "Command palette owns text input while open",
+                    );
+                    self.persist_session_if_configured();
+                    self.refresh_projection()?;
+                    self.last_outcome = DesktopWorkflowOutcome::Noop;
+                    self.persist_diagnostics_if_configured();
+                    return Ok(DesktopWorkflowOutcome::Noop);
+                }
                 let bridge_output = self.bridge.translate(action, &snapshot);
                 let outcome = match bridge_output {
                     DesktopBridgeOutput::Intent(CommandDispatchIntent::Quit) => {
@@ -1222,6 +1244,23 @@ impl DesktopRuntime {
             AppCommandOutcome::Edited(_) => {
                 self.set_status(StatusSeverity::Info, "Edited");
                 DesktopWorkflowOutcome::Edited
+            }
+            AppCommandOutcome::ClipboardUpdated(metadata) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!(
+                        "Clipboard {} metadata: bytes={} lines={}",
+                        if metadata.cut { "cut" } else { "copy" },
+                        metadata.byte_len,
+                        metadata.line_count
+                    ),
+                );
+                DesktopWorkflowOutcome::ClipboardUpdated {
+                    buffer_id: metadata.buffer_id,
+                    byte_len: metadata.byte_len,
+                    line_count: metadata.line_count,
+                    cut: metadata.cut,
+                }
             }
             AppCommandOutcome::Save(AppSaveOutcome::Saved(_)) => {
                 self.set_status(StatusSeverity::Info, "Saved");
@@ -1923,6 +1962,23 @@ fn save_all_item_status_message(item: &AppSaveAllItemOutcome) -> StatusMessagePr
             )
         }
     }
+}
+
+fn editor_text_action_blocked_by_palette(
+    action: &DesktopAction,
+    snapshot: &ShellProjectionSnapshot,
+) -> bool {
+    snapshot.palette_projection.open
+        && matches!(
+            action,
+            DesktopAction::InsertText { .. }
+                | DesktopAction::ReplaceRange { .. }
+                | DesktopAction::DeleteRange { .. }
+                | DesktopAction::ClipboardPaste { .. }
+                | DesktopAction::ClipboardCut
+                | DesktopAction::ImeCommit { .. }
+                | DesktopAction::SelectAll { .. }
+        )
 }
 
 fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, String)> {

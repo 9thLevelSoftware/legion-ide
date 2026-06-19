@@ -527,6 +527,10 @@ pub enum DesktopAction {
         /// Projected insertion coordinate.
         at: TextCoordinate,
     },
+    /// Copy the active editor selection without exposing clipboard text in outcomes.
+    ClipboardCopy,
+    /// Cut the active editor selection without exposing clipboard text in outcomes.
+    ClipboardCut,
     /// Commit IME text at a projected coordinate.
     ImeCommit {
         /// IME text to insert.
@@ -551,6 +555,11 @@ pub enum DesktopAction {
         buffer_id: Option<BufferId>,
         /// Selection range in projection space.
         range: ProtocolTextRange,
+    },
+    /// Select the entire target buffer or active buffer.
+    SelectAll {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
     },
     /// Set viewport scroll for a buffer or the active buffer.
     SetViewportScroll {
@@ -1606,6 +1615,12 @@ impl DesktopCommandBridge {
                     range,
                 })
             }
+            DesktopAction::ClipboardCopy => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::ClipboardCopy { buffer_id }
+            }),
+            DesktopAction::ClipboardCut => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::ClipboardCut { buffer_id }
+            }),
             DesktopAction::Undo => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::Undo { buffer_id }
             }),
@@ -1620,6 +1635,11 @@ impl DesktopCommandBridge {
             DesktopAction::SetSelection { buffer_id, range } => {
                 self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
                     CommandDispatchIntent::SetSelection { buffer_id, range }
+                })
+            }
+            DesktopAction::SelectAll { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::SelectAll { buffer_id }
                 })
             }
             DesktopAction::SetViewportScroll { buffer_id, scroll } => {

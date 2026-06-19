@@ -2199,6 +2199,21 @@ pub enum CommandDispatchIntent {
         /// Replacement payload.
         replacement: String,
     },
+    /// Copy the current editor selection through app-owned metadata-only clipboard authority.
+    ClipboardCopy {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Cut the current editor selection through app/editor authority.
+    ClipboardCut {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Select the entire target buffer through editor authority.
+    SelectAll {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
     /// Save through the editor save-request and workspace write path.
     Save {
         /// Target buffer identifier.

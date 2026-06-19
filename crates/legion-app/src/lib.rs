@@ -6965,6 +6965,73 @@ fn text_coordinate_sort_key(coordinate: TextCoordinate) -> (u32, u32, u64) {
     )
 }
 
+fn text_coordinate_with_offsets(
+    line: u32,
+    character: u32,
+    byte_offset: u64,
+    utf16_offset: u64,
+) -> TextCoordinate {
+    TextCoordinate {
+        line,
+        character,
+        byte_offset: Some(byte_offset),
+        utf16_offset: Some(utf16_offset),
+    }
+}
+
+fn text_end_coordinate(text: &str) -> TextCoordinate {
+    let line = text.bytes().filter(|byte| *byte == b'\n').count() as u32;
+    let character = text
+        .rsplit_once('\n')
+        .map_or(text.len(), |(_, tail)| tail.len()) as u32;
+    TextCoordinate {
+        line,
+        character,
+        byte_offset: Some(text.len() as u64),
+        utf16_offset: Some(text.encode_utf16().count() as u64),
+    }
+}
+
+fn text_coordinate_after_replacement(start: TextPosition, replacement: &str) -> TextCoordinate {
+    let mut line = start.line;
+    let mut column = start.column;
+    for ch in replacement.chars() {
+        if ch == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += ch.len_utf8();
+        }
+    }
+    TextCoordinate {
+        line: line as u32,
+        character: column as u32,
+        byte_offset: None,
+        utf16_offset: None,
+    }
+}
+
+fn byte_bounds_for_protocol_range(text: &str, range: ProtocolTextRange) -> Option<(usize, usize)> {
+    let start = usize::try_from(range.start.byte_offset?).ok()?;
+    let end = usize::try_from(range.end.byte_offset?).ok()?;
+    if start > end
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn selected_line_count(selected: &str) -> usize {
+    if selected.is_empty() {
+        0
+    } else {
+        selected.bytes().filter(|byte| *byte == b'\n').count() + 1
+    }
+}
+
 fn identifier_byte_range_at(text: &str, requested_byte: u64) -> Option<ByteRange> {
     if text.is_empty() {
         return None;
@@ -7472,6 +7539,21 @@ pub enum AppCommandRequest {
         buffer_id: BufferId,
         /// Editor edit in UI-projected text coordinates.
         edit: TextEdit,
+    },
+    /// Copy the current selection and return metadata-only clipboard evidence.
+    ClipboardCopy {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Cut the current selection through editor authority and return metadata-only clipboard evidence.
+    ClipboardCut {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Select the entire target buffer through editor authority.
+    SelectAll {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
     },
     /// Save the active buffer through editor/proposal/workspace authorities.
     Save {
@@ -8183,6 +8265,9 @@ impl CommandExecutionService {
                 )))
             }
             AppCommandRequest::Save { .. }
+            | AppCommandRequest::ClipboardCopy { .. }
+            | AppCommandRequest::ClipboardCut { .. }
+            | AppCommandRequest::SelectAll { .. }
             | AppCommandRequest::SetProductMode { .. }
             | AppCommandRequest::SwitchTab { .. }
             | AppCommandRequest::CloseTab { .. }
@@ -8369,6 +8454,18 @@ impl CommandDispatcher {
                 TextEdit::new(Self::editor_range(range), replacement),
                 correlation_id,
             ),
+            CommandDispatchIntent::ClipboardCopy { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ClipboardCopy { buffer_id })
+            }
+            CommandDispatchIntent::ClipboardCut { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ClipboardCut { buffer_id })
+            }
+            CommandDispatchIntent::SelectAll { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::SelectAll { buffer_id })
+            }
             CommandDispatchIntent::Save { buffer_id } => {
                 Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
                 Ok(AppCommandRequest::Save { buffer_id })
@@ -10974,6 +11071,19 @@ fn assisted_ai_request_contract_from_metadata(
     }
 }
 
+/// Metadata-only clipboard update evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppClipboardUpdate {
+    /// Buffer whose selection was copied or cut.
+    pub buffer_id: BufferId,
+    /// UTF-8 byte length of the selected text.
+    pub byte_len: usize,
+    /// Selected line count.
+    pub line_count: usize,
+    /// Whether the update came from a cut operation that also mutated editor text.
+    pub cut: bool,
+}
+
 /// Result of routing a UI command intent through application-owned services.
 #[derive(Debug, Clone)]
 pub enum AppCommandOutcome {
@@ -10985,6 +11095,8 @@ pub enum AppCommandOutcome {
     ProductModeChanged(AppProductMode),
     /// Editor transaction was applied.
     Edited(TextTransactionDescriptor),
+    /// Clipboard metadata changed without exposing copied text.
+    ClipboardUpdated(AppClipboardUpdate),
     /// Buffer save completed through workspace authority.
     Save(AppSaveOutcome),
     /// All open buffers were saved or rejected through app authority.
@@ -13864,14 +13976,43 @@ impl AppComposition {
             event_context.correlation_id,
         )?;
 
-        if let AppCommandRequest::ApplyEdit { buffer_id, edit } = &request {
-            let descriptor = self.apply_edit_to_buffer_with_correlation(
-                *buffer_id,
-                edit.clone(),
-                event_context.correlation_id,
-            )?;
-            self.emit_transaction_event(&descriptor);
-            return Ok(AppCommandOutcome::Edited(descriptor));
+        match &request {
+            AppCommandRequest::ApplyEdit { buffer_id, edit } => {
+                let descriptor = self.apply_edit_to_buffer_with_correlation(
+                    *buffer_id,
+                    edit.clone(),
+                    event_context.correlation_id,
+                )?;
+                self.set_cursor_after_edit(*buffer_id, edit)?;
+                self.emit_transaction_event(&descriptor);
+                return Ok(AppCommandOutcome::Edited(descriptor));
+            }
+            AppCommandRequest::ClipboardCopy { buffer_id } => {
+                return Ok(AppCommandOutcome::ClipboardUpdated(
+                    self.clipboard_metadata_for_selection(*buffer_id, false)?.0,
+                ));
+            }
+            AppCommandRequest::ClipboardCut { buffer_id } => {
+                let (metadata, selection) =
+                    self.clipboard_metadata_for_selection(*buffer_id, true)?;
+                if metadata.byte_len > 0 {
+                    if let Some(selection) = selection {
+                        let descriptor = self.apply_edit_to_buffer_with_correlation(
+                            *buffer_id,
+                            TextEdit::delete(CommandDispatcher::editor_range(selection)),
+                            event_context.correlation_id,
+                        )?;
+                        self.set_buffer_cursor(*buffer_id, selection.start)?;
+                        self.emit_transaction_event(&descriptor);
+                    }
+                }
+                return Ok(AppCommandOutcome::ClipboardUpdated(metadata));
+            }
+            AppCommandRequest::SelectAll { buffer_id } => {
+                self.select_all_buffer(*buffer_id)?;
+                return Ok(AppCommandOutcome::SelectionSet(*buffer_id));
+            }
+            _ => {}
         }
 
         let mut state = AppCommandExecutionState::from_active(&self.active_documents);
@@ -17640,6 +17781,97 @@ impl AppComposition {
             }],
         )?;
         Ok(())
+    }
+
+    fn select_all_buffer(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let end = text_end_coordinate(self.editor.text(buffer_id)?);
+        self.set_buffer_selection(
+            buffer_id,
+            ProtocolTextRange {
+                start: text_coordinate_with_offsets(0, 0, 0, 0),
+                end,
+            },
+        )
+    }
+
+    fn clipboard_metadata_for_selection(
+        &self,
+        buffer_id: BufferId,
+        cut: bool,
+    ) -> Result<(AppClipboardUpdate, Option<ProtocolTextRange>), AppCompositionError> {
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let Some(selection) = self.primary_selection(buffer_id)? else {
+            return Ok((
+                AppClipboardUpdate {
+                    buffer_id,
+                    byte_len: 0,
+                    line_count: 0,
+                    cut,
+                },
+                None,
+            ));
+        };
+
+        let text = self.editor.text(buffer_id)?;
+        let Some((start, end)) = byte_bounds_for_protocol_range(text, selection) else {
+            return Err(EditorError::InvalidEdit(
+                "clipboard selection requires valid byte-coordinate bounds",
+            )
+            .into());
+        };
+        if start == end {
+            return Ok((
+                AppClipboardUpdate {
+                    buffer_id,
+                    byte_len: 0,
+                    line_count: 0,
+                    cut,
+                },
+                None,
+            ));
+        }
+        let selected = &text[start..end];
+        Ok((
+            AppClipboardUpdate {
+                buffer_id,
+                byte_len: selected.len(),
+                line_count: selected_line_count(selected),
+                cut,
+            },
+            Some(selection),
+        ))
+    }
+
+    fn primary_selection(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<Option<ProtocolTextRange>, AppCompositionError> {
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        Ok(self
+            .editor
+            .viewport_projection(legion_protocol::EditorViewportRequest {
+                buffer_id,
+                scroll: self.active_documents.viewport_scroll_for(buffer_id),
+                dimensions: legion_protocol::ViewportDimensions {
+                    width_px: 800,
+                    height_px: 384,
+                },
+            })?
+            .selections
+            .into_iter()
+            .next())
+    }
+
+    fn set_cursor_after_edit(
+        &mut self,
+        buffer_id: BufferId,
+        edit: &TextEdit,
+    ) -> Result<(), AppCompositionError> {
+        self.set_buffer_cursor(
+            buffer_id,
+            text_coordinate_after_replacement(edit.range.start, &edit.new_text),
+        )
     }
 
     /// Store viewport scroll for an open buffer.
@@ -24329,6 +24561,60 @@ mod tests {
         )
         .expect("details intent maps");
         assert!(details.is_none());
+    }
+
+    #[test]
+    fn command_dispatcher_routes_manual_clipboard_input_intents_to_app_requests() {
+        let active = AppCommandRouteContext {
+            workspace_id: Some(WorkspaceId(1)),
+            buffer_id: Some(BufferId(9)),
+            file_id: Some(FileId(2)),
+        };
+
+        let copy = CommandDispatcher::route_intent(
+            CommandDispatchIntent::ClipboardCopy {
+                buffer_id: BufferId(9),
+            },
+            active,
+            CorrelationId(1),
+        )
+        .expect("copy routes");
+        assert_eq!(
+            copy,
+            AppCommandRequest::ClipboardCopy {
+                buffer_id: BufferId(9)
+            }
+        );
+
+        let cut = CommandDispatcher::route_intent(
+            CommandDispatchIntent::ClipboardCut {
+                buffer_id: BufferId(9),
+            },
+            active,
+            CorrelationId(1),
+        )
+        .expect("cut routes");
+        assert_eq!(
+            cut,
+            AppCommandRequest::ClipboardCut {
+                buffer_id: BufferId(9)
+            }
+        );
+
+        let select_all = CommandDispatcher::route_intent(
+            CommandDispatchIntent::SelectAll {
+                buffer_id: BufferId(9),
+            },
+            active,
+            CorrelationId(1),
+        )
+        .expect("select-all routes");
+        assert_eq!(
+            select_all,
+            AppCommandRequest::SelectAll {
+                buffer_id: BufferId(9)
+            }
+        );
     }
 
     #[test]
