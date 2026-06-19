@@ -46,21 +46,21 @@ Rectangular selection is intentionally deferred out of the v1 product-workflow g
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `cargo test -p xtask --test perf_harness` |  |  |
-| `cargo run -p xtask -- perf-harness` |  |  |
-| `cargo run -p xtask -- verify-perf-harness` |  |  |
-| `cargo run -p xtask -- no-egui-textedit` |  |  |
-| `cargo test -p legion-desktop --test manual_perf` |  |  |
-| `cargo test -p legion-desktop --test manual_input_conformance` |  |  |
-| `cargo test -p legion-desktop --test manual_renderer_evidence` |  |  |
-| `cargo test -p legion-app --test manual_zero_egress` |  |  |
-| `cargo run -p xtask -- check-deps` |  |  |
-| `cargo run -p xtask -- docs-hygiene` |  |  |
-| `cargo fmt --all --check` |  |  |
-| `cargo check --workspace --all-targets` |  |  |
-| `cargo test --workspace --all-targets --no-fail-fast` |  |  |
-| `cargo clippy --workspace --all-targets -- -D warnings` |  |  |
-| `git diff --check` |  |  |
+| `cargo test -p xtask --test perf_harness` | Pass | WS-MANUAL-01 perf-harness phase added Manual renderer budget/report coverage in `xtask/tests/perf_harness.rs`; Phase 10 will re-run the final current-tree target. |
+| `cargo run -p xtask -- perf-harness` | Pass | Generated `target/perf-harness/perf_report.toml` includes `manual.renderer_input_to_paint` with 3 passed, 0 failed, 0 skipped at git `787b7030c3a622d55625fbcb1233cc768a56901c`. |
+| `cargo run -p xtask -- verify-perf-harness` | Pass | MANUAL.02 perf-harness phase verified the generated report; Phase 10 will re-run this against the final tree. |
+| `cargo run -p xtask -- no-egui-textedit` | Pass | MANUAL.03 keeps the custom Manual editor path covered by the no-`egui::TextEdit` xtask gate and companion test. |
+| `cargo test -p legion-desktop --test manual_perf` | Pass | MANUAL.02 added the renderer-backed Manual edit perf test and metadata-only report path in `crates/legion-desktop/tests/manual_perf.rs`. |
+| `cargo test -p legion-desktop --test manual_input_conformance` | Pass | MANUAL.04, MANUAL.05, MANUAL.06, and MANUAL.07 are covered by Manual focus, IME, clipboard, copy/cut composition suppression, and selection-scope tests. |
+| `cargo test -p legion-desktop --test manual_renderer_evidence` | Pass | MANUAL.08, MANUAL.09, MANUAL.10, MANUAL.11, and the renderer zero-egress trust-boundary check are covered by `manual_renderer_evidence` and large-file evidence tests. |
+| `cargo test -p legion-app --test manual_zero_egress` | Pass | MANUAL.12 app-level open/edit/save/search zero-egress smoke is recorded in `manual-mode-zero-egress.md` and strengthened by commits `98f0b6b` and `64b3a85`. |
+| `cargo run -p xtask -- check-deps` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
+| `cargo run -p xtask -- docs-hygiene` | Pass | Phase 9 docs-hygiene command passed after the ledger/evidence updates. |
+| `cargo fmt --all --check` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
+| `cargo check --workspace --all-targets` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
+| `cargo test --workspace --all-targets --no-fail-fast` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
+| `git diff --check` | Pass | Phase 9 whitespace check passed after the docs updates. |
 
 ## Product-Readiness Decision
 
