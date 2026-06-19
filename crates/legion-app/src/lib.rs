@@ -112,25 +112,25 @@ use legion_protocol::{
     LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
     LegionWorkflowState, LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
-    LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind, McpPrimitiveKind,
-    McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName, PermissionBudgetActionClass,
-    PluginContributionProjection, PluginHostCallKind, PluginHostCallRequest,
-    PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary, PrincipalId,
-    ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem, ProposalBatchRollbackPolicy,
-    ProposalCancellationReason, ProposalDenialReason, ProposalDiffChunkDescriptor,
-    ProposalFailureReason, ProposalId, ProposalLedgerProjection, ProposalLedgerRow,
-    ProposalLifecycleAction, ProposalLifecycleCommand, ProposalLifecycleCommandReason,
-    ProposalLifecycleState, ProposalLifecycleTransition, ProposalPartialFailureDisposition,
-    ProposalPartialFailureRecord, ProposalPayload, ProposalPort, ProposalPreviewWarning,
-    ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest, ProposalResponse,
-    ProposalRiskLabel, ProposalRollbackReason, ProposalStaleReason, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
-    ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError, ProtocolResult,
-    ProtocolTextRange, RedactionHint, RemoteAuditRecord, RemoteCapabilityKind, RemoteGuiProjection,
-    RemoteProposalReviewGuiRow, RemoteTransportEnvelope, RemoteTransportPayload,
-    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionGuiRow,
-    RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal, SaveIntent,
-    SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
+    LineWrappingPolicy, LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind,
+    McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName,
+    PermissionBudgetActionClass, PluginContributionProjection, PluginHostCallKind,
+    PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest, PreviewSummary,
+    PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
+    ProposalBatchRollbackPolicy, ProposalCancellationReason, ProposalDenialReason,
+    ProposalDiffChunkDescriptor, ProposalFailureReason, ProposalId, ProposalLedgerProjection,
+    ProposalLedgerRow, ProposalLifecycleAction, ProposalLifecycleCommand,
+    ProposalLifecycleCommandReason, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalPartialFailureDisposition, ProposalPartialFailureRecord, ProposalPayload, ProposalPort,
+    ProposalPreviewWarning, ProposalPreviewWarningKind, ProposalRejectionReason, ProposalRequest,
+    ProposalResponse, ProposalRiskLabel, ProposalRollbackReason, ProposalStaleReason,
+    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
+    ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity, ProtocolError,
+    ProtocolResult, ProtocolTextRange, RedactionHint, RemoteAuditRecord, RemoteCapabilityKind,
+    RemoteGuiProjection, RemoteProposalReviewGuiRow, RemoteTransportEnvelope,
+    RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionDescriptor,
+    RemoteWorkspaceSessionGuiRow, RemoteWorkspaceSessionId, SaveConflictPolicy, SaveFileProposal,
+    SaveIntent, SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
     SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup,
     StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
@@ -7685,6 +7685,13 @@ pub enum AppCommandRequest {
         /// Whether smooth scrolling should be enabled.
         enabled: bool,
     },
+    /// Update editor line wrapping policy.
+    SetLineWrappingPolicy {
+        /// Requested line wrapping policy.
+        policy: LineWrappingPolicy,
+        /// Optional fixed wrap column.
+        wrap_column: Option<u32>,
+    },
     /// Toggle indexed workspace search.
     SetIndexedWorkspaceSearchEnabled {
         /// Whether workspace search should use the optional indexed backend.
@@ -8300,6 +8307,7 @@ impl CommandExecutionService {
             | AppCommandRequest::SetWhitespaceGuidesVisible { .. }
             | AppCommandRequest::SetIndentGuidesVisible { .. }
             | AppCommandRequest::SetSmoothScrollingEnabled { .. }
+            | AppCommandRequest::SetLineWrappingPolicy { .. }
             | AppCommandRequest::SetIndexedWorkspaceSearchEnabled { .. }
             | AppCommandRequest::SetNextEditPredictionEnabled { .. }
             | AppCommandRequest::SetCrashReportsEnabled { .. }
@@ -8548,6 +8556,13 @@ impl CommandDispatcher {
             CommandDispatchIntent::SetSmoothScrollingEnabled { enabled } => {
                 Ok(AppCommandRequest::SetSmoothScrollingEnabled { enabled })
             }
+            CommandDispatchIntent::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            } => Ok(AppCommandRequest::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            }),
             CommandDispatchIntent::SetIndexedWorkspaceSearchEnabled { enabled } => {
                 Ok(AppCommandRequest::SetIndexedWorkspaceSearchEnabled { enabled })
             }
@@ -10015,6 +10030,8 @@ fn workbench_settings_record_from_projection(
         whitespace_guides_visible: settings.editor.whitespace_guides_visible,
         indent_guides_visible: settings.editor.indent_guides_visible,
         smooth_scrolling_enabled: settings.editor.smooth_scrolling_enabled,
+        line_wrapping_policy: settings.editor.line_wrapping_policy,
+        wrap_column: settings.editor.wrap_column,
         indexed_workspace_search_enabled: settings.indexed_workspace_search_enabled,
         next_edit_prediction_enabled: settings.next_edit_prediction_enabled,
         telemetry: settings.telemetry.clone(),
@@ -10043,6 +10060,8 @@ fn settings_projection_from_workbench_record(
             whitespace_guides_visible: record.whitespace_guides_visible,
             indent_guides_visible: record.indent_guides_visible,
             smooth_scrolling_enabled: record.smooth_scrolling_enabled,
+            line_wrapping_policy: record.line_wrapping_policy,
+            wrap_column: record.wrap_column,
         },
         telemetry: WorkbenchTelemetryConsent {
             enabled: record.telemetry.enabled,
@@ -13554,6 +13573,17 @@ impl AppComposition {
         self.settings_projection()
     }
 
+    fn set_line_wrapping_policy(
+        &mut self,
+        policy: LineWrappingPolicy,
+        wrap_column: Option<u32>,
+    ) -> SettingsProjection {
+        self.settings.editor.line_wrapping_policy = policy;
+        self.settings.editor.wrap_column = wrap_column;
+        self.settings = self.settings_projection();
+        self.settings_projection()
+    }
+
     fn set_indexed_workspace_search_enabled(&mut self, enabled: bool) -> SettingsProjection {
         self.settings.indexed_workspace_search_enabled = enabled;
         self.settings_projection()
@@ -14131,6 +14161,12 @@ impl AppComposition {
             AppCommandRequest::SetSmoothScrollingEnabled { enabled } => Ok(
                 AppCommandOutcome::SettingsUpdated(self.set_smooth_scrolling_enabled(enabled)),
             ),
+            AppCommandRequest::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            } => Ok(AppCommandOutcome::SettingsUpdated(
+                self.set_line_wrapping_policy(policy, wrap_column),
+            )),
             AppCommandRequest::SetIndexedWorkspaceSearchEnabled { enabled } => {
                 Ok(AppCommandOutcome::SettingsUpdated(
                     self.set_indexed_workspace_search_enabled(enabled),

@@ -426,6 +426,19 @@ pub enum ViewportProjectionMode {
     DegradedLargeFile,
 }
 
+/// Editor line wrapping policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LineWrappingPolicy {
+    /// Do not soft-wrap editor lines.
+    #[default]
+    Off,
+    /// Soft-wrap at the visible viewport width while preserving logical coordinates.
+    Viewport,
+    /// Soft-wrap at a fixed character column while preserving logical coordinates.
+    FixedColumn,
+}
+
 /// Truncation state for a visible viewport line slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ViewportLineTruncationState {
@@ -560,6 +573,12 @@ pub struct ViewportProjection {
     pub scroll: ViewportScroll,
     /// Viewport dimensions.
     pub dimensions: ViewportDimensions,
+    /// Renderer presentation-only line wrapping policy for the projected viewport.
+    #[serde(default)]
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column for presentation-only soft wrapping.
+    #[serde(default)]
+    pub wrap_column: Option<u32>,
     /// Projection mode used to produce the viewport payload.
     #[serde(default)]
     pub mode: ViewportProjectionMode,
@@ -19567,6 +19586,12 @@ pub struct WorkbenchSettingsRecord {
     pub indent_guides_visible: bool,
     /// Whether smooth scrolling is enabled.
     pub smooth_scrolling_enabled: bool,
+    /// Editor line wrapping policy.
+    #[serde(default)]
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column.
+    #[serde(default = "default_wrap_column")]
+    pub wrap_column: Option<u32>,
     /// Whether workspace search may use the optional indexed backend.
     #[serde(default)]
     pub indexed_workspace_search_enabled: bool,
@@ -19582,6 +19607,10 @@ pub struct WorkbenchSettingsRecord {
 
 fn default_editor_font_family() -> String {
     "monospace".to_string()
+}
+
+fn default_wrap_column() -> Option<u32> {
+    Some(120)
 }
 
 impl Default for WorkbenchSettingsRecord {
@@ -19600,6 +19629,8 @@ impl Default for WorkbenchSettingsRecord {
             whitespace_guides_visible: false,
             indent_guides_visible: false,
             smooth_scrolling_enabled: true,
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: default_wrap_column(),
             indexed_workspace_search_enabled: false,
             next_edit_prediction_enabled: false,
             telemetry: WorkbenchTelemetryConsent::default(),

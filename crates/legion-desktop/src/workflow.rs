@@ -2978,6 +2978,8 @@ mod tests {
                 width_px: 800,
                 height_px: 600,
             },
+            line_wrapping_policy: legion_protocol::LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: legion_protocol::ViewportProjectionMode::default(),
             line_slices: vec![],
             line_metrics: vec![],

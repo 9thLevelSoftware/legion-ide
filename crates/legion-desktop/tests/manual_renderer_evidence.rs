@@ -54,3 +54,26 @@ fn font_fallback_diagnostics_are_projected_without_raw_font_paths() {
             && !row.contains('\0')
     }));
 }
+
+#[test]
+fn line_wrapping_policy_keeps_viewport_math_stable() {
+    let mut snapshot = Shell::empty("Wrap").projection_snapshot();
+    snapshot.settings_projection.editor.line_wrapping_policy =
+        legion_protocol::LineWrappingPolicy::FixedColumn;
+    snapshot.settings_projection.editor.wrap_column = Some(80);
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert_eq!(
+        model.settings.line_wrapping_policy,
+        legion_protocol::LineWrappingPolicy::FixedColumn
+    );
+    assert_eq!(model.settings.wrap_column, Some(80));
+    assert_eq!(model.settings.wrapping_row, "wrapping: fixed_column 80");
+    assert!(
+        model
+            .viewport_metadata_rows
+            .iter()
+            .all(|row| !row.contains("visual_line"))
+    );
+}

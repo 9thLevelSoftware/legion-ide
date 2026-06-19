@@ -10,12 +10,12 @@ use legion_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRuntimeActivationState,
     DelegatedTaskToolPermissionDecision, FileFingerprint, FileId, LanguageToolingProjection,
     LegionWorkflowConflictId, LegionWorkflowProjection, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, PermissionBudgetProjection,
-    PluginContributionProjection, PluginId, PrivacyInspectorProjection, ProductMode,
-    ProductRuntimeSurface, ProposalApprovalChecklistProjection, ProposalCancellationReason,
-    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
-    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
-    RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
+    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, LineWrappingPolicy,
+    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
+    ProductMode, ProductRuntimeSurface, ProposalApprovalChecklistProjection,
+    ProposalCancellationReason, ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel,
+    ProposalRejectionReason, ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange,
+    RedactionHint, RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
     TerminalSessionId, TextCoordinate, TimestampMillis, Utf16Range, VerificationRunProjection,
     ViewportLineTruncationState, ViewportScroll, WorkbenchFontFallbackDiagnostic,
     WorkbenchTelemetryConsent, WorkspaceId, product_mode_allows_runtime_surface,
@@ -2064,6 +2064,12 @@ pub struct EditorSettingsProjection {
     pub indent_guides_visible: bool,
     /// Whether smooth scrolling is enabled.
     pub smooth_scrolling_enabled: bool,
+    /// Editor line wrapping policy.
+    #[serde(default)]
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column.
+    #[serde(default = "default_wrap_column")]
+    pub wrap_column: Option<u32>,
 }
 
 impl Default for EditorSettingsProjection {
@@ -2077,6 +2083,8 @@ impl Default for EditorSettingsProjection {
             whitespace_guides_visible: false,
             indent_guides_visible: false,
             smooth_scrolling_enabled: true,
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: default_wrap_column(),
         }
     }
 }
@@ -2130,6 +2138,12 @@ impl SettingsProjection {
             .editor_font_size_pt
             .clamp(Self::MIN_EDITOR_FONT_SIZE_PT, Self::MAX_EDITOR_FONT_SIZE_PT);
         self.font_fallback_diagnostics.truncate(8);
+        self.editor.wrap_column = match self.editor.line_wrapping_policy {
+            LineWrappingPolicy::FixedColumn => {
+                Some(self.editor.wrap_column.unwrap_or(120).clamp(40, 240))
+            }
+            LineWrappingPolicy::Off | LineWrappingPolicy::Viewport => None,
+        };
         self.telemetry.enabled = self.telemetry.crash_reports_enabled;
         self.telemetry.raw_source_allowed = false;
         self.telemetry.consent_label = if self.telemetry.crash_reports_enabled {
@@ -2164,6 +2178,10 @@ fn normalize_font_family_label(value: &str) -> String {
 
 fn default_editor_font_family_label() -> String {
     "monospace".to_string()
+}
+
+fn default_wrap_column() -> Option<u32> {
+    Some(120)
 }
 
 impl Default for SettingsProjection {
@@ -2375,6 +2393,13 @@ pub enum CommandDispatchIntent {
     SetSmoothScrollingEnabled {
         /// Whether smooth scrolling should be enabled.
         enabled: bool,
+    },
+    /// Update editor line wrapping policy.
+    SetLineWrappingPolicy {
+        /// Requested line wrapping policy.
+        policy: LineWrappingPolicy,
+        /// Optional fixed wrap column.
+        wrap_column: Option<u32>,
     },
     /// Toggle workspace search using the optional indexed backend.
     SetIndexedWorkspaceSearchEnabled {
@@ -5207,6 +5232,8 @@ mod tests {
                 whitespace_guides_visible: false,
                 indent_guides_visible: false,
                 smooth_scrolling_enabled: true,
+                line_wrapping_policy: LineWrappingPolicy::FixedColumn,
+                wrap_column: Some(12),
             },
             telemetry: WorkbenchTelemetryConsent::default(),
             indexed_workspace_search_enabled: false,
@@ -5224,6 +5251,11 @@ mod tests {
         );
         assert_eq!(settings.font_fallback_diagnostics.len(), 8);
         assert_eq!(settings.toast_verbosity, ToastVerbosityProjection::All);
+        assert_eq!(
+            settings.editor.line_wrapping_policy,
+            LineWrappingPolicy::FixedColumn
+        );
+        assert_eq!(settings.editor.wrap_column, Some(40));
         assert!(!settings.editor.line_numbers_visible);
         assert!(!settings.editor.current_line_highlight);
         assert!(!settings.telemetry.crash_reports_enabled);
@@ -5445,6 +5477,8 @@ mod tests {
                 width_px: 800,
                 height_px: 32,
             },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: ViewportProjectionMode::DegradedLargeFile,
             line_slices: vec![
                 ViewportLineSlice {

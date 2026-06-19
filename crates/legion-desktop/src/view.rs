@@ -11,10 +11,11 @@ use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 
 use legion_protocol::{
     BufferId, DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
-    PRODUCT_NAME, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    ProposalId, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, RedactionHint,
-    TerminalOutputRowProjection, TextCoordinate, ViewportLineTruncationState,
-    ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
+    PluginContributionProjection, ProposalId, ProposalRejectionReason, ProposalRiskLabel,
+    ProtocolTextRange, RedactionHint, TerminalOutputRowProjection, TextCoordinate,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, GitBlameLineProjection,
@@ -277,6 +278,12 @@ pub struct DesktopSettingsViewModel {
     pub next_edit_prediction_enabled: bool,
     /// Whether smooth scrolling is enabled.
     pub smooth_scrolling_enabled: bool,
+    /// Editor line wrapping policy.
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column.
+    pub wrap_column: Option<u32>,
+    /// Stable wrapping policy row for deterministic renderer evidence.
+    pub wrapping_row: String,
     /// Whether crash reports are enabled.
     pub crash_reports_enabled: bool,
     /// Telemetry consent display label.
@@ -289,6 +296,14 @@ impl DesktopSettingsViewModel {
     fn from_projection(projection: &SettingsProjection) -> Self {
         let normalized = projection.clone().normalized();
         let font_fallback_rows = font_fallback_rows(&normalized);
+        let wrapping_row = match normalized.editor.line_wrapping_policy {
+            LineWrappingPolicy::Off => "wrapping: off".to_string(),
+            LineWrappingPolicy::Viewport => "wrapping: viewport".to_string(),
+            LineWrappingPolicy::FixedColumn => format!(
+                "wrapping: fixed_column {}",
+                normalized.editor.wrap_column.unwrap_or(120)
+            ),
+        };
         Self {
             theme_preference: normalized.theme_preference,
             theme_label: normalized.theme_preference.label().to_string(),
@@ -308,6 +323,9 @@ impl DesktopSettingsViewModel {
             indexed_workspace_search_enabled: normalized.indexed_workspace_search_enabled,
             next_edit_prediction_enabled: normalized.next_edit_prediction_enabled,
             smooth_scrolling_enabled: normalized.editor.smooth_scrolling_enabled,
+            line_wrapping_policy: normalized.editor.line_wrapping_policy,
+            wrap_column: normalized.editor.wrap_column,
+            wrapping_row,
             crash_reports_enabled: normalized.telemetry.crash_reports_enabled,
             telemetry_label: normalized.telemetry.consent_label.clone(),
             schema_version: normalized.schema_version,
@@ -1777,7 +1795,7 @@ fn render_code_lines(
                     active_buffer_id,
                     snapshot_id,
                     line,
-                    ui.available_width(),
+                    code_line_wrap_width(model, ui.available_width()),
                 );
                 let response =
                     ui.add(egui::Label::new(galley).sense(egui::Sense::click_and_drag()));
@@ -1883,6 +1901,17 @@ fn render_code_lines(
 
 fn code_char_width() -> f32 {
     theme::tokens().typography.code as f32 * 0.62
+}
+
+fn code_line_wrap_width(model: &DesktopProjectionViewModel, available_width: f32) -> f32 {
+    match model.settings.line_wrapping_policy {
+        LineWrappingPolicy::Off => f32::INFINITY,
+        LineWrappingPolicy::Viewport => available_width.max(1.0),
+        LineWrappingPolicy::FixedColumn => {
+            let column = model.settings.wrap_column.unwrap_or(120).max(1);
+            column as f32 * code_char_width()
+        }
+    }
 }
 
 const CODE_LINE_GALLEY_CACHE_LIMIT: usize = 512;

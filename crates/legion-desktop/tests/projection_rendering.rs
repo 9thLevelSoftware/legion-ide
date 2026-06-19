@@ -12,7 +12,7 @@ use legion_protocol::{
     CollaborationSessionId, CommandDescriptor, CommandRegistryProjection, CommandRiskLabel,
     ContextManifestEgressStatus, ContextManifestInclusionState, ContextManifestItem,
     ContextManifestItemCount, ContextManifestItemKind, FileFingerprint, FileId,
-    LanguageStickyScopeProjection, PluginCommandDescriptor, PluginContribution,
+    LanguageStickyScopeProjection, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
     PluginContributionProjection, PluginId, PrincipalId, ProposalContextManifestSummary,
     ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
     ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
@@ -378,6 +378,8 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 width_px: 800,
                 height_px: 600,
             },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: ViewportProjectionMode::DegradedLargeFile,
             line_slices: vec![ViewportLineSlice {
                 line_number: 0,
@@ -434,6 +436,8 @@ fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 width_px: 800,
                 height_px: 600,
             },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: ViewportProjectionMode::Normal,
             line_slices: vec![
                 ViewportLineSlice {
@@ -1074,6 +1078,8 @@ fn projection_rendering_projects_workbench_settings_model() {
             whitespace_guides_visible: true,
             indent_guides_visible: true,
             smooth_scrolling_enabled: true,
+            line_wrapping_policy: LineWrappingPolicy::FixedColumn,
+            wrap_column: Some(12),
         },
         telemetry: legion_protocol::WorkbenchTelemetryConsent::default(),
         indexed_workspace_search_enabled: false,
@@ -1110,6 +1116,12 @@ fn projection_rendering_projects_workbench_settings_model() {
     assert!(model.settings.whitespace_guides_visible);
     assert!(model.settings.indent_guides_visible);
     assert!(model.settings.smooth_scrolling_enabled);
+    assert_eq!(
+        model.settings.line_wrapping_policy,
+        LineWrappingPolicy::FixedColumn
+    );
+    assert_eq!(model.settings.wrap_column, Some(40));
+    assert_eq!(model.settings.wrapping_row, "wrapping: fixed_column 40");
     assert!(!model.settings.crash_reports_enabled);
     assert_eq!(model.settings.telemetry_label, "local-only");
     assert!(
@@ -1160,6 +1172,8 @@ fn projection_rendering_projects_editor_polish_summary_rows() {
             width_px: 80,
             height_px: 24,
         },
+        line_wrapping_policy: LineWrappingPolicy::Off,
+        wrap_column: None,
         mode: ViewportProjectionMode::Normal,
         line_slices: Vec::new(),
         line_metrics: Vec::new(),

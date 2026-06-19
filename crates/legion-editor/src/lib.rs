@@ -1026,6 +1026,8 @@ impl EditorEngine {
             cursor: Self::protocol_coordinate_from_offset(&state.buffer, state.buffer.try_byte_offset(cursor)?)?,
             scroll: request.scroll,
             dimensions: request.dimensions,
+            line_wrapping_policy: legion_protocol::LineWrappingPolicy::Off,
+            wrap_column: None,
             mode,
             line_slices,
             line_metrics,
