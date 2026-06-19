@@ -7514,6 +7514,8 @@ version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "clap",
+ "legion-protocol",
+ "legion-text",
  "serde",
  "toml",
 ]

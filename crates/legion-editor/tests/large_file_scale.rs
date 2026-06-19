@@ -304,3 +304,36 @@ fn large_file_undo_redo_round_trips_content() {
         "save after redo must match edited content"
     );
 }
+
+/// SCALE.04 — binary file is refused at open.
+#[test]
+fn binary_file_open_is_refused() {
+    let mut engine = EditorEngine::new();
+    let binary_content = "hello\x00world binary content";
+    let result = engine.open_buffer(
+        WorkspaceId(1),
+        FileId(1),
+        "image.png",
+        binary_content,
+    );
+    assert!(result.is_err(), "binary file should be refused");
+    let err = result.unwrap_err();
+    let err_msg = format!("{err}");
+    assert!(
+        err_msg.contains("binary"),
+        "error should mention binary: {err_msg}"
+    );
+}
+
+/// SCALE.04 — clean text file with no NUL bytes opens normally.
+#[test]
+fn text_file_with_no_nul_opens_normally() {
+    let mut engine = EditorEngine::new();
+    let result = engine.open_buffer(
+        WorkspaceId(1),
+        FileId(1),
+        "clean.rs",
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    );
+    assert!(result.is_ok(), "clean text file should open: {:?}", result.err());
+}
