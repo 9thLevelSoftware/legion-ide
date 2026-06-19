@@ -7,25 +7,25 @@ Scope: Manual editor feel, rendering, input, focus, font, wrapping, degraded-mod
 
 - Branch: `codex/ws-manual-01`
 - Starting dirty files: none (`git status --short --branch` showed only the branch line).
-- Ending dirty files: `plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md` before the Phase 0 evidence commits; none expected after the latest Phase 0 evidence commit.
+- Ending dirty files: none expected after the final evidence commit.
 
-Current branch history already contains `a6666ff docs: add WS-MANUAL-01 implementation plan`, `7ca090b test: fix Windows baseline portability`, and `84fce4c docs: seed WS-MANUAL-01 evidence`.
+Current branch history contains WS-MANUAL-01 implementation and evidence commits through the final Phase 10 verification update.
 
 ## Workstream Coverage
 
 | Master-plan task | Planned evidence / target check |
 | --- | --- |
-| MANUAL.01 latency budgets | To be created in MANUAL.01: `plans/evidence/production/WS-MANUAL-01/editor-latency-budgets.md` |
-| MANUAL.02 renderer-backed input-to-paint | To be created in MANUAL.02: `target/perf-harness/perf_report.toml`; `cargo run -p xtask -- perf-harness`; `cargo run -p xtask -- verify-perf-harness` |
+| MANUAL.01 latency budgets | `plans/evidence/production/WS-MANUAL-01/editor-latency-budgets.md`; `cargo test -p xtask --test perf_harness` |
+| MANUAL.02 renderer-backed input-to-paint | `target/perf-harness/perf_report.toml`; `cargo run -p xtask -- perf-harness`; `cargo run -p xtask -- verify-perf-harness`; `cargo test -p legion-desktop --test manual_perf` |
 | MANUAL.03 custom editor path / no TextEdit | `cargo run -p xtask -- no-egui-textedit`; `cargo test -p xtask --test no_egui_textedit` |
-| MANUAL.04 IME smoke | To be created in MANUAL.04: `cargo test -p legion-desktop --test manual_input_conformance ime_composition_suppresses_shortcuts_and_commits_text -- --exact` |
-| MANUAL.05 clipboard tests | To be created in MANUAL.05: `cargo test -p legion-desktop --test manual_input_conformance clipboard_copy_cut_paste_select_all_round_trips_through_app_authority -- --exact` |
+| MANUAL.04 IME smoke | `cargo test -p legion-desktop --test manual_input_conformance manual_input_conformance_commits_ime_text_and_advances_projected_cursor -- --exact` |
+| MANUAL.05 clipboard tests | `cargo test -p legion-desktop --test manual_input_conformance manual_input_conformance_clipboard_copy_cut_paste_and_select_all_are_app_owned -- --exact`; copy/cut are suppressed during active IME composition. |
 | MANUAL.06 multi-cursor / rectangular selection | Covered for v1 Manual scope by the editor projection substrate test; rectangular selection is explicitly deferred. See MANUAL.06 Decision below. |
-| MANUAL.07 keyboard focus | To be created in MANUAL.07: `cargo test -p legion-desktop --test manual_input_conformance manual_focus_routes_text_to_active_surface_only -- --exact` |
-| MANUAL.08 font fallback diagnostics | To be created in MANUAL.08: `cargo test -p legion-desktop --test manual_renderer_evidence font_fallback_diagnostics_are_projected_without_raw_font_paths -- --exact` |
-| MANUAL.09 line wrapping policy | To be created in MANUAL.09: `cargo test -p legion-desktop --test manual_renderer_evidence line_wrapping_policy_keeps_viewport_math_stable -- --exact` |
-| MANUAL.10 degraded-mode banner | To be created in MANUAL.10: `cargo test -p legion-desktop --test large_file_guardrails large_file_guardrails_degraded_banner_names_capability_reduction -- --exact` |
-| MANUAL.11 deterministic renderer evidence | To be created in MANUAL.11: `cargo test -p legion-desktop --test manual_renderer_evidence deterministic_renderer_evidence_covers_core_editor_states -- --exact` |
+| MANUAL.07 keyboard focus | `cargo test -p legion-desktop --test manual_input_conformance manual_input_conformance_palette_focus_blocks_direct_editor_insert -- --exact` |
+| MANUAL.08 font fallback diagnostics | `cargo test -p legion-desktop --test manual_renderer_evidence font_fallback_diagnostics_are_projected_without_raw_font_paths -- --exact` |
+| MANUAL.09 line wrapping policy | `cargo test -p legion-desktop --test manual_renderer_evidence line_wrapping_policy_keeps_viewport_math_stable -- --exact` |
+| MANUAL.10 degraded-mode banner | `cargo test -p legion-desktop --test large_file_guardrails large_file_guardrails_degraded_banner_names_capability_reduction -- --exact` |
+| MANUAL.11 deterministic renderer evidence | `cargo test -p legion-desktop --test manual_renderer_evidence deterministic_renderer_evidence_covers_core_editor_states -- --exact` |
 | MANUAL.12 zero-egress smoke | `crates/legion-app/tests/manual_zero_egress.rs`; `plans/evidence/production/WS-MANUAL-01/manual-mode-zero-egress.md`; `cargo test -p legion-app --test manual_zero_egress` |
 
 ## MANUAL.06 Decision
@@ -46,22 +46,24 @@ Rectangular selection is intentionally deferred out of the v1 product-workflow g
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `cargo test -p xtask --test perf_harness` | Pass | WS-MANUAL-01 perf-harness phase added Manual renderer budget/report coverage in `xtask/tests/perf_harness.rs`; Phase 10 will re-run the final current-tree target. |
-| `cargo run -p xtask -- perf-harness` | Pass | Generated `target/perf-harness/perf_report.toml` includes `manual.renderer_input_to_paint` with 3 passed, 0 failed, 0 skipped at git `787b7030c3a622d55625fbcb1233cc768a56901c`. |
-| `cargo run -p xtask -- verify-perf-harness` | Pass | MANUAL.02 perf-harness phase verified the generated report; Phase 10 will re-run this against the final tree. |
-| `cargo run -p xtask -- no-egui-textedit` | Pass | MANUAL.03 keeps the custom Manual editor path covered by the no-`egui::TextEdit` xtask gate and companion test. |
-| `cargo test -p legion-desktop --test manual_perf` | Pass | MANUAL.02 added the renderer-backed Manual edit perf test and metadata-only report path in `crates/legion-desktop/tests/manual_perf.rs`. |
-| `cargo test -p legion-desktop --test manual_input_conformance` | Pass | MANUAL.04, MANUAL.05, MANUAL.06, and MANUAL.07 are covered by Manual focus, IME, clipboard, copy/cut composition suppression, and selection-scope tests. |
-| `cargo test -p legion-desktop --test manual_renderer_evidence` | Pass | MANUAL.08, MANUAL.09, MANUAL.11, and the renderer zero-egress trust-boundary check are covered by `manual_renderer_evidence`. |
-| `cargo test -p legion-desktop --test large_file_guardrails large_file_guardrails_degraded_banner_names_capability_reduction -- --exact` | Pass | MANUAL.10 degraded-mode banner evidence is covered by the focused large-file guardrail test. |
-| `cargo test -p legion-app --test manual_zero_egress` | Pass | MANUAL.12 app-level open/edit/save/search zero-egress smoke is recorded in `manual-mode-zero-egress.md` and strengthened by commits `98f0b6b` and `64b3a85`. |
-| `cargo run -p xtask -- check-deps` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
-| `cargo run -p xtask -- docs-hygiene` | Pass | Phase 9 docs-hygiene command passed after the ledger/evidence updates. |
-| `cargo fmt --all --check` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
-| `cargo check --workspace --all-targets` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
-| `cargo test --workspace --all-targets --no-fail-fast` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
-| `cargo clippy --workspace --all-targets -- -D warnings` | Blocked | Pending final Phase 10 sweep; not claimed by this docs-only evidence closure. |
-| `git diff --check` | Pass | Phase 9 whitespace check passed after the docs updates. |
+| `cargo test -p xtask --test perf_harness` | Pass | Phase 10 rerun passed: 20 passed, 0 failed. |
+| `cargo run -p xtask -- perf-harness` | Pass | Generated `target/perf-harness/perf_report.toml` at git `04207b9db7f69bdccbc5ced0abd8d5416bb5b7f6`: 3 passed, 0 failed, 0 skipped; `manual.renderer_input_to_paint` p50 2077 us / p95 18223 us under the 32 ms budget. |
+| `cargo run -p xtask -- verify-perf-harness` | Pass | Strict verification passed for the final perf report: 3 passed, 0 failed, 0 skipped. |
+| `cargo run -p xtask -- no-egui-textedit` | Pass | Phase 10 rerun passed; custom Manual editor path still avoids `egui::TextEdit`. |
+| `cargo test -p xtask --test no_egui_textedit` | Pass | Phase 10 rerun passed: 6 passed, 0 failed. |
+| `cargo test -p legion-desktop --test manual_perf` | Pass | Phase 10 rerun passed: 3 passed, 0 failed. |
+| `cargo test -p legion-desktop --test manual_input_conformance` | Pass | Phase 10 rerun passed: 3 passed, 0 failed; covers Manual focus, IME, clipboard, copy/cut composition suppression, and selection-scope behavior. |
+| `cargo test -p legion-desktop --test manual_renderer_evidence` | Pass | Phase 10 rerun passed: 4 passed, 0 failed; covers MANUAL.08, MANUAL.09, MANUAL.11, and renderer zero-egress trust-boundary rows. |
+| `cargo test -p legion-desktop --test large_file_guardrails` | Pass | Phase 10 rerun passed: 3 passed, 0 failed; covers the MANUAL.10 degraded-mode banner and no-source-leak guardrails. |
+| `cargo test -p legion-app --test manual_zero_egress` | Pass | Phase 10 rerun passed: 1 passed, 0 failed; app-level Manual open/edit/save/search zero-egress smoke remains green. |
+| `cargo test -p legion-app --test settings` | Pass | Phase 10 rerun passed: 2 passed, 0 failed; settings projection and command-palette settings dispatch remain green after font/wrapping settings additions. |
+| `cargo run -p xtask -- check-deps` | Pass | Phase 10 rerun passed; dependency policy checks passed. |
+| `cargo run -p xtask -- docs-hygiene` | Pass | Phase 10 rerun passed; documentation hygiene checks passed. |
+| `cargo fmt --all --check` | Pass | Phase 10 rerun passed. |
+| `cargo check --workspace --all-targets` | Pass | Phase 10 rerun passed for the workspace. |
+| `cargo test --workspace --all-targets --no-fail-fast -j 1` | Pass | Default-concurrency attempt failed during Windows MSVC linking with `LNK1102: out of memory`; single-job rerun passed all workspace targets. |
+| `cargo clippy --workspace --all-targets -j 1 -- -D warnings` | Pass | Phase 10 rerun passed with single-job concurrency to avoid the same Windows linker/resource pressure. |
+| `git diff --check` | Pass | Phase 10 rerun passed after the final evidence update. |
 
 ## Product-Readiness Decision
 
