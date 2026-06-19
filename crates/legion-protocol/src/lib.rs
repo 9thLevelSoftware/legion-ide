@@ -550,6 +550,17 @@ pub struct LargeFileStatus {
     pub message: String,
 }
 
+/// File size classification for UX status display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileSizeClassification {
+    /// File is within normal editing limits.
+    Normal,
+    /// File exceeds the large-file threshold and operates in degraded mode.
+    Large,
+    /// File was detected as binary content and cannot be previewed as text.
+    Binary,
+}
+
 /// Protocol-level viewport projection for later UI rendering contracts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewportProjection {
@@ -1276,6 +1287,8 @@ pub struct EditorBufferMetadata {
     pub undo_len: usize,
     /// Number of redo entries retained for the buffer.
     pub redo_len: usize,
+    /// File size classification for UX display.
+    pub file_size_classification: FileSizeClassification,
     /// Metadata DTO schema version.
     pub schema_version: u16,
 }

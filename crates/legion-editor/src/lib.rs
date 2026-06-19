@@ -876,6 +876,10 @@ impl EditorEngine {
             conflict: state.conflict_state.clone(),
             undo_len: state.undo_stack.len(),
             redo_len: state.redo_stack.len(),
+            file_size_classification: match state.mode {
+                BufferMode::Normal => legion_protocol::FileSizeClassification::Normal,
+                BufferMode::Degraded => legion_protocol::FileSizeClassification::Large,
+            },
             schema_version: 1,
         })
     }
