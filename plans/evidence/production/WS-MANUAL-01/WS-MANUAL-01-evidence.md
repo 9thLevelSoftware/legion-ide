@@ -20,7 +20,7 @@ Current branch history already contains `a6666ff docs: add WS-MANUAL-01 implemen
 | MANUAL.03 custom editor path / no TextEdit | `cargo run -p xtask -- no-egui-textedit`; `cargo test -p xtask --test no_egui_textedit` |
 | MANUAL.04 IME smoke | To be created in MANUAL.04: `cargo test -p legion-desktop --test manual_input_conformance ime_composition_suppresses_shortcuts_and_commits_text -- --exact` |
 | MANUAL.05 clipboard tests | To be created in MANUAL.05: `cargo test -p legion-desktop --test manual_input_conformance clipboard_copy_cut_paste_select_all_round_trips_through_app_authority -- --exact` |
-| MANUAL.06 multi-cursor / rectangular selection | See MANUAL.06 Decision below; app/editor projection tests or a documented deferral must be recorded before closure. |
+| MANUAL.06 multi-cursor / rectangular selection | Covered for v1 Manual scope by the editor projection substrate test; rectangular selection is explicitly deferred. See MANUAL.06 Decision below. |
 | MANUAL.07 keyboard focus | To be created in MANUAL.07: `cargo test -p legion-desktop --test manual_input_conformance manual_focus_routes_text_to_active_surface_only -- --exact` |
 | MANUAL.08 font fallback diagnostics | To be created in MANUAL.08: `cargo test -p legion-desktop --test manual_renderer_evidence font_fallback_diagnostics_are_projected_without_raw_font_paths -- --exact` |
 | MANUAL.09 line wrapping policy | To be created in MANUAL.09: `cargo test -p legion-desktop --test manual_renderer_evidence line_wrapping_policy_keeps_viewport_math_stable -- --exact` |
@@ -30,7 +30,9 @@ Current branch history already contains `a6666ff docs: add WS-MANUAL-01 implemen
 
 ## MANUAL.06 Decision
 
-Decision status: pending. WS-MANUAL-01 must record whether multi-cursor and rectangular selection ship in the v1 Manual editor path or are explicitly deferred, with app/editor projection tests or a deferral rationale. Until then, MANUAL.06 remains open.
+Decision status: recorded. Multi-cursor substrate is in scope for v1 Manual mode and is covered by `crates/legion-editor/src/lib.rs::engine_preserves_multiple_cursors_and_selections_in_projection`, which verifies that the editor engine preserves multiple cursors and selections through viewport projection.
+
+Rectangular selection is intentionally deferred out of the v1 product-workflow gate until the editor exposes a rectangular selection command with stable protocol DTOs, keyboard/mouse gestures, and renderer evidence. The Manual UI must not advertise rectangular selection as complete.
 
 ## Phase 0 Baseline Mapping
 
