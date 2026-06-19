@@ -317,14 +317,13 @@ impl DesktopSettingsViewModel {
 
 fn font_fallback_rows(projection: &SettingsProjection) -> Vec<String> {
     if projection.font_fallback_diagnostics.is_empty() {
-        let probe = theme::font_fallback_probe(&projection.editor_font_family);
         return vec![format!(
             "font fallback: requested={} resolved={} coverage={} found={} message={}",
-            probe.requested_family_label,
-            probe.resolved_family_label,
-            probe.coverage_label,
-            probe.fallback_found,
-            probe.message
+            sanitize_font_fallback_label(&projection.editor_font_family, "monospace"),
+            "unreported",
+            "cjk",
+            false,
+            "diagnostic-unreported"
         )];
     }
 
@@ -334,13 +333,41 @@ fn font_fallback_rows(projection: &SettingsProjection) -> Vec<String> {
         .map(|diagnostic| {
             format!(
                 "font fallback: requested={} resolved={} coverage={} found={}",
-                diagnostic.requested_family_label,
-                diagnostic.resolved_family_label,
-                diagnostic.coverage_label,
+                sanitize_font_fallback_label(
+                    &diagnostic.requested_family_label,
+                    "redacted-requested-font"
+                ),
+                sanitize_font_fallback_label(
+                    &diagnostic.resolved_family_label,
+                    "redacted-resolved-font"
+                ),
+                sanitize_font_fallback_label(&diagnostic.coverage_label, "unknown"),
                 diagnostic.fallback_found
             )
         })
         .collect()
+}
+
+fn sanitize_font_fallback_label(value: &str, fallback: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() || looks_like_font_path(label) {
+        return fallback.to_string();
+    }
+
+    let normalized = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+        .take(64)
+        .collect::<String>();
+    if normalized.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn looks_like_font_path(value: &str) -> bool {
+    value.contains('\\') || value.contains('/') || value.contains(':')
 }
 
 /// Testable display model derived only from a shell projection snapshot.

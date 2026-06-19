@@ -21303,7 +21303,7 @@ pub enum StorageRepositoryResponse {
     /// Metadata.
     FileMetadata(Option<FileMetadata>),
     /// Session record.
-    SessionRecord(Option<WorkspaceSessionRecord>),
+    SessionRecord(Box<Option<WorkspaceSessionRecord>>),
     /// Trust record.
     TrustRecord(Option<TrustRecord>),
     /// Proposal audit record.

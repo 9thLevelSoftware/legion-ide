@@ -394,7 +394,10 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
         ThemeVariant::Dark => egui::Theme::Dark,
         ThemeVariant::Light => egui::Theme::Light,
     });
-    if let Some(fonts) = cjk_font_definitions() {
+    let fallback_probe = font_fallback_probe("monospace");
+    if fallback_probe.fallback_found
+        && let Some(fonts) = cjk_font_definitions()
+    {
         ctx.set_fonts(fonts);
     }
     let mut visuals = match theme.variant {
