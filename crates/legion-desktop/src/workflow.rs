@@ -2508,6 +2508,12 @@ fn editor_text_input_actions(
                     at,
                 });
             }
+            egui::Event::Copy => {
+                actions.push(DesktopAction::ClipboardCopy);
+            }
+            egui::Event::Cut => {
+                actions.push(DesktopAction::ClipboardCut);
+            }
             egui::Event::Ime(egui::ImeEvent::Enabled) => {
                 composition.active = true;
             }
@@ -2554,13 +2560,22 @@ fn editor_keyboard_control_actions(
     // - egui#248 tracks composition events and candidate positioning
     // - egui#7908 tracks composition-time key consumption bugs
     // Keep editor shortcuts out of the way while the IME is active.
-    if !editor_input_enabled || input.modifiers.command || ime_composition_active {
+    if !editor_input_enabled || ime_composition_active {
         return Vec::new();
     }
 
     let Some(buffer_id) = active_buffer_for_input(snapshot) else {
         return Vec::new();
     };
+
+    if input.modifiers.command {
+        if input.key_pressed(egui::Key::A) {
+            return vec![DesktopAction::SelectAll {
+                buffer_id: Some(buffer_id),
+            }];
+        }
+        return Vec::new();
+    }
 
     let mut actions = Vec::new();
     if input.key_pressed(egui::Key::Tab)
@@ -2833,6 +2848,8 @@ mod tests {
         let events = vec![
             egui::Event::Text("x".to_string()),
             egui::Event::Paste("clip".to_string()),
+            egui::Event::Copy,
+            egui::Event::Cut,
             egui::Event::Ime(egui::ImeEvent::Commit("漢".to_string())),
         ];
         let at = TextCoordinate {
@@ -2854,6 +2871,8 @@ mod tests {
                         text: "clip".to_string(),
                         at,
                     },
+                    DesktopAction::ClipboardCopy,
+                    DesktopAction::ClipboardCut,
                     DesktopAction::ImeCommit {
                         text: "漢".to_string(),
                         at,
@@ -2971,6 +2990,25 @@ mod tests {
                     start: coordinate(7, 5),
                     end: coordinate(7, 6),
                 },
+            }]
+        );
+    }
+
+    #[test]
+    fn editor_keyboard_control_actions_routes_command_a_to_select_all() {
+        let snapshot = snapshot_with_active_buffer();
+        let command_a = input_state_for_key(
+            egui::Key::A,
+            egui::Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            editor_keyboard_control_actions(&command_a, &snapshot, true, false),
+            vec![DesktopAction::SelectAll {
+                buffer_id: Some(BufferId(1)),
             }]
         );
     }

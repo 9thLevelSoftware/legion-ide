@@ -14003,7 +14003,7 @@ impl AppComposition {
                         TextEdit::delete(CommandDispatcher::editor_range(selection)),
                         event_context.correlation_id,
                     )?;
-                    self.set_buffer_cursor(*buffer_id, selection.start)?;
+                    self.collapse_selection_to_cursor(*buffer_id, selection.start)?;
                     self.emit_transaction_event(&descriptor);
                 }
                 return Ok(AppCommandOutcome::ClipboardUpdated(metadata));
@@ -17780,6 +17780,16 @@ impl AppComposition {
                 range: CommandDispatcher::editor_range(range),
             }],
         )?;
+        Ok(())
+    }
+
+    fn collapse_selection_to_cursor(
+        &mut self,
+        buffer_id: BufferId,
+        cursor: TextCoordinate,
+    ) -> Result<(), AppCompositionError> {
+        self.set_buffer_cursor(buffer_id, cursor)?;
+        self.editor.set_selections(buffer_id, Vec::new())?;
         Ok(())
     }
 

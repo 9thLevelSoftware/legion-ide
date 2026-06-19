@@ -186,6 +186,16 @@ fn manual_input_conformance_clipboard_copy_cut_paste_and_select_all_are_app_owne
         } if cut_buffer == buffer_id
     ));
     assert_ne!(active_text(&runtime), "alpha\nbeta\n");
+    let snapshot_after_cut = runtime.projection_snapshot();
+    assert!(
+        snapshot_after_cut
+            .daily_editing_projection
+            .viewport_states
+            .iter()
+            .find(|state| state.buffer_id == buffer_id)
+            .is_some_and(|state| state.selections.is_empty()),
+        "cut should collapse the consumed selection"
+    );
 
     assert_eq!(
         runtime
