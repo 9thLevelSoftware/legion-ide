@@ -10,6 +10,7 @@ pub mod beta;
 pub mod bridge;
 pub mod diagnostics;
 pub mod health;
+pub mod manual_perf;
 pub mod metrics;
 pub mod package;
 pub mod platform;

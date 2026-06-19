@@ -35,6 +35,11 @@ use crate::{
     },
     diagnostics::DesktopDiagnosticsExport,
     health::DesktopOperationalHealthSnapshot,
+    manual_perf::{
+        DEFAULT_KEYPRESS_P50_BUDGET_MS, DEFAULT_KEYPRESS_P95_BUDGET_MS,
+        DEFAULT_MANUAL_RENDERER_REPORT_PATH, DEFAULT_MANUAL_RENDERER_SAMPLE_COUNT,
+        DEFAULT_SCROLL_P95_BUDGET_MS, ManualPerfConfig,
+    },
     platform::{
         NativePlatformObservation, build_platform_adapter_checks, build_platform_smoke_snapshot,
     },
@@ -63,6 +68,8 @@ pub struct DesktopLaunchConfig {
     pub smoke: Option<RendererSmokeConfig>,
     /// Optional non-native-window GUI Phase 7 beta smoke configuration.
     pub beta: Option<BetaWorkflowConfig>,
+    /// Optional desktop-owned Manual renderer performance configuration.
+    pub manual_perf: Option<ManualPerfConfig>,
     /// Optional metadata-only session JSON path.
     pub session_state: Option<PathBuf>,
     /// Optional metadata-only diagnostics markdown path.
@@ -78,6 +85,7 @@ impl DesktopLaunchConfig {
             principal: PrincipalId("desktop".to_string()),
             smoke: None,
             beta: None,
+            manual_perf: None,
             session_state: None,
             diagnostics_export: None,
         }
@@ -104,12 +112,17 @@ impl DesktopLaunchConfig {
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut smoke_enabled = false;
         let mut beta_enabled = false;
+        let mut manual_perf_enabled = false;
         let mut workspace_root = None;
         let mut beta_workspace_root = None;
         let mut initial_file = None;
         let mut duration_ms = 1500;
         let mut evidence_path =
             PathBuf::from("plans/evidence/gui-productization/phase-2-renderer-smoke.md");
+        let mut perf_report_path = PathBuf::from(DEFAULT_MANUAL_RENDERER_REPORT_PATH);
+        let mut perf_report_seen = false;
+        let mut perf_samples = DEFAULT_MANUAL_RENDERER_SAMPLE_COUNT;
+        let mut perf_samples_seen = false;
         let mut session_state = None;
         let mut diagnostics_export = None;
         let mut positionals = Vec::new();
@@ -120,6 +133,7 @@ impl DesktopLaunchConfig {
             match arg_text.as_ref() {
                 "--smoke" => smoke_enabled = true,
                 "--beta-smoke" => beta_enabled = true,
+                "--manual-perf" => manual_perf_enabled = true,
                 "--workspace" => {
                     let value = args
                         .next()
@@ -150,6 +164,22 @@ impl DesktopLaunchConfig {
                         .ok_or_else(|| anyhow!("--evidence requires a path"))?;
                     evidence_path = PathBuf::from(value);
                 }
+                "--perf-report" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--perf-report requires a path"))?;
+                    perf_report_seen = true;
+                    perf_report_path = PathBuf::from(value);
+                }
+                "--perf-samples" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--perf-samples requires a positive integer"))?;
+                    perf_samples_seen = true;
+                    perf_samples = value.to_string_lossy().parse::<usize>().map_err(|error| {
+                        anyhow!("--perf-samples requires a positive integer: {error}")
+                    })?;
+                }
                 "--session-state" => {
                     let value = args
                         .next()
@@ -179,6 +209,17 @@ impl DesktopLaunchConfig {
         }
         if smoke_enabled && beta_enabled {
             return Err(anyhow!("--smoke and --beta-smoke cannot be combined"));
+        }
+        if manual_perf_enabled && smoke_enabled {
+            return Err(anyhow!("--manual-perf and --smoke cannot be combined"));
+        }
+        if manual_perf_enabled && beta_enabled {
+            return Err(anyhow!("--manual-perf and --beta-smoke cannot be combined"));
+        }
+        if !manual_perf_enabled && (perf_report_seen || perf_samples_seen) {
+            return Err(anyhow!(
+                "--perf-report and --perf-samples require --manual-perf"
+            ));
         }
 
         let initial_file = initial_file
@@ -213,6 +254,19 @@ impl DesktopLaunchConfig {
         } else {
             None
         };
+        let manual_perf = if manual_perf_enabled {
+            Some(ManualPerfConfig::new(
+                workspace_root.clone(),
+                initial_file.as_ref().map(PathBuf::from),
+                perf_report_path,
+                perf_samples,
+                DEFAULT_KEYPRESS_P50_BUDGET_MS,
+                DEFAULT_KEYPRESS_P95_BUDGET_MS,
+                DEFAULT_SCROLL_P95_BUDGET_MS,
+            )?)
+        } else {
+            None
+        };
 
         Ok(Self {
             workspace_root,
@@ -220,6 +274,7 @@ impl DesktopLaunchConfig {
             principal: PrincipalId("desktop".to_string()),
             smoke,
             beta,
+            manual_perf,
             session_state,
             diagnostics_export,
         })
@@ -1859,7 +1914,9 @@ fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, St
 /// Run the desktop adapter from process arguments.
 pub fn run_from_env() -> Result<()> {
     let config = DesktopLaunchConfig::from_env_args()?;
-    if let Some(beta_config) = config.beta.clone() {
+    if let Some(manual_perf_config) = config.manual_perf.clone() {
+        crate::manual_perf::run_manual_perf(manual_perf_config)
+    } else if let Some(beta_config) = config.beta.clone() {
         beta::run_beta_workflow(beta_config).map(|_| ())
     } else if let Some(smoke_config) = config.smoke.clone() {
         smoke::run_smoke(config, smoke_config)
