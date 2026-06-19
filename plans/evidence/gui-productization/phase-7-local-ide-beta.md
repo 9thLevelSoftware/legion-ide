@@ -27,7 +27,6 @@ It does not accept remote production GUI, collaboration GUI, plugin management, 
 - `.planning/phases/07-fully-functional-local-ide-beta/07-05-RESULT.md`
 - `scripts/gui-smoke.ps1`
 - `scripts/gui-smoke.sh`
-- `.github/workflows/ci.yml`
 
 ## Required Commands
 
@@ -66,3 +65,4 @@ It does not accept remote production GUI, collaboration GUI, plugin management, 
 
 - Native OS accessibility inspection and broad platform parity remain outside GUI Phase 7 acceptance until later evidence accepts them.
 - GUI Phase 7 acceptance is local-beta acceptance only; unsupported advanced surfaces remain outside this phase.
+- No hosted CI workflow is currently configured; local repository gates and GUI evidence commands are the active verification source.

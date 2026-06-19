@@ -70,7 +70,7 @@ cargo deny --version
 
 If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
-CI runs cargo-deny through `EmbarkStudios/cargo-deny-action` on the Linux matrix leg, so local developer machines must install the CLI separately before using `scripts/run-phase-gates.*`.
+No GitHub Actions CI workflow is currently configured. Local developer machines must install the CLI before using `scripts/run-phase-gates.*`; those local gates are the active verification source.
 
 ## CLI Proof
 

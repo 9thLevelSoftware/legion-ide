@@ -31,7 +31,6 @@ The GUI track must preserve app/protocol/runtime authority boundaries. `legion-u
 - `.planning/phases/08-advanced-platform-gui-ga/08-07-RESULT.md`
 - `scripts/gui-smoke.ps1`
 - `scripts/gui-smoke.sh`
-- `.github/workflows/ci.yml`
 
 ## Required Commands
 
@@ -72,7 +71,7 @@ The GUI track must preserve app/protocol/runtime authority boundaries. `legion-u
 - [x] Collaboration GUI evidence is complete.
 - [x] Remote workspace GUI evidence is complete.
 - [x] Delegated task command-center evidence is complete and approval-gated.
-- [x] GA release, update, rollback, incident, smoke, CI, and platform parity evidence is complete.
+- [x] GA release, update, rollback, incident, smoke, and platform parity evidence is complete.
 - [x] GUI Phase 8 final gates passed and required command outputs are archived.
 - [x] Phase 8 accepted status is recorded only after all required artifacts and commands pass.
 
@@ -80,3 +79,4 @@ The GUI track must preserve app/protocol/runtime authority boundaries. `legion-u
 
 - The accepted legacy runtime substrate evidence under `plans/evidence/phase-8/` remains valid but is not a substitute for GUI productization GA evidence.
 - Phase 8 does not enable autonomous apply. Delegated-task runtime activation beyond metadata-only planning is a post-GA track and remains proposal-mediated, isolated, and approval-gated.
+- No hosted CI workflow is currently configured; local repository gates and GUI evidence commands are the active verification source.
