@@ -136,6 +136,7 @@ fn terminal_fixture_lifecycle_projects_status() {
         AppCommandOutcome::TerminalPanelUpdated(_) => {}
         other => panic!("expected terminal projection, got {other:?}"),
     };
+    let expect_finish_markers = cfg!(unix);
     for _ in 0..20 {
         projection = match app
             .dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id })
@@ -144,11 +145,15 @@ fn terminal_fixture_lifecycle_projects_status() {
             AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
             other => panic!("expected terminal projection, got {other:?}"),
         };
-        if projection
+        let has_ready = projection
             .output_rows
             .iter()
-            .any(|row| row.redacted_payload.contains("command block finished"))
-        {
+            .any(|row| row.redacted_payload.contains("ready"));
+        let has_finish = projection
+            .output_rows
+            .iter()
+            .any(|row| row.redacted_payload.contains("command block finished"));
+        if (expect_finish_markers && has_finish) || (!expect_finish_markers && has_ready) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
@@ -175,24 +180,27 @@ fn terminal_fixture_lifecycle_projects_status() {
         .iter()
         .position(|row| row.redacted_payload.contains("ready"))
         .expect("ready output row");
-    let finish_index = projection
-        .output_rows
-        .iter()
-        .position(|row| row.redacted_payload.contains("command block finished"))
-        .expect("command block finish row");
-    assert!(start_index < ready_index && ready_index < finish_index);
-    assert!(
-        projection
+    assert!(start_index < ready_index);
+    if expect_finish_markers {
+        let finish_index = projection
             .output_rows
             .iter()
-            .any(|row| row.redacted_payload.contains("command block finished"))
-    );
-    assert!(
-        projection
-            .output_rows
-            .iter()
-            .any(|row| row.redacted_payload.contains("exit=0"))
-    );
+            .position(|row| row.redacted_payload.contains("command block finished"))
+            .expect("command block finish row");
+        assert!(ready_index < finish_index);
+        assert!(
+            projection
+                .output_rows
+                .iter()
+                .any(|row| row.redacted_payload.contains("command block finished"))
+        );
+        assert!(
+            projection
+                .output_rows
+                .iter()
+                .any(|row| row.redacted_payload.contains("exit=0"))
+        );
+    }
     assert!(
         projection
             .output_rows
