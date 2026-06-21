@@ -13,6 +13,9 @@ pub use download::{
 mod session;
 pub use session::{LanguageSessionError, LspReadOutcome, RustAnalyzerLaunchConfig, RustAnalyzerSession};
 
+mod proposal;
+pub use proposal::workspace_edit_to_proposal_input;
+
 // Re-export discovery types consumed by tests and callers.
 pub use legion_lsp::{DiscoveredBinary, RustAnalyzerDiscovery};
 
