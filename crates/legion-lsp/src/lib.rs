@@ -2213,6 +2213,40 @@ pub struct LspDiagnosticNotificationMetadata {
     pub schema_version: u16,
 }
 
+/// Result of a bounded notification pump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpOutcome {
+    /// The caller predicate returned true.
+    PredicateMet,
+    /// The deadline elapsed before the predicate was met.
+    Deadline,
+    /// The child closed its stdout before the predicate was met.
+    Closed,
+}
+
+/// Notifications observed during a pump, borrowed for predicate evaluation.
+#[derive(Debug, Default)]
+pub struct PumpedNotifications {
+    /// Diagnostic notifications observed so far.
+    pub diagnostics: Vec<LspDiagnosticNotificationMetadata>,
+    /// Progress notifications observed so far.
+    pub progress: Vec<LspProgressNotification>,
+}
+
+/// Source of asynchronous LSP notifications. `BlockingPump` is the current
+/// single-threaded implementation; a future reader-thread implementation can
+/// replace it without changing callers (design §4, B-ready seam).
+pub trait LspNotificationSource {
+    /// Reads frames until `predicate` returns true, the deadline elapses, or
+    /// the child closes stdout. Id-bearing frames are routed to correlation;
+    /// notification frames are accumulated and surfaced to `predicate`.
+    fn pump_until(
+        &mut self,
+        deadline: std::time::Instant,
+        predicate: &mut dyn FnMut(&PumpedNotifications) -> bool,
+    ) -> LspRuntimeResult<PumpOutcome>;
+}
+
 /// Process-backed stdio LSP session that combines an
 /// [`LspStdioProcess`] handle with an [`LspClient`] correlation table.
 ///
@@ -2386,6 +2420,50 @@ impl LspStdioSession {
         self.ready
     }
 
+    /// Bounded pump for asynchronous notifications (design §4). Accumulated
+    /// notifications also land in `self.diagnostic_notifications` /
+    /// `self.progress_notifications` so existing accessors keep working.
+    pub fn pump_until(
+        &mut self,
+        deadline: std::time::Instant,
+        predicate: &mut dyn FnMut(&PumpedNotifications) -> bool,
+    ) -> LspRuntimeResult<PumpOutcome> {
+        let mut acc = PumpedNotifications::default();
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Ok(PumpOutcome::Deadline);
+            }
+            let envelope = match self.process.read_envelope()? {
+                Some(envelope) => envelope,
+                None => return Ok(PumpOutcome::Closed),
+            };
+            if envelope.id.is_some() {
+                // Out-of-band response while pumping: keep it correlatable by
+                // dropping it here is wrong, so ignore id frames during a pump
+                // (callers pump only when no request is outstanding).
+                continue;
+            }
+            match envelope.method.as_deref() {
+                Some("$/progress") => {
+                    if let Some(p) = progress_notification_from_params(envelope.params.as_ref()) {
+                        self.progress_notifications.push(p.clone());
+                        acc.progress.push(p);
+                    }
+                }
+                Some("textDocument/publishDiagnostics") => {
+                    if let Some(d) = diagnostic_notification_from_params(envelope.params.as_ref()) {
+                        self.diagnostic_notifications.push(d.clone());
+                        acc.diagnostics.push(d);
+                    }
+                }
+                _ => {}
+            }
+            if predicate(&acc) {
+                return Ok(PumpOutcome::PredicateMet);
+            }
+        }
+    }
+
     /// Reads frames from the child until we see a response for
     /// `target_json_rpc_id`; intermediate notifications are
     /// discarded so the framing/buffering layer can be exercised
@@ -2426,6 +2504,16 @@ impl LspStdioSession {
             debug_assert_eq!(correlated.request_id, expected_request_id);
             return Ok(correlated);
         }
+    }
+}
+
+impl LspNotificationSource for LspStdioSession {
+    fn pump_until(
+        &mut self,
+        deadline: std::time::Instant,
+        predicate: &mut dyn FnMut(&PumpedNotifications) -> bool,
+    ) -> LspRuntimeResult<PumpOutcome> {
+        LspStdioSession::pump_until(self, deadline, predicate)
     }
 }
 
