@@ -22,6 +22,8 @@ pub fn redact_lsp_stderr(raw: &str) -> StderrSummary {
     for line in raw.lines() {
         line_count += 1;
         let upper = line.to_ascii_uppercase();
+        // First-match-wins (intentional): a line matching both ERROR and WARN
+        // is counted as an error only.
         if upper.contains("ERROR") {
             error_lines += 1;
         } else if upper.contains("WARN") {

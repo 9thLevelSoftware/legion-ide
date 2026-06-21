@@ -12,7 +12,7 @@ use legion_protocol::{
 use super::RustAnalyzerDiscovery;
 
 /// Bounded restart policy for a crashed server (design §8, LANG.10).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestartPolicy {
     /// Maximum restarts before giving up.
     pub max_restarts: u32,
