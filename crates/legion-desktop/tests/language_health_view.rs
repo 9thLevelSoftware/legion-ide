@@ -74,6 +74,62 @@ fn health_projection_all_status_variants_covered() {
 }
 
 #[test]
+fn health_projection_all_provenance_variants_have_exact_labels() {
+    let base = LspServerHealthRecord {
+        server_id: LanguageServerId(7),
+        language_id: LanguageId("rust".into()),
+        binary_provenance: LspServerBinaryProvenance::Configured,
+        binary_path_hash: None,
+        artifact_hash: None,
+        version: None,
+        init_status: LspResultStatus::Fresh,
+        capabilities: Vec::new(),
+        diagnostics_latency_ms: None,
+        restart_count: 0,
+        download_decision_id: None,
+        schema_version: LspServerHealthRecord::schema_version(),
+    };
+
+    let cases = [
+        (LspServerBinaryProvenance::Configured, "configured path"),
+        (LspServerBinaryProvenance::ProjectLocal, "project-local"),
+        (LspServerBinaryProvenance::SystemPath, "system PATH"),
+        (LspServerBinaryProvenance::Bundled, "bundled"),
+        (LspServerBinaryProvenance::Downloaded, "downloaded"),
+    ];
+    for (provenance, expected_label) in cases {
+        let mut record = base.clone();
+        record.binary_provenance = provenance;
+        let p = project_lsp_health(&record, false);
+        assert_eq!(
+            p.provenance_label, expected_label,
+            "provenance {:?} should map to label '{}'",
+            provenance, expected_label
+        );
+    }
+}
+
+#[test]
+fn health_projection_server_label_uses_language_id() {
+    let record = LspServerHealthRecord {
+        server_id: LanguageServerId(42),
+        language_id: LanguageId("python".into()),
+        binary_provenance: LspServerBinaryProvenance::SystemPath,
+        binary_path_hash: None,
+        artifact_hash: None,
+        version: None,
+        init_status: LspResultStatus::Fresh,
+        capabilities: Vec::new(),
+        diagnostics_latency_ms: None,
+        restart_count: 0,
+        download_decision_id: None,
+        schema_version: LspServerHealthRecord::schema_version(),
+    };
+    let p = project_lsp_health(&record, false);
+    assert_eq!(p.server_label, "python#42");
+}
+
+#[test]
 fn health_projection_download_refused_flag_is_passed_through() {
     let record = LspServerHealthRecord {
         server_id: LanguageServerId(3),

@@ -1867,7 +1867,7 @@ pub fn project_lsp_health(
     .to_string();
 
     LspServerHealthProjection {
-        server_label: format!("rust-analyzer#{}", record.server_id.0),
+        server_label: format!("{}#{}", record.language_id.0, record.server_id.0),
         provenance_label,
         version_label: record.version.clone().unwrap_or_else(|| "unknown".into()),
         status_label,
