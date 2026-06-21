@@ -16,6 +16,8 @@ pub use session::{LanguageSessionError, LspReadOutcome, RustAnalyzerLaunchConfig
 // Re-export discovery types consumed by tests and callers.
 pub use legion_lsp::{DiscoveredBinary, RustAnalyzerDiscovery};
 
+use legion_protocol::SnapshotId;
+
 /// Returns `true` when a response issued against `issued` is stale relative to
 /// the buffer's `current` snapshot (LANG.07).
 ///
@@ -32,10 +34,7 @@ pub use legion_lsp::{DiscoveredBinary, RustAnalyzerDiscovery};
 /// real read path goes through [`RustAnalyzerSession::request_read`], which
 /// surfaces `issued_snapshot` in [`LspReadOutcome`] so callers can apply this
 /// gate directly.
-pub fn is_stale_response(
-    issued: legion_protocol::SnapshotId,
-    current: legion_protocol::SnapshotId,
-) -> bool {
+pub fn is_stale_response(issued: SnapshotId, current: SnapshotId) -> bool {
     issued != current
 }
 

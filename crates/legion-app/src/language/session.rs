@@ -32,6 +32,8 @@ pub enum LanguageSessionError {
     Launch(legion_lsp::LspRuntimeError),
     /// The `initialize` handshake failed.
     Handshake(legion_lsp::LspRuntimeError),
+    /// A read request (completion/hover/etc.) failed.
+    ReadRequest(legion_lsp::LspRuntimeError),
 }
 
 impl std::fmt::Display for LanguageSessionError {
@@ -41,6 +43,9 @@ impl std::fmt::Display for LanguageSessionError {
             LanguageSessionError::Launch(e) => write!(f, "rust-analyzer launch failed: {e}"),
             LanguageSessionError::Handshake(e) => {
                 write!(f, "rust-analyzer handshake failed: {e}")
+            }
+            LanguageSessionError::ReadRequest(e) => {
+                write!(f, "rust-analyzer read request failed: {e}")
             }
         }
     }
@@ -182,7 +187,7 @@ impl RustAnalyzerSession {
         let response = self
             .session
             .request(method.to_string(), params, super::operation_context())
-            .map_err(LanguageSessionError::Handshake)?;
+            .map_err(LanguageSessionError::ReadRequest)?;
         Ok(LspReadOutcome {
             result: response.result,
             issued_snapshot: response.context.snapshot_id,
