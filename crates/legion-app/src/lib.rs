@@ -25,6 +25,11 @@ use legion_ai_providers::{
 };
 #[cfg(not(feature = "ai"))]
 pub mod offline_ai;
+
+/// Language-tooling orchestration: capability-gated download decisions and
+/// artifact verification for LSP servers (design §5, §10).
+pub mod language;
+
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use legion_editor::{
     BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
