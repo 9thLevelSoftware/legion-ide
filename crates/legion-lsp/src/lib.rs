@@ -354,6 +354,69 @@ impl LanguageServerAdapterPlan {
     }
 }
 
+/// Resolution inputs for locating a rust-analyzer binary (design §5).
+#[derive(Debug, Clone, Default)]
+pub struct RustAnalyzerDiscovery {
+    /// Explicit user/workspace-configured path.
+    pub configured_path: Option<std::path::PathBuf>,
+    /// Project-local vendored binary path.
+    pub project_local_path: Option<std::path::PathBuf>,
+    /// Application-bundled binary path.
+    pub bundled_path: Option<std::path::PathBuf>,
+    /// Raw `PATH` environment value to scan for `rust-analyzer`.
+    pub path_env: Option<String>,
+}
+
+/// Outcome of binary discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveredBinary {
+    /// A binary was resolved with the given provenance.
+    Found {
+        /// Resolved binary path.
+        path: std::path::PathBuf,
+        /// How it was resolved.
+        provenance: legion_protocol::LspServerBinaryProvenance,
+    },
+    /// No binary could be resolved through any source.
+    NotFound,
+}
+
+impl RustAnalyzerDiscovery {
+    /// Resolves the binary in order: configured -> project-local -> PATH -> bundled.
+    pub fn resolve(&self) -> DiscoveredBinary {
+        use legion_protocol::LspServerBinaryProvenance as P;
+        if let Some(p) = &self.configured_path {
+            return DiscoveredBinary::Found { path: p.clone(), provenance: P::Configured };
+        }
+        if let Some(p) = &self.project_local_path {
+            return DiscoveredBinary::Found { path: p.clone(), provenance: P::ProjectLocal };
+        }
+        if let Some(path_env) = &self.path_env {
+            let exe = if cfg!(windows) { "rust-analyzer.exe" } else { "rust-analyzer" };
+            for dir in std::env::split_paths(path_env) {
+                let candidate = dir.join(exe);
+                if candidate.is_file() {
+                    return DiscoveredBinary::Found { path: candidate, provenance: P::SystemPath };
+                }
+            }
+        }
+        if let Some(p) = &self.bundled_path {
+            return DiscoveredBinary::Found { path: p.clone(), provenance: P::Bundled };
+        }
+        DiscoveredBinary::NotFound
+    }
+
+    /// Probes `<path> --version`, returning the trimmed stdout line if it runs.
+    pub fn probe_version(path: &std::path::Path) -> Option<String> {
+        let output = std::process::Command::new(path).arg("--version").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() { None } else { Some(text) }
+    }
+}
+
 /// Binary-manifest entry describing a language-server adapter for one workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspServerBinaryManifestEntry {
