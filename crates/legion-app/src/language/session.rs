@@ -119,6 +119,44 @@ impl RustAnalyzerSession {
         &self.health
     }
 
+    /// Sends `textDocument/didOpen` for a buffer.
+    pub fn did_open(
+        &mut self,
+        uri: &str,
+        language_id: &str,
+        version: i64,
+        text: &str,
+    ) -> Result<(), LanguageSessionError> {
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": language_id,
+                "version": version,
+                "text": text,
+            }
+        });
+        self.session
+            .send_notification("textDocument/didOpen", params)
+            .map_err(LanguageSessionError::Handshake)
+    }
+
+    /// Returns diagnostics for the session, pumping until some arrive or the
+    /// timeout elapses. Short-circuits if diagnostics are already buffered
+    /// (e.g. emitted at/before initialize), so it never blocks needlessly.
+    pub fn pump_diagnostics(
+        &mut self,
+        _uri: &str,
+        timeout: std::time::Duration,
+    ) -> Vec<legion_lsp::LspDiagnosticNotificationMetadata> {
+        if self.session.diagnostic_notifications().is_empty() {
+            let deadline = std::time::Instant::now() + timeout;
+            let _ = self
+                .session
+                .pump_until(deadline, &mut |n| !n.diagnostics.is_empty());
+        }
+        self.session.diagnostic_notifications().to_vec()
+    }
+
     /// Mutable access to the underlying stdio session (for later tasks: doc sync, restart).
     #[allow(dead_code)]
     pub(crate) fn session_mut(&mut self) -> &mut LspStdioSession {

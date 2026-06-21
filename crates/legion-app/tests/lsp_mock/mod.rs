@@ -118,3 +118,15 @@ pub fn mock_supervisor_config() -> LspSupervisorConfig {
         max_restart_attempts: 3,
     }
 }
+
+/// Same as [`mock_supervisor_config`] but with `MOCK_LSP_EMIT_DIAGNOSTICS=1`
+/// in the process environment so the mock emits a `publishDiagnostics` notification.
+#[allow(dead_code)]
+pub fn mock_supervisor_config_with_diagnostics() -> LspSupervisorConfig {
+    let mut config = mock_supervisor_config();
+    config
+        .process
+        .env
+        .push(("MOCK_LSP_EMIT_DIAGNOSTICS".into(), "1".into()));
+    config
+}
