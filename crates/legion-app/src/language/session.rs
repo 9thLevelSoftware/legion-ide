@@ -1,0 +1,133 @@
+//! `RustAnalyzerSession` — launch + handshake orchestrator (WS-LANG-01 LANG.03/04).
+//!
+//! Owns a live [`LspStdioSession`] and the [`LspServerHealthRecord`] that tracks
+//! binary provenance, handshake status, and runtime health.
+
+use legion_lsp::{DiscoveredBinary, LspStdioSession, LspStdioSpawner, LspSupervisorConfig};
+use legion_protocol::{
+    LanguageId, LanguageServerId, LspResultStatus, LspServerBinaryProvenance,
+    LspServerHealthRecord,
+};
+
+use super::RustAnalyzerDiscovery;
+
+/// Errors raised while launching or initializing the rust-analyzer session.
+#[derive(Debug)]
+pub enum LanguageSessionError {
+    /// No binary could be discovered through any resolution source.
+    Discovery,
+    /// The process failed to launch or spawn.
+    Launch(legion_lsp::LspRuntimeError),
+    /// The `initialize` handshake failed.
+    Handshake(legion_lsp::LspRuntimeError),
+}
+
+impl std::fmt::Display for LanguageSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LanguageSessionError::Discovery => write!(f, "rust-analyzer binary not found"),
+            LanguageSessionError::Launch(e) => write!(f, "rust-analyzer launch failed: {e}"),
+            LanguageSessionError::Handshake(e) => {
+                write!(f, "rust-analyzer handshake failed: {e}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LanguageSessionError {}
+
+/// Inputs for launching the rust-analyzer session.
+pub struct RustAnalyzerLaunchConfig {
+    /// Discovery inputs (resolution order: configured → project-local → PATH → bundled).
+    pub discovery: RustAnalyzerDiscovery,
+    /// Supervisor / process config (command, policy, backoff).
+    pub supervisor: LspSupervisorConfig,
+    /// Server identity written into the health record.
+    pub server_id: LanguageServerId,
+    /// Language identity written into the health record.
+    pub language_id: LanguageId,
+}
+
+/// Owns a live rust-analyzer stdio session and its health record.
+pub struct RustAnalyzerSession {
+    session: LspStdioSession,
+    health: LspServerHealthRecord,
+}
+
+impl RustAnalyzerSession {
+    /// Resolves discovery for provenance, launches the stdio process, and seeds
+    /// the health record with `init_status = Unavailable` until `initialize` is called.
+    pub fn launch(
+        config: RustAnalyzerLaunchConfig,
+        launcher: &mut impl LspStdioSpawner,
+    ) -> Result<Self, LanguageSessionError> {
+        // Resolve provenance from discovery inputs (metadata-only — no path stored).
+        let provenance: LspServerBinaryProvenance = match config.discovery.resolve() {
+            DiscoveredBinary::Found { provenance, .. } => provenance,
+            DiscoveredBinary::NotFound => return Err(LanguageSessionError::Discovery),
+        };
+
+        // Launch the stdio session through the caller-supplied launcher.
+        let session =
+            LspStdioSession::start(config.supervisor, launcher).map_err(LanguageSessionError::Launch)?;
+
+        // Seed the health record; init_status is Unavailable until initialize() succeeds.
+        let health = LspServerHealthRecord {
+            server_id: config.server_id,
+            language_id: config.language_id,
+            binary_provenance: provenance,
+            binary_path_hash: None,
+            artifact_hash: None,
+            version: None,
+            init_status: LspResultStatus::Unavailable,
+            capabilities: Vec::new(),
+            diagnostics_latency_ms: None,
+            restart_count: 0,
+            download_decision_id: None,
+            schema_version: LspServerHealthRecord::schema_version(),
+        };
+
+        Ok(Self { session, health })
+    }
+
+    /// Sends the LSP `initialize` request and the `initialized` notification,
+    /// then updates `health.init_status` from the correlated response.
+    pub fn initialize(&mut self, root_uri: &str) -> Result<(), LanguageSessionError> {
+        let params = serde_json::json!({
+            "processId": std::process::id(),
+            "rootUri": root_uri,
+            "capabilities": {},
+            "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
+        });
+
+        let response = self
+            .session
+            .initialize(params, super::operation_context())
+            .map_err(LanguageSessionError::Handshake)?;
+
+        self.health.init_status = response.status;
+
+        self.session
+            .send_notification("initialized", serde_json::json!({}))
+            .map_err(LanguageSessionError::Handshake)?;
+
+        Ok(())
+    }
+
+    /// Borrows the health record for read-only projection.
+    pub fn health(&self) -> &LspServerHealthRecord {
+        &self.health
+    }
+
+    /// Mutable access to the underlying stdio session (for later tasks: doc sync, restart).
+    #[allow(dead_code)]
+    pub(crate) fn session_mut(&mut self) -> &mut LspStdioSession {
+        &mut self.session
+    }
+
+    /// Mutable access to the health record (for later tasks: restart counter, capability update).
+    #[allow(dead_code)]
+    pub(crate) fn health_mut(&mut self) -> &mut LspServerHealthRecord {
+        &mut self.health
+    }
+}
