@@ -45,9 +45,12 @@ pub enum DownloadDecision {
 /// network target) and calls `broker.handle(...)`. Fails closed on any error.
 ///
 /// # Security
-/// Default `NetworkPolicy` is air-gapped (`air_gap: true`), so this returns
-/// `Denied` unless the operator has explicitly opened the release host in their
-/// security policy.
+/// Requests the `network.fetch` capability — a binary download is network
+/// egress, and `network.fetch` / `network.egress` are the capabilities the
+/// broker routes through its air-gap (`network_target_decision`) check. Default
+/// `NetworkPolicy` is air-gapped (`air_gap: true`), so this returns `Denied`
+/// for any non-loopback release host unless the operator has explicitly
+/// allowlisted it in their security policy.
 pub fn evaluate_rust_analyzer_download(
     req: &RustAnalyzerDownloadRequest,
     broker: &dyn CapabilityBrokerPort,
@@ -69,7 +72,7 @@ pub fn evaluate_rust_analyzer_download(
 
     match broker.handle(CapabilityRequest::Request {
         principal_id,
-        capability_id: CapabilityId("network.lsp_server_download".into()),
+        capability_id: CapabilityId("network.fetch".into()),
         workspace_trust_state,
         target_path: None,
         decision_id: None,

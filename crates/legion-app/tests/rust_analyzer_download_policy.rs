@@ -35,23 +35,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-/// Proves that the deny-by-default moat correctly denies network downloads.
+/// Proves the deny-by-default moat using the REAL `DenyByDefaultBroker`.
 ///
-/// # Broker choice
-/// The `DenyByDefaultBroker::default()` was attempted first (air_gap: true).
-/// However, `DenyByDefaultBroker` only routes `network.fetch` / `network.egress`
-/// through the air-gap check; all other `network.*` sub-capabilities fall through
-/// to `SecurityDecision::allow()` (legion-security/src/lib.rs ~line 1905-1909).
-/// The capability_id `"network.lsp_server_download"` (required by the task brief)
-/// is therefore NOT denied by the real broker in its current form — this is a
-/// documented gap in the broker's routing table that should be resolved separately.
-///
-/// We use the `DenyAll` fixture here to prove the function correctly maps a denied
-/// decision to `DownloadDecision::Denied`. The `DenyByDefaultBroker` integration
-/// is exercised by `air_gap_real_broker_allows_lsp_download_gap` below.
+/// Under `SecurityPolicy::default()` (`air_gap: true`, `allow_untrusted: false`),
+/// the broker routes the `network.fetch` capability through
+/// `network_target_decision`, which denies any non-loopback host. The
+/// `release_host` is `releases.example.invalid` (non-loopback), so the air-gap
+/// check fails closed and the request is denied. (A trusted workspace is denied
+/// by the air-gap branch; an untrusted one would be denied even earlier — either
+/// trust value proves the moat.)
 #[test]
 fn air_gap_default_denies_download() {
-    let broker = broker_fixture::DenyAll;
+    let broker = DenyByDefaultBroker::default();
     let result = evaluate_rust_analyzer_download(
         &req(),
         &broker,
@@ -62,33 +57,9 @@ fn air_gap_default_denies_download() {
     match result {
         DownloadDecision::Denied { .. } => {}
         DownloadDecision::Allowed { .. } => {
-            panic!("DenyAll fixture must produce DownloadDecision::Denied")
+            panic!("air-gap must deny rust-analyzer download")
         }
     }
-}
-
-/// Documents the current broker gap: `DenyByDefaultBroker` allows
-/// `network.lsp_server_download` even with air_gap=true because the routing
-/// at legion-security/src/lib.rs:1900-1909 only air-gap-checks `network.fetch`
-/// and `network.egress`. The broker routing table must be extended to cover
-/// `network.lsp_server_download` for the moat to be complete.
-#[test]
-fn air_gap_real_broker_documents_routing_gap() {
-    let broker = DenyByDefaultBroker::default();
-    let result = evaluate_rust_analyzer_download(
-        &req(),
-        &broker,
-        principal(),
-        WorkspaceTrustState::Trusted,
-        correlation(),
-    );
-    // KNOWN GAP: This currently returns Allowed — the broker routing table does
-    // not check air_gap for network.lsp_server_download. When the broker is
-    // extended, flip this assertion to assert Denied.
-    assert!(
-        matches!(result, DownloadDecision::Allowed { .. }),
-        "documenting current broker gap: network.lsp_server_download is not air-gap-gated"
-    );
 }
 
 /// A fixture broker that unconditionally grants verifies the allowed path.
