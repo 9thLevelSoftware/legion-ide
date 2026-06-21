@@ -6,10 +6,22 @@
 use legion_lsp::{DiscoveredBinary, LspStdioSession, LspStdioSpawner, LspSupervisorConfig};
 use legion_protocol::{
     LanguageId, LanguageServerId, LspResultStatus, LspServerBinaryProvenance,
-    LspServerHealthRecord,
+    LspServerHealthRecord, SnapshotId,
 };
 
 use super::RustAnalyzerDiscovery;
+
+/// Outcome of an LSP read request: the raw result plus the snapshot the
+/// request was issued against and the freshness status.
+#[derive(Debug, Clone)]
+pub struct LspReadOutcome {
+    /// Raw JSON result payload from the LSP response.
+    pub result: serde_json::Value,
+    /// The snapshot against which the request was issued.
+    pub issued_snapshot: SnapshotId,
+    /// Freshness status of the response.
+    pub status: LspResultStatus,
+}
 
 /// Errors raised while launching or initializing the rust-analyzer session.
 #[derive(Debug)]
@@ -155,6 +167,27 @@ impl RustAnalyzerSession {
                 .pump_until(deadline, &mut |n| !n.diagnostics.is_empty());
         }
         self.session.diagnostic_notifications().to_vec()
+    }
+
+    /// Sends an LSP read request (e.g. `textDocument/completion`) and blocks
+    /// for the correlated response.  Returns an [`LspReadOutcome`] carrying the
+    /// raw JSON result, the snapshot the request was issued against, and the
+    /// freshness status — allowing callers to gate ingestion via
+    /// [`super::is_stale_response`] before projecting into buffer state.
+    pub fn request_read(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<LspReadOutcome, LanguageSessionError> {
+        let response = self
+            .session
+            .request(method.to_string(), params, super::operation_context())
+            .map_err(LanguageSessionError::Handshake)?;
+        Ok(LspReadOutcome {
+            result: response.result,
+            issued_snapshot: response.context.snapshot_id,
+            status: response.status,
+        })
     }
 
     /// Mutable access to the underlying stdio session (for later tasks: doc sync, restart).

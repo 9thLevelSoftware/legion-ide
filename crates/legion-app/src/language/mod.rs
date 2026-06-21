@@ -11,10 +11,33 @@ pub use download::{
 };
 
 mod session;
-pub use session::{LanguageSessionError, RustAnalyzerLaunchConfig, RustAnalyzerSession};
+pub use session::{LanguageSessionError, LspReadOutcome, RustAnalyzerLaunchConfig, RustAnalyzerSession};
 
 // Re-export discovery types consumed by tests and callers.
 pub use legion_lsp::{DiscoveredBinary, RustAnalyzerDiscovery};
+
+/// Returns `true` when a response issued against `issued` is stale relative to
+/// the buffer's `current` snapshot (LANG.07).
+///
+/// A response is considered stale whenever the snapshot it was issued against
+/// differs from the snapshot the buffer is currently at — regardless of
+/// direction. Callers should discard stale responses rather than projecting
+/// them into buffer state.
+///
+/// # Deferred call-site adoption
+/// The legacy `ingest_lsp_*_response_for_buffer` methods in `lib.rs` are NOT
+/// yet gated by this function (their signatures would need to change and there
+/// are ~8 such methods with 25k-line call-site context). They operate on
+/// mock/deterministic-fed data. Broad adoption is deliberately deferred; the
+/// real read path goes through [`RustAnalyzerSession::request_read`], which
+/// surfaces `issued_snapshot` in [`LspReadOutcome`] so callers can apply this
+/// gate directly.
+pub fn is_stale_response(
+    issued: legion_protocol::SnapshotId,
+    current: legion_protocol::SnapshotId,
+) -> bool {
+    issued != current
+}
 
 /// Builds a deterministic baseline [`LspOperationContext`] for handshake-phase
 /// LSP calls (e.g. `initialize`).  All fields are fixed metadata-only values
