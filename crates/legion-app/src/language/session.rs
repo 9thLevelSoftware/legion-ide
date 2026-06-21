@@ -11,6 +11,27 @@ use legion_protocol::{
 
 use super::RustAnalyzerDiscovery;
 
+/// Bounded restart policy for a crashed server (design §8, LANG.10).
+#[derive(Debug, Clone)]
+pub struct RestartPolicy {
+    /// Maximum restarts before giving up.
+    pub max_restarts: u32,
+    /// Base backoff in milliseconds, doubled per attempt.
+    pub backoff_base_ms: u64,
+}
+
+impl RestartPolicy {
+    /// Backoff duration for a zero-based attempt index.
+    pub fn backoff_for_attempt(&self, attempt: u32) -> std::time::Duration {
+        std::time::Duration::from_millis(self.backoff_base_ms << attempt.min(16))
+    }
+
+    /// Whether the restart budget is exhausted at `attempt`.
+    pub fn is_exhausted(&self, attempt: u32) -> bool {
+        attempt >= self.max_restarts
+    }
+}
+
 /// Outcome of an LSP read request: the raw result plus the snapshot the
 /// request was issued against and the freshness status.
 #[derive(Debug, Clone)]
@@ -205,5 +226,20 @@ impl RustAnalyzerSession {
     #[allow(dead_code)]
     pub(crate) fn health_mut(&mut self) -> &mut LspServerHealthRecord {
         &mut self.health
+    }
+
+    /// Records a crash, increments `restart_count`, and returns the backoff if
+    /// a restart is still permitted (caller performs the relaunch).
+    pub fn note_crash_and_should_restart(
+        &mut self,
+        policy: &RestartPolicy,
+    ) -> Option<std::time::Duration> {
+        let attempt = self.health.restart_count;
+        if policy.is_exhausted(attempt) {
+            self.health.init_status = legion_protocol::LspResultStatus::Unavailable;
+            return None;
+        }
+        self.health.restart_count = attempt + 1;
+        Some(policy.backoff_for_attempt(attempt))
     }
 }
