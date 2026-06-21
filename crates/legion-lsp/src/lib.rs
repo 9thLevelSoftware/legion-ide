@@ -2420,6 +2420,38 @@ impl LspStdioSession {
         self.ready
     }
 
+    /// Routes a notification-shaped frame into the durable buffers and, when
+    /// pumping, into the caller's accumulator. Returns true if the frame was a
+    /// recognized notification.
+    fn record_notification(
+        &mut self,
+        envelope: &JsonRpcEnvelope,
+        acc: Option<&mut PumpedNotifications>,
+    ) -> bool {
+        match envelope.method.as_deref() {
+            Some("$/progress") => {
+                if let Some(p) = progress_notification_from_params(envelope.params.as_ref()) {
+                    self.progress_notifications.push(p.clone());
+                    if let Some(acc) = acc {
+                        acc.progress.push(p);
+                    }
+                    return true;
+                }
+            }
+            Some("textDocument/publishDiagnostics") => {
+                if let Some(d) = diagnostic_notification_from_params(envelope.params.as_ref()) {
+                    self.diagnostic_notifications.push(d.clone());
+                    if let Some(acc) = acc {
+                        acc.diagnostics.push(d);
+                    }
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     /// Bounded pump for asynchronous notifications (design §4). Accumulated
     /// notifications also land in `self.diagnostic_notifications` /
     /// `self.progress_notifications` so existing accessors keep working.
@@ -2438,26 +2470,12 @@ impl LspStdioSession {
                 None => return Ok(PumpOutcome::Closed),
             };
             if envelope.id.is_some() {
-                // Out-of-band response while pumping: keep it correlatable by
-                // dropping it here is wrong, so ignore id frames during a pump
-                // (callers pump only when no request is outstanding).
+                // Out-of-band response while pumping: callers must not pump with
+                // an outstanding request, so we skip id-bearing frames rather
+                // than stash them.
                 continue;
             }
-            match envelope.method.as_deref() {
-                Some("$/progress") => {
-                    if let Some(p) = progress_notification_from_params(envelope.params.as_ref()) {
-                        self.progress_notifications.push(p.clone());
-                        acc.progress.push(p);
-                    }
-                }
-                Some("textDocument/publishDiagnostics") => {
-                    if let Some(d) = diagnostic_notification_from_params(envelope.params.as_ref()) {
-                        self.diagnostic_notifications.push(d.clone());
-                        acc.diagnostics.push(d);
-                    }
-                }
-                _ => {}
-            }
+            self.record_notification(&envelope, Some(&mut acc));
             if predicate(&acc) {
                 return Ok(PumpOutcome::PredicateMet);
             }
@@ -2465,9 +2483,10 @@ impl LspStdioSession {
     }
 
     /// Reads frames from the child until we see a response for
-    /// `target_json_rpc_id`; intermediate notifications are
-    /// discarded so the framing/buffering layer can be exercised
-    /// without affecting correlation.
+    /// `target_json_rpc_id`. Intermediate `$/progress` and
+    /// `textDocument/publishDiagnostics` notifications are recorded into the
+    /// session buffers, while non-target responses are skipped, so the
+    /// framing/buffering layer can be exercised without affecting correlation.
     fn read_until_correlated_response(
         &mut self,
         target_json_rpc_id: u64,
@@ -2483,17 +2502,7 @@ impl LspStdioSession {
                 }
             };
             let Some(id) = envelope.id else {
-                if envelope.method.as_deref() == Some("$/progress")
-                    && let Some(progress) =
-                        progress_notification_from_params(envelope.params.as_ref())
-                {
-                    self.progress_notifications.push(progress);
-                } else if envelope.method.as_deref() == Some("textDocument/publishDiagnostics")
-                    && let Some(diagnostics) =
-                        diagnostic_notification_from_params(envelope.params.as_ref())
-                {
-                    self.diagnostic_notifications.push(diagnostics);
-                }
+                self.record_notification(&envelope, None);
                 continue;
             };
             if id != target_json_rpc_id {
