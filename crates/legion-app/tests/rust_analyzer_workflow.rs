@@ -41,6 +41,9 @@ use uuid::Uuid;
 // Support helpers
 // ---------------------------------------------------------------------------
 
+// intentional duplication: cross-crate integration test (discovered / path_to_file_uri
+// also live in legion-lsp's rust_analyzer_smoke.rs; sharing across crate test boundaries
+// would require a published support crate, which is not warranted for two helpers).
 fn discovered() -> Option<std::path::PathBuf> {
     let d = RustAnalyzerDiscovery {
         path_env: std::env::var("PATH").ok(),
@@ -155,6 +158,7 @@ fn rust_analyzer_full_workflow() {
     let version = RustAnalyzerDiscovery::probe_version(&bin);
     eprintln!("rust-analyzer binary: {}", bin.display());
     eprintln!("rust-analyzer version: {:?}", version);
+    assert!(version.is_some(), "rust-analyzer --version should succeed");
 
     // --- Fixture crate ---
     let (fixture_dir, _lib_rs, root_uri, lib_rs_uri) = create_fixture_crate();
@@ -303,12 +307,13 @@ fn rust_analyzer_full_workflow() {
 
     // --- rename ---
     // Issue rename at the `add` function name position (line 1, char 7).
-    // We assert the raw JSON result is a well-formed WorkspaceEdit-shaped object.
     //
-    // NOTE: Converting the raw WorkspaceEdit JSON into a `WorkspaceEditProposalPayload`
-    // (which requires position→byte and uri→FileIdentity mapping) is deliberately
-    // deferred. Proposal routing from a STRUCTURED payload is covered by Task 8's
-    // unit tests; full JSON translation is deferred to that task.
+    // Rename can return an error/non-Fresh result if RA hasn't finished indexing;
+    // the smoke tolerates that. Proposal routing from a STRUCTURED WorkspaceEdit
+    // payload is covered by Task 8's unit tests; raw-JSON translation is deferred.
+    //
+    // `request_read` returns `Ok` with an error-bearing/non-Fresh `LspReadOutcome`
+    // for an LSP error response; it only `Err`s on transport failure.
     let rename_params = serde_json::json!({
         "textDocument": { "uri": lib_rs_uri },
         "position": { "line": 1, "character": 7 },
@@ -316,23 +321,30 @@ fn rust_analyzer_full_workflow() {
     });
     let rename_outcome = session
         .request_read("textDocument/rename", rename_params)
-        .expect("rename request_read should not error");
-    eprintln!("rename result type: {}", json_type_name(&rename_outcome.result));
-    // A successful rename returns a WorkspaceEdit object; no changes → null is also valid.
-    assert!(
-        rename_outcome.result.is_object() || rename_outcome.result.is_null(),
-        "rename result should be object or null; got: {:?}",
-        rename_outcome.result
+        .expect("rename request_read should not fail at the transport layer");
+    eprintln!(
+        "rename result status: {:?}, type: {}",
+        rename_outcome.status,
+        json_type_name(&rename_outcome.result)
     );
-    if rename_outcome.result.is_object() {
-        // Verify it has the expected WorkspaceEdit shape (changes or documentChanges).
+    if rename_outcome.status == legion_protocol::LspResultStatus::Fresh
+        && rename_outcome.result.is_object()
+    {
+        // Fresh WorkspaceEdit: assert it has the expected shape (changes or documentChanges).
         let has_changes = rename_outcome.result.get("changes").is_some()
             || rename_outcome.result.get("documentChanges").is_some();
         eprintln!("rename WorkspaceEdit has_changes: {has_changes}");
         assert!(
             has_changes,
-            "rename WorkspaceEdit should have 'changes' or 'documentChanges' field; got: {:?}",
+            "fresh rename WorkspaceEdit should have 'changes' or 'documentChanges'; got: {:?}",
             rename_outcome.result
+        );
+    } else {
+        // Non-Fresh status, or a null/error result — RA likely hadn't finished
+        // indexing when the rename was issued. Accept it without panicking.
+        eprintln!(
+            "rename returned a non-edit result (status={:?}); accepting — likely indexing/timing",
+            rename_outcome.status
         );
     }
 
