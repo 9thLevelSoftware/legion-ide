@@ -66,3 +66,32 @@ cargo clippy -p legion-app --all-targets -- -D warnings
 ## Concerns
 
 None blocking. The `restart_count` and `session_mut`/`health_mut` scaffolding will be needed in Task 6 (restart logic). The `#[allow(dead_code)]` attributes should be removed when those tasks consume them.
+
+---
+
+## Review fixes (WS-LANG-01 Task 5 review)
+
+Three findings from the approved review applied:
+
+1. **Handshake test now HARD-REQUIRES the mock binary (no silent skip).** Replaced the `match ... { None => { eprintln!; return; } }` graceful skip — which counted as a passing test and hid non-execution — with `.expect("mock_lsp_server not found — ...")` at the call site. `mock_server_path()` still returns `Option`; the `.expect` lives in the test. Under `cargo test --workspace --all-targets` the sibling bin is always built, so the test genuinely runs and asserts the health fields; in isolated `-p legion-app` runs without the bin it fails loudly with an actionable message. Did NOT use `#[ignore]` (that would drop the test from the gate).
+
+2. **`operation_context()` document-scoped ids are now bootstrap-zero sentinels.** Changed `file_id`/`buffer_id`/`snapshot_id`/`buffer_version` from `11/12/13/14` (which looked like real document ids) to `0` with comment `// Bootstrap/handshake context: no document is open yet, so document-scoped ids are 0.` Left `workspace_id`, `correlation_id`, `causality_id`, `timeout_ms`, `cancellation_token`, `privacy_scope`, `schema_version`, `request_id`, `language_id` unchanged.
+
+3. **Hardened test path traversal.** Replaced both unchecked `.unwrap()`s on `CARGO_MANIFEST_DIR.parent().parent()` in `lsp_mock/mod.rs` with `.expect("legion-app crate is two levels below the workspace root")`.
+
+(Tracked-for-final-review minors — unused `DiscoveredBinary` re-export and `#[allow(dead_code)]` on private test helpers — left untouched per coordinator instruction; the `DiscoveredBinary` re-export is a public path future tasks may consume, so removal was not trivially safe.)
+
+### Re-run output
+
+```
+cargo build -p legion-lsp --bin mock_lsp_server
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+
+cargo test -p legion-app --test rust_analyzer_session_handshake
+running 1 test
+test launch_and_initialize_populates_health_record ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+cargo clippy -p legion-app --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.82s   (clean)
+```

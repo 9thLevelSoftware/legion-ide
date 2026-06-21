@@ -26,10 +26,11 @@ pub(crate) fn operation_context() -> legion_protocol::LspOperationContext {
     LspOperationContext {
         request_id: LspRequestId(uuid::Uuid::from_u128(1)),
         workspace_id: WorkspaceId(55),
-        file_id: FileId(11),
-        buffer_id: BufferId(12),
-        snapshot_id: SnapshotId(13),
-        buffer_version: BufferVersion(14),
+        // Bootstrap/handshake context: no document is open yet, so document-scoped ids are 0.
+        file_id: FileId(0),
+        buffer_id: BufferId(0),
+        snapshot_id: SnapshotId(0),
+        buffer_version: BufferVersion(0),
         language_id: LanguageId("rust".to_string()),
         correlation_id: CorrelationId(1u64),
         causality_id: CausalityId(uuid::Uuid::from_u128(1001)),

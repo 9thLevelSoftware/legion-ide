@@ -106,9 +106,9 @@ pub fn mock_supervisor_config() -> LspSupervisorConfig {
             cwd: Some(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .parent()
-                    .unwrap()
+                    .expect("legion-app crate is two levels below the workspace root")
                     .parent()
-                    .unwrap()
+                    .expect("legion-app crate is two levels below the workspace root")
                     .to_path_buf(),
             ),
             env: Vec::new(),

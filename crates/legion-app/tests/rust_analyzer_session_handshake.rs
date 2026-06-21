@@ -18,13 +18,9 @@ mod lsp_mock;
 
 #[test]
 fn launch_and_initialize_populates_health_record() {
-    let mock_path = match lsp_mock::mock_server_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("mock_lsp_server not built; skipping — run: cargo build -p legion-lsp --bin mock_lsp_server");
-            return;
-        }
-    };
+    let mock_path = lsp_mock::mock_server_path()
+        .expect("mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`, \
+                 or run under `cargo test --workspace --all-targets` which builds it");
 
     let config = RustAnalyzerLaunchConfig {
         discovery: RustAnalyzerDiscovery {
