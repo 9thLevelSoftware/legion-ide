@@ -46,6 +46,7 @@ pub fn file_identity() -> FileIdentity {
 
 pub fn preconditions() -> ProposalVersionPreconditions {
     ProposalVersionPreconditions {
+        // `file_version` is a legacy alias of `file_content_version`; both set equal.
         file_version: Some(FileContentVersion(44)),
         buffer_version: Some(BufferVersion(55)),
         snapshot_id: Some(SnapshotId(66)),
@@ -80,8 +81,20 @@ pub fn batch_target_coverage() -> ProposalTargetCoverage {
     }
 }
 
-/// Build a minimal `WorkspaceEditProposalPayload` with the given source kind.
-pub fn workspace_edit_payload(source: WorkspaceEditSourceKind) -> WorkspaceEditProposalPayload {
+/// Capability required by an LSP rename edit.
+pub const RENAME_CAPABILITY: &str = "language.rename";
+/// Capability required by an LSP code action edit (distinct from rename).
+pub const CODE_ACTION_CAPABILITY: &str = "language.code_action";
+
+/// Build a minimal `WorkspaceEditProposalPayload` with the given source kind
+/// and required capability. The caller supplies `required_capability` so the
+/// payload and the conversion-input envelope can carry a capability accurate to
+/// the edit source; the validator enforces `required_capability == capability`,
+/// so each test must keep the two equal but distinct across edit kinds.
+pub fn workspace_edit_payload(
+    source: WorkspaceEditSourceKind,
+    required_capability: &str,
+) -> WorkspaceEditProposalPayload {
     WorkspaceEditProposalPayload {
         workspace_id: WorkspaceId(11),
         edit_id: Uuid::parse_str("78787878-7878-7878-7878-787878787878").unwrap(),
@@ -103,10 +116,24 @@ pub fn workspace_edit_payload(source: WorkspaceEditSourceKind) -> WorkspaceEditP
             file: file_identity(),
             destination: CanonicalPath("C:/repo/src/main_renamed.rs".to_string()),
         }],
-        required_capability: CapabilityId("language.rename".to_string()),
+        required_capability: CapabilityId(required_capability.to_string()),
         diagnostics: vec![],
         schema_version: 1,
     }
+}
+
+/// Rename-source payload requiring the `language.rename` capability.
+pub fn rename_payload() -> WorkspaceEditProposalPayload {
+    workspace_edit_payload(WorkspaceEditSourceKind::LspRename, RENAME_CAPABILITY)
+}
+
+/// Code-action-source payload requiring the distinct `language.code_action`
+/// capability so the code-action test independently exercises the invariant.
+pub fn code_action_payload() -> WorkspaceEditProposalPayload {
+    workspace_edit_payload(
+        WorkspaceEditSourceKind::LspCodeAction,
+        CODE_ACTION_CAPABILITY,
+    )
 }
 
 /// LSP request correlation (mirrors dto_contracts.rs `lsp_request_correlation()`).
@@ -148,6 +175,12 @@ pub fn principal() -> PrincipalId {
     PrincipalId("principal-1".to_string())
 }
 
-pub fn capability() -> CapabilityId {
-    CapabilityId("language.rename".to_string())
+/// Envelope capability for the rename case (matches `rename_payload`).
+pub fn rename_capability() -> CapabilityId {
+    CapabilityId(RENAME_CAPABILITY.to_string())
+}
+
+/// Envelope capability for the code-action case (matches `code_action_payload`).
+pub fn code_action_capability() -> CapabilityId {
+    CapabilityId(CODE_ACTION_CAPABILITY.to_string())
 }

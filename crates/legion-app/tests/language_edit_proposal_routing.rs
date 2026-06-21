@@ -11,15 +11,14 @@ mod proposal_fixture;
 
 #[test]
 fn rust_analyzer_rename_edit_becomes_workspace_proposal() {
-    let payload =
-        proposal_fixture::workspace_edit_payload(WorkspaceEditSourceKind::LspRename);
+    let payload = proposal_fixture::rename_payload();
 
     let input = workspace_edit_to_proposal_input(
         payload,
         proposal_fixture::correlation(),
         ProposalId(1),
         proposal_fixture::principal(),
-        proposal_fixture::capability(),
+        proposal_fixture::rename_capability(),
         proposal_fixture::preconditions(),
         ProposalLifecycleState::Created,
         proposal_fixture::privacy_label(),
@@ -47,15 +46,14 @@ fn rust_analyzer_rename_edit_becomes_workspace_proposal() {
 
 #[test]
 fn rust_analyzer_code_action_edit_becomes_workspace_proposal() {
-    let payload =
-        proposal_fixture::workspace_edit_payload(WorkspaceEditSourceKind::LspCodeAction);
+    let payload = proposal_fixture::code_action_payload();
 
     let input = workspace_edit_to_proposal_input(
         payload,
         proposal_fixture::correlation(),
         ProposalId(2),
         proposal_fixture::principal(),
-        proposal_fixture::capability(),
+        proposal_fixture::code_action_capability(),
         proposal_fixture::preconditions(),
         ProposalLifecycleState::Created,
         proposal_fixture::privacy_label(),

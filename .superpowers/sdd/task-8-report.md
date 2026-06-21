@@ -96,3 +96,37 @@ Neither is available at this adapter layer. The orchestrator (which has both a b
 
 - The function signature accepts `expires_at: Option<TimestampMillis>` as a parameter rather than hardcoding `None`, consistent with `LspEditProposalConversionInput` having it as `Option`. The brief mentioned no `expires_at` parameter but the live struct has it — included to be complete.
 - No concerns: implementation is thin (pure struct assembly), fully exercised by two tests that go through the real `convert_lsp_edit_to_workspace_proposal` and `validate_lsp_edit_proposal_contract`.
+
+---
+
+## Review fix (Task 8 review — Important + Minors)
+
+### Important: code-action test now uses a distinct capability
+
+The original fixture hard-coded `required_capability: "language.rename"` for both tests, so the `LspCodeAction` test passed only because both the payload and envelope happened to carry the same string — it did not independently verify the `required_capability == capability` invariant for code actions.
+
+Fix:
+- `proposal_fixture/mod.rs`: parameterized `workspace_edit_payload(source, required_capability: &str)`. Added `RENAME_CAPABILITY = "language.rename"` and `CODE_ACTION_CAPABILITY = "language.code_action"` consts, plus builders `rename_payload()` / `code_action_payload()` and envelope helpers `rename_capability()` / `code_action_capability()`. Each test keeps `required_capability == capability` (validator-enforced) but the code-action test now uses `"language.code_action"` on **both** payload and envelope.
+- `language_edit_proposal_routing.rs`: rename test uses `rename_payload()` + `rename_capability()`; code-action test uses `code_action_payload()` + `code_action_capability()`. Both assertions retained (`matches! ProposalPayload::WorkspaceEdit` AND `source == LspCodeAction`).
+
+### Minors
+
+- Applied: added a one-line comment in `preconditions()` noting `file_version` is a legacy alias of `file_content_version` (both set equal).
+- Skipped: reordering `expires_at` before `created_at` in `workspace_edit_to_proposal_input`. This would ripple into both call sites' positional arguments (they currently pass `created_at()` then `None`) for a cosmetic gain — judged "awkward ripple" per the review's own condition, so left as-is.
+
+### Verification
+
+```
+$ cargo test -p legion-app --test language_edit_proposal_routing
+
+running 2 tests
+test rust_analyzer_code_action_edit_becomes_workspace_proposal ... ok
+test rust_analyzer_rename_edit_becomes_workspace_proposal ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ cargo clippy -p legion-app --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.55s
+```
