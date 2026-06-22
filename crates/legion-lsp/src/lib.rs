@@ -386,29 +386,48 @@ impl RustAnalyzerDiscovery {
     pub fn resolve(&self) -> DiscoveredBinary {
         use legion_protocol::LspServerBinaryProvenance as P;
         if let Some(p) = &self.configured_path {
-            return DiscoveredBinary::Found { path: p.clone(), provenance: P::Configured };
+            return DiscoveredBinary::Found {
+                path: p.clone(),
+                provenance: P::Configured,
+            };
         }
         if let Some(p) = &self.project_local_path {
-            return DiscoveredBinary::Found { path: p.clone(), provenance: P::ProjectLocal };
+            return DiscoveredBinary::Found {
+                path: p.clone(),
+                provenance: P::ProjectLocal,
+            };
         }
         if let Some(path_env) = &self.path_env {
-            let exe = if cfg!(windows) { "rust-analyzer.exe" } else { "rust-analyzer" };
+            let exe = if cfg!(windows) {
+                "rust-analyzer.exe"
+            } else {
+                "rust-analyzer"
+            };
             for dir in std::env::split_paths(path_env) {
                 let candidate = dir.join(exe);
                 if candidate.is_file() {
-                    return DiscoveredBinary::Found { path: candidate, provenance: P::SystemPath };
+                    return DiscoveredBinary::Found {
+                        path: candidate,
+                        provenance: P::SystemPath,
+                    };
                 }
             }
         }
         if let Some(p) = &self.bundled_path {
-            return DiscoveredBinary::Found { path: p.clone(), provenance: P::Bundled };
+            return DiscoveredBinary::Found {
+                path: p.clone(),
+                provenance: P::Bundled,
+            };
         }
         DiscoveredBinary::NotFound
     }
 
     /// Probes `<path> --version`, returning the trimmed stdout line if it runs.
     pub fn probe_version(path: &std::path::Path) -> Option<String> {
-        let output = std::process::Command::new(path).arg("--version").output().ok()?;
+        let output = std::process::Command::new(path)
+            .arg("--version")
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }

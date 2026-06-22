@@ -1,6 +1,5 @@
 use legion_protocol::{
-    LanguageId, LanguageServerId, LspResultStatus, LspServerBinaryProvenance,
-    LspServerHealthRecord,
+    LanguageId, LanguageServerId, LspResultStatus, LspServerBinaryProvenance, LspServerHealthRecord,
 };
 use legion_ui::project_lsp_health;
 

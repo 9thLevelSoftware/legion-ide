@@ -34,10 +34,7 @@ fn identity() -> LspConfiguredServerIdentity {
     }
 }
 
-fn posture(
-    trust: WorkspaceTrustState,
-    privacy_scope_allowed: bool,
-) -> LspWorkspaceTrustPosture {
+fn posture(trust: WorkspaceTrustState, privacy_scope_allowed: bool) -> LspWorkspaceTrustPosture {
     LspWorkspaceTrustPosture {
         workspace_id: WorkspaceId(55),
         workspace_trust_state: trust,

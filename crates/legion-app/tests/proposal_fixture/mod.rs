@@ -4,14 +4,14 @@
 //! (lines 115–537) and adapted for the app-level integration test.
 
 use legion_protocol::{
-    BufferId, BufferVersion, CanonicalPath, CapabilityId, CausalityId, CancellationTokenId,
-    CorrelationId, EditBatch, FileContentVersion, FileFingerprint, FileId, FileIdentity,
-    LspRequestCorrelation, LspRequestId, LanguageServerId, PreviewSummary, PrincipalId,
-    ProposalPrivacyLabel, ProposalTargetCoverage, ProposalTargetCoverageKind,
-    ProposalTargetKind, ProposalAffectedTarget, ProposalVersionPreconditions, RedactionHint,
-    SemanticPrivacyScope, SnapshotId, TextEdit, TextRange, TimestampMillis, WorkspaceEditProposalPayload,
-    WorkspaceEditSourceKind, WorkspaceFileOperation, WorkspaceId, WorkspaceTextEdit,
-    ByteRange,
+    BufferId, BufferVersion, ByteRange, CancellationTokenId, CanonicalPath, CapabilityId,
+    CausalityId, CorrelationId, EditBatch, FileContentVersion, FileFingerprint, FileId,
+    FileIdentity, LanguageServerId, LspRequestCorrelation, LspRequestId, PreviewSummary,
+    PrincipalId, ProposalAffectedTarget, ProposalPrivacyLabel, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions, RedactionHint,
+    SemanticPrivacyScope, SnapshotId, TextEdit, TextRange, TimestampMillis,
+    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceFileOperation, WorkspaceId,
+    WorkspaceTextEdit,
 };
 use uuid::Uuid;
 

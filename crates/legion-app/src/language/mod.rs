@@ -12,14 +12,15 @@ pub use download::{
 
 mod session;
 pub use session::{
-    LanguageSessionError, LspReadOutcome, RestartPolicy, RustAnalyzerLaunchConfig, RustAnalyzerSession,
+    LanguageSessionError, LspReadOutcome, RestartPolicy, RustAnalyzerLaunchConfig,
+    RustAnalyzerSession,
 };
 
 mod proposal;
 pub use proposal::workspace_edit_to_proposal_input;
 
 mod redaction;
-pub use redaction::{redact_lsp_stderr, StderrSummary};
+pub use redaction::{StderrSummary, redact_lsp_stderr};
 
 // Re-export discovery types consumed by tests and callers.
 pub use legion_lsp::{DiscoveredBinary, RustAnalyzerDiscovery};

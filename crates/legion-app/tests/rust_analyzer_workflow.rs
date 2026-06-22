@@ -56,7 +56,10 @@ fn discovered() -> Option<std::path::PathBuf> {
 }
 
 fn fingerprint(value: &str) -> FileFingerprint {
-    FileFingerprint { algorithm: "workflow-smoke".to_string(), value: value.to_string() }
+    FileFingerprint {
+        algorithm: "workflow-smoke".to_string(),
+        value: value.to_string(),
+    }
 }
 
 fn identity(command: &str) -> LspConfiguredServerIdentity {
@@ -99,12 +102,7 @@ fn launch_policy(command: &str) -> LspLaunchPolicyDecision {
 
 /// Creates a tiny throwaway fixture crate and returns
 /// (fixture_dir, src/lib.rs path, root_uri, lib_rs_uri).
-fn create_fixture_crate() -> (
-    std::path::PathBuf,
-    std::path::PathBuf,
-    String,
-    String,
-) {
+fn create_fixture_crate() -> (std::path::PathBuf, std::path::PathBuf, String, String) {
     let fixture_dir = std::env::temp_dir().join(format!(
         "ws-lang-01-ra-app-smoke-{}",
         std::time::SystemTime::now()
@@ -198,9 +196,14 @@ fn rust_analyzer_full_workflow() {
     // --- Initialize ---
     // RustAnalyzerSession::initialize already sends `capabilities: {}` (empty),
     // preventing server→client registration requests (hazard #1).
-    session.initialize(&root_uri).expect("initialize should succeed");
+    session
+        .initialize(&root_uri)
+        .expect("initialize should succeed");
     let health = session.health();
-    eprintln!("health after initialize: status={:?}, restarts={}", health.init_status, health.restart_count);
+    eprintln!(
+        "health after initialize: status={:?}, restarts={}",
+        health.init_status, health.restart_count
+    );
     assert_eq!(
         health.init_status,
         legion_protocol::LspResultStatus::Fresh,
@@ -232,7 +235,10 @@ fn rust_analyzer_full_workflow() {
     let completion_outcome = session
         .request_read("textDocument/completion", completion_params)
         .expect("completion request_read should not error");
-    eprintln!("completion result type: {}", json_type_name(&completion_outcome.result));
+    eprintln!(
+        "completion result type: {}",
+        json_type_name(&completion_outcome.result)
+    );
     // Accept object (CompletionList), array (flat list), or null (nothing at cursor).
     assert!(
         completion_outcome.result.is_object()
@@ -250,7 +256,10 @@ fn rust_analyzer_full_workflow() {
     let hover_outcome = session
         .request_read("textDocument/hover", hover_params)
         .expect("hover request_read should not error");
-    eprintln!("hover result type: {}", json_type_name(&hover_outcome.result));
+    eprintln!(
+        "hover result type: {}",
+        json_type_name(&hover_outcome.result)
+    );
     assert!(
         hover_outcome.result.is_object() || hover_outcome.result.is_null(),
         "hover result should be object or null; got: {:?}",
@@ -265,7 +274,10 @@ fn rust_analyzer_full_workflow() {
     let definition_outcome = session
         .request_read("textDocument/definition", definition_params)
         .expect("definition request_read should not error");
-    eprintln!("definition result type: {}", json_type_name(&definition_outcome.result));
+    eprintln!(
+        "definition result type: {}",
+        json_type_name(&definition_outcome.result)
+    );
     assert!(
         definition_outcome.result.is_array()
             || definition_outcome.result.is_object()
@@ -283,7 +295,10 @@ fn rust_analyzer_full_workflow() {
     let references_outcome = session
         .request_read("textDocument/references", references_params)
         .expect("references request_read should not error");
-    eprintln!("references result type: {}", json_type_name(&references_outcome.result));
+    eprintln!(
+        "references result type: {}",
+        json_type_name(&references_outcome.result)
+    );
     assert!(
         references_outcome.result.is_array() || references_outcome.result.is_null(),
         "references result should be array or null; got: {:?}",
@@ -298,7 +313,10 @@ fn rust_analyzer_full_workflow() {
     let formatting_outcome = session
         .request_read("textDocument/formatting", formatting_params)
         .expect("formatting request_read should not error");
-    eprintln!("formatting result type: {}", json_type_name(&formatting_outcome.result));
+    eprintln!(
+        "formatting result type: {}",
+        json_type_name(&formatting_outcome.result)
+    );
     assert!(
         formatting_outcome.result.is_array() || formatting_outcome.result.is_null(),
         "formatting result should be array or null; got: {:?}",
@@ -351,11 +369,17 @@ fn rust_analyzer_full_workflow() {
     // --- note_crash_and_should_restart (hazard #5) ---
     // Exercise the restart policy/state machine. This does NOT kill the process;
     // it only advances the policy counters on the live session.
-    let policy = RestartPolicy { max_restarts: 1, backoff_base_ms: 50 };
+    let policy = RestartPolicy {
+        max_restarts: 1,
+        backoff_base_ms: 50,
+    };
     let backoff = session.note_crash_and_should_restart(&policy);
     eprintln!("note_crash_and_should_restart backoff: {:?}", backoff);
     // With max_restarts=1 and 0 prior restarts, first call must return Some(backoff).
-    assert!(backoff.is_some(), "first crash within budget should return a backoff");
+    assert!(
+        backoff.is_some(),
+        "first crash within budget should return a backoff"
+    );
     assert_eq!(
         session.health().restart_count,
         1,
@@ -363,7 +387,10 @@ fn rust_analyzer_full_workflow() {
     );
     // Second call exhausts the budget (max_restarts=1, already at count=1).
     let backoff2 = session.note_crash_and_should_restart(&policy);
-    assert!(backoff2.is_none(), "second crash should exhaust budget and return None");
+    assert!(
+        backoff2.is_none(),
+        "second crash should exhaust budget and return None"
+    );
     eprintln!("restart budget exhausted as expected");
 
     eprintln!("workflow smoke PASSED");

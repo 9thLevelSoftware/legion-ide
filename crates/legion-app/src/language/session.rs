@@ -106,8 +106,8 @@ impl RustAnalyzerSession {
         };
 
         // Launch the stdio session through the caller-supplied launcher.
-        let session =
-            LspStdioSession::start(config.supervisor, launcher).map_err(LanguageSessionError::Launch)?;
+        let session = LspStdioSession::start(config.supervisor, launcher)
+            .map_err(LanguageSessionError::Launch)?;
 
         // Seed the health record; init_status is Unavailable until initialize() succeeds.
         let health = LspServerHealthRecord {

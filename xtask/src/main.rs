@@ -552,6 +552,15 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         strict: bool,
     },
+    /// Run the ignored rust-analyzer integration smoke tests against a real rust-analyzer binary.
+    ///
+    /// Executes:
+    ///   cargo test -p legion-lsp --test rust_analyzer_smoke -- --ignored
+    ///   cargo test -p legion-app --test rust_analyzer_workflow -- --ignored
+    ///
+    /// A clean skip (rust-analyzer absent) is treated as success (exit 0).
+    /// Returns non-zero only on a real test failure.
+    RustAnalyzerSmoke,
 }
 
 fn main() {
@@ -586,6 +595,7 @@ fn main() {
         Commands::VerifyLegionBench { out, strict } => {
             run_verify_legion_bench_command(&out, strict)
         }
+        Commands::RustAnalyzerSmoke => run_rust_analyzer_smoke_command(),
     };
 
     process::exit(code);
@@ -1140,6 +1150,50 @@ fn run_verify_legion_bench_command(out: &str, strict: bool) -> i32 {
     } else {
         0
     }
+}
+
+fn run_rust_analyzer_smoke_command() -> i32 {
+    let invocations: &[&[&str]] = &[
+        &[
+            "test",
+            "-p",
+            "legion-lsp",
+            "--test",
+            "rust_analyzer_smoke",
+            "--",
+            "--ignored",
+        ],
+        &[
+            "test",
+            "-p",
+            "legion-app",
+            "--test",
+            "rust_analyzer_workflow",
+            "--",
+            "--ignored",
+        ],
+    ];
+    for args in invocations {
+        println!("rust-analyzer smoke: running cargo {}", args.join(" "));
+        let status = process::Command::new("cargo").args(*args).status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!(
+                    "rust-analyzer smoke: cargo {} failed with {}",
+                    args.join(" "),
+                    s
+                );
+                return s.code().unwrap_or(1);
+            }
+            Err(err) => {
+                eprintln!("rust-analyzer smoke: unable to spawn cargo: {err}");
+                return 1;
+            }
+        }
+    }
+    println!("rust-analyzer smoke: all invocations passed");
+    0
 }
 
 fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBenchRunMode, String> {

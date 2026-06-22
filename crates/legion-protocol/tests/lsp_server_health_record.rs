@@ -1,6 +1,6 @@
 use legion_protocol::{
-    CapabilityDecisionId, LanguageId, LanguageServerId, LspResultStatus,
-    LspServerBinaryProvenance, LspServerHealthRecord,
+    CapabilityDecisionId, LanguageId, LanguageServerId, LspResultStatus, LspServerBinaryProvenance,
+    LspServerHealthRecord,
 };
 
 #[test]

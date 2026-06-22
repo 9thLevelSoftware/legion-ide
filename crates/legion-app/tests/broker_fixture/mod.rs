@@ -1,8 +1,8 @@
 //! Minimal CapabilityBrokerPort fixtures for integration tests.
 
 use legion_protocol::{
-    CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityId, CapabilityRequest,
-    CapabilityResponse, ProtocolResult,
+    CapabilityBrokerPort, CapabilityDecision, CapabilityDecisionId, CapabilityId,
+    CapabilityRequest, CapabilityResponse, ProtocolResult,
 };
 
 /// A fixture broker that always grants (returns Decision { granted: true }).

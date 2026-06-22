@@ -32,7 +32,10 @@ fn pump_collects_async_diagnostics_until_predicate() {
         })
         .unwrap();
 
-    assert!(matches!(outcome, PumpOutcome::PredicateMet | PumpOutcome::Closed));
+    assert!(matches!(
+        outcome,
+        PumpOutcome::PredicateMet | PumpOutcome::Closed
+    ));
     // The pumped notification must also land in the session's durable buffer.
     assert!(!session.diagnostic_notifications().is_empty());
 

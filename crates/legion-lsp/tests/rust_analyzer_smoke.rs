@@ -47,7 +47,10 @@ fn discovered() -> Option<std::path::PathBuf> {
 }
 
 fn fingerprint(value: &str) -> FileFingerprint {
-    FileFingerprint { algorithm: "smoke-test".to_string(), value: value.to_string() }
+    FileFingerprint {
+        algorithm: "smoke-test".to_string(),
+        value: value.to_string(),
+    }
 }
 
 fn identity(command: &str) -> LspConfiguredServerIdentity {
@@ -187,7 +190,10 @@ fn rust_analyzer_initializes_and_emits_diagnostics() {
     let mut launcher = LspStdioLauncher::new();
     let mut session =
         LspStdioSession::start(supervisor_config, &mut launcher).expect("launch rust-analyzer");
-    eprintln!("session launched; lifecycle={:?}", session.lifecycle_state());
+    eprintln!(
+        "session launched; lifecycle={:?}",
+        session.lifecycle_state()
+    );
 
     // --- Initialize ---
     // CRITICAL: send empty `capabilities: {}` to prevent rust-analyzer from
@@ -200,10 +206,14 @@ fn rust_analyzer_initializes_and_emits_diagnostics() {
         "workspaceFolders": [{ "uri": root_uri, "name": "ra-smoke" }],
     });
 
-    let init_response =
-        session.initialize(init_params, smoke_operation_context()).expect("initialize");
+    let init_response = session
+        .initialize(init_params, smoke_operation_context())
+        .expect("initialize");
     eprintln!("initialize response status: {:?}", init_response.status);
-    assert!(session.is_ready(), "session should be ready after initialize");
+    assert!(
+        session.is_ready(),
+        "session should be ready after initialize"
+    );
 
     // --- initialized notification ---
     session
@@ -241,7 +251,10 @@ fn rust_analyzer_initializes_and_emits_diagnostics() {
         "diagnostic notifications received: {}",
         session.diagnostic_notifications().len()
     );
-    eprintln!("progress notifications received: {}", session.progress_notifications().len());
+    eprintln!(
+        "progress notifications received: {}",
+        session.progress_notifications().len()
+    );
 
     // Accept both: diagnostics emitted OR clean deadline (indexing time varies).
     assert!(
@@ -250,7 +263,10 @@ fn rust_analyzer_initializes_and_emits_diagnostics() {
     );
 
     // Process must still be alive — the session was not killed by rust-analyzer.
-    assert!(session.is_running(), "rust-analyzer process should still be running after smoke");
+    assert!(
+        session.is_running(),
+        "rust-analyzer process should still be running after smoke"
+    );
 
     eprintln!("smoke PASSED");
 

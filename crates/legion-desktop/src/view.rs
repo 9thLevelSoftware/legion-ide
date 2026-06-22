@@ -2801,7 +2801,12 @@ fn render_manual_context_inspector(
         snapshot.language_tooling_projection.problems.len()
     )));
     section_label(ui, "LSP Health", None);
-    render_compact_rows(ui, &model.lsp_health_rows, "No LSP health rows projected", 4);
+    render_compact_rows(
+        ui,
+        &model.lsp_health_rows,
+        "No LSP health rows projected",
+        4,
+    );
     section_label(ui, "Debug", Some(theme::tokens().accent.orange));
     render_compact_rows(ui, &model.debug_rows, "No projected debug state", 6);
     section_label(ui, "Structural Search", Some(theme::tokens().accent.cyan));

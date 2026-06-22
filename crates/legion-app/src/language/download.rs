@@ -81,12 +81,18 @@ pub fn evaluate_rust_analyzer_download(
     }) {
         Ok(CapabilityResponse::Decision(d)) => {
             if d.granted {
-                DownloadDecision::Allowed { decision_id: d.decision_id }
+                DownloadDecision::Allowed {
+                    decision_id: d.decision_id,
+                }
             } else {
-                DownloadDecision::Denied { reason: d.reason.unwrap_or_default() }
+                DownloadDecision::Denied {
+                    reason: d.reason.unwrap_or_default(),
+                }
             }
         }
-        Ok(CapabilityResponse::Granted(g)) => DownloadDecision::Allowed { decision_id: g.decision_id },
+        Ok(CapabilityResponse::Granted(g)) => DownloadDecision::Allowed {
+            decision_id: g.decision_id,
+        },
         Ok(CapabilityResponse::Denied(den)) => DownloadDecision::Denied { reason: den.reason },
         Err(e) => DownloadDecision::Denied {
             reason: format!("capability broker error (fail closed): {e:?}"),

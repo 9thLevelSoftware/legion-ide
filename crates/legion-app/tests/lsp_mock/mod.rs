@@ -96,7 +96,9 @@ fn launch_policy(command: &str) -> legion_protocol::LspLaunchPolicyDecision {
 /// skipping should call `mock_server_path()` directly before calling this.
 #[allow(dead_code)]
 pub fn mock_supervisor_config() -> LspSupervisorConfig {
-    let path = mock_server_path().expect("mock_lsp_server binary not found — run: cargo build -p legion-lsp --bin mock_lsp_server");
+    let path = mock_server_path().expect(
+        "mock_lsp_server binary not found — run: cargo build -p legion-lsp --bin mock_lsp_server",
+    );
     let command = path.to_string_lossy().into_owned();
     LspSupervisorConfig {
         launch_policy: launch_policy(&command),

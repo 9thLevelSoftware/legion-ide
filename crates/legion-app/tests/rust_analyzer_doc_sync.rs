@@ -16,9 +16,10 @@ mod lsp_mock;
 
 #[test]
 fn did_open_then_pump_collects_diagnostics() {
-    let mock_path = lsp_mock::mock_server_path()
-        .expect("mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`, \
-                 or run under `cargo test --workspace --all-targets` which builds it");
+    let mock_path = lsp_mock::mock_server_path().expect(
+        "mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`, \
+                 or run under `cargo test --workspace --all-targets` which builds it",
+    );
 
     let config = RustAnalyzerLaunchConfig {
         discovery: RustAnalyzerDiscovery {
@@ -40,9 +41,6 @@ fn did_open_then_pump_collects_diagnostics() {
         .did_open("file:///workspace/src/lib.rs", "rust", 1, "fn main() {}")
         .expect("did_open should succeed");
 
-    let diags = session.pump_diagnostics(
-        "file:///workspace/src/lib.rs",
-        Duration::from_secs(5),
-    );
+    let diags = session.pump_diagnostics("file:///workspace/src/lib.rs", Duration::from_secs(5));
     assert!(!diags.is_empty(), "mock emits one publishDiagnostics");
 }

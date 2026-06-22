@@ -18,8 +18,9 @@ mod lsp_mock;
 
 #[test]
 fn completion_request_returns_well_formed_result() {
-    let mock_path = lsp_mock::mock_server_path()
-        .expect("mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`");
+    let mock_path = lsp_mock::mock_server_path().expect(
+        "mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`",
+    );
 
     let config = RustAnalyzerLaunchConfig {
         discovery: RustAnalyzerDiscovery {
@@ -56,8 +57,9 @@ fn completion_request_returns_well_formed_result() {
 // issued_snapshot is SnapshotId(0) until per-buffer contexts are wired; this confirms the read path surfaces a snapshot the gate can act on. The gate's discriminating behavior is covered by language_stale_snapshot.rs.
 #[test]
 fn stale_snapshot_gate_exercises_issued_snapshot_from_real_read() {
-    let mock_path = lsp_mock::mock_server_path()
-        .expect("mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`");
+    let mock_path = lsp_mock::mock_server_path().expect(
+        "mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`",
+    );
 
     let config = RustAnalyzerLaunchConfig {
         discovery: RustAnalyzerDiscovery {

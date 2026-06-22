@@ -30,5 +30,9 @@ pub fn redact_lsp_stderr(raw: &str) -> StderrSummary {
             warn_lines += 1;
         }
     }
-    StderrSummary { line_count, error_lines, warn_lines }
+    StderrSummary {
+        line_count,
+        error_lines,
+        warn_lines,
+    }
 }
