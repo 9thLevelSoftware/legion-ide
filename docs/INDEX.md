@@ -36,7 +36,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../plans/` — phase plans, evidence packages, ADRs, and the product-readiness ledger.
 - `../plans/legion-production-master-plan-v0.2.md` — the current production master plan: current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, and milestones from accepted substrate evidence to production utility.
 - `../plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking v0.2 and the product-readiness ledger.
-- `../plans/legion-customizable-autonomy-continuation-plan-v0.1.md` — continuation plan re-centering the path forward on three pillars: an old-school manual IDE, deep customizability (config-as-code, keymaps, themes, layouts, profiles), and a configurable autonomy continuum (ADR-0041..0045, WS-21..WS-29, milestones C1..C5) scaling from zero AI to a gated full-automation envelope.
+- `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `../audit-reports/` — durable audit artifacts.
 
 ## How to use this index
