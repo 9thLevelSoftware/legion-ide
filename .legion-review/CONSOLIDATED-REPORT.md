@@ -1,0 +1,3379 @@
+# Consolidated Legion IDE Review Report
+
+## Executive summary
+- Total findings: 265
+- Severity breakdown: 6 critical, 73 high, 133 medium, 53 low
+- Category breakdown: 92 bugs, 157 failure points, 11 stubs, 5 errors
+- Source review files: 20 markdown reports
+
+### Findings by area
+- Security & Sandbox: 17
+- Observability & Debug: 13
+- Plugin: 10
+- AI: 12
+- Agent: 12
+- UI, Editor & Collaboration: 19
+- App: 7
+- Protocol: 10
+- Desktop: 37
+- LSP & Remote: 15
+- Platform & Misc: 15
+- Build & Config: 7
+- Storage / Retention / Memory: 16
+- Xtask: 17
+- Tests: Desktop: 18
+- Tests: App & Agent: 19
+- Tests: Remaining Crates: 21
+
+## Findings by severity
+### Critical (6)
+- F001 — Observability & Debug — `observability-&-debug.md` — 13-17, 91, 99, 127, 138 — bug: `fingerprint` labels every `FileFingerprint` as `sha256` but stores the input string directly instead of a SHA-256 digest. `debug_adapter_audit_evidence` and `test_run_summary_evid
+- F002 — Plugin — `plugin-system.md` — 84-87, 223-232 — failure-point: The Wasmtime host does not enforce the manifest's `max_fuel`, `max_wall_time_ms`, or `max_memory_pages` quotas. The engine is created with the default `Config`, the store is create
+- F003 — Security & Sandbox — `sandbox-&-security.md` — 133-148, 183-191 — bug: `NormalizedPolicyPath::starts_with` only checks prefix equality when the policy root has a prefix. The default roots are `./`, which parse to no prefix and no segments, so they mat
+- F004 — Security & Sandbox — `sandbox-&-security.md` — 1852-1889 — bug: Filesystem capability handling only applies `PathPolicy` to `fs.write` when `target_path` is present. If `fs.write` omits `target_path`, the code returns `Allow`; non-write `fs.*`
+- F005 — Security & Sandbox — `sandbox-&-security.md` — 290-315 — bug: `path_is_within_scope` is purely lexical and `normalize_path` collapses `..` without resolving symlinks or canonical paths. A symlink inside the workspace that points outside still
+- F006 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 419-435, 558-620 — error: `handle_transport_envelope` validates that `envelope.sender_participant_id` is nonzero, but it never checks that the sender matches the participant encoded in the payload. An envel
+
+### High (73)
+- F007 — AI — `ai-stack.md` — 1230-1239, 1267-1275, 1309-1320, 1355-1365 — bug: The Anthropic transport sends whatever was configured as `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` using a bearer authorization header. Anthropic API keys normally require the
+- F008 — AI — `ai-stack.md` — 24-40, 51-56 — bug: The redaction pass replaces marker strings and token prefixes, but not the complete sensitive values. For example, API-key assignments and authorization headers can be transformed
+- F009 — AI — `ai-stack.md` — 333-340, 1230-1241, 1267-1278, 2256-2259 — failure-point: All blocking HTTP transports create default `reqwest::blocking::Client` instances without request/connect timeouts. A hung provider endpoint or MCP HTTP server can block the callin
+- F010 — AI — `ai-stack.md` — 619-625 — failure-point: `OpenAiResponsesProvider::request_payload` defaults `openai.responses.store` to `true`, causing hosted Responses API calls to opt into provider-side response storage unless callers
+- F011 — Agent — `agent-system.md` — 23-37 — bug: Scope enforcement delegates to `target_is_within_scope` and `forbids_path` using the raw `target_path`. Neither the target path nor forbidden path comparison is canonicalized/norma
+- F012 — Agent — `agent-system.md` — 361-388 — failure-point: The copy-based sandbox fallback walks the workspace and calls `std::fs::copy` for every non-directory entry. Symlinks are not detected or rejected; `std::fs::copy` follows symlinks
+- F013 — Agent — `agent-system.md` — 422-469, 519-524 — bug: `validate_containment` normalizes a candidate path for the containment check, but `generate_proposal` later derives the proposal path from the original `input.target_path`. A path
+- F014 — Agent — `agent-system.md` — 514-565 — bug: `DelegatedTaskProposalGenerator::generate_proposal` is documented as comparing sandbox state with `HEAD`, but it never reads `HEAD`, never diffs the target, and always emits a `Pro
+- F015 — Agent — `agent-system.md` — 78-99 — bug: `validate_workspace_edit_conversion` requires `ProposalTargetCoverageKind::Complete`, but it never verifies that `payload.target_coverage.targets` actually match every path/file to
+- F016 — Agent — `agent-system.md` — 82-102 — bug: `workflow_dag_from_approved_plan` creates nodes for every plan section entry and then connects them with a simple linear `windows(2)` chain. It does not preserve task-graph depende
+- F017 — App — `app-entry-&-proposals.md` — 10525-10537, 18138-18155 — bug: The direct save workflow writes the file through `workspace.save_file_with_proposal` before requiring the applied-proposal audit to persist. If `observe_proposal_response` fails af
+- F018 — App — `app-entry-&-proposals.md` — 1283-1320 — error: The offline-build test helper `route_request()` constructs `AssistedAiProviderRouteRequest` without the required `prompt_prefix` field. This breaks the no-default-feature test targ
+- F019 — App — `app-entry-&-proposals.md` — 410-418, 420-435 — failure-point: `validate_containment` canonicalizes the sandbox base but only lexically normalizes the candidate target path. A path that remains textually under the sandbox while traversing a sy
+- F020 — App — `app-entry-&-proposals.md` — 81-92, 117-125 — bug: `filtered_batch_proposal_for_accepted_targets` keeps every item whose own targets are accepted, then drops dependency edges whenever either endpoint is not retained. If an accepted
+- F021 — Build & Config — `build-&-config.md` — 10, 51-53 — failure-point: The dependency policy treats yanked crates, unknown registries, and unknown git sources as warnings (`yanked = "warn"`, `unknown-registry = "warn"`, `unknown-git = "warn"`). Becaus
+- F022 — Desktop — `desktop-core.md` — 2683-2731 — bug: `editor_text_input_actions` computes the insertion coordinate once before iterating all text/paste/IME events. If a single egui frame contains multiple text-like events, all genera
+- F023 — Desktop — `desktop-core.md` — 2945-2958 — failure-point: On Windows, `open_url_in_system_browser` invokes `cmd /C start` and passes the URL as a raw argument. Forge URLs can contain shell metacharacters such as `&` in query strings (nota
+- F024 — Desktop — `desktop-core.md` — 872-879 — bug: The `OpenWorkspace` app request opens the new root in `AppComposition`, but `DesktopRuntime.workspace_root` is never updated. Diagnostics, operational health, and later session cap
+- F025 — Desktop — `desktop-views-part-1.md` — 19-32, 39-68 — failure-point: The privacy inspector header reports aggregate counts for all records, but the detail rows silently show only the first 10 records. If high-risk, denied, external-egress, or redact
+- F026 — Desktop — `desktop-views-part-1.md` — 3333-3336 — bug: The command center always renders the delegated-task scope picker with `DesktopScopePickerViewModel::default()`. That shows a repo-scoped, balanced-risk, read-only default regardle
+- F027 — Desktop — `desktop-views-part-1.md` — 3389-3499 — failure-point: Hunk-review controls silently cap visible reviews to 4, file groups to 6, and hunk rows to 6. Hidden reviews/files cannot be accepted, rejected, marked pending, or edited from this
+- F028 — Desktop — `desktop-views-part-1.md` — 74-119 — error: `host_profile_summary` compiles and displays a sandbox profile for the hard-coded path `/workspace/project` instead of the active workspace/task scope. On Windows it also unwraps t
+- F029 — Desktop — `desktop-views-part-2.md` — 15-21, 32-39, 64-88 — bug: `fleet_card_view_models` turns every proposal-ledger row into a card and `render_card` always exposes `Approve`, `Review`, and `Reject` actions. The card projection only carries th
+- F030 — Desktop — `desktop-views-part-2.md` — 197-206 — bug: Waiting-for-approval recovery actions are discovered by searching `row.display_safe_labels` for a `signoff:` prefix, but real `LegionWorkflowProjectionRow` construction currently p
+- F031 — Desktop — `desktop-views-part-2.md` — 213-235, 241-250, 259-264 — bug: Verification and conflict recovery actions construct typed IDs from display-safe label text (`LegionWorkflowVerificationGateId(gate_id)` and `LegionWorkflowConflictId(conflict_id)`
+- F032 — Desktop — `desktop-views-part-2.md` — 58, 132-136 — bug: Every fenced code block gets an enabled `Apply as proposal` affordance whenever the caller supplies any `proposal_id`. The renderer then dispatches `DesktopAction::ApplyProposal {
+- F033 — LSP & Remote — `lsp-&-remote.md` — 1177-1192 — bug: `validate_mutation_gate` accepts any granted capability decision and any non-empty principal through `has_required_write_guards`. It does not require the capability to be `remote.f
+- F034 — LSP & Remote — `lsp-&-remote.md` — 2366-2372, 2435-2447, 2607-2678 — failure-point: The stdio read path is fully blocking and does not apply the `LspPendingRequest.timeout_ms` budget. `resolve_timeout` exists on `LspClient`, but `read_response_for` and `request` n
+- F035 — LSP & Remote — `lsp-&-remote.md` — 2435-2468 — bug: `LspStdioSession::read_until_correlated_response` discards every response whose JSON-RPC id is not the one currently being waited for. If callers send multiple requests and the ser
+- F036 — LSP & Remote — `lsp-&-remote.md` — 791-817, 994-1000, 1205-1213, 1267-1275 — bug: The runtime deduplicates and audits using the envelope `operation_id`, but payload descriptors only check that their own operation ids are non-zero. Filesystem and process payloads
+- F037 — Observability & Debug — `observability-&-debug.md` — 1799-1812, 1822-1830, 1832-1837 — failure-point: Metadata-only redaction preserves every top-level string whose key does not match a small denylist. Keys such as `summary`, `reason`, `message`, `diagnostics`, `path`, `command`, o
+- F038 — Observability & Debug — `observability-&-debug.md` — 26-31, 58-60 — bug: Crash symbol upload gating only checks `consent.crash_reports_enabled`. It ignores the master `consent.enabled` flag, so an inconsistent or stale consent record with telemetry disa
+- F039 — Observability & Debug — `observability-&-debug.md` — 39-50, 58-60 — failure-point: The crash summary envelope stores `report.crash_id`, `report.signal`, `report.metadata_summary`, and, when consented, `symbol_upload_target` verbatim in a metadata-only payload. Cr
+- F040 — Observability & Debug — `observability-&-debug.md` — 713-735, 1631-1635, 1754-1757 — bug: `metadata_fingerprint` and `metadata_hash` build audit fingerprints with `std::collections::hash_map::DefaultHasher`. That hasher is not a stable, documented file/audit fingerprint
+- F041 — Observability & Debug — `observability-&-debug.md` — 87, 102-128 — failure-point: `consented_training_candidate_from_records` validates the assisted-AI audit record but does not validate the `ProposalAuditRecord` before copying `proposal.payload_summary`, lifecy
+- F042 — Platform & Misc — `platform-&-misc-crates.md` — 148-173, 197-235 — failure-point: Manifest classification ignores executable extension entrypoints such as `main` and `browser`. A package with extension host code but only declarative-looking contributions can be
+- F043 — Platform & Misc — `platform-&-misc-crates.md` — 1573-1643 — failure-point: The Gix backend parses `gix` status items by formatting them with `Debug` and scraping substrings such as `path: "..."`, `untracked`, and `modified`. This is not a stable API and c
+- F044 — Platform & Misc — `platform-&-misc-crates.md` — 194-209 — bug: `LegionWorkflowTrackerRecord::validate` allows `merge_readiness_state == Ready` while `failed_verification_count > 0`. The ready-state guard requires gate ids, sign-off counts, and
+- F045 — Platform & Misc — `platform-&-misc-crates.md` — 2461-2466, 2503-2511, 2520-2528, 2620-2624, 2653-2678 — bug: Registering a plugin tree-sitter grammar makes `tree_sitter_supports_language` return true for that language, but the parser/highlighter/chunker still call the bundled Rust tree-si
+- F046 — Platform & Misc — `platform-&-misc-crates.md` — 580-604, 697-705 — bug: `pending_batch` accepts `consent` and `endpoint` independently and does not verify that `consent.endpoint` matches the endpoint used for upload. `HostedTelemetryExporter::export_on
+- F047 — Platform & Misc — `platform-&-misc-crates.md` — 990-1019 — bug: `NativeProcessService::execute` enforces `request.timeout` only after `Command::output()` returns. A command that hangs or produces no terminating output can block forever and the
+- F048 — Plugin — `plugin-system.md` — 136-160, 223-231 — bug: Import validation allows exactly `env::host_log`, but `invoke` creates an empty `Linker` and never defines `env.host_log`. A module importing the only allowed host function success
+- F049 — Plugin — `plugin-system.md` — 171-176, 205-208 — bug: `dispatch_host_call` tracks `output_bytes_used`, but quota enforcement only compares the current `metadata_label.len()` to `max_output_bytes`. Multiple accepted host calls with lab
+- F050 — Plugin — `plugin-system.md` — 181-188, 197-210, 263-265 — bug: Host-call quota enforcement is tied to successful guest invocations rather than actual host calls. `used_host_calls` is checked before instantiation and incremented once after an i
+- F051 — Plugin — `plugin-system.md` — 41-63, 81-95 — failure-point: `SignedExtensionRegistry` validates only signature presence and trust decision; it never calls `validate_plugin_manifest`. As a result, a signed/trusted manifest with an invalid pl
+- F052 — Plugin — `plugin-system.md` — 81-94 — bug: The registry treats `signature.is_some()` plus a trusted self-reported `manifest.trust.decision` as sufficient proof that an artifact is signed and trusted. It does not verify that
+- F053 — Protocol — `core-protocol.md` — 131-136 — bug: `RiskAssessment::is_allow()` returns true when `findings` is empty because `Iterator::all()` is vacuously true. If a risk engine fails to emit findings, omits all rules, or deseria
+- F054 — Security & Sandbox — `sandbox-&-security.md` — 1402-1411 — bug: `remote.fs.read` and `remote.fs.write` are allowed whenever remote runtime sessions and filesystem access are enabled; only write size is checked. The remote filesystem path is not
+- F055 — Security & Sandbox — `sandbox-&-security.md` — 15-24 — stub: `LandlockProfile::compile` only returns human-readable notes such as `bwrap --unshare-net` and `Landlock write rules deny paths outside workspace`. It does not construct Landlock r
+- F056 — Security & Sandbox — `sandbox-&-security.md` — 15-24 — stub: `SeatbeltProfile::compile` emits generic strings, not a valid macOS Seatbelt profile. The rules do not interpolate or escape the workspace root or egress destinations, so the compi
+- F057 — Security & Sandbox — `sandbox-&-security.md` — 162-180, 260-272 — failure-point: `ActivatedSandbox::activate` cannot fail and always records an allowed activation event, even for an unsupported backend/platform pairing. The `SandboxError::UnsupportedBackend` an
+- F058 — Security & Sandbox — `sandbox-&-security.md` — 2012-2054 — bug: `CapabilityBrokerPort::handle` passes `CapabilityRequest::Grant` and `CapabilityRequest::Deny` through directly without checking namespace, policy, trust state, principal, or wheth
+- F059 — Security & Sandbox — `sandbox-&-security.md` — 21-48 — failure-point: On non-Windows hosts, `WindowsProfile::compile` returns `Ok(Self)` using `SandboxBackend::DocumentedFallback` instead of returning `SandboxError::DocumentedFallbackRequired` or `Un
+- F060 — Security & Sandbox — `sandbox-&-security.md` — 383-414, 1913-1920, 1948-1958 — failure-point: `CommandTaxonomy` classifies `git` as `Read` based only on the first token. Mutating or networked commands such as `git push`, `git clean`, or `git checkout` are therefore treated
+- F061 — Security & Sandbox — `sandbox-&-security.md` — 457-475, 1925-1933 — bug: `LspLaunchPolicy` defines `allowed_binaries` and `deny_network_refresh`, but the `lsp.*` decision path ignores both fields and allows any LSP capability in trusted workspaces. A ma
+- F062 — Security & Sandbox — `sandbox-&-security.md` — 69-76 — bug: `ProposalAutoApprovalPolicy::allows_rule_ids` returns true when `enabled` is true and `rule_ids` is empty because `.all(...)` on an empty iterator is true. This can allow auto-appr
+- F063 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 1248-1253 — failure-point: The file-backed vault index is written with plain `fs::write`. A process crash, disk-full condition, or interrupted write can leave `index.json` truncated or partially written, mak
+- F064 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 428-440, 590-597, 1188-1217 — bug: Raw-source retention leases store `expires_at` as `TimestampMillis(self.policy.ttl_ms)`, treating a TTL duration as an absolute timestamp. With a normal TTL such as 60,000 ms, ever
+- F065 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 501-542, 745-775, 1121-1152 — bug: File-backed protocol records for workspace config, file metadata, session records, and trust records are not persisted across reopen. `StorageRepositoryRequest::SaveWorkspaceConfig
+- F066 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 568-573, 626-630, 1219-1241 — bug: `RawSourceCaptureRequest::max_bytes` is validated only as metadata and is not enforced against the actual packed file payload. `capture_bundle` rejects only empty payloads or paylo
+- F067 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 675-684 — failure-point: `InMemoryStorageRepositoryPort::record_event` emits the event envelope before it verifies that redacted event metadata was durably stored, and it evaluates both operations before r
+- F068 — Tests: Remaining Crates — `tests---remaining-crates.md` — 196-215 — failure-point: `perf_harness_fail_on_budget_env_overrides_descriptor_budget` mutates process-global environment with `set_var`/`remove_var`. Rust integration tests can run concurrently within the
+- F069 — Tests: Remaining Crates — `tests---remaining-crates.md` — 230-237, 444-446 — failure-point: `spawn_http_fixture` accepts exactly four HTTP requests and the test unconditionally joins the fixture thread. If the client sends fewer than four requests, fails before the tool c
+- F070 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 1141-1153 — bug: Batch edit deltas are computed while edits are applied in descending byte order. A later lower-offset edit can shift the post-edit coordinates of an earlier higher-offset delta, bu
+- F071 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 2373-2388 — bug: `EditorRequest::ApplyTransaction` validates that a transaction descriptor matches the buffer identity and then returns it as `EditorResponse::Transaction`, but it does not mutate t
+- F072 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 267-306, 739-773 — bug: Submission only detects gaps in the author's `participant_sequence`. Cross-participant dependencies declared in `operation.preconditions.base_vector` are not checked against accept
+- F073 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 3383-3427, 3457-3914 — failure-point: `Shell::render` writes active file text, viewport text, paths, command labels, terminal rows, debug values, and other projection strings directly to stdout with `println!` and no t
+- F074 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 4802-4810 — bug: `parse_pos` converts byte offsets in viewport mode by accumulating `visible_text.len() + 1` from the first visible slice and then returns `byte_offset: Some(byte_offset as u64)`. T
+- F075 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 721-789, 794-843 — bug: Concurrent text operations are replayed in deterministic order using their original byte ranges, but ranges are never transformed against prior concurrent inserts/deletes/replaceme
+- F076 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 806-823 — failure-point: `LineIndex::visible_line_slices` creates `Vec::with_capacity(end_line_exclusive.saturating_sub(start_line))` before checking that `end_line_exclusive` is within the document. A cal
+- F077 — Xtask — `xtask.md` — 195-220, 320-340 — bug: The large-fixture search benchmark scans only indices `0..scan_limit`, while the 50K/100K descriptors search for `module_49999` and `module_99999` with a default scan limit of 1024
+- F078 — Xtask — `xtask.md` — 296-350 — bug: `verify_legion_bench_report` trusts most of the report payload. It checks schema, suite name/fingerprint, task count, summary failure counts, and task id order, but it does not com
+- F079 — Xtask — `xtask.md` — 740-755 — bug: `verify-release-pipeline` always reloads `xtask/release-pipeline.example.toml` instead of accepting or remembering the config used by `release-pipeline --config ...`. Descriptors g
+
+### Medium (133)
+- F080 — AI — `ai-stack.md` — 21-40 — failure-point: Sensitive-marker detection lowercases the payload in `scan_payload_for_sensitive_markers`, but the subsequent replacement list is mostly case-sensitive. Mixed-case forms can be fla
+- F081 — AI — `ai-stack.md` — 2172-2195, 2203-2216 — failure-point: `StdioMcpTransport::send_on_session` loops on `read_line` until it sees the expected response id, with no timeout, cancellation path, or maximum number of unrelated messages. A sil
+- F082 — AI — `ai-stack.md` — 36-61 — bug: `flush_code` drops fenced code blocks when `code_lines` is empty, both for complete and incomplete fences. An assistant response containing an intentionally empty code block, such
+- F083 — AI — `ai-stack.md` — 451-480, 512-522 — failure-point: The deterministic inline predictor can produce an `Available` inline-prediction result with empty ghost text when `max_prediction_bytes` is zero or too small for the generated pref
+- F084 — AI — `ai-stack.md` — 679-705 — bug: `ProviderRouter::route_completion` invokes the selected provider, but the successful route response reports `provider_id` and `model_label` from the original request without checki
+- F085 — AI — `ai-stack.md` — 958-972 — bug: `OpenAiCompatibleProvider::complete` serializes `max_tokens` and `temperature` directly inside `json!`, so absent options are sent as JSON `null`. Some OpenAI-compatible endpoints
+- F086 — Agent — `agent-system.md` — 1207-1268 — failure-point: Provider route requests use a constant cancellation token (`Uuid::from_u128(13)`) and constant event sequence (`EventSequence(13)`) for every provider-backed worker. Multiple route
+- F087 — Agent — `agent-system.md` — 43-58 — failure-point: `task_entries` converts each task node into a display string with id, targets, and verification requirements, but drops `depends_on`, `edge_count`, blocked-task metadata, and task
+- F088 — Agent — `agent-system.md` — 44-74, 147-156 — failure-point: `external_log_evidence_record` constructs evidence ids and command labels directly from `log_label`, and `record_external_log_evidence` pushes the record without running `validate_
+- F089 — Agent — `agent-system.md` — 997-1058 — failure-point: `record_proposal_output` appends proposal outputs, evidence records, and worker results every time it is called. The generated evidence/result ids are deterministic by worker id (`
+- F090 — App — `app-entry-&-proposals.md` — 11-22 — failure-point: The CLI entry point defaults to `scratch.txt` but opens it with `AppComposition::open_file`, which uses `OpenFileIntent::Existing`. Starting the app in a fresh directory therefore
+- F091 — App — `app-entry-&-proposals.md` — 15656-15659, 15702-15706, 15742-15744 — failure-point: `execute_delegated_task` allocates a sandbox/worktree, but cleanup is not guaranteed on all error exits. If the ACP host command fails to start, the `?` at the `run(...)` call retu
+- F092 — App — `app-entry-&-proposals.md` — 21705-21763, 2189-2202 — bug: Partial delegated-hunk application creates a filtered batch proposal locally, but the coordinator stores the original proposal before filtering and never replaces it with the filte
+- F093 — Build & Config — `build-&-config.md` — 1-10 — failure-point: The workflow does not define an explicit `permissions` block. Jobs in this workflow only need repository checkout/read access, but without a workflow-level `permissions: contents:
+- F094 — Build & Config — `build-&-config.md` — 14-16 — failure-point: `multiple-versions = "warn"` is too weak for a governance gate and there is no explicit exception list explaining which duplicate crates are acceptable. The current lockfile has 55
+- F095 — Build & Config — `build-&-config.md` — 21-25, 40-42, 70-72, 80-82, 159-164, 180-187 — failure-point: Third-party GitHub Actions are referenced by mutable major/channel tags (`actions/checkout@v4`, `dtolnay/rust-toolchain@stable`, `swatinem/rust-cache@v2`, `actions/upload-artifact@
+- F096 — Build & Config — `build-&-config.md` — 24-25, 183-184 — failure-point: Both validation and release jobs install a floating stable Rust toolchain without tying it to a checked-in `rust-toolchain.toml` or the workspace MSRV. This makes build and release
+- F097 — Build & Config — `build-&-config.md` — 36-40, 38 — failure-point: The workspace opts into edition 2024 but does not declare a `rust-version` in `[workspace.package]`. Combined with CI's floating `dtolnay/rust-toolchain@stable`, the effective comp
+- F098 — Desktop — `desktop-core.md` — 1249-1255 — bug: `OpenGitPullRequestUrl` falls back to using the current branch as the base branch when `remote_default_branch` is missing. That produces a self-compare URL (`branch...branch`) rath
+- F099 — Desktop — `desktop-core.md` — 126-183 — failure-point: Crash-safe saves use a temporary path based only on the process id (`.<file>.<pid>.tmp`). Concurrent saves of the same session path within one process can remove or overwrite each
+- F100 — Desktop — `desktop-core.md` — 2029-2030, 2103-2104, 2136-2138, 2191-2194, 2200-2205, 2210-2213, 2222-2225, 2233-2236, 2385-2386, 2443-2447, 2505-2514 — failure-point: Multiple UI event paths call `runtime.handle_action(...)` and discard the `Result` with `let _ = ...`. If refresh, session persistence, diagnostics, or app authority returns an err
+- F101 — Desktop — `desktop-core.md` — 315-323 — bug: Native smoke pass/fail only checks whether at least one frame was observed. Adapter checks, focus/high-DPI observation, accessibility projection, and guardrail statuses can all be
+- F102 — Desktop — `desktop-core.md` — 345-360 — failure-point: `prepare_beta_workspace` resolves relative beta workspace paths against `std::env::current_dir()` instead of `BetaWorkflowConfig.real_workspace_root`. Programmatic callers or launc
+- F103 — Desktop — `desktop-core.md` — 35-40, 116-120 — bug: The Windows package plan always builds `cargo build -p legion-desktop` and points at `target/<profile>/legion-desktop.exe`. On non-Windows hosts this command produces the host bina
+- F104 — Desktop — `desktop-core.md` — 50-52, 87-102, 111-127 — failure-point: `FrameTimingRecorder` stores every input-to-paint sample and every frame duration with no retention bound. If reused outside short smoke runs, a long-running desktop session can ac
+- F105 — Desktop — `desktop-views-part-1.md` — 128-134 — bug: `render_plan_editor` only appends missing draft section bodies and never reconciles an existing draft when `model.sections` shrinks, reorders, or changes kind. Because drafts are k
+- F106 — Desktop — `desktop-views-part-1.md` — 1859-1910, 2082-2104, 4296-4304 — bug: Drag selection ranges are emitted as `{ start: drag_anchor, end: coordinate }` without normalizing start/end order. The paint path in `selection_span_for_line` assumes `start <= en
+- F107 — Desktop — `desktop-views-part-1.md` — 229-241, 341-347 — bug: `proposal_evidence_panel` treats `ProposalId(0)` as a sentinel for an absent checkpoint proposal, but if there is no selected proposal it still returns `Some(checkpoint_projection.
+- F108 — Desktop — `desktop-views-part-1.md` — 2704-2712, 2725-2728 — stub: The Legion workflow header renders `Pause Workflow` and `Add Constraint` buttons but discards their responses, so the controls are visible and clickable-looking while producing no
+- F109 — Desktop — `desktop-views-part-1.md` — 5490-5497 — bug: `git_relative_path` uses plain string `strip_prefix(root)` and then trims separators. This is not path-boundary aware: a file such as `/repo2/src/lib.rs` can be treated as relative
+- F110 — Desktop — `desktop-views-part-1.md` — 67-81, 87-99 — failure-point: The conversion from `DesktopScopePickerViewModel` to `DelegatedTaskScope` permits `File` or `Module` scopes with `target_path: None`, and the summary falls back to the placeholder
+- F111 — Desktop — `desktop-views-part-2.md` — 21-29 — failure-point: The renderer hard-limits the fleet cards to the first four cards with `cards.iter().take(4)` and does not show an overflow count. Any additional proposal rows are silently hidden,
+- F112 — Desktop — `desktop-views-part-2.md` — 31-41, 65-72 — failure-point: The panel always appends `cancellation: mid-flight cancel is available while the task is not terminal`, even when the cloud runtime is disabled, when there are no submitted tasks,
+- F113 — Desktop — `desktop-views-part-2.md` — 44-75, 77-80 — failure-point: `provider_policy_rows` re-derives policy labels from `provider_class` using hard-coded strings and ignores the provider summary's actual `availability`, `refusal`, `risk_label`, `p
+- F114 — Desktop — `desktop-views-part-2.md` — 8-10, 28-36 — failure-point: The manifest preview can report `no context items projected before invocation` whenever `manifest.items` is empty, even if `omitted_item_count`, stale metadata risk, permissions, o
+- F115 — LSP & Remote — `lsp-&-remote.md` — 1035-1064, 1089-1096, 1166-1173 — failure-point: Mutating operations preserve or reuse the caller's precondition snapshot id instead of issuing a new post-mutation snapshot id. Writes set `entry.snapshot_id = preconditions.snapsh
+- F116 — LSP & Remote — `lsp-&-remote.md` — 1089-1096 — bug: `create_file` stores content containing the proposal id (`remote-created-by-proposal:{id}`) but records the fingerprint of the constant string `remote-created-by-proposal`. The ret
+- F117 — LSP & Remote — `lsp-&-remote.md` — 1670-1679 — failure-point: `common_headers` silently omits the `Authorization` or `X-Legion-Client-Identity` header when `HeaderValue::from_str` fails. A malformed configured token or identity label turns in
+- F118 — LSP & Remote — `lsp-&-remote.md` — 1749, 1765, 1775, 1785 — failure-point: Cloud task ids are interpolated directly into URL path segments. `validate_cloud_task_id` only rejects empty ids, so ids containing `/`, `?`, `#`, or percent-encoded path separator
+- F119 — LSP & Remote — `lsp-&-remote.md` — 291-303 — failure-point: The mock server parses `Content-Length` and immediately allocates `vec![0u8; length]` with no maximum payload bound. A malformed or hostile test client can force excessive memory a
+- F120 — LSP & Remote — `lsp-&-remote.md` — 584-587, 731-735, 905-911 — failure-point: `replay_window_size` only bounds `accepted_sequences`; `seen_operations` and `inflight_operations` keep growing for every accepted operation until acked or process lifetime ends. L
+- F121 — LSP & Remote — `lsp-&-remote.md` — 761-779 — bug: `checkpoint` accepts a checkpoint for any seen `last_operation_id` without checking that `checkpoint.event_sequence` is at or behind the current `last_sequence` or consistent with
+- F122 — Observability & Debug — `observability-&-debug.md` — 122-178 — failure-point: `suggestion_metadata_summary` concatenates request ids, result ids, acceptance/dismissal ids, provider ids, model labels, health labels, and cost labels directly into one free-form
+- F123 — Observability & Debug — `observability-&-debug.md` — 26-31, 47-49 — bug: `symbolicated` is set to `consent.crash_reports_enabled` rather than to whether the minidump was actually symbolicated. With crash reporting enabled but no upload target, the event
+- F124 — Observability & Debug — `observability-&-debug.md` — 602-634 — bug: `proposal_audit_record` combines `proposal` data with lifecycle, timestamp, principal, capability, correlation, and causality from `transition`, but never verifies `transition.prop
+- F125 — Observability & Debug — `observability-&-debug.md` — 643, 1067, 1089, 1109, 1155, 1530, 1760-1767 — failure-point: Many public event helper functions return `EventEnvelope` directly but call `assert_core_ids`, which panics on a nil causality id, zero correlation id, or zero sequence. Invalid ru
+- F126 — Observability & Debug — `observability-&-debug.md` — 77-85 — failure-point: The training candidate gate treats `AssistedAiConsentState::NotRequired` the same as explicit `Granted` consent. If training export or retention policy requires affirmative user co
+- F127 — Observability & Debug — `observability-&-debug.md` — 89-92 — bug: Only `ProposalLifecycleState::Approved` is labeled as `Accepted`; `Applied` traces return `Ok(None)`. If downstream audit records are captured after a proposal is actually applied,
+- F128 — Platform & Misc — `platform-&-misc-crates.md` — 1102-1110 — bug: Unix PTY spawning clears the environment and then calls `child_environment_vars(&[])`, ignoring `PtyRequest.env`. PTY sessions therefore cannot receive caller-supplied environment
+- F129 — Platform & Misc — `platform-&-misc-crates.md` — 1798-1800, 1834-1845 — failure-point: `close_pty` on Unix calls `kill_pty(..., PtyKillMode::Terminate)`, and the terminate path signals only the direct child PID. Because PTY children are placed in a new session/proces
+- F130 — Platform & Misc — `platform-&-misc-crates.md` — 2644-2650, 2658-2660, 2681-2685, 2688-2693 — failure-point: The global plugin grammar registry is protected by a `Mutex`, but every lock uses `expect(...)`. Any panic while holding the registry lock poisons it and turns later grammar regist
+- F131 — Platform & Misc — `platform-&-misc-crates.md` — 279-285, 460-466, 1793-1796, 3451-3454 — bug: The project-local `stable_hash` uses `std::collections::hash_map::DefaultHasher` for identifiers that are intended to be deterministic (`WorkspaceId`, hunk ids, content-version dig
+- F132 — Platform & Misc — `platform-&-misc-crates.md` — 3108-3127, 4718-4736 — bug: Workspace search reports `line_number: line_number as u32` directly from `enumerate()`, so search hits are zero-based. `WorkspaceSearchHit::line_number` is a user-facing line field
+- F133 — Platform & Misc — `platform-&-misc-crates.md` — 5241-5324 — bug: `build_rename_preview_payload` always marks the target coverage as `Complete` with `omitted_target_count: 0`, even though it only uses the ranges present in a single `SymbolFileMap
+- F134 — Platform & Misc — `platform-&-misc-crates.md` — 534-555 — failure-point: `FileBackedTelemetrySpool::open` deserializes persisted spool state but does not validate the decoded schema version, records, or capacity invariants. A corrupted/stale spool file
+- F135 — Plugin — `plugin-system.md` — 226-231, 284-299, 333-347 — bug: Traps during instantiation or exported-function lookup call `finish_trap`, which only appends an audit entry and returns an error. The stored plugin state remains `Running`; `plugi
+- F136 — Plugin — `plugin-system.md` — 263-271 — failure-point: `PluginRuntimePort::handle` accepts `CommandDescriptor` and `Contribution` requests directly and returns successful registration responses without verifying that a trusted manifest
+- F137 — Plugin — `plugin-system.md` — 84-87, 164-168, 205-209 — failure-point: `host_calls_used` is documented as usage during the active invocation, but this metadata-only host never establishes or resets an invocation boundary. The counter is initialized at
+- F138 — Plugin — `plugin-system.md` — 9-24, 31-69 — failure-point: Permission review rows are emitted per requested capability and `permission_reason_for_capability` uses `find_map`, so only the first matching contribution is surfaced. A manifest
+- F139 — Protocol — `core-protocol.md` — 304-379 — bug: `validate_tool_schema_definition()` validates that required fields match `tool.kind.required_fields()`, but it does not verify that `tool.tool_name` equals `tool.kind.tool_name()`
+- F140 — Protocol — `core-protocol.md` — 334-335, 420-447 — bug: The artifact contract documents that `sections` are "always ordered requirements → design → tasks", but `EditablePlanArtifact::validate()` only checks presence and duplicates. A pl
+- F141 — Protocol — `core-protocol.md` — 77-109 — failure-point: `DelegatedTaskScope::target_is_within_scope()` validates the workspace/module/file boundary but does not consult `forbidden_paths`. Because both methods live on the same scope obje
+- F142 — Protocol — `core-protocol.md` — 88-125 — failure-point: `ContextManifestAssembly::into_record()` emits a `ContextManifestRecord` without validating required contract fields or derived consistency. Empty `manifest_id`, zero `schema_versi
+- F143 — Protocol — `core-protocol.md` — 9483-9488 — failure-point: Delegated runtime protected-path enforcement checks `target.contains(protected)` on display/path labels. Substring matching is not path-aware: it can flag unrelated paths and can a
+- F144 — Protocol — `core-protocol.md` — 95-103, 127-140 — failure-point: `LegionToolCallFeedbackKind::UnknownTool` exists, but `LegionToolCallFeedback` requires `tool: LegionToolKind`. An actually unknown tool name cannot be represented without mapping
+- F145 — Security & Sandbox — `sandbox-&-security.md` — 114-130 — failure-point: `is_dependency_or_lockfile` catches several lockfiles but misses common dependency manifests such as `Cargo.toml` and `package.json`. Dependency changes in Rust or npm projects can
+- F146 — Security & Sandbox — `sandbox-&-security.md` — 2012-2048 — failure-point: `handle` clones the broker for every request and increments the clone's counter. When callers omit `decision_id`, repeated `handle` calls on the same broker can reuse the same gene
+- F147 — Security & Sandbox — `sandbox-&-security.md` — 218-248, 395-404 — failure-point: When `workspace_root` is absent, the path-scope rule emits an allow finding with an informational label. If no other rule denies, the aggregate risk remains `Low`, even though path
+- F148 — Security & Sandbox — `sandbox-&-security.md` — 37-47 — bug: `documented_fallback` is always populated, including the `cfg!(windows)` path where `SandboxBackend::RestrictedToken` is selected. This makes successful Windows restricted-token pr
+- F149 — Security & Sandbox — `sandbox-&-security.md` — 57-72 — failure-point: `allowlist_matches_target` treats a host-only allowlist entry as matching the same host with any explicit port. For example, allowing `localhost` also allows `localhost:1`, `localh
+- F150 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 1155-1185, 1203-1214 — failure-point: `delete_bundle` returns an I/O error if the ciphertext file is already missing and does not remove index metadata or record the tombstone. `purge_expired` calls `delete_bundle` wit
+- F151 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 118-123 — bug: `provider_secret_reference` builds the keyring account as `format!("{provider_id}:{secret_name}")` without escaping or length-prefixing either component. Inputs containing `:` can
+- F152 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 157-168, 243-260 — failure-point: `MemoryService::from_snapshot` does not validate `MemoryServiceSnapshot.schema_version`. Snapshots with schema version 0 or a future unsupported schema are accepted as long as the
+- F153 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 299-306, 331-341, 366-373, 309-315, 344-350, 376-382 — bug: The three retain paths append records without checking for duplicate `candidate_id` or `trace_id`, while delete operations remove every matching id. Duplicate retained records can
+- F154 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 38-55, 467-482 — bug: `validate_memory_candidate` does not explicitly require `MemoryCandidateRecord.candidate_id` to be non-empty. It builds a Phase 4 audit id as `memory:{candidate_id}`, and the proto
+- F155 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 391-394, 422-427, 494-499 — failure-point: Migration backup verification uses `stable_storage_sum`, a wrapping additive checksum plus length, as the integrity value. This is trivially collision-prone: byte changes can prese
+- F156 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 631-649 — failure-point: `capture_bundle` writes encrypted bundle bytes before inserting metadata and flushing the vault index. If `flush_index` fails after the ciphertext write, the vault returns an error
+- F157 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 67-74, 132-134 — failure-point: Missing keyring entries are detected by lowercasing `error.to_string()` and searching for `"not found"`. This is brittle across keyring versions, platforms, and localized/backend-s
+- F158 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 789-798 — failure-point: Corrupt file quarantine ignores the result of `fs::rename`. `FileBackedStorage::open` can return `StorageError::Corrupt` with a quarantine path even if the rename failed because of
+- F159 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 93-115 — bug: `InMemorySecretStore` uses `Mutex::lock().expect("secret store lock")` in `store`, `load`, and `delete`. A poisoned lock will panic even though the `SecretStore` trait returns `Res
+- F160 — Tests: App & Agent — `tests---app-&-agent.md` — 106-118 — failure-point: All git workflow tests require the external `git` binary and panic if it is missing or if repository setup fails. There is no precondition check, skip path, or feature gate, so env
+- F161 — Tests: App & Agent — `tests---app-&-agent.md` — 108-124, 143-155, 231-247 — failure-point: The terminal workflow tests use fixed `20 * 25ms` sleep/poll loops. Real terminal startup, command execution, or CI load can exceed 500ms, creating flakes unrelated to the terminal
+- F162 — Tests: App & Agent — `tests---app-&-agent.md` — 121-124, 248-249 — failure-point: The cross-file rename traversal test writes `traversal_target` outside the workspace root and only removes it at the end of the happy path. Any panic before line 248 leaves an off-
+- F163 — Tests: App & Agent — `tests---app-&-agent.md` — 219-237 — failure-point: `terminal_actions_cannot_mutate_editor_or_disk` sends terminal input, polls once, immediately searches, and then asserts `output_rows` is not empty. Terminal output is asynchronous
+- F164 — Tests: App & Agent — `tests---app-&-agent.md` — 231-238 — failure-point: `daily_editing_search_workspace_honors_gitignore` only checks that `git init` could be spawned. It does not assert that the exit status succeeded. If `git init -q` returns a non-ze
+- F165 — Tests: App & Agent — `tests---app-&-agent.md` — 2391-2394, 3044-3048 — failure-point: Off-workspace escape fixture names are derived from `TEMP_ROOT_COUNTER.load(Ordering::Relaxed)` without a process id, timestamp, or increment. Parallel test processes, reruns after
+- F166 — Tests: App & Agent — `tests---app-&-agent.md` — 264-274, 286-296 — bug: The assertions intended to prove fallback comment detection ignores delimiters inside strings can pass even when a bogus comment token starts immediately after the delimiter. For e
+- F167 — Tests: App & Agent — `tests---app-&-agent.md` — 373-379 — failure-point: The ACP host integration test hard-codes `/bin/sh`. That path is Unix-specific and makes the test fail on Windows or sandboxed environments where `/bin/sh` is unavailable, despite
+- F168 — Tests: App & Agent — `tests---app-&-agent.md` — 374-453, 523-527 — failure-point: The command catalog coverage check uses a manually maintained case list and a hard-coded denominator of `13`. If the registered command catalog grows, the test can still report 100
+- F169 — Tests: App & Agent — `tests---app-&-agent.md` — 530-534, 634-638, 784-788, 896-900, 1020-1024 — bug: The conflict tests intentionally run `git merge feature` to create a conflicted state, but they ignore the merge exit status and stdout/stderr. If the merge unexpectedly succeeds,
+- F170 — Tests: Desktop — `tests---desktop.md` — 1021-1027 — failure-point: The app-boundary test reads `src/bridge.rs` and checks for a few forbidden names as raw substrings. This is brittle and incomplete: aliases, qualified imports not named in the list
+- F171 — Tests: Desktop — `tests---desktop.md` — 1716-1721 — failure-point: The renderer app-boundary test reads `src/view.rs` and asserts that `legion_app` and `AppComposition` do not appear. This raw substring check is too narrow to enforce architectural
+- F172 — Tests: Desktop — `tests---desktop.md` — 224-232 — failure-point: The projection-only boundary check uses raw source substring checks for `AppComposition`, `legion_terminal`, and `TerminalRuntime<`. This can miss real forbidden dependencies throu
+- F173 — Tests: Desktop — `tests---desktop.md` — 229-233 — failure-point: `platform_smoke_adapter_paths_route_without_metrics_payloads` reads `src/metrics.rs` and asserts that broad substrings like `String,` are absent. This is not tied to any metric pay
+- F174 — Tests: Desktop — `tests---desktop.md` — 241-247, 520-526 — failure-point: The no-bypass checks only assert that `report.proposal_status` does not contain the substrings `apply` or `autonomous`. A human-readable status string can be renamed and still hide
+- F175 — Tests: Desktop — `tests---desktop.md` — 274-277 — failure-point: `save_all_conflict_desktop_save_paths_dispatch_ui_intent` verifies save-path architecture by scanning `workflow.rs` for `dispatch_ui_intent` and absence of `save_file_with_proposal
+- F176 — Tests: Desktop — `tests---desktop.md` — 280-364 — failure-point: The acceptance test comments claim coverage for approved VSIX install, context manifest inspection, proposal diff review, and test execution, but these sections instantiate local f
+- F177 — Tests: Desktop — `tests---desktop.md` — 337-347 — failure-point: The projection-boundary test reads `src/bridge.rs` and `src/view.rs` as text and asserts that selected type names are absent. Source substring checks are easy to evade accidentally
+- F178 — Tests: Desktop — `tests---desktop.md` — 339-355, 357-382 — failure-point: The remote workflow test enables a local remote-development fixture and verifies a connected projection, but it does not exercise remote transport handshakes, offline/reconnect eve
+- F179 — Tests: Desktop — `tests---desktop.md` — 345-375 — failure-point: The workflow test enables a local collaboration fixture runtime and verifies join/presence status transitions, but it does not exercise a real collaboration transport, remote peer
+- F180 — Tests: Desktop — `tests---desktop.md` — 345-412 — failure-point: The command palette coverage test increments `resolved_cases` over a local fixed `cases` array and divides by a hard-coded denominator of `13`. If the command catalog grows, this t
+- F181 — Tests: Desktop — `tests---desktop.md` — 49, 78-90, 91-121, 128-148 — failure-point: Like `breakpoint_hit.rs`, this test writes a Cargo project but switches to `enable_debug_fixture_for_tests()` before refreshing configs, launching, stepping, and evaluating. It ver
+- F182 — Tests: Desktop — `tests---desktop.md` — 49, 81-91, 100-125, 132-153 — failure-point: The test creates a Rust crate but then calls `enable_debug_fixture_for_tests()` and asserts fixture-projected paused state, rows, locals, and console entries. This does not exercis
+- F183 — Tests: Desktop — `tests---desktop.md` — 83-100, 117-124 — failure-point: The diagnostics harness only tests a matching `buffer_id`/URI happy path and then a clear event for the same file. It does not cover mismatched URI vs buffer id, diagnostics for un
+- F184 — Tests: Desktop — `tests---desktop.md` — 90-100, 117, 139-142 — failure-point: Several important beta workflow assertions rely on substring checks against status/error/evidence text (`contains("saved")`, `contains("denied")`, `contains("blocked")`, etc.). Thi
+- F185 — Tests: Remaining Crates — `tests---remaining-crates.md` — 129-145, 137-139 — bug: `serve_one` reads the HTTP request with a single 4096-byte `read`. TCP does not guarantee the entire request arrives in one read, and larger or segmented requests will be truncated
+- F186 — Tests: Remaining Crates — `tests---remaining-crates.md` — 129-145, 293-343 — failure-point: Negative tests that assert policy rejection still call `serve_one`, spawning a listener thread whose handler should never run. Because `serve_one` returns only a URL and no join/sh
+- F187 — Tests: Remaining Crates — `tests---remaining-crates.md` — 155-164 — failure-point: `indexed_workspace_search_refreshes_after_file_changes` relies on a fixed 120 ms sleep before polling watcher events. This is timing-sensitive and can flake on slow or heavily load
+- F188 — Tests: Remaining Crates — `tests---remaining-crates.md` — 157-190 — stub: The tests named `perf_harness_unreachable_budget_marks_measurement_failed` and `perf_harness_tight_budget_classifies_measurement_failed` do not actually assert a failed measurement
+- F189 — Tests: Remaining Crates — `tests---remaining-crates.md` — 22-28 — failure-point: A default, non-ignored test allocates and opens a 100 MiB string. This can make ordinary test runs slow or memory-sensitive, especially when the harness runs tests in parallel with
+- F190 — Tests: Remaining Crates — `tests---remaining-crates.md` — 239-251 — error: `docs_hygiene_checks_untracked_markdown_in_git_repo` checks that `git init` and `git add` spawn, but it never checks `output.status.success()`. If either command fails, the test ma
+- F191 — Tests: Remaining Crates — `tests---remaining-crates.md` — 333-395 — stub: `large_file_100mb_degraded_mode_measurement` records open, viewport, and edit latencies but never asserts latency budgets for the measured values. The test logs `open_elapsed`, `vi
+- F192 — Tests: Remaining Crates — `tests---remaining-crates.md` — 399-409 — failure-point: The real `rust-analyzer` smoke test is skipped by default and also returns success when the binary is unavailable. This leaves the real server launch path untested in default CI.
+- F193 — Tests: Remaining Crates — `tests---remaining-crates.md` — 533-705 — stub: Even when the rust-analyzer smoke is enabled, many projected responses are assigned to underscore variables without assertions (`_completion_rows`, `_hover`, `_definitions`, `_refe
+- F194 — Tests: Remaining Crates — `tests---remaining-crates.md` — 72-77 — failure-point: The hosted Anthropic smoke path silently returns success when credentials are unavailable. In normal CI this means the only live provider validation can pass without exercising tok
+- F195 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 148-160 — bug: Participant initialization inserts participants into a `HashMap` keyed by participant id without rejecting duplicates. A duplicate participant id silently overwrites the earlier de
+- F196 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 1871-1896, 1002-1037 — failure-point: `set_cursors` and `set_selections` accept arbitrary `TextPosition`/`TextRange` values without validating them against the buffer. The invalid state is stored and later causes `view
+- F197 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 202-207, 234, 240-261 — bug: `legion_workflow_fleet_card_projections` computes one aggregate `test_status_label` from the entire `VerificationRunProjection` and applies the same label to every proposal card. I
+- F198 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 2428-2431, 1899-1910 — bug: `EditorRequest::Overlay` returns `OverlayApplied` but never stores the overlay in any buffer state. `EditorEngine` has `set_overlays`, but the protocol request path is a no-op succ
+- F199 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 318-323, 651-676 — bug: For accepted operations, `acknowledge` is called before `participant_sequences` is updated with the accepted sequence. The `observed_vector` in an Accepted acknowledgement therefor
+- F200 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 4571-4613, 5153-5157 — failure-point: Proposal command parsing accepts `ProposalId(0)` because `parse_proposal_id` does not reject zero. Other parsers in the same file reject zero identifiers, and the empty approval/ch
+- F201 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 4789-4799 — failure-point: In small-buffer mode, `parse_pos` uses `text.as_bytes().get(..byte_offset)`. If the requested byte offset lands inside a UTF-8 codepoint or past the end, the command silently falls
+- F202 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 73-77, 1047-1060, 1674-1683 — failure-point: Degraded-save behavior is inconsistent and potentially unbounded. `EditorError::DegradedSaveUnavailable` and the viewport large-file message say degraded saves fail closed, but `re
+- F203 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 730-742, 1257-1299 — failure-point: The simple-edit fast path shifts chunk boundaries and updates only the containing chunk hash, but it never rebalances/splits chunks if repeated same-line edits make a chunk exceed
+- F204 — Xtask — `xtask.md` — 17-27, 41-50, 192-203 — bug: The schema says `dependencies` is a required task field, but `BacklogCard.dependencies` has `#[serde(default)]` and `check_required_fields` always treats `dependencies` as present.
+- F205 — Xtask — `xtask.md` — 221-223 — bug: Broken-link validation treats every normalized relative target as valid if either `file.parent().join(target)` or `root.join(target)` exists. Markdown relative links are resolved r
+- F206 — Xtask — `xtask.md` — 2652-2658 — failure-point: `markdown_section` uses `source.find(heading)` and then stops at the next `\n## `. It can match the heading text inside prose, code blocks, or a deeper heading, not necessarily an
+- F207 — Xtask — `xtask.md` — 274-286, 294-312 — bug: Preview builds compute descriptor `version` as `<workspace_version>-preview`, but `build_version_stamp` receives `workspace_version` instead of the channel-adjusted `version`. Prev
+- F208 — Xtask — `xtask.md` — 346-360, 617-627 — failure-point: Descriptor filenames are derived by lowercasing alphanumeric, `-`, and `_` characters and replacing every other character with `-`. Distinct installer target names such as `linux x
+- F209 — Xtask — `xtask.md` — 399-425, 461-463 — failure-point: The startup, input-to-paint, and scroll-jank workloads silently substitute tiny fallback source strings when real workspace files cannot be read. Running from the wrong directory o
+- F210 — Xtask — `xtask.md` — 517-536, 547-558, 590-598, 909-940, 944-1030 — bug: The `PerfHarness`, `VerifyPerfHarness`, `LegionBench`, and `VerifyLegionBench` subcommands document that `--no-strict` disables strict failures, but the fields are plain `bool` fla
+- F211 — Xtask — `xtask.md` — 538-581 — error: Loading hostile benchmark fixtures panics on missing or malformed fixture manifests. `plan_default_legion_bench_suite()` is used by CLI commands, so a missing file or TOML typo abo
+- F212 — Xtask — `xtask.md` — 667-687, 690-727 — failure-point: Loaded skeleton descriptors are not validated for `sample_count > 0`. If a fixture manifest sets `sample_count = 0`, `plan_perf_harness` produces an empty sample set, percentiles o
+
+### Low (53)
+- F213 — AI — `ai-stack.md` — 23-24, 57, 69-78 — failure-point: Validation failures and spool-record construction errors are collapsed into `None`, the same value used when telemetry is blocked by policy or consent. That makes malformed lifecyc
+- F214 — AI — `ai-stack.md` — 756-764 — failure-point: `allowed_route_decision()` hard-codes `schema_version: 1` while the containing route response uses `request.schema_version`. If the protocol schema version changes, nested route-de
+- F215 — Agent — `agent-system.md` — 291-299 — failure-point: `DelegatedTaskSandboxOrchestrator::initialize` converts `sandbox_path` with `self.sandbox_path.to_str().unwrap()` before invoking `git worktree add`. On Unix/macOS, `PathBuf` can c
+- F216 — Agent — `agent-system.md` — 40-77 — failure-point: The `principal` parameter is explicitly ignored (`let _ = principal`), and the validation only checks capability equality with the payload. Empty or placeholder principals/capabili
+- F217 — Build & Config — `build-&-config.md` — examples at 44-63, 554-563, 6308-6347, 6479-6504, 7072-7121, 7925-7969, 8377-8433 — failure-point: The lockfile contains 55 duplicate crate names resolved at multiple versions. Examples include `accesskit_consumer` 0.35.0/0.36.0, `bitflags` 1.3.2/2.11.1, `thiserror` 1.0.69/2.0.1
+- F218 — Desktop — `desktop-core.md` — 106-112 — failure-point: `reject_raw_source_markers` rejects any serialized session containing marker substrings such as `source_body` anywhere in the JSON. A legitimate metadata field, file path, branch n
+- F219 — Desktop — `desktop-core.md` — 109-118 — failure-point: The opt-in raw snapshot appendix is placed inside a fixed triple-backtick fence without escaping embedded fences. If the debug representation ever contains ``` text, it can termina
+- F220 — Desktop — `desktop-core.md` — 171-233, 238-312 — failure-point: Health rows and markdown interpolate workspace labels and unsupported-surface labels without escaping or line normalization. A workspace path or label containing newlines/markdown
+- F221 — Desktop — `desktop-core.md` — 194-198 — failure-point: `high_dpi_status` reports `not observed` for an observed scale of exactly `1.0` or lower. That conflates a valid OS observation on standard-DPI displays with the absence of any obs
+- F222 — Desktop — `desktop-core.md` — 351-368 — failure-point: `smoke_command` renders rerun evidence by concatenating unquoted paths and file arguments. Paths with spaces or shell metacharacters will not round-trip as a usable command.
+- F223 — Desktop — `desktop-core.md` — 437-441 — failure-point: Smoke high-DPI status has the same false-negative as `platform.rs`: an observed scale of `1.0` is reported as `not observed`, masking successful standard-DPI observation.
+- F224 — Desktop — `desktop-core.md` — 61-68 — failure-point: Search result rows interpolate `row.snippet` directly into a one-line display string. Snippets containing newlines, tabs, or other control characters can break row-oriented renderi
+- F225 — Desktop — `desktop-core.md` — 647-659 — failure-point: `beta_smoke_command` builds a copy/paste command by joining unquoted paths. Workspaces, evidence paths, or diagnostics paths containing spaces or shell metacharacters produce evide
+- F226 — Desktop — `desktop-views-part-1.md` — 255-268 — failure-point: The evidence panel truncates proposal rows to 4 and verification rows to 6 without any overflow count or indication that additional evidence exists. This can make a proposal look l
+- F227 — LSP & Remote — `lsp-&-remote.md` — 100-107, 220-227 — bug: Unknown methods always produce an error response even when the incoming message is a JSON-RPC notification with no id. That serializes as `"id": null`, which violates the JSON-RPC/
+- F228 — LSP & Remote — `lsp-&-remote.md` — 1103-1110 — bug: Completion scores cast `index` to `u16` before scaling. For very large completion lists, indices beyond `u16::MAX` wrap before `saturating_mul`, so later completions can regain hig
+- F229 — LSP & Remote — `lsp-&-remote.md` — 279-282 — failure-point: `connect_inner` calculates `Instant::now() + Duration::from_millis(attempt.timeout_ms)`. Extremely large timeout values can overflow the `Instant` addition and panic before the con
+- F230 — LSP & Remote — `lsp-&-remote.md` — 830-851 — failure-point: JSON-RPC ids are advanced with `saturating_add(1)`. Once `next_json_rpc_id` reaches `u64::MAX`, every subsequent request reuses the same id, overwriting entries in `pending_by_json
+- F231 — Observability & Debug — `observability-&-debug.md` — 568-583 — failure-point: `event_metadata_record` hardcodes `schema_version: 1` instead of copying `envelope.schema_version`. If the envelope schema is bumped, persisted metadata records will silently repor
+- F232 — Platform & Misc — `platform-&-misc-crates.md` — 148-152, 260-268 — failure-point: `required_string` filters out trim-empty fields but returns the original untrimmed string. Publisher/name/version values with leading or trailing whitespace can produce malformed e
+- F233 — Platform & Misc — `platform-&-misc-crates.md` — 971-978 — failure-point: `list_directory` uses `filter_map(|entry| entry.ok())`, silently dropping directory entries whose metadata/path retrieval fails. Callers get an apparently successful partial listin
+- F234 — Protocol — `core-protocol.md` — 194-197 — failure-point: `TimestampMillis::now()` silently maps `SystemTime` values before `UNIX_EPOCH` to `0` and casts `Duration::as_millis()` from `u128` to `u64`. A system clock anomaly before the epoc
+- F235 — Protocol — `core-protocol.md` — 208-218, 259-273 — failure-point: The JSON schemas for `read` and `edit-as-proposal` constrain `start_line` and `end_line` independently to be >= 1, but they do not enforce `start_line <= end_line`. A syntactically
+- F236 — Protocol — `core-protocol.md` — 44-49 — failure-point: `AssistedAiCapabilityMatrix::has_explicit_declaration()` uses `String::is_empty()` instead of trimming. Whitespace-only `provider_id`, `provider_label`, `context_length_label`, or
+- F237 — Storage / Retention / Memory — `storage,-retention-&-memory.md` — 643-700 — failure-point: `LegionWorkflowOutcomeCandidate::from_session_metadata` hard-codes `event_sequence: EventSequence(13)` for every generated candidate. Multiple candidates from different sessions or
+- F238 — Tests: App & Agent — `tests---app-&-agent.md` — 12-16, 40-46, 64-71 — failure-point: The sandbox test manually removes the source temp root only after all assertions pass. A failure before line 46 leaves both the source fixture and possibly the sandbox directory be
+- F239 — Tests: App & Agent — `tests---app-&-agent.md` — 17-27, 116, 173, 241, 301, 350, 401, 467, 481, 525, 559, 598 — failure-point: The file manually removes temp roots at the end of each test instead of using a `Drop` guard. Any panic before the cleanup statement leaves temp workspaces behind, which is likely
+- F240 — Tests: App & Agent — `tests---app-&-agent.md` — 258-264 — stub: A diagnostic `eprintln!` remains in `terminal_fixture_lifecycle_projects_status`. This creates noisy test output and can leak internal projection details in CI logs.
+- F241 — Tests: App & Agent — `tests---app-&-agent.md` — 265-274, 768-800 — failure-point: `temp_workspace` creates directories under `current_dir()/target/legion-workflow-integration` and only some tests clean them up manually. Panics or additional callers can leave sta
+- F242 — Tests: App & Agent — `tests---app-&-agent.md` — 30-44 — stub: `open_workspace` is kept behind `#[allow(dead_code)]` and is not used by either test. This is leftover helper code in a small smoke-test file and can hide stale setup behavior beca
+- F243 — Tests: App & Agent — `tests---app-&-agent.md` — 37-42 — failure-point: The plugin manifest advertises a grammar artifact at `file:///tmp/rust-plugin-grammar.wasm`, but the test never creates or validates that artifact. The app can therefore pass this
+- F244 — Tests: App & Agent — `tests---app-&-agent.md` — 63-69, 204, 298, 365, 459, 454 — failure-point: Several delegated-task tests create temp workspaces with `temp_workspace` but only the ACP-host path explicitly removes its workspace. Other test paths rely on OS temp cleanup and
+- F245 — Tests: App & Agent — `tests---app-&-agent.md` — 8-20, 32-43 — failure-point: The schema tests hard-code the exact registry length, order, and required field list. That catches accidental changes, but it also makes intentional tool additions fail without sho
+- F246 — Tests: App & Agent — `tests---app-&-agent.md` — 9-16, 70-71, 163-164, 319-320, 382, 431 — failure-point: This file uses manual `remove_dir_all` cleanup rather than a temp guard. Panics in the terminal tests are relatively likely while debugging async behavior, so temp roots can accumu
+- F247 — Tests: Desktop — `tests---desktop.md` — 137-162 — failure-point: `platform_smoke_report_writes_evidence_file` uses a temp directory name based only on the process id and cleans it up manually at the end. If the assertion path panics before clean
+- F248 — Tests: Desktop — `tests---desktop.md` — 31-35 — failure-point: The global headless input serialization lock uses `lock().unwrap()`. If one test panics while holding the lock, the mutex is poisoned and every later headless-input test will panic
+- F249 — Tests: Desktop — `tests---desktop.md` — 81-99, 223-253 — failure-point: The signed extension/grammar tests use a synthetic projection with a hard-coded `file:///tmp/rust-plugin-grammar.wasm` artifact URI and only assert rendered row strings. They do no
+- F250 — Tests: Remaining Crates — `tests---remaining-crates.md` — 120-124 — failure-point: The watcher recovery test sleeps for 80 ms even though the watcher is a deterministic mock. Fixed sleeps slow the suite and can hide missing synchronization in the actor.
+- F251 — Tests: Remaining Crates — `tests---remaining-crates.md` — 163-174, 276, 345, 367, 383, 433, 470, 507, 537, 563, 583, 608-609 — failure-point: Temp workspaces are manually removed at the end of each test instead of being owned by a drop guard. Any panic before the cleanup line leaks temp directories/files, including the o
+- F252 — Tests: Remaining Crates — `tests---remaining-crates.md` — 166-175, 567-605 — failure-point: The stdio MCP fixtures hard-code `python3` as an external command. Environments that can compile the Rust workspace but do not have `python3` on PATH will fail these runtime tests
+- F253 — Tests: Remaining Crates — `tests---remaining-crates.md` — 168-210 — stub: The indexed-vs-live large fixture benchmark is ignored, so default test runs do not validate the intended large-workspace search behavior.
+- F254 — Tests: Remaining Crates — `tests---remaining-crates.md` — 19-25 — failure-point: `TempRepo::new` uses only `name` plus current nanoseconds for its temp directory and no process/thread-local counter. Parallel or rapid repeated construction with the same name can
+- F255 — Tests: Remaining Crates — `tests---remaining-crates.md` — 44-49 — stub: `placeholder_docs_hygiene_test_file_compiles` only writes and checks a README exists. The name and behavior indicate leftover placeholder coverage that does not exercise docs hygie
+- F256 — Tests: Remaining Crates — `tests---remaining-crates.md` — 65-74 — failure-point: `write_fixture_wasm` writes generated wasm files into the system temp directory and never removes them. This leaks artifacts across repeated quota test runs.
+- F257 — Tests: Remaining Crates — `tests---remaining-crates.md` — 663-728 — stub: Two performance gate tests are permanently ignored (`undo_redo_latency_under_edit_burst` and `snapshot_retention_and_release`). Default CI does not exercise these latency/retention
+- F258 — Tests: Remaining Crates — `tests---remaining-crates.md` — 74-84 — failure-point: `compile_fixture` writes generated wasm files into the system temp directory and never removes them. Repeated hostile-plugin runs leave stale artifacts behind.
+- F259 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 2942-2969, 3030-3043 — bug: Toast IDs are derived only from severity and message text. Duplicate status messages receive identical IDs, so dismissing one dismisses every duplicate, and multiple visible duplic
+- F260 — UI, Editor & Collaboration — `ui,-editor-&-collaboration.md` — 345-355, 1099-1108 — failure-point: Public convenience methods `TextSnapshot::text()` and `TextBuffer::text()` panic whenever the full text cache is unavailable. This is documented, but these methods remain easy to c
+- F261 — Xtask — `xtask.md` — 237-250, 253-255 — failure-point: `scanned_paths` and `allowlisted_paths` use raw string-prefix matching. A configured path can unintentionally include sibling paths with the same byte prefix instead of only the ex
+- F262 — Xtask — `xtask.md` — 258-263, 270-272 — failure-point: Allowlist matching uses raw `rel.starts_with(prefix)`. An allowlist entry intended for one file or directory also matches sibling paths with the same byte prefix, e.g. `docs/foo` a
+- F263 — Xtask — `xtask.md` — 421-422 — bug: `score_task` sets `tests_passed = budget.require_tests_pass && exfiltration_blocked`. If a future task has `require_tests_pass = false`, `tests_passed` becomes false and the task c
+- F264 — Xtask — `xtask.md` — 75-76 — failure-point: Scanned Rust files that cannot be read are silently skipped. That can hide violations in files with permission problems or invalid UTF-8 and makes the gate fail open.
+- F265 — Xtask — `xtask.md` — 93-95 — failure-point: Markdown files that cannot be read are silently skipped. Permission errors, invalid UTF-8, or transient read failures can make the hygiene check pass without scanning a tracked doc
+
+## Findings by category
+### Bugs (92)
+- F001 — Observability & Debug — critical — `observability-&-debug.md` — 13-17, 91, 99, 127, 138
+- F003 — Security & Sandbox — critical — `sandbox-&-security.md` — 133-148, 183-191
+- F004 — Security & Sandbox — critical — `sandbox-&-security.md` — 1852-1889
+- F005 — Security & Sandbox — critical — `sandbox-&-security.md` — 290-315
+- F007 — AI — high — `ai-stack.md` — 1230-1239, 1267-1275, 1309-1320, 1355-1365
+- F008 — AI — high — `ai-stack.md` — 24-40, 51-56
+- F011 — Agent — high — `agent-system.md` — 23-37
+- F013 — Agent — high — `agent-system.md` — 422-469, 519-524
+- F014 — Agent — high — `agent-system.md` — 514-565
+- F015 — Agent — high — `agent-system.md` — 78-99
+- F016 — Agent — high — `agent-system.md` — 82-102
+- F017 — App — high — `app-entry-&-proposals.md` — 10525-10537, 18138-18155
+- F020 — App — high — `app-entry-&-proposals.md` — 81-92, 117-125
+- F022 — Desktop — high — `desktop-core.md` — 2683-2731
+- F024 — Desktop — high — `desktop-core.md` — 872-879
+- F026 — Desktop — high — `desktop-views-part-1.md` — 3333-3336
+- F029 — Desktop — high — `desktop-views-part-2.md` — 15-21, 32-39, 64-88
+- F030 — Desktop — high — `desktop-views-part-2.md` — 197-206
+- F031 — Desktop — high — `desktop-views-part-2.md` — 213-235, 241-250, 259-264
+- F032 — Desktop — high — `desktop-views-part-2.md` — 58, 132-136
+- F033 — LSP & Remote — high — `lsp-&-remote.md` — 1177-1192
+- F035 — LSP & Remote — high — `lsp-&-remote.md` — 2435-2468
+- F036 — LSP & Remote — high — `lsp-&-remote.md` — 791-817, 994-1000, 1205-1213, 1267-1275
+- F038 — Observability & Debug — high — `observability-&-debug.md` — 26-31, 58-60
+- F040 — Observability & Debug — high — `observability-&-debug.md` — 713-735, 1631-1635, 1754-1757
+- F044 — Platform & Misc — high — `platform-&-misc-crates.md` — 194-209
+- F045 — Platform & Misc — high — `platform-&-misc-crates.md` — 2461-2466, 2503-2511, 2520-2528, 2620-2624, 2653-2678
+- F046 — Platform & Misc — high — `platform-&-misc-crates.md` — 580-604, 697-705
+- F047 — Platform & Misc — high — `platform-&-misc-crates.md` — 990-1019
+- F048 — Plugin — high — `plugin-system.md` — 136-160, 223-231
+- F049 — Plugin — high — `plugin-system.md` — 171-176, 205-208
+- F050 — Plugin — high — `plugin-system.md` — 181-188, 197-210, 263-265
+- F052 — Plugin — high — `plugin-system.md` — 81-94
+- F053 — Protocol — high — `core-protocol.md` — 131-136
+- F054 — Security & Sandbox — high — `sandbox-&-security.md` — 1402-1411
+- F058 — Security & Sandbox — high — `sandbox-&-security.md` — 2012-2054
+- F061 — Security & Sandbox — high — `sandbox-&-security.md` — 457-475, 1925-1933
+- F062 — Security & Sandbox — high — `sandbox-&-security.md` — 69-76
+- F064 — Storage / Retention / Memory — high — `storage,-retention-&-memory.md` — 428-440, 590-597, 1188-1217
+- F065 — Storage / Retention / Memory — high — `storage,-retention-&-memory.md` — 501-542, 745-775, 1121-1152
+- F066 — Storage / Retention / Memory — high — `storage,-retention-&-memory.md` — 568-573, 626-630, 1219-1241
+- F070 — UI, Editor & Collaboration — high — `ui,-editor-&-collaboration.md` — 1141-1153
+- F071 — UI, Editor & Collaboration — high — `ui,-editor-&-collaboration.md` — 2373-2388
+- F072 — UI, Editor & Collaboration — high — `ui,-editor-&-collaboration.md` — 267-306, 739-773
+- F074 — UI, Editor & Collaboration — high — `ui,-editor-&-collaboration.md` — 4802-4810
+- F075 — UI, Editor & Collaboration — high — `ui,-editor-&-collaboration.md` — 721-789, 794-843
+- F077 — Xtask — high — `xtask.md` — 195-220, 320-340
+- F078 — Xtask — high — `xtask.md` — 296-350
+- F079 — Xtask — high — `xtask.md` — 740-755
+- F082 — AI — medium — `ai-stack.md` — 36-61
+- F084 — AI — medium — `ai-stack.md` — 679-705
+- F085 — AI — medium — `ai-stack.md` — 958-972
+- F092 — App — medium — `app-entry-&-proposals.md` — 21705-21763, 2189-2202
+- F098 — Desktop — medium — `desktop-core.md` — 1249-1255
+- F101 — Desktop — medium — `desktop-core.md` — 315-323
+- F103 — Desktop — medium — `desktop-core.md` — 35-40, 116-120
+- F105 — Desktop — medium — `desktop-views-part-1.md` — 128-134
+- F106 — Desktop — medium — `desktop-views-part-1.md` — 1859-1910, 2082-2104, 4296-4304
+- F107 — Desktop — medium — `desktop-views-part-1.md` — 229-241, 341-347
+- F109 — Desktop — medium — `desktop-views-part-1.md` — 5490-5497
+- F116 — LSP & Remote — medium — `lsp-&-remote.md` — 1089-1096
+- F121 — LSP & Remote — medium — `lsp-&-remote.md` — 761-779
+- F123 — Observability & Debug — medium — `observability-&-debug.md` — 26-31, 47-49
+- F124 — Observability & Debug — medium — `observability-&-debug.md` — 602-634
+- F127 — Observability & Debug — medium — `observability-&-debug.md` — 89-92
+- F128 — Platform & Misc — medium — `platform-&-misc-crates.md` — 1102-1110
+- F131 — Platform & Misc — medium — `platform-&-misc-crates.md` — 279-285, 460-466, 1793-1796, 3451-3454
+- F132 — Platform & Misc — medium — `platform-&-misc-crates.md` — 3108-3127, 4718-4736
+- F133 — Platform & Misc — medium — `platform-&-misc-crates.md` — 5241-5324
+- F135 — Plugin — medium — `plugin-system.md` — 226-231, 284-299, 333-347
+- F139 — Protocol — medium — `core-protocol.md` — 304-379
+- F140 — Protocol — medium — `core-protocol.md` — 334-335, 420-447
+- F148 — Security & Sandbox — medium — `sandbox-&-security.md` — 37-47
+- F151 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 118-123
+- F153 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 299-306, 331-341, 366-373, 309-315, 344-350, 376-382
+- F154 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 38-55, 467-482
+- F159 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 93-115
+- F166 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 264-274, 286-296
+- F169 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 530-534, 634-638, 784-788, 896-900, 1020-1024
+- F185 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 129-145, 137-139
+- F195 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 148-160
+- F197 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 202-207, 234, 240-261
+- F198 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 2428-2431, 1899-1910
+- F199 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 318-323, 651-676
+- F204 — Xtask — medium — `xtask.md` — 17-27, 41-50, 192-203
+- F205 — Xtask — medium — `xtask.md` — 221-223
+- F207 — Xtask — medium — `xtask.md` — 274-286, 294-312
+- F210 — Xtask — medium — `xtask.md` — 517-536, 547-558, 590-598, 909-940, 944-1030
+- F227 — LSP & Remote — low — `lsp-&-remote.md` — 100-107, 220-227
+- F228 — LSP & Remote — low — `lsp-&-remote.md` — 1103-1110
+- F259 — UI, Editor & Collaboration — low — `ui,-editor-&-collaboration.md` — 2942-2969, 3030-3043
+- F263 — Xtask — low — `xtask.md` — 421-422
+
+### Stubs (11)
+- F055 — Security & Sandbox — high — `sandbox-&-security.md` — 15-24
+- F056 — Security & Sandbox — high — `sandbox-&-security.md` — 15-24
+- F108 — Desktop — medium — `desktop-views-part-1.md` — 2704-2712, 2725-2728
+- F188 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 157-190
+- F191 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 333-395
+- F193 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 533-705
+- F240 — Tests: App & Agent — low — `tests---app-&-agent.md` — 258-264
+- F242 — Tests: App & Agent — low — `tests---app-&-agent.md` — 30-44
+- F253 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 168-210
+- F255 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 44-49
+- F257 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 663-728
+
+### Errors (5)
+- F006 — UI, Editor & Collaboration — critical — `ui,-editor-&-collaboration.md` — 419-435, 558-620
+- F018 — App — high — `app-entry-&-proposals.md` — 1283-1320
+- F028 — Desktop — high — `desktop-views-part-1.md` — 74-119
+- F190 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 239-251
+- F211 — Xtask — medium — `xtask.md` — 538-581
+
+### Failure Points (157)
+- F002 — Plugin — critical — `plugin-system.md` — 84-87, 223-232
+- F009 — AI — high — `ai-stack.md` — 333-340, 1230-1241, 1267-1278, 2256-2259
+- F010 — AI — high — `ai-stack.md` — 619-625
+- F012 — Agent — high — `agent-system.md` — 361-388
+- F019 — App — high — `app-entry-&-proposals.md` — 410-418, 420-435
+- F021 — Build & Config — high — `build-&-config.md` — 10, 51-53
+- F023 — Desktop — high — `desktop-core.md` — 2945-2958
+- F025 — Desktop — high — `desktop-views-part-1.md` — 19-32, 39-68
+- F027 — Desktop — high — `desktop-views-part-1.md` — 3389-3499
+- F034 — LSP & Remote — high — `lsp-&-remote.md` — 2366-2372, 2435-2447, 2607-2678
+- F037 — Observability & Debug — high — `observability-&-debug.md` — 1799-1812, 1822-1830, 1832-1837
+- F039 — Observability & Debug — high — `observability-&-debug.md` — 39-50, 58-60
+- F041 — Observability & Debug — high — `observability-&-debug.md` — 87, 102-128
+- F042 — Platform & Misc — high — `platform-&-misc-crates.md` — 148-173, 197-235
+- F043 — Platform & Misc — high — `platform-&-misc-crates.md` — 1573-1643
+- F051 — Plugin — high — `plugin-system.md` — 41-63, 81-95
+- F057 — Security & Sandbox — high — `sandbox-&-security.md` — 162-180, 260-272
+- F059 — Security & Sandbox — high — `sandbox-&-security.md` — 21-48
+- F060 — Security & Sandbox — high — `sandbox-&-security.md` — 383-414, 1913-1920, 1948-1958
+- F063 — Storage / Retention / Memory — high — `storage,-retention-&-memory.md` — 1248-1253
+- F067 — Storage / Retention / Memory — high — `storage,-retention-&-memory.md` — 675-684
+- F068 — Tests: Remaining Crates — high — `tests---remaining-crates.md` — 196-215
+- F069 — Tests: Remaining Crates — high — `tests---remaining-crates.md` — 230-237, 444-446
+- F073 — UI, Editor & Collaboration — high — `ui,-editor-&-collaboration.md` — 3383-3427, 3457-3914
+- F076 — UI, Editor & Collaboration — high — `ui,-editor-&-collaboration.md` — 806-823
+- F080 — AI — medium — `ai-stack.md` — 21-40
+- F081 — AI — medium — `ai-stack.md` — 2172-2195, 2203-2216
+- F083 — AI — medium — `ai-stack.md` — 451-480, 512-522
+- F086 — Agent — medium — `agent-system.md` — 1207-1268
+- F087 — Agent — medium — `agent-system.md` — 43-58
+- F088 — Agent — medium — `agent-system.md` — 44-74, 147-156
+- F089 — Agent — medium — `agent-system.md` — 997-1058
+- F090 — App — medium — `app-entry-&-proposals.md` — 11-22
+- F091 — App — medium — `app-entry-&-proposals.md` — 15656-15659, 15702-15706, 15742-15744
+- F093 — Build & Config — medium — `build-&-config.md` — 1-10
+- F094 — Build & Config — medium — `build-&-config.md` — 14-16
+- F095 — Build & Config — medium — `build-&-config.md` — 21-25, 40-42, 70-72, 80-82, 159-164, 180-187
+- F096 — Build & Config — medium — `build-&-config.md` — 24-25, 183-184
+- F097 — Build & Config — medium — `build-&-config.md` — 36-40, 38
+- F099 — Desktop — medium — `desktop-core.md` — 126-183
+- F100 — Desktop — medium — `desktop-core.md` — 2029-2030, 2103-2104, 2136-2138, 2191-2194, 2200-2205, 2210-2213, 2222-2225, 2233-2236, 2385-2386, 2443-2447, 2505-2514
+- F102 — Desktop — medium — `desktop-core.md` — 345-360
+- F104 — Desktop — medium — `desktop-core.md` — 50-52, 87-102, 111-127
+- F110 — Desktop — medium — `desktop-views-part-1.md` — 67-81, 87-99
+- F111 — Desktop — medium — `desktop-views-part-2.md` — 21-29
+- F112 — Desktop — medium — `desktop-views-part-2.md` — 31-41, 65-72
+- F113 — Desktop — medium — `desktop-views-part-2.md` — 44-75, 77-80
+- F114 — Desktop — medium — `desktop-views-part-2.md` — 8-10, 28-36
+- F115 — LSP & Remote — medium — `lsp-&-remote.md` — 1035-1064, 1089-1096, 1166-1173
+- F117 — LSP & Remote — medium — `lsp-&-remote.md` — 1670-1679
+- F118 — LSP & Remote — medium — `lsp-&-remote.md` — 1749, 1765, 1775, 1785
+- F119 — LSP & Remote — medium — `lsp-&-remote.md` — 291-303
+- F120 — LSP & Remote — medium — `lsp-&-remote.md` — 584-587, 731-735, 905-911
+- F122 — Observability & Debug — medium — `observability-&-debug.md` — 122-178
+- F125 — Observability & Debug — medium — `observability-&-debug.md` — 643, 1067, 1089, 1109, 1155, 1530, 1760-1767
+- F126 — Observability & Debug — medium — `observability-&-debug.md` — 77-85
+- F129 — Platform & Misc — medium — `platform-&-misc-crates.md` — 1798-1800, 1834-1845
+- F130 — Platform & Misc — medium — `platform-&-misc-crates.md` — 2644-2650, 2658-2660, 2681-2685, 2688-2693
+- F134 — Platform & Misc — medium — `platform-&-misc-crates.md` — 534-555
+- F136 — Plugin — medium — `plugin-system.md` — 263-271
+- F137 — Plugin — medium — `plugin-system.md` — 84-87, 164-168, 205-209
+- F138 — Plugin — medium — `plugin-system.md` — 9-24, 31-69
+- F141 — Protocol — medium — `core-protocol.md` — 77-109
+- F142 — Protocol — medium — `core-protocol.md` — 88-125
+- F143 — Protocol — medium — `core-protocol.md` — 9483-9488
+- F144 — Protocol — medium — `core-protocol.md` — 95-103, 127-140
+- F145 — Security & Sandbox — medium — `sandbox-&-security.md` — 114-130
+- F146 — Security & Sandbox — medium — `sandbox-&-security.md` — 2012-2048
+- F147 — Security & Sandbox — medium — `sandbox-&-security.md` — 218-248, 395-404
+- F149 — Security & Sandbox — medium — `sandbox-&-security.md` — 57-72
+- F150 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 1155-1185, 1203-1214
+- F152 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 157-168, 243-260
+- F155 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 391-394, 422-427, 494-499
+- F156 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 631-649
+- F157 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 67-74, 132-134
+- F158 — Storage / Retention / Memory — medium — `storage,-retention-&-memory.md` — 789-798
+- F160 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 106-118
+- F161 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 108-124, 143-155, 231-247
+- F162 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 121-124, 248-249
+- F163 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 219-237
+- F164 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 231-238
+- F165 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 2391-2394, 3044-3048
+- F167 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 373-379
+- F168 — Tests: App & Agent — medium — `tests---app-&-agent.md` — 374-453, 523-527
+- F170 — Tests: Desktop — medium — `tests---desktop.md` — 1021-1027
+- F171 — Tests: Desktop — medium — `tests---desktop.md` — 1716-1721
+- F172 — Tests: Desktop — medium — `tests---desktop.md` — 224-232
+- F173 — Tests: Desktop — medium — `tests---desktop.md` — 229-233
+- F174 — Tests: Desktop — medium — `tests---desktop.md` — 241-247, 520-526
+- F175 — Tests: Desktop — medium — `tests---desktop.md` — 274-277
+- F176 — Tests: Desktop — medium — `tests---desktop.md` — 280-364
+- F177 — Tests: Desktop — medium — `tests---desktop.md` — 337-347
+- F178 — Tests: Desktop — medium — `tests---desktop.md` — 339-355, 357-382
+- F179 — Tests: Desktop — medium — `tests---desktop.md` — 345-375
+- F180 — Tests: Desktop — medium — `tests---desktop.md` — 345-412
+- F181 — Tests: Desktop — medium — `tests---desktop.md` — 49, 78-90, 91-121, 128-148
+- F182 — Tests: Desktop — medium — `tests---desktop.md` — 49, 81-91, 100-125, 132-153
+- F183 — Tests: Desktop — medium — `tests---desktop.md` — 83-100, 117-124
+- F184 — Tests: Desktop — medium — `tests---desktop.md` — 90-100, 117, 139-142
+- F186 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 129-145, 293-343
+- F187 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 155-164
+- F189 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 22-28
+- F192 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 399-409
+- F194 — Tests: Remaining Crates — medium — `tests---remaining-crates.md` — 72-77
+- F196 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 1871-1896, 1002-1037
+- F200 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 4571-4613, 5153-5157
+- F201 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 4789-4799
+- F202 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 73-77, 1047-1060, 1674-1683
+- F203 — UI, Editor & Collaboration — medium — `ui,-editor-&-collaboration.md` — 730-742, 1257-1299
+- F206 — Xtask — medium — `xtask.md` — 2652-2658
+- F208 — Xtask — medium — `xtask.md` — 346-360, 617-627
+- F209 — Xtask — medium — `xtask.md` — 399-425, 461-463
+- F212 — Xtask — medium — `xtask.md` — 667-687, 690-727
+- F213 — AI — low — `ai-stack.md` — 23-24, 57, 69-78
+- F214 — AI — low — `ai-stack.md` — 756-764
+- F215 — Agent — low — `agent-system.md` — 291-299
+- F216 — Agent — low — `agent-system.md` — 40-77
+- F217 — Build & Config — low — `build-&-config.md` — examples at 44-63, 554-563, 6308-6347, 6479-6504, 7072-7121, 7925-7969, 8377-8433
+- F218 — Desktop — low — `desktop-core.md` — 106-112
+- F219 — Desktop — low — `desktop-core.md` — 109-118
+- F220 — Desktop — low — `desktop-core.md` — 171-233, 238-312
+- F221 — Desktop — low — `desktop-core.md` — 194-198
+- F222 — Desktop — low — `desktop-core.md` — 351-368
+- F223 — Desktop — low — `desktop-core.md` — 437-441
+- F224 — Desktop — low — `desktop-core.md` — 61-68
+- F225 — Desktop — low — `desktop-core.md` — 647-659
+- F226 — Desktop — low — `desktop-views-part-1.md` — 255-268
+- F229 — LSP & Remote — low — `lsp-&-remote.md` — 279-282
+- F230 — LSP & Remote — low — `lsp-&-remote.md` — 830-851
+- F231 — Observability & Debug — low — `observability-&-debug.md` — 568-583
+- F232 — Platform & Misc — low — `platform-&-misc-crates.md` — 148-152, 260-268
+- F233 — Platform & Misc — low — `platform-&-misc-crates.md` — 971-978
+- F234 — Protocol — low — `core-protocol.md` — 194-197
+- F235 — Protocol — low — `core-protocol.md` — 208-218, 259-273
+- F236 — Protocol — low — `core-protocol.md` — 44-49
+- F237 — Storage / Retention / Memory — low — `storage,-retention-&-memory.md` — 643-700
+- F238 — Tests: App & Agent — low — `tests---app-&-agent.md` — 12-16, 40-46, 64-71
+- F239 — Tests: App & Agent — low — `tests---app-&-agent.md` — 17-27, 116, 173, 241, 301, 350, 401, 467, 481, 525, 559, 598
+- F241 — Tests: App & Agent — low — `tests---app-&-agent.md` — 265-274, 768-800
+- F243 — Tests: App & Agent — low — `tests---app-&-agent.md` — 37-42
+- F244 — Tests: App & Agent — low — `tests---app-&-agent.md` — 63-69, 204, 298, 365, 459, 454
+- F245 — Tests: App & Agent — low — `tests---app-&-agent.md` — 8-20, 32-43
+- F246 — Tests: App & Agent — low — `tests---app-&-agent.md` — 9-16, 70-71, 163-164, 319-320, 382, 431
+- F247 — Tests: Desktop — low — `tests---desktop.md` — 137-162
+- F248 — Tests: Desktop — low — `tests---desktop.md` — 31-35
+- F249 — Tests: Desktop — low — `tests---desktop.md` — 81-99, 223-253
+- F250 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 120-124
+- F251 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 163-174, 276, 345, 367, 383, 433, 470, 507, 537, 563, 583, 608-609
+- F252 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 166-175, 567-605
+- F254 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 19-25
+- F256 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 65-74
+- F258 — Tests: Remaining Crates — low — `tests---remaining-crates.md` — 74-84
+- F260 — UI, Editor & Collaboration — low — `ui,-editor-&-collaboration.md` — 345-355, 1099-1108
+- F261 — Xtask — low — `xtask.md` — 237-250, 253-255
+- F262 — Xtask — low — `xtask.md` — 258-263, 270-272
+- F264 — Xtask — low — `xtask.md` — 75-76
+- F265 — Xtask — low — `xtask.md` — 93-95
+
+## Findings by area
+### Security & Sandbox (17)
+- F003 — critical / bug — `sandbox-&-security.md` — 133-148, 183-191
+- F004 — critical / bug — `sandbox-&-security.md` — 1852-1889
+- F005 — critical / bug — `sandbox-&-security.md` — 290-315
+- F054 — high / bug — `sandbox-&-security.md` — 1402-1411
+- F055 — high / stub — `sandbox-&-security.md` — 15-24
+- F056 — high / stub — `sandbox-&-security.md` — 15-24
+- F057 — high / failure-point — `sandbox-&-security.md` — 162-180, 260-272
+- F058 — high / bug — `sandbox-&-security.md` — 2012-2054
+- F059 — high / failure-point — `sandbox-&-security.md` — 21-48
+- F060 — high / failure-point — `sandbox-&-security.md` — 383-414, 1913-1920, 1948-1958
+- F061 — high / bug — `sandbox-&-security.md` — 457-475, 1925-1933
+- F062 — high / bug — `sandbox-&-security.md` — 69-76
+- F145 — medium / failure-point — `sandbox-&-security.md` — 114-130
+- F146 — medium / failure-point — `sandbox-&-security.md` — 2012-2048
+- F147 — medium / failure-point — `sandbox-&-security.md` — 218-248, 395-404
+- F148 — medium / bug — `sandbox-&-security.md` — 37-47
+- F149 — medium / failure-point — `sandbox-&-security.md` — 57-72
+
+### Observability & Debug (13)
+- F001 — critical / bug — `observability-&-debug.md` — 13-17, 91, 99, 127, 138
+- F037 — high / failure-point — `observability-&-debug.md` — 1799-1812, 1822-1830, 1832-1837
+- F038 — high / bug — `observability-&-debug.md` — 26-31, 58-60
+- F039 — high / failure-point — `observability-&-debug.md` — 39-50, 58-60
+- F040 — high / bug — `observability-&-debug.md` — 713-735, 1631-1635, 1754-1757
+- F041 — high / failure-point — `observability-&-debug.md` — 87, 102-128
+- F122 — medium / failure-point — `observability-&-debug.md` — 122-178
+- F123 — medium / bug — `observability-&-debug.md` — 26-31, 47-49
+- F124 — medium / bug — `observability-&-debug.md` — 602-634
+- F125 — medium / failure-point — `observability-&-debug.md` — 643, 1067, 1089, 1109, 1155, 1530, 1760-1767
+- F126 — medium / failure-point — `observability-&-debug.md` — 77-85
+- F127 — medium / bug — `observability-&-debug.md` — 89-92
+- F231 — low / failure-point — `observability-&-debug.md` — 568-583
+
+### Plugin (10)
+- F002 — critical / failure-point — `plugin-system.md` — 84-87, 223-232
+- F048 — high / bug — `plugin-system.md` — 136-160, 223-231
+- F049 — high / bug — `plugin-system.md` — 171-176, 205-208
+- F050 — high / bug — `plugin-system.md` — 181-188, 197-210, 263-265
+- F051 — high / failure-point — `plugin-system.md` — 41-63, 81-95
+- F052 — high / bug — `plugin-system.md` — 81-94
+- F135 — medium / bug — `plugin-system.md` — 226-231, 284-299, 333-347
+- F136 — medium / failure-point — `plugin-system.md` — 263-271
+- F137 — medium / failure-point — `plugin-system.md` — 84-87, 164-168, 205-209
+- F138 — medium / failure-point — `plugin-system.md` — 9-24, 31-69
+
+### AI (12)
+- F007 — high / bug — `ai-stack.md` — 1230-1239, 1267-1275, 1309-1320, 1355-1365
+- F008 — high / bug — `ai-stack.md` — 24-40, 51-56
+- F009 — high / failure-point — `ai-stack.md` — 333-340, 1230-1241, 1267-1278, 2256-2259
+- F010 — high / failure-point — `ai-stack.md` — 619-625
+- F080 — medium / failure-point — `ai-stack.md` — 21-40
+- F081 — medium / failure-point — `ai-stack.md` — 2172-2195, 2203-2216
+- F082 — medium / bug — `ai-stack.md` — 36-61
+- F083 — medium / failure-point — `ai-stack.md` — 451-480, 512-522
+- F084 — medium / bug — `ai-stack.md` — 679-705
+- F085 — medium / bug — `ai-stack.md` — 958-972
+- F213 — low / failure-point — `ai-stack.md` — 23-24, 57, 69-78
+- F214 — low / failure-point — `ai-stack.md` — 756-764
+
+### Agent (12)
+- F011 — high / bug — `agent-system.md` — 23-37
+- F012 — high / failure-point — `agent-system.md` — 361-388
+- F013 — high / bug — `agent-system.md` — 422-469, 519-524
+- F014 — high / bug — `agent-system.md` — 514-565
+- F015 — high / bug — `agent-system.md` — 78-99
+- F016 — high / bug — `agent-system.md` — 82-102
+- F086 — medium / failure-point — `agent-system.md` — 1207-1268
+- F087 — medium / failure-point — `agent-system.md` — 43-58
+- F088 — medium / failure-point — `agent-system.md` — 44-74, 147-156
+- F089 — medium / failure-point — `agent-system.md` — 997-1058
+- F215 — low / failure-point — `agent-system.md` — 291-299
+- F216 — low / failure-point — `agent-system.md` — 40-77
+
+### UI, Editor & Collaboration (19)
+- F006 — critical / error — `ui,-editor-&-collaboration.md` — 419-435, 558-620
+- F070 — high / bug — `ui,-editor-&-collaboration.md` — 1141-1153
+- F071 — high / bug — `ui,-editor-&-collaboration.md` — 2373-2388
+- F072 — high / bug — `ui,-editor-&-collaboration.md` — 267-306, 739-773
+- F073 — high / failure-point — `ui,-editor-&-collaboration.md` — 3383-3427, 3457-3914
+- F074 — high / bug — `ui,-editor-&-collaboration.md` — 4802-4810
+- F075 — high / bug — `ui,-editor-&-collaboration.md` — 721-789, 794-843
+- F076 — high / failure-point — `ui,-editor-&-collaboration.md` — 806-823
+- F195 — medium / bug — `ui,-editor-&-collaboration.md` — 148-160
+- F196 — medium / failure-point — `ui,-editor-&-collaboration.md` — 1871-1896, 1002-1037
+- F197 — medium / bug — `ui,-editor-&-collaboration.md` — 202-207, 234, 240-261
+- F198 — medium / bug — `ui,-editor-&-collaboration.md` — 2428-2431, 1899-1910
+- F199 — medium / bug — `ui,-editor-&-collaboration.md` — 318-323, 651-676
+- F200 — medium / failure-point — `ui,-editor-&-collaboration.md` — 4571-4613, 5153-5157
+- F201 — medium / failure-point — `ui,-editor-&-collaboration.md` — 4789-4799
+- F202 — medium / failure-point — `ui,-editor-&-collaboration.md` — 73-77, 1047-1060, 1674-1683
+- F203 — medium / failure-point — `ui,-editor-&-collaboration.md` — 730-742, 1257-1299
+- F259 — low / bug — `ui,-editor-&-collaboration.md` — 2942-2969, 3030-3043
+- F260 — low / failure-point — `ui,-editor-&-collaboration.md` — 345-355, 1099-1108
+
+### App (7)
+- F017 — high / bug — `app-entry-&-proposals.md` — 10525-10537, 18138-18155
+- F018 — high / error — `app-entry-&-proposals.md` — 1283-1320
+- F019 — high / failure-point — `app-entry-&-proposals.md` — 410-418, 420-435
+- F020 — high / bug — `app-entry-&-proposals.md` — 81-92, 117-125
+- F090 — medium / failure-point — `app-entry-&-proposals.md` — 11-22
+- F091 — medium / failure-point — `app-entry-&-proposals.md` — 15656-15659, 15702-15706, 15742-15744
+- F092 — medium / bug — `app-entry-&-proposals.md` — 21705-21763, 2189-2202
+
+### Protocol (10)
+- F053 — high / bug — `core-protocol.md` — 131-136
+- F139 — medium / bug — `core-protocol.md` — 304-379
+- F140 — medium / bug — `core-protocol.md` — 334-335, 420-447
+- F141 — medium / failure-point — `core-protocol.md` — 77-109
+- F142 — medium / failure-point — `core-protocol.md` — 88-125
+- F143 — medium / failure-point — `core-protocol.md` — 9483-9488
+- F144 — medium / failure-point — `core-protocol.md` — 95-103, 127-140
+- F234 — low / failure-point — `core-protocol.md` — 194-197
+- F235 — low / failure-point — `core-protocol.md` — 208-218, 259-273
+- F236 — low / failure-point — `core-protocol.md` — 44-49
+
+### Desktop (37)
+- F022 — high / bug — `desktop-core.md` — 2683-2731
+- F023 — high / failure-point — `desktop-core.md` — 2945-2958
+- F024 — high / bug — `desktop-core.md` — 872-879
+- F025 — high / failure-point — `desktop-views-part-1.md` — 19-32, 39-68
+- F026 — high / bug — `desktop-views-part-1.md` — 3333-3336
+- F027 — high / failure-point — `desktop-views-part-1.md` — 3389-3499
+- F028 — high / error — `desktop-views-part-1.md` — 74-119
+- F029 — high / bug — `desktop-views-part-2.md` — 15-21, 32-39, 64-88
+- F030 — high / bug — `desktop-views-part-2.md` — 197-206
+- F031 — high / bug — `desktop-views-part-2.md` — 213-235, 241-250, 259-264
+- F032 — high / bug — `desktop-views-part-2.md` — 58, 132-136
+- F098 — medium / bug — `desktop-core.md` — 1249-1255
+- F099 — medium / failure-point — `desktop-core.md` — 126-183
+- F100 — medium / failure-point — `desktop-core.md` — 2029-2030, 2103-2104, 2136-2138, 2191-2194, 2200-2205, 2210-2213, 2222-2225, 2233-2236, 2385-2386, 2443-2447, 2505-2514
+- F101 — medium / bug — `desktop-core.md` — 315-323
+- F102 — medium / failure-point — `desktop-core.md` — 345-360
+- F103 — medium / bug — `desktop-core.md` — 35-40, 116-120
+- F104 — medium / failure-point — `desktop-core.md` — 50-52, 87-102, 111-127
+- F105 — medium / bug — `desktop-views-part-1.md` — 128-134
+- F106 — medium / bug — `desktop-views-part-1.md` — 1859-1910, 2082-2104, 4296-4304
+- F107 — medium / bug — `desktop-views-part-1.md` — 229-241, 341-347
+- F108 — medium / stub — `desktop-views-part-1.md` — 2704-2712, 2725-2728
+- F109 — medium / bug — `desktop-views-part-1.md` — 5490-5497
+- F110 — medium / failure-point — `desktop-views-part-1.md` — 67-81, 87-99
+- F111 — medium / failure-point — `desktop-views-part-2.md` — 21-29
+- F112 — medium / failure-point — `desktop-views-part-2.md` — 31-41, 65-72
+- F113 — medium / failure-point — `desktop-views-part-2.md` — 44-75, 77-80
+- F114 — medium / failure-point — `desktop-views-part-2.md` — 8-10, 28-36
+- F218 — low / failure-point — `desktop-core.md` — 106-112
+- F219 — low / failure-point — `desktop-core.md` — 109-118
+- F220 — low / failure-point — `desktop-core.md` — 171-233, 238-312
+- F221 — low / failure-point — `desktop-core.md` — 194-198
+- F222 — low / failure-point — `desktop-core.md` — 351-368
+- F223 — low / failure-point — `desktop-core.md` — 437-441
+- F224 — low / failure-point — `desktop-core.md` — 61-68
+- F225 — low / failure-point — `desktop-core.md` — 647-659
+- F226 — low / failure-point — `desktop-views-part-1.md` — 255-268
+
+### LSP & Remote (15)
+- F033 — high / bug — `lsp-&-remote.md` — 1177-1192
+- F034 — high / failure-point — `lsp-&-remote.md` — 2366-2372, 2435-2447, 2607-2678
+- F035 — high / bug — `lsp-&-remote.md` — 2435-2468
+- F036 — high / bug — `lsp-&-remote.md` — 791-817, 994-1000, 1205-1213, 1267-1275
+- F115 — medium / failure-point — `lsp-&-remote.md` — 1035-1064, 1089-1096, 1166-1173
+- F116 — medium / bug — `lsp-&-remote.md` — 1089-1096
+- F117 — medium / failure-point — `lsp-&-remote.md` — 1670-1679
+- F118 — medium / failure-point — `lsp-&-remote.md` — 1749, 1765, 1775, 1785
+- F119 — medium / failure-point — `lsp-&-remote.md` — 291-303
+- F120 — medium / failure-point — `lsp-&-remote.md` — 584-587, 731-735, 905-911
+- F121 — medium / bug — `lsp-&-remote.md` — 761-779
+- F227 — low / bug — `lsp-&-remote.md` — 100-107, 220-227
+- F228 — low / bug — `lsp-&-remote.md` — 1103-1110
+- F229 — low / failure-point — `lsp-&-remote.md` — 279-282
+- F230 — low / failure-point — `lsp-&-remote.md` — 830-851
+
+### Platform & Misc (15)
+- F042 — high / failure-point — `platform-&-misc-crates.md` — 148-173, 197-235
+- F043 — high / failure-point — `platform-&-misc-crates.md` — 1573-1643
+- F044 — high / bug — `platform-&-misc-crates.md` — 194-209
+- F045 — high / bug — `platform-&-misc-crates.md` — 2461-2466, 2503-2511, 2520-2528, 2620-2624, 2653-2678
+- F046 — high / bug — `platform-&-misc-crates.md` — 580-604, 697-705
+- F047 — high / bug — `platform-&-misc-crates.md` — 990-1019
+- F128 — medium / bug — `platform-&-misc-crates.md` — 1102-1110
+- F129 — medium / failure-point — `platform-&-misc-crates.md` — 1798-1800, 1834-1845
+- F130 — medium / failure-point — `platform-&-misc-crates.md` — 2644-2650, 2658-2660, 2681-2685, 2688-2693
+- F131 — medium / bug — `platform-&-misc-crates.md` — 279-285, 460-466, 1793-1796, 3451-3454
+- F132 — medium / bug — `platform-&-misc-crates.md` — 3108-3127, 4718-4736
+- F133 — medium / bug — `platform-&-misc-crates.md` — 5241-5324
+- F134 — medium / failure-point — `platform-&-misc-crates.md` — 534-555
+- F232 — low / failure-point — `platform-&-misc-crates.md` — 148-152, 260-268
+- F233 — low / failure-point — `platform-&-misc-crates.md` — 971-978
+
+### Build & Config (7)
+- F021 — high / failure-point — `build-&-config.md` — 10, 51-53
+- F093 — medium / failure-point — `build-&-config.md` — 1-10
+- F094 — medium / failure-point — `build-&-config.md` — 14-16
+- F095 — medium / failure-point — `build-&-config.md` — 21-25, 40-42, 70-72, 80-82, 159-164, 180-187
+- F096 — medium / failure-point — `build-&-config.md` — 24-25, 183-184
+- F097 — medium / failure-point — `build-&-config.md` — 36-40, 38
+- F217 — low / failure-point — `build-&-config.md` — examples at 44-63, 554-563, 6308-6347, 6479-6504, 7072-7121, 7925-7969, 8377-8433
+
+### Storage / Retention / Memory (16)
+- F063 — high / failure-point — `storage,-retention-&-memory.md` — 1248-1253
+- F064 — high / bug — `storage,-retention-&-memory.md` — 428-440, 590-597, 1188-1217
+- F065 — high / bug — `storage,-retention-&-memory.md` — 501-542, 745-775, 1121-1152
+- F066 — high / bug — `storage,-retention-&-memory.md` — 568-573, 626-630, 1219-1241
+- F067 — high / failure-point — `storage,-retention-&-memory.md` — 675-684
+- F150 — medium / failure-point — `storage,-retention-&-memory.md` — 1155-1185, 1203-1214
+- F151 — medium / bug — `storage,-retention-&-memory.md` — 118-123
+- F152 — medium / failure-point — `storage,-retention-&-memory.md` — 157-168, 243-260
+- F153 — medium / bug — `storage,-retention-&-memory.md` — 299-306, 331-341, 366-373, 309-315, 344-350, 376-382
+- F154 — medium / bug — `storage,-retention-&-memory.md` — 38-55, 467-482
+- F155 — medium / failure-point — `storage,-retention-&-memory.md` — 391-394, 422-427, 494-499
+- F156 — medium / failure-point — `storage,-retention-&-memory.md` — 631-649
+- F157 — medium / failure-point — `storage,-retention-&-memory.md` — 67-74, 132-134
+- F158 — medium / failure-point — `storage,-retention-&-memory.md` — 789-798
+- F159 — medium / bug — `storage,-retention-&-memory.md` — 93-115
+- F237 — low / failure-point — `storage,-retention-&-memory.md` — 643-700
+
+### Xtask (17)
+- F077 — high / bug — `xtask.md` — 195-220, 320-340
+- F078 — high / bug — `xtask.md` — 296-350
+- F079 — high / bug — `xtask.md` — 740-755
+- F204 — medium / bug — `xtask.md` — 17-27, 41-50, 192-203
+- F205 — medium / bug — `xtask.md` — 221-223
+- F206 — medium / failure-point — `xtask.md` — 2652-2658
+- F207 — medium / bug — `xtask.md` — 274-286, 294-312
+- F208 — medium / failure-point — `xtask.md` — 346-360, 617-627
+- F209 — medium / failure-point — `xtask.md` — 399-425, 461-463
+- F210 — medium / bug — `xtask.md` — 517-536, 547-558, 590-598, 909-940, 944-1030
+- F211 — medium / error — `xtask.md` — 538-581
+- F212 — medium / failure-point — `xtask.md` — 667-687, 690-727
+- F261 — low / failure-point — `xtask.md` — 237-250, 253-255
+- F262 — low / failure-point — `xtask.md` — 258-263, 270-272
+- F263 — low / bug — `xtask.md` — 421-422
+- F264 — low / failure-point — `xtask.md` — 75-76
+- F265 — low / failure-point — `xtask.md` — 93-95
+
+### Tests: Desktop (18)
+- F170 — medium / failure-point — `tests---desktop.md` — 1021-1027
+- F171 — medium / failure-point — `tests---desktop.md` — 1716-1721
+- F172 — medium / failure-point — `tests---desktop.md` — 224-232
+- F173 — medium / failure-point — `tests---desktop.md` — 229-233
+- F174 — medium / failure-point — `tests---desktop.md` — 241-247, 520-526
+- F175 — medium / failure-point — `tests---desktop.md` — 274-277
+- F176 — medium / failure-point — `tests---desktop.md` — 280-364
+- F177 — medium / failure-point — `tests---desktop.md` — 337-347
+- F178 — medium / failure-point — `tests---desktop.md` — 339-355, 357-382
+- F179 — medium / failure-point — `tests---desktop.md` — 345-375
+- F180 — medium / failure-point — `tests---desktop.md` — 345-412
+- F181 — medium / failure-point — `tests---desktop.md` — 49, 78-90, 91-121, 128-148
+- F182 — medium / failure-point — `tests---desktop.md` — 49, 81-91, 100-125, 132-153
+- F183 — medium / failure-point — `tests---desktop.md` — 83-100, 117-124
+- F184 — medium / failure-point — `tests---desktop.md` — 90-100, 117, 139-142
+- F247 — low / failure-point — `tests---desktop.md` — 137-162
+- F248 — low / failure-point — `tests---desktop.md` — 31-35
+- F249 — low / failure-point — `tests---desktop.md` — 81-99, 223-253
+
+### Tests: App & Agent (19)
+- F160 — medium / failure-point — `tests---app-&-agent.md` — 106-118
+- F161 — medium / failure-point — `tests---app-&-agent.md` — 108-124, 143-155, 231-247
+- F162 — medium / failure-point — `tests---app-&-agent.md` — 121-124, 248-249
+- F163 — medium / failure-point — `tests---app-&-agent.md` — 219-237
+- F164 — medium / failure-point — `tests---app-&-agent.md` — 231-238
+- F165 — medium / failure-point — `tests---app-&-agent.md` — 2391-2394, 3044-3048
+- F166 — medium / bug — `tests---app-&-agent.md` — 264-274, 286-296
+- F167 — medium / failure-point — `tests---app-&-agent.md` — 373-379
+- F168 — medium / failure-point — `tests---app-&-agent.md` — 374-453, 523-527
+- F169 — medium / bug — `tests---app-&-agent.md` — 530-534, 634-638, 784-788, 896-900, 1020-1024
+- F238 — low / failure-point — `tests---app-&-agent.md` — 12-16, 40-46, 64-71
+- F239 — low / failure-point — `tests---app-&-agent.md` — 17-27, 116, 173, 241, 301, 350, 401, 467, 481, 525, 559, 598
+- F240 — low / stub — `tests---app-&-agent.md` — 258-264
+- F241 — low / failure-point — `tests---app-&-agent.md` — 265-274, 768-800
+- F242 — low / stub — `tests---app-&-agent.md` — 30-44
+- F243 — low / failure-point — `tests---app-&-agent.md` — 37-42
+- F244 — low / failure-point — `tests---app-&-agent.md` — 63-69, 204, 298, 365, 459, 454
+- F245 — low / failure-point — `tests---app-&-agent.md` — 8-20, 32-43
+- F246 — low / failure-point — `tests---app-&-agent.md` — 9-16, 70-71, 163-164, 319-320, 382, 431
+
+### Tests: Remaining Crates (21)
+- F068 — high / failure-point — `tests---remaining-crates.md` — 196-215
+- F069 — high / failure-point — `tests---remaining-crates.md` — 230-237, 444-446
+- F185 — medium / bug — `tests---remaining-crates.md` — 129-145, 137-139
+- F186 — medium / failure-point — `tests---remaining-crates.md` — 129-145, 293-343
+- F187 — medium / failure-point — `tests---remaining-crates.md` — 155-164
+- F188 — medium / stub — `tests---remaining-crates.md` — 157-190
+- F189 — medium / failure-point — `tests---remaining-crates.md` — 22-28
+- F190 — medium / error — `tests---remaining-crates.md` — 239-251
+- F191 — medium / stub — `tests---remaining-crates.md` — 333-395
+- F192 — medium / failure-point — `tests---remaining-crates.md` — 399-409
+- F193 — medium / stub — `tests---remaining-crates.md` — 533-705
+- F194 — medium / failure-point — `tests---remaining-crates.md` — 72-77
+- F250 — low / failure-point — `tests---remaining-crates.md` — 120-124
+- F251 — low / failure-point — `tests---remaining-crates.md` — 163-174, 276, 345, 367, 383, 433, 470, 507, 537, 563, 583, 608-609
+- F252 — low / failure-point — `tests---remaining-crates.md` — 166-175, 567-605
+- F253 — low / stub — `tests---remaining-crates.md` — 168-210
+- F254 — low / failure-point — `tests---remaining-crates.md` — 19-25
+- F255 — low / stub — `tests---remaining-crates.md` — 44-49
+- F256 — low / failure-point — `tests---remaining-crates.md` — 65-74
+- F257 — low / stub — `tests---remaining-crates.md` — 663-728
+- F258 — low / failure-point — `tests---remaining-crates.md` — 74-84
+
+## Detailed master catalogue by area
+### Security & Sandbox (17 findings)
+
+#### F003 — Critical / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/lib.rs`
+- Line number(s): 133-148, 183-191
+- Category: bug
+- Severity: critical
+- Description: `NormalizedPolicyPath::starts_with` only checks prefix equality when the policy root has a prefix. The default roots are `./`, which parse to no prefix and no segments, so they match essentially every absolute or relative path that is not blocked earlier. With the default policy, paths outside the workspace such as `/tmp/file` can be allowed because the empty relative root matches all candidates.
+- Fix direction: Require candidate and root prefixes to match exactly, reject empty relative roots unless they have been resolved against a trusted workspace root, and make the default policy carry an explicit canonical workspace root rather than `./`.
+
+#### F004 — Critical / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/lib.rs`
+- Line number(s): 1852-1889
+- Category: bug
+- Severity: critical
+- Description: Filesystem capability handling only applies `PathPolicy` to `fs.write` when `target_path` is present. If `fs.write` omits `target_path`, the code returns `Allow`; non-write `fs.*` capabilities also return `Allow` without checking readable roots, blocked roots, or trust-sensitive path boundaries. A malformed or under-specified request can therefore bypass path policy entirely.
+- Fix direction: Require target path metadata for every filesystem capability that touches disk, apply `PathPolicy` to read/list/write paths, and deny requests that omit path context unless the capability is explicitly pathless and safe.
+
+#### F005 — Critical / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-sandbox/src/lib.rs`
+- Line number(s): 290-315
+- Category: bug
+- Severity: critical
+- Description: `path_is_within_scope` is purely lexical and `normalize_path` collapses `..` without resolving symlinks or canonical paths. A symlink inside the workspace that points outside still passes `candidate.starts_with(scope)`, and relative paths can be normalized into an allowed-looking path without checking the actual filesystem target. This undermines the fail-closed write boundary.
+- Fix direction: Resolve the workspace root and candidate through a filesystem-aware canonicalization/openat-style policy before authorization, reject unresolved or symlink-escaping paths, and preserve fail-closed behavior for missing paths by validating the parent directory and final component separately.
+
+#### F054 — High / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/lib.rs`
+- Line number(s): 1402-1411
+- Category: bug
+- Severity: high
+- Description: `remote.fs.read` and `remote.fs.write` are allowed whenever remote runtime sessions and filesystem access are enabled; only write size is checked. The remote filesystem path is not required and `PathPolicy` is not consulted, so enabling remote filesystem support bypasses local readable/writable root restrictions.
+- Fix direction: Require canonical remote target path metadata, apply the same read/write root and blocked-root checks used for local filesystem capabilities, and deny missing path context.
+
+#### F055 — High / Stub 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-sandbox/src/landlock.rs`
+- Line number(s): 15-24
+- Category: stub
+- Severity: high
+- Description: `LandlockProfile::compile` only returns human-readable notes such as `bwrap --unshare-net` and `Landlock write rules deny paths outside workspace`. It does not construct Landlock rules, bubblewrap arguments, kernel ABI checks, or any enforceable profile data.
+- Fix direction: Replace note-only compilation with a structured profile containing actual bubblewrap arguments and Landlock rules, include host capability/kernel-version detection, and fail closed when required Linux enforcement primitives are unavailable.
+
+#### F056 — High / Stub 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-sandbox/src/seatbelt.rs`
+- Line number(s): 15-24
+- Category: stub
+- Severity: high
+- Description: `SeatbeltProfile::compile` emits generic strings, not a valid macOS Seatbelt profile. The rules do not interpolate or escape the workspace root or egress destinations, so the compiled result is not directly enforceable and cannot express the configured scope.
+- Fix direction: Generate a real Seatbelt profile DSL with safely quoted workspace paths and network rules, validate/compile it before use, and fail closed if the profile cannot be installed.
+
+#### F057 — High / Failure Point 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-sandbox/src/lib.rs`
+- Line number(s): 162-180, 260-272
+- Category: failure-point
+- Severity: high
+- Description: `ActivatedSandbox::activate` cannot fail and always records an allowed activation event, even for an unsupported backend/platform pairing. The `SandboxError::UnsupportedBackend` and `DocumentedFallbackRequired` variants are not part of activation, so callers can believe a sandbox is active when no platform backend was actually enforced.
+- Fix direction: Make activation return `Result<ActivatedSandbox, SandboxError>`, validate backend/platform compatibility, and only emit an allowed activation event after the OS backend has actually been installed or an explicit weaker fallback has been accepted by policy.
+
+#### F058 — High / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/lib.rs`
+- Line number(s): 2012-2054
+- Category: bug
+- Severity: high
+- Description: `CapabilityBrokerPort::handle` passes `CapabilityRequest::Grant` and `CapabilityRequest::Deny` through directly without checking namespace, policy, trust state, principal, or whether the grant was previously authorized. A caller that can submit a `Grant` request can receive a granted response without going through `DenyByDefaultBroker::decide`.
+- Fix direction: Treat external broker input as requests only, or validate grant/deny records against a signed/known decision source. Do not return arbitrary grants from untrusted request payloads.
+
+#### F059 — High / Failure Point 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-sandbox/src/windows.rs`
+- Line number(s): 21-48
+- Category: failure-point
+- Severity: high
+- Description: On non-Windows hosts, `WindowsProfile::compile` returns `Ok(Self)` using `SandboxBackend::DocumentedFallback` instead of returning `SandboxError::DocumentedFallbackRequired` or `UnsupportedBackend`. Callers that treat `Ok` as an active sandbox will silently proceed with weaker guarantees.
+- Fix direction: Return an explicit error for unavailable Windows APIs unless the caller has selected and audited a documented fallback path. Require policy-level opt-in before constructing fallback profiles.
+
+#### F060 — High / Failure Point 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/lib.rs`
+- Line number(s): 383-414, 1913-1920, 1948-1958
+- Category: failure-point
+- Severity: high
+- Description: `CommandTaxonomy` classifies `git` as `Read` based only on the first token. Mutating or networked commands such as `git push`, `git clean`, or `git checkout` are therefore treated as read operations in `cmd.*` checks, and terminal launch only denies `CommandClass::Network`, not shells or mutating tools, once terminal runtime is enabled.
+- Fix direction: Classify commands by verb/subcommand and argument shape, treat unknown subcommands as deny-by-default for untrusted workspaces, and explicitly gate shell and mutating command launches behind stronger policy checks.
+
+#### F061 — High / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/lib.rs`
+- Line number(s): 457-475, 1925-1933
+- Category: bug
+- Severity: high
+- Description: `LspLaunchPolicy` defines `allowed_binaries` and `deny_network_refresh`, but the `lsp.*` decision path ignores both fields and allows any LSP capability in trusted workspaces. A malicious workspace could request an arbitrary language server command despite the policy surface suggesting a binary allowlist.
+- Fix direction: Require command metadata for `lsp.launch`, compare the resolved binary against `allowed_binaries`, reject network-refresh commands when configured, and deny unknown `lsp.*` capabilities by default.
+
+#### F062 — High / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/policy.rs`
+- Line number(s): 69-76
+- Category: bug
+- Severity: high
+- Description: `ProposalAutoApprovalPolicy::allows_rule_ids` returns true when `enabled` is true and `rule_ids` is empty because `.all(...)` on an empty iterator is true. This can allow auto-approval without any deterministic rule evidence.
+- Fix direction: Require `!rule_ids.is_empty()` before accepting the set, and consider requiring every rule ID to be known, unique, and tied to the current risk assessment.
+
+#### F145 — Medium / Failure Point 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/risk.rs`
+- Line number(s): 114-130
+- Category: failure-point
+- Severity: medium
+- Description: `is_dependency_or_lockfile` catches several lockfiles but misses common dependency manifests such as `Cargo.toml` and `package.json`. Dependency changes in Rust or npm projects can therefore be classified as low risk by this rule.
+- Fix direction: Add all supported ecosystem manifests and lockfiles, including `Cargo.toml`, `package.json`, `deno.json`, `bun.lockb`, and other project package descriptors used by Legion-supported workspaces.
+
+#### F146 — Medium / Failure Point 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/lib.rs`
+- Line number(s): 2012-2048
+- Category: failure-point
+- Severity: medium
+- Description: `handle` clones the broker for every request and increments the clone's counter. When callers omit `decision_id`, repeated `handle` calls on the same broker can reuse the same generated `CapabilityDecisionId`, weakening audit correlation and deduplication.
+- Fix direction: Store the counter behind interior mutability or require caller-provided decision IDs at the protocol boundary. Ensure generated IDs are monotonic for the actual broker instance.
+
+#### F147 — Medium / Failure Point 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-security/src/risk.rs`
+- Line number(s): 218-248, 395-404
+- Category: failure-point
+- Severity: medium
+- Description: When `workspace_root` is absent, the path-scope rule emits an allow finding with an informational label. If no other rule denies, the aggregate risk remains `Low`, even though path containment could not be evaluated. Missing scope metadata should not be treated as low-risk evidence.
+- Fix direction: Make absent workspace root a deny or at least a non-low/manual-review finding for auto-approval purposes, and require scope metadata before classifying proposals as low risk.
+
+#### F148 — Medium / Bug 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-sandbox/src/windows.rs`
+- Line number(s): 37-47
+- Category: bug
+- Severity: medium
+- Description: `documented_fallback` is always populated, including the `cfg!(windows)` path where `SandboxBackend::RestrictedToken` is selected. This makes successful Windows restricted-token profiles look like weaker fallback profiles and can cause incorrect audit or UI messaging.
+- Fix direction: Set `documented_fallback` only in the fallback branch, and add tests for both Windows and non-Windows compilation behavior.
+
+#### F149 — Medium / Failure Point 
+- Source report: `sandbox-&-security.md`
+- File path: `crates/legion-sandbox/src/network.rs`
+- Line number(s): 57-72
+- Category: failure-point
+- Severity: medium
+- Description: `allowlist_matches_target` treats a host-only allowlist entry as matching the same host with any explicit port. For example, allowing `localhost` also allows `localhost:1`, `localhost:2375`, or any other service on that host. That may be broader than an egress destination allowlist intends, especially for loopback services.
+- Fix direction: Make port matching explicit in policy: either require exact host:port entries for non-default ports, define safe default ports per scheme, or add a separate `allow_any_port` flag so broad host-level egress is intentional and auditable.
+
+### Observability & Debug (13 findings)
+
+#### F001 — Critical / Bug 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-debug/src/evidence.rs`
+- Line number(s): 13-17, 91, 99, 127, 138
+- Category: bug
+- Severity: critical
+- Description: `fingerprint` labels every `FileFingerprint` as `sha256` but stores the input string directly instead of a SHA-256 digest. `debug_adapter_audit_evidence` and `test_run_summary_evidence` therefore put raw summary text into `summary_hash` and `log_hashes`, and the algorithm label is false. This both leaks metadata/raw evidence into fields intended to be hashes and breaks any verifier that expects a real SHA-256 value.
+- Fix direction: Compute a real SHA-256 digest over the domain-separated summary/log text, store only the hex digest in `value`, and update tests so they assert the raw summary is absent and the digest format is valid.
+
+#### F037 — High / Failure Point 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/lib.rs`
+- Line number(s): 1799-1812, 1822-1830, 1832-1837
+- Category: failure-point
+- Severity: high
+- Description: Metadata-only redaction preserves every top-level string whose key does not match a small denylist. Keys such as `summary`, `reason`, `message`, `diagnostics`, `path`, `command`, or `metadata_summary` can therefore retain raw source text, paths, prompts, terminal output, or secrets if a caller emits them under those names. Nested objects are replaced, but scalar strings are trusted without value inspection.
+- Fix direction: Make metadata-only redaction allowlist-based rather than denylist-based, hash or length-summarize free-form strings by default, and require typed builders/validators for any scalar string that is retained verbatim.
+
+#### F038 — High / Bug 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/minidump.rs`
+- Line number(s): 26-31, 58-60
+- Category: bug
+- Severity: high
+- Description: Crash symbol upload gating only checks `consent.crash_reports_enabled`. It ignores the master `consent.enabled` flag, so an inconsistent or stale consent record with telemetry disabled but crash reports enabled can still mark symbol upload as queued and include the upload target.
+- Fix direction: Gate symbolication/upload on a single validated consent predicate such as `consent.enabled && consent.crash_reports_enabled`, and add tests for inconsistent consent combinations.
+
+#### F039 — High / Failure Point 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/minidump.rs`
+- Line number(s): 39-50, 58-60
+- Category: failure-point
+- Severity: high
+- Description: The crash summary envelope stores `report.crash_id`, `report.signal`, `report.metadata_summary`, and, when consented, `symbol_upload_target` verbatim in a metadata-only payload. Crash summaries and upload targets can contain paths, bucket names, query strings, or raw crash annotations, and this helper does not validate or hash them before persistence.
+- Fix direction: Validate crash-report strings for metadata-only safety, hash or classify upload targets instead of storing raw endpoints, and record only bounded crash-summary labels/counts unless raw retention has been explicitly authorized elsewhere.
+
+#### F040 — High / Bug 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/lib.rs`
+- Line number(s): 713-735, 1631-1635, 1754-1757
+- Category: bug
+- Severity: high
+- Description: `metadata_fingerprint` and `metadata_hash` build audit fingerprints with `std::collections::hash_map::DefaultHasher`. That hasher is not a stable, documented file/audit fingerprint algorithm and is not collision-resistant, yet the values are stored in `FileFingerprint` fields for provider, route, request, projection, preview, path, command, and policy metadata. Durable replay/audit comparisons can change across Rust implementations or collide far more easily than a real digest.
+- Fix direction: Replace `DefaultHasher` with an explicit stable digest such as SHA-256 or BLAKE3, set `FileFingerprint.algorithm` to the real digest algorithm plus any domain-separation label, and add golden tests proving hashes remain stable across runs.
+
+#### F041 — High / Failure Point 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/training.rs`
+- Line number(s): 87, 102-128
+- Category: failure-point
+- Severity: high
+- Description: `consented_training_candidate_from_records` validates the assisted-AI audit record but does not validate the `ProposalAuditRecord` before copying `proposal.payload_summary`, lifecycle state, and other proposal-derived fields into a training artifact. A malformed proposal audit with `RedactionHint::None`, schema version zero, raw titles, paths, or diagnostics can therefore enter the training-candidate dataset.
+- Fix direction: Add and call a proposal-audit validation/redaction routine before candidate creation, reject non-metadata-only proposal fields, and add tests with raw path/title/diagnostic payloads.
+
+#### F122 — Medium / Failure Point 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/telemetry.rs`
+- Line number(s): 122-178
+- Category: failure-point
+- Severity: medium
+- Description: `suggestion_metadata_summary` concatenates request ids, result ids, acceptance/dismissal ids, provider ids, model labels, health labels, and cost labels directly into one free-form string. The helper accepts most of these as strings from upstream DTOs and does not hash, bound, escape, or marker-scan them here, so a malformed provider label or id can inject raw text, newlines, or parser-confusing fields into hosted telemetry metadata.
+- Fix direction: Store structured metadata fields instead of a space-delimited string, hash or length-summarize arbitrary labels, bound field lengths, and validate provider/model labels against the same metadata-only raw-marker policy used by audit records.
+
+#### F123 — Medium / Bug 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/minidump.rs`
+- Line number(s): 26-31, 47-49
+- Category: bug
+- Severity: medium
+- Description: `symbolicated` is set to `consent.crash_reports_enabled` rather than to whether the minidump was actually symbolicated. With crash reporting enabled but no upload target, the event reports `symbolicated=true` and `symbol_upload_state=skipped`, which is contradictory audit metadata.
+- Fix direction: Track separate states for consent, upload queued, upload completed, and symbolication completed; only set `symbolicated=true` after successful symbolication metadata is available.
+
+#### F124 — Medium / Bug 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/lib.rs`
+- Line number(s): 602-634
+- Category: bug
+- Severity: medium
+- Description: `proposal_audit_record` combines `proposal` data with lifecycle, timestamp, principal, capability, correlation, and causality from `transition`, but never verifies `transition.proposal_id == proposal.proposal_id`. A caller bug can create an audit record and checkpoint/rollback projection that attributes another proposal's transition to the current proposal.
+- Fix direction: Return a `Result`, reject mismatched proposal ids, and add tests covering cross-proposal transition misuse.
+
+#### F125 — Medium / Failure Point 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/lib.rs`
+- Line number(s): 643, 1067, 1089, 1109, 1155, 1530, 1760-1767
+- Category: failure-point
+- Severity: medium
+- Description: Many public event helper functions return `EventEnvelope` directly but call `assert_core_ids`, which panics on a nil causality id, zero correlation id, or zero sequence. Invalid runtime metadata can therefore crash the caller instead of producing a recoverable `ObservabilityError`/protocol error.
+- Fix direction: Change public helpers that validate externally supplied identifiers to return `Result<EventEnvelope, ObservabilityError>`, reuse `validate_envelope`/protocol validation, and reserve panics for internal invariant violations only.
+
+#### F126 — Medium / Failure Point 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/training.rs`
+- Line number(s): 77-85
+- Category: failure-point
+- Severity: medium
+- Description: The training candidate gate treats `AssistedAiConsentState::NotRequired` the same as explicit `Granted` consent. If training export or retention policy requires affirmative user consent, traces that only skipped consent because it was considered unnecessary can be retained for training.
+- Fix direction: Split local/non-export retention from training retention and require an explicit training consent grant unless a policy object proves `NotRequired` is acceptable for this exact artifact.
+
+#### F127 — Medium / Bug 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/training.rs`
+- Line number(s): 89-92
+- Category: bug
+- Severity: medium
+- Description: Only `ProposalLifecycleState::Approved` is labeled as `Accepted`; `Applied` traces return `Ok(None)`. If downstream audit records are captured after a proposal is actually applied, successfully accepted/applied examples will be silently dropped from the training set, biasing the dataset toward pre-apply approvals.
+- Fix direction: Define the intended acceptance lifecycle boundary explicitly and include `Applied` when the training label means successful acceptance/application, or document and test that only pre-apply approval events are eligible.
+
+#### F231 — Low / Failure Point 
+- Source report: `observability-&-debug.md`
+- File path: `crates/legion-observability/src/lib.rs`
+- Line number(s): 568-583
+- Category: failure-point
+- Severity: low
+- Description: `event_metadata_record` hardcodes `schema_version: 1` instead of copying `envelope.schema_version`. If the envelope schema is bumped, persisted metadata records will silently report the wrong schema version.
+- Fix direction: Copy the envelope schema version or introduce an explicit metadata-record schema field that is named separately from the source envelope schema.
+
+### Plugin (10 findings)
+
+#### F002 — Critical / Failure Point 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/host.rs`
+- Line number(s): 84-87, 223-232
+- Category: failure-point
+- Severity: critical
+- Description: The Wasmtime host does not enforce the manifest's `max_fuel`, `max_wall_time_ms`, or `max_memory_pages` quotas. The engine is created with the default `Config`, the store is created without fuel/epoch interruption or a resource limiter, and calls are executed synchronously with no timeout. A malicious fixture with an actual infinite loop or unbounded memory growth can consume CPU or memory despite declaring strict quotas.
+- Fix direction: Enable fuel consumption and/or epoch interruption in `Config`, add the manifest fuel budget before each call, install a `ResourceLimiter`/`StoreLimits` that caps memory/table growth from `max_memory_pages`, and enforce wall-clock timeout/cancellation around `func.call`.
+
+#### F048 — High / Bug 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/host.rs`
+- Line number(s): 136-160, 223-231
+- Category: bug
+- Severity: high
+- Description: Import validation allows exactly `env::host_log`, but `invoke` creates an empty `Linker` and never defines `env.host_log`. A module importing the only allowed host function successfully passes `load_fixture` but then traps during instantiation because the allowed import is missing. That makes the host interface internally inconsistent and records a crash instead of an audited host-call acceptance/denial.
+- Fix direction: Either reject all imports at load time if host calls are intentionally unavailable, or define `env::host_log` with `linker.func_wrap` and make the callback perform broker checks, quota accounting, and audit recording.
+
+#### F049 — High / Bug 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/lib.rs`
+- Line number(s): 171-176, 205-208
+- Category: bug
+- Severity: high
+- Description: `dispatch_host_call` tracks `output_bytes_used`, but quota enforcement only compares the current `metadata_label.len()` to `max_output_bytes`. Multiple accepted host calls with labels under the per-call limit can cumulatively exceed the declared bounded-output quota, and the tracked total is never used to deny the next call.
+- Fix direction: Compute `next_output_bytes = output_bytes_used + metadata_label.len()` with checked/saturating arithmetic and deny when the cumulative total would exceed `manifest.quotas.max_output_bytes`. Reset the counter at the correct invocation boundary if the quota is intended to be per invocation.
+
+#### F050 — High / Bug 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/host.rs`
+- Line number(s): 181-188, 197-210, 263-265
+- Category: bug
+- Severity: high
+- Description: Host-call quota enforcement is tied to successful guest invocations rather than actual host calls. `used_host_calls` is checked before instantiation and incremented once after an invocation returns successfully, so the quota does not correspond to calls to a host interface such as `host_log`. If host functions are added, a guest could make multiple host calls within one invocation while consuming only one quota unit.
+- Fix direction: Move `max_host_calls` accounting into each host-function callback, deny/trap when the per-invocation call count exceeds the quota, and reset that counter for each invocation.
+
+#### F051 — High / Failure Point 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/registry.rs`
+- Line number(s): 41-63, 81-95
+- Category: failure-point
+- Severity: high
+- Description: `SignedExtensionRegistry` validates only signature presence and trust decision; it never calls `validate_plugin_manifest`. As a result, a signed/trusted manifest with an invalid plugin id, empty module hash, bad ABI range, mismatched storage namespace, or missing grammar capability can be installed into the registry even though the runtime would reject it later.
+- Fix direction: Reuse `validate_plugin_manifest` with the current host ABI in `validate_installable` and map protocol validation errors into registry errors before inserting or updating registry state.
+
+#### F052 — High / Bug 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/registry.rs`
+- Line number(s): 81-94
+- Category: bug
+- Severity: high
+- Description: The registry treats `signature.is_some()` plus a trusted self-reported `manifest.trust.decision` as sufficient proof that an artifact is signed and trusted. It does not verify that signer/algorithm/digest fields are non-empty, that the digest matches the manifest/module, or that the signature chains to an approved signer. A forged manifest can populate `signature` metadata and `ExplicitlyAllowed` trust fields and pass registry validation.
+- Fix direction: Validate signature metadata fields at minimum, and preferably verify a detached signature over canonical manifest/module bytes against an allowlisted signer before accepting `Trusted`/`ExplicitlyAllowed`. Treat trust metadata as verification output, not as input authority from the manifest itself.
+
+#### F135 — Medium / Bug 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/host.rs`
+- Line number(s): 226-231, 284-299, 333-347
+- Category: bug
+- Severity: medium
+- Description: Traps during instantiation or exported-function lookup call `finish_trap`, which only appends an audit entry and returns an error. The stored plugin state remains `Running`; `plugin_state` later infers `Crashed` by scanning the audit log, but the underlying state machine is inconsistent and subsequent internal logic still sees a running plugin.
+- Fix direction: On every `finish_trap` path, mutate the loaded plugin state to `PluginRuntimeState::Crashed` before returning. Avoid deriving state from audit history as a substitute for updating the state machine.
+
+#### F136 — Medium / Failure Point 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/lib.rs`
+- Line number(s): 263-271
+- Category: failure-point
+- Severity: medium
+- Description: `PluginRuntimePort::handle` accepts `CommandDescriptor` and `Contribution` requests directly and returns successful registration responses without verifying that a trusted manifest was loaded, that the contribution belongs to the loaded plugin, or that any required capability was declared/granted. This bypasses the manifest validation path used for host calls.
+- Fix direction: Require command/contribution registration to be derived from a loaded `PluginManifest`, or validate the request against the loaded plugin identity and declared capabilities before returning `CommandRegistered` / `ContributionRegistered`.
+
+#### F137 — Medium / Failure Point 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/lib.rs`
+- Line number(s): 84-87, 164-168, 205-209
+- Category: failure-point
+- Severity: medium
+- Description: `host_calls_used` is documented as usage during the active invocation, but this metadata-only host never establishes or resets an invocation boundary. The counter is initialized at load and then accumulates for the life of the loaded plugin, so a plugin can be denied later even though the manifest quota is declared as `max_host_calls` per invocation.
+- Fix direction: Model invocation start/end explicitly and reset per-invocation counters there, or rename/redefine the quota as lifetime quota and update protocol docs/tests accordingly.
+
+#### F138 — Medium / Failure Point 
+- Source report: `plugin-system.md`
+- File path: `crates/legion-plugin/src/manifest.rs`
+- Line number(s): 9-24, 31-69
+- Category: failure-point
+- Severity: medium
+- Description: Permission review rows are emitted per requested capability and `permission_reason_for_capability` uses `find_map`, so only the first matching contribution is surfaced. A manifest with many commands, formatters, LSP entries, scanners, or AI context providers sharing one capability can show a single benign-looking reason while hiding other uses behind the same capability. Several contribution variants also fall back to generic capability text, reducing install-review clarity.
+- Fix direction: Build review rows per contribution/capability pair or aggregate all matching contribution names for each capability. Add explicit coverage for every `PluginContribution` variant and tests for multiple contributions sharing the same capability.
+
+### AI (12 findings)
+
+#### F007 — High / Bug 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai-providers/src/lib.rs`
+- Line number(s): 1230-1239, 1267-1275, 1309-1320, 1355-1365
+- Category: bug
+- Severity: high
+- Description: The Anthropic transport sends whatever was configured as `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` using a bearer authorization header. Anthropic API keys normally require the `x-api-key` header, while bearer authorization is only appropriate for auth-token style credentials. As written, the common `ANTHROPIC_API_KEY` path can fail even when a valid key is configured.
+- Fix direction: Track which credential source was used and set `x-api-key` for API keys, and a bearer authorization header only for auth tokens. Update tests to assert the header selected for each credential type.
+
+#### F008 — High / Bug 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai/src/redaction.rs`
+- Line number(s): 24-40, 51-56
+- Category: bug
+- Severity: high
+- Description: The redaction pass replaces marker strings and token prefixes, but not the complete sensitive values. For example, API-key assignments and authorization headers can be transformed so that the field name or token prefix is redacted while the rest of the secret remains in `redacted_text`. This is especially risky because callers use the returned text as model-bound or telemetry-safe output.
+- Fix direction: Replace token-aware spans rather than marker substrings. Use regexes or scanner-provided byte ranges that cover the full assignment/header/token value, and add tests with realistic non-placeholder secrets to verify the entire value is removed.
+
+#### F009 — High / Failure Point 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai-providers/src/lib.rs`
+- Line number(s): 333-340, 1230-1241, 1267-1278, 2256-2259
+- Category: failure-point
+- Severity: high
+- Description: All blocking HTTP transports create default `reqwest::blocking::Client` instances without request/connect timeouts. A hung provider endpoint or MCP HTTP server can block the calling thread indefinitely, which is dangerous for IDE/UI paths and for background agents that expect bounded provider failures.
+- Fix direction: Build shared clients with explicit connect and total request timeouts, surface timeout errors as provider/transport failures, and add tests using an injected transport or delayed server behavior.
+
+#### F010 — High / Failure Point 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai-providers/src/lib.rs`
+- Line number(s): 619-625
+- Category: failure-point
+- Severity: high
+- Description: `OpenAiResponsesProvider::request_payload` defaults `openai.responses.store` to `true`, causing hosted Responses API calls to opt into provider-side response storage unless callers remember to override metadata. This is a risky default for an IDE AI stack that otherwise emphasizes metadata-only routing and explicit consent.
+- Fix direction: Default `store` to `false` and require an explicit opt-in metadata flag for provider-side storage. Document the retention behavior in provider setup guidance.
+
+#### F080 — Medium / Failure Point 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai/src/redaction.rs`
+- Line number(s): 21-40
+- Category: failure-point
+- Severity: medium
+- Description: Sensitive-marker detection lowercases the payload in `scan_payload_for_sensitive_markers`, but the subsequent replacement list is mostly case-sensitive. Mixed-case forms can be flagged as requiring redaction while not actually being removed from `redacted_text`.
+- Fix direction: Make redaction itself case-insensitive, or have the scanner return exact spans to replace. Ensure tests cover uppercase, lowercase, and mixed-case variants of API-key and authorization markers.
+
+#### F081 — Medium / Failure Point 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai-providers/src/lib.rs`
+- Line number(s): 2172-2195, 2203-2216
+- Category: failure-point
+- Severity: medium
+- Description: `StdioMcpTransport::send_on_session` loops on `read_line` until it sees the expected response id, with no timeout, cancellation path, or maximum number of unrelated messages. A silent, wedged, or notification-only MCP server can hang the caller forever while the session mutex remains held.
+- Fix direction: Add a per-request timeout/deadline and return a transport error when it expires. Consider handling JSON-RPC error responses and notifications separately, and avoid holding the mutex across unbounded blocking reads.
+
+#### F082 — Medium / Bug 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai/src/streaming.rs`
+- Line number(s): 36-61
+- Category: bug
+- Severity: medium
+- Description: `flush_code` drops fenced code blocks when `code_lines` is empty, both for complete and incomplete fences. An assistant response containing an intentionally empty code block, such as a placeholder fence with a language label, is silently omitted from the segment stream.
+- Fix direction: Emit a `MarkdownStreamSegment::CodeBlock` even when the code body is empty, preserving the language and `complete` flag. Add tests for empty complete and incomplete fences.
+
+#### F083 — Medium / Failure Point 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai/src/lib.rs`
+- Line number(s): 451-480, 512-522
+- Category: failure-point
+- Severity: medium
+- Description: The deterministic inline predictor can produce an `Available` inline-prediction result with empty ghost text when `max_prediction_bytes` is zero or too small for the generated prefix. The result still reports `line_count` as 1, so consumers may try to display or accept an empty suggestion as if it were useful.
+- Fix direction: Treat zero-length generated text as a refusal/no-suggestion state, or validate `max_prediction_bytes` before building an `Available` result. Add an explicit test for `max_prediction_bytes == 0`.
+
+#### F084 — Medium / Bug 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai/src/lib.rs`
+- Line number(s): 679-705
+- Category: bug
+- Severity: medium
+- Description: `ProviderRouter::route_completion` invokes the selected provider, but the successful route response reports `provider_id` and `model_label` from the original request without checking that the provider response came from the same provider/model. A misconfigured or malicious adapter could return a response for another backend while policy, audit labels, and UI metadata still claim the requested provider was used.
+- Fix direction: Validate `completion.provider == request.provider_id` and `completion.model == request.model_label` (or explicitly record both requested and actual provider/model) before returning a completed route. Refuse or error on mismatch.
+
+#### F085 — Medium / Bug 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai-providers/src/lib.rs`
+- Line number(s): 958-972
+- Category: bug
+- Severity: medium
+- Description: `OpenAiCompatibleProvider::complete` serializes `max_tokens` and `temperature` directly inside `json!`, so absent options are sent as JSON `null`. Some OpenAI-compatible endpoints reject nullable optional fields rather than treating them as omitted.
+- Fix direction: Build the payload incrementally and only include `max_tokens` and `temperature` when the request options are `Some`.
+
+#### F213 — Low / Failure Point 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai/src/telemetry.rs`
+- Line number(s): 23-24, 57, 69-78
+- Category: failure-point
+- Severity: low
+- Description: Validation failures and spool-record construction errors are collapsed into `None`, the same value used when telemetry is blocked by policy or consent. That makes malformed lifecycle/result records indistinguishable from intentional consent gating and can hide integration regressions.
+- Fix direction: Consider returning `Result<Option<HostedTelemetrySpoolRecord>, _>` for the lower-level helper, or at least log/label validation failures separately from consent-policy blocks.
+
+#### F214 — Low / Failure Point 
+- Source report: `ai-stack.md`
+- File path: `crates/legion-ai/src/lib.rs`
+- Line number(s): 756-764
+- Category: failure-point
+- Severity: low
+- Description: `allowed_route_decision()` hard-codes `schema_version: 1` while the containing route response uses `request.schema_version`. If the protocol schema version changes, nested route-decision metadata can be stale even when the top-level response preserves the caller's version.
+- Fix direction: Pass the request schema version into `allowed_route_decision(schema_version)` and use it consistently in the nested `AssistedAiRouteDecision`.
+
+### Agent (12 findings)
+
+#### F011 — High / Bug 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/scope.rs`
+- Line number(s): 23-37
+- Category: bug
+- Severity: high
+- Description: Scope enforcement delegates to `target_is_within_scope` and `forbids_path` using the raw `target_path`. Neither the target path nor forbidden path comparison is canonicalized/normalized here. Paths with `..` components or symlinks can pass a module/repo `starts_with` check while resolving outside the intended scope, and forbidden path checks can be bypassed with alternate spellings.
+- Fix direction: Canonicalize or securely normalize workspace root, scope target, forbidden paths, and the candidate path before comparison. Reject paths that cannot be canonicalized when mutation is involved, and resolve symlinks according to the selected workspace policy.
+
+#### F012 — High / Failure Point 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/lib.rs`
+- Line number(s): 361-388
+- Category: failure-point
+- Severity: high
+- Description: The copy-based sandbox fallback walks the workspace and calls `std::fs::copy` for every non-directory entry. Symlinks are not detected or rejected; `std::fs::copy` follows symlinks, so a workspace symlink pointing outside the repository can copy external files into the delegated sandbox. This breaks isolation and can leak files that were never intended to be part of the delegated task scope.
+- Fix direction: Use `symlink_metadata` and explicitly handle symlinks. Either preserve safe in-repo symlinks after resolving and validating their targets, or skip/reject symlinks whose canonical target is outside the workspace root.
+
+#### F013 — High / Bug 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/lib.rs`
+- Line number(s): 422-469, 519-524
+- Category: bug
+- Severity: high
+- Description: `validate_containment` normalizes a candidate path for the containment check, but `generate_proposal` later derives the proposal path from the original `input.target_path`. A path like `<sandbox>/src/../generated.txt` validates as contained, then can be emitted as `src/../generated.txt` in the proposal payload. Downstream apply code may interpret the `..` segments differently, and the emitted `CanonicalPath` is not actually canonical.
+- Fix direction: Return the normalized/canonicalized contained path from the containment helper and use that normalized path for `strip_prefix` and proposal payload construction. Reject proposal-relative paths containing `ParentDir`, root, prefix, or other non-normal components.
+
+#### F014 — High / Bug 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/lib.rs`
+- Line number(s): 514-565
+- Category: bug
+- Severity: high
+- Description: `DelegatedTaskProposalGenerator::generate_proposal` is documented as comparing sandbox state with `HEAD`, but it never reads `HEAD`, never diffs the target, and always emits a `ProposalPayload::CreateFile` with no version/fingerprint preconditions. Existing-file modifications are represented as create-file proposals, and stale sandbox state can produce proposals with no concurrency guard.
+- Fix direction: Detect whether the target exists in the base checkout and generate the appropriate edit/patch payload for modifications versus creates. Populate file/workspace preconditions and expected fingerprints from the current sandbox/base state before returning proposal metadata.
+
+#### F015 — High / Bug 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/external.rs`
+- Line number(s): 78-99
+- Category: bug
+- Severity: high
+- Description: `validate_workspace_edit_conversion` requires `ProposalTargetCoverageKind::Complete`, but it never verifies that `payload.target_coverage.targets` actually match every path/file touched by `file_edits` and `file_operations`. An external producer can declare complete coverage for one target while including edits, creates, deletes, or renames for another target.
+- Fix direction: Derive the affected target set from `file_edits` and every `WorkspaceFileOperation`, compare it against `target_coverage.targets`, and reject missing, extra, or redacted targets when complete coverage is required.
+
+#### F016 — High / Bug 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/dag.rs`
+- Line number(s): 82-102
+- Category: bug
+- Severity: high
+- Description: `workflow_dag_from_approved_plan` creates nodes for every plan section entry and then connects them with a simple linear `windows(2)` chain. It does not preserve task-graph dependencies, independent branches, blocked nodes, or explicit task ordering from the workflow metadata. A plan with parallel tasks becomes a serial chain, which can over-constrain execution and misrepresent the approved workflow DAG.
+- Fix direction: Build DAG nodes and edges from task graph dependency metadata when available, and only fall back to section-order presentation edges for non-executable requirement/design entries. Add tests for independent tasks and multi-edge dependency graphs.
+
+#### F086 — Medium / Failure Point 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/lib.rs`
+- Line number(s): 1207-1268
+- Category: failure-point
+- Severity: medium
+- Description: Provider route requests use a constant cancellation token (`Uuid::from_u128(13)`) and constant event sequence (`EventSequence(13)`) for every provider-backed worker. Multiple routes in the same workflow can therefore share cancellation/audit identifiers, making targeted cancellation and audit ordering ambiguous.
+- Fix direction: Derive cancellation token and event sequence from stable per-worker/session data supplied by the caller, or require them in the worker/session metadata so each provider route has unique audit/cancellation identity.
+
+#### F087 — Medium / Failure Point 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/plan.rs`
+- Line number(s): 43-58
+- Category: failure-point
+- Severity: medium
+- Description: `task_entries` converts each task node into a display string with id, targets, and verification requirements, but drops `depends_on`, `edge_count`, blocked-task metadata, and task state. The editable plan that users approve therefore omits the dependency information that later DAG/scheduler behavior depends on.
+- Fix direction: Include dependency and state metadata in task entries or add a dedicated dependency section. Validate that `TaskGraphArtifact::edge_count` and node `depends_on` data are represented in the editable plan before approval.
+
+#### F088 — Medium / Failure Point 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/evidence.rs`
+- Line number(s): 44-74, 147-156
+- Category: failure-point
+- Severity: medium
+- Description: `external_log_evidence_record` constructs evidence ids and command labels directly from `log_label`, and `record_external_log_evidence` pushes the record without running `validate_legion_evidence_record`. Empty labels, path-like labels, newlines, or other invalid characters can create invalid or colliding evidence ids; sensitive label text can also be included in the metadata summary before redaction policy validation.
+- Fix direction: Validate all evidence records before insertion, normalize or hash external labels before embedding them in ids, and keep raw labels out of summaries unless they have been policy-checked/redacted.
+
+#### F089 — Medium / Failure Point 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/lib.rs`
+- Line number(s): 997-1058
+- Category: failure-point
+- Severity: medium
+- Description: `record_proposal_output` appends proposal outputs, evidence records, and worker results every time it is called. The generated evidence/result ids are deterministic by worker id (`legion-evidence:{worker}` and `legion-result:{worker}`), so repeated calls for the same worker create duplicate ids and duplicate worker results. Other coordinator methods are explicitly idempotent, but this one can corrupt downstream result/evidence consumers.
+- Fix direction: Make proposal recording idempotent per worker/proposal id, or reject duplicate records with a structured error. If multiple outputs per worker are valid, include proposal id or sequence in evidence/result ids and validate uniqueness before insertion.
+
+#### F215 — Low / Failure Point 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/lib.rs`
+- Line number(s): 291-299
+- Category: failure-point
+- Severity: low
+- Description: `DelegatedTaskSandboxOrchestrator::initialize` converts `sandbox_path` with `self.sandbox_path.to_str().unwrap()` before invoking `git worktree add`. On Unix/macOS, `PathBuf` can contain non-UTF-8 bytes; a path provided through the environment or filesystem can panic the process instead of returning an error.
+- Fix direction: Avoid `to_str().unwrap()` and pass `&self.sandbox_path` directly to `Command::arg`, or convert with `to_str().ok_or_else(...)` and return an `io::Error` with a clear message.
+
+#### F216 — Low / Failure Point 
+- Source report: `agent-system.md`
+- File path: `crates/legion-agent/src/external.rs`
+- Line number(s): 40-77
+- Category: failure-point
+- Severity: low
+- Description: The `principal` parameter is explicitly ignored (`let _ = principal`), and the validation only checks capability equality with the payload. Empty or placeholder principals/capabilities can be accepted as long as they match each other, weakening audit attribution for externally supplied proposals.
+- Fix direction: Validate that `principal` and both capability fields are non-empty, well-formed identifiers. Keep the capability equality check, but also reject placeholder/empty identities before constructing the proposal envelope.
+
+### UI, Editor & Collaboration (19 findings)
+
+#### F006 — Critical / Error 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-collaboration/src/lib.rs`
+- Line number(s): 419-435, 558-620
+- Category: error
+- Severity: critical
+- Description: `handle_transport_envelope` validates that `envelope.sender_participant_id` is nonzero, but it never checks that the sender matches the participant encoded in the payload. An envelope from one participant can carry an operation authored by another admitted participant, and `validate_operation_shape` then authorizes based on the payload's `author_participant_id` rather than the transport sender.
+- Fix direction: Require `envelope.sender_participant_id == operation.author_participant_id` for operation payloads and `== projection.participant_id` for presence payloads before dispatching. Add negative tests for sender/payload mismatches.
+
+#### F070 — High / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-editor/src/lib.rs`
+- Line number(s): 1141-1153
+- Category: bug
+- Severity: high
+- Description: Batch edit deltas are computed while edits are applied in descending byte order. A later lower-offset edit can shift the post-edit coordinates of an earlier higher-offset delta, but the higher-offset delta was already recorded before that shift. After `deltas.reverse()`, transaction metadata can report stale byte/UTF-16 ranges for multi-edit batches where lower edits change length.
+- Fix direction: Compute all changed ranges against the final staged buffer after all edits are applied, or adjust already-recorded higher-offset deltas by the length delta of lower-offset edits before recording the transaction.
+
+#### F071 — High / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-editor/src/lib.rs`
+- Line number(s): 2373-2388
+- Category: bug
+- Severity: high
+- Description: `EditorRequest::ApplyTransaction` validates that a transaction descriptor matches the buffer identity and then returns it as `EditorResponse::Transaction`, but it does not mutate the buffer, append the transaction log, or emit an event. Callers can receive a successful transaction response for a transaction that was never applied.
+- Fix direction: Either remove/rename this request if it is only an acknowledgement path, or route it through real editor mutation logic with edits/preconditions and transaction/event recording. At minimum, return `unsupported` instead of a success response when no mutation occurs.
+
+#### F072 — High / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-collaboration/src/lib.rs`
+- Line number(s): 267-306, 739-773
+- Category: bug
+- Severity: high
+- Description: Submission only detects gaps in the author's `participant_sequence`. Cross-participant dependencies declared in `operation.preconditions.base_vector` are not checked against accepted participant sequences before accepting the operation. `deterministic_order` only orders dependencies that are already present in the accepted operation list, so an operation can be accepted even when it causally depends on another participant's missing sequence.
+- Fix direction: Validate every base-vector entry before acceptance: the runtime's observed sequence for that participant must be at least the requested sequence, otherwise emit a causal gap/resync acknowledgement rather than applying the operation.
+
+#### F073 — High / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-ui/src/ui.rs`
+- Line number(s): 3383-3427, 3457-3914
+- Category: failure-point
+- Severity: high
+- Description: `Shell::render` writes active file text, viewport text, paths, command labels, terminal rows, debug values, and other projection strings directly to stdout with `println!` and no terminal escaping. A malicious file or remote/tool/terminal output containing ANSI escape sequences can clear the screen, spoof prompts, hide text, or manipulate terminal state.
+- Fix direction: Escape or sanitize control characters before rendering untrusted content to a terminal. Keep raw text only for renderer backends that explicitly support safe rich text, and add tests for ANSI/control-character payloads.
+
+#### F074 — High / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-ui/src/ui.rs`
+- Line number(s): 4802-4810
+- Category: bug
+- Severity: high
+- Description: `parse_pos` converts byte offsets in viewport mode by accumulating `visible_text.len() + 1` from the first visible slice and then returns `byte_offset: Some(byte_offset as u64)`. This treats the offset as relative to the visible viewport, ignoring each slice's absolute `byte_range.start`. Commands emitted from degraded/streaming viewport projections can therefore target the wrong absolute document byte offset.
+- Fix direction: Resolve viewport positions from `ViewportLineSlice.byte_range.start` plus a validated in-slice offset, and reject offsets outside the visible slice instead of fabricating document offsets from viewport-relative counters.
+
+#### F075 — High / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-collaboration/src/lib.rs`
+- Line number(s): 721-789, 794-843
+- Category: bug
+- Severity: high
+- Description: Concurrent text operations are replayed in deterministic order using their original byte ranges, but ranges are never transformed against prior concurrent inserts/deletes/replacements. Concurrent operations based on the same initial document can therefore delete/replace the wrong bytes or conflict depending on deterministic ordering, even though all replicas converge on the same incorrect text.
+- Fix direction: Add an operational-transform/CRDT range transform step, or constrain accepted operations to a strictly linear base version/vector where raw byte ranges are valid. Conflict and resync when a concurrent range cannot be transformed safely.
+
+#### F076 — High / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-text/src/lib.rs`
+- Line number(s): 806-823
+- Category: failure-point
+- Severity: high
+- Description: `LineIndex::visible_line_slices` creates `Vec::with_capacity(end_line_exclusive.saturating_sub(start_line))` before checking that `end_line_exclusive` is within the document. A caller can request a huge end line and force a massive allocation or abort before the first out-of-bounds line check.
+- Fix direction: Validate `end_line_exclusive <= line_count()` and cap the requested line count before allocating. Consider returning `LineOutOfBounds` or a bounded-limit error for oversized viewport requests.
+
+#### F195 — Medium / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-collaboration/src/lib.rs`
+- Line number(s): 148-160
+- Category: bug
+- Severity: medium
+- Description: Participant initialization inserts participants into a `HashMap` keyed by participant id without rejecting duplicates. A duplicate participant id silently overwrites the earlier descriptor, including principal and permissions, while the initial bounds check used the pre-deduplicated vector length.
+- Fix direction: Reject duplicate participant IDs during session construction and validate that the deduplicated participant count equals the submitted count.
+
+#### F196 — Medium / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-editor/src/lib.rs`
+- Line number(s): 1871-1896, 1002-1037
+- Category: failure-point
+- Severity: medium
+- Description: `set_cursors` and `set_selections` accept arbitrary `TextPosition`/`TextRange` values without validating them against the buffer. The invalid state is stored and later causes `viewport_projection` to fail when it tries to convert cursor/selection positions to byte offsets.
+- Fix direction: Validate cursor and selection positions with `buffer.try_byte_offset` when setting them, and reject invalid ranges immediately so projection generation remains infallible for stored editor state.
+
+#### F197 — Medium / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-ui/src/projection.rs`
+- Line number(s): 202-207, 234, 240-261
+- Category: bug
+- Severity: medium
+- Description: `legion_workflow_fleet_card_projections` computes one aggregate `test_status_label` from the entire `VerificationRunProjection` and applies the same label to every proposal card. If multiple proposals are present, each card shows the global verification totals rather than the verification state for that proposal, making failed or blocked tests appear on unrelated cards.
+- Fix direction: Join verification rows to their owning proposal/workflow before projecting card status, or clearly label the field as a global aggregate outside per-proposal card data.
+
+#### F198 — Medium / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-editor/src/lib.rs`
+- Line number(s): 2428-2431, 1899-1910
+- Category: bug
+- Severity: medium
+- Description: `EditorRequest::Overlay` returns `OverlayApplied` but never stores the overlay in any buffer state. `EditorEngine` has `set_overlays`, but the protocol request path is a no-op success, so UI/diagnostic overlays can be dropped silently.
+- Fix direction: Add buffer identity to the overlay request or resolve it from overlay metadata, then update the target buffer's overlay list. If overlays are intentionally projection-only, return an explicit unsupported/no-op response instead of `OverlayApplied`.
+
+#### F199 — Medium / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-collaboration/src/lib.rs`
+- Line number(s): 318-323, 651-676
+- Category: bug
+- Severity: medium
+- Description: For accepted operations, `acknowledge` is called before `participant_sequences` is updated with the accepted sequence. The `observed_vector` in an Accepted acknowledgement therefore omits the operation being acknowledged, which can make clients believe the server has not observed their latest sequence.
+- Fix direction: Update the participant sequence before constructing Accepted acknowledgements, or have `acknowledge` accept an overlay vector that includes the just-accepted operation.
+
+#### F200 — Medium / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-ui/src/ui.rs`
+- Line number(s): 4571-4613, 5153-5157
+- Category: failure-point
+- Severity: medium
+- Description: Proposal command parsing accepts `ProposalId(0)` because `parse_proposal_id` does not reject zero. Other parsers in the same file reject zero identifiers, and the empty approval/checkpoint projections use proposal id 0 as a sentinel. This allows commands such as `:proposal-approve 0` to emit privileged proposal intents for an invalid/sentinel proposal.
+- Fix direction: Filter parsed proposal IDs with `id != 0` and add tests that malformed or zero proposal IDs emit `Noop` or an explicit validation error.
+
+#### F201 — Medium / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-ui/src/ui.rs`
+- Line number(s): 4789-4799
+- Category: failure-point
+- Severity: medium
+- Description: In small-buffer mode, `parse_pos` uses `text.as_bytes().get(..byte_offset)`. If the requested byte offset lands inside a UTF-8 codepoint or past the end, the command silently falls back to `(0,0)` with byte offset 0. A malformed command or cursor offset can turn an intended local edit into an edit at the beginning of the file.
+- Fix direction: Validate `byte_offset <= text.len()` and `text.is_char_boundary(byte_offset)`. Return a command error for invalid offsets rather than coercing to the file start.
+
+#### F202 — Medium / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-editor/src/lib.rs`
+- Line number(s): 73-77, 1047-1060, 1674-1683
+- Category: failure-point
+- Severity: medium
+- Description: Degraded-save behavior is inconsistent and potentially unbounded. `EditorError::DegradedSaveUnavailable` and the viewport large-file message say degraded saves fail closed, but `request_save` materializes the entire degraded snapshot into a `String` via `materialize_full_text_from_chunks`. Very large files can therefore allocate whole-file payloads on the interactive path despite the degraded-mode budget.
+- Fix direction: Decide on one contract. If degraded saves should be supported, stream chunks through the save path without building a single `String` and update the status/error text. If they should fail closed, return `DegradedSaveUnavailable` before materialization.
+
+#### F203 — Medium / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-text/src/lib.rs`
+- Line number(s): 730-742, 1257-1299
+- Category: failure-point
+- Severity: medium
+- Description: The simple-edit fast path shifts chunk boundaries and updates only the containing chunk hash, but it never rebalances/splits chunks if repeated same-line edits make a chunk exceed `DEFAULT_CHUNK_FORCE_MAX_BYTES`. Over time, chunk descriptors can become much larger than the advertised bound, causing chunk reads and save materialization to lose their bounded-payload guarantee.
+- Fix direction: After simple edits, check the edited chunk's size against the force maximum and fall back to `rebuild_from_chunk` when it exceeds the chunk budget or crosses other chunking invariants.
+
+#### F259 — Low / Bug 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-ui/src/ui.rs`
+- Line number(s): 2942-2969, 3030-3043
+- Category: bug
+- Severity: low
+- Description: Toast IDs are derived only from severity and message text. Duplicate status messages receive identical IDs, so dismissing one dismisses every duplicate, and multiple visible duplicates cannot be independently addressed.
+- Fix direction: Include a monotonic sequence, timestamp, source id, or caller-supplied notification id in `ToastProjection::id` while preserving deterministic IDs only where deduplication is explicitly desired.
+
+#### F260 — Low / Failure Point 
+- Source report: `ui,-editor-&-collaboration.md`
+- File path: `crates/legion-text/src/lib.rs`
+- Line number(s): 345-355, 1099-1108
+- Category: failure-point
+- Severity: low
+- Description: Public convenience methods `TextSnapshot::text()` and `TextBuffer::text()` panic whenever the full text cache is unavailable. This is documented, but these methods remain easy to call from production paths and can crash on large/degraded buffers.
+- Fix direction: Prefer fallible APIs in production-facing code paths, consider gating the panicking methods behind test/compatibility naming, or rename them to make the panic behavior explicit.
+
+### App (7 findings)
+
+#### F017 — High / Bug 
+- Source report: `app-entry-&-proposals.md`
+- File path: `crates/legion-app/src/lib.rs`
+- Line number(s): 10525-10537, 18138-18155
+- Category: bug
+- Severity: high
+- Description: The direct save workflow writes the file through `workspace.save_file_with_proposal` before requiring the applied-proposal audit to persist. If `observe_proposal_response` fails after the workspace save succeeds, `SaveWorkflowService::save_active_buffer` returns `SaveWorkflowFailure`, and `AppComposition::save_buffer` reports `AppSaveOutcome::Rejected` without rolling back the on-disk write and without binding the new saved metadata into `active_documents`. This can leave disk mutated while the editor/app state believes the save failed and remains dirty/stale. The generic `apply_workspace_proposal` path has rollback logic for audit failure, but this direct `save_active_buffer` path does not.
+- Fix direction: Treat audit failure after a successful workspace save consistently with proposal apply: either persist audit before committing the workspace mutation, add rollback for the saved file using a pre-save checkpoint, or commit the saved editor metadata while surfacing the audit failure separately so disk/editor state cannot diverge.
+
+#### F018 — High / Error 
+- Source report: `app-entry-&-proposals.md`
+- File path: `crates/legion-app/src/offline_ai.rs`
+- Line number(s): 1283-1320
+- Category: error
+- Severity: high
+- Description: The offline-build test helper `route_request()` constructs `AssistedAiProviderRouteRequest` without the required `prompt_prefix` field. This breaks the no-default-feature test target even though the no-default-feature library target checks. Verification command: `cargo check -p legion-app --no-default-features --all-targets` failed with `error[E0063]: missing field prompt_prefix in initializer of legion_protocol::AssistedAiProviderRouteRequest` at `offline_ai.rs:1283:9`.
+- Fix direction: Add `prompt_prefix: String::new()` (or the intended deterministic prompt prefix) to the test initializer and keep no-default-feature all-targets in CI so offline tests track protocol shape changes.
+
+#### F019 — High / Failure Point 
+- Source report: `app-entry-&-proposals.md`
+- File path: `crates/legion-app/src/offline_ai.rs`
+- Line number(s): 410-418, 420-435
+- Category: failure-point
+- Severity: high
+- Description: `validate_containment` canonicalizes the sandbox base but only lexically normalizes the candidate target path. A path that remains textually under the sandbox while traversing a symlink inside the sandbox can pass `starts_with` and still resolve outside the sandbox at use time. The same function also calls `std::env::current_dir().unwrap()` on fallback paths, so a process with an unavailable current directory can panic instead of returning `OfflineAiError`.
+- Fix direction: Propagate `current_dir` errors instead of unwrapping, and validate containment against a canonical/resolved target parent with symlink-aware filesystem checks. For create-file targets, validate the existing parent directory canonically and reject symlink components or use an openat-style/no-follow creation strategy.
+
+#### F020 — High / Bug 
+- Source report: `app-entry-&-proposals.md`
+- File path: `crates/legion-app/src/proposal.rs`
+- Line number(s): 81-92, 117-125
+- Category: bug
+- Severity: high
+- Description: `filtered_batch_proposal_for_accepted_targets` keeps every item whose own targets are accepted, then drops dependency edges whenever either endpoint is not retained. If an accepted item depended on a rejected/omitted prerequisite item, the dependency is silently removed and the dependent item can be applied without its required prerequisite. This changes the semantics of the original batch during partial hunk application.
+- Fix direction: Preserve dependency safety when filtering. Either reject a filtered batch when any retained item has a prerequisite outside the retained set, recursively include required prerequisites only when their targets were accepted, or mark dependent retained items as not applicable with a diagnostic/partial-failure record.
+
+#### F090 — Medium / Failure Point 
+- Source report: `app-entry-&-proposals.md`
+- File path: `crates/legion-app/src/main.rs`
+- Line number(s): 11-22
+- Category: failure-point
+- Severity: medium
+- Description: The CLI entry point defaults to `scratch.txt` but opens it with `AppComposition::open_file`, which uses `OpenFileIntent::Existing`. Starting the app in a fresh directory therefore exits before the command loop because `scratch.txt` does not exist. I verified this by running the built `target/debug/legion-app` from an empty temporary directory; it returned `platform error: not found for .../scratch.txt while metadata` with exit status 1.
+- Fix direction: Either default through explicit create intent (`open_new_file`) when the default scratch path is absent, require the user to pass an existing file, or surface an interactive/new-file fallback instead of exiting during app startup.
+
+#### F091 — Medium / Failure Point 
+- Source report: `app-entry-&-proposals.md`
+- File path: `crates/legion-app/src/lib.rs`
+- Line number(s): 15656-15659, 15702-15706, 15742-15744
+- Category: failure-point
+- Severity: medium
+- Description: `execute_delegated_task` allocates a sandbox/worktree, but cleanup is not guaranteed on all error exits. If the ACP host command fails to start, the `?` at the `run(...)` call returns immediately. If the host succeeds but the proposal file cannot be read, the `read_to_string(...)?` path also returns immediately. In both cases the already-initialized sandbox is not cleaned up. The unsuccessful-exit path does clean up explicitly, and the later proposal-generation path also attempts cleanup, so these early ACP paths are inconsistent.
+- Fix direction: Use a scope guard/RAII cleanup wrapper or restructure the ACP block so every return after successful `orchestrator.initialize` runs `orchestrator.cleanup(&permission)` and reports cleanup failures alongside the original error.
+
+#### F092 — Medium / Bug 
+- Source report: `app-entry-&-proposals.md`
+- File path: `crates/legion-app/src/lib.rs`
+- Line number(s): 21705-21763, 2189-2202
+- Category: bug
+- Severity: medium
+- Description: Partial delegated-hunk application creates a filtered batch proposal locally, but the coordinator stores the original proposal before filtering and never replaces it with the filtered one. `proposal_ledger_projection` later renders rows from `self.proposals`, so after a filtered apply the ledger/review projection can still describe the original full batch even though only accepted hunks were applied. That can make rejected hunks appear to be part of the applied proposal metadata.
+- Fix direction: When `filtered_apply_required` returns a filtered proposal, update the coordinator's stored proposal (or store an applied-subset record) before observing/applying transitions, and ensure the ledger/review projection distinguishes original proposal coverage from the actually applied subset.
+
+### Protocol (10 findings)
+
+#### F053 — High / Bug 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/risk.rs`
+- Line number(s): 131-136
+- Category: bug
+- Severity: high
+- Description: `RiskAssessment::is_allow()` returns true when `findings` is empty because `Iterator::all()` is vacuously true. If a risk engine fails to emit findings, omits all rules, or deserializes an empty assessment, approval gating can treat the proposal as allowed even though no deterministic rules actually ran.
+- Fix direction: Fail closed by requiring at least one finding and preferably one finding per `RiskRuleId::all()`. Return false when findings are empty or when any canonical rule id is missing.
+
+#### F139 — Medium / Bug 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/tools.rs`
+- Line number(s): 304-379
+- Category: bug
+- Severity: medium
+- Description: `validate_tool_schema_definition()` validates that required fields match `tool.kind.required_fields()`, but it does not verify that `tool.tool_name` equals `tool.kind.tool_name()` or that `description_label` equals the canonical label. A schema definition with kind `Read` and name `terminal-command` can pass validation, corrupting registry identity and routing.
+- Fix direction: Validate canonical name/label consistency against `tool.kind` and reject mismatches. Also consider checking that every property referenced by `required` has a schema compatible with the tool kind.
+
+#### F140 — Medium / Bug 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/plan.rs`
+- Line number(s): 334-335, 420-447
+- Category: bug
+- Severity: medium
+- Description: The artifact contract documents that `sections` are "always ordered requirements → design → tasks", but `EditablePlanArtifact::validate()` only checks presence and duplicates. A plan with all three sections in the wrong order passes validation, allowing downstream UI/diff code to receive a contract-valid artifact that violates the documented ordering invariant.
+- Fix direction: During validation, compare each section's index to `section.kind.order()` or sort only in constructors and reject externally deserialized artifacts whose section order differs from the canonical order.
+
+#### F141 — Medium / Failure Point 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/scope.rs`
+- Line number(s): 77-109
+- Category: failure-point
+- Severity: medium
+- Description: `DelegatedTaskScope::target_is_within_scope()` validates the workspace/module/file boundary but does not consult `forbidden_paths`. Because both methods live on the same scope object, callers can easily treat `target_is_within_scope()` as the complete authorization predicate and accidentally allow a target that is inside the selected module/repo but explicitly forbidden.
+- Fix direction: Add an all-in-one predicate such as `allows_target_path()` that checks workspace boundary, target kind, and forbidden paths together, or make `target_is_within_scope()` call `forbids_path()` before returning true.
+
+#### F142 — Medium / Failure Point 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/manifest.rs`
+- Line number(s): 88-125
+- Category: failure-point
+- Severity: medium
+- Description: `ContextManifestAssembly::into_record()` emits a `ContextManifestRecord` without validating required contract fields or derived consistency. Empty `manifest_id`, zero `schema_version`, whitespace identifiers, inconsistent `omitted_item_count`, and stale/freshness flags that disagree with the flattened items can all be serialized as trusted manifest records.
+- Fix direction: Add a validation step or change the helper to return `Result<ContextManifestRecord, AssistedAiContractError>`. Validate manifest id, schema version, redaction hints, item/permission schema versions, and recompute or verify derived counts/risk flags.
+
+#### F143 — Medium / Failure Point 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/lib.rs`
+- Line number(s): 9483-9488
+- Category: failure-point
+- Severity: medium
+- Description: Delegated runtime protected-path enforcement checks `target.contains(protected)` on display/path labels. Substring matching is not path-aware: it can flag unrelated paths and can also miss intended protected paths when separators, canonicalization, case, symlinks, or glob-style protected patterns differ from the raw label representation.
+- Fix direction: Represent protected paths/patterns as canonical paths or compiled globs and compare with `Path`-aware boundary checks. Normalize targets before evaluation and keep a conservative fallback for non-path labels.
+
+#### F144 — Medium / Failure Point 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/tools.rs`
+- Line number(s): 95-103, 127-140
+- Category: failure-point
+- Severity: medium
+- Description: `LegionToolCallFeedbackKind::UnknownTool` exists, but `LegionToolCallFeedback` requires `tool: LegionToolKind`. An actually unknown tool name cannot be represented without mapping it to a known enum variant, which loses the invalid attempted name and can mislead model feedback/retry handling.
+- Fix direction: Add an `attempted_tool_name: Option<String>` field or change the feedback tool field to an enum that can carry either `Known(LegionToolKind)` or `Unknown(String)`.
+
+#### F234 — Low / Failure Point 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/lib.rs`
+- Line number(s): 194-197
+- Category: failure-point
+- Severity: low
+- Description: `TimestampMillis::now()` silently maps `SystemTime` values before `UNIX_EPOCH` to `0` and casts `Duration::as_millis()` from `u128` to `u64`. A system clock anomaly before the epoch becomes indistinguishable from a real epoch timestamp, and a far-future/overflowing duration would wrap during the cast.
+- Fix direction: Return a `Result<TimestampMillis, _>` for clock errors, or saturate explicitly with a diagnostic path. Use `u64::try_from(d.as_millis()).unwrap_or(u64::MAX)` or equivalent checked conversion instead of a direct cast.
+
+#### F235 — Low / Failure Point 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/tools.rs`
+- Line number(s): 208-218, 259-273
+- Category: failure-point
+- Severity: low
+- Description: The JSON schemas for `read` and `edit-as-proposal` constrain `start_line` and `end_line` independently to be >= 1, but they do not enforce `start_line <= end_line`. A syntactically valid tool call can request an inverted range, pushing the error to later runtime handling.
+- Fix direction: Add runtime validation after JSON Schema validation or encode a stricter schema if the validator supports cross-field constraints. Return structured `InvalidArguments` feedback when an inverted range is provided.
+
+#### F236 — Low / Failure Point 
+- Source report: `core-protocol.md`
+- File path: `crates/legion-protocol/src/capability.rs`
+- Line number(s): 44-49
+- Category: failure-point
+- Severity: low
+- Description: `AssistedAiCapabilityMatrix::has_explicit_declaration()` uses `String::is_empty()` instead of trimming. Whitespace-only `provider_id`, `provider_label`, `context_length_label`, or `cost_usage_label` therefore count as an explicit declaration, which can make malformed provider metadata appear usable to routing or UI surfaces.
+- Fix direction: Check `trim().is_empty()` for user/display/provider identifier fields and consider validating `schema_version`, availability, and redaction posture in a dedicated `validate()` method.
+
+### Desktop (37 findings)
+
+#### F022 — High / Bug 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/workflow.rs`
+- Line number(s): 2683-2731
+- Category: bug
+- Severity: high
+- Description: `editor_text_input_actions` computes the insertion coordinate once before iterating all text/paste/IME events. If a single egui frame contains multiple text-like events, all generated actions target the same stale cursor. Production `handle_keyboard` then executes the batched actions after collection, so inserted text can be ordered incorrectly or inserted at the wrong offset.
+- Fix direction: Dispatch text actions sequentially while refreshing the projection/cursor after each edit, or accumulate text-like payloads into one insertion preserving event order before creating a single action.
+
+#### F023 — High / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/workflow.rs`
+- Line number(s): 2945-2958
+- Category: failure-point
+- Severity: high
+- Description: On Windows, `open_url_in_system_browser` invokes `cmd /C start` and passes the URL as a raw argument. Forge URLs can contain shell metacharacters such as `&` in query strings (notably GitLab merge-request URLs), and cmd parsing can split or reinterpret them. This can make valid URLs fail to open and may become command-injection-prone if any URL component is attacker-controlled.
+- Fix direction: Avoid `cmd /C start` for untrusted URLs. Use a Windows shell-open API (for example `open::that`/ShellExecute) or carefully quote/escape the entire URL for `cmd` semantics.
+
+#### F024 — High / Bug 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/workflow.rs`
+- Line number(s): 872-879
+- Category: bug
+- Severity: high
+- Description: The `OpenWorkspace` app request opens the new root in `AppComposition`, but `DesktopRuntime.workspace_root` is never updated. Diagnostics, operational health, and later session captures continue to label the original workspace after a successful workspace switch; adapter-local explorer expansion also remains from the previous root.
+- Fix direction: On successful workspace open, assign `self.workspace_root = root`, reset workspace-scoped adapter-local state as appropriate, and ensure session/diagnostics paths are either rebased or explicitly kept per launch policy.
+
+#### F025 — High / Failure Point 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view/privacy_inspector.rs`
+- Line number(s): 19-32, 39-68
+- Category: failure-point
+- Severity: high
+- Description: The privacy inspector header reports aggregate counts for all records, but the detail rows silently show only the first 10 records. If high-risk, denied, external-egress, or redacted records occur after the first 10, the operator sees aggregate counts without the corresponding record details or an omitted-record warning.
+- Fix direction: Show an explicit omitted count and prioritize denied/high-risk/external-egress records before truncation, or add expansion/pagination so every exposure record can be inspected.
+
+#### F026 — High / Bug 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view.rs`
+- Line number(s): 3333-3336
+- Category: bug
+- Severity: high
+- Description: The command center always renders the delegated-task scope picker with `DesktopScopePickerViewModel::default()`. That shows a repo-scoped, balanced-risk, read-only default regardless of the active delegated task's actual target, risk tolerance, allowed tools, or forbidden paths. Because scope is a trust-boundary surface, this can display false safety information to a human reviewer.
+- Fix direction: Build the scope picker view model from the task/snapshot scope projection, and show an explicit missing-scope warning if no scope is projected.
+
+#### F027 — High / Failure Point 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view.rs`
+- Line number(s): 3389-3499
+- Category: failure-point
+- Severity: high
+- Description: Hunk-review controls silently cap visible reviews to 4, file groups to 6, and hunk rows to 6. Hidden reviews/files cannot be accepted, rejected, marked pending, or edited from this surface, and there is no overflow warning or navigation. A large proposal can therefore leave unreviewed hunks invisible to the operator.
+- Fix direction: Add pagination/scrolling/overflow counts and actions for all reviews/files/hunks, or provide proposal-level controls that deliberately include hidden items with clear counts.
+
+#### F028 — High / Error 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view/sandbox_panel.rs`
+- Line number(s): 74-119
+- Category: error
+- Severity: high
+- Description: `host_profile_summary` compiles and displays a sandbox profile for the hard-coded path `/workspace/project` instead of the active workspace/task scope. On Windows it also unwraps the profile compilation with `expect`, so a future real compile error would panic while rendering the panel. The result is a security surface that can report a strong sandbox for a dummy scope rather than the actual runtime boundary.
+- Fix direction: Derive the sandbox scope from the active snapshot/task workspace, propagate compile errors into caveat rows instead of panicking, and clearly distinguish host capability from the actual allocated sandbox.
+
+#### F029 — High / Bug 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/fleet_card.rs`
+- Line number(s): 15-21, 32-39, 64-88
+- Category: bug
+- Severity: high
+- Description: `fleet_card_view_models` turns every proposal-ledger row into a card and `render_card` always exposes `Approve`, `Review`, and `Reject` actions. The card projection only carries the lifecycle label, not the lifecycle state or action readiness, so already-applied, rejected, denied, failed, stale, conflicted, or cancelled proposals can still present active approval/rejection controls. This is especially risky because the surrounding empty state says `No pending proposals`, but the code does not filter to pending/actionable proposals.
+- Fix direction: Include proposal lifecycle/action-readiness in the fleet card view model. Filter to actionable pending states or disable buttons for terminal/non-actionable states, and gate approval on the same approval checklist/readiness used by the proposal workflow.
+
+#### F030 — High / Bug 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/worker_panel.rs`
+- Line number(s): 197-206
+- Category: bug
+- Severity: high
+- Description: Waiting-for-approval recovery actions are discovered by searching `row.display_safe_labels` for a `signoff:` prefix, but real `LegionWorkflowProjectionRow` construction currently populates `display_safe_labels` from worker model labels, conflict labels, and verification gate labels, not from `sign_off_records`. As a result, real workflows that need sign-off can fail to show the `Request sign-off` recovery action; the unit test only passes because it fabricates `signoff:` labels directly in the projection row.
+- Fix direction: Project sign-off identifiers/labels into the workflow row explicitly, or add a dedicated recovery-action projection sourced from `sign_off_records`. Avoid relying on generic display labels for required approval metadata.
+
+#### F031 — High / Bug 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/worker_panel.rs`
+- Line number(s): 213-235, 241-250, 259-264
+- Category: bug
+- Severity: high
+- Description: Verification and conflict recovery actions construct typed IDs from display-safe label text (`LegionWorkflowVerificationGateId(gate_id)` and `LegionWorkflowConflictId(conflict_id)`). The upstream projection adds verification gate labels and conflict labels to `display_safe_labels`, not necessarily the stable `gate_id` or `conflict_id`. Human-readable labels can therefore produce invalid IDs, miss available recovery actions, or dispatch actions for the wrong gate/conflict.
+- Fix direction: Carry stable `gate_id` and `conflict_id` values in the projection/recovery view model and dispatch those typed IDs directly. Keep display labels only for UI text, not as an ID transport mechanism.
+
+#### F032 — High / Bug 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/assistant_rail.rs`
+- Line number(s): 58, 132-136
+- Category: bug
+- Severity: high
+- Description: Every fenced code block gets an enabled `Apply as proposal` affordance whenever the caller supplies any `proposal_id`. The renderer then dispatches `DesktopAction::ApplyProposal { proposal_id }` from the code-block UI without proving that the code block corresponds to that proposal, and without requiring the streamed fence to be complete. Current call sites pass `first_proposal_id(snapshot)`, which falls back to the selected or first proposal in the ledger, so an unrelated assistant/code-block row can apply the wrong proposal.
+- Fix direction: Do not derive proposal application from arbitrary assistant markdown. Bind the affordance to a proposal-preview/proposal-ledger row that owns the proposal id, require the code block or proposal preview to be complete and reviewable, and disable or hide the button for generic assistant text. Consider making incomplete code blocks render only a preview/streaming state.
+
+#### F098 — Medium / Bug 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/bridge.rs`
+- Line number(s): 1249-1255
+- Category: bug
+- Severity: medium
+- Description: `OpenGitPullRequestUrl` falls back to using the current branch as the base branch when `remote_default_branch` is missing. That produces a self-compare URL (`branch...branch`) rather than surfacing that the default/base branch is unknown, so the PR action can open a misleading or useless forge page.
+- Fix direction: Treat missing or empty remote default branch as a typed bridge error, or choose a validated configured fallback such as `main` only when the projection explicitly supports it.
+
+#### F099 — Medium / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/session.rs`
+- Line number(s): 126-183
+- Category: failure-point
+- Severity: medium
+- Description: Crash-safe saves use a temporary path based only on the process id (`.<file>.<pid>.tmp`). Concurrent saves of the same session path within one process can remove or overwrite each other's temp file, causing lost saves or publish failures.
+- Fix direction: Include a per-save nonce/counter or use an atomic tempfile API in the destination directory. Avoid deleting a temp path that could belong to another in-flight save.
+
+#### F100 — Medium / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/workflow.rs`
+- Line number(s): 2029-2030, 2103-2104, 2136-2138, 2191-2194, 2200-2205, 2210-2213, 2222-2225, 2233-2236, 2385-2386, 2443-2447, 2505-2514
+- Category: failure-point
+- Severity: medium
+- Description: Multiple UI event paths call `runtime.handle_action(...)` and discard the `Result` with `let _ = ...`. If refresh, session persistence, diagnostics, or app authority returns an error, production UI/headless harness can silently continue without surfacing the failure to the user or tests.
+- Fix direction: Capture errors, set an error status, and request a projection refresh. In test/headless paths, consider returning or storing the error so failures are assertable.
+
+#### F101 — Medium / Bug 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/smoke.rs`
+- Line number(s): 315-323
+- Category: bug
+- Severity: medium
+- Description: Native smoke pass/fail only checks whether at least one frame was observed. Adapter checks, focus/high-DPI observation, accessibility projection, and guardrail statuses can all be `not observed` or failed while the overall status is still `Passed`.
+- Fix direction: Add explicit gate checks for required smoke signals and include failed adapter/platform checks in `errors` before selecting `RendererSmokeStatus::Passed`.
+
+#### F102 — Medium / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/beta.rs`
+- Line number(s): 345-360
+- Category: failure-point
+- Severity: medium
+- Description: `prepare_beta_workspace` resolves relative beta workspace paths against `std::env::current_dir()` instead of `BetaWorkflowConfig.real_workspace_root`. Programmatic callers or launches from a different current directory can create/delete the smoke workspace under the wrong `target/` tree while the report still labels the configured real workspace.
+- Fix direction: Resolve relative beta workspace paths against the configured real workspace root, or document/enforce that the process current directory must be the repository root before running the beta workflow.
+
+#### F103 — Medium / Bug 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/package.rs`
+- Line number(s): 35-40, 116-120
+- Category: bug
+- Severity: medium
+- Description: The Windows package plan always builds `cargo build -p legion-desktop` and points at `target/<profile>/legion-desktop.exe`. On non-Windows hosts this command produces the host binary, not a Windows `.exe`; cross-compiled Windows builds would usually live under `target/<triple>/<profile>/`. The plan can therefore reference an executable that was never built.
+- Fix direction: Include an explicit Windows target triple in the plan/config when packaging from non-Windows hosts, and derive `executable_source` from Cargo's target-dir/target-triple layout.
+
+#### F104 — Medium / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/metrics.rs`
+- Line number(s): 50-52, 87-102, 111-127
+- Category: failure-point
+- Severity: medium
+- Description: `FrameTimingRecorder` stores every input-to-paint sample and every frame duration with no retention bound. If reused outside short smoke runs, a long-running desktop session can accumulate unbounded timing vectors and increasingly expensive summaries.
+- Fix direction: Bound samples with a ring buffer or windowed aggregation, and make the retention policy explicit in the recorder API.
+
+#### F105 — Medium / Bug 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view/plan_editor.rs`
+- Line number(s): 128-134
+- Category: bug
+- Severity: medium
+- Description: `render_plan_editor` only appends missing draft section bodies and never reconciles an existing draft when `model.sections` shrinks, reorders, or changes kind. Because drafts are keyed only by artifact id in `view.rs`, a refreshed plan artifact can display stale body text under the wrong section heading.
+- Fix direction: Key draft entries by stable section kind/id rather than vector index, and reconcile/remove stale entries whenever the model section list changes.
+
+#### F106 — Medium / Bug 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view.rs`
+- Line number(s): 1859-1910, 2082-2104, 4296-4304
+- Category: bug
+- Severity: medium
+- Description: Drag selection ranges are emitted as `{ start: drag_anchor, end: coordinate }` without normalizing start/end order. The paint path in `selection_span_for_line` assumes `start <= end`; if the user drags backwards on the same line or across lines, the computed range can have `start` after `end`, so the selection highlight disappears and downstream editor actions may receive an inverted `ProtocolTextRange`.
+- Fix direction: Normalize text ranges before emitting `DesktopAction::SetSelection`, or make `selection_span_for_line` and the command handler canonicalize ranges consistently for backwards selections.
+
+#### F107 — Medium / Bug 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view/proposal_review.rs`
+- Line number(s): 229-241, 341-347
+- Category: bug
+- Severity: medium
+- Description: `proposal_evidence_panel` treats `ProposalId(0)` as a sentinel for an absent checkpoint proposal, but if there is no selected proposal it still returns `Some(checkpoint_projection.proposal_id)`, which is `Some(ProposalId(0))`. The renderer then displays `checkpoint timeline proposal=0`, creating a fake proposal association.
+- Fix direction: Return `None` when the checkpoint projection has the sentinel id and no selected proposal exists; only render the timeline proposal label when the id is real.
+
+#### F108 — Medium / Stub 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view.rs`
+- Line number(s): 2704-2712, 2725-2728
+- Category: stub
+- Severity: medium
+- Description: The Legion workflow header renders `Pause Workflow` and `Add Constraint` buttons but discards their responses, so the controls are visible and clickable-looking while producing no `DesktopAction`. The same surface hard-codes `confidence 87%`, which can mislead operators because it is not derived from projection state.
+- Fix direction: Either wire these controls to real workflow pause/constraint actions and projected confidence data, or render them disabled/hidden with explicit unavailable text until supported.
+
+#### F109 — Medium / Bug 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view.rs`
+- Line number(s): 5490-5497
+- Category: bug
+- Severity: medium
+- Description: `git_relative_path` uses plain string `strip_prefix(root)` and then trims separators. This is not path-boundary aware: a file such as `/repo2/src/lib.rs` can be treated as relative to root `/repo`, yielding `2/src/lib.rs`. That can mis-associate git hunks/blame with the wrong active buffer when workspace roots share prefixes.
+- Fix direction: Use `Path::strip_prefix` on normalized/canonical paths, or explicitly require a separator/path-component boundary after the root prefix before accepting the relative path.
+
+#### F110 — Medium / Failure Point 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view/scope_picker.rs`
+- Line number(s): 67-81, 87-99
+- Category: failure-point
+- Severity: medium
+- Description: The conversion from `DesktopScopePickerViewModel` to `DelegatedTaskScope` permits `File` or `Module` scopes with `target_path: None`, and the summary falls back to the placeholder strings `file` or `module`. The resulting protocol scope denies all concrete file/module targets while the UI presents it as a selected scope, making it easy to create an unusable delegated task scope.
+- Fix direction: Validate that `target_path` is present for file/module targets before conversion, expose a validation error in the picker, and avoid placeholder summaries that look like real paths.
+
+#### F111 — Medium / Failure Point 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/fleet_card.rs`
+- Line number(s): 21-29
+- Category: failure-point
+- Severity: medium
+- Description: The renderer hard-limits the fleet cards to the first four cards with `cards.iter().take(4)` and does not show an overflow count. Any additional proposal rows are silently hidden, so users cannot tell that more pending or problematic proposals exist.
+- Fix direction: Render an explicit overflow row such as `N more proposals`, support paging/scrolling, or honor the projection's omitted-row metadata so hidden cards remain visible to the operator.
+
+#### F112 — Medium / Failure Point 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/cloud_lane.rs`
+- Line number(s): 31-41, 65-72
+- Category: failure-point
+- Severity: medium
+- Description: The panel always appends `cancellation: mid-flight cancel is available while the task is not terminal`, even when the cloud runtime is disabled, when there are no submitted tasks, or when every task row is terminal. This can advertise a cancellation affordance that is not actually available and conflicts with the per-row `cancelable=false` computation.
+- Fix direction: Only emit a cancellation-available row when `runtime_enabled` is true and at least one projected task is cancelable. Otherwise show a disabled/not-available row that explains whether the runtime is disabled, there are no active tasks, or all tasks are terminal.
+
+#### F113 — Medium / Failure Point 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/provider_setup.rs`
+- Line number(s): 44-75, 77-80
+- Category: failure-point
+- Severity: medium
+- Description: `provider_policy_rows` re-derives policy labels from `provider_class` using hard-coded strings and ignores the provider summary's actual `availability`, `refusal`, `risk_label`, `privacy_label`, and route/consent state. It also maps `Gateway` to `Unknown` despite the protocol documenting gateway as a future managed remote class that does not authorize network egress, which can understate the fail-closed posture operators should see.
+- Fix direction: Build policy rows from the authoritative provider/route projection fields and refusal metadata rather than static class labels. Treat `Gateway` and `Unknown` conservatively as denied/unavailable unless explicit route consent and policy approval are projected.
+
+#### F114 — Medium / Failure Point 
+- Source report: `desktop-views-part-2.md`
+- File path: `crates/legion-desktop/src/view/manifest_panel.rs`
+- Line number(s): 8-10, 28-36
+- Category: failure-point
+- Severity: medium
+- Description: The manifest preview can report `no context items projected before invocation` whenever `manifest.items` is empty, even if `omitted_item_count`, stale metadata risk, permissions, or other manifest-level risk fields indicate context was omitted or redacted. For non-empty manifests it renders only the first 12 items without an overflow row, so additional context/egress-relevant items are silently hidden.
+- Fix direction: Include manifest-level `omitted_item_count`, stale/missing metadata risk, privacy/risk/egress, and permission counts in the summary even when `items` is empty. When truncating with `take(12)`, add an explicit `N more items omitted from preview` row.
+
+#### F218 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/session.rs`
+- Line number(s): 106-112
+- Category: failure-point
+- Severity: low
+- Description: `reject_raw_source_markers` rejects any serialized session containing marker substrings such as `source_body` anywhere in the JSON. A legitimate metadata field, file path, branch name, or label containing one of those substrings would make load/save fail even though no raw source payload is present.
+- Fix direction: Validate structured fields that are known raw-payload carriers, or use schema-level redaction markers rather than broad substring matching over the whole JSON document.
+
+#### F219 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/diagnostics.rs`
+- Line number(s): 109-118
+- Category: failure-point
+- Severity: low
+- Description: The opt-in raw snapshot appendix is placed inside a fixed triple-backtick fence without escaping embedded fences. If the debug representation ever contains ``` text, it can terminate the fence early and corrupt the diagnostics markdown.
+- Fix direction: Use a dynamically chosen fence length longer than any fence in the payload, indent raw data, or otherwise escape fence markers before writing markdown.
+
+#### F220 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/health.rs`
+- Line number(s): 171-233, 238-312
+- Category: failure-point
+- Severity: low
+- Description: Health rows and markdown interpolate workspace labels and unsupported-surface labels without escaping or line normalization. A workspace path or label containing newlines/markdown characters can produce malformed rows or misleading diagnostics output.
+- Fix direction: Normalize labels used in row-oriented evidence by replacing control characters/newlines and escaping markdown-sensitive content where the output is intended to be parsed or audited.
+
+#### F221 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/platform.rs`
+- Line number(s): 194-198
+- Category: failure-point
+- Severity: low
+- Description: `high_dpi_status` reports `not observed` for an observed scale of exactly `1.0` or lower. That conflates a valid OS observation on standard-DPI displays with the absence of any observation, so smoke/diagnostic evidence can falsely claim high-DPI data was not collected.
+- Fix direction: Distinguish `None` from `Some(scale)`. Report something like `os-observed scale 1.000` for all observed finite positive scales, and reserve `not observed` for `None` or invalid values.
+
+#### F222 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/smoke.rs`
+- Line number(s): 351-368
+- Category: failure-point
+- Severity: low
+- Description: `smoke_command` renders rerun evidence by concatenating unquoted paths and file arguments. Paths with spaces or shell metacharacters will not round-trip as a usable command.
+- Fix direction: Store command evidence as structured argv or shell-quote path arguments.
+
+#### F223 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/smoke.rs`
+- Line number(s): 437-441
+- Category: failure-point
+- Severity: low
+- Description: Smoke high-DPI status has the same false-negative as `platform.rs`: an observed scale of `1.0` is reported as `not observed`, masking successful standard-DPI observation.
+- Fix direction: Report all observed finite positive scales distinctly from `None`; only absence of a sample should become `not observed`.
+
+#### F224 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/search.rs`
+- Line number(s): 61-68
+- Category: failure-point
+- Severity: low
+- Description: Search result rows interpolate `row.snippet` directly into a one-line display string. Snippets containing newlines, tabs, or other control characters can break row-oriented rendering/logging and make result diagnostics ambiguous.
+- Fix direction: Normalize snippets for display rows by replacing control characters and newlines, while keeping any raw/snippet-rich data in structured fields if needed.
+
+#### F225 — Low / Failure Point 
+- Source report: `desktop-core.md`
+- File path: `crates/legion-desktop/src/beta.rs`
+- Line number(s): 647-659
+- Category: failure-point
+- Severity: low
+- Description: `beta_smoke_command` builds a copy/paste command by joining unquoted paths. Workspaces, evidence paths, or diagnostics paths containing spaces or shell metacharacters produce evidence commands that cannot be reliably rerun.
+- Fix direction: Render command evidence as an argv list or shell-quote each path/argument for the documented shell.
+
+#### F226 — Low / Failure Point 
+- Source report: `desktop-views-part-1.md`
+- File path: `crates/legion-desktop/src/view/proposal_review.rs`
+- Line number(s): 255-268
+- Category: failure-point
+- Severity: low
+- Description: The evidence panel truncates proposal rows to 4 and verification rows to 6 without any overflow count or indication that additional evidence exists. This can make a proposal look less supported or less risky than it is when later rows contain warnings, failed verification runs, or relevant provenance.
+- Fix direction: Include hidden-row counts and a way to expand/paginate evidence rows, especially for failed or high-risk verification entries.
+
+### LSP & Remote (15 findings)
+
+#### F033 — High / Bug 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote/src/lib.rs`
+- Line number(s): 1177-1192
+- Category: bug
+- Severity: high
+- Description: `validate_mutation_gate` accepts any granted capability decision and any non-empty principal through `has_required_write_guards`. It does not require the capability to be `remote.fs.write`, does not require the principal to match the active session/envelope principal, and does not bind precondition correlation/causality to the envelope. A granted decision for a different capability could authorize remote filesystem mutation.
+- Fix direction: Reuse `validate_capability(&preconditions.capability_decision, "remote.fs.write")`, compare `preconditions.principal_id` with the session/envelope principal, and bind precondition correlation/causality to the operation envelope.
+
+#### F034 — High / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-lsp/src/lib.rs`
+- Line number(s): 2366-2372, 2435-2447, 2607-2678
+- Category: failure-point
+- Severity: high
+- Description: The stdio read path is fully blocking and does not apply the `LspPendingRequest.timeout_ms` budget. `resolve_timeout` exists on `LspClient`, but `read_response_for` and `request` never use it; a wedged or slow language server can hang the caller indefinitely while reading headers or payloads.
+- Fix direction: Add deadline-aware reads around `read_response_for`, preferably with an async/nonblocking read pump or a watchdog thread. On timeout, call `resolve_timeout`, emit a cancellation notification if appropriate, and return a timeout result instead of blocking forever.
+
+#### F035 — High / Bug 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-lsp/src/lib.rs`
+- Line number(s): 2435-2468
+- Category: bug
+- Severity: high
+- Description: `LspStdioSession::read_until_correlated_response` discards every response whose JSON-RPC id is not the one currently being waited for. If callers send multiple requests and the server answers out of order, the earlier response can be read and skipped while waiting for a later request. The skipped response is never correlated, buffered, or removed from the pending table, so a later `read_response_for` for that request can block until EOF and the pending request remains stranded.
+- Fix direction: Correlate every response as it arrives and store completed responses by request id until the caller asks for them, or make the stdio session enforce one in-flight request at a time. Do not silently skip response frames with known pending ids.
+
+#### F036 — High / Bug 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote/src/lib.rs`
+- Line number(s): 791-817, 994-1000, 1205-1213, 1267-1275
+- Category: bug
+- Severity: high
+- Description: The runtime deduplicates and audits using the envelope `operation_id`, but payload descriptors only check that their own operation ids are non-zero. Filesystem and process payloads can therefore carry an `operation_id` that differs from the envelope id; duplicate detection, causality, audit records, and mutation text can all refer to a different operation than the payload being applied.
+- Fix direction: Validate that every payload type with an embedded operation id matches `envelope.operation_id` before dispatching. Apply the same session/principal/correlation consistency checks at the envelope-to-payload boundary.
+
+#### F115 — Medium / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote/src/lib.rs`
+- Line number(s): 1035-1064, 1089-1096, 1166-1173
+- Category: failure-point
+- Severity: medium
+- Description: Mutating operations preserve or reuse the caller's precondition snapshot id instead of issuing a new post-mutation snapshot id. Writes set `entry.snapshot_id = preconditions.snapshot_id`, creates copy the precondition snapshot, and renames carry the old entry unchanged to the destination. Snapshot ids therefore do not reliably identify unique remote states after mutation.
+- Fix direction: Allocate or derive a new snapshot id for each accepted mutation, update the entry to that post-mutation snapshot, and return that new snapshot in the outcome.
+
+#### F116 — Medium / Bug 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote/src/lib.rs`
+- Line number(s): 1089-1096
+- Category: bug
+- Severity: medium
+- Description: `create_file` stores content containing the proposal id (`remote-created-by-proposal:{id}`) but records the fingerprint of the constant string `remote-created-by-proposal`. The returned snapshot fingerprint does not describe the stored content, which can make later write preconditions stale or allow mismatched content to appear valid.
+- Fix direction: Compute the fingerprint from the actual `content` string after it is built, exactly as `seed_file` and `write_file` do.
+
+#### F117 — Medium / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote/src/lib.rs`
+- Line number(s): 1670-1679
+- Category: failure-point
+- Severity: medium
+- Description: `common_headers` silently omits the `Authorization` or `X-Legion-Client-Identity` header when `HeaderValue::from_str` fails. A malformed configured token or identity label turns into an unauthenticated/misattributed request rather than a local configuration error.
+- Fix direction: Make header construction fallible and return `RemoteRuntimeError::InvalidOperation` or `Transport` when configured headers are invalid.
+
+#### F118 — Medium / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote/src/lib.rs`
+- Line number(s): 1749, 1765, 1775, 1785
+- Category: failure-point
+- Severity: medium
+- Description: Cloud task ids are interpolated directly into URL path segments. `validate_cloud_task_id` only rejects empty ids, so ids containing `/`, `?`, `#`, or percent-encoded path separators can alter the requested endpoint path when the HTTP transport is used.
+- Fix direction: Percent-encode task ids as path segments before formatting URLs, and tighten task-id validation to reject path/control characters.
+
+#### F119 — Medium / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-lsp/src/bin/mock_lsp_server.rs`
+- Line number(s): 291-303
+- Category: failure-point
+- Severity: medium
+- Description: The mock server parses `Content-Length` and immediately allocates `vec![0u8; length]` with no maximum payload bound. A malformed or hostile test client can force excessive memory allocation and kill the mock process.
+- Fix direction: Reuse the production framer limit or add a small mock-specific maximum before allocating the payload buffer.
+
+#### F120 — Medium / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote-transport/src/lib.rs`
+- Line number(s): 584-587, 731-735, 905-911
+- Category: failure-point
+- Severity: medium
+- Description: `replay_window_size` only bounds `accepted_sequences`; `seen_operations` and `inflight_operations` keep growing for every accepted operation until acked or process lifetime ends. Long-lived sessions can accumulate unbounded operation ids, and the reported replay window does not reflect the memory retained for duplicate detection.
+- Fix direction: Bound duplicate/replay tracking to the configured replay window, evict old operation ids when their sequence leaves the window, and keep inflight state separate from historical replay state.
+
+#### F121 — Medium / Bug 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote-transport/src/lib.rs`
+- Line number(s): 761-779
+- Category: bug
+- Severity: medium
+- Description: `checkpoint` accepts a checkpoint for any seen `last_operation_id` without checking that `checkpoint.event_sequence` is at or behind the current `last_sequence` or consistent with the accepted replay window. A future or stale checkpoint can become the resume anchor and later produce misleading replay metadata.
+- Fix direction: Require checkpoint sequence/order to be within the accepted replay window and no greater than the current highest accepted sequence before saving `last_checkpoint`.
+
+#### F227 — Low / Bug 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-lsp/src/bin/mock_lsp_server.rs`
+- Line number(s): 100-107, 220-227
+- Category: bug
+- Severity: low
+- Description: Unknown methods always produce an error response even when the incoming message is a JSON-RPC notification with no id. That serializes as `"id": null`, which violates the JSON-RPC/LSP notification rule that notifications must not receive responses. The same pattern can affect other handled methods if they arrive as notifications.
+- Fix direction: If `id` is `None`, process only true notifications such as `exit`/`$/cancelRequest` and otherwise ignore the message or log it without writing a response.
+
+#### F228 — Low / Bug 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-lsp/src/lib.rs`
+- Line number(s): 1103-1110
+- Category: bug
+- Severity: low
+- Description: Completion scores cast `index` to `u16` before scaling. For very large completion lists, indices beyond `u16::MAX` wrap before `saturating_mul`, so later completions can regain high scores instead of staying at the saturated floor.
+- Fix direction: Do the score calculation in `usize` or `u32`, clamp at zero, and only then cast to `u16`.
+
+#### F229 — Low / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-remote-transport/src/lib.rs`
+- Line number(s): 279-282
+- Category: failure-point
+- Severity: low
+- Description: `connect_inner` calculates `Instant::now() + Duration::from_millis(attempt.timeout_ms)`. Extremely large timeout values can overflow the `Instant` addition and panic before the connection path can return a structured `RemoteTransportCarrierError`.
+- Fix direction: Use `Instant::now().checked_add(...)` and reject unsupported timeout budgets with `InvalidPolicy` instead of panicking.
+
+#### F230 — Low / Failure Point 
+- Source report: `lsp-&-remote.md`
+- File path: `crates/legion-lsp/src/lib.rs`
+- Line number(s): 830-851
+- Category: failure-point
+- Severity: low
+- Description: JSON-RPC ids are advanced with `saturating_add(1)`. Once `next_json_rpc_id` reaches `u64::MAX`, every subsequent request reuses the same id, overwriting entries in `pending_by_json_rpc_id` and `json_rpc_id_by_request_id` and corrupting request correlation.
+- Fix direction: Use `checked_add` and return an explicit exhaustion error, or wrap only after confirming there are no pending requests for the candidate id.
+
+### Platform & Misc (15 findings)
+
+#### F042 — High / Failure Point 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-vscode-compat/src/lib.rs`
+- Line number(s): 148-173, 197-235
+- Category: failure-point
+- Severity: high
+- Description: Manifest classification ignores executable extension entrypoints such as `main` and `browser`. A package with extension host code but only declarative-looking contributions can be classified as Tier0/`NoneRequired`, even though executing that extension would require a host policy decision.
+- Fix direction: Parse `main`/`browser`/extension entrypoint metadata and raise the required tier/status/capabilities when executable code is present, even if activation events are absent or declarative.
+
+#### F043 — High / Failure Point 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-project/src/lib.rs`
+- Line number(s): 1573-1643
+- Category: failure-point
+- Severity: high
+- Description: The Gix backend parses `gix` status items by formatting them with `Debug` and scraping substrings such as `path: "..."`, `untracked`, and `modified`. This is not a stable API and can silently misclassify or drop paths whenever the debug format changes, contains escaped quotes, or includes words that trip the heuristic status detector.
+- Fix direction: Use typed `gix` status item accessors for path and status, or keep the CLI porcelain parser as the authoritative implementation until the typed Gix mapping is implemented and covered by rename/copy/delete/untracked tests.
+
+#### F044 — High / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-tracker/src/lib.rs`
+- Line number(s): 194-209
+- Category: bug
+- Severity: high
+- Description: `LegionWorkflowTrackerRecord::validate` allows `merge_readiness_state == Ready` while `failed_verification_count > 0`. The ready-state guard requires gate ids, sign-off counts, and no unresolved conflicts, but it does not reject failed or blocked verification gates.
+- Fix direction: Add `failed_verification_count == 0` to the Ready-state validation and add a regression test for a Ready record with failed verification metadata.
+
+#### F045 — High / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-index/src/lib.rs`
+- Line number(s): 2461-2466, 2503-2511, 2520-2528, 2620-2624, 2653-2678
+- Category: bug
+- Severity: high
+- Description: Registering a plugin tree-sitter grammar makes `tree_sitter_supports_language` return true for that language, but the parser/highlighter/chunker still call the bundled Rust tree-sitter routines unconditionally. A registered non-Rust plugin language will therefore be parsed/highlighted as Rust instead of using its plugin grammar or falling back safely.
+- Fix direction: Separate bundled Rust support from plugin registration. Only call `parse_tree_sitter_rust`/Rust highlight queries for Rust, and route plugin grammars through a real loaded grammar worker; until then, registered plugin languages should fall back to `LexicalFallbackParser` with a diagnostic.
+
+#### F046 — High / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-telemetry/src/lib.rs`
+- Line number(s): 580-604, 697-705
+- Category: bug
+- Severity: high
+- Description: `pending_batch` accepts `consent` and `endpoint` independently and does not verify that `consent.endpoint` matches the endpoint used for upload. `HostedTelemetryExporter::export_once` then uploads to `batch.endpoint`, so a caller can combine consent for one hosted endpoint with a different allowlisted endpoint descriptor.
+- Fix direction: Validate endpoint binding inside `pending_batch`/`export_once` (endpoint id, label, region, and schema) before constructing the batch, or derive the upload endpoint only from the consent grant.
+
+#### F047 — High / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-platform/src/lib.rs`
+- Line number(s): 990-1019
+- Category: bug
+- Severity: high
+- Description: `NativeProcessService::execute` enforces `request.timeout` only after `Command::output()` returns. A command that hangs or produces no terminating output can block forever and the timeout branch is never reached until the child exits naturally.
+- Fix direction: Spawn the child with piped stdout/stderr, poll `try_wait()` against the timeout, and kill/reap the child (and process tree/session where appropriate) on timeout before returning `PlatformError::Timeout`.
+
+#### F128 — Medium / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-platform/src/lib.rs`
+- Line number(s): 1102-1110
+- Category: bug
+- Severity: medium
+- Description: Unix PTY spawning clears the environment and then calls `child_environment_vars(&[])`, ignoring `PtyRequest.env`. PTY sessions therefore cannot receive caller-supplied environment variables even though `PtyRequest` exposes that field.
+- Fix direction: Pass `&request.env` to `child_environment_vars`, matching the non-PTY process execution path, and add a test that a spawned PTY can observe an injected variable.
+
+#### F129 — Medium / Failure Point 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-platform/src/lib.rs`
+- Line number(s): 1798-1800, 1834-1845
+- Category: failure-point
+- Severity: medium
+- Description: `close_pty` on Unix calls `kill_pty(..., PtyKillMode::Terminate)`, and the terminate path signals only the direct child PID. Because PTY children are placed in a new session/process group, grandchildren or shells with active child jobs can survive a close and remain orphaned.
+- Fix direction: Treat close as a process-group/session cleanup, or add an explicit close mode that signals `-pid`, escalates after a timeout, and reaps the leader before removing the session.
+
+#### F130 — Medium / Failure Point 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-index/src/lib.rs`
+- Line number(s): 2644-2650, 2658-2660, 2681-2685, 2688-2693
+- Category: failure-point
+- Severity: medium
+- Description: The global plugin grammar registry is protected by a `Mutex`, but every lock uses `expect(...)`. Any panic while holding the registry lock poisons it and turns later grammar registration/support checks into process panics.
+- Fix direction: Replace `expect` with fallible lock handling that returns zero/false or a structured `IndexError`, and emit a diagnostic so one poisoned plugin path does not take down indexing.
+
+#### F131 — Medium / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-project/src/lib.rs`
+- Line number(s): 279-285, 460-466, 1793-1796, 3451-3454
+- Category: bug
+- Severity: medium
+- Description: The project-local `stable_hash` uses `std::collections::hash_map::DefaultHasher` for identifiers that are intended to be deterministic (`WorkspaceId`, hunk ids, content-version digests). `DefaultHasher` is not a stable serialization/hash contract across Rust versions or implementations, so these ids can drift across builds even though the surrounding code labels them stable/deterministic.
+- Fix direction: Use an explicit stable hash algorithm (for example the platform crate's FNV-1a helper, xxHash with fixed seed, or SHA-256 truncated to the required width) and version the algorithm in any persisted/protocol-facing ids.
+
+#### F132 — Medium / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-project/src/lib.rs`
+- Line number(s): 3108-3127, 4718-4736
+- Category: bug
+- Severity: medium
+- Description: Workspace search reports `line_number: line_number as u32` directly from `enumerate()`, so search hits are zero-based. `WorkspaceSearchHit::line_number` is a user-facing line field rather than a protocol `TextCoordinate`, and returning zero for the first line is likely to mislead UI/search consumers that display normal one-based line numbers.
+- Fix direction: Decide and document the coordinate convention. If this is display/search output, return `line_number.saturating_add(1) as u32`; if it is intentionally zero-based, rename/document it accordingly and ensure every consumer applies the same convention.
+
+#### F133 — Medium / Bug 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-index/src/lib.rs`
+- Line number(s): 5241-5324
+- Category: bug
+- Severity: medium
+- Description: `build_rename_preview_payload` always marks the target coverage as `Complete` with `omitted_target_count: 0`, even though it only uses the ranges present in a single `SymbolFileMapRecord`. If the symbol map is file-scoped or stale, consumers may treat an incomplete rename preview as a complete workspace rename.
+- Fix direction: Mark coverage as partial unless the symbol record carries an explicit workspace-complete proof/freshness token, or add omitted-target diagnostics when cross-file references were not searched.
+
+#### F134 — Medium / Failure Point 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-telemetry/src/lib.rs`
+- Line number(s): 534-555
+- Category: failure-point
+- Severity: medium
+- Description: `FileBackedTelemetrySpool::open` deserializes persisted spool state but does not validate the decoded schema version, records, or capacity invariants. A corrupted/stale spool file can remain loaded until later operations fail in less obvious places, and invalid records can poison export attempts.
+- Fix direction: Validate `schema_version`, cap `records.len()` against configuration, and run `validate_hosted_telemetry_spool_record` on every decoded record during open; quarantine or reject invalid spool files with a clear error.
+
+#### F232 — Low / Failure Point 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-vscode-compat/src/lib.rs`
+- Line number(s): 148-152, 260-268
+- Category: failure-point
+- Severity: low
+- Description: `required_string` filters out trim-empty fields but returns the original untrimmed string. Publisher/name/version values with leading or trailing whitespace can produce malformed extension ids and fail identity comparisons later in `load_open_vsx_extension`.
+- Fix direction: Normalize manifest identity fields with `trim()` before storing/comparing them, or reject values where trimming would change the identity.
+
+#### F233 — Low / Failure Point 
+- Source report: `platform-&-misc-crates.md`
+- File path: `crates/legion-platform/src/lib.rs`
+- Line number(s): 971-978
+- Category: failure-point
+- Severity: low
+- Description: `list_directory` uses `filter_map(|entry| entry.ok())`, silently dropping directory entries whose metadata/path retrieval fails. Callers get an apparently successful partial listing with no diagnostic.
+- Fix direction: Collect `read_dir` entries with error propagation, or return a structured partial result with omitted-entry diagnostics if partial listings are intentional.
+
+### Build & Config (7 findings)
+
+#### F021 — High / Failure Point 
+- Source report: `build-&-config.md`
+- File path: `deny.toml`
+- Line number(s): 10, 51-53
+- Category: failure-point
+- Severity: high
+- Description: The dependency policy treats yanked crates, unknown registries, and unknown git sources as warnings (`yanked = "warn"`, `unknown-registry = "warn"`, `unknown-git = "warn"`). Because CI runs cargo-deny as a gate, these settings allow the gate to pass even when the dependency graph includes yanked packages or sources outside the expected registry/source policy.
+- Fix direction: Change these to deny/fail-level policy for release and protected-branch CI. If a temporary exception is needed, use a narrow documented allow/ignore entry with an owner and removal condition rather than globally warning.
+
+#### F093 — Medium / Failure Point 
+- Source report: `build-&-config.md`
+- File path: `.github/workflows/ci.yml`
+- Line number(s): 1-10
+- Category: failure-point
+- Severity: medium
+- Description: The workflow does not define an explicit `permissions` block. Jobs in this workflow only need repository checkout/read access, but without a workflow-level `permissions: contents: read`, token scope depends on repository/org defaults and can be broader than necessary.
+- Fix direction: Add a top-level least-privilege permissions block, for example `permissions: { contents: read }`, and grant broader scopes only on jobs that truly need them.
+
+#### F094 — Medium / Failure Point 
+- Source report: `build-&-config.md`
+- File path: `deny.toml`
+- Line number(s): 14-16
+- Category: failure-point
+- Severity: medium
+- Description: `multiple-versions = "warn"` is too weak for a governance gate and there is no explicit exception list explaining which duplicate crates are acceptable. The current lockfile has 55 duplicate crate names, and `cargo deny check` still exits successfully.
+- Fix direction: Add explicit `skip`/exception entries for unavoidable duplicates with rationale, resolve avoidable duplicates, and move `multiple-versions` to deny when the reviewed baseline is ready.
+
+#### F095 — Medium / Failure Point 
+- Source report: `build-&-config.md`
+- File path: `.github/workflows/ci.yml`
+- Line number(s): 21-25, 40-42, 70-72, 80-82, 159-164, 180-187
+- Category: failure-point
+- Severity: medium
+- Description: Third-party GitHub Actions are referenced by mutable major/channel tags (`actions/checkout@v4`, `dtolnay/rust-toolchain@stable`, `swatinem/rust-cache@v2`, `actions/upload-artifact@v4`, and `EmbarkStudios/cargo-deny-action@v2`). A compromised or unexpectedly changed tag can alter CI behavior for both validation and tagged release workflows.
+- Fix direction: Pin third-party actions to full commit SHAs (optionally with comments naming the upstream version), and maintain them through an automated dependency-update process.
+
+#### F096 — Medium / Failure Point 
+- Source report: `build-&-config.md`
+- File path: `.github/workflows/ci.yml`
+- Line number(s): 24-25, 183-184
+- Category: failure-point
+- Severity: medium
+- Description: Both validation and release jobs install a floating stable Rust toolchain without tying it to a checked-in `rust-toolchain.toml` or the workspace MSRV. This makes build and release behavior time-dependent and can hide whether the project actually supports the intended compiler floor.
+- Fix direction: Add a checked-in `rust-toolchain.toml` or explicit toolchain version for release reproducibility, and add a separate CI lane for current stable if forward-compatibility coverage is desired.
+
+#### F097 — Medium / Failure Point 
+- Source report: `build-&-config.md`
+- File path: `Cargo.toml`
+- Line number(s): 36-40, 38
+- Category: failure-point
+- Severity: medium
+- Description: The workspace opts into edition 2024 but does not declare a `rust-version` in `[workspace.package]`. Combined with CI's floating `dtolnay/rust-toolchain@stable`, the effective compiler contract is implicit: older developer/automation toolchains fail late, while CI can also start accepting or rejecting code as stable Rust changes.
+- Fix direction: Add an explicit workspace `rust-version` matching the intended MSRV for edition 2024 and current dependency requirements, and test that version in CI (optionally alongside current stable).
+
+#### F217 — Low / Failure Point 
+- Source report: `build-&-config.md`
+- File path: `Cargo.lock`
+- Line number(s): examples at 44-63, 554-563, 6308-6347, 6479-6504, 7072-7121, 7925-7969, 8377-8433
+- Category: failure-point
+- Severity: low
+- Description: The lockfile contains 55 duplicate crate names resolved at multiple versions. Examples include `accesskit_consumer` 0.35.0/0.36.0, `bitflags` 1.3.2/2.11.1, `thiserror` 1.0.69/2.0.18, `toml` 0.8.23/0.9.12, `wasmparser` 0.244.0/0.247.0/0.248.0/0.252.0, `windows-sys` 0.45.0/0.52.0/0.59.0/0.60.2/0.61.2, and `wit-parser` 0.244.0/0.247.0/0.248.0. `cargo deny check` reports these only as warnings, so the dependency gate currently allows this state.
+- Fix direction: Decide which duplicates are acceptable transitive baggage and document them explicitly in `deny.toml`; for the rest, align direct dependency versions or update upstream crates. Once the intentional set is small and documented, consider promoting duplicate-version enforcement from warning to deny.
+
+### Storage / Retention / Memory (16 findings)
+
+#### F063 — High / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-retention/src/lib.rs`
+- Line number(s): 1248-1253
+- Category: failure-point
+- Severity: high
+- Description: The file-backed vault index is written with plain `fs::write`. A process crash, disk-full condition, or interrupted write can leave `index.json` truncated or partially written, making all retained bundle metadata unavailable on next open despite encrypted payload files still existing.
+- Fix direction: Use the same atomic temp-file, fsync, rename, and parent-directory sync pattern used by `legion-storage`, and add recovery/quarantine behavior for a corrupt index.
+
+#### F064 — High / Bug 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-retention/src/lib.rs`
+- Line number(s): 428-440, 590-597, 1188-1217
+- Category: bug
+- Severity: high
+- Description: Raw-source retention leases store `expires_at` as `TimestampMillis(self.policy.ttl_ms)`, treating a TTL duration as an absolute timestamp. With a normal TTL such as 60,000 ms, every new bundle appears to expire at 1970-01-01T00:01:00Z and will be purged immediately by real wall-clock timestamps. The code also ignores the consent grant expiry when computing lease expiry.
+- Fix direction: Compute expiry as `min(now + policy.ttl_ms, grant.expires_at)` using a clock supplied to the capture path for testability, and update purge tests to use real absolute expiry timestamps rather than TTL literals.
+
+#### F065 — High / Bug 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-storage/src/lib.rs`
+- Line number(s): 501-542, 745-775, 1121-1152
+- Category: bug
+- Severity: high
+- Description: File-backed protocol records for workspace config, file metadata, session records, and trust records are not persisted across reopen. `StorageRepositoryRequest::SaveWorkspaceConfig`, `SaveFileMetadata`, `SaveSessionRecord`, and `SaveTrustRecord` write only to `protocol_workspace_configs`, `protocol_file_metadata`, `protocol_sessions`, and `protocol_trust`, but `PersistedState` has no fields for those maps and `From<PersistedState>` reinitializes them to empty. A `FileBackedStorage` flush/reopen therefore silently loses these protocol records while returning successful save responses before restart.
+- Fix direction: Add the missing protocol maps to `PersistedState` with `#[serde(default)]`, include them in `From<&InMemoryStorage>`, restore them in `From<PersistedState>`, and add a reopen regression test for all four protocol request variants.
+
+#### F066 — High / Bug 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-retention/src/lib.rs`
+- Line number(s): 568-573, 626-630, 1219-1241
+- Category: bug
+- Severity: high
+- Description: `RawSourceCaptureRequest::max_bytes` is validated only as metadata and is not enforced against the actual packed file payload. `capture_bundle` rejects only empty payloads or payloads over `config.max_bundle_bytes`; `pack_files` appends all file bytes without checking the request's byte budget. A caller can request a small consent-bound `max_bytes` but capture much more data as long as it fits the vault configuration.
+- Fix direction: Track cumulative packed/raw bytes in `pack_files` and reject when they exceed `request.max_bytes` before encryption. Consider also ensuring the final encrypted size is bounded by both the request budget and the vault configuration or documenting why tag/header overhead is excluded.
+
+#### F067 — High / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-storage/src/lib.rs`
+- Line number(s): 675-684
+- Category: failure-point
+- Severity: high
+- Description: `InMemoryStorageRepositoryPort::record_event` emits the event envelope before it verifies that redacted event metadata was durably stored, and it evaluates both operations before returning. If `emit` succeeds but `SaveEventMetadata` fails, observers can receive an event that has no audit metadata. If storage succeeds but `emit` fails, the caller receives an error even though the record was persisted. This creates inconsistent event/audit state on partial failure.
+- Fix direction: Define a single ordering with fail-closed semantics, preferably validate and persist metadata before external emission, and return/record partial-failure state explicitly if both actions cannot be made atomic.
+
+#### F150 — Medium / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-retention/src/lib.rs`
+- Line number(s): 1155-1185, 1203-1214
+- Category: failure-point
+- Severity: medium
+- Description: `delete_bundle` returns an I/O error if the ciphertext file is already missing and does not remove index metadata or record the tombstone. `purge_expired` calls `delete_bundle` with `?`, so one missing ciphertext can abort the whole purge and leave stale descriptors permanently blocking cleanup.
+- Fix direction: Treat missing ciphertext as a recoverable/quarantine deletion path: record a tombstone or recovery report, remove the stale descriptor metadata, continue purge for other bundles, and surface a warning/report rather than failing the entire cleanup.
+
+#### F151 — Medium / Bug 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-storage/src/secrets.rs`
+- Line number(s): 118-123
+- Category: bug
+- Severity: medium
+- Description: `provider_secret_reference` builds the keyring account as `format!("{provider_id}:{secret_name}")` without escaping or length-prefixing either component. Inputs containing `:` can collide, for example `(provider_id="a:b", secret_name="c")` and `(provider_id="a", secret_name="b:c")` both map to `a:b:c`, which can overwrite or expose the wrong provider secret.
+- Fix direction: Encode the tuple unambiguously, e.g. length-prefix each component, percent/base64-url encode separators, or store a structured hash with collision-resistant domain separation.
+
+#### F152 — Medium / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-memory/src/lib.rs`
+- Line number(s): 157-168, 243-260
+- Category: failure-point
+- Severity: medium
+- Description: `MemoryService::from_snapshot` does not validate `MemoryServiceSnapshot.schema_version`. Snapshots with schema version 0 or a future unsupported schema are accepted as long as the contained records validate, which can silently restore incompatible or malformed persisted state.
+- Fix direction: Reject zero schema versions and explicitly gate future versions, or add a migration path before constructing `MemoryService`.
+
+#### F153 — Medium / Bug 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-memory/src/lib.rs`
+- Line number(s): 299-306, 331-341, 366-373, 309-315, 344-350, 376-382
+- Category: bug
+- Severity: medium
+- Description: The three retain paths append records without checking for duplicate `candidate_id` or `trace_id`, while delete operations remove every matching id. Duplicate retained records can accumulate across repeated review/restore flows, produce duplicate export entries, and make deletion counts/auditability ambiguous.
+- Fix direction: Enforce uniqueness on retain (reject or replace existing ids), or store records in keyed maps and make delete semantics explicit.
+
+#### F154 — Medium / Bug 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-memory/src/lib.rs`
+- Line number(s): 38-55, 467-482
+- Category: bug
+- Severity: medium
+- Description: `validate_memory_candidate` does not explicitly require `MemoryCandidateRecord.candidate_id` to be non-empty. It builds a Phase 4 audit id as `memory:{candidate_id}`, and the protocol audit-string validator rejects raw markers but not empty logical ids. Empty candidate ids can therefore be proposed/retained, making deletion and snapshot identity ambiguous.
+- Fix direction: Add a direct `candidate.candidate_id.trim().is_empty()` check and tests for empty candidate ids before constructing the audit wrapper.
+
+#### F155 — Medium / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-storage/src/lib.rs`
+- Line number(s): 391-394, 422-427, 494-499
+- Category: failure-point
+- Severity: medium
+- Description: Migration backup verification uses `stable_storage_sum`, a wrapping additive checksum plus length, as the integrity value. This is trivially collision-prone: byte changes can preserve the same sum and length, allowing a corrupted or swapped backup to pass `recover_from_backup` checksum verification.
+- Fix direction: Replace the stable sum with a cryptographic digest such as SHA-256, set the checksum algorithm accordingly, and keep backward compatibility only through an explicit migration/legacy path.
+
+#### F156 — Medium / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-retention/src/lib.rs`
+- Line number(s): 631-649
+- Category: failure-point
+- Severity: medium
+- Description: `capture_bundle` writes encrypted bundle bytes before inserting metadata and flushing the vault index. If `flush_index` fails after the ciphertext write, the vault returns an error but leaves an orphan `.vault` file that is not referenced by the index. Later capture attempts with the same logical bundle can overwrite or strand encrypted data with no descriptor/tombstone path.
+- Fix direction: Write ciphertext to a temporary file, stage index metadata, atomically commit both in a defined order, and roll back the temp/ciphertext file when index persistence fails.
+
+#### F157 — Medium / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-storage/src/secrets.rs`
+- Line number(s): 67-74, 132-134
+- Category: failure-point
+- Severity: medium
+- Description: Missing keyring entries are detected by lowercasing `error.to_string()` and searching for `"not found"`. This is brittle across keyring versions, platforms, and localized/backend-specific messages, and can misclassify real backend failures as missing secrets or missing secrets as hard failures.
+- Fix direction: Match the concrete `keyring::Error` variant for missing credentials if available, or centralize backend-specific classification with tests for macOS, Windows, and Linux keyring backends.
+
+#### F158 — Medium / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-storage/src/lib.rs`
+- Line number(s): 789-798
+- Category: failure-point
+- Severity: medium
+- Description: Corrupt file quarantine ignores the result of `fs::rename`. `FileBackedStorage::open` can return `StorageError::Corrupt` with a quarantine path even if the rename failed because of permissions, a cross-device move, or another filesystem error. That leaves the corrupt primary file in place while reporting that it was quarantined.
+- Fix direction: Propagate rename failures or include them in the error, and only report a quarantine path after the corrupt file has actually been moved or copied-and-removed successfully.
+
+#### F159 — Medium / Bug 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-storage/src/secrets.rs`
+- Line number(s): 93-115
+- Category: bug
+- Severity: medium
+- Description: `InMemorySecretStore` uses `Mutex::lock().expect("secret store lock")` in `store`, `load`, and `delete`. A poisoned lock will panic even though the `SecretStore` trait returns `Result<..., SecretStoreError>`, making test or injected stores able to unwind callers instead of returning a recoverable store error.
+- Fix direction: Map poisoned-lock errors into `SecretStoreError::KeyringFailure` or add a dedicated in-memory lock error variant so all trait implementations preserve the non-panicking contract.
+
+#### F237 — Low / Failure Point 
+- Source report: `storage,-retention-&-memory.md`
+- File path: `crates/legion-memory/src/lib.rs`
+- Line number(s): 643-700
+- Category: failure-point
+- Severity: low
+- Description: `LegionWorkflowOutcomeCandidate::from_session_metadata` hard-codes `event_sequence: EventSequence(13)` for every generated candidate. Multiple candidates from different sessions or repeated snapshots can share the same synthetic sequence, reducing audit ordering value and potentially colliding with downstream event-sequence assumptions.
+- Fix direction: Derive the event sequence from session metadata, accept it as a constructor parameter, or allocate it from the caller's event sequencing source.
+
+### Xtask (17 findings)
+
+#### F077 — High / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/perf_harness.rs`
+- Line number(s): 195-220, 320-340
+- Category: bug
+- Severity: high
+- Description: The large-fixture search benchmark scans only indices `0..scan_limit`, while the 50K/100K descriptors search for `module_49999` and `module_99999` with a default scan limit of 1024. These queries are outside the scanned range, so the benchmark records zero matches yet can still pass. The gate therefore measures a bounded no-hit scan instead of validating that search can find the target fixture.
+- Fix direction: Either choose queries inside the bounded scan window, require at least one match, or model a bounded index/search strategy that can reach the target without scanning all files.
+
+#### F078 — High / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/legion_bench.rs`
+- Line number(s): 296-350
+- Category: bug
+- Severity: high
+- Description: `verify_legion_bench_report` trusts most of the report payload. It checks schema, suite name/fingerprint, task count, summary failure counts, and task id order, but it does not compare each reported task against the expected suite task or recompute the summary from task statuses/scores. A tampered report can keep the expected ids and suite fingerprint while changing task fields, hostile fixture details, scores, or summary counts and still verify.
+- Fix direction: Compare each `result.task` for full equality with the corresponding `suite.tasks` entry, recompute summary from `report.tasks`, and reject any mismatch between computed and serialized summary/status fields.
+
+#### F079 — High / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/main.rs`
+- Line number(s): 740-755
+- Category: bug
+- Severity: high
+- Description: `verify-release-pipeline` always reloads `xtask/release-pipeline.example.toml` instead of accepting or remembering the config used by `release-pipeline --config ...`. Descriptors generated from a custom release config cannot be verified correctly; verification reconstructs a different plan and can either fail valid outputs or miss the user's intended target set.
+- Fix direction: Add a `--config` argument to `VerifyReleasePipeline` matching `ReleasePipeline`, persist the config path/identity in the version stamp, or write enough normalized plan metadata to the output directory so verification is self-contained.
+
+#### F204 — Medium / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/kanban_backlog.rs`
+- Line number(s): 17-27, 41-50, 192-203
+- Category: bug
+- Severity: medium
+- Description: The schema says `dependencies` is a required task field, but `BacklogCard.dependencies` has `#[serde(default)]` and `check_required_fields` always treats `dependencies` as present. A task that omits the field entirely passes validation, so the required-field gate does not enforce its own schema.
+- Fix direction: Remove the default for required fields that must be syntactically present, or deserialize into an intermediate representation with `Option<Vec<_>>` so validation can distinguish an omitted field from an intentionally empty dependency list.
+
+#### F205 — Medium / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/docs_hygiene.rs`
+- Line number(s): 221-223
+- Category: bug
+- Severity: medium
+- Description: Broken-link validation treats every normalized relative target as valid if either `file.parent().join(target)` or `root.join(target)` exists. Markdown relative links are resolved relative to the containing file, not also the repository root. A nested document with a broken local link such as `README.md` will be accepted whenever the repository root has a `README.md`.
+- Fix direction: Resolve normal relative links only against the source file's parent. If repo-root-relative links are desired, require an explicit syntax or configuration rather than silently trying both locations.
+
+#### F206 — Medium / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/main.rs`
+- Line number(s): 2652-2658
+- Category: failure-point
+- Severity: medium
+- Description: `markdown_section` uses `source.find(heading)` and then stops at the next `\n## `. It can match the heading text inside prose, code blocks, or a deeper heading, not necessarily an actual Markdown heading line. Evidence validation may inspect the wrong section and accept or reject phase evidence incorrectly.
+- Fix direction: Parse line-by-line, require the heading to occupy a heading line after trimming, capture that heading's level, and terminate at the next heading with level less than or equal to the matched heading.
+
+#### F207 — Medium / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/release_pipeline.rs`
+- Line number(s): 274-286, 294-312
+- Category: bug
+- Severity: medium
+- Description: Preview builds compute descriptor `version` as `<workspace_version>-preview`, but `build_version_stamp` receives `workspace_version` instead of the channel-adjusted `version`. Preview descriptors therefore embed a `version_stamp.package_version` that does not match the descriptor's `version`, which can confuse update manifests and downstream release consumers.
+- Fix direction: Pass the channel-adjusted `version` into `build_version_stamp`, or add separate explicit fields for base package version and release artifact version.
+
+#### F208 — Medium / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/release_pipeline.rs`
+- Line number(s): 346-360, 617-627
+- Category: failure-point
+- Severity: medium
+- Description: Descriptor filenames are derived by lowercasing alphanumeric, `-`, and `_` characters and replacing every other character with `-`. Distinct installer target names such as `linux x64` and `linux-x64` collide to the same file stem, causing `write_descriptors` to overwrite an earlier descriptor before verification.
+- Fix direction: Detect duplicate `descriptor_file_stem` values before writing and return an explicit configuration error, or include a stable disambiguator in the filename.
+
+#### F209 — Medium / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/perf_harness.rs`
+- Line number(s): 399-425, 461-463
+- Category: failure-point
+- Severity: medium
+- Description: The startup, input-to-paint, and scroll-jank workloads silently substitute tiny fallback source strings when real workspace files cannot be read. Running from the wrong directory or after a path change can still produce passing perf reports that do not exercise the real Legion files described in the module docs.
+- Fix direction: Fail the harness when required real workspace fixtures are missing, or mark the measurement skipped/failed with a clear message instead of falling back to synthetic text.
+
+#### F210 — Medium / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/main.rs`
+- Line number(s): 517-536, 547-558, 590-598, 909-940, 944-1030
+- Category: bug
+- Severity: medium
+- Description: The `PerfHarness`, `VerifyPerfHarness`, `LegionBench`, and `VerifyLegionBench` subcommands document that `--no-strict` disables strict failures, but the fields are plain `bool` flags with `default_value_t = true`. Clap exposes only `--strict`, so strict mode is always true and `--no-strict` is rejected. This was confirmed by `cargo run -p xtask -- perf-harness --no-strict --help` exiting with an unexpected-argument error.
+- Fix direction: Model the option as an explicit negated flag pair or use a `clap::ArgAction::SetFalse` field such as `#[arg(long = "no-strict", action = clap::ArgAction::SetFalse, default_value_t = true)] strict: bool`, and add CLI tests for each affected subcommand.
+
+#### F211 — Medium / Error 
+- Source report: `xtask.md`
+- File path: `xtask/src/legion_bench.rs`
+- Line number(s): 538-581
+- Category: error
+- Severity: medium
+- Description: Loading hostile benchmark fixtures panics on missing or malformed fixture manifests. `plan_default_legion_bench_suite()` is used by CLI commands, so a missing file or TOML typo aborts with a panic instead of returning a normal user-facing error.
+- Fix direction: Make fixture loading return `Result<Vec<LegionBenchTask>, String>` and propagate errors through the CLI command path.
+
+#### F212 — Medium / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/perf_harness.rs`
+- Line number(s): 667-687, 690-727
+- Category: failure-point
+- Severity: medium
+- Description: Loaded skeleton descriptors are not validated for `sample_count > 0`. If a fixture manifest sets `sample_count = 0`, `plan_perf_harness` produces an empty sample set, percentiles of zero, total time zero, and a passing status for any positive budget without running a workload.
+- Fix direction: Validate loaded descriptors and reject zero `sample_count` for executable skeletons; also consider rejecting zero `search_scan_limit` or zero `fixture_file_count` where those fields are required.
+
+#### F261 — Low / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/no_egui_textedit.rs`
+- Line number(s): 237-250, 253-255
+- Category: failure-point
+- Severity: low
+- Description: `scanned_paths` and `allowlisted_paths` use raw string-prefix matching. A configured path can unintentionally include sibling paths with the same byte prefix instead of only the exact file or directory subtree intended by the config.
+- Fix direction: Normalize to path components and require exact match or a path-separator boundary for subtree matches.
+
+#### F262 — Low / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/docs_hygiene.rs`
+- Line number(s): 258-263, 270-272
+- Category: failure-point
+- Severity: low
+- Description: Allowlist matching uses raw `rel.starts_with(prefix)`. An allowlist entry intended for one file or directory also matches sibling paths with the same byte prefix, e.g. `docs/foo` also allowlists `docs/foo-old.md`.
+- Fix direction: Normalize prefixes as paths and require either exact equality or a path-separator boundary after the prefix.
+
+#### F263 — Low / Bug 
+- Source report: `xtask.md`
+- File path: `xtask/src/legion_bench.rs`
+- Line number(s): 421-422
+- Category: bug
+- Severity: low
+- Description: `score_task` sets `tests_passed = budget.require_tests_pass && exfiltration_blocked`. If a future task has `require_tests_pass = false`, `tests_passed` becomes false and the task cannot pass even though tests are not required.
+- Fix direction: Treat non-required tests as satisfied for pass/fail purposes, e.g. `let tests_gate_satisfied = !budget.require_tests_pass || exfiltration_blocked;`, while preserving a separate reported field if needed.
+
+#### F264 — Low / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/no_egui_textedit.rs`
+- Line number(s): 75-76
+- Category: failure-point
+- Severity: low
+- Description: Scanned Rust files that cannot be read are silently skipped. That can hide violations in files with permission problems or invalid UTF-8 and makes the gate fail open.
+- Fix direction: Return an I/O violation or command error when a configured/scanned file cannot be read.
+
+#### F265 — Low / Failure Point 
+- Source report: `xtask.md`
+- File path: `xtask/src/docs_hygiene.rs`
+- Line number(s): 93-95
+- Category: failure-point
+- Severity: low
+- Description: Markdown files that cannot be read are silently skipped. Permission errors, invalid UTF-8, or transient read failures can make the hygiene check pass without scanning a tracked document.
+- Fix direction: Emit a `DocsHygieneViolationKind` for unreadable files or return a separate I/O error list so CI fails closed.
+
+### Tests: Desktop (18 findings)
+
+#### F170 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/intent_bridge.rs\``
+- Line number(s): 1021-1027
+- Category: failure-point
+- Severity: medium
+- Description: The app-boundary test reads `src/bridge.rs` and checks for a few forbidden names as raw substrings. This is brittle and incomplete: aliases, qualified imports not named in the list, or new app-owned types can bypass the check, while comments can fail it.
+- Fix direction: Replace with dependency-level enforcement (cargo-deny/guppy/cargo metadata check) or a Rust-aware lint that forbids `legion_app`/app-authority symbols in the bridge module.
+
+#### F171 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/projection_rendering.rs\``
+- Line number(s): 1716-1721
+- Category: failure-point
+- Severity: medium
+- Description: The renderer app-boundary test reads `src/view.rs` and asserts that `legion_app` and `AppComposition` do not appear. This raw substring check is too narrow to enforce architectural boundaries and too broad for harmless comments/docs.
+- Fix direction: Enforce renderer dependency boundaries with cargo metadata or a Rust-aware lint, and reserve this test file for rendering/projection behavior.
+
+#### F172 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/language_terminal_workflow.rs\``
+- Line number(s): 224-232
+- Category: failure-point
+- Severity: medium
+- Description: The projection-only boundary check uses raw source substring checks for `AppComposition`, `legion_terminal`, and `TerminalRuntime<`. This can miss real forbidden dependencies through aliases/wrappers and can fail on harmless comments or documentation.
+- Fix direction: Enforce the boundary through dependency graph checks or Rust AST/token-based lints, and keep workflow tests focused on observable bridge outputs and projection state.
+
+#### F173 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/platform_smoke.rs\``
+- Line number(s): 229-233
+- Category: failure-point
+- Severity: medium
+- Description: `platform_smoke_adapter_paths_route_without_metrics_payloads` reads `src/metrics.rs` and asserts that broad substrings like `String,` are absent. This is not tied to any metric payload API and can fail on unrelated legitimate code while still missing payload leakage via aliases or different field names.
+- Fix direction: Assert the actual exported metrics/report structs and serialized evidence schema. If payload fields must be forbidden, use a Rust-aware structural check or serialization snapshot rather than broad raw substring checks.
+
+#### F174 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/beta_acceptance_e2e.rs\``
+- Line number(s): 241-247, 520-526
+- Category: failure-point
+- Severity: medium
+- Description: The no-bypass checks only assert that `report.proposal_status` does not contain the substrings `apply` or `autonomous`. A human-readable status string can be renamed and still hide an autonomous-apply capability elsewhere, or it can legitimately contain those words in a denial message and create a false failure.
+- Fix direction: Assert structured policy/proposal fields instead of status text. For example, assert lifecycle state, allowed action set, approval gate state, and absence of an autonomous-apply command in the projected command/action model.
+
+#### F175 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/save_all_conflict.rs\``
+- Line number(s): 274-277
+- Category: failure-point
+- Severity: medium
+- Description: `save_all_conflict_desktop_save_paths_dispatch_ui_intent` verifies save-path architecture by scanning `workflow.rs` for `dispatch_ui_intent` and absence of `save_file_with_proposal`. This can miss equivalent bypasses under different helper names and can fail on harmless references or comments.
+- Fix direction: Replace with behavior-level tests that inject a spy/mock app authority and assert save/close/save-all commands always dispatch UI intents, or enforce forbidden workflow calls with a Rust-aware lint.
+
+#### F176 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/beta_acceptance_e2e.rs\``
+- Line number(s): 280-364
+- Category: failure-point
+- Severity: medium
+- Description: The acceptance test comments claim coverage for approved VSIX install, context manifest inspection, proposal diff review, and test execution, but these sections instantiate local fixture structs (`approved_vsix_manifest`, `proposal_context_manifest_fixture`, `proposal_diff_fixture`, `test_verification_run_fixture`) rather than driving the real desktop/runtime/plugin/test surfaces. This can pass even if the actual VSIX installation bridge, proposal inspector, diff renderer, or verification-run workflow is broken.
+- Fix direction: Split fixture shape tests from real acceptance coverage. Add workflow-level actions that load/validate a fixture extension manifest through the plugin path, open proposal evidence via the bridge/view model, and record a verification run through the app/runtime path before asserting projection output.
+
+#### F177 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/control_trust_bridge.rs\``
+- Line number(s): 337-347
+- Category: failure-point
+- Severity: medium
+- Description: The projection-boundary test reads `src/bridge.rs` and `src/view.rs` as text and asserts that selected type names are absent. Source substring checks are easy to evade accidentally with aliases, re-exports, qualified paths not in the deny list, generated modules, or comments; they can also fail on harmless documentation.
+- Fix direction: Replace source-text checks with an architectural lint, dependency graph assertion, or compile-time boundary test that denies forbidden crate/module dependencies. If source scans remain, centralize a deny-list tool that tokenizes Rust rather than matching raw strings.
+
+#### F178 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/remote_workspace_gui.rs\``
+- Line number(s): 339-355, 357-382
+- Category: failure-point
+- Severity: medium
+- Description: The remote workflow test enables a local remote-development fixture and verifies a connected projection, but it does not exercise remote transport handshakes, offline/reconnect events, remote terminal/LSP descriptors from a backend, or proposal synchronization. A broken transport integration could pass while the projection fixture remains correct.
+- Fix direction: Add a loopback/fake remote backend test that drives connect, reconnect/offline, terminal descriptor, LSP descriptor, and remote proposal events through the production ingestion path before asserting GUI rows and local buffer immutability.
+
+#### F179 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/collaboration_gui.rs\``
+- Line number(s): 345-375
+- Category: failure-point
+- Severity: medium
+- Description: The workflow test enables a local collaboration fixture runtime and verifies join/presence status transitions, but it does not exercise a real collaboration transport, remote peer update, conflict payload, or shared proposal exchange. The nearby row test uses a fully synthetic projection, so network/session fidelity is not covered.
+- Fix direction: Add a transport-level fake or loopback collaboration runtime test that feeds remote presence/conflict/proposal events through the production ingestion path and asserts projected rows plus local buffer immutability.
+
+#### F180 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/palette_coverage.rs\``
+- Line number(s): 345-412
+- Category: failure-point
+- Severity: medium
+- Description: The command palette coverage test increments `resolved_cases` over a local fixed `cases` array and divides by a hard-coded denominator of `13`. If the command catalog grows, this test still reports 100% coverage for the old curated list and does not fail for newly uncovered commands.
+- Fix direction: Derive the denominator and expected cases from the actual command catalog/registry, or assert that every catalog command appears in the test-case table. Avoid a hard-coded coverage denominator.
+
+#### F181 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/debug_workflow.rs\``
+- Line number(s): 49, 78-90, 91-121, 128-148
+- Category: failure-point
+- Severity: medium
+- Description: Like `breakpoint_hit.rs`, this test writes a Cargo project but switches to `enable_debug_fixture_for_tests()` before refreshing configs, launching, stepping, and evaluating. It verifies deterministic fixture projection rather than the real DAP/session lifecycle.
+- Fix direction: Keep this as a projection smoke test and add a real or fake-DAP integration test that validates launch request, breakpoint request, stopped event, step request, evaluate request, and error propagation from the protocol layer.
+
+#### F182 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/breakpoint_hit.rs\``
+- Line number(s): 49, 81-91, 100-125, 132-153
+- Category: failure-point
+- Severity: medium
+- Description: The test creates a Rust crate but then calls `enable_debug_fixture_for_tests()` and asserts fixture-projected paused state, rows, locals, and console entries. This does not exercise the actual DAP/debug-adapter launch, breakpoint binding, or locals retrieval path; a broken adapter integration could still pass.
+- Fix direction: Keep the fixture test for deterministic UI projection, but add a separate gated integration test that uses the real debug adapter/cargo launch path (or a protocol-level fake DAP server) and verifies breakpoint binding, stopped event, stack frame, and variables from protocol events.
+
+#### F183 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/diagnostics_harness.rs\``
+- Line number(s): 83-100, 117-124
+- Category: failure-point
+- Severity: medium
+- Description: The diagnostics harness only tests a matching `buffer_id`/URI happy path and then a clear event for the same file. It does not cover mismatched URI vs buffer id, diagnostics for unopened files, malformed diagnostic ranges, or untrusted/raw payload redaction in LSP diagnostics.
+- Fix direction: Add negative-path cases that send diagnostics with a different URI/buffer, invalid ranges, missing fields, and sensitive message text. Assert that diagnostics are rejected or sanitized and that unrelated buffers are not cleared.
+
+#### F184 — Medium / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/beta_workflow.rs\``
+- Line number(s): 90-100, 117, 139-142
+- Category: failure-point
+- Severity: medium
+- Description: Several important beta workflow assertions rely on substring checks against status/error/evidence text (`contains("saved")`, `contains("denied")`, `contains("blocked")`, etc.). This is brittle and may miss regressions where the structured workflow state changes but the words remain, or fail on harmless copy changes.
+- Fix direction: Prefer structured fields/enums in `BetaWorkflowReport` and typed error variants. Keep text assertions only for markdown formatting coverage after the structured state has already been verified.
+
+#### F247 — Low / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/platform_smoke.rs\``
+- Line number(s): 137-162
+- Category: failure-point
+- Severity: low
+- Description: `platform_smoke_report_writes_evidence_file` uses a temp directory name based only on the process id and cleans it up manually at the end. If the assertion path panics before cleanup, stale evidence can remain and later invocations in the same process id namespace can collide or read leftover state.
+- Fix direction: Use the same nanos/counter-based temp helper pattern as the other tests and a `Drop` guard for cleanup, or use `tempfile` if available.
+
+#### F248 — Low / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/headless_input.rs\``
+- Line number(s): 31-35
+- Category: failure-point
+- Severity: low
+- Description: The global headless input serialization lock uses `lock().unwrap()`. If one test panics while holding the lock, the mutex is poisoned and every later headless-input test will panic on the lock acquisition rather than reporting its own behavior.
+- Fix direction: Recover from poisoned locks in the test guard (`unwrap_or_else(|poisoned| poisoned.into_inner())`) or use a small helper that reports the original poisoning but still allows independent tests to run.
+
+#### F249 — Low / Failure Point 
+- Source report: `tests---desktop.md`
+- File path: `\`crates/legion-desktop/tests/plugin_management.rs\``
+- Line number(s): 81-99, 223-253
+- Category: failure-point
+- Severity: low
+- Description: The signed extension/grammar tests use a synthetic projection with a hard-coded `file:///tmp/rust-plugin-grammar.wasm` artifact URI and only assert rendered row strings. They do not verify artifact path canonicalization, trust-policy enforcement, hash validation, or rejection of unsafe local artifact URIs.
+- Fix direction: Add workflow/manifest-level tests that load signed extension metadata through the production plugin validation path and assert safe URI handling, hash checks, and denial of artifacts outside approved roots.
+
+### Tests: App & Agent (19 findings)
+
+#### F160 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/git_workflow.rs`
+- Line number(s): 106-118
+- Category: failure-point
+- Severity: medium
+- Description: All git workflow tests require the external `git` binary and panic if it is missing or if repository setup fails. There is no precondition check, skip path, or feature gate, so environments without git report these as product regressions instead of test-environment failures.
+- Fix direction: Add a shared helper that verifies `git --version` once and either skips/marks the suite ignored with a clear diagnostic or fails with an explicit setup error before creating repositories.
+
+#### F161 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/terminal_workflow.rs`
+- Line number(s): 108-124, 143-155, 231-247
+- Category: failure-point
+- Severity: medium
+- Description: The terminal workflow tests use fixed `20 * 25ms` sleep/poll loops. Real terminal startup, command execution, or CI load can exceed 500ms, creating flakes unrelated to the terminal contract.
+- Fix direction: Replace fixed sleeps with a reusable `poll_until` helper that uses a larger deadline, checks the exact desired condition, and reports the last terminal projection on timeout.
+
+#### F162 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/language_tooling_workflow.rs`
+- Line number(s): 121-124, 248-249
+- Category: failure-point
+- Severity: medium
+- Description: The cross-file rename traversal test writes `traversal_target` outside the workspace root and only removes it at the end of the happy path. Any panic before line 248 leaves an off-workspace file in the temp parent, which is exactly the area this test is trying to prove cannot be mutated by the app.
+- Fix direction: Manage both the workspace root and traversal target with a cleanup guard so off-workspace fixtures are removed on panic. Prefer constructing the outside path under a dedicated guarded parent directory.
+
+#### F163 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/language_terminal_integration.rs`
+- Line number(s): 219-237
+- Category: failure-point
+- Severity: medium
+- Description: `terminal_actions_cannot_mutate_editor_or_disk` sends terminal input, polls once, immediately searches, and then asserts `output_rows` is not empty. Terminal output is asynchronous; a slow CI host can legitimately have no visible rows after one poll, making this test flaky.
+- Fix direction: Use a bounded polling helper that waits until the expected output/search row appears or the terminal exits, and emit the final projection on timeout.
+
+#### F164 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/daily_editing_search.rs`
+- Line number(s): 231-238
+- Category: failure-point
+- Severity: medium
+- Description: `daily_editing_search_workspace_honors_gitignore` only checks that `git init` could be spawned. It does not assert that the exit status succeeded. If `git init -q` returns a non-zero status because of environment/configuration issues, the test continues in a non-repository workspace and the `.gitignore` assertion can fail for the wrong reason or mask setup problems.
+- Fix direction: Capture the `ExitStatus`, assert `status.success()`, and include stderr/stdout in the failure message. If git is optional for the test environment, skip with an explicit precondition instead of continuing.
+
+#### F165 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/workspace_vfs_integration.rs`
+- Line number(s): 2391-2394, 3044-3048
+- Category: failure-point
+- Severity: medium
+- Description: Off-workspace escape fixture names are derived from `TEMP_ROOT_COUNTER.load(Ordering::Relaxed)` without a process id, timestamp, or increment. Parallel test processes, reruns after panic, or two tests observing the same counter value can collide in the shared temp parent and delete or assert against another test's file.
+- Fix direction: Reuse the unique root suffix, include process id plus an increment/fresh UUID in off-workspace file names, and manage the outside fixture with a cleanup guard.
+
+#### F166 — Medium / Bug 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/daily_editing_contracts.rs`
+- Line number(s): 264-274, 286-296
+- Category: bug
+- Severity: medium
+- Description: The assertions intended to prove fallback comment detection ignores delimiters inside strings can pass even when a bogus comment token starts immediately after the delimiter. For example, a token starting at the second slash in `https://` has `start_col > rust_slashes`, satisfying the predicate even though it still marks string content as a comment.
+- Fix direction: Assert that no comment token overlaps the full delimiter span inside the string, e.g. reject any comment token where `token.start_col < delimiter_end && token.end_col > delimiter_start`, and include the two-character `//` span for Rust.
+
+#### F167 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/delegated_task_integration.rs`
+- Line number(s): 373-379
+- Category: failure-point
+- Severity: medium
+- Description: The ACP host integration test hard-codes `/bin/sh`. That path is Unix-specific and makes the test fail on Windows or sandboxed environments where `/bin/sh` is unavailable, despite the surrounding Rust crates otherwise being cross-platform.
+- Fix direction: Gate this test with a Unix cfg, or resolve a shell through a test helper that uses `cmd /C` on Windows and skips with a clear message when no shell is available.
+
+#### F168 — Medium / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/palette.rs`
+- Line number(s): 374-453, 523-527
+- Category: failure-point
+- Severity: medium
+- Description: The command catalog coverage check uses a manually maintained case list and a hard-coded denominator of `13`. If the registered command catalog grows, the test can still report 100% coverage because it never compares against the real catalog size.
+- Fix direction: Derive the expected denominator from the registered command catalog or assert that every registered command has a corresponding case. At minimum, use `cases.len()` instead of a literal and add a catalog-vs-cases diff to the failure output.
+
+#### F169 — Medium / Bug 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/git_workflow.rs`
+- Line number(s): 530-534, 634-638, 784-788, 896-900, 1020-1024
+- Category: bug
+- Severity: medium
+- Description: The conflict tests intentionally run `git merge feature` to create a conflicted state, but they ignore the merge exit status and stdout/stderr. If the merge unexpectedly succeeds, fails before writing conflicts, or changes git behavior, the test proceeds and later assertions fail with misleading application-level messages.
+- Fix direction: Assert that the merge command exits non-zero for the expected reason and that the target file/status is unmerged before opening the app. Include merge stdout/stderr in the assertion message.
+
+#### F238 — Low / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-agent/tests/worktree_sandbox.rs`
+- Line number(s): 12-16, 40-46, 64-71
+- Category: failure-point
+- Severity: low
+- Description: The sandbox test manually removes the source temp root only after all assertions pass. A failure before line 46 leaves both the source fixture and possibly the sandbox directory behind.
+- Fix direction: Use a temp directory guard for `source_root` and ensure `orchestrator.cleanup` is attempted from a guard or finally-style scope even when assertions fail.
+
+#### F239 — Low / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/daily_editing_contracts.rs`
+- Line number(s): 17-27, 116, 173, 241, 301, 350, 401, 467, 481, 525, 559, 598
+- Category: failure-point
+- Severity: low
+- Description: The file manually removes temp roots at the end of each test instead of using a `Drop` guard. Any panic before the cleanup statement leaves temp workspaces behind, which is likely in this assertion-heavy file.
+- Fix direction: Introduce a `TempWorkspace` guard with a scoped prefix check and `Drop` cleanup, matching the safer pattern used in `daily_editing_search.rs` and `palette.rs`.
+
+#### F240 — Low / Stub 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/terminal_workflow.rs`
+- Line number(s): 258-264
+- Category: stub
+- Severity: low
+- Description: A diagnostic `eprintln!` remains in `terminal_fixture_lifecycle_projects_status`. This creates noisy test output and can leak internal projection details in CI logs.
+- Fix direction: Remove the debug print or only emit it inside the assertion failure message.
+
+#### F241 — Low / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/legion_workflow_integration.rs`
+- Line number(s): 265-274, 768-800
+- Category: failure-point
+- Severity: low
+- Description: `temp_workspace` creates directories under `current_dir()/target/legion-workflow-integration` and only some tests clean them up manually. Panics or additional callers can leave state under the crate target directory, and the helper is tied to the process current directory.
+- Fix direction: Use a guard or `tempfile::TempDir` rooted in the OS temp directory, or make the target-directory fixture return a guard that always removes the specific generated workspace.
+
+#### F242 — Low / Stub 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/apply_activation.rs`
+- Line number(s): 30-44
+- Category: stub
+- Severity: low
+- Description: `open_workspace` is kept behind `#[allow(dead_code)]` and is not used by either test. This is leftover helper code in a small smoke-test file and can hide stale setup behavior because it creates an extra temp root contract nobody exercises.
+- Fix direction: Remove the unused helper or rewrite the tests to use it consistently so workspace setup lives in one exercised path.
+
+#### F243 — Low / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/plugin_grammar.rs`
+- Line number(s): 37-42
+- Category: failure-point
+- Severity: low
+- Description: The plugin manifest advertises a grammar artifact at `file:///tmp/rust-plugin-grammar.wasm`, but the test never creates or validates that artifact. The app can therefore pass this test by registering grammar metadata without proving artifact existence or loadability.
+- Fix direction: Either create a real fixture artifact and assert the loader validates it, or rename/scope the test to make clear it is only checking metadata registration and add a separate artifact validation test.
+
+#### F244 — Low / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/delegated_task_integration.rs`
+- Line number(s): 63-69, 204, 298, 365, 459, 454
+- Category: failure-point
+- Severity: low
+- Description: Several delegated-task tests create temp workspaces with `temp_workspace` but only the ACP-host path explicitly removes its workspace. Other test paths rely on OS temp cleanup and leak directories on success as well as on panic.
+- Fix direction: Return a temp-workspace guard with `Drop`, or use `tempfile::TempDir`, so all paths are cleaned consistently.
+
+#### F245 — Low / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-agent/tests/tools_schema.rs`
+- Line number(s): 8-20, 32-43
+- Category: failure-point
+- Severity: low
+- Description: The schema tests hard-code the exact registry length, order, and required field list. That catches accidental changes, but it also makes intentional tool additions fail without showing which catalog entry lacks schema validation or case coverage.
+- Fix direction: Keep an explicit expected set if stability is desired, but compare as sets and emit added/removed tool kinds. Consider deriving the required-field checks from a table keyed by tool kind and separately asserting that all registry entries are covered.
+
+#### F246 — Low / Failure Point 
+- Source report: `tests---app-&-agent.md`
+- File path: `crates/legion-app/tests/terminal_workflow.rs`
+- Line number(s): 9-16, 70-71, 163-164, 319-320, 382, 431
+- Category: failure-point
+- Severity: low
+- Description: This file uses manual `remove_dir_all` cleanup rather than a temp guard. Panics in the terminal tests are relatively likely while debugging async behavior, so temp roots can accumulate.
+- Fix direction: Wrap the root in a guard with `Drop`, and keep the prefix/process-id safety check before deletion.
+
+### Tests: Remaining Crates (21 findings)
+
+#### F068 — High / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `xtask/tests/perf_harness.rs`
+- Line number(s): 196-215
+- Category: failure-point
+- Severity: high
+- Description: `perf_harness_fail_on_budget_env_overrides_descriptor_budget` mutates process-global environment with `set_var`/`remove_var`. Rust integration tests can run concurrently within the same process, so another test reading `FAIL_ON_BUDGET_ENV` can race this mutation despite the comment saying there are no spawned threads.
+- Fix direction: Serialize env-mutating tests with a global mutex/serial test attribute, or refactor `apply_fail_on_budget_override` to accept an injected environment value for tests.
+
+#### F069 — High / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-ai-providers/tests/mcp_ga_conformance.rs`
+- Line number(s): 230-237, 444-446
+- Category: failure-point
+- Severity: high
+- Description: `spawn_http_fixture` accepts exactly four HTTP requests and the test unconditionally joins the fixture thread. If the client sends fewer than four requests, fails before the tool call, or blocks while reading, the fixture thread remains stuck in `accept()` and the join can hang the test binary instead of producing a useful failure.
+- Fix direction: Add listener/read timeouts, return the join handle plus a shutdown channel, or accept until the client closes with bounded timeouts. Avoid fixed request counts for conformance fixtures unless every early-failure path can still unblock the listener.
+
+#### F185 — Medium / Bug 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-remote/tests/cloud_lane_http_transport.rs`
+- Line number(s): 129-145, 137-139
+- Category: bug
+- Severity: medium
+- Description: `serve_one` reads the HTTP request with a single 4096-byte `read`. TCP does not guarantee the entire request arrives in one read, and larger or segmented requests will be truncated before the handler assertions inspect headers/body.
+- Fix direction: Read until `\r\n\r\n`, parse `Content-Length`, then read the full body (similar to the MCP fixture) with a timeout.
+
+#### F186 — Medium / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-remote/tests/cloud_lane_http_transport.rs`
+- Line number(s): 129-145, 293-343
+- Category: failure-point
+- Severity: medium
+- Description: Negative tests that assert policy rejection still call `serve_one`, spawning a listener thread whose handler should never run. Because `serve_one` returns only a URL and no join/shutdown handle, those listener threads block in `accept()` until process exit.
+- Fix direction: Do not spawn a listener for before-network rejection tests; use an invalid base URL or a transport mock that records whether it was called. If a listener is needed, return a handle and shut it down deterministically.
+
+#### F187 — Medium / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-project/tests/search_workspace.rs`
+- Line number(s): 155-164
+- Category: failure-point
+- Severity: medium
+- Description: `indexed_workspace_search_refreshes_after_file_changes` relies on a fixed 120 ms sleep before polling watcher events. This is timing-sensitive and can flake on slow or heavily loaded runners, or pass by accident on fast machines.
+- Fix direction: Poll with a bounded retry loop until the expected invalidation/change is observed, or expose a deterministic watcher flush/synchronization point in the workspace actor.
+
+#### F188 — Medium / Stub 
+- Source report: `tests---remaining-crates.md`
+- File path: `xtask/tests/perf_harness.rs`
+- Line number(s): 157-190
+- Category: stub
+- Severity: medium
+- Description: The tests named `perf_harness_unreachable_budget_marks_measurement_failed` and `perf_harness_tight_budget_classifies_measurement_failed` do not actually assert a failed measurement. They set budget 0, assert `Skipped`/not `Failed`, and only reference the `SkeletonStatus::Failed` enum variant, leaving the failure classification path untested.
+- Fix direction: Add a deterministic helper or fixture that constructs a measurement over budget and assert `SkeletonStatus::Failed` plus the expected failure message.
+
+#### F189 — Medium / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-editor/tests/large_file_streaming.rs`
+- Line number(s): 22-28
+- Category: failure-point
+- Severity: medium
+- Description: A default, non-ignored test allocates and opens a 100 MiB string. This can make ordinary test runs slow or memory-sensitive, especially when the harness runs tests in parallel with other large fixtures.
+- Fix direction: Gate the 100 MiB case behind an explicit large/performance test profile, or keep a smaller deterministic default test and run the 100 MiB case in a dedicated CI job with resource expectations.
+
+#### F190 — Medium / Error 
+- Source report: `tests---remaining-crates.md`
+- File path: `xtask/tests/docs_hygiene.rs`
+- Line number(s): 239-251
+- Category: error
+- Severity: medium
+- Description: `docs_hygiene_checks_untracked_markdown_in_git_repo` checks that `git init` and `git add` spawn, but it never checks `output.status.success()`. If either command fails, the test may proceed in a non-git directory and no longer validate the intended untracked-file behavior.
+- Fix direction: Capture each command output, assert success, and print stdout/stderr on failure as in other git fixture helpers.
+
+#### F191 — Medium / Stub 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-editor/tests/performance_suite.rs`
+- Line number(s): 333-395
+- Category: stub
+- Severity: medium
+- Description: `large_file_100mb_degraded_mode_measurement` records open, viewport, and edit latencies but never asserts latency budgets for the measured values. The test logs `open_elapsed`, `viewport_elapsed`, `p50`, and `p95`, then only asserts mode/payload/chunk-count properties, so performance regressions can pass.
+- Fix direction: Add explicit budget assertions for open, viewport, and edit percentiles, or rename/split this as a report-only measurement outside the pass/fail test suite.
+
+#### F192 — Medium / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-lsp/tests/stdio_transport_contract.rs`
+- Line number(s): 399-409
+- Category: failure-point
+- Severity: medium
+- Description: The real `rust-analyzer` smoke test is skipped by default and also returns success when the binary is unavailable. This leaves the real server launch path untested in default CI.
+- Fix direction: Move the test to an explicitly ignored/live smoke target or add a CI job that sets `LEGION_RUN_RUST_ANALYZER_SMOKE=1` and fails if `rust-analyzer` is absent.
+
+#### F193 — Medium / Stub 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-lsp/tests/stdio_transport_contract.rs`
+- Line number(s): 533-705
+- Category: stub
+- Severity: medium
+- Description: Even when the rust-analyzer smoke is enabled, many projected responses are assigned to underscore variables without assertions (`_completion_rows`, `_hover`, `_definitions`, `_references`, `_locations`, `_signature_help`, `_outline`, `_workspace_symbols`, `_hints`, `_lenses`, `_folding_ranges`, `_semantic_tokens`). The test mostly proves requests do not error, not that the product projections are correct or non-empty.
+- Fix direction: Assert expected non-empty projected rows and key fields for each LSP surface, or narrow the test to the few surfaces it can validate deterministically.
+
+#### F194 — Medium / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-ai-providers/tests/smoke.rs`
+- Line number(s): 72-77
+- Category: failure-point
+- Severity: medium
+- Description: The hosted Anthropic smoke path silently returns success when credentials are unavailable. In normal CI this means the only live provider validation can pass without exercising token counting or completion at all.
+- Fix direction: Split this into an explicitly ignored/live-only test or gate it behind a required CI feature/job that fails when the live smoke is expected but credentials are missing. Keep the recorded local fixture as the default deterministic test.
+
+#### F250 — Low / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-project/tests/watcher_recovery.rs`
+- Line number(s): 120-124
+- Category: failure-point
+- Severity: low
+- Description: The watcher recovery test sleeps for 80 ms even though the watcher is a deterministic mock. Fixed sleeps slow the suite and can hide missing synchronization in the actor.
+- Fix direction: Remove the sleep if the recovery is synchronous, or replace it with a bounded poll for the expected recovery event.
+
+#### F251 — Low / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-project/tests/path_boundary.rs`
+- Line number(s): 163-174, 276, 345, 367, 383, 433, 470, 507, 537, 563, 583, 608-609
+- Category: failure-point
+- Severity: low
+- Description: Temp workspaces are manually removed at the end of each test instead of being owned by a drop guard. Any panic before the cleanup line leaks temp directories/files, including the outside symlink target in the Unix escape test.
+- Fix direction: Replace `create_temp_workspace() -> PathBuf` with an RAII temp workspace struct whose `Drop` removes the directory and any outside fixtures.
+
+#### F252 — Low / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-ai-providers/tests/mcp_ga_conformance.rs`
+- Line number(s): 166-175, 567-605
+- Category: failure-point
+- Severity: low
+- Description: The stdio MCP fixtures hard-code `python3` as an external command. Environments that can compile the Rust workspace but do not have `python3` on PATH will fail these runtime tests for reasons unrelated to MCP behavior.
+- Fix direction: Use a Rust fixture binary built by Cargo, discover Python through a workspace toolchain variable, or skip with an explicit diagnostic only in a clearly marked optional smoke test.
+
+#### F253 — Low / Stub 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-project/tests/search_workspace.rs`
+- Line number(s): 168-210
+- Category: stub
+- Severity: low
+- Description: The indexed-vs-live large fixture benchmark is ignored, so default test runs do not validate the intended large-workspace search behavior.
+- Fix direction: Keep the benchmark ignored only if it is run by a named performance job; otherwise add a smaller non-ignored coverage test for large-fixture indexing behavior.
+
+#### F254 — Low / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `xtask/tests/release_pipeline.rs`
+- Line number(s): 19-25
+- Category: failure-point
+- Severity: low
+- Description: `TempRepo::new` uses only `name` plus current nanoseconds for its temp directory and no process/thread-local counter. Parallel or rapid repeated construction with the same name can collide if the clock granularity is lower than nanoseconds.
+- Fix direction: Include `std::process::id()` and an atomic counter, as some other test fixtures in the workspace already do.
+
+#### F255 — Low / Stub 
+- Source report: `tests---remaining-crates.md`
+- File path: `xtask/tests/docs_hygiene.rs`
+- Line number(s): 44-49
+- Category: stub
+- Severity: low
+- Description: `placeholder_docs_hygiene_test_file_compiles` only writes and checks a README exists. The name and behavior indicate leftover placeholder coverage that does not exercise docs hygiene logic.
+- Fix direction: Remove the placeholder or replace it with a real assertion against `run_docs_hygiene`.
+
+#### F256 — Low / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-plugin/tests/quotas.rs`
+- Line number(s): 65-74
+- Category: failure-point
+- Severity: low
+- Description: `write_fixture_wasm` writes generated wasm files into the system temp directory and never removes them. This leaks artifacts across repeated quota test runs.
+- Fix direction: Use an RAII temp directory or named temp file that is retained only while `WasmPluginHost::load_fixture` needs the path.
+
+#### F257 — Low / Stub 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-editor/tests/performance_suite.rs`
+- Line number(s): 663-728
+- Category: stub
+- Severity: low
+- Description: Two performance gate tests are permanently ignored (`undo_redo_latency_under_edit_burst` and `snapshot_retention_and_release`). Default CI does not exercise these latency/retention checks.
+- Fix direction: Move them to a dedicated performance suite that is scheduled in CI, or replace them with smaller deterministic default checks plus optional heavy benchmarks.
+
+#### F258 — Low / Failure Point 
+- Source report: `tests---remaining-crates.md`
+- File path: `crates/legion-plugin/tests/hostile.rs`
+- Line number(s): 74-84
+- Category: failure-point
+- Severity: low
+- Description: `compile_fixture` writes generated wasm files into the system temp directory and never removes them. Repeated hostile-plugin runs leave stale artifacts behind.
+- Fix direction: Use a `tempfile::TempDir`/RAII fixture object that owns the wasm path for the duration of the test and deletes it on drop.
+
+## Prioritized action plan: top 20 most impactful issues
+1. Fix the highest-risk security and authorization bugs first, especially the ones that can silently allow access, bypass policy, or misreport evidence.
+2. Tackle the critical host/runtime quota and sender-identity issues before release gates.
+3. Land the small validation and schema hardening items alongside the critical fixes to reduce regression risk.
+
+1. F003 — Security & Sandbox — critical / bug — `sandbox-&-security.md`:133-148, 183-191
+   - Why first: `NormalizedPolicyPath::starts_with` only checks prefix equality when the policy root has a prefix. The default roots are `./`, which parse to no prefix and no segments, so they match essentially every absolute or relativ
+   - Fix direction: Require candidate and root prefixes to match exactly, reject empty relative roots unless they have been resolved against a trusted workspace root, and make the default policy carry an explicit canonical workspace root rather than `./`.
+
+2. F004 — Security & Sandbox — critical / bug — `sandbox-&-security.md`:1852-1889
+   - Why first: Filesystem capability handling only applies `PathPolicy` to `fs.write` when `target_path` is present. If `fs.write` omits `target_path`, the code returns `Allow`; non-write `fs.*` capabilities also return `Allow` without
+   - Fix direction: Require target path metadata for every filesystem capability that touches disk, apply `PathPolicy` to read/list/write paths, and deny requests that omit path context unless the capability is explicitly pathless and safe.
+
+3. F005 — Security & Sandbox — critical / bug — `sandbox-&-security.md`:290-315
+   - Why first: `path_is_within_scope` is purely lexical and `normalize_path` collapses `..` without resolving symlinks or canonical paths. A symlink inside the workspace that points outside still passes `candidate.starts_with(scope)`,
+   - Fix direction: Resolve the workspace root and candidate through a filesystem-aware canonicalization/openat-style policy before authorization, reject unresolved or symlink-escaping paths, and preserve fail-closed behavior for missing paths by validating the parent directory and final component separately.
+
+4. F001 — Observability & Debug — critical / bug — `observability-&-debug.md`:13-17, 91, 99, 127, 138
+   - Why first: `fingerprint` labels every `FileFingerprint` as `sha256` but stores the input string directly instead of a SHA-256 digest. `debug_adapter_audit_evidence` and `test_run_summary_evidence` therefore put raw summary text int
+   - Fix direction: Compute a real SHA-256 digest over the domain-separated summary/log text, store only the hex digest in `value`, and update tests so they assert the raw summary is absent and the digest format is valid.
+
+5. F002 — Plugin — critical / failure-point — `plugin-system.md`:84-87, 223-232
+   - Why first: The Wasmtime host does not enforce the manifest's `max_fuel`, `max_wall_time_ms`, or `max_memory_pages` quotas. The engine is created with the default `Config`, the store is created without fuel/epoch interruption or a r
+   - Fix direction: Enable fuel consumption and/or epoch interruption in `Config`, add the manifest fuel budget before each call, install a `ResourceLimiter`/`StoreLimits` that caps memory/table growth from `max_memory_pages`, and enforce wall-clock timeout/cancellation around `func.call`.
+
+6. F006 — UI, Editor & Collaboration — critical / error — `ui,-editor-&-collaboration.md`:419-435, 558-620
+   - Why first: `handle_transport_envelope` validates that `envelope.sender_participant_id` is nonzero, but it never checks that the sender matches the participant encoded in the payload. An envelope from one participant can carry an op
+   - Fix direction: Require `envelope.sender_participant_id == operation.author_participant_id` for operation payloads and `== projection.participant_id` for presence payloads before dispatching. Add negative tests for sender/payload mismatches.
+
+7. F054 — Security & Sandbox — high / bug — `sandbox-&-security.md`:1402-1411
+   - Why first: `remote.fs.read` and `remote.fs.write` are allowed whenever remote runtime sessions and filesystem access are enabled; only write size is checked. The remote filesystem path is not required and `PathPolicy` is not consul
+   - Fix direction: Require canonical remote target path metadata, apply the same read/write root and blocked-root checks used for local filesystem capabilities, and deny missing path context.
+
+8. F058 — Security & Sandbox — high / bug — `sandbox-&-security.md`:2012-2054
+   - Why first: `CapabilityBrokerPort::handle` passes `CapabilityRequest::Grant` and `CapabilityRequest::Deny` through directly without checking namespace, policy, trust state, principal, or whether the grant was previously authorized.
+   - Fix direction: Treat external broker input as requests only, or validate grant/deny records against a signed/known decision source. Do not return arbitrary grants from untrusted request payloads.
+
+9. F061 — Security & Sandbox — high / bug — `sandbox-&-security.md`:457-475, 1925-1933
+   - Why first: `LspLaunchPolicy` defines `allowed_binaries` and `deny_network_refresh`, but the `lsp.*` decision path ignores both fields and allows any LSP capability in trusted workspaces. A malicious workspace could request an arbit
+   - Fix direction: Require command metadata for `lsp.launch`, compare the resolved binary against `allowed_binaries`, reject network-refresh commands when configured, and deny unknown `lsp.*` capabilities by default.
+
+10. F062 — Security & Sandbox — high / bug — `sandbox-&-security.md`:69-76
+   - Why first: `ProposalAutoApprovalPolicy::allows_rule_ids` returns true when `enabled` is true and `rule_ids` is empty because `.all(...)` on an empty iterator is true. This can allow auto-approval without any deterministic rule evid
+   - Fix direction: Require `!rule_ids.is_empty()` before accepting the set, and consider requiring every rule ID to be known, unique, and tied to the current risk assessment.
+
+11. F057 — Security & Sandbox — high / failure-point — `sandbox-&-security.md`:162-180, 260-272
+   - Why first: `ActivatedSandbox::activate` cannot fail and always records an allowed activation event, even for an unsupported backend/platform pairing. The `SandboxError::UnsupportedBackend` and `DocumentedFallbackRequired` variants
+   - Fix direction: Make activation return `Result<ActivatedSandbox, SandboxError>`, validate backend/platform compatibility, and only emit an allowed activation event after the OS backend has actually been installed or an explicit weaker fallback has been accepted by policy.
+
+12. F059 — Security & Sandbox — high / failure-point — `sandbox-&-security.md`:21-48
+   - Why first: On non-Windows hosts, `WindowsProfile::compile` returns `Ok(Self)` using `SandboxBackend::DocumentedFallback` instead of returning `SandboxError::DocumentedFallbackRequired` or `UnsupportedBackend`. Callers that treat `O
+   - Fix direction: Return an explicit error for unavailable Windows APIs unless the caller has selected and audited a documented fallback path. Require policy-level opt-in before constructing fallback profiles.
+
+13. F060 — Security & Sandbox — high / failure-point — `sandbox-&-security.md`:383-414, 1913-1920, 1948-1958
+   - Why first: `CommandTaxonomy` classifies `git` as `Read` based only on the first token. Mutating or networked commands such as `git push`, `git clean`, or `git checkout` are therefore treated as read operations in `cmd.*` checks, an
+   - Fix direction: Classify commands by verb/subcommand and argument shape, treat unknown subcommands as deny-by-default for untrusted workspaces, and explicitly gate shell and mutating command launches behind stronger policy checks.
+
+14. F048 — Plugin — high / bug — `plugin-system.md`:136-160, 223-231
+   - Why first: Import validation allows exactly `env::host_log`, but `invoke` creates an empty `Linker` and never defines `env.host_log`. A module importing the only allowed host function successfully passes `load_fixture` but then tra
+   - Fix direction: Either reject all imports at load time if host calls are intentionally unavailable, or define `env::host_log` with `linker.func_wrap` and make the callback perform broker checks, quota accounting, and audit recording.
+
+15. F049 — Plugin — high / bug — `plugin-system.md`:171-176, 205-208
+   - Why first: `dispatch_host_call` tracks `output_bytes_used`, but quota enforcement only compares the current `metadata_label.len()` to `max_output_bytes`. Multiple accepted host calls with labels under the per-call limit can cumulat
+   - Fix direction: Compute `next_output_bytes = output_bytes_used + metadata_label.len()` with checked/saturating arithmetic and deny when the cumulative total would exceed `manifest.quotas.max_output_bytes`. Reset the counter at the correct invocation boundary if the quota is intended to be per invocation.
+
+16. F050 — Plugin — high / bug — `plugin-system.md`:181-188, 197-210, 263-265
+   - Why first: Host-call quota enforcement is tied to successful guest invocations rather than actual host calls. `used_host_calls` is checked before instantiation and incremented once after an invocation returns successfully, so the q
+   - Fix direction: Move `max_host_calls` accounting into each host-function callback, deny/trap when the per-invocation call count exceeds the quota, and reset that counter for each invocation.
+
+17. F052 — Plugin — high / bug — `plugin-system.md`:81-94
+   - Why first: The registry treats `signature.is_some()` plus a trusted self-reported `manifest.trust.decision` as sufficient proof that an artifact is signed and trusted. It does not verify that signer/algorithm/digest fields are non-
+   - Fix direction: Validate signature metadata fields at minimum, and preferably verify a detached signature over canonical manifest/module bytes against an allowlisted signer before accepting `Trusted`/`ExplicitlyAllowed`. Treat trust metadata as verification output, not as input authority from the manifest itself.
+
+18. F038 — Observability & Debug — high / bug — `observability-&-debug.md`:26-31, 58-60
+   - Why first: Crash symbol upload gating only checks `consent.crash_reports_enabled`. It ignores the master `consent.enabled` flag, so an inconsistent or stale consent record with telemetry disabled but crash reports enabled can still
+   - Fix direction: Gate symbolication/upload on a single validated consent predicate such as `consent.enabled && consent.crash_reports_enabled`, and add tests for inconsistent consent combinations.
+
+19. F040 — Observability & Debug — high / bug — `observability-&-debug.md`:713-735, 1631-1635, 1754-1757
+   - Why first: `metadata_fingerprint` and `metadata_hash` build audit fingerprints with `std::collections::hash_map::DefaultHasher`. That hasher is not a stable, documented file/audit fingerprint algorithm and is not collision-resistan
+   - Fix direction: Replace `DefaultHasher` with an explicit stable digest such as SHA-256 or BLAKE3, set `FileFingerprint.algorithm` to the real digest algorithm plus any domain-separation label, and add golden tests proving hashes remain stable across runs.
+
+20. F051 — Plugin — high / failure-point — `plugin-system.md`:41-63, 81-95
+   - Why first: `SignedExtensionRegistry` validates only signature presence and trust decision; it never calls `validate_plugin_manifest`. As a result, a signed/trusted manifest with an invalid plugin id, empty module hash, bad ABI rang
+   - Fix direction: Reuse `validate_plugin_manifest` with the current host ABI in `validate_installable` and map protocol validation errors into registry errors before inserting or updating registry state.
