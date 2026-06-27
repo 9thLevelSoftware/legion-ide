@@ -10,3 +10,5 @@ clap = { version = "=4.5.61", features = ["derive"] }
 cargo_metadata = { version = "=0.18.1" }
 serde = { workspace = true }
 toml = { workspace = true }
+legion-text = { workspace = true }
+legion-protocol = { workspace = true }

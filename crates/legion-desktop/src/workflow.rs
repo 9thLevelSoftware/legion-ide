@@ -35,6 +35,11 @@ use crate::{
     },
     diagnostics::DesktopDiagnosticsExport,
     health::DesktopOperationalHealthSnapshot,
+    manual_perf::{
+        DEFAULT_KEYPRESS_P50_BUDGET_MS, DEFAULT_KEYPRESS_P95_BUDGET_MS,
+        DEFAULT_MANUAL_RENDERER_REPORT_PATH, DEFAULT_MANUAL_RENDERER_SAMPLE_COUNT,
+        DEFAULT_SCROLL_P95_BUDGET_MS, ManualPerfConfig,
+    },
     platform::{
         NativePlatformObservation, build_platform_adapter_checks, build_platform_smoke_snapshot,
     },
@@ -63,6 +68,8 @@ pub struct DesktopLaunchConfig {
     pub smoke: Option<RendererSmokeConfig>,
     /// Optional non-native-window GUI Phase 7 beta smoke configuration.
     pub beta: Option<BetaWorkflowConfig>,
+    /// Optional desktop-owned Manual renderer performance configuration.
+    pub manual_perf: Option<ManualPerfConfig>,
     /// Optional metadata-only session JSON path.
     pub session_state: Option<PathBuf>,
     /// Optional metadata-only diagnostics markdown path.
@@ -78,6 +85,7 @@ impl DesktopLaunchConfig {
             principal: PrincipalId("desktop".to_string()),
             smoke: None,
             beta: None,
+            manual_perf: None,
             session_state: None,
             diagnostics_export: None,
         }
@@ -104,12 +112,17 @@ impl DesktopLaunchConfig {
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut smoke_enabled = false;
         let mut beta_enabled = false;
+        let mut manual_perf_enabled = false;
         let mut workspace_root = None;
         let mut beta_workspace_root = None;
         let mut initial_file = None;
         let mut duration_ms = 1500;
         let mut evidence_path =
             PathBuf::from("plans/evidence/gui-productization/phase-2-renderer-smoke.md");
+        let mut perf_report_path = PathBuf::from(DEFAULT_MANUAL_RENDERER_REPORT_PATH);
+        let mut perf_report_seen = false;
+        let mut perf_samples = DEFAULT_MANUAL_RENDERER_SAMPLE_COUNT;
+        let mut perf_samples_seen = false;
         let mut session_state = None;
         let mut diagnostics_export = None;
         let mut positionals = Vec::new();
@@ -120,6 +133,7 @@ impl DesktopLaunchConfig {
             match arg_text.as_ref() {
                 "--smoke" => smoke_enabled = true,
                 "--beta-smoke" => beta_enabled = true,
+                "--manual-perf" => manual_perf_enabled = true,
                 "--workspace" => {
                     let value = args
                         .next()
@@ -150,6 +164,22 @@ impl DesktopLaunchConfig {
                         .ok_or_else(|| anyhow!("--evidence requires a path"))?;
                     evidence_path = PathBuf::from(value);
                 }
+                "--perf-report" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--perf-report requires a path"))?;
+                    perf_report_seen = true;
+                    perf_report_path = PathBuf::from(value);
+                }
+                "--perf-samples" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--perf-samples requires a positive integer"))?;
+                    perf_samples_seen = true;
+                    perf_samples = value.to_string_lossy().parse::<usize>().map_err(|error| {
+                        anyhow!("--perf-samples requires a positive integer: {error}")
+                    })?;
+                }
                 "--session-state" => {
                     let value = args
                         .next()
@@ -179,6 +209,17 @@ impl DesktopLaunchConfig {
         }
         if smoke_enabled && beta_enabled {
             return Err(anyhow!("--smoke and --beta-smoke cannot be combined"));
+        }
+        if manual_perf_enabled && smoke_enabled {
+            return Err(anyhow!("--manual-perf and --smoke cannot be combined"));
+        }
+        if manual_perf_enabled && beta_enabled {
+            return Err(anyhow!("--manual-perf and --beta-smoke cannot be combined"));
+        }
+        if !manual_perf_enabled && (perf_report_seen || perf_samples_seen) {
+            return Err(anyhow!(
+                "--perf-report and --perf-samples require --manual-perf"
+            ));
         }
 
         let initial_file = initial_file
@@ -213,6 +254,19 @@ impl DesktopLaunchConfig {
         } else {
             None
         };
+        let manual_perf = if manual_perf_enabled {
+            Some(ManualPerfConfig::new(
+                workspace_root.clone(),
+                initial_file.as_ref().map(PathBuf::from),
+                perf_report_path,
+                perf_samples,
+                DEFAULT_KEYPRESS_P50_BUDGET_MS,
+                DEFAULT_KEYPRESS_P95_BUDGET_MS,
+                DEFAULT_SCROLL_P95_BUDGET_MS,
+            )?)
+        } else {
+            None
+        };
 
         Ok(Self {
             workspace_root,
@@ -220,6 +274,7 @@ impl DesktopLaunchConfig {
             principal: PrincipalId("desktop".to_string()),
             smoke,
             beta,
+            manual_perf,
             session_state,
             diagnostics_export,
         })
@@ -240,6 +295,17 @@ pub enum DesktopWorkflowOutcome {
     Opened,
     /// App authority applied an editor transaction.
     Edited,
+    /// App-owned clipboard metadata changed without exposing copied text.
+    ClipboardUpdated {
+        /// Buffer whose selection was copied or cut.
+        buffer_id: BufferId,
+        /// UTF-8 byte length of the selected text.
+        byte_len: usize,
+        /// Selected line count.
+        line_count: usize,
+        /// Whether the action also cut text from the buffer.
+        cut: bool,
+    },
     /// Save completed through app/workspace authority.
     Saved,
     /// Save-all completed through app/workspace authority.
@@ -573,6 +639,17 @@ impl DesktopRuntime {
             }
             action => {
                 let snapshot = self.shell.projection_snapshot();
+                if editor_text_action_blocked_by_palette(&action, &snapshot) {
+                    self.set_status(
+                        StatusSeverity::Info,
+                        "Command palette owns text input while open",
+                    );
+                    self.persist_session_if_configured();
+                    self.refresh_projection()?;
+                    self.last_outcome = DesktopWorkflowOutcome::Noop;
+                    self.persist_diagnostics_if_configured();
+                    return Ok(DesktopWorkflowOutcome::Noop);
+                }
                 let bridge_output = self.bridge.translate(action, &snapshot);
                 let outcome = match bridge_output {
                     DesktopBridgeOutput::Intent(CommandDispatchIntent::Quit) => {
@@ -755,6 +832,31 @@ impl DesktopRuntime {
             health,
             platform,
         }
+    }
+
+    /// Render one projection frame through the same persistent view/state path used by native runs.
+    pub(crate) fn render_projection_once_for_perf(
+        &mut self,
+        context: &egui::Context,
+    ) -> Result<()> {
+        let snapshot = self.projection_snapshot();
+        let view_state = self.projection_view_state();
+        let mut rendered_output = None;
+        let full_output = context.run_ui(egui::RawInput::default(), |ui| {
+            rendered_output = Some(self.view.render_with_state(ui, &snapshot, &view_state));
+        });
+        std::hint::black_box(full_output);
+        let output = rendered_output
+            .ok_or_else(|| anyhow!("manual perf renderer did not produce a projection frame"))?;
+
+        let needs_repaint = output.needs_repaint;
+        for action in output.actions {
+            self.handle_action(action)?;
+        }
+        if needs_repaint {
+            context.request_repaint();
+        }
+        Ok(())
     }
 
     fn projection_view_state(&self) -> DesktopProjectionViewState {
@@ -1142,6 +1244,23 @@ impl DesktopRuntime {
             AppCommandOutcome::Edited(_) => {
                 self.set_status(StatusSeverity::Info, "Edited");
                 DesktopWorkflowOutcome::Edited
+            }
+            AppCommandOutcome::ClipboardUpdated(metadata) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!(
+                        "Clipboard {} metadata: bytes={} lines={}",
+                        if metadata.cut { "cut" } else { "copy" },
+                        metadata.byte_len,
+                        metadata.line_count
+                    ),
+                );
+                DesktopWorkflowOutcome::ClipboardUpdated {
+                    buffer_id: metadata.buffer_id,
+                    byte_len: metadata.byte_len,
+                    line_count: metadata.line_count,
+                    cut: metadata.cut,
+                }
             }
             AppCommandOutcome::Save(AppSaveOutcome::Saved(_)) => {
                 self.set_status(StatusSeverity::Info, "Saved");
@@ -1845,6 +1964,23 @@ fn save_all_item_status_message(item: &AppSaveAllItemOutcome) -> StatusMessagePr
     }
 }
 
+fn editor_text_action_blocked_by_palette(
+    action: &DesktopAction,
+    snapshot: &ShellProjectionSnapshot,
+) -> bool {
+    snapshot.palette_projection.open
+        && matches!(
+            action,
+            DesktopAction::InsertText { .. }
+                | DesktopAction::ReplaceRange { .. }
+                | DesktopAction::DeleteRange { .. }
+                | DesktopAction::ClipboardPaste { .. }
+                | DesktopAction::ClipboardCut
+                | DesktopAction::ImeCommit { .. }
+                | DesktopAction::SelectAll { .. }
+        )
+}
+
 fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, String)> {
     match intent {
         CommandDispatchIntent::InvokePluginCommand {
@@ -1859,7 +1995,9 @@ fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, St
 /// Run the desktop adapter from process arguments.
 pub fn run_from_env() -> Result<()> {
     let config = DesktopLaunchConfig::from_env_args()?;
-    if let Some(beta_config) = config.beta.clone() {
+    if let Some(manual_perf_config) = config.manual_perf.clone() {
+        crate::manual_perf::run_manual_perf(manual_perf_config)
+    } else if let Some(beta_config) = config.beta.clone() {
         beta::run_beta_workflow(beta_config).map(|_| ())
     } else if let Some(smoke_config) = config.smoke.clone() {
         smoke::run_smoke(config, smoke_config)
@@ -2401,6 +2539,12 @@ fn editor_text_input_actions(
                     at,
                 });
             }
+            egui::Event::Copy if !composition.active && composition.preedit.is_empty() => {
+                actions.push(DesktopAction::ClipboardCopy);
+            }
+            egui::Event::Cut if !composition.active && composition.preedit.is_empty() => {
+                actions.push(DesktopAction::ClipboardCut);
+            }
             egui::Event::Ime(egui::ImeEvent::Enabled) => {
                 composition.active = true;
             }
@@ -2447,13 +2591,22 @@ fn editor_keyboard_control_actions(
     // - egui#248 tracks composition events and candidate positioning
     // - egui#7908 tracks composition-time key consumption bugs
     // Keep editor shortcuts out of the way while the IME is active.
-    if !editor_input_enabled || input.modifiers.command || ime_composition_active {
+    if !editor_input_enabled || ime_composition_active {
         return Vec::new();
     }
 
     let Some(buffer_id) = active_buffer_for_input(snapshot) else {
         return Vec::new();
     };
+
+    if input.modifiers.command {
+        if input.key_pressed(egui::Key::A) {
+            return vec![DesktopAction::SelectAll {
+                buffer_id: Some(buffer_id),
+            }];
+        }
+        return Vec::new();
+    }
 
     let mut actions = Vec::new();
     if input.key_pressed(egui::Key::Tab)
@@ -2726,6 +2879,8 @@ mod tests {
         let events = vec![
             egui::Event::Text("x".to_string()),
             egui::Event::Paste("clip".to_string()),
+            egui::Event::Copy,
+            egui::Event::Cut,
             egui::Event::Ime(egui::ImeEvent::Commit("漢".to_string())),
         ];
         let at = TextCoordinate {
@@ -2747,11 +2902,35 @@ mod tests {
                         text: "clip".to_string(),
                         at,
                     },
+                    DesktopAction::ClipboardCopy,
+                    DesktopAction::ClipboardCut,
                     DesktopAction::ImeCommit {
                         text: "漢".to_string(),
                         at,
                     },
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn editor_text_input_suppresses_copy_cut_during_ime_composition() {
+        let events = vec![egui::Event::Copy, egui::Event::Cut];
+
+        egui::__run_test_ui(|ui| {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    ime_composition_state_id(BufferId(1)),
+                    ImeCompositionProjection {
+                        active: true,
+                        preedit: "kana".to_string(),
+                    },
+                );
+            });
+
+            assert!(
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true)
+                    .is_empty()
             );
         });
     }
@@ -2830,6 +3009,8 @@ mod tests {
                 width_px: 800,
                 height_px: 600,
             },
+            line_wrapping_policy: legion_protocol::LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: legion_protocol::ViewportProjectionMode::default(),
             line_slices: vec![],
             line_metrics: vec![],
@@ -2864,6 +3045,25 @@ mod tests {
                     start: coordinate(7, 5),
                     end: coordinate(7, 6),
                 },
+            }]
+        );
+    }
+
+    #[test]
+    fn editor_keyboard_control_actions_routes_command_a_to_select_all() {
+        let snapshot = snapshot_with_active_buffer();
+        let command_a = input_state_for_key(
+            egui::Key::A,
+            egui::Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            editor_keyboard_control_actions(&command_a, &snapshot, true, false),
+            vec![DesktopAction::SelectAll {
+                buffer_id: Some(BufferId(1)),
             }]
         );
     }

@@ -452,6 +452,19 @@ pub enum ViewportProjectionMode {
     DegradedLargeFile,
 }
 
+/// Editor line wrapping policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LineWrappingPolicy {
+    /// Do not soft-wrap editor lines.
+    #[default]
+    Off,
+    /// Soft-wrap at the visible viewport width while preserving logical coordinates.
+    Viewport,
+    /// Soft-wrap at a fixed character column while preserving logical coordinates.
+    FixedColumn,
+}
+
 /// Truncation state for a visible viewport line slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ViewportLineTruncationState {
@@ -563,6 +576,17 @@ pub struct LargeFileStatus {
     pub message: String,
 }
 
+/// File size classification for UX status display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileSizeClassification {
+    /// File is within normal editing limits.
+    Normal,
+    /// File exceeds the large-file threshold and operates in degraded mode.
+    Large,
+    /// File was detected as binary content and cannot be previewed as text.
+    Binary,
+}
+
 /// Protocol-level viewport projection for later UI rendering contracts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewportProjection {
@@ -589,6 +613,12 @@ pub struct ViewportProjection {
     pub scroll: ViewportScroll,
     /// Viewport dimensions.
     pub dimensions: ViewportDimensions,
+    /// Renderer presentation-only line wrapping policy for the projected viewport.
+    #[serde(default)]
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column for presentation-only soft wrapping.
+    #[serde(default)]
+    pub wrap_column: Option<u32>,
     /// Projection mode used to produce the viewport payload.
     #[serde(default)]
     pub mode: ViewportProjectionMode,
@@ -1286,6 +1316,8 @@ pub struct EditorBufferMetadata {
     pub undo_len: usize,
     /// Number of redo entries retained for the buffer.
     pub redo_len: usize,
+    /// File size classification for UX display.
+    pub file_size_classification: FileSizeClassification,
     /// Metadata DTO schema version.
     pub schema_version: u16,
 }
@@ -19796,6 +19828,23 @@ pub struct WorkbenchFontSettings {
     pub schema_version: u16,
 }
 
+/// Metadata-only font fallback diagnostic surfaced by the desktop renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchFontFallbackDiagnostic {
+    /// Requested family label, never a raw filesystem path.
+    pub requested_family_label: String,
+    /// Resolved family label, never a raw filesystem path.
+    pub resolved_family_label: String,
+    /// Script or glyph coverage label.
+    pub coverage_label: String,
+    /// Whether a host fallback was found.
+    pub fallback_found: bool,
+    /// Display-safe diagnostic message.
+    pub message: String,
+    /// DTO schema version.
+    pub schema_version: u16,
+}
+
 /// Workbench layout settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkbenchLayoutSettings {
@@ -19860,6 +19909,9 @@ pub struct WorkbenchSettingsRecord {
     pub theme_preference: String,
     /// UI zoom percentage.
     pub zoom_percent: u16,
+    /// Editor font family label.
+    #[serde(default = "default_editor_font_family")]
+    pub editor_font_family: String,
     /// Editor font size in points.
     pub editor_font_size_pt: u16,
     /// Toast verbosity label.
@@ -19880,6 +19932,12 @@ pub struct WorkbenchSettingsRecord {
     pub indent_guides_visible: bool,
     /// Whether smooth scrolling is enabled.
     pub smooth_scrolling_enabled: bool,
+    /// Editor line wrapping policy.
+    #[serde(default)]
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column.
+    #[serde(default = "default_wrap_column")]
+    pub wrap_column: Option<u32>,
     /// Whether workspace search may use the optional indexed backend.
     #[serde(default)]
     pub indexed_workspace_search_enabled: bool,
@@ -19893,11 +19951,20 @@ pub struct WorkbenchSettingsRecord {
     pub schema_version: u16,
 }
 
+fn default_editor_font_family() -> String {
+    "monospace".to_string()
+}
+
+fn default_wrap_column() -> Option<u32> {
+    Some(120)
+}
+
 impl Default for WorkbenchSettingsRecord {
     fn default() -> Self {
         Self {
             theme_preference: "dark".to_string(),
             zoom_percent: 100,
+            editor_font_family: default_editor_font_family(),
             editor_font_size_pt: 12,
             toast_verbosity: "warnings_and_errors".to_string(),
             line_numbers_visible: true,
@@ -19908,6 +19975,8 @@ impl Default for WorkbenchSettingsRecord {
             whitespace_guides_visible: false,
             indent_guides_visible: false,
             smooth_scrolling_enabled: true,
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: default_wrap_column(),
             indexed_workspace_search_enabled: false,
             next_edit_prediction_enabled: false,
             telemetry: WorkbenchTelemetryConsent::default(),
@@ -21615,7 +21684,7 @@ pub enum StorageRepositoryResponse {
     /// Metadata.
     FileMetadata(Option<FileMetadata>),
     /// Session record.
-    SessionRecord(Option<WorkspaceSessionRecord>),
+    SessionRecord(Box<Option<WorkspaceSessionRecord>>),
     /// Trust record.
     TrustRecord(Option<TrustRecord>),
     /// Proposal audit record.

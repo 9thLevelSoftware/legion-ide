@@ -82,6 +82,12 @@ fn run_git<const N: usize>(root: &Path, args: [&str; N]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn projected_path_matches(path: &str, expected: &Path) -> bool {
+    Path::new(path)
+        .canonicalize()
+        .is_ok_and(|actual| actual == expected)
+}
+
 #[test]
 fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
     let repo = TempGitRepo::new();
@@ -141,7 +147,7 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         projection
             .worktrees
             .iter()
-            .any(|worktree| worktree.path == repo_root.display().to_string())
+            .any(|worktree| projected_path_matches(&worktree.path, &repo_root))
     );
     assert_eq!(
         app.shell_projection_snapshot("git")

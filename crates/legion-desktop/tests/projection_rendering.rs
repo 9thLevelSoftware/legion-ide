@@ -12,14 +12,15 @@ use legion_protocol::{
     CollaborationSessionId, CommandDescriptor, CommandRegistryProjection, CommandRiskLabel,
     ContextManifestEgressStatus, ContextManifestInclusionState, ContextManifestItem,
     ContextManifestItemCount, ContextManifestItemKind, FileFingerprint, FileId,
-    LanguageStickyScopeProjection, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, PluginId, PrincipalId, ProposalContextManifestSummary,
-    ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
-    ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
-    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId,
-    SystemGraphEdge, SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis,
-    Utf16Position, Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
+    LanguageStickyScopeProjection, LargeFileStatus, LineWrappingPolicy, PluginCommandDescriptor,
+    PluginContribution, PluginContributionProjection, PluginId, PrincipalId,
+    ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
+    ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
+    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
+    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
+    ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId, SystemGraphEdge,
+    SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis, Utf16Position,
+    Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
     ViewportDimensions, ViewportFoldRange, ViewportLineSlice, ViewportLineTruncationState,
     ViewportProjection, ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay, WorkspaceId,
@@ -382,6 +383,8 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 width_px: 800,
                 height_px: 600,
             },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: ViewportProjectionMode::DegradedLargeFile,
             line_slices: vec![ViewportLineSlice {
                 line_number: 0,
@@ -404,7 +407,18 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
             decoration_spans: Vec::new(),
             fold_ranges: Vec::new(),
             semantic_token_overlays: Vec::new(),
-            large_file_status: None,
+            large_file_status: Some(LargeFileStatus {
+                threshold_bytes: 16,
+                byte_len: 64,
+                disabled_overlay_reasons: vec![
+                    "semantic overlays disabled".to_string(),
+                    "C:\\Windows\\Fonts\\malgun.ttf\nHIDDEN_NEEDLE_AFTER_VIEWPORT".to_string(),
+                    "/System/Library/Fonts/PingFang.ttc\u{0000}".to_string(),
+                    "/usr/share/fonts/noto/NotoSansCJK.ttc".to_string(),
+                ],
+                bounded_search_enabled: true,
+                message: "degraded large file".to_string(),
+            }),
             schema_version: 1,
         }),
         state: legion_ui::ActiveBufferProjectionState::Degraded,
@@ -496,6 +510,8 @@ fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 width_px: 800,
                 height_px: 600,
             },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: ViewportProjectionMode::Normal,
             line_slices: vec![
                 ViewportLineSlice {
@@ -1125,7 +1141,9 @@ fn projection_rendering_projects_workbench_settings_model() {
     snapshot.settings_projection = SettingsProjection {
         theme_preference: ThemePreferenceProjection::System,
         zoom_percent: 220,
+        editor_font_family: "  JetBrains Mono<script>\n".to_string(),
         editor_font_size_pt: 8,
+        font_fallback_diagnostics: Vec::new(),
         toast_verbosity: ToastVerbosityProjection::All,
         editor: legion_ui::EditorSettingsProjection {
             line_numbers_visible: false,
@@ -1136,6 +1154,8 @@ fn projection_rendering_projects_workbench_settings_model() {
             whitespace_guides_visible: true,
             indent_guides_visible: true,
             smooth_scrolling_enabled: true,
+            line_wrapping_policy: LineWrappingPolicy::FixedColumn,
+            wrap_column: Some(12),
         },
         telemetry: legion_protocol::WorkbenchTelemetryConsent::default(),
         indexed_workspace_search_enabled: false,
@@ -1158,6 +1178,7 @@ fn projection_rendering_projects_workbench_settings_model() {
         model.settings.editor_font_size_pt,
         SettingsProjection::MIN_EDITOR_FONT_SIZE_PT
     );
+    assert_eq!(model.settings.editor_font_family, "JetBrains Monoscript");
     assert_eq!(
         model.settings.toast_verbosity,
         ToastVerbosityProjection::All
@@ -1171,6 +1192,12 @@ fn projection_rendering_projects_workbench_settings_model() {
     assert!(model.settings.whitespace_guides_visible);
     assert!(model.settings.indent_guides_visible);
     assert!(model.settings.smooth_scrolling_enabled);
+    assert_eq!(
+        model.settings.line_wrapping_policy,
+        LineWrappingPolicy::FixedColumn
+    );
+    assert_eq!(model.settings.wrap_column, Some(40));
+    assert_eq!(model.settings.wrapping_row, "wrapping: fixed_column 40");
     assert!(!model.settings.crash_reports_enabled);
     assert_eq!(model.settings.telemetry_label, "local-only");
     assert!(
@@ -1222,6 +1249,8 @@ fn projection_rendering_projects_editor_polish_summary_rows() {
             width_px: 80,
             height_px: 24,
         },
+        line_wrapping_policy: LineWrappingPolicy::Off,
+        wrap_column: None,
         mode: ViewportProjectionMode::Normal,
         line_slices: Vec::new(),
         line_metrics: Vec::new(),
@@ -1361,6 +1390,20 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             .iter()
             .any(|row| row.contains("visible streaming line"))
     );
+    assert!(
+        degraded_model
+            .large_file_banner_rows
+            .iter()
+            .any(|row| row.contains("capability reduced: semantic overlays disabled"))
+    );
+    assert!(degraded_model.large_file_banner_rows.iter().all(|row| {
+        !row.contains("HIDDEN_NEEDLE_AFTER_VIEWPORT")
+            && !row.contains("\\Windows\\Fonts")
+            && !row.contains("/System/Library/Fonts")
+            && !row.contains("/usr/share/fonts")
+            && !row.contains('\n')
+            && !row.contains('\0')
+    }));
 }
 
 #[test]

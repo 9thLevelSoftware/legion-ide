@@ -274,6 +274,52 @@ fn cjk_font_definitions() -> Option<FontDefinitions> {
         .clone()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FontFallbackProbe {
+    pub(crate) requested_family_label: String,
+    pub(crate) resolved_family_label: String,
+    pub(crate) coverage_label: String,
+    pub(crate) fallback_found: bool,
+    pub(crate) message: String,
+}
+
+pub(crate) fn font_fallback_probe(requested_family_label: &str) -> FontFallbackProbe {
+    let fallback_found = cjk_font_definitions().is_some();
+    FontFallbackProbe {
+        requested_family_label: sanitize_font_family_label(requested_family_label),
+        resolved_family_label: if fallback_found {
+            "legion-cjk-fallback".to_string()
+        } else {
+            "egui-default".to_string()
+        },
+        coverage_label: "cjk".to_string(),
+        fallback_found,
+        message: if fallback_found {
+            "CJK fallback loaded from host font catalog".to_string()
+        } else {
+            "CJK fallback not found in host font catalog".to_string()
+        },
+    }
+}
+
+fn sanitize_font_family_label(value: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() {
+        return "monospace".to_string();
+    }
+
+    let normalized = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+        .take(64)
+        .collect::<String>();
+    if normalized.trim().is_empty() {
+        "monospace".to_string()
+    } else {
+        normalized
+    }
+}
+
 fn build_cjk_font_definitions() -> Option<FontDefinitions> {
     let mut fonts = FontDefinitions::default();
     let (font_name, font_bytes) = load_cjk_font_bytes()?;
@@ -348,7 +394,10 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
         ThemeVariant::Dark => egui::Theme::Dark,
         ThemeVariant::Light => egui::Theme::Light,
     });
-    if let Some(fonts) = cjk_font_definitions() {
+    let fallback_probe = font_fallback_probe("monospace");
+    if fallback_probe.fallback_found
+        && let Some(fonts) = cjk_font_definitions()
+    {
         ctx.set_fonts(fonts);
     }
     let mut visuals = match theme.variant {

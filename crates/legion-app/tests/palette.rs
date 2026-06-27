@@ -76,6 +76,19 @@ fn open_app(root: &Path, file: Option<&Path>) -> AppComposition {
     app
 }
 
+fn projected_path_eq(actual: Option<&str>, expected: &Path) -> bool {
+    let Some(actual) = actual else {
+        return false;
+    };
+    let Ok(actual) = Path::new(actual).canonicalize() else {
+        return false;
+    };
+    let Ok(expected) = expected.canonicalize() else {
+        return false;
+    };
+    actual == expected
+}
+
 #[test]
 fn palette_file_mode_ranks_workspace_file_results() {
     let workspace = TempWorkspace::new();
@@ -142,20 +155,17 @@ fn palette_file_mode_frecency_boosts_recently_focused_file() {
         .expect("projection should build")
         .palette_projection;
 
-    let first_path = first.to_string_lossy().to_string();
-    let second_path = second.to_string_lossy().to_string();
-
     assert_eq!(palette.mode, PaletteMode::File);
     assert_eq!(palette.results[0].kind, PaletteResultKind::File);
-    assert_eq!(
+    assert!(projected_path_eq(
         palette.results[0].path.as_deref(),
-        Some(first_path.as_str())
-    );
+        &first
+    ));
     assert!(
         palette
             .results
             .iter()
-            .any(|result| result.path.as_deref() == Some(second_path.as_str()))
+            .any(|result| projected_path_eq(result.path.as_deref(), &second))
     );
 }
 
@@ -178,14 +188,12 @@ fn palette_symbol_mode_opens_symbol_location() {
         .expect("projection should build")
         .palette_projection;
 
-    let source_path = source.to_string_lossy().to_string();
-
     assert_eq!(palette.mode, PaletteMode::Symbol);
     assert_eq!(palette.results[0].kind, PaletteResultKind::Symbol);
-    assert_eq!(
+    assert!(projected_path_eq(
         palette.results[0].path.as_deref(),
-        Some(source_path.as_str())
-    );
+        &source
+    ));
     assert!(palette.results[0].position.is_some());
 
     let outcome = app
@@ -232,15 +240,12 @@ fn palette_recent_buffers_mode_switches_to_recent_tab() {
         .expect("projection should build")
         .palette_projection;
 
-    let first_path = first.to_string_lossy().to_string();
-    let _second_path = second.to_string_lossy().to_string();
-
     assert_eq!(palette.mode, PaletteMode::RecentBuffers);
     assert_eq!(palette.results[0].kind, PaletteResultKind::RecentBuffers);
-    assert_eq!(
+    assert!(projected_path_eq(
         palette.results[0].path.as_deref(),
-        Some(first_path.as_str())
-    );
+        &first
+    ));
     assert_eq!(palette.results[0].buffer_id, Some(first_buffer));
 
     let outcome = app

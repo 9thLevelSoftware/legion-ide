@@ -2194,13 +2194,27 @@ mod tests {
     #[test]
     fn process_execution_strips_secret_like_env_vars() {
         let process = NativeProcessService;
+        #[cfg(windows)]
+        let (command, args) = (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "[Console]::Out.Write($env:KEEP_ME + '|' + $env:OPENAI_API_KEY)".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "printf '%s|%s' \"$KEEP_ME\" \"${OPENAI_API_KEY:-}\"".to_string(),
+            ],
+        );
         let result = process
             .execute(&ProcessRequest {
-                command: "sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "printf '%s|%s' \"$KEEP_ME\" \"${OPENAI_API_KEY:-}\"".to_string(),
-                ],
+                command,
+                args,
                 cwd: None,
                 env: vec![
                     ("KEEP_ME".to_string(), "visible".to_string()),

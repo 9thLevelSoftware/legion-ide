@@ -53,6 +53,31 @@ fn sandbox_path(plan_id: &DelegatedTaskPlanId) -> PathBuf {
     PathBuf::from("target/delegated-tasks").join(format!("task-{}", plan_id.0))
 }
 
+#[cfg(windows)]
+fn acp_host_command() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("powershell"),
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            r#"$ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path $env:LEGION_ACP_TARGET_DIR | Out-Null; @('external-agent=claude-code', "plan=$env:LEGION_ACP_PLAN_ID") | Set-Content -LiteralPath $env:LEGION_ACP_TARGET_PATH -Encoding UTF8"#
+                .to_string(),
+        ],
+    )
+}
+
+#[cfg(not(windows))]
+fn acp_host_command() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".to_string(),
+            r#"mkdir -p "$(dirname "$LEGION_ACP_TARGET_PATH")"; printf 'external-agent=claude-code\nplan=%s\n' "$LEGION_ACP_PLAN_ID" > "$LEGION_ACP_TARGET_PATH""#
+                .to_string(),
+        ],
+    )
+}
+
 fn temp_workspace(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "legion_app_delegated_{label}_{}",
@@ -254,14 +279,8 @@ fn execute_delegated_task_uses_acp_host_command_and_projects_comm_stream() {
     )
     .expect("workspace opens for projection snapshot");
     app.seed_delegated_task_plan_contracts(vec![delegated_plan_contract(plan_id.clone())]);
-    app.set_acp_host_command(
-        PathBuf::from("/bin/sh"),
-        vec![
-            "-c".to_string(),
-            r#"mkdir -p "$(dirname "$LEGION_ACP_TARGET_PATH")"; printf 'external-agent=claude-code\nplan=%s\n' "$LEGION_ACP_PLAN_ID" > "$LEGION_ACP_TARGET_PATH""#
-                .to_string(),
-        ],
-    );
+    let (program, args) = acp_host_command();
+    app.set_acp_host_command(program, args);
 
     let request_id = match app
         .execute_delegated_task(&plan_id)

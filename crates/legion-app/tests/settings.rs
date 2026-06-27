@@ -6,7 +6,7 @@ use std::{
 };
 
 use legion_app::{AppCommandOutcome, AppComposition};
-use legion_protocol::{PrincipalId, WorkspaceTrustState};
+use legion_protocol::{LineWrappingPolicy, PrincipalId, WorkspaceTrustState};
 use legion_ui::{
     CommandDispatchIntent, PaletteMode, PaletteResultKind, SearchScopeProjection,
     SettingsProjection, ThemePreferenceProjection, ToastVerbosityProjection,
@@ -99,6 +99,14 @@ fn settings_intents_update_projection_and_clamp_numeric_values() {
     );
 
     let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetEditorFontFamily {
+            family: "  JetBrains Mono<script>\n".to_string(),
+        })
+        .expect("editor font family should update"),
+    );
+    assert_eq!(settings.editor_font_family, "JetBrains Monoscript");
+
+    let settings = settings_from_outcome(
         app.dispatch_ui_intent(CommandDispatchIntent::SetToastVerbosity {
             verbosity: ToastVerbosityProjection::All,
         })
@@ -153,6 +161,32 @@ fn settings_intents_update_projection_and_clamp_numeric_values() {
             .expect("smooth scrolling setting should update"),
     );
     assert!(!settings.editor.smooth_scrolling_enabled);
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetLineWrappingPolicy {
+            policy: LineWrappingPolicy::FixedColumn,
+            wrap_column: Some(999),
+        })
+        .expect("line wrapping policy should update"),
+    );
+    assert_eq!(
+        settings.editor.line_wrapping_policy,
+        LineWrappingPolicy::FixedColumn
+    );
+    assert_eq!(settings.editor.wrap_column, Some(240));
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetLineWrappingPolicy {
+            policy: LineWrappingPolicy::Off,
+            wrap_column: Some(80),
+        })
+        .expect("line wrapping policy should update"),
+    );
+    assert_eq!(
+        settings.editor.line_wrapping_policy,
+        LineWrappingPolicy::Off
+    );
+    assert_eq!(settings.editor.wrap_column, None);
 
     let settings = settings_from_outcome(
         app.dispatch_ui_intent(CommandDispatchIntent::SetIndexedWorkspaceSearchEnabled {

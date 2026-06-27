@@ -10,15 +10,15 @@ use legion_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRuntimeActivationState,
     DelegatedTaskToolPermissionDecision, FileFingerprint, FileId, LanguageToolingProjection,
     LegionWorkflowConflictId, LegionWorkflowProjection, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, PermissionBudgetProjection,
-    PluginContributionProjection, PluginId, PrivacyInspectorProjection, ProductMode,
-    ProductRuntimeSurface, ProposalApprovalChecklistProjection, ProposalCancellationReason,
-    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
-    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
-    RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
+    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, LineWrappingPolicy,
+    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
+    ProductMode, ProductRuntimeSurface, ProposalApprovalChecklistProjection,
+    ProposalCancellationReason, ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel,
+    ProposalRejectionReason, ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange,
+    RedactionHint, RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
     TerminalSessionId, TextCoordinate, TimestampMillis, Utf16Range, VerificationRunProjection,
-    ViewportLineTruncationState, ViewportScroll, WorkbenchTelemetryConsent, WorkspaceId,
-    product_mode_allows_runtime_surface,
+    ViewportLineTruncationState, ViewportScroll, WorkbenchFontFallbackDiagnostic,
+    WorkbenchTelemetryConsent, WorkspaceId, product_mode_allows_runtime_surface,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2064,6 +2064,12 @@ pub struct EditorSettingsProjection {
     pub indent_guides_visible: bool,
     /// Whether smooth scrolling is enabled.
     pub smooth_scrolling_enabled: bool,
+    /// Editor line wrapping policy.
+    #[serde(default)]
+    pub line_wrapping_policy: LineWrappingPolicy,
+    /// Optional fixed wrapping column.
+    #[serde(default = "default_wrap_column")]
+    pub wrap_column: Option<u32>,
 }
 
 impl Default for EditorSettingsProjection {
@@ -2077,6 +2083,8 @@ impl Default for EditorSettingsProjection {
             whitespace_guides_visible: false,
             indent_guides_visible: false,
             smooth_scrolling_enabled: true,
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: default_wrap_column(),
         }
     }
 }
@@ -2088,8 +2096,14 @@ pub struct SettingsProjection {
     pub theme_preference: ThemePreferenceProjection,
     /// UI zoom percentage.
     pub zoom_percent: u16,
+    /// Editor font family label.
+    #[serde(default = "default_editor_font_family_label")]
+    pub editor_font_family: String,
     /// Editor font size in points.
     pub editor_font_size_pt: u16,
+    /// Metadata-only renderer fallback diagnostics.
+    #[serde(default)]
+    pub font_fallback_diagnostics: Vec<WorkbenchFontFallbackDiagnostic>,
     /// Toast verbosity.
     pub toast_verbosity: ToastVerbosityProjection,
     /// Editor options.
@@ -2119,9 +2133,17 @@ impl SettingsProjection {
         self.zoom_percent = self
             .zoom_percent
             .clamp(Self::MIN_ZOOM_PERCENT, Self::MAX_ZOOM_PERCENT);
+        self.editor_font_family = normalize_font_family_label(&self.editor_font_family);
         self.editor_font_size_pt = self
             .editor_font_size_pt
             .clamp(Self::MIN_EDITOR_FONT_SIZE_PT, Self::MAX_EDITOR_FONT_SIZE_PT);
+        self.font_fallback_diagnostics.truncate(8);
+        self.editor.wrap_column = match self.editor.line_wrapping_policy {
+            LineWrappingPolicy::FixedColumn => {
+                Some(self.editor.wrap_column.unwrap_or(120).clamp(40, 240))
+            }
+            LineWrappingPolicy::Off | LineWrappingPolicy::Viewport => None,
+        };
         self.telemetry.enabled = self.telemetry.crash_reports_enabled;
         self.telemetry.raw_source_allowed = false;
         self.telemetry.consent_label = if self.telemetry.crash_reports_enabled {
@@ -2136,12 +2158,40 @@ impl SettingsProjection {
     }
 }
 
+fn normalize_font_family_label(value: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() {
+        return default_editor_font_family_label();
+    }
+
+    let normalized = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+        .take(64)
+        .collect::<String>();
+    if normalized.trim().is_empty() {
+        default_editor_font_family_label()
+    } else {
+        normalized
+    }
+}
+
+fn default_editor_font_family_label() -> String {
+    "monospace".to_string()
+}
+
+fn default_wrap_column() -> Option<u32> {
+    Some(120)
+}
+
 impl Default for SettingsProjection {
     fn default() -> Self {
         Self {
             theme_preference: ThemePreferenceProjection::Dark,
             zoom_percent: 100,
+            editor_font_family: default_editor_font_family_label(),
             editor_font_size_pt: 12,
+            font_fallback_diagnostics: Vec::new(),
             toast_verbosity: ToastVerbosityProjection::WarningsAndErrors,
             editor: EditorSettingsProjection::default(),
             telemetry: WorkbenchTelemetryConsent::default(),
@@ -2198,6 +2248,21 @@ pub enum CommandDispatchIntent {
         range: ProtocolTextRange,
         /// Replacement payload.
         replacement: String,
+    },
+    /// Copy the current editor selection through app-owned metadata-only clipboard authority.
+    ClipboardCopy {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Cut the current editor selection through app/editor authority.
+    ClipboardCut {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Select the entire target buffer through editor authority.
+    SelectAll {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
     },
     /// Save through the editor save-request and workspace write path.
     Save {
@@ -2279,6 +2344,11 @@ pub enum CommandDispatchIntent {
         /// Requested editor font size in points.
         font_size_pt: u16,
     },
+    /// Update the app-owned editor font family.
+    SetEditorFontFamily {
+        /// Requested editor font family label.
+        family: String,
+    },
     /// Update app-owned toast verbosity.
     SetToastVerbosity {
         /// Requested toast verbosity.
@@ -2323,6 +2393,13 @@ pub enum CommandDispatchIntent {
     SetSmoothScrollingEnabled {
         /// Whether smooth scrolling should be enabled.
         enabled: bool,
+    },
+    /// Update editor line wrapping policy.
+    SetLineWrappingPolicy {
+        /// Requested line wrapping policy.
+        policy: LineWrappingPolicy,
+        /// Optional fixed wrap column.
+        wrap_column: Option<u32>,
     },
     /// Toggle workspace search using the optional indexed backend.
     SetIndexedWorkspaceSearchEnabled {
@@ -5132,7 +5209,18 @@ mod tests {
             theme_preference: ThemePreferenceProjection::parse("System")
                 .expect("theme label should parse"),
             zoom_percent: 999,
+            editor_font_family: "  JetBrains Mono<script>\n".to_string(),
             editor_font_size_pt: 1,
+            font_fallback_diagnostics: (0..9)
+                .map(|index| WorkbenchFontFallbackDiagnostic {
+                    requested_family_label: "JetBrains Mono".to_string(),
+                    resolved_family_label: "legion-cjk-fallback".to_string(),
+                    coverage_label: format!("cjk-{index}"),
+                    fallback_found: true,
+                    message: "CJK fallback loaded from host font catalog".to_string(),
+                    schema_version: 1,
+                })
+                .collect(),
             toast_verbosity: ToastVerbosityProjection::parse("All statuses")
                 .expect("toast label should parse"),
             editor: EditorSettingsProjection {
@@ -5144,6 +5232,8 @@ mod tests {
                 whitespace_guides_visible: false,
                 indent_guides_visible: false,
                 smooth_scrolling_enabled: true,
+                line_wrapping_policy: LineWrappingPolicy::FixedColumn,
+                wrap_column: Some(12),
             },
             telemetry: WorkbenchTelemetryConsent::default(),
             indexed_workspace_search_enabled: false,
@@ -5154,11 +5244,18 @@ mod tests {
 
         assert_eq!(settings.theme_preference, ThemePreferenceProjection::System);
         assert_eq!(settings.zoom_percent, SettingsProjection::MAX_ZOOM_PERCENT);
+        assert_eq!(settings.editor_font_family, "JetBrains Monoscript");
         assert_eq!(
             settings.editor_font_size_pt,
             SettingsProjection::MIN_EDITOR_FONT_SIZE_PT
         );
+        assert_eq!(settings.font_fallback_diagnostics.len(), 8);
         assert_eq!(settings.toast_verbosity, ToastVerbosityProjection::All);
+        assert_eq!(
+            settings.editor.line_wrapping_policy,
+            LineWrappingPolicy::FixedColumn
+        );
+        assert_eq!(settings.editor.wrap_column, Some(40));
         assert!(!settings.editor.line_numbers_visible);
         assert!(!settings.editor.current_line_highlight);
         assert!(!settings.telemetry.crash_reports_enabled);
@@ -5582,6 +5679,8 @@ mod tests {
                 width_px: 800,
                 height_px: 32,
             },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: ViewportProjectionMode::DegradedLargeFile,
             line_slices: vec![
                 ViewportLineSlice {

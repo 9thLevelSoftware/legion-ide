@@ -92,6 +92,10 @@ fn run_search(
     }
 }
 
+fn path_ends_with(path: &str, suffix: &str) -> bool {
+    path.replace('\\', "/").ends_with(suffix)
+}
+
 #[test]
 fn daily_editing_search_active_file_returns_bounded_rows() {
     let workspace = TempWorkspace::new();
@@ -223,7 +227,7 @@ fn daily_editing_search_workspace_applies_include_and_exclude_globs() {
         projection.results[0]
             .file_path
             .as_ref()
-            .is_some_and(|path| path.0.ends_with("src/match.rs"))
+            .is_some_and(|path| path_ends_with(&path.0, "src/match.rs"))
     );
 }
 

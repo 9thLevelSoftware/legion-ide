@@ -815,6 +815,8 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
             width_px: 1280,
             height_px: 720,
         },
+        line_wrapping_policy: LineWrappingPolicy::Viewport,
+        wrap_column: None,
         mode: ViewportProjectionMode::DegradedLargeFile,
         line_slices: vec![ViewportLineSlice {
             line_number: 120,
@@ -875,6 +877,8 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
         "cursor": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
         "scroll": {"top_line": 120, "left_column": 4},
         "dimensions": {"width_px": 1280, "height_px": 720},
+        "line_wrapping_policy": "viewport",
+        "wrap_column": null,
         "mode": "DegradedLargeFile",
         "line_slices": [
             {
@@ -938,6 +942,8 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
         .as_object_mut()
         .expect("legacy viewport payload must be JSON object");
     legacy_map.remove("mode");
+    legacy_map.remove("line_wrapping_policy");
+    legacy_map.remove("wrap_column");
     legacy_map.remove("line_slices");
     legacy_map.remove("line_metrics");
     legacy_map.remove("decoration_spans");
@@ -952,6 +958,11 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
     ));
     assert!(legacy_roundtrip.line_slices.is_empty());
     assert!(legacy_roundtrip.line_metrics.is_empty());
+    assert_eq!(
+        legacy_roundtrip.line_wrapping_policy,
+        LineWrappingPolicy::Off
+    );
+    assert_eq!(legacy_roundtrip.wrap_column, None);
     assert!(legacy_roundtrip.large_file_status.is_none());
 
     let mut missing_workspace = value.clone();
@@ -4044,6 +4055,7 @@ fn dto_contracts_session_record_schema_golden() {
         "workbench_settings": {
             "theme_preference": "dark",
             "zoom_percent": 100,
+            "editor_font_family": "monospace",
             "editor_font_size_pt": 12,
             "toast_verbosity": "warnings_and_errors",
             "line_numbers_visible": true,
@@ -4056,6 +4068,8 @@ fn dto_contracts_session_record_schema_golden() {
             "indexed_workspace_search_enabled": false,
             "next_edit_prediction_enabled": false,
             "smooth_scrolling_enabled": true,
+            "line_wrapping_policy": "off",
+            "wrap_column": 120,
             "telemetry": {
                 "enabled": false,
                 "crash_reports_enabled": false,
@@ -4704,6 +4718,8 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
             width_px: 1280,
             height_px: 720,
         },
+        line_wrapping_policy: LineWrappingPolicy::Off,
+        wrap_column: None,
         mode: ViewportProjectionMode::Normal,
         line_slices: vec![],
         line_metrics: vec![],
@@ -4732,6 +4748,8 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
         "cursor": {"line": 2, "character": 4, "byte_offset": 20, "utf16_offset": 18},
         "scroll": {"top_line": 1, "left_column": 0},
         "dimensions": {"width_px": 1280, "height_px": 720},
+        "line_wrapping_policy": "off",
+        "wrap_column": null,
         "mode": "Normal",
         "line_slices": [],
         "line_metrics": [],

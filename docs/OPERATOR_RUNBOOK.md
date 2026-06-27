@@ -76,7 +76,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-CI runs cargo-deny through `EmbarkStudios/cargo-deny-action` on the Linux matrix leg, so local developer machines must install the CLI separately before running the full verification suite.
+No GitHub Actions CI workflow is currently configured, so local developer machines must install the CLI before running the full verification suite.
 
 ## Evidence naming
 
