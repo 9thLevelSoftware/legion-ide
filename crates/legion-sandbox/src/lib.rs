@@ -273,16 +273,52 @@ impl fmt::Display for SandboxError {
 
 impl std::error::Error for SandboxError {}
 
-/// Returns true when the path is lexically inside the scope.
+/// Returns true when the path resolves to a location inside the scope.
+///
+/// Lexical normalization alone is not a safe write boundary: a symlink inside
+/// the workspace can point outside it, so a purely textual prefix check can be
+/// bypassed. To fail closed, both the candidate and the scope are resolved with
+/// filesystem-aware canonicalization (which follows symlinks) before the prefix
+/// comparison. Because the candidate is frequently a not-yet-created file, we
+/// canonicalize the longest existing ancestor and re-append the remaining,
+/// not-yet-created components lexically. When nothing along a path exists (for
+/// example synthetic paths in unit tests), we fall back to lexical
+/// normalization.
 fn path_is_within_scope(candidate: &Path, scope: &Path) -> bool {
-    let candidate = normalize_path(candidate);
-    let scope = normalize_path(scope);
-
+    let scope = resolve_for_scope_check(scope);
     if scope.components().count() == 0 {
         return false;
     }
 
+    let candidate = resolve_for_scope_check(candidate);
     candidate.starts_with(&scope)
+}
+
+/// Resolve a path for boundary checking by canonicalizing its longest existing
+/// ancestor (following symlinks) and re-appending the trailing components that
+/// do not yet exist. Falls back to lexical normalization when no ancestor can
+/// be canonicalized.
+fn resolve_for_scope_check(path: &Path) -> PathBuf {
+    let normalized = normalize_path(path);
+    let mut existing = normalized.as_path();
+    let mut trailing: Vec<&std::ffi::OsStr> = Vec::new();
+
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            let mut resolved = canonical;
+            for component in trailing.iter().rev() {
+                resolved.push(component);
+            }
+            return normalize_path(&resolved);
+        }
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                trailing.push(name);
+                existing = parent;
+            }
+            _ => return normalized,
+        }
+    }
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

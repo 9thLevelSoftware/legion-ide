@@ -2,12 +2,13 @@ use legion_ai::redaction::redact_model_bound_output;
 
 #[test]
 fn redact_model_bound_output_scrubs_secret_markers_and_truncates() {
-    let output = "prefix OPENAI_API_KEY=sk-test-1234567890 Authorization: Bearer abcdefghijklmnopqrstuvwxyz raw blob payload";
+    let output = "prefix OPENAI_API_KEY=sk-test-mock Authorization: Bearer mock-token-value trailing context that keeps this payload beyond the byte ceiling";
 
     let redacted = redact_model_bound_output(output, 48);
 
     assert!(redacted.redacted_text.contains("[redacted]"));
-    assert!(!redacted.redacted_text.contains("sk-test-1234567890"));
+    assert!(!redacted.redacted_text.contains("sk-test-mock"));
+    assert!(!redacted.redacted_text.contains("mock-token-value"));
     assert!(redacted.redacted_text.len() <= 48);
     assert!(redacted.redacted);
     assert!(redacted.truncated);
@@ -30,7 +31,7 @@ fn redact_model_bound_output_preserves_utf8_boundaries() {
 
 #[test]
 fn redact_model_bound_output_scrubs_new_context_scanning_markers() {
-    let output = "proposal_content: retained_context: terminal_excerpts: ejected_context: OPENAI_API_KEY=sk-secret";
+    let output = "proposal_content: retained_context: terminal_excerpts: ejected_context: OPENAI_API_KEY=sk-test-mock";
 
     let redacted = redact_model_bound_output(output, 256);
 

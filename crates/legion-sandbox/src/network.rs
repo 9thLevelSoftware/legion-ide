@@ -15,7 +15,7 @@ fn canonicalize_egress_target(raw: &str) -> Option<String> {
         target = rest;
     }
 
-    if let Some((authority, _)) = target.split(['/', '?', '#']).next().map(|part| (part, ())) {
+    if let Some(authority) = target.split(['/', '?', '#']).next() {
         target = authority;
     }
 

@@ -141,21 +141,29 @@ impl std::error::Error for KanbanBacklogValidationError {}
 /// Validate the parsed backlog. Errors are returned on the first violation;
 /// callers that need a full report can iterate card-by-card instead.
 pub fn validate_backlog(backlog: &KanbanBacklog) -> Result<(), KanbanBacklogValidationError> {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-
-    // Index all ids first so we can check duplicates globally and have a
-    // complete set for dependency lookups.
+    // Index all ids first so we can check duplicates globally (an id that
+    // fails to insert is a duplicate) and have a complete set for dependency
+    // lookups.
     let mut all_ids: BTreeSet<String> = BTreeSet::new();
     for epic in &backlog.epics {
-        check_unique(epic.id.clone(), &mut seen)?;
-        all_ids.insert(epic.id.clone());
+        if !all_ids.insert(epic.id.clone()) {
+            return Err(KanbanBacklogValidationError::DuplicateId {
+                id: epic.id.clone(),
+            });
+        }
         for feature in &epic.features {
-            check_unique(feature.id.clone(), &mut seen)?;
-            all_ids.insert(feature.id.clone());
+            if !all_ids.insert(feature.id.clone()) {
+                return Err(KanbanBacklogValidationError::DuplicateId {
+                    id: feature.id.clone(),
+                });
+            }
             for task in &feature.tasks {
-                check_unique(task.id.clone(), &mut seen)?;
+                if !all_ids.insert(task.id.clone()) {
+                    return Err(KanbanBacklogValidationError::DuplicateId {
+                        id: task.id.clone(),
+                    });
+                }
                 check_required_fields(task)?;
-                all_ids.insert(task.id.clone());
             }
         }
     }
@@ -176,16 +184,6 @@ pub fn validate_backlog(backlog: &KanbanBacklog) -> Result<(), KanbanBacklogVali
         }
     }
 
-    Ok(())
-}
-
-fn check_unique(
-    id: String,
-    seen: &mut BTreeSet<String>,
-) -> Result<(), KanbanBacklogValidationError> {
-    if !seen.insert(id.clone()) {
-        return Err(KanbanBacklogValidationError::DuplicateId { id });
-    }
     Ok(())
 }
 

@@ -39,14 +39,9 @@ pub fn split_markdown_stream(input: &str) -> Vec<MarkdownStreamSegment> {
         code_language: &mut Option<String>,
         complete: bool,
     | {
-        if code_lines.is_empty() && complete {
-            code_language.take();
-            return;
-        }
-        if code_lines.is_empty() && !complete {
-            code_language.take();
-            return;
-        }
+        // Empty code blocks (e.g. a placeholder fence with only a language
+        // label) are intentionally preserved: an opening fence was observed,
+        // so the segment is real even when it carries no body.
         let mut code = code_lines.join("");
         if complete && code.ends_with('\n') {
             code.pop();
@@ -117,6 +112,39 @@ mod tests {
             }
         );
         assert_eq!(segments[2], MarkdownStreamSegment::Text("after\n".to_string()));
+    }
+
+    #[test]
+    fn split_markdown_stream_preserves_empty_code_block_segments() {
+        let segments = split_markdown_stream("before\n```rust\n```\nafter\n");
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], MarkdownStreamSegment::Text("before\n".to_string()));
+        assert_eq!(
+            segments[1],
+            MarkdownStreamSegment::CodeBlock {
+                language: Some("rust".to_string()),
+                code: String::new(),
+                complete: true,
+            }
+        );
+        assert_eq!(segments[2], MarkdownStreamSegment::Text("after\n".to_string()));
+    }
+
+    #[test]
+    fn split_markdown_stream_preserves_empty_open_code_block_segments() {
+        let segments = split_markdown_stream("intro\n```python\n");
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0], MarkdownStreamSegment::Text("intro\n".to_string()));
+        assert_eq!(
+            segments[1],
+            MarkdownStreamSegment::CodeBlock {
+                language: Some("python".to_string()),
+                code: String::new(),
+                complete: false,
+            }
+        );
     }
 
     #[test]

@@ -32,7 +32,12 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn headless_input_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    // Recover from a poisoned lock so a panic in one test does not cascade
+    // into spurious failures across every other serialized test.
+    match TEST_LOCK.get_or_init(|| Mutex::new(())).lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 struct TempWorkspace {

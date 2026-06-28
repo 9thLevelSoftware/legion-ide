@@ -2039,12 +2039,19 @@ pub fn desktop_native_options(title: &str) -> eframe::NativeOptions {
 /// `winit` window.
 pub struct DesktopEframeApp {
     runtime: DesktopRuntime,
+    /// Persistent egui context reused across frames so frame-to-frame input
+    /// state (focus, modifiers, active widgets) survives between calls. A
+    /// fresh context per frame would silently drop that state.
+    ctx: egui::Context,
 }
 
 impl DesktopEframeApp {
     /// Build a desktop eframe app around an already-opened runtime.
     pub fn new(runtime: DesktopRuntime) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            ctx: egui::Context::default(),
+        }
     }
 
     /// Return a clone of the current app-owned shell projection snapshot.
@@ -2065,7 +2072,7 @@ impl DesktopEframeApp {
     /// app-owned projection without needing a native window. Renderer output
     /// is discarded; the harness asserts through the projection snapshot.
     pub fn run_headless_input(&mut self, raw_input: egui::RawInput) -> egui::FullOutput {
-        let ctx = egui::Context::default();
+        let ctx = self.ctx.clone();
         ctx.run_ui(raw_input, |ui| {
             self.handle_keyboard(ui);
         })
