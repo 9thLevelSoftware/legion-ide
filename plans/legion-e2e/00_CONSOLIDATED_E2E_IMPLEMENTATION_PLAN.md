@@ -1,5 +1,7 @@
 # Legion E2E Design, Development, and Implementation Plan
 
+> **Historical / supporting material.** This is a pre-Legion-rename consolidated E2E plan and is preserved for traceability only. Do not use its phase numbering or feature labels as current planning input. Current product path: `.hermes/plans/2026-06-13_173122-legion-current-to-ga-kanban-plan.md` and `plans/legion-production-master-plan-v0.1.md`. The `plans/legion-e2e/source-package/` directory contains the original planning package this was consolidated from. See `docs/INDEX.md` for current canonical documentation.
+
 > For Hermes: execute this with `subagent-driven-development`; dispatch fresh implementation subagents per task, then run spec-compliance and quality reviewers. Kimi 2.6 implementer prompts must include the exact task text, exact files, exact commands, and exact pass criteria from this document.
 
 Goal: turn the current `legion-ide` repository into the Legion IDE product described by the five planning documents in `plans/legion-e2e/source-package/`, with complete local-first deterministic IDE foundations, Assist, Delegate, Automate, Cloud Lane, and model-training/data-flywheel features.

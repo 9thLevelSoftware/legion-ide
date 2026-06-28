@@ -30,6 +30,34 @@ The current package-and-support path is intentionally explicit so release notes 
 - GUI beta dry-run: `sh scripts/gui-smoke.sh --beta --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun`
 - GUI Phase 8 dry-run: `sh scripts/gui-smoke.sh --phase-8 --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Phase8 -DryRun`
 
+### Release signer references
+
+The release pipeline config and operator runbook must describe signer references without committing any private material. Pick exactly one source for a given release run and store only the reference string in the repo or CI configuration.
+
+| Source | Where the material lives | What the repo records |
+| --- | --- | --- |
+| `env` | exported process environment | the environment variable name or alias only |
+| `keyring` | OS keychain / keyring | the service/account label only |
+| `kms` | deployment-owned KMS adapter | the key URI/ARN and adapter reference only |
+| `ci-secret` | CI secret manager | the secret name or variable name only |
+
+Recommended local example:
+
+```toml
+[signing]
+source = "keyring"
+reference = "legion-release/signing-profile"
+identity = "release-signing-profile"
+```
+
+Operational notes:
+
+- Use `env` for ephemeral local or launchd-driven runs when a shell export is the least surprising source of truth.
+- Use `keyring` when the signer material should stay bound to the host user session or machine keychain.
+- Use `kms` when a deployment-owned service or build adapter resolves the signer material outside the repository.
+- Use `ci-secret` when CI injects a signer reference and the actual credential remains in the CI secret store.
+- Never commit the private key, certificate, token value, or notarization credential itself; only commit the reference needed to look it up.
+
 ### Expected artifacts
 
 - Windows package directory: `target/gui-phase6-package/`

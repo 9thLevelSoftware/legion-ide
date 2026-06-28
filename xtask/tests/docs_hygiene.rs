@@ -114,6 +114,81 @@ fn docs_hygiene_reports_unallowlisted_devil_reference() {
 }
 
 #[test]
+fn docs_hygiene_reports_stale_legacy_mode_label_as_section() {
+    let repo = TempRepo::new("legacy-mode-section");
+    repo.write(
+        "docs/MODES.md",
+        "# Modes\n\n## Manual\n\nManual mode.\n\n## Automate\n\nAutomate mode is legacy.\n",
+    );
+
+    let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
+    let violations = result.expect_err("expected stale Automate mode section violation");
+
+    assert!(
+        violations.iter().any(|violation| {
+            violation.message.contains("stale mode-taxonomy section")
+                && violation.message.contains("Automate")
+        }),
+        "expected violation mentioning stale Automate section, got: {:?}",
+        violations
+            .iter()
+            .map(|v| format!("{}:{}: {}", v.path.display(), v.line, v.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn docs_hygiene_reports_stale_delegates_label_as_section() {
+    let repo = TempRepo::new("legacy-delegates-section");
+    repo.write(
+        "docs/MODES.md",
+        "# Modes\n\n## Manual\n\n## Delegates\n\nOld wording.\n",
+    );
+
+    let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
+    let violations = result.expect_err("expected stale Delegates section violation");
+
+    assert!(
+        violations.iter().any(|violation| {
+            violation.message.contains("stale mode-taxonomy section")
+                && violation.message.contains("Delegates")
+        }),
+        "expected violation mentioning stale Delegates section, got: {:?}",
+        violations
+            .iter()
+            .map(|v| format!("{}:{}: {}", v.path.display(), v.line, v.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn docs_hygiene_accepts_canonical_mode_sections() {
+    let repo = TempRepo::new("canonical-mode-sections");
+    repo.write(
+        "docs/MODES.md",
+        "# Modes\n\n## Manual\n\n## Assist\n\n## Delegate\n\n## Legion Workflows\n",
+    );
+
+    run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
+        .expect("all four canonical mode sections must pass");
+}
+
+#[test]
+fn docs_hygiene_allows_stale_mode_label_in_allowlisted_archive() {
+    let repo = TempRepo::new("allowlist-mode-archive");
+    repo.write(
+        "plans/archive/old-modes.md",
+        "# Old\n\n## Automate\n\nOld mode taxonomy.\n",
+    );
+    let config = DocsHygieneConfig {
+        allowlisted_paths: vec!["plans/archive/".to_string()],
+    };
+
+    run_docs_hygiene(&repo.root, &config)
+        .expect("allowlisted historical path should be allowed to keep legacy mode labels");
+}
+
+#[test]
 fn docs_hygiene_allows_devil_reference_in_allowlisted_path() {
     let repo = TempRepo::new("allowlisted-devil-reference");
     repo.write(
