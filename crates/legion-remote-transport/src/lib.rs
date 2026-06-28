@@ -734,9 +734,16 @@ impl RemoteTransportStateMachine {
             .push_back((frame.frame_sequence, frame.operation_id));
         while self.accepted_sequences.len() > self.config.replay_window_size as usize {
             if let Some((_, evicted_operation)) = self.accepted_sequences.pop_front() {
-                // Evict the operation id from the dedup set as the replay window
-                // slides so `seen_operations` stays bounded to the window size.
-                self.seen_operations.remove(&evicted_operation);
+                // Slide the replay window, but keep still-in-flight (unacked)
+                // operation ids in the dedup set even after they leave the
+                // window. With `replay_window_size < max_inflight_frames` an
+                // unacked id could otherwise be dropped here; a duplicate frame
+                // for it would then bypass the duplicate check, be accepted as
+                // new, and corrupt replay/flow-control accounting. Retained ids
+                // are removed by `ack_frame` once acknowledged.
+                if !self.inflight_operations.contains(&evicted_operation) {
+                    self.seen_operations.remove(&evicted_operation);
+                }
             }
         }
         self.last_sequence = frame.frame_sequence;
@@ -758,6 +765,16 @@ impl RemoteTransportStateMachine {
             return Err(RemoteTransportCoreError::InvalidFrame {
                 reason: "acknowledged operation was not in flight".to_string(),
             });
+        }
+        // If this operation already slid out of the replay window it was retained
+        // in the dedup set only because it was in-flight; now that it is acked,
+        // drop it so `seen_operations` stays bounded by the replay window.
+        if !self
+            .accepted_sequences
+            .iter()
+            .any(|(_, op)| *op == operation_id)
+        {
+            self.seen_operations.remove(&operation_id);
         }
         self.state = RemoteTransportLifecycleState::Active;
         self.flow_control_window()
@@ -1866,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_transport_state_machine_bounds_seen_operations_to_replay_window() {
+    fn remote_transport_state_machine_retains_inflight_operations_then_bounds_after_ack() {
         let mut machine = RemoteTransportStateMachine::new(RemoteTransportConfig {
             replay_window_size: 2,
             max_inflight_frames: 64,
@@ -1883,12 +1900,34 @@ mod tests {
                 .try_accept_frame(ordered_frame(sequence, sequence))
                 .expect("accept frame");
         }
+
+        // The replay window itself stays bounded to two frames...
         let window = machine.replay_window().expect("replay window");
-        // Replay window is bounded, so accepted_operation_count must not grow
-        // unbounded with the number of accepted operations.
-        assert_eq!(window.accepted_operation_count, 2);
         assert_eq!(window.lowest_accepted_sequence, EventSequence(10));
         assert_eq!(window.highest_accepted_sequence, EventSequence(11));
+        // ...but operations that slid out of the window are RETAINED in the dedup
+        // set while still in flight (unacked). With replay_window_size (2) <
+        // max_inflight_frames (64), dropping them on window slide would let a
+        // duplicate frame for an unacked operation bypass the duplicate check.
+        assert_eq!(window.accepted_operation_count, 5);
+
+        // A duplicate frame for an unacked operation that already left the replay
+        // window is still detected as a duplicate (pre-fix this was accepted as a
+        // new frame and corrupted flow-control accounting).
+        assert!(matches!(
+            machine.try_accept_frame(ordered_frame(99, 7)),
+            Ok(RemoteTransportAcceptOutcome::Duplicate)
+        ));
+
+        // Acknowledging the out-of-window operations drops them from the dedup
+        // set, so it shrinks back to the replay-window bound.
+        for operation in 7..=9u128 {
+            machine
+                .ack_frame(RemoteOperationId(operation))
+                .expect("ack frame");
+        }
+        let window = machine.replay_window().expect("replay window");
+        assert_eq!(window.accepted_operation_count, 2);
     }
 
     #[test]

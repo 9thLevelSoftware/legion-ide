@@ -432,12 +432,13 @@ impl DelegatedTaskProposalGenerator {
     ///
     /// * When the base target does **not** exist this is a genuine creation and a
     ///   [`ProposalPayload::CreateFile`] is emitted with no preconditions.
-    /// * When the base target **already exists** an edit payload
-    ///   ([`ProposalPayload::TextEdit`]) reflecting the minimal diff between the
-    ///   base and modified content is emitted instead of re-creating the file.
-    ///   A deterministic [`legion_protocol::FileId`] is derived from the
-    ///   sandbox-relative path so the edit can be addressed without a buffer being
-    ///   open.
+    /// * When the base target **already exists** a path-based
+    ///   [`ProposalPayload::CreateFile`] (create/overwrite) is emitted carrying
+    ///   the full modified content plus a content-level concurrency guard. The
+    ///   generator has no workspace `FileId` or open buffer, so it cannot emit a
+    ///   buffer-addressable `TextEdit` (the apply path resolves edits via
+    ///   `buffer_for_file`); a path-based proposal with preconditions is the
+    ///   appliable representation.
     ///
     /// For an existing base the size, last-modified timestamp, content
     /// fingerprint, and a content-derived [`legion_protocol::FileContentVersion`]
@@ -476,37 +477,18 @@ impl DelegatedTaskProposalGenerator {
             })
         };
 
-        let (payload, preconditions, preview_summary) = match &base_state {
-            Some(base) => {
-                let edits = base_edit_batch(base, input.modified_content);
-                if edits.edits.is_empty() {
-                    // The base already holds the proposed content (for example the
-                    // target path is the delegated task's own output sink, so a
-                    // diff against it is a no-op). Emit a lossless create/overwrite
-                    // proposal carrying the full content rather than an empty edit
-                    // that would silently drop the produced content.
-                    (
-                        create_payload(),
-                        empty_preconditions(),
-                        "Create file proposal".to_string(),
-                    )
-                } else {
-                    (
-                        ProposalPayload::TextEdit(legion_protocol::TextEditProposal {
-                            file_id: derive_file_id(&target_relative),
-                            edits,
-                        }),
-                        base.preconditions(),
-                        "Edit file proposal".to_string(),
-                    )
-                }
-            }
-            None => (
-                create_payload(),
-                empty_preconditions(),
-                "Create file proposal".to_string(),
-            ),
+        // The delegated generator works from the sandbox output and has no
+        // workspace `FileId` or open editor buffer. A `TextEdit` proposal would
+        // need a real buffer-addressable file id (the apply path resolves edits
+        // via `buffer_for_file`), so a synthetic id would make existing-file
+        // proposals reject at apply time. Always emit a path-based create/
+        // overwrite proposal; when a base already exists, attach a content-level
+        // concurrency guard derived from its snapshot.
+        let (payload, preconditions) = match &base_state {
+            Some(base) => (create_payload(), base.preconditions()),
+            None => (create_payload(), empty_preconditions()),
         };
+        let preview_summary = "Create file proposal".to_string();
 
         Ok(AssistedAiEditProposalOutput {
             output_id: input.output_id,
@@ -540,8 +522,6 @@ struct BaseTargetState {
     len: u64,
     /// Last-modified timestamp when the platform exposes one.
     modified_at: Option<TimestampMillis>,
-    /// Raw base bytes when readable; `None` if the read failed.
-    content: Option<Vec<u8>>,
     /// Stable FNV-1a digest of the base bytes when readable.
     content_hash: Option<u64>,
 }
@@ -549,9 +529,9 @@ struct BaseTargetState {
 impl BaseTargetState {
     /// Reads the base target at `path`. Returns `None` when the target does not
     /// exist or is not a regular file (a genuine create). Any read error after a
-    /// successful stat still yields a state (with `content == None`) so the
-    /// generator can emit an edit rather than misclassifying an existing file as
-    /// a create.
+    /// successful stat still yields a state (with `content_hash == None`) so the
+    /// generator treats an existing file as an overwrite rather than
+    /// misclassifying it as a create.
     fn read(path: &Path) -> Option<Self> {
         let metadata = std::fs::metadata(path).ok()?;
         if !metadata.is_file() {
@@ -564,14 +544,12 @@ impl BaseTargetState {
             .map(|elapsed| {
                 TimestampMillis(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
             });
-        let content = std::fs::read(path).ok();
-        let content_hash = content
-            .as_ref()
-            .map(|bytes| stable_hash_128(bytes) as u64);
+        let content_hash = std::fs::read(path)
+            .ok()
+            .map(|bytes| stable_hash_128(&bytes) as u64);
         Some(Self {
             len: metadata.len(),
             modified_at,
-            content,
             content_hash,
         })
     }
@@ -612,71 +590,6 @@ fn empty_preconditions() -> ProposalVersionPreconditions {
     }
 }
 
-/// Builds a [`ProposalPayload::TextEdit`] reflecting the diff between an
-/// existing base target and the provider-produced content.
-///
-/// A deterministic [`legion_protocol::FileId`] is derived from the
-/// sandbox-relative path so the edit can be addressed even though no buffer is
-/// open. When the base bytes are unreadable the edit replaces the whole file by
-/// reported length so an existing target is never misclassified as a create.
-/// Computes the minimal edit batch transforming the base target into the
-/// modified content. Returns an empty batch when the base already equals the
-/// modified content (the caller treats an empty batch as "no real change" and
-/// emits a lossless create/overwrite proposal instead).
-fn base_edit_batch(base: &BaseTargetState, modified_content: &str) -> legion_protocol::EditBatch {
-    match &base.content {
-        Some(bytes) => compute_minimal_edit(bytes, modified_content),
-        None => legion_protocol::EditBatch {
-            edits: vec![legion_protocol::TextEdit {
-                range: legion_protocol::TextRange::byte(0, base.len),
-                replacement: modified_content.to_string(),
-            }],
-        },
-    }
-}
-
-/// Computes a single minimal byte-range replacement transforming `base` into
-/// `modified` by trimming the shared prefix and suffix. The trimmed boundaries
-/// are pulled back to UTF-8 char boundaries of `modified` so the replacement is
-/// always valid text. Identical inputs yield an empty edit batch.
-fn compute_minimal_edit(base: &[u8], modified: &str) -> legion_protocol::EditBatch {
-    let modified_bytes = modified.as_bytes();
-    let max = base.len().min(modified_bytes.len());
-
-    let mut prefix = 0;
-    while prefix < max && base[prefix] == modified_bytes[prefix] {
-        prefix += 1;
-    }
-    while prefix > 0 && !modified.is_char_boundary(prefix) {
-        prefix -= 1;
-    }
-
-    let mut suffix = 0;
-    while suffix < max - prefix
-        && base[base.len() - 1 - suffix] == modified_bytes[modified_bytes.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-    while suffix > 0 && !modified.is_char_boundary(modified_bytes.len() - suffix) {
-        suffix -= 1;
-    }
-
-    let start = prefix as u64;
-    let end = (base.len() - suffix) as u64;
-    let replacement = modified[prefix..modified_bytes.len() - suffix].to_string();
-
-    if start == end && replacement.is_empty() {
-        return legion_protocol::EditBatch { edits: Vec::new() };
-    }
-
-    legion_protocol::EditBatch {
-        edits: vec![legion_protocol::TextEdit {
-            range: legion_protocol::TextRange::byte(start, end),
-            replacement,
-        }],
-    }
-}
-
 /// Deterministic, cross-version-stable 128-bit FNV-1a hash.
 ///
 /// Unlike `std::collections::hash_map::DefaultHasher`, FNV-1a is a fixed
@@ -695,14 +608,6 @@ fn stable_hash_128(bytes: &[u8]) -> u128 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
-}
-
-/// Derives a deterministic [`legion_protocol::FileId`] from a sandbox-relative
-/// path so edit payloads can address a base target without an open buffer.
-fn derive_file_id(relative_path: &str) -> legion_protocol::FileId {
-    legion_protocol::FileId(stable_hash_128(
-        format!("legion.delegated.file_id\u{1f}{relative_path}").as_bytes(),
-    ))
 }
 
 /// Metadata-only output from a Legion workflow coordinator action.
@@ -2348,7 +2253,7 @@ mod tests {
     }
 
     #[test]
-    fn proposal_emits_edit_payload_with_preconditions_when_base_exists() {
+    fn proposal_emits_guarded_create_when_base_exists() {
         let sandbox = PathBuf::from("target/legion-agent-edit-when-present-test");
         std::fs::create_dir_all(&sandbox).expect("create sandbox");
         let target = sandbox.join("existing.rs");
@@ -2359,26 +2264,20 @@ mod tests {
         let modified = "hello brave world\n";
         let proposal = generator
             .generate_proposal(proposal_input(&target, modified))
-            .expect("edit proposal");
+            .expect("create proposal");
 
-        // An existing base must produce an edit reflecting the minimal diff, not
-        // a CreateFile.
+        // An existing base produces a path-based create/overwrite carrying the
+        // full modified content (the generator has no workspace FileId/open
+        // buffer, so an appliable TextEdit cannot be addressed here).
         match &proposal.payload {
-            ProposalPayload::TextEdit(edit) => {
-                // FileId is derived deterministically from the relative path.
-                assert_eq!(edit.file_id, derive_file_id("existing.rs"));
-                assert_eq!(edit.edits.edits.len(), 1);
-                let text_edit = &edit.edits.edits[0];
-                // Shared prefix "hello " and suffix "world\n" are trimmed; only the
-                // inserted "brave " remains as the replacement.
-                assert_eq!(text_edit.range.start.value, 6);
-                assert_eq!(text_edit.range.end.value, 6);
-                assert_eq!(text_edit.replacement, "brave ");
+            ProposalPayload::CreateFile(create_file) => {
+                assert_eq!(create_file.path.0, "existing.rs");
+                assert_eq!(create_file.initial_content.as_deref(), Some(modified));
             }
-            other => panic!("expected text-edit proposal, got {other:?}"),
+            other => panic!("expected create-file proposal, got {other:?}"),
         }
 
-        // Concurrency guard populated from the base snapshot.
+        // Content-level concurrency guard populated from the base snapshot.
         assert_eq!(
             proposal.preconditions.expected_file_length,
             Some(base.len() as u64)
@@ -2386,7 +2285,7 @@ mod tests {
         assert!(proposal.preconditions.expected_fingerprint.is_some());
         assert!(proposal.preconditions.expected_modified_at.is_some());
         assert!(proposal.preconditions.file_content_version.is_some());
-        assert_eq!(proposal.preview.summary, "Edit file proposal");
+        assert_eq!(proposal.preview.summary, "Create file proposal");
 
         std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
     }
