@@ -229,14 +229,13 @@ impl DelegatedTaskSandboxOrchestrator {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Try git worktree first
+        // Try git worktree first. Pass the path as an OsStr so a non-UTF-8
+        // PathBuf cannot panic the process.
         let output = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                self.sandbox_path.to_str().unwrap(),
-                "HEAD",
-            ])
+            .arg("worktree")
+            .arg("add")
+            .arg(&self.sandbox_path)
+            .arg("HEAD")
             .output();
 
         match output {
@@ -311,8 +310,14 @@ fn validate_sandbox_permission(
     ))
 }
 
-/// Validate that path is contained within the base directory.
-pub fn validate_containment(base: &Path, path: &Path) -> Result<(), AgentError> {
+/// Validate that `path` is contained within the base directory.
+///
+/// Returns the lexically-normalized path *relative to* `base` (with any `.`/`..`
+/// segments already collapsed) so callers emit a genuinely canonical path rather
+/// than one that still embeds traversal segments. Any path that escapes the base
+/// or retains residual traversal/root/prefix components after normalization is
+/// rejected.
+pub fn validate_containment(base: &Path, path: &Path) -> Result<PathBuf, AgentError> {
     let base_absolute =
         std::fs::canonicalize(base).unwrap_or_else(|_| std::env::current_dir().unwrap().join(base));
 
@@ -350,14 +355,30 @@ pub fn validate_containment(base: &Path, path: &Path) -> Result<(), AgentError> 
     let clean_stripped = strip_unc(&clean_path);
     let base_stripped = strip_unc(&base_absolute);
 
-    if !clean_stripped.starts_with(&base_stripped) {
+    let relative = clean_stripped.strip_prefix(&base_stripped).map_err(|_| {
+        AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
+            reason: "Path traversal escaped sandbox".to_string(),
+        })
+    })?;
+
+    // Defense in depth: a normalized, contained path must not retain any
+    // traversal, root, or prefix components.
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
         return Err(AgentError::InvalidMetadata(
             AssistedAiContractError::InvalidProposalMetadata {
-                reason: "Path traversal escaped sandbox".to_string(),
+                reason: "Normalized sandbox path retained traversal components".to_string(),
             },
         ));
     }
-    Ok(())
+
+    Ok(relative.to_path_buf())
 }
 
 /// Proposal generator inside `legion-agent`.
@@ -403,22 +424,71 @@ impl DelegatedTaskProposalGenerator {
         Self { sandbox_base }
     }
 
-    /// Compares sandbox directory state with HEAD checkout and builds AssistedAiEditProposalOutput.
+    /// Builds an `AssistedAiEditProposalOutput` for the sandbox target.
+    ///
+    /// Stats and reads the base target (the HEAD checkout / sandbox-base copy at
+    /// `target_path`) and compares it with the provider-produced
+    /// `modified_content` to decide the payload shape:
+    ///
+    /// * When the base target does **not** exist this is a genuine creation and a
+    ///   [`ProposalPayload::CreateFile`] is emitted with no preconditions.
+    /// * When the base target **already exists** a path-based
+    ///   [`ProposalPayload::CreateFile`] (create/overwrite) is emitted carrying
+    ///   the full modified content plus a content-level concurrency guard. The
+    ///   generator has no workspace `FileId` or open buffer, so it cannot emit a
+    ///   buffer-addressable `TextEdit` (the apply path resolves edits via
+    ///   `buffer_for_file`); a path-based proposal with preconditions is the
+    ///   appliable representation.
+    ///
+    /// For an existing base the size, last-modified timestamp, content
+    /// fingerprint, and a content-derived [`legion_protocol::FileContentVersion`]
+    /// are recorded in [`ProposalVersionPreconditions`] so an apply step can
+    /// detect concurrent modification. The proposal target path is the
+    /// normalized, sandbox-relative path returned by [`validate_containment`].
     pub fn generate_proposal(
         &self,
         input: DelegatedTaskProposalInput<'_>,
     ) -> Result<AssistedAiEditProposalOutput, AgentError> {
-        validate_containment(&self.sandbox_base, input.target_path)?;
-
-        let target_relative = input
-            .target_path
-            .strip_prefix(&self.sandbox_base)
-            .unwrap_or(input.target_path);
-        let target_relative = target_relative.to_str().ok_or_else(|| {
-            AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
-                reason: "Proposal target path is not valid UTF-8".to_string(),
+        let target_relative = validate_containment(&self.sandbox_base, input.target_path)?;
+        // Emit a canonical, forward-slash relative path regardless of host OS so
+        // the `CanonicalPath` payload is portable and free of `..` segments.
+        let target_relative = target_relative
+            .components()
+            .map(|component| {
+                component.as_os_str().to_str().ok_or_else(|| {
+                    AgentError::InvalidMetadata(
+                        AssistedAiContractError::InvalidProposalMetadata {
+                            reason: "Proposal target path is not valid UTF-8".to_string(),
+                        },
+                    )
+                })
             })
-        })?;
+            .collect::<Result<Vec<_>, _>>()?
+            .join("/");
+
+        // Stat/read the base target so we can both populate a concurrency guard
+        // and decide whether this is a create (no base) or an edit (base exists).
+        let base_state = BaseTargetState::read(input.target_path);
+
+        let create_payload = || {
+            ProposalPayload::CreateFile(legion_protocol::CreateFileProposal {
+                path: CanonicalPath(target_relative.clone()),
+                initial_content: Some(input.modified_content.to_string()),
+            })
+        };
+
+        // The delegated generator works from the sandbox output and has no
+        // workspace `FileId` or open editor buffer. A `TextEdit` proposal would
+        // need a real buffer-addressable file id (the apply path resolves edits
+        // via `buffer_for_file`), so a synthetic id would make existing-file
+        // proposals reject at apply time. Always emit a path-based create/
+        // overwrite proposal; when a base already exists, attach a content-level
+        // concurrency guard derived from its snapshot.
+        let (payload, preconditions) = match &base_state {
+            Some(base) => (create_payload(), base.preconditions()),
+            None => (create_payload(), empty_preconditions()),
+        };
+        let preview_summary = "Create file proposal".to_string();
 
         Ok(AssistedAiEditProposalOutput {
             output_id: input.output_id,
@@ -429,23 +499,10 @@ impl DelegatedTaskProposalGenerator {
             capability: input.capability,
             correlation_id: input.correlation_id,
             causality_id: input.causality_id,
-            payload: ProposalPayload::CreateFile(legion_protocol::CreateFileProposal {
-                path: CanonicalPath(target_relative.to_string()),
-                initial_content: Some(input.modified_content.to_string()),
-            }),
-            preconditions: ProposalVersionPreconditions {
-                file_version: None,
-                buffer_version: None,
-                snapshot_id: None,
-                generation: None,
-                file_content_version: None,
-                workspace_generation: None,
-                expected_fingerprint: None,
-                expected_file_length: None,
-                expected_modified_at: None,
-            },
+            payload,
+            preconditions,
             preview: PreviewSummary {
-                summary: "Create file proposal".to_string(),
+                summary: preview_summary,
                 details: vec![],
             },
             expires_at: None,
@@ -456,6 +513,101 @@ impl DelegatedTaskProposalGenerator {
             schema_version: 1,
         })
     }
+}
+
+/// On-disk state of a base proposal target captured once so that both the
+/// concurrency guard and the create-vs-edit decision use a consistent snapshot.
+struct BaseTargetState {
+    /// Length of the base file in bytes.
+    len: u64,
+    /// Last-modified timestamp when the platform exposes one.
+    modified_at: Option<TimestampMillis>,
+    /// Stable FNV-1a digest of the base bytes when readable.
+    content_hash: Option<u64>,
+}
+
+impl BaseTargetState {
+    /// Reads the base target at `path`. Returns `None` when the target does not
+    /// exist or is not a regular file (a genuine create). Any read error after a
+    /// successful stat still yields a state (with `content_hash == None`) so the
+    /// generator treats an existing file as an overwrite rather than
+    /// misclassifying it as a create.
+    fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| {
+                TimestampMillis(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+            });
+        let content_hash = std::fs::read(path)
+            .ok()
+            .map(|bytes| stable_hash_128(&bytes) as u64);
+        Some(Self {
+            len: metadata.len(),
+            modified_at,
+            content_hash,
+        })
+    }
+
+    /// Derives a concurrency guard from this base snapshot. The length and
+    /// modified timestamp always populate; the fingerprint and content version
+    /// populate only when the base bytes were readable.
+    fn preconditions(&self) -> ProposalVersionPreconditions {
+        ProposalVersionPreconditions {
+            file_version: None,
+            buffer_version: None,
+            snapshot_id: None,
+            generation: None,
+            file_content_version: self.content_hash.map(legion_protocol::FileContentVersion),
+            workspace_generation: None,
+            expected_fingerprint: self.content_hash.map(|hash| FileFingerprint {
+                algorithm: "fnv1a-64-v1".to_string(),
+                value: format!("{hash:016x}"),
+            }),
+            expected_file_length: Some(self.len),
+            expected_modified_at: self.modified_at,
+        }
+    }
+}
+
+/// Preconditions for a genuine create: nothing on disk to guard against.
+fn empty_preconditions() -> ProposalVersionPreconditions {
+    ProposalVersionPreconditions {
+        file_version: None,
+        buffer_version: None,
+        snapshot_id: None,
+        generation: None,
+        file_content_version: None,
+        workspace_generation: None,
+        expected_fingerprint: None,
+        expected_file_length: None,
+        expected_modified_at: None,
+    }
+}
+
+/// Deterministic, cross-version-stable 128-bit FNV-1a hash.
+///
+/// Unlike `std::collections::hash_map::DefaultHasher`, FNV-1a is a fixed
+/// published specification, so identifiers and fingerprints derived from it stay
+/// stable across compiler versions, platforms, and runs. The unit-separator
+/// (`\u{1f}`) between domain prefix and payload prevents prefix-collision
+/// ambiguity between distinct id namespaces.
+fn stable_hash_128(bytes: &[u8]) -> u128 {
+    // FNV-1a (128-bit) constants.
+    const FNV_OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= byte as u128;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// Metadata-only output from a Legion workflow coordinator action.
@@ -867,11 +1019,32 @@ impl LegionWorkflowCoordinator {
                 "proposal output must remain metadata-redacted".to_string(),
             ));
         }
+
+        // Fail closed on duplicate recording: the evidence/result ids are derived
+        // solely from the worker id, so a second call would mint colliding ids
+        // and duplicate worker results.
+        let evidence_id = format!("legion-evidence:{}", worker_id.0);
+        let result_id = format!("legion-result:{}", worker_id.0);
+        if self
+            .worker_results
+            .iter()
+            .any(|result| result.result_id == result_id)
+            || self
+                .evidence_records
+                .iter()
+                .any(|record| record.evidence_id == evidence_id)
+        {
+            return Err(AgentError::InvalidLegionWorkflow(format!(
+                "proposal output already recorded for worker {}",
+                worker_id.0
+            )));
+        }
+
         self.proposal_outputs.push(output.clone());
 
         let packet_id = self.packet_id_for_worker(worker_id);
         let evidence = LegionEvidenceRecord {
-            evidence_id: format!("legion-evidence:{}", worker_id.0),
+            evidence_id,
             kind: LegionEvidenceKind::CommandRun,
             source: LegionEvidenceSource::LocalCommand,
             payload_hash: FileFingerprint {
@@ -892,7 +1065,7 @@ impl LegionWorkflowCoordinator {
         self.evidence_records.push(evidence.clone());
 
         let result = LegionWorkerResult {
-            result_id: format!("legion-result:{}", worker_id.0),
+            result_id,
             packet_id,
             result_kind: LegionWorkerResultKind::PatchProposal,
             patch_proposal: Some(output.proposal_id),
@@ -1083,6 +1256,24 @@ fn has_dependency_path(
     false
 }
 
+/// Derives a per-worker cancellation token so provider routes do not share a
+/// single audit/cancellation identity. Deterministic for a given
+/// `(worker_id, correlation_id)` pair so replays stay stable.
+fn derive_cancellation_token(worker_id: &str, correlation_id: u64) -> CancellationTokenId {
+    CancellationTokenId(uuid::Uuid::from_u128(stable_hash_128(
+        format!("legion.workflow.cancellation\u{1f}{worker_id}\u{1f}{correlation_id}").as_bytes(),
+    )))
+}
+
+/// Derives a per-worker event sequence so provider-route audit records do not
+/// all collapse onto a single sequence value. Deterministic for a given
+/// `(worker_id, correlation_id)` pair.
+fn derive_event_sequence(worker_id: &str, correlation_id: u64) -> EventSequence {
+    EventSequence(stable_hash_128(
+        format!("legion.workflow.event_sequence\u{1f}{worker_id}\u{1f}{correlation_id}").as_bytes(),
+    ) as u64)
+}
+
 fn provider_route_request_from_worker(
     worker: &LegionWorkflowWorkerAssignment,
     route_ref: AssistedAiTrustProjectionReference,
@@ -1134,14 +1325,14 @@ fn provider_route_request_from_worker(
         policy_decision_id: None,
         required_capability: CapabilityId("legion.workflow.provider_route".to_string()),
         network_target: None,
-        cancellation_token: CancellationTokenId(uuid::Uuid::from_u128(13)),
+        cancellation_token: derive_cancellation_token(&worker.worker_id.0, worker.correlation_id.0),
         health_labels: vec!["provider_route.not_invoked".to_string()],
         cost_labels: vec!["cost.metadata_only".to_string()],
         principal_id: PrincipalId("legion.workflow.coordinator".to_string()),
         workspace_trust_state: WorkspaceTrustState::Trusted,
         correlation_id: worker.correlation_id,
         causality_id: worker.causality_id,
-        event_sequence: EventSequence(13),
+        event_sequence: derive_event_sequence(&worker.worker_id.0, worker.correlation_id.0),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
@@ -2001,6 +2192,173 @@ mod tests {
             LegionWorkflowCoordinatorOutput::Blocked { .. }
         ));
         assert!(coordinator.next_ready_workers().is_empty());
+    }
+
+    #[test]
+    fn proposal_populates_concurrency_guard_when_target_exists() {
+        let sandbox = PathBuf::from("target/legion-agent-precondition-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("existing.txt");
+        std::fs::write(&target, b"existing base content").expect("write base file");
+
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let proposal = generator
+            .generate_proposal(proposal_input(&target, "updated content"))
+            .expect("proposal output");
+
+        assert_eq!(proposal.preconditions.expected_file_length, Some(21));
+        assert!(proposal.preconditions.expected_fingerprint.is_some());
+        assert!(proposal.preconditions.expected_modified_at.is_some());
+
+        // A non-existent target is a genuine create and carries no guard.
+        let missing = sandbox.join("missing.txt");
+        let create = generator
+            .generate_proposal(proposal_input(&missing, "new content"))
+            .expect("create proposal");
+        assert_eq!(create.preconditions.expected_file_length, None);
+        assert_eq!(create.preconditions.expected_fingerprint, None);
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn proposal_emits_create_file_when_base_absent() {
+        let sandbox = PathBuf::from("target/legion-agent-create-when-absent-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let missing = sandbox.join("brand-new.rs");
+
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let proposal = generator
+            .generate_proposal(proposal_input(&missing, "fn fresh() {}\n"))
+            .expect("create proposal");
+
+        match &proposal.payload {
+            ProposalPayload::CreateFile(create_file) => {
+                assert_eq!(create_file.path.0, "brand-new.rs");
+                assert_eq!(
+                    create_file.initial_content.as_deref(),
+                    Some("fn fresh() {}\n")
+                );
+            }
+            other => panic!("expected create-file proposal, got {other:?}"),
+        }
+        // A genuine create carries no concurrency guard.
+        assert_eq!(proposal.preconditions.expected_file_length, None);
+        assert_eq!(proposal.preconditions.expected_fingerprint, None);
+        assert_eq!(proposal.preconditions.expected_modified_at, None);
+        assert_eq!(proposal.preconditions.file_content_version, None);
+        assert_eq!(proposal.preview.summary, "Create file proposal");
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn proposal_emits_guarded_create_when_base_exists() {
+        let sandbox = PathBuf::from("target/legion-agent-edit-when-present-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("existing.rs");
+        let base = "hello world\n";
+        std::fs::write(&target, base.as_bytes()).expect("write base file");
+
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let modified = "hello brave world\n";
+        let proposal = generator
+            .generate_proposal(proposal_input(&target, modified))
+            .expect("create proposal");
+
+        // An existing base produces a path-based create/overwrite carrying the
+        // full modified content (the generator has no workspace FileId/open
+        // buffer, so an appliable TextEdit cannot be addressed here).
+        match &proposal.payload {
+            ProposalPayload::CreateFile(create_file) => {
+                assert_eq!(create_file.path.0, "existing.rs");
+                assert_eq!(create_file.initial_content.as_deref(), Some(modified));
+            }
+            other => panic!("expected create-file proposal, got {other:?}"),
+        }
+
+        // Content-level concurrency guard populated from the base snapshot.
+        assert_eq!(
+            proposal.preconditions.expected_file_length,
+            Some(base.len() as u64)
+        );
+        assert!(proposal.preconditions.expected_fingerprint.is_some());
+        assert!(proposal.preconditions.expected_modified_at.is_some());
+        assert!(proposal.preconditions.file_content_version.is_some());
+        assert_eq!(proposal.preview.summary, "Create file proposal");
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn legion_workflow_duplicate_proposal_record_fails_closed() {
+        let mut coordinator =
+            LegionWorkflowCoordinator::new(workflow_session()).expect("valid workflow");
+        let sandbox = PathBuf::from("target/legion-agent-duplicate-record-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let target = sandbox.join("dup.txt");
+        let worker = LegionWorkflowWorkerId("worker:local".to_string());
+
+        let first = generator
+            .generate_proposal(proposal_input(&target, "first"))
+            .expect("first proposal");
+        coordinator
+            .record_proposal_output(&worker, first)
+            .expect("first record");
+
+        let second = generator
+            .generate_proposal(proposal_input(&target, "second"))
+            .expect("second proposal");
+        let error = coordinator
+            .record_proposal_output(&worker, second)
+            .expect_err("duplicate recording must fail closed");
+
+        assert!(matches!(error, AgentError::InvalidLegionWorkflow(_)));
+        assert_eq!(coordinator.worker_results().len(), 1);
+        assert_eq!(coordinator.evidence_records().len(), 1);
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn legion_workflow_provider_routes_have_distinct_audit_identity() {
+        let mut session = workflow_session();
+        session.dependency_edges.clear();
+        session.worker_assignments = vec![
+            workflow_worker(
+                "worker:provider-a",
+                LegionWorkflowModelBackend::ProviderBacked,
+                "crates/legion-agent/src/a.rs",
+            ),
+            workflow_worker(
+                "worker:provider-b",
+                LegionWorkflowModelBackend::ProviderBacked,
+                "crates/legion-agent/src/b.rs",
+            ),
+        ];
+
+        let mut coordinator = LegionWorkflowCoordinator::new(session).expect("valid workflow");
+
+        let route_a = match coordinator
+            .provider_route_for_worker(&LegionWorkflowWorkerId("worker:provider-a".to_string()))
+            .expect("route a")
+        {
+            LegionWorkflowCoordinatorOutput::ProviderRouteRequired(route) => *route,
+            _ => panic!("expected provider route"),
+        };
+        let route_b = match coordinator
+            .provider_route_for_worker(&LegionWorkflowWorkerId("worker:provider-b".to_string()))
+            .expect("route b")
+        {
+            LegionWorkflowCoordinatorOutput::ProviderRouteRequired(route) => *route,
+            _ => panic!("expected provider route"),
+        };
+
+        assert_ne!(route_a.cancellation_token, route_b.cancellation_token);
+        assert_ne!(route_a.event_sequence, route_b.event_sequence);
+        assert_ne!(route_a.cancellation_token.0, uuid::Uuid::from_u128(13));
+        assert_ne!(route_a.event_sequence.0, 13);
     }
 
     #[test]

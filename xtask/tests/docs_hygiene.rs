@@ -42,10 +42,16 @@ impl Drop for TempRepo {
 }
 
 #[test]
-fn placeholder_docs_hygiene_test_file_compiles() {
-    let repo = TempRepo::new("placeholder");
-    repo.write("README.md", "# Test\n");
-    assert!(repo.path("README.md").exists());
+fn docs_hygiene_passes_for_clean_minimal_repo() {
+    let repo = TempRepo::new("clean-minimal");
+    repo.write(
+        "README.md",
+        "# Test\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n",
+    );
+    repo.write("plans/legion-production-master-plan-v0.2.md", "# Plan\n");
+
+    run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
+        .expect("clean minimal repo should pass docs hygiene");
 }
 
 #[test]
@@ -299,23 +305,35 @@ fn docs_hygiene_skips_git_target_almanac_directories() {
 #[test]
 fn docs_hygiene_checks_untracked_markdown_in_git_repo() {
     let repo = TempRepo::new("git-untracked-markdown");
-    Command::new("git")
+    let init = Command::new("git")
         .arg("init")
         .arg(&repo.root)
         .output()
         .expect("git init should run");
+    assert!(
+        init.status.success(),
+        "git init should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
     repo.write(
         "README.md",
         "# Clean\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n",
     );
     repo.write("plans/legion-production-master-plan-v0.2.md", "# Plan\n");
-    Command::new("git")
+    let add = Command::new("git")
         .arg("-C")
         .arg(&repo.root)
         .arg("add")
         .arg("README.md")
         .output()
         .expect("git add should run");
+    assert!(
+        add.status.success(),
+        "git add should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
     repo.write("NEW.md", "# New\n\nStale `devil-app` marker.\n");
     repo.write(
         ".almanac/page.md",

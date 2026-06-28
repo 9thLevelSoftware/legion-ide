@@ -120,6 +120,35 @@ fn validate_rejects_missing_required_task_field() {
 }
 
 #[test]
+fn validate_rejects_omitted_dependencies_field() {
+    // Drop the `dependencies` field entirely. An omitted field must be
+    // treated as a missing required field, not silently defaulted to empty.
+    let toml_src = minimal_valid_backlog_toml().replace("dependencies = []\n", "");
+    let dir = TempDir::new("omitted-dependencies");
+    let path = dir.write("backlog.toml", &toml_src);
+    let backlog = KanbanBacklog::from_file(&path)
+        .expect("backlog with omitted dependencies should still parse");
+    let err = validate_backlog(&backlog)
+        .expect_err("validation should fail when the dependencies field is omitted");
+    match err {
+        KanbanBacklogValidationError::MissingRequiredField { card_id, field } => {
+            assert_eq!(card_id, "P0.F1.T1");
+            assert_eq!(field, "dependencies");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn validate_accepts_present_empty_dependencies() {
+    // An explicit empty list is present and therefore valid.
+    let dir = TempDir::new("empty-dependencies");
+    let path = dir.write("backlog.toml", minimal_valid_backlog_toml());
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    validate_backlog(&backlog).expect("present empty dependencies list should validate");
+}
+
+#[test]
 fn validate_rejects_unknown_dependency() {
     // Add a dependency to a card id that does not exist anywhere in the backlog.
     let toml_src = minimal_valid_backlog_toml()
@@ -192,7 +221,7 @@ fn collect_all_ids_returns_feature_and_task_ids() {
                     mode: "Manual".to_string(),
                     readiness_row: "PR-UI-001".to_string(),
                     files: vec![],
-                    dependencies: vec![],
+                    dependencies: Some(vec![]),
                     verification: vec![],
                     acceptance: vec![],
                     stop_condition: "n/a".to_string(),

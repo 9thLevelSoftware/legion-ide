@@ -10,7 +10,9 @@ use legion_desktop::{
     view::DesktopProjectionViewModel,
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_protocol::TextCoordinate;
+use legion_protocol::{ProposalLifecycleState, TextCoordinate};
+
+mod common;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -273,6 +275,131 @@ fn save_all_conflict_clean_close_removes_tab_without_prompt() {
 #[test]
 fn save_all_conflict_desktop_save_paths_dispatch_ui_intent() {
     let workflow_source = include_str!("../src/workflow.rs");
-    assert!(workflow_source.contains("dispatch_ui_intent"));
-    assert!(!workflow_source.contains("save_file_with_proposal"));
+    // Save/close/save-all paths must route through the UI-intent dispatcher and
+    // must never call a proposal-apply save. Match whole identifier tokens
+    // (ignoring comments and string literals) so the boundary is not satisfied
+    // or violated by prose mentioning these symbols.
+    common::assert_source_includes(workflow_source, "src/workflow.rs", "dispatch_ui_intent");
+    common::assert_source_excludes(
+        workflow_source,
+        "src/workflow.rs",
+        &["save_file_with_proposal"],
+    );
+}
+
+#[test]
+fn save_all_conflict_save_paths_never_route_through_proposal_apply() {
+    // Behavior test: drive the real runtime and assert that save, save-all, and
+    // dirty-close-save commands all produce direct UI-intent save outcomes and
+    // never create or apply a proposal. A save that routed through a
+    // proposal-apply path would surface a proposal in the typed ledger; the
+    // ledger must stay empty of any save-originated proposal.
+    let workspace = TempWorkspace::new();
+    let alpha = workspace.write("alpha.txt", "alpha");
+    let beta = workspace.write("beta.txt", "beta");
+    let mut runtime = open_runtime(workspace.path(), &alpha);
+
+    // Edit + SaveActive must dispatch a direct save UI intent.
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::InsertText {
+                text: "!".to_string(),
+                at: coord(0, 5, 5),
+            })
+            .expect("edit alpha"),
+        DesktopWorkflowOutcome::Edited
+    );
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::SaveActive)
+            .expect("save active dispatches UI intent"),
+        DesktopWorkflowOutcome::Saved
+    );
+    assert_eq!(fs::read_to_string(&alpha).expect("alpha saved"), "alpha!");
+    assert_no_pending_proposal_apply_from_save(&runtime);
+
+    // Edit a second buffer and SaveAll must dispatch the save-all UI intent.
+    open_file(&mut runtime, &beta);
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::InsertText {
+                text: "!".to_string(),
+                at: coord(0, 4, 4),
+            })
+            .expect("edit beta"),
+        DesktopWorkflowOutcome::Edited
+    );
+    let save_all_outcome = runtime
+        .handle_action(DesktopAction::SaveAll)
+        .expect("save all dispatches UI intent");
+    assert!(
+        matches!(
+            save_all_outcome,
+            DesktopWorkflowOutcome::SaveAll {
+                rejected_count: 0,
+                saved_count
+            } if saved_count >= 1
+        ),
+        "save-all should dispatch a UI-intent save with no rejections, got {save_all_outcome:?}"
+    );
+    assert_eq!(fs::read_to_string(&beta).expect("beta saved"), "beta!");
+    assert_no_pending_proposal_apply_from_save(&runtime);
+
+    // Dirty-close-save must dispatch the save UI intent, not a proposal apply.
+    let beta_buffer = tab_buffers(&runtime)
+        .into_iter()
+        .last()
+        .expect("beta tab buffer");
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::InsertText {
+                text: "?".to_string(),
+                at: coord(0, 5, 5),
+            })
+            .expect("re-dirty beta"),
+        DesktopWorkflowOutcome::Edited
+    );
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::CloseTab {
+                buffer_id: beta_buffer
+            })
+            .expect("dirty close prompts"),
+        DesktopWorkflowOutcome::CloseDirtyPrompt(beta_buffer)
+    );
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::SaveDirtyClose {
+                buffer_id: beta_buffer
+            })
+            .expect("save dirty close dispatches UI intent"),
+        DesktopWorkflowOutcome::Saved
+    );
+    assert_eq!(fs::read_to_string(&beta).expect("beta saved"), "beta!?");
+    assert_no_pending_proposal_apply_from_save(&runtime);
+}
+
+/// Assert a save dispatched a direct UI intent rather than routing through a
+/// proposal-apply path. A direct save is recorded only as an already-`Applied`
+/// audit proposal; it must never leave a preview-pending proposal
+/// (`Created`/`Validated`/`Previewed`/`Approved`) that an autonomous actor could
+/// later apply. The presence of any such pending proposal would indicate the
+/// save was mediated by the assisted proposal-apply path.
+fn assert_no_pending_proposal_apply_from_save(runtime: &DesktopRuntime) {
+    let snapshot = runtime.projection_snapshot();
+    for row in &snapshot.proposal_ledger_projection.rows {
+        assert!(
+            !matches!(
+                row.lifecycle.state,
+                ProposalLifecycleState::Created
+                    | ProposalLifecycleState::Validated
+                    | ProposalLifecycleState::Previewed
+                    | ProposalLifecycleState::Approved
+            ),
+            "save command must not create a preview-pending/applyable proposal; \
+             proposal {:?} is in state {:?}",
+            row.proposal_id,
+            row.lifecycle.state
+        );
+    }
 }

@@ -78,6 +78,44 @@ fn legion_bench_verify_rejects_suite_fingerprint_mismatch() {
 }
 
 #[test]
+fn legion_bench_verify_rejects_tampered_summary_counts() {
+    let suite = plan_default_legion_bench_suite();
+    let mut report = plan_legion_bench_report(
+        "legion-desktop",
+        "feedface",
+        LegionBenchRunMode::RecordedOffline,
+        &suite,
+    );
+    // Tamper only with the summary aggregate; the per-task results are intact.
+    report.summary.average_score = report.summary.average_score.wrapping_add(1);
+
+    let err = verify_legion_bench_report(&report, &suite)
+        .expect_err("tampered summary should be rejected");
+    assert!(err.contains("summary"), "unexpected error: {err}");
+}
+
+#[test]
+fn legion_bench_verify_rejects_tampered_task_definition() {
+    let suite = plan_default_legion_bench_suite();
+    let mut report = plan_legion_bench_report(
+        "legion-desktop",
+        "feedface",
+        LegionBenchRunMode::RecordedOffline,
+        &suite,
+    );
+    // Tamper with a non-fingerprinted-but-embedded task field; the suite
+    // fingerprint still matches so only full equality can catch this.
+    report.tasks[0].task.objective.push_str(" (tampered)");
+
+    let err = verify_legion_bench_report(&report, &suite)
+        .expect_err("tampered task definition should be rejected");
+    assert!(
+        err.contains("task definition mismatch"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn legion_bench_report_tracks_run_mode_profile() {
     let suite = plan_default_legion_bench_suite();
     let recorded = plan_legion_bench_report(

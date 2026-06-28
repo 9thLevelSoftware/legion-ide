@@ -5,6 +5,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use legion_protocol::{BufferVersion, SnapshotId};
@@ -244,6 +245,9 @@ pub struct TextLineSlice {
 pub struct TextSnapshot {
     rope: Arc<Rope>,
     full_text_cache: Option<Arc<String>>,
+    /// Lazily materialized full text used as a fallback for [`TextSnapshot::text`] when the bounded
+    /// compatibility cache is absent. Computed at most once per snapshot.
+    materialized_full_text: OnceLock<Arc<String>>,
     line_index: Arc<LineIndex>,
     descriptor: TextSnapshotDescriptor,
 }
@@ -340,6 +344,7 @@ impl TextSnapshot {
         Ok(Self {
             rope,
             full_text_cache,
+            materialized_full_text: OnceLock::new(),
             line_index,
             descriptor,
         })
@@ -347,14 +352,19 @@ impl TextSnapshot {
 
     /// Return the full text.
     ///
-    /// # Panics
-    ///
-    /// Panics when the snapshot does not retain a bounded compatibility full-text cache. Prefer
-    /// [`TextSnapshot::try_full_text`] for large or degraded snapshots.
+    /// When the snapshot retains a bounded compatibility full-text cache the cached string is
+    /// returned directly. For large or degraded snapshots that dropped the bounded cache, the full
+    /// text is materialized from the rope on first use and retained for the snapshot's lifetime, so
+    /// this method never panics. Prefer [`TextSnapshot::try_full_text`] (or the bounded
+    /// [`TextSnapshot::line_slice`] / [`TextSnapshot::chunk_text`] APIs) when the additional
+    /// materialized retention is undesirable.
     pub fn text(&self) -> &str {
-        self.try_full_text().expect(
-            "full text cache unavailable; use try_full_text(), line_slice(), or chunk_text()",
-        )
+        if let Some(text) = self.full_text_cache.as_ref() {
+            return text.as_str();
+        }
+        self.materialized_full_text
+            .get_or_init(|| Arc::new(self.rope.to_string()))
+            .as_str()
     }
 
     /// Return the cached full text when the snapshot remains within the full-cache budget.
@@ -734,6 +744,12 @@ impl LineIndex {
         if let Some(chunk) = chunks.get_mut(edit_chunk_index) {
             chunk.end_byte = shift_usize(chunk.end_byte, byte_delta);
             chunk.byte_len = shift_usize(chunk.byte_len, byte_delta);
+            // Repeated same-line edits can grow the edited chunk past the advertised bound while
+            // staying on the simple-edit fast path. Bail out so the caller falls back to a full
+            // chunk rebuild, restoring the bounded-chunk invariant.
+            if chunk.byte_len > DEFAULT_CHUNK_FORCE_MAX_BYTES {
+                return None;
+            }
             chunk.hash = chunk_hash_for_byte_range(rope.as_ref(), chunk.start_byte, chunk.end_byte);
         } else {
             return None;
@@ -816,6 +832,17 @@ impl LineIndex {
             return Err(TextError::InvalidRange {
                 start: start_line,
                 end: end_line_exclusive,
+            });
+        }
+
+        // Validate the requested range against the line table *before* allocating so a huge
+        // `end_line_exclusive` cannot force a massive `Vec::with_capacity` ahead of the per-line
+        // bounds check inside the loop.
+        let line_count = self.line_count();
+        if end_line_exclusive > line_count {
+            return Err(TextError::LineOutOfBounds {
+                line: end_line_exclusive,
+                line_count,
             });
         }
 
@@ -1012,14 +1039,33 @@ impl LineIndex {
 /// insertions and deletions. Full-source access remains available only while the buffer stays under
 /// [`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`]; large buffers remain rope-backed, chunked, and
 /// line-sliceable without materializing the entire document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TextBuffer {
     rope: Rope,
     line_index: Arc<LineIndex>,
     version: BufferVersion,
     full_text_cache: Option<String>,
+    /// Lazily materialized full text used as a fallback for [`TextBuffer::text`] when the bounded
+    /// compatibility cache is absent. Computed at most once per buffer state and invalidated
+    /// whenever the buffer is mutated.
+    materialized_full_text: OnceLock<Arc<String>>,
     allow_full_cache: bool,
 }
+
+impl PartialEq for TextBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        // The lazily materialized full-text fallback is a pure cache derived from the rope; it is
+        // intentionally excluded so two buffers with identical content compare equal regardless of
+        // whether either has materialized its degraded-path text.
+        self.rope == other.rope
+            && self.line_index == other.line_index
+            && self.version == other.version
+            && self.full_text_cache == other.full_text_cache
+            && self.allow_full_cache == other.allow_full_cache
+    }
+}
+
+impl Eq for TextBuffer {}
 
 impl TextBuffer {
     /// Create a new buffer from a string.
@@ -1084,6 +1130,7 @@ impl TextBuffer {
             line_index,
             version,
             full_text_cache,
+            materialized_full_text: OnceLock::new(),
             allow_full_cache,
         })
     }
@@ -1096,19 +1143,26 @@ impl TextBuffer {
         } else {
             None
         };
+        // Policy changes do not alter content, but keep the fallback in lockstep with the bounded
+        // cache so a freshly enabled bounded cache is always preferred by `text()`.
+        self.materialized_full_text = OnceLock::new();
         Ok(())
     }
 
     /// Return the full text.
     ///
-    /// # Panics
-    ///
-    /// Panics when the buffer does not retain a bounded compatibility full-text cache. Prefer
-    /// [`TextBuffer::try_full_text`] for large or degraded buffers.
+    /// When the buffer retains a bounded compatibility full-text cache the cached string is returned
+    /// directly. For large or degraded buffers that dropped the bounded cache, the full text is
+    /// materialized from the rope on first use and retained until the next mutation, so this method
+    /// never panics. Prefer [`TextBuffer::try_full_text`] (or the bounded [`TextBuffer::line_slice`]
+    /// / [`TextBuffer::chunk_text`] APIs) when the additional materialized retention is undesirable.
     pub fn text(&self) -> &str {
-        self.try_full_text().expect(
-            "full text cache unavailable; use try_full_text(), line_slice(), or chunk_text()",
-        )
+        if let Some(text) = self.full_text_cache.as_deref() {
+            return text;
+        }
+        self.materialized_full_text
+            .get_or_init(|| Arc::new(self.rope.to_string()))
+            .as_str()
     }
 
     /// Return the cached full text when the buffer remains within the full-cache budget.
@@ -1286,6 +1340,10 @@ impl TextBuffer {
         } else {
             self.full_text_cache = None;
         }
+
+        // The lazily materialized degraded-path fallback is now stale; drop it so the next
+        // `text()` call rematerializes from the mutated rope.
+        self.materialized_full_text = OnceLock::new();
 
         if simple_edit {
             let rope = Arc::new(self.rope.clone());
@@ -2241,6 +2299,84 @@ mod tests {
         assert_eq!(slices[0].text, "one");
         assert_eq!(slices[2].line, 3);
         assert_eq!(slices[2].text, "three");
+    }
+
+    #[test]
+    fn visible_line_slices_reject_out_of_bounds_range_before_allocating() {
+        let buf = TextBuffer::new("a\nb\nc");
+        assert_eq!(buf.line_count(), 3);
+        // A huge `end_line_exclusive` must be rejected up front instead of forcing a massive
+        // `Vec::with_capacity` ahead of the per-line bounds check.
+        let err = buf.visible_line_slices(0, usize::MAX).unwrap_err();
+        assert!(matches!(
+            err,
+            TextError::LineOutOfBounds {
+                line,
+                line_count: 3
+            } if line == usize::MAX
+        ));
+    }
+
+    #[test]
+    fn simple_edit_growing_chunk_past_bound_falls_back_to_bounded_rebuild() {
+        let mut buf = TextBuffer::new("abc");
+        // A no-newline (simple-edit fast-path) insertion large enough to push the edited chunk past
+        // the advertised force-max bound must fall back to a full chunk rebuild rather than leaving
+        // an oversized chunk on the fast path.
+        let big = "x".repeat(DEFAULT_CHUNK_FORCE_MAX_BYTES * 2);
+        buf.try_replace_range(1, 1, &big).unwrap();
+        let chunks = buf.chunk_descriptors();
+        assert!(chunks.len() > 1);
+        for chunk in chunks {
+            assert!(chunk.byte_len <= DEFAULT_CHUNK_FORCE_MAX_BYTES);
+        }
+    }
+
+    #[test]
+    fn snapshot_text_does_not_panic_for_degraded_cache() {
+        let text = "z".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1024);
+        let snapshot = TextSnapshot::try_new(text.clone()).unwrap();
+        assert!(matches!(
+            snapshot.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+        // `text()` must materialize the full content instead of panicking.
+        assert_eq!(snapshot.text(), text);
+        assert_eq!(snapshot.text().len(), snapshot.len());
+    }
+
+    #[test]
+    fn buffer_text_does_not_panic_for_degraded_cache() {
+        let text = "z".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 1024);
+        let buf = TextBuffer::new(text.clone());
+        // The bounded compatibility cache is dropped for over-budget buffers.
+        assert!(matches!(
+            buf.try_full_text(),
+            Err(TextError::FullCacheBudgetExceeded { .. })
+        ));
+        // `text()` must materialize the full content instead of panicking.
+        assert_eq!(buf.text(), text);
+        assert_eq!(buf.text().len(), buf.len());
+    }
+
+    #[test]
+    fn buffer_text_materialized_fallback_invalidated_after_mutation() {
+        let mut buf = TextBuffer::new("a".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 8));
+        assert!(buf.try_full_text().is_err());
+        // Materialize the degraded-path fallback once.
+        assert_eq!(buf.text().len(), DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 8);
+
+        // A mutation that keeps the buffer over budget must invalidate the cached fallback so the
+        // next `text()` reflects the edit rather than returning stale content.
+        buf.try_insert(0, "PREFIX").unwrap();
+        assert!(buf.try_full_text().is_err());
+        assert!(buf.text().starts_with("PREFIXa"));
+        assert_eq!(buf.text().len(), DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES + 14);
+
+        // Shrinking back under budget must prefer the freshly restored bounded cache.
+        buf.try_delete_range(6, buf.len()).unwrap();
+        assert_eq!(buf.text(), "PREFIX");
+        assert_eq!(buf.try_full_text().unwrap(), "PREFIX");
     }
 
     #[test]

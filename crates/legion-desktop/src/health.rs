@@ -170,7 +170,7 @@ impl DesktopOperationalHealthSnapshot {
     #[must_use]
     pub fn rows(&self) -> Vec<String> {
         let mut rows = vec![
-            format!("workspace: {}", self.workspace_label),
+            format!("workspace: {}", normalize_inline(&self.workspace_label)),
             format!(
                 "tabs: open={} dirty={}",
                 self.open_tab_count, self.dirty_tab_count
@@ -228,7 +228,7 @@ impl DesktopOperationalHealthSnapshot {
         rows.extend(
             self.unsupported_surfaces
                 .iter()
-                .map(|surface| format!("unsupported: {surface}")),
+                .map(|surface| format!("unsupported: {}", normalize_inline(surface))),
         );
         rows
     }
@@ -237,7 +237,7 @@ impl DesktopOperationalHealthSnapshot {
     #[must_use]
     pub fn to_markdown(&self) -> String {
         let mut lines = vec![
-            format!("workspace_label: {}", self.workspace_label),
+            format!("workspace_label: {}", normalize_markdown(&self.workspace_label)),
             format!("open_tab_count: {}", self.open_tab_count),
             format!("dirty_tab_count: {}", self.dirty_tab_count),
             format!("status_message_count: {}", self.status_message_count),
@@ -306,11 +306,58 @@ impl DesktopOperationalHealthSnapshot {
         lines.extend(
             self.unsupported_surfaces
                 .iter()
-                .map(|surface| format!("- {surface}")),
+                .map(|surface| format!("- {}", normalize_markdown(surface))),
         );
         lines.push(String::new());
         lines.join("\n")
     }
+}
+
+/// Normalize a free-form label for single-line row display by replacing control
+/// characters (newlines, carriage returns, tabs, etc.) with spaces so a single
+/// label cannot inject extra rows or break the one-line format.
+fn normalize_inline(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
+/// Normalize and escape a label for markdown output: control characters become
+/// spaces and markdown-sensitive characters are backslash-escaped so a label
+/// cannot alter the rendered structure.
+fn normalize_markdown(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_control() {
+            out.push(' ');
+            continue;
+        }
+        if matches!(
+            ch,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '-'
+                | '.'
+                | '!'
+                | '|'
+                | '<'
+                | '>'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Phase 7 local beta limitations that must remain visible in evidence.

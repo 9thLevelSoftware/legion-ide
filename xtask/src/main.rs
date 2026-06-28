@@ -496,6 +496,11 @@ enum Commands {
     },
     /// Verify previously-written release pipeline descriptors.
     VerifyReleasePipeline {
+        /// Path to release pipeline TOML configuration. Must match the
+        /// `--config` used for `release-pipeline` so the plan is
+        /// reconstructed from the same config.
+        #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_CONFIG_PATH)]
+        config: String,
         /// Output directory holding descriptors and version stamp.
         #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH)]
         out: String,
@@ -514,10 +519,13 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_PERF_HARNESS_OUTPUT_PATH)]
         out: String,
         /// Treat any failed skeleton as a CI failure (default: true).
-        /// Set `--no-strict` to keep the report-only behavior even when
+        /// Pass `--no-strict` to keep the report-only behavior even when
         /// measurements exceed the configured budget.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when budgets are exceeded).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
     },
     /// Verify a previously-written perf-harness report.
     VerifyPerfHarness {
@@ -525,10 +533,13 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_PERF_HARNESS_OUTPUT_PATH)]
         out: String,
         /// Treat any failed skeleton as a CI failure (default: true).
-        /// Set `--no-strict` to keep the report-only behavior even when
+        /// Pass `--no-strict` to keep the report-only behavior even when
         /// measurements exceed the configured budget.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when budgets are exceeded).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
     },
     /// Run the Legion-Bench v0 eval suite and write a bench report.
     LegionBench {
@@ -539,18 +550,26 @@ enum Commands {
         /// live is reserved for the weekly external run.
         #[arg(long, default_value = "recorded")]
         mode: String,
-        /// Treat any failed task as a CI failure.
+        /// Treat any failed task as a CI failure (default: true).
+        /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when a task fails).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
     },
     /// Verify a previously-written Legion-Bench report.
     VerifyLegionBench {
         /// Output directory holding the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
-        /// Treat any failed task as a CI failure.
+        /// Treat any failed task as a CI failure (default: true).
+        /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when a task fails).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
     },
     /// Validate the machine-readable Kanban backlog file.
     VerifyKanbanBacklog {
@@ -581,17 +600,30 @@ fn main() {
             channel,
             dry_run,
         } => run_release_pipeline_command(&config, &out, &channel, dry_run),
-        Commands::VerifyReleasePipeline { out } => run_verify_release_pipeline_command(&out),
-        Commands::PerfHarness { out, strict } => run_perf_harness_command(&out, strict),
-        Commands::VerifyPerfHarness { out, strict } => {
-            run_verify_perf_harness_command(&out, strict)
+        Commands::VerifyReleasePipeline { config, out } => {
+            run_verify_release_pipeline_command(&config, &out)
         }
-        Commands::LegionBench { out, mode, strict } => {
-            run_legion_bench_command(&out, &mode, strict)
-        }
-        Commands::VerifyLegionBench { out, strict } => {
-            run_verify_legion_bench_command(&out, strict)
-        }
+        Commands::PerfHarness {
+            out,
+            strict,
+            no_strict,
+        } => run_perf_harness_command(&out, strict && !no_strict),
+        Commands::VerifyPerfHarness {
+            out,
+            strict,
+            no_strict,
+        } => run_verify_perf_harness_command(&out, strict && !no_strict),
+        Commands::LegionBench {
+            out,
+            mode,
+            strict,
+            no_strict,
+        } => run_legion_bench_command(&out, &mode, strict && !no_strict),
+        Commands::VerifyLegionBench {
+            out,
+            strict,
+            no_strict,
+        } => run_verify_legion_bench_command(&out, strict && !no_strict),
         Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
     };
 
@@ -732,7 +764,7 @@ fn run_release_pipeline_command(config_path: &str, out: &str, channel: &str, dry
     0
 }
 
-fn run_verify_release_pipeline_command(out: &str) -> i32 {
+fn run_verify_release_pipeline_command(config_path: &str, out: &str) -> i32 {
     let workspace_root = match env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -740,7 +772,7 @@ fn run_verify_release_pipeline_command(out: &str) -> i32 {
             return 1;
         }
     };
-    let config_path = workspace_root.join(DEFAULT_RELEASE_PIPELINE_CONFIG_PATH);
+    let config_path = workspace_root.join(config_path);
     let config = match xtask::release_pipeline::ReleasePipelineConfig::from_file(&config_path) {
         Ok(config) => config,
         Err(err) => {
@@ -2768,13 +2800,64 @@ fn is_ascii_word_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+/// Parse an ATX Markdown heading line into its `(level, label)`. Returns
+/// `None` for non-heading lines and for empty labels. A valid ATX heading
+/// is 1..=6 leading `#` characters followed by whitespace, with any
+/// trailing closing `#` sequence stripped from the label.
+fn parse_atx_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let hashes = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = &trimmed[hashes..];
+    match rest.chars().next() {
+        Some(ch) if ch.is_whitespace() => {}
+        _ => return None,
+    }
+    let label = rest.trim().trim_end_matches('#').trim();
+    if label.is_empty() {
+        None
+    } else {
+        Some((hashes, label))
+    }
+}
+
+/// Extract the body of the Markdown section introduced by `heading`.
+///
+/// `heading` is itself an ATX heading string (e.g. `"## Acceptance status"`).
+/// The match requires a *line* that is an ATX heading with the same level
+/// and label -- a substring match in prose or a fenced code block no longer
+/// counts. The section terminates at the next heading line whose level is
+/// less than or equal to the matched heading's level.
 fn markdown_section<'a>(source: &'a str, heading: &str) -> Option<&'a str> {
-    let start = source.find(heading)?;
-    let tail = &source[start..];
-    let body_start = tail.find('\n').map_or(tail.len(), |idx| idx + 1);
-    let body = &tail[body_start..];
-    let end = body.find("\n## ").unwrap_or(body.len());
-    Some(&body[..end])
+    let (want_level, want_label) = parse_atx_heading(heading)?;
+
+    let mut body_start: Option<usize> = None;
+    let mut offset = 0usize;
+    for line in source.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+
+        if let Some(body) = body_start {
+            if let Some((level, _)) = parse_atx_heading(content)
+                && level <= want_level
+            {
+                return Some(&source[body..line_start]);
+            }
+        } else if let Some((level, label)) = parse_atx_heading(content)
+            && level == want_level
+            && label == want_label
+        {
+            body_start = Some(offset);
+        }
+    }
+    body_start.map(|body| &source[body..])
 }
 
 #[derive(Default)]
@@ -3045,6 +3128,51 @@ mod tests {
     fn read_workspace_file(relative_path: &str) -> String {
         fs::read_to_string(workspace_root().join(relative_path))
             .unwrap_or_else(|err| panic!("unable to read `{relative_path}`: {err}"))
+    }
+
+    #[test]
+    fn markdown_section_requires_real_heading_line_not_substring() {
+        // The heading label appears in prose and a code block before the
+        // real heading; the substring must not be matched.
+        let source = "\
+Intro mentioning ## Acceptance status in prose.\n\
+```\n\
+## Acceptance status (inside a code fence)\n\
+```\n\
+## Acceptance status\n\
+real body line\n\
+## Next\n\
+not part of the section\n";
+        let section = markdown_section(source, "## Acceptance status")
+            .expect("the real heading line should be found");
+        assert!(section.contains("real body line"));
+        assert!(!section.contains("not part of the section"));
+        assert!(!section.contains("in prose"));
+    }
+
+    #[test]
+    fn markdown_section_terminates_at_same_or_higher_level_heading() {
+        // A deeper (level-3) heading does not terminate a level-2 section;
+        // the next level-2 (or level-1) heading does.
+        let source = "\
+## Status\n\
+body a\n\
+### Subsection\n\
+body b\n\
+## Other\n\
+body c\n";
+        let section =
+            markdown_section(source, "## Status").expect("level-2 heading should be found");
+        assert!(section.contains("body a"));
+        assert!(section.contains("### Subsection"));
+        assert!(section.contains("body b"));
+        assert!(!section.contains("body c"));
+    }
+
+    #[test]
+    fn markdown_section_returns_none_when_heading_absent() {
+        let source = "## Something else\nbody\n";
+        assert!(markdown_section(source, "## Acceptance status").is_none());
     }
 
     fn source_block(text: &str, marker: &str) -> String {

@@ -10,6 +10,8 @@ use legion_desktop::{
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use legion_protocol::{BufferId, TerminalPanelProjection, TerminalSessionId, TextCoordinate};
+
+mod common;
 use legion_protocol::{
     EventSequence, RedactionHint, TerminalOutputRowProjection, TerminalPanelStatus,
     TerminalPanelStatusKind, TerminalRuntimeState, TerminalScrollbackProjection,
@@ -226,9 +228,7 @@ fn desktop_phase4_dispatch_stays_projection_only() {
         fs::read_to_string(manifest_dir.join("src/bridge.rs")).expect("read bridge source");
     let view_source =
         fs::read_to_string(manifest_dir.join("src/view.rs")).expect("read view source");
-    for source in [bridge_source, view_source] {
-        assert!(!source.contains("AppComposition"));
-        assert!(!source.contains("legion_terminal"));
-        assert!(!source.contains("TerminalRuntime<"));
-    }
+    let forbidden = ["AppComposition", "legion_terminal", "TerminalRuntime"];
+    common::assert_source_excludes(&bridge_source, "src/bridge.rs", &forbidden);
+    common::assert_source_excludes(&view_source, "src/view.rs", &forbidden);
 }

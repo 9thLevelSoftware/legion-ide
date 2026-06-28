@@ -812,6 +812,9 @@ pub enum DesktopBridgeError {
     /// Git pull-request flow requires a projected branch label.
     #[error("git branch label is unavailable in the current projection")]
     MissingGitBranchLabel,
+    /// Git pull-request flow requires a projected remote default branch.
+    #[error("git remote default branch is unavailable in the current projection")]
+    MissingRemoteDefaultBranch,
     /// Git pull-request flow does not support the projected remote URL.
     #[error("unsupported git forge remote: {remote_url}")]
     UnsupportedGitForgeRemote {
@@ -1212,11 +1215,20 @@ impl DesktopCommandBridge {
                 let Some(branch_label) = snapshot.git_projection.branch_label.as_deref() else {
                     return DesktopBridgeOutput::Error(DesktopBridgeError::MissingGitBranchLabel);
                 };
-                let base_branch = snapshot
+                let base_branch = match snapshot
                     .git_projection
                     .remote_default_branch
                     .as_deref()
-                    .unwrap_or(branch_label);
+                    .map(str::trim)
+                    .filter(|branch| !branch.is_empty())
+                {
+                    Some(base_branch) => base_branch,
+                    None => {
+                        return DesktopBridgeOutput::Error(
+                            DesktopBridgeError::MissingRemoteDefaultBranch,
+                        );
+                    }
+                };
                 let Some(url) = git_pull_request_url(remote_url, base_branch, branch_label) else {
                     return DesktopBridgeOutput::Error(
                         DesktopBridgeError::UnsupportedGitForgeRemote {

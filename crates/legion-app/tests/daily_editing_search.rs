@@ -234,12 +234,19 @@ fn daily_editing_search_workspace_applies_include_and_exclude_globs() {
 #[test]
 fn daily_editing_search_workspace_honors_gitignore() {
     let workspace = TempWorkspace::new();
-    std::process::Command::new("git")
+    let git_init = std::process::Command::new("git")
         .arg("init")
         .arg("-q")
         .arg(workspace.path())
-        .status()
+        .output()
         .expect("git init should run");
+    assert!(
+        git_init.status.success(),
+        "git init failed (status {:?}): stdout={:?} stderr={:?}",
+        git_init.status.code(),
+        String::from_utf8_lossy(&git_init.stdout),
+        String::from_utf8_lossy(&git_init.stderr)
+    );
     workspace.write(".gitignore", "ignored.txt\n");
     workspace.write("ignored.txt", "needle ignored\n");
     let mut app = open_app(workspace.path(), None);

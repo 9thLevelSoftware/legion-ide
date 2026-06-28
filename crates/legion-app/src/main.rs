@@ -8,8 +8,9 @@ use legion_app::{AppComposition, AppSaveOutcome};
 use legion_protocol::{PrincipalId, WorkspaceTrustState};
 
 fn main() -> Result<()> {
-    let path = env::args()
-        .nth(1)
+    let explicit_path = env::args().nth(1);
+    let path = explicit_path
+        .clone()
         .unwrap_or_else(|| "scratch.txt".to_string());
 
     let root = env::current_dir()?;
@@ -19,7 +20,14 @@ fn main() -> Result<()> {
         WorkspaceTrustState::Trusted,
         PrincipalId("cli".to_string()),
     )?;
-    let file_id = app.open_file(path)?;
+    // When no path was supplied we fall back to the scratch buffer. If that
+    // default file does not exist yet, create it rather than aborting startup
+    // (the Existing open intent reads metadata and fails on a missing file).
+    let file_id = if explicit_path.is_none() && !std::path::Path::new(&path).exists() {
+        app.open_new_file(&path)?
+    } else {
+        app.open_file(&path)?
+    };
 
     println!("Opened file id {:?}", file_id);
     println!("Commands: :w | :q");

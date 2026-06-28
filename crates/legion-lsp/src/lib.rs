@@ -6,6 +6,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use legion_protocol::{
     BufferVersion, EventId, EventSequence, FileFingerprint, FileId, LanguageCodeLensProjection,
@@ -65,6 +68,10 @@ pub enum LspRuntimeError {
         /// Supervised LSP request identifier.
         request_id: LspRequestId,
     },
+    /// The monotonic JSON-RPC id space was exhausted, so no further
+    /// request can be correlated without reusing an id.
+    #[error("LSP JSON-RPC id space exhausted")]
+    JsonRpcIdExhausted,
     /// The process-backed stdio session is not in a running state.
     #[error("LSP stdio session is not running")]
     SessionNotRunning,
@@ -830,9 +837,15 @@ impl LspClient {
         method: impl Into<String>,
         params: Value,
         context: LspOperationContext,
-    ) -> LspPendingRequest {
+    ) -> LspRuntimeResult<LspPendingRequest> {
         let json_rpc_id = self.next_json_rpc_id;
-        self.next_json_rpc_id = self.next_json_rpc_id.saturating_add(1);
+        // Use `checked_add` so id exhaustion is reported explicitly rather
+        // than silently reusing `u64::MAX` and corrupting the correlation
+        // tables on subsequent requests.
+        self.next_json_rpc_id = self
+            .next_json_rpc_id
+            .checked_add(1)
+            .ok_or(LspRuntimeError::JsonRpcIdExhausted)?;
         let method = method.into();
         let envelope = JsonRpcEnvelope::request(json_rpc_id, method.clone(), params);
         let pending = LspPendingRequest {
@@ -847,7 +860,7 @@ impl LspClient {
             .insert(json_rpc_id, pending.clone());
         self.json_rpc_id_by_request_id
             .insert(context.request_id, json_rpc_id);
-        pending
+        Ok(pending)
     }
 
     /// Correlates a response envelope back to the supervised request that produced it.
@@ -1103,7 +1116,13 @@ fn completion_projection_for_item(
         label,
         detail_label: detail,
         kind_label,
-        score_basis_points: 10_000u16.saturating_sub((index as u16).saturating_mul(100)),
+        score_basis_points: {
+            // Compute the penalty in u32 so a large `index` cannot wrap when
+            // cast to u16 before the multiply (which would let far-down
+            // completions regain a top score).
+            let penalty = (index as u32).saturating_mul(100);
+            10_000u32.saturating_sub(penalty) as u16
+        },
         degraded: item.get("insertText").is_none(),
         schema_version: 1,
     })
@@ -1986,21 +2005,57 @@ fn metadata_fingerprint(label: &str, input: &str) -> FileFingerprint {
 // Process-backed stdio transport (WS03.T1).
 // -----------------------------------------------------------------------------
 
+/// Message produced by the background stdout reader thread and consumed by
+/// the session on the request-driving thread. Carrying parsed frames over a
+/// channel decouples the (blocking) pipe read from the caller, so a fully
+/// silent server can be bounded with [`Receiver::recv_timeout`] instead of
+/// blocking a pipe read that `std` cannot time out.
+enum StdoutReaderEvent {
+    /// A successfully framed and parsed JSON-RPC envelope.
+    Frame(Box<JsonRpcEnvelope>),
+    /// The peer closed stdout cleanly (clean EOF between frames).
+    Eof,
+    /// A framing or parse error terminated the reader.
+    Err(Box<LspRuntimeError>),
+}
+
+/// Background reader that owns the child's stdout pipe and forwards parsed
+/// frames over a channel. The thread terminates after the first `Eof` or
+/// `Err`, or once the receiver is dropped.
+struct StdoutReader {
+    rx: Receiver<StdoutReaderEvent>,
+    handle: Option<JoinHandle<()>>,
+}
+
+/// Outcome of a deadline-bounded read on [`LspStdioProcess::read_envelope_until`].
+pub enum LspReadOutcome {
+    /// A framed envelope was read before the deadline.
+    Envelope(JsonRpcEnvelope),
+    /// The peer closed stdout cleanly before the deadline.
+    Eof,
+    /// The deadline elapsed before a frame arrived. The process is left
+    /// running; the caller decides how to resolve the in-flight request.
+    TimedOut,
+}
+
 /// Owned handle to a launched `std::process::Child` running an LSP server
 /// on piped stdio.
 ///
 /// The handle implements [`LspProcessHandle`] so the existing
 /// [`LspSupervisor`] can reuse it for metadata-only lifecycle bookkeeping,
-/// and additionally exposes the buffered stdin/stdout pipes so the
-/// higher-level [`LspStdioSession`] can read and write Content-Length
-/// framed JSON-RPC messages. The stderr pipe is captured so the
+/// and additionally exposes the buffered stdin pipe plus a deadline-bounded
+/// frame reader so the higher-level [`LspStdioSession`] can read and write
+/// Content-Length framed JSON-RPC messages without a silent server blocking
+/// the caller forever. The stdout pipe is read on a dedicated background
+/// thread that forwards parsed frames over a channel; the session waits on
+/// that channel with a deadline. The stderr pipe is captured so the
 /// supervisor/drain loop can read it independently; it is intentionally
 /// metadata-only and never propagated into response payloads.
 pub struct LspStdioProcess {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
-    stdout: Option<BufReader<ChildStdout>>,
     stderr: Option<ChildStderr>,
+    reader: Option<StdoutReader>,
     killed: bool,
 }
 
@@ -2015,11 +2070,12 @@ impl LspStdioProcess {
             message: "child stdout unavailable".to_string(),
         })?;
         let stderr = child.stderr.take();
+        let reader = StdoutReader::spawn(stdout)?;
         Ok(Self {
             child: Some(child),
             stdin: Some(stdin),
-            stdout: Some(BufReader::new(stdout)),
             stderr,
+            reader: Some(reader),
             killed: false,
         })
     }
@@ -2043,20 +2099,45 @@ impl LspStdioProcess {
     }
 
     /// Reads the next Content-Length framed JSON-RPC envelope from the
-    /// child's stdout.
+    /// child's stdout, blocking until a frame, clean EOF, or a framing error.
     ///
     /// Returns `Ok(None)` on clean EOF (peer closed the stream) so callers
     /// can distinguish a graceful shutdown from a framing error.
+    ///
+    /// This blocks indefinitely on a silent server; prefer
+    /// [`Self::read_envelope_until`] when an unresponsive server must be
+    /// bounded by a deadline.
     pub fn read_envelope(&mut self) -> LspRuntimeResult<Option<JsonRpcEnvelope>> {
-        let stdout = self
-            .stdout
-            .as_mut()
-            .ok_or(LspRuntimeError::SessionNotRunning)?;
-        let payload = match read_lsp_frame(stdout)? {
-            Some(payload) => payload,
-            None => return Ok(None),
-        };
-        Ok(Some(serde_json::from_slice(&payload)?))
+        let reader = self.reader.as_ref().ok_or(LspRuntimeError::SessionNotRunning)?;
+        match reader.rx.recv() {
+            Ok(StdoutReaderEvent::Frame(envelope)) => Ok(Some(*envelope)),
+            Ok(StdoutReaderEvent::Eof) => Ok(None),
+            Ok(StdoutReaderEvent::Err(err)) => Err(*err),
+            // The reader thread ended without a terminal message we observed
+            // (e.g. it was already drained); treat a closed channel as EOF.
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Reads the next framed JSON-RPC envelope, returning
+    /// [`LspReadOutcome::TimedOut`] if `deadline` elapses before a frame
+    /// arrives. Unlike [`Self::read_envelope`], this bounds the wait even
+    /// when the server goes fully silent, because the actual blocking pipe
+    /// read happens on a background thread and this only waits on a channel.
+    pub fn read_envelope_until(
+        &mut self,
+        deadline: Instant,
+    ) -> LspRuntimeResult<LspReadOutcome> {
+        let reader = self.reader.as_ref().ok_or(LspRuntimeError::SessionNotRunning)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match reader.rx.recv_timeout(remaining) {
+            Ok(StdoutReaderEvent::Frame(envelope)) => Ok(LspReadOutcome::Envelope(*envelope)),
+            Ok(StdoutReaderEvent::Eof) => Ok(LspReadOutcome::Eof),
+            Ok(StdoutReaderEvent::Err(err)) => Err(*err),
+            Err(RecvTimeoutError::Timeout) => Ok(LspReadOutcome::TimedOut),
+            // Reader thread ended; treat a closed channel as EOF.
+            Err(RecvTimeoutError::Disconnected) => Ok(LspReadOutcome::Eof),
+        }
     }
 
     /// Detaches the stderr handle so the supervisor/drain loop can read
@@ -2090,8 +2171,51 @@ impl LspProcessHandle for LspStdioProcess {
         }
         // Drop pipes so any blocked reader/writer unblocks.
         self.stdin.take();
-        self.stdout.take();
         self.stderr.take();
+        // The child is dead, so its stdout closes; the reader thread observes
+        // EOF and exits. Drop the receiver and join the thread so it does not
+        // outlive the process handle.
+        if let Some(mut reader) = self.reader.take()
+            && let Some(handle) = reader.handle.take()
+        {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl StdoutReader {
+    /// Spawns a background thread that reads Content-Length framed JSON-RPC
+    /// envelopes from `stdout` and forwards them over a channel until clean
+    /// EOF or a framing/parse error.
+    fn spawn(stdout: ChildStdout) -> LspRuntimeResult<Self> {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name("legion-lsp-stdout-reader".to_string())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let event = match read_lsp_frame(&mut reader) {
+                        Ok(Some(payload)) => match serde_json::from_slice(&payload) {
+                            Ok(envelope) => StdoutReaderEvent::Frame(Box::new(envelope)),
+                            Err(err) => StdoutReaderEvent::Err(Box::new(err.into())),
+                        },
+                        Ok(None) => StdoutReaderEvent::Eof,
+                        Err(err) => StdoutReaderEvent::Err(Box::new(err)),
+                    };
+                    let terminal = !matches!(event, StdoutReaderEvent::Frame(_));
+                    // If the receiver is gone the session no longer cares; stop.
+                    if tx.send(event).is_err() || terminal {
+                        return;
+                    }
+                }
+            })
+            .map_err(|err| LspRuntimeError::StdioIo {
+                message: format!("spawn stdout reader thread: {err}"),
+            })?;
+        Ok(Self {
+            rx,
+            handle: Some(handle),
+        })
     }
 }
 
@@ -2236,6 +2360,11 @@ pub struct LspStdioSession {
     supervision_events: Vec<LspSupervisionEvent>,
     progress_notifications: Vec<LspProgressNotification>,
     diagnostic_notifications: Vec<LspDiagnosticNotificationMetadata>,
+    /// Correlated responses that arrived while we were waiting for a
+    /// different request's response, keyed by JSON-RPC id. Drained by
+    /// [`Self::read_response_for`] so an out-of-order response is never
+    /// dropped and its request left stranded.
+    response_stash: HashMap<u64, LspCorrelatedResponse>,
 }
 
 impl LspStdioSession {
@@ -2277,6 +2406,7 @@ impl LspStdioSession {
             supervision_events: events,
             progress_notifications: Vec::new(),
             diagnostic_notifications: Vec::new(),
+            response_stash: HashMap::new(),
         })
     }
 
@@ -2305,7 +2435,7 @@ impl LspStdioSession {
         params: Value,
         context: LspOperationContext,
     ) -> LspRuntimeResult<LspPendingRequest> {
-        let pending = self.client.prepare_request(method, params, context);
+        let pending = self.client.prepare_request(method, params, context)?;
         self.process.write_envelope(&pending.envelope)?;
         Ok(pending)
     }
@@ -2326,7 +2456,17 @@ impl LspStdioSession {
         &mut self,
         pending: &LspPendingRequest,
     ) -> LspRuntimeResult<LspCorrelatedResponse> {
-        self.read_until_correlated_response(pending.json_rpc_id, pending.request_id)
+        // A response for this request may have already been read (and
+        // stashed) while we waited on an earlier request. Serve it from
+        // the stash before reading new frames.
+        if let Some(stashed) = self.response_stash.remove(&pending.json_rpc_id) {
+            return Ok(stashed);
+        }
+        self.read_until_correlated_response(
+            pending.json_rpc_id,
+            pending.request_id,
+            pending.timeout_ms,
+        )
     }
 
     /// Cancels a pending request and writes the `$/cancelRequest` notification.
@@ -2394,15 +2534,55 @@ impl LspStdioSession {
         &mut self,
         target_json_rpc_id: u64,
         expected_request_id: LspRequestId,
+        timeout_ms: u64,
     ) -> LspRuntimeResult<LspCorrelatedResponse> {
+        let started = Instant::now();
+        // A non-zero budget yields a hard deadline. The frame reader waits on
+        // a channel fed by a background pipe-reader thread, so the deadline is
+        // honored even when the server keeps emitting unrelated frames *or*
+        // goes fully silent (the blocking pipe read lives off the caller's
+        // thread). A zero budget means "wait indefinitely" and falls back to a
+        // plain blocking read.
+        let deadline = (timeout_ms > 0).then(|| started + Duration::from_millis(timeout_ms));
         loop {
-            let envelope = match self.process.read_envelope()? {
-                Some(envelope) => envelope,
-                None => {
-                    return Err(LspRuntimeError::StdioIo {
-                        message: "child closed stdout before response".to_string(),
-                    });
-                }
+            // Enforce the deadline before each read. This covers a server that
+            // floods frames fast enough that `recv_timeout` always has a frame
+            // buffered: the explicit check still bounds the loop.
+            if let Some(deadline) = deadline
+                && Instant::now() >= deadline
+            {
+                return self.resolve_request_timeout(
+                    target_json_rpc_id,
+                    expected_request_id,
+                    started,
+                    timeout_ms,
+                );
+            }
+            let envelope = match deadline {
+                Some(deadline) => match self.process.read_envelope_until(deadline)? {
+                    LspReadOutcome::Envelope(envelope) => envelope,
+                    LspReadOutcome::TimedOut => {
+                        return self.resolve_request_timeout(
+                            target_json_rpc_id,
+                            expected_request_id,
+                            started,
+                            timeout_ms,
+                        );
+                    }
+                    LspReadOutcome::Eof => {
+                        return Err(LspRuntimeError::StdioIo {
+                            message: "child closed stdout before response".to_string(),
+                        });
+                    }
+                },
+                None => match self.process.read_envelope()? {
+                    Some(envelope) => envelope,
+                    None => {
+                        return Err(LspRuntimeError::StdioIo {
+                            message: "child closed stdout before response".to_string(),
+                        });
+                    }
+                },
             };
             let Some(id) = envelope.id else {
                 if envelope.method.as_deref() == Some("$/progress")
@@ -2419,13 +2599,56 @@ impl LspStdioSession {
                 continue;
             };
             if id != target_json_rpc_id {
-                // Skip notification-shaped or out-of-order responses.
+                // A response for a *different* in-flight request. Correlate it
+                // and stash it by JSON-RPC id so a later `read_response_for`
+                // can retrieve it, rather than dropping it and stranding that
+                // request in the correlation tables.
+                match self.client.correlate_response(envelope) {
+                    Ok(correlated) => {
+                        self.response_stash.insert(id, correlated);
+                    }
+                    // Unknown / already-resolved id (e.g. a late response for a
+                    // cancelled or timed-out request): nothing to correlate,
+                    // skip it just like before.
+                    Err(LspRuntimeError::UnknownResponseId { .. }) => {}
+                    Err(err) => return Err(err),
+                }
                 continue;
             }
             let correlated = self.client.correlate_response(envelope)?;
             debug_assert_eq!(correlated.request_id, expected_request_id);
             return Ok(correlated);
         }
+    }
+
+    /// Resolves an in-flight request as timed out: best-effort emits a
+    /// `$/cancelRequest` so the server can abandon the work, then drops the
+    /// correlation entry and returns the [`LspResultStatus::Timeout`] response.
+    ///
+    /// The `$/cancelRequest` is written directly (rather than via
+    /// [`LspClient::cancel_request`]) so the correlation tables stay intact for
+    /// [`LspClient::resolve_timeout`], which requires the request to still be
+    /// pending.
+    fn resolve_request_timeout(
+        &mut self,
+        target_json_rpc_id: u64,
+        expected_request_id: LspRequestId,
+        started: Instant,
+        timeout_ms: u64,
+    ) -> LspRuntimeResult<LspCorrelatedResponse> {
+        // Best-effort cancellation: ignore write failures (e.g. the server's
+        // stdin is already gone) since we are tearing down the request anyway.
+        let _ = self.process.write_envelope(&JsonRpcEnvelope::notification(
+            "$/cancelRequest",
+            json!({ "id": target_json_rpc_id }),
+        ));
+        // `resolve_timeout` requires the elapsed time to strictly exceed the
+        // budget; clamp up by 1ms to cover the case where the deadline fired
+        // at exactly the budget due to timer granularity.
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis())
+            .unwrap_or(u64::MAX)
+            .max(timeout_ms.saturating_add(1));
+        self.client.resolve_timeout(expected_request_id, elapsed_ms)
     }
 }
 

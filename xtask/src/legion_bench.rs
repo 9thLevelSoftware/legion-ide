@@ -208,21 +208,7 @@ pub fn plan_legion_bench_report(
         .map(|(ordinal, task)| score_task(task, ordinal, mode, &provider_profile))
         .collect::<Vec<_>>();
 
-    let mut summary = LegionBenchSummary {
-        total: results.len(),
-        ..LegionBenchSummary::default()
-    };
-    let mut score_total = 0_u32;
-    for result in &results {
-        score_total = score_total.saturating_add(u32::from(result.score.score));
-        match result.score.status {
-            LegionBenchTaskStatus::Passed => summary.passed += 1,
-            LegionBenchTaskStatus::Failed => summary.failed += 1,
-        }
-    }
-    if summary.total > 0 {
-        summary.average_score = score_total / summary.total as u32;
-    }
+    let summary = recompute_summary(&results);
 
     LegionBenchReport {
         schema_version: BENCH_SCHEMA_VERSION,
@@ -274,15 +260,52 @@ pub fn verify_legion_bench_report(
             report.summary.failed, report.summary.regressed
         ));
     }
+    // Full task-definition equality: the report's embedded task must match the
+    // suite definition exactly, not merely share its id. This rejects tampering
+    // with any non-fingerprinted task field as well as reordering.
     for (expected, result) in suite.tasks.iter().zip(&report.tasks) {
-        if expected.id != result.task.id {
+        if expected != &result.task {
             return Err(format!(
-                "bench task order mismatch: report={} suite={}",
-                result.task.id, expected.id
+                "bench task definition mismatch for `{}`: report task does not match the suite definition",
+                expected.id
             ));
         }
     }
+    // Recompute the summary from the per-task statuses/scores and reject if the
+    // stored summary was tampered with (counts or aggregate score).
+    let recomputed = recompute_summary(&report.tasks);
+    if report.summary != recomputed {
+        return Err(format!(
+            "bench summary does not match recomputed task statuses: report={:?} recomputed={:?}",
+            report.summary, recomputed
+        ));
+    }
     Ok(())
+}
+
+/// Recompute the suite-level summary from the per-task results. Shared by
+/// [`plan_legion_bench_report`] (to build the summary) and
+/// [`verify_legion_bench_report`] (to detect a tampered summary), so the two
+/// can never drift apart. `regressed` is not derivable from a single report's
+/// statuses and is left at the default (`0`); the baseline gate rejects any
+/// non-zero `regressed` separately.
+fn recompute_summary(tasks: &[LegionBenchTaskResult]) -> LegionBenchSummary {
+    let mut summary = LegionBenchSummary {
+        total: tasks.len(),
+        ..LegionBenchSummary::default()
+    };
+    let mut score_total = 0_u32;
+    for result in tasks {
+        score_total = score_total.saturating_add(u32::from(result.score.score));
+        match result.score.status {
+            LegionBenchTaskStatus::Passed => summary.passed += 1,
+            LegionBenchTaskStatus::Failed => summary.failed += 1,
+        }
+    }
+    if summary.total > 0 {
+        summary.average_score = score_total / summary.total as u32;
+    }
+    summary
 }
 
 pub fn write_report(out_dir: &Path, report: &LegionBenchReport) -> Result<PathBuf, String> {
@@ -348,8 +371,14 @@ fn score_task(
         .max_cost_cents
         .saturating_sub(2 + (ordinal as u32 % 2))
         .max(1);
-    let tests_passed = budget.require_tests_pass;
-    let passed = tests_passed
+    // The recorded baseline run passes its tests; `require_tests_pass` only
+    // controls whether passing tests are a *gate*. A task that does not
+    // require passing tests must not be forced to fail (the previous code
+    // set `tests_passed = require_tests_pass`, so `require_tests_pass = false`
+    // could never pass).
+    let tests_passed = true;
+    let tests_gate = !budget.require_tests_pass || tests_passed;
+    let passed = tests_gate
         && diff_files <= budget.max_diff_files
         && turns <= budget.max_turns
         && cost_cents <= budget.max_cost_cents;

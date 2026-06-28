@@ -57,6 +57,39 @@ fn create_root() -> std::path::PathBuf {
     root
 }
 
+/// Drop-guarded off-workspace fixture placed in the shared temp parent (a sibling of the test
+/// root). The name carries a fresh UUID so parallel processes and reruns cannot collide, and
+/// the file is removed on drop with a prefix/location check so it never leaks.
+struct OutsideFixture {
+    path: std::path::PathBuf,
+}
+
+impl OutsideFixture {
+    fn new(root: &Path, label: &str) -> Self {
+        let parent = root.parent().expect("root parent");
+        let path = parent.join(format!("legion-{label}-{}.txt", Uuid::now_v7()));
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for OutsideFixture {
+    fn drop(&mut self) {
+        let temp_root = std::env::temp_dir();
+        let named = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("legion-"));
+        if self.path.starts_with(&temp_root) && named {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn ui_text_coordinate(line: u32, character: u32) -> TextCoordinate {
     TextCoordinate {
         line,
@@ -2372,10 +2405,8 @@ fn workspace_vfs_integration_closed_file_apply_rejections_do_not_mutate_disk_or_
     let dirty = root.join("dirty.txt");
     let stale_target = root.join("stale-delete.txt");
     let conflict_target = root.join("conflict-delete.txt");
-    let escape = root.parent().expect("root parent").join(format!(
-        "legion-escape-{}.txt",
-        TEMP_ROOT_COUNTER.load(Ordering::Relaxed)
-    ));
+    let escape_fixture = OutsideFixture::new(&root, "escape");
+    let escape = escape_fixture.path();
     std::fs::write(&dirty, "dirty").expect("seed dirty file");
     std::fs::write(&stale_target, "stale").expect("seed stale target");
     std::fs::write(&conflict_target, "conflict").expect("seed conflict target");
@@ -2454,7 +2485,6 @@ fn workspace_vfs_integration_closed_file_apply_rejections_do_not_mutate_disk_or_
     assert!(app.editor().is_dirty(dirty_buffer).expect("dirty retained"));
 
     let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_file(&escape);
 }
 
 #[test]
@@ -3025,11 +3055,13 @@ fn workspace_vfs_integration_batch_preflight_rejects_unresolved_parent_traversal
 {
     let root = create_root();
     let inside_path = root.join("new").join("deep").join("file.txt");
-    let outside_file_name = format!(
-        "legion-outside-{}.txt",
-        TEMP_ROOT_COUNTER.load(Ordering::Relaxed)
-    );
-    let outside_normalized = root.parent().expect("root parent").join(&outside_file_name);
+    let outside_fixture = OutsideFixture::new(&root, "outside");
+    let outside_file_name = outside_fixture
+        .path()
+        .file_name()
+        .expect("outside file name")
+        .to_owned();
+    let outside_normalized = outside_fixture.path().to_path_buf();
     let outside_path = root
         .join("new")
         .join("..")
@@ -3118,7 +3150,6 @@ fn workspace_vfs_integration_batch_preflight_rejects_unresolved_parent_traversal
     assert!(!outside_normalized.exists());
 
     let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_file(&outside_normalized);
 }
 
 #[test]

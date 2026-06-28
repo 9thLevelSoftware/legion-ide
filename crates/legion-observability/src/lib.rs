@@ -3,9 +3,7 @@
 #![warn(missing_docs)]
 
 use std::{
-    collections::hash_map::DefaultHasher,
     fmt,
-    hash::{Hash, Hasher},
     sync::{Arc, Mutex},
 };
 
@@ -57,6 +55,9 @@ pub enum ObservabilityError {
     /// Event sequence is missing or zero.
     #[error("event envelope sequence must be non-zero")]
     InvalidSequence,
+    /// Proposal lifecycle transition referenced a different proposal than the audit subject.
+    #[error("proposal audit record requires transition.proposal_id == proposal.proposal_id")]
+    MismatchedProposalTransition,
     /// Event sink storage lock was poisoned.
     #[error("event sink storage lock poisoned")]
     StorageUnavailable,
@@ -569,7 +570,7 @@ pub fn event_metadata_record(envelope: &EventEnvelope) -> EventMetadataRecord {
         retention: envelope.retention,
         redaction: RedactionHint::MetadataOnly,
         occurred_at: envelope.occurred_at,
-        schema_version: 1,
+        schema_version: envelope.schema_version,
     }
 }
 
@@ -577,8 +578,14 @@ pub fn event_metadata_record(envelope: &EventEnvelope) -> EventMetadataRecord {
 pub fn proposal_audit_record(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
-) -> ProposalAuditRecord {
-    ProposalAuditRecord {
+) -> Result<ProposalAuditRecord, ObservabilityError> {
+    // Fail closed on a mismatched proposal/transition pairing: emitting a record
+    // that stamps `proposal.proposal_id` onto a different proposal's lifecycle
+    // data would silently corrupt the audit trail.
+    if transition.proposal_id != proposal.proposal_id {
+        return Err(ObservabilityError::MismatchedProposalTransition);
+    }
+    Ok(ProposalAuditRecord {
         proposal_id: proposal.proposal_id,
         lifecycle_state: transition.lifecycle_state,
         timestamp: transition.timestamp,
@@ -587,10 +594,12 @@ pub fn proposal_audit_record(
         correlation_id: transition.correlation_id,
         causality_id: transition.causality_id,
         payload_summary: proposal_payload_summary(proposal),
+        checkpoint_rollback_projection: None,
+        risk_rule_ids: Vec::new(),
         diagnostics: redacted_diagnostics(&transition.diagnostics),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
-    }
+    })
 }
 
 /// Build an envelope-ready metadata DTO proving that proposal audit storage completed.
@@ -598,8 +607,8 @@ pub fn proposal_audit_recorded_event(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
-) -> EventEnvelope {
-    assert_core_ids(transition.causality_id, transition.correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(transition.causality_id, transition.correlation_id, sequence)?;
     let summary = proposal_payload_summary(proposal);
     let mut builder = EventEnvelopeBuilder::new("proposal.audit_recorded", transition.causality_id)
         .correlation_id(transition.correlation_id)
@@ -624,7 +633,7 @@ pub fn proposal_audit_recorded_event(
         builder = builder.file_id(file_id);
     }
 
-    builder.build()
+    Ok(builder.build())
 }
 
 /// Build a metadata-only assisted-AI audit record without provider invocation or mutation authority.
@@ -730,11 +739,6 @@ pub fn assisted_ai_audit_recorded_event(
     record: &AssistedAiAuditRecord,
 ) -> Result<EventEnvelope, AssistedAiContractError> {
     validate_assisted_ai_audit_record(record)?;
-    assert_core_ids(
-        record.causality_id,
-        record.correlation_id,
-        record.event_sequence,
-    );
     let mut builder = EventEnvelopeBuilder::new("assisted_ai.audit_recorded", record.causality_id)
         .correlation_id(record.correlation_id)
         .sequence(record.event_sequence)
@@ -812,11 +816,6 @@ pub fn delegated_task_readiness_audit_linkage_recorded_event(
     record: &DelegatedTaskAuditLinkageRecord,
 ) -> Result<EventEnvelope, AssistedAiContractError> {
     validate_delegated_task_audit_linkage_record(record)?;
-    assert_core_ids(
-        record.causality_id,
-        record.correlation_id,
-        record.event_sequence,
-    );
     Ok(EventEnvelopeBuilder::new(
         "delegated_task.readiness_audit_linkage_recorded",
         record.causality_id,
@@ -856,11 +855,6 @@ pub fn phase4_runtime_audit_recorded_event(
     record: &Phase4RuntimeAuditRecord,
 ) -> Result<EventEnvelope, AssistedAiContractError> {
     validate_phase4_runtime_audit_record(record)?;
-    assert_core_ids(
-        record.causality_id,
-        record.correlation_id,
-        record.event_sequence,
-    );
     let mut builder =
         EventEnvelopeBuilder::new("phase4.runtime_audit_recorded", record.causality_id)
             .correlation_id(record.correlation_id)
@@ -888,11 +882,6 @@ pub fn agent_replay_manifest_recorded_event(
     manifest: &AgentReplayManifest,
 ) -> Result<EventEnvelope, AssistedAiContractError> {
     validate_agent_replay_manifest(manifest)?;
-    assert_core_ids(
-        manifest.causality_id,
-        manifest.correlation_id,
-        manifest.event_sequence,
-    );
     Ok(EventEnvelopeBuilder::new(
         "phase4.agent_replay_manifest_recorded",
         manifest.causality_id,
@@ -1022,19 +1011,21 @@ pub fn save_denied_event(
     causality_id: CausalityId,
     sequence: EventSequence,
     reason: impl Into<String>,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let reason = reason.into();
-    EventEnvelopeBuilder::new("workspace.save_denied", causality_id)
-        .workspace_id(workspace_id)
-        .file_id(file_id)
-        .correlation_id(correlation_id)
-        .sequence(sequence)
-        .severity(EventSeverity::Warning)
-        .retention(RetentionLabel::Audit)
-        .metadata("reason_hash", metadata_hash(&reason))
-        .metadata("reason_len", reason.len() as u64)
-        .build()
+    Ok(
+        EventEnvelopeBuilder::new("workspace.save_denied", causality_id)
+            .workspace_id(workspace_id)
+            .file_id(file_id)
+            .correlation_id(correlation_id)
+            .sequence(sequence)
+            .severity(EventSeverity::Warning)
+            .retention(RetentionLabel::Audit)
+            .metadata("reason_hash", metadata_hash(&reason))
+            .metadata("reason_len", reason.len() as u64)
+            .build(),
+    )
 }
 
 /// Build an envelope-ready metadata DTO for denied path escape attempts.
@@ -1044,18 +1035,20 @@ pub fn path_escape_denied_event(
     causality_id: CausalityId,
     sequence: EventSequence,
     path: impl Into<String>,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let path = path.into();
-    EventEnvelopeBuilder::new("workspace.path_escape_denied", causality_id)
-        .workspace_id(workspace_id)
-        .correlation_id(correlation_id)
-        .sequence(sequence)
-        .severity(EventSeverity::Warning)
-        .retention(RetentionLabel::Audit)
-        .metadata("path_hash", metadata_hash(&path))
-        .metadata("path_len", path.len() as u64)
-        .build()
+    Ok(
+        EventEnvelopeBuilder::new("workspace.path_escape_denied", causality_id)
+            .workspace_id(workspace_id)
+            .correlation_id(correlation_id)
+            .sequence(sequence)
+            .severity(EventSeverity::Warning)
+            .retention(RetentionLabel::Audit)
+            .metadata("path_hash", metadata_hash(&path))
+            .metadata("path_len", path.len() as u64)
+            .build(),
+    )
 }
 
 /// Build an envelope-ready metadata DTO for editor transaction outcomes.
@@ -1064,8 +1057,8 @@ pub fn transaction_event(
     applied: bool,
     reason: Option<&str>,
     sequence: EventSequence,
-) -> EventEnvelope {
-    assert_core_ids(descriptor.causality_id, descriptor.correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(descriptor.causality_id, descriptor.correlation_id, sequence)?;
     let event = if applied {
         "editor.transaction_applied"
     } else {
@@ -1100,7 +1093,7 @@ pub fn transaction_event(
             .metadata("reason_len", reason.len() as u64);
     }
 
-    builder.build()
+    Ok(builder.build())
 }
 
 /// Build an envelope-ready metadata DTO for watcher overflow or recovery.
@@ -1110,9 +1103,9 @@ pub fn watcher_recovery_event(
     causality_id: CausalityId,
     sequence: EventSequence,
     recovered: bool,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
-    EventEnvelopeBuilder::new(
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
+    Ok(EventEnvelopeBuilder::new(
         if recovered {
             "workspace.watcher_recovery"
         } else {
@@ -1130,7 +1123,7 @@ pub fn watcher_recovery_event(
     })
     .retention(RetentionLabel::Warm)
     .metadata("recovered", recovered)
-    .build()
+    .build())
 }
 
 /// Build a proposal-created lifecycle event.
@@ -1138,7 +1131,7 @@ pub fn proposal_created_event(
     proposal: &WorkspaceProposal,
     causality_id: CausalityId,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_lifecycle_event(
         "proposal.created",
         proposal,
@@ -1157,7 +1150,7 @@ pub fn proposal_validated_event(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_transition_event("proposal.validated", proposal, transition, sequence, None)
 }
 
@@ -1166,7 +1159,7 @@ pub fn proposal_previewed_event(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_transition_event("proposal.previewed", proposal, transition, sequence, None)
 }
 
@@ -1175,7 +1168,7 @@ pub fn proposal_approved_event(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_transition_event("proposal.approved", proposal, transition, sequence, None)
 }
 
@@ -1185,7 +1178,7 @@ pub fn proposal_rejected_event(
     transition: &ProposalLifecycleTransition,
     reason: ProposalRejectionReason,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_transition_event(
         "proposal.rejected",
         proposal,
@@ -1200,7 +1193,7 @@ pub fn proposal_applied_event(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_transition_event("proposal.applied", proposal, transition, sequence, None)
 }
 
@@ -1210,7 +1203,7 @@ pub fn proposal_failed_event(
     transition: &ProposalLifecycleTransition,
     reason: ProposalFailureReason,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_transition_event(
         "proposal.failed",
         proposal,
@@ -1226,7 +1219,7 @@ pub fn proposal_rolled_back_event(
     transition: &ProposalLifecycleTransition,
     reason: ProposalRollbackReason,
     sequence: EventSequence,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     proposal_transition_event(
         "proposal.rolled_back",
         proposal,
@@ -1245,18 +1238,20 @@ pub fn stale_proposal_rejected_event(
     sequence: EventSequence,
     proposal_id: legion_protocol::ProposalId,
     reason: ProposalStaleReason,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
-    EventEnvelopeBuilder::new("proposal.stale_rejected", causality_id)
-        .workspace_id(workspace_id)
-        .file_id(file_id)
-        .correlation_id(correlation_id)
-        .sequence(sequence)
-        .severity(EventSeverity::Warning)
-        .retention(RetentionLabel::Audit)
-        .metadata("proposal_id", json!(proposal_id.0))
-        .metadata("stale_reason", format!("{reason:?}"))
-        .build()
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
+    Ok(
+        EventEnvelopeBuilder::new("proposal.stale_rejected", causality_id)
+            .workspace_id(workspace_id)
+            .file_id(file_id)
+            .correlation_id(correlation_id)
+            .sequence(sequence)
+            .severity(EventSeverity::Warning)
+            .retention(RetentionLabel::Audit)
+            .metadata("proposal_id", json!(proposal_id.0))
+            .metadata("stale_reason", format!("{reason:?}"))
+            .build(),
+    )
 }
 
 /// Build a file-conflict-created event.
@@ -1265,8 +1260,8 @@ pub fn conflict_created_event(
     correlation_id: CorrelationId,
     causality_id: CausalityId,
     sequence: EventSequence,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let context = &conflict.context;
     let mut builder = EventEnvelopeBuilder::new("workspace.conflict_created", causality_id)
         .workspace_id(context.workspace_id)
@@ -1286,7 +1281,7 @@ pub fn conflict_created_event(
         .metadata("diagnostics", diagnostics_summary(&conflict.diagnostics));
     builder = add_fingerprint_metadata(builder, "expected", context.expected_fingerprint.as_ref());
     builder = add_fingerprint_metadata(builder, "disk", context.disk_fingerprint.as_ref());
-    builder.build()
+    Ok(builder.build())
 }
 
 /// Build a non-atomic fallback-attempted event.
@@ -1297,7 +1292,7 @@ pub fn fallback_attempted_event(
     causality_id: CausalityId,
     sequence: EventSequence,
     policy: impl Into<String>,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     fallback_event(
         "workspace.fallback_attempted",
         EventSeverity::Warning,
@@ -1318,7 +1313,7 @@ pub fn fallback_denied_event(
     causality_id: CausalityId,
     sequence: EventSequence,
     policy: impl Into<String>,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     fallback_event(
         "workspace.fallback_denied",
         EventSeverity::Warning,
@@ -1339,7 +1334,7 @@ pub fn fallback_applied_event(
     causality_id: CausalityId,
     sequence: EventSequence,
     policy: impl Into<String>,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     fallback_event(
         "workspace.fallback_applied",
         EventSeverity::Info,
@@ -1364,22 +1359,24 @@ pub fn editor_retention_degradation_event(
     evicted_snapshot_count: usize,
     estimated_bytes: usize,
     reason: impl Into<String>,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let reason = reason.into();
-    EventEnvelopeBuilder::new("editor.retention_degraded", causality_id)
-        .workspace_id(workspace_id)
-        .buffer_id(buffer_id)
-        .correlation_id(correlation_id)
-        .sequence(sequence)
-        .severity(EventSeverity::Warning)
-        .retention(RetentionLabel::Warm)
-        .metadata("retained_snapshot_count", retained_snapshot_count as u64)
-        .metadata("evicted_snapshot_count", evicted_snapshot_count as u64)
-        .metadata("estimated_bytes", estimated_bytes as u64)
-        .metadata("reason_hash", metadata_hash(&reason))
-        .metadata("reason_len", reason.len() as u64)
-        .build()
+    Ok(
+        EventEnvelopeBuilder::new("editor.retention_degraded", causality_id)
+            .workspace_id(workspace_id)
+            .buffer_id(buffer_id)
+            .correlation_id(correlation_id)
+            .sequence(sequence)
+            .severity(EventSeverity::Warning)
+            .retention(RetentionLabel::Warm)
+            .metadata("retained_snapshot_count", retained_snapshot_count as u64)
+            .metadata("evicted_snapshot_count", evicted_snapshot_count as u64)
+            .metadata("estimated_bytes", estimated_bytes as u64)
+            .metadata("reason_hash", metadata_hash(&reason))
+            .metadata("reason_len", reason.len() as u64)
+            .build(),
+    )
 }
 
 /// Build a security-denial event with path and reason redacted to metadata hashes.
@@ -1394,8 +1391,8 @@ pub fn security_denial_event(
     sequence: EventSequence,
     target_path: Option<&str>,
     reason: impl Into<String>,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let reason = reason.into();
     let mut builder = EventEnvelopeBuilder::new("security.denial", causality_id)
         .workspace_id(workspace_id)
@@ -1417,7 +1414,7 @@ pub fn security_denial_event(
             .metadata("target_path_hash", metadata_hash(path))
             .metadata("target_path_len", path.len() as u64);
     }
-    builder.build()
+    Ok(builder.build())
 }
 
 /// Build an open-file read-failure event with path and error text summarized.
@@ -1428,21 +1425,23 @@ pub fn open_file_read_failure_event(
     sequence: EventSequence,
     path: impl Into<String>,
     reason: impl Into<String>,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let path = path.into();
     let reason = reason.into();
-    EventEnvelopeBuilder::new("workspace.open_read_failed", causality_id)
-        .workspace_id(workspace_id)
-        .correlation_id(correlation_id)
-        .sequence(sequence)
-        .severity(EventSeverity::Warning)
-        .retention(RetentionLabel::Warm)
-        .metadata("path_hash", metadata_hash(&path))
-        .metadata("path_len", path.len() as u64)
-        .metadata("reason_hash", metadata_hash(&reason))
-        .metadata("reason_len", reason.len() as u64)
-        .build()
+    Ok(
+        EventEnvelopeBuilder::new("workspace.open_read_failed", causality_id)
+            .workspace_id(workspace_id)
+            .correlation_id(correlation_id)
+            .sequence(sequence)
+            .severity(EventSeverity::Warning)
+            .retention(RetentionLabel::Warm)
+            .metadata("path_hash", metadata_hash(&path))
+            .metadata("path_len", path.len() as u64)
+            .metadata("reason_hash", metadata_hash(&reason))
+            .metadata("reason_len", reason.len() as u64)
+            .build(),
+    )
 }
 
 fn proposal_transition_event(
@@ -1451,7 +1450,7 @@ fn proposal_transition_event(
     transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
     reason: Option<String>,
-) -> EventEnvelope {
+) -> Result<EventEnvelope, ObservabilityError> {
     let severity = match transition.lifecycle_state {
         ProposalLifecycleState::Failed => EventSeverity::Error,
         ProposalLifecycleState::Denied
@@ -1485,8 +1484,8 @@ fn proposal_lifecycle_event(
     severity: EventSeverity,
     reason: Option<&str>,
     diagnostics: &[ProtocolDiagnostic],
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let summary = proposal_payload_summary(proposal);
     let mut builder = EventEnvelopeBuilder::new(event, causality_id)
         .correlation_id(correlation_id)
@@ -1517,7 +1516,7 @@ fn proposal_lifecycle_event(
         builder = builder.metadata("reason", reason.to_string());
     }
 
-    builder.build()
+    Ok(builder.build())
 }
 
 fn proposal_workspace_id(proposal: &WorkspaceProposal) -> Option<WorkspaceId> {
@@ -1549,10 +1548,10 @@ fn fallback_event(
     causality_id: CausalityId,
     sequence: EventSequence,
     policy: impl Into<String>,
-) -> EventEnvelope {
-    assert_core_ids(causality_id, correlation_id, sequence);
+) -> Result<EventEnvelope, ObservabilityError> {
+    validate_core_ids(causality_id, correlation_id, sequence)?;
     let policy = policy.into();
-    EventEnvelopeBuilder::new(event, causality_id)
+    Ok(EventEnvelopeBuilder::new(event, causality_id)
         .workspace_id(workspace_id)
         .file_id(file_id)
         .correlation_id(correlation_id)
@@ -1561,7 +1560,7 @@ fn fallback_event(
         .retention(RetentionLabel::Audit)
         .metadata("policy_hash", metadata_hash(&policy))
         .metadata("policy_len", policy.len() as u64)
-        .build()
+        .build())
 }
 
 fn add_fingerprint_metadata(
@@ -1587,10 +1586,17 @@ fn add_fingerprint_metadata(
     builder
 }
 
-fn metadata_fingerprint(algorithm: &str, value: &str) -> FileFingerprint {
+/// Build a metadata fingerprint with a stable cryptographic digest.
+///
+/// `domain` is a domain-separation label (e.g. `"assisted-ai-provider"`). The
+/// returned `FileFingerprint.algorithm` names the actual digest (`sha256`) and
+/// the domain label so consumers can tell what was hashed, and the digest input
+/// is domain-separated so identical bytes under different domains never collide.
+fn metadata_fingerprint(domain: &str, value: &str) -> FileFingerprint {
+    let digest_input = format!("{domain}\u{1f}{value}");
     FileFingerprint {
-        algorithm: algorithm.to_string(),
-        value: metadata_hash(value),
+        algorithm: format!("{METADATA_DIGEST_ALGORITHM}:{domain}"),
+        value: metadata_hash(&digest_input),
     }
 }
 
@@ -1710,20 +1716,139 @@ fn diagnostics_summary(diagnostics: &[ProtocolDiagnostic]) -> Value {
     })
 }
 
+/// Stable cryptographic digest name emitted alongside metadata fingerprints.
+const METADATA_DIGEST_ALGORITHM: &str = "sha256";
+
+/// Compute a stable, deterministic hex digest of `value`.
+///
+/// Uses SHA-256 so the output is identical across processes, platforms, and
+/// builds (unlike `DefaultHasher`, whose output is unspecified and may change
+/// between runs). The full 64-character hex digest is returned.
 fn metadata_hash(value: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    sha256_hex(value.as_bytes())
 }
 
-fn assert_core_ids(
+/// Render a SHA-256 digest of `bytes` as lowercase hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = sha256_digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Pure-Rust SHA-256 (FIPS 180-4) over `message`, returning the 32-byte digest.
+fn sha256_digest(message: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    // Padding: append 0x80, then zeros, then the 64-bit big-endian bit length.
+    let bit_len = (message.len() as u64).wrapping_mul(8);
+    let mut padded = Vec::with_capacity(message.len() + 72);
+    padded.extend_from_slice(message);
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in w.iter_mut().enumerate().take(16) {
+            let base = i * 4;
+            *word = u32::from_be_bytes([
+                chunk[base],
+                chunk[base + 1],
+                chunk[base + 2],
+                chunk[base + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut digest = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        digest[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+/// Validate externally-supplied core envelope ids, failing closed instead of
+/// panicking on invalid input.
+///
+/// Mirrors the id checks performed by [`validate_envelope`] so callers building
+/// envelopes from caller-provided ids reject zero/nil ids with a typed error
+/// rather than aborting the process.
+fn validate_core_ids(
     causality_id: CausalityId,
     correlation_id: CorrelationId,
     sequence: EventSequence,
-) {
-    assert_ne!(causality_id.0, Uuid::nil(), "causality_id must be non-zero");
-    assert_ne!(correlation_id.0, 0, "correlation_id must be non-zero");
-    assert_ne!(sequence.0, 0, "sequence must be non-zero");
+) -> Result<(), ObservabilityError> {
+    if causality_id.0 == Uuid::nil() {
+        return Err(ObservabilityError::InvalidCausalityId);
+    }
+    if correlation_id.0 == 0 {
+        return Err(ObservabilityError::InvalidCorrelationId);
+    }
+    if sequence.0 == 0 {
+        return Err(ObservabilityError::InvalidSequence);
+    }
+    Ok(())
 }
 
 fn validate_envelope(
@@ -1764,10 +1889,8 @@ fn redact_payload(payload: &Value, hint: RedactionHint) -> Value {
                 for (key, value) in map {
                     if is_sensitive_key(key) {
                         redacted.insert(key.clone(), Value::String("<redacted>".to_string()));
-                    } else if is_metadata_value(value) {
-                        redacted.insert(key.clone(), value.clone());
                     } else {
-                        redacted.insert(key.clone(), Value::String("<metadata-only>".to_string()));
+                        redacted.insert(key.clone(), redact_metadata_value(key, value));
                     }
                 }
                 redacted.insert("metadata_only".to_string(), Value::Bool(true));
@@ -1788,11 +1911,72 @@ fn is_sensitive_key(key: &str) -> bool {
         || lower.contains("payload")
 }
 
-fn is_metadata_value(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-    )
+/// Redact a single non-sensitive metadata value under metadata-only retention.
+///
+/// Scalars other than strings (null/bool/number) are safe structural metadata
+/// and pass through. Free-form strings are NOT trusted: only allowlisted,
+/// classifier-style keys pass through verbatim, and even then only if they do
+/// not contain a forbidden raw/payload marker. Any other string is collapsed to
+/// a stable `hash=<digest>;len=<n>` summary so raw content (summaries, reasons,
+/// messages, diagnostics, paths, commands) can never leak. Arrays and objects
+/// are reduced to a `<metadata-only>` marker.
+fn redact_metadata_value(key: &str, value: &Value) -> Value {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::String(text) => {
+            if is_safe_metadata_key(key) && !contains_forbidden_assisted_ai_marker(text) {
+                value.clone()
+            } else {
+                Value::String(format!("hash={};len={}", metadata_hash(text), text.len()))
+            }
+        }
+        Value::Array(_) | Value::Object(_) => Value::String("<metadata-only>".to_string()),
+    }
+}
+
+/// Allowlist of metadata keys whose string values are known-safe to retain
+/// verbatim (stable classifiers, enum labels, identifiers, and pre-hashed
+/// fields). Anything not matched here is treated as untrusted free-form text.
+fn is_safe_metadata_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    const SAFE_KEYS: [&str; 17] = [
+        "metadata_only",
+        "payload_class",
+        "payload_kind",
+        "lifecycle_state",
+        "severity",
+        "retention",
+        "redaction",
+        "disposition",
+        "outcome",
+        "outcome_category",
+        "consent_state",
+        "schema_version",
+        "phase",
+        "status",
+        "kind",
+        "state",
+        "metadata_summary",
+    ];
+    if SAFE_KEYS.contains(&lower.as_str()) {
+        return true;
+    }
+    // Structural suffixes that denote already-redacted or classifier values.
+    [
+        "_hash",
+        "_len",
+        "_id",
+        "_count",
+        "_class",
+        "_kind",
+        "_state",
+        "_label",
+        "_category",
+        "_disposition",
+        "_version",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
 }
 
 fn protocol_error(error: ObservabilityError) -> ProtocolError {
@@ -2016,7 +2200,8 @@ mod tests {
             causality,
             EventSequence(13),
             "untrusted workspace",
-        );
+        )
+        .expect("valid ids");
 
         assert_eq!(envelope.schema_version, 1);
         assert_eq!(envelope.causality_id, causality);
@@ -2051,29 +2236,34 @@ mod tests {
             occurred_at: TimestampMillis(7),
         };
 
-        let applied = transaction_event(&descriptor, true, None, EventSequence(1));
-        let failed = transaction_event(&descriptor, false, Some("invalid range"), EventSequence(2));
+        let applied =
+            transaction_event(&descriptor, true, None, EventSequence(1)).expect("valid ids");
+        let failed = transaction_event(&descriptor, false, Some("invalid range"), EventSequence(2))
+            .expect("valid ids");
         let overflow = watcher_recovery_event(
             WorkspaceId(1),
             CorrelationId(4),
             causality,
             EventSequence(3),
             false,
-        );
+        )
+        .expect("valid ids");
         let recovery = watcher_recovery_event(
             WorkspaceId(1),
             CorrelationId(4),
             causality,
             EventSequence(4),
             true,
-        );
+        )
+        .expect("valid ids");
         let escape = path_escape_denied_event(
             WorkspaceId(1),
             CorrelationId(4),
             causality,
             EventSequence(5),
             "../secret.txt",
-        );
+        )
+        .expect("valid ids");
 
         assert_eq!(applied.event, "editor.transaction_applied");
         assert_eq!(failed.event, "editor.transaction_failed");
@@ -2087,15 +2277,19 @@ mod tests {
     fn proposal_lifecycle_helpers_are_metadata_only_and_orderable() {
         let proposal = save_proposal();
         let created_causality = CausalityId(Uuid::now_v7());
-        let created = proposal_created_event(&proposal, created_causality, EventSequence(1));
+        let created = proposal_created_event(&proposal, created_causality, EventSequence(1))
+            .expect("valid ids");
         let validated_transition = transition(ProposalLifecycleState::Validated);
         let validated =
-            proposal_validated_event(&proposal, &validated_transition, EventSequence(2));
+            proposal_validated_event(&proposal, &validated_transition, EventSequence(2))
+                .expect("valid ids");
         let previewed_transition = transition(ProposalLifecycleState::Previewed);
         let previewed =
-            proposal_previewed_event(&proposal, &previewed_transition, EventSequence(3));
+            proposal_previewed_event(&proposal, &previewed_transition, EventSequence(3))
+                .expect("valid ids");
         let applied_transition = transition(ProposalLifecycleState::Applied);
-        let applied = proposal_applied_event(&proposal, &applied_transition, EventSequence(4));
+        let applied = proposal_applied_event(&proposal, &applied_transition, EventSequence(4))
+            .expect("valid ids");
 
         let events = [created, validated, previewed, applied];
         let names = events
@@ -2129,21 +2323,24 @@ mod tests {
             &failed_transition,
             ProposalFailureReason::ApplyFailed,
             EventSequence(5),
-        );
+        )
+        .expect("valid ids");
         let rejected_transition = transition(ProposalLifecycleState::Rejected);
         let rejected = proposal_rejected_event(
             &proposal,
             &rejected_transition,
             ProposalRejectionReason::ValidationFailed,
             EventSequence(6),
-        );
+        )
+        .expect("valid ids");
         let rolled_back_transition = transition(ProposalLifecycleState::RolledBack);
         let rolled_back = proposal_rolled_back_event(
             &proposal,
             &rolled_back_transition,
             ProposalRollbackReason::ApplyFailed,
             EventSequence(7),
-        );
+        )
+        .expect("valid ids");
         let stale = stale_proposal_rejected_event(
             WorkspaceId(1),
             FileId(3),
@@ -2152,7 +2349,8 @@ mod tests {
             EventSequence(8),
             proposal.proposal_id,
             ProposalStaleReason::FingerprintMismatch,
-        );
+        )
+        .expect("valid ids");
         let denial = security_denial_event(
             WorkspaceId(1),
             Some(FileId(3)),
@@ -2163,7 +2361,8 @@ mod tests {
             EventSequence(9),
             Some("/secret/source.rs"),
             "denied because /secret/source.rs is blocked",
-        );
+        )
+        .expect("valid ids");
         let fallback = fallback_denied_event(
             WorkspaceId(1),
             FileId(3),
@@ -2171,7 +2370,8 @@ mod tests {
             CausalityId(Uuid::now_v7()),
             EventSequence(10),
             "non-atomic fallback disabled; raw path /secret/source.rs",
-        );
+        )
+        .expect("valid ids");
         let retention = editor_retention_degradation_event(
             WorkspaceId(1),
             BufferId(2),
@@ -2182,7 +2382,8 @@ mod tests {
             2,
             512,
             "evicted undo snapshot with source text",
-        );
+        )
+        .expect("valid ids");
 
         for event in [
             failed,
@@ -2206,19 +2407,21 @@ mod tests {
     fn proposal_audit_and_event_metadata_records_are_redacted() {
         let proposal = save_proposal();
         let transition = transition(ProposalLifecycleState::Applied);
-        let audit = proposal_audit_record(&proposal, &transition);
+        let audit = proposal_audit_record(&proposal, &transition).expect("matching ids");
         assert_eq!(audit.proposal_id, proposal.proposal_id);
         assert_eq!(audit.lifecycle_state, ProposalLifecycleState::Applied);
         assert_eq!(audit.redaction_hints, vec![RedactionHint::MetadataOnly]);
         assert!(!format!("{audit:?}").contains("/secret/source.rs"));
 
-        let event = proposal_applied_event(&proposal, &transition, EventSequence(12));
+        let event =
+            proposal_applied_event(&proposal, &transition, EventSequence(12)).expect("valid ids");
         let metadata = event_metadata_record(&event);
         assert_eq!(metadata.event_id, event.event_id);
         assert_eq!(metadata.redaction, RedactionHint::MetadataOnly);
         assert_eq!(metadata.sequence, EventSequence(12));
 
-        let audit_event = proposal_audit_recorded_event(&proposal, &transition, EventSequence(13));
+        let audit_event = proposal_audit_recorded_event(&proposal, &transition, EventSequence(13))
+            .expect("valid ids");
         assert_eq!(audit_event.event, "proposal.audit_recorded");
         assert_eq!(audit_event.redaction, RedactionHint::MetadataOnly);
         assert_eq!(audit_event.sequence, EventSequence(13));
@@ -2520,5 +2723,172 @@ mod tests {
             phase4_runtime_audit_recorded_event(&raw_marker),
             Err(AssistedAiContractError::NonMetadataOnlyAuditRecord { .. })
         ));
+    }
+
+    #[test]
+    fn metadata_hash_is_stable_cryptographic_sha256() {
+        // Golden SHA-256 vectors (FIPS 180-4): output is fixed across runs and
+        // platforms, unlike the previous DefaultHasher-based digest.
+        assert_eq!(
+            metadata_hash(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            metadata_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            metadata_hash("hello"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        // Full 64-character hex digest, deterministic across invocations.
+        let value = "/secret/source.rs";
+        assert_eq!(metadata_hash(value).len(), 64);
+        assert_eq!(metadata_hash(value), metadata_hash(value));
+    }
+
+    #[test]
+    fn metadata_fingerprint_names_digest_and_domain_separates() {
+        let provider = metadata_fingerprint("assisted-ai-provider", "payload");
+        assert_eq!(provider.algorithm, "sha256:assisted-ai-provider");
+        assert_eq!(provider.value.len(), 64);
+
+        // Identical input bytes under different domains never collide.
+        let route = metadata_fingerprint("assisted-ai-route", "payload");
+        assert_ne!(provider.value, route.value);
+        assert_eq!(route.algorithm, "sha256:assisted-ai-route");
+    }
+
+    #[test]
+    fn metadata_only_redaction_hashes_free_form_strings() {
+        let sink = RedactingEventSink::new();
+        let envelope = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("summary", "raw user prose that must not leak")
+            .metadata("reason", "blocked because /secret/source.rs")
+            .metadata("lifecycle_state", "Applied")
+            .metadata("affected_file_count", json!(3))
+            .build();
+
+        sink.try_emit(EventSinkRequest { envelope })
+            .expect("redacted event should store");
+        let stored = sink.events().expect("stored events");
+        let payload = &stored[0].payload;
+
+        // Free-form keys collapse to a hash+length summary.
+        let summary = payload["summary"].as_str().expect("summary string");
+        assert!(summary.starts_with("hash="));
+        assert!(summary.contains(";len="));
+        assert!(!summary.contains("raw user prose"));
+        let reason = payload["reason"].as_str().expect("reason string");
+        assert!(reason.starts_with("hash="));
+        assert!(!reason.contains("/secret/source.rs"));
+
+        // Allowlisted classifier keys and numeric metadata pass through verbatim.
+        assert_eq!(payload["lifecycle_state"], "Applied");
+        assert_eq!(payload["affected_file_count"], 3);
+        assert_eq!(payload["metadata_only"], true);
+    }
+
+    #[test]
+    fn metadata_only_redaction_rejects_allowlisted_key_with_forbidden_marker() {
+        let sink = RedactingEventSink::new();
+        // Even an allowlisted key must not pass through a forbidden raw marker.
+        let envelope = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("metadata_summary", "contains raw prompt body")
+            .build();
+
+        sink.try_emit(EventSinkRequest { envelope })
+            .expect("redacted event should store");
+        let stored = sink.events().expect("stored events");
+        let value = stored[0].payload["metadata_summary"]
+            .as_str()
+            .expect("summary string");
+        assert!(value.starts_with("hash="));
+        assert!(!value.contains("raw prompt"));
+    }
+
+    #[test]
+    fn event_metadata_record_propagates_envelope_schema_version() {
+        let mut envelope = event_with_payload(json!({"ok": true}));
+        envelope.schema_version = 7;
+        let metadata = event_metadata_record(&envelope);
+        assert_eq!(metadata.schema_version, 7);
+    }
+
+    #[test]
+    fn proposal_audit_record_accepts_matching_ids() {
+        let proposal = save_proposal();
+        let transition = transition(ProposalLifecycleState::Applied);
+        let audit = proposal_audit_record(&proposal, &transition).expect("matching ids");
+        assert_eq!(audit.proposal_id, proposal.proposal_id);
+    }
+
+    #[test]
+    fn proposal_audit_record_rejects_mismatched_proposal_id() {
+        let proposal = save_proposal();
+        let mut transition = transition(ProposalLifecycleState::Applied);
+        transition.proposal_id = legion_protocol::ProposalId(9999);
+        assert_eq!(
+            proposal_audit_record(&proposal, &transition).unwrap_err(),
+            ObservabilityError::MismatchedProposalTransition
+        );
+    }
+
+    #[test]
+    fn envelope_helpers_reject_invalid_ids_instead_of_panicking() {
+        // Zero correlation id.
+        assert_eq!(
+            save_denied_event(
+                WorkspaceId(1),
+                FileId(2),
+                CorrelationId(0),
+                CausalityId(Uuid::now_v7()),
+                EventSequence(1),
+                "denied",
+            )
+            .unwrap_err(),
+            ObservabilityError::InvalidCorrelationId
+        );
+
+        // Nil causality id.
+        assert_eq!(
+            save_denied_event(
+                WorkspaceId(1),
+                FileId(2),
+                CorrelationId(3),
+                CausalityId(Uuid::nil()),
+                EventSequence(1),
+                "denied",
+            )
+            .unwrap_err(),
+            ObservabilityError::InvalidCausalityId
+        );
+
+        // Zero sequence.
+        assert_eq!(
+            save_denied_event(
+                WorkspaceId(1),
+                FileId(2),
+                CorrelationId(3),
+                CausalityId(Uuid::now_v7()),
+                EventSequence(0),
+                "denied",
+            )
+            .unwrap_err(),
+            ObservabilityError::InvalidSequence
+        );
+
+        // Lifecycle helpers validate caller-supplied ids too.
+        let proposal = save_proposal();
+        let transition = transition(ProposalLifecycleState::Applied);
+        assert_eq!(
+            proposal_created_event(&proposal, CausalityId(Uuid::nil()), EventSequence(1))
+                .unwrap_err(),
+            ObservabilityError::InvalidCausalityId
+        );
+        assert_eq!(
+            proposal_applied_event(&proposal, &transition, EventSequence(0)).unwrap_err(),
+            ObservabilityError::InvalidSequence
+        );
     }
 }

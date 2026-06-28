@@ -56,6 +56,46 @@ fn invalid_batch_rolls_back_live_text_version_dirty_and_side_effects() {
 }
 
 #[test]
+fn batch_edit_deltas_track_cumulative_shift_from_lower_edits() {
+    // A lower-offset edit that changes length must shift the recorded range of
+    // every higher-offset edit so each delta points at the post-edit buffer.
+    let mut engine = EditorEngine::new();
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(7), "batch.txt", "hello world")
+        .expect("open buffer");
+
+    let tx = engine
+        .apply_edits(
+            buffer,
+            vec![
+                // Replace "hello" (5 bytes) with "hi" (2 bytes): shrinks by 3.
+                TextEdit::new(
+                    TextRange::new(TextPosition::new(0, 0), TextPosition::new(0, 5)),
+                    "hi",
+                ),
+                // Replace "world" (5 bytes) at original offset 6 with "WORLD!".
+                TextEdit::new(
+                    TextRange::new(TextPosition::new(0, 6), TextPosition::new(0, 11)),
+                    "WORLD!",
+                ),
+            ],
+            TransactionSource::User,
+            None,
+            None,
+        )
+        .expect("batch edit");
+
+    assert_eq!(engine.text(buffer).expect("text"), "hi WORLD!");
+    assert_eq!(tx.deltas.len(), 2);
+    // Deltas are ordered ascending by final start offset.
+    assert_eq!(tx.deltas[0].byte_range.start, 0);
+    assert_eq!(tx.deltas[0].byte_range.end, 2);
+    // Higher edit's recorded range reflects the -3 shift from the lower edit.
+    assert_eq!(tx.deltas[1].byte_range.start, 3);
+    assert_eq!(tx.deltas[1].byte_range.end, 9);
+}
+
+#[test]
 fn oversize_edit_transitions_buffer_into_degraded_mode_without_losing_undo_history() {
     let mut engine = EditorEngine::new();
     let buffer = engine

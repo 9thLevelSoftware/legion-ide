@@ -282,12 +282,14 @@ fn transport_lsp_client_correlates_out_of_order_responses_by_id() {
         "textDocument/hover",
         json!({"position": {"line": 1, "character": 2}}),
         operation_context(1, 100),
-    );
+    )
+    .unwrap();
     let second = client.prepare_request(
         "textDocument/hover",
         json!({"position": {"line": 3, "character": 4}}),
         operation_context(2, 100),
-    );
+    )
+    .unwrap();
 
     let second_response =
         JsonRpcEnvelope::response(second.json_rpc_id, json!({"contents": "second"}));
@@ -311,7 +313,8 @@ fn transport_lsp_client_times_out_request_after_budget() {
         "textDocument/hover",
         json!({"position": {"line": 1, "character": 2}}),
         operation_context(3, 10),
-    );
+    )
+    .unwrap();
 
     let timeout = client.resolve_timeout(pending.request_id, 11).unwrap();
 
@@ -334,7 +337,8 @@ fn transport_lsp_client_maps_json_rpc_errors_to_unavailable_status() {
         "textDocument/hover",
         json!({"position": {"line": 1, "character": 2}}),
         operation_context(4, 100),
-    );
+    )
+    .unwrap();
 
     let correlated = client
         .correlate_response(JsonRpcEnvelope::error_response(
@@ -356,7 +360,8 @@ fn transport_lsp_client_cancels_pending_request_and_rejects_late_response() {
         "textDocument/hover",
         json!({"position": {"line": 1, "character": 2}}),
         operation_context(5, 100),
-    );
+    )
+    .unwrap();
 
     let cancelled = client.cancel_request(pending.request_id).unwrap();
 

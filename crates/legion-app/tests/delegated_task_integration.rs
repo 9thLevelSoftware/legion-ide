@@ -78,13 +78,45 @@ fn acp_host_command() -> (PathBuf, Vec<String>) {
     )
 }
 
-fn temp_workspace(label: &str) -> PathBuf {
+/// Drop-guarded temporary workspace. Removes the directory on drop with a
+/// prefix/location check so a panic mid-test never leaks the temp dir.
+struct TempWorkspace {
+    root: PathBuf,
+}
+
+impl std::ops::Deref for TempWorkspace {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl AsRef<std::path::Path> for TempWorkspace {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let temp_root = std::env::temp_dir();
+        let file_name = self.root.file_name().and_then(|name| name.to_str());
+        if self.root.starts_with(&temp_root)
+            && file_name.is_some_and(|name| name.starts_with("legion_app_delegated_"))
+        {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn temp_workspace(label: &str) -> TempWorkspace {
     let root = std::env::temp_dir().join(format!(
         "legion_app_delegated_{label}_{}",
         uuid::Uuid::now_v7()
     ));
     fs::create_dir(&root).expect("temp workspace should be created");
-    root
+    TempWorkspace { root }
 }
 
 #[test]
@@ -353,8 +385,6 @@ fn execute_delegated_task_uses_acp_host_command_and_projects_comm_stream() {
         }
         other => panic!("expected ProposalReady, got {other:?}"),
     }
-
-    let _ = fs::remove_dir_all(workspace_root);
 }
 
 #[test]
@@ -432,8 +462,6 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
         )
         .is_err()
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -487,6 +515,4 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
             .all(|citation| !citation.metadata_label.contains("42"))
     );
     assert_eq!(outcome.projection.tool_permission_request_count, 1);
-
-    let _ = fs::remove_dir_all(root);
 }

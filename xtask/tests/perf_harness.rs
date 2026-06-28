@@ -2,12 +2,12 @@ use std::{
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use xtask::perf_harness::{
-    FAIL_ON_BUDGET_ENV, ManualRendererPerfToml, PERF_REPORT_FILE, PerfReport, SkeletonDescriptor,
-    SkeletonKind, SkeletonMeasurement, SkeletonStatus, apply_fail_on_budget_override,
+    ManualRendererPerfToml, PERF_REPORT_FILE, PerfReport, SkeletonDescriptor, SkeletonKind,
+    SkeletonMeasurement, SkeletonStatus, apply_fail_on_budget_value, classify_skeleton_status,
     manual_renderer_perf_measurement, plan_m0_skeletons, plan_perf_harness, plan_perf_skeletons,
     read_manual_renderer_perf_report, read_report, resolve_workspace_git_sha, write_report,
 };
@@ -146,66 +146,71 @@ fn perf_harness_zero_budget_marks_measurement_skipped() {
 }
 
 #[test]
-fn perf_harness_unreachable_budget_marks_measurement_failed() {
+fn perf_harness_classifies_status_failed_when_total_exceeds_budget() {
+    // Deterministically exercise the failure-classification path without
+    // relying on host timing: a total above the budget must classify as
+    // Failed, a total within budget as Passed, and a `None` (report-only)
+    // budget as Skipped.
+    assert_eq!(
+        classify_skeleton_status(Duration::from_millis(5), Some(Duration::from_millis(1))),
+        SkeletonStatus::Failed,
+        "total above budget must classify as Failed"
+    );
+    // Boundary: total exactly at the budget is still within budget.
+    assert_eq!(
+        classify_skeleton_status(Duration::from_millis(1), Some(Duration::from_millis(1))),
+        SkeletonStatus::Passed,
+        "total equal to budget must classify as Passed"
+    );
+    assert_eq!(
+        classify_skeleton_status(Duration::from_micros(1), Some(Duration::from_millis(5))),
+        SkeletonStatus::Passed,
+        "total below budget must classify as Passed"
+    );
+    assert_eq!(
+        classify_skeleton_status(Duration::from_millis(5), None),
+        SkeletonStatus::Skipped,
+        "report-only (no budget) must classify as Skipped"
+    );
+}
+
+#[test]
+fn perf_harness_zero_budget_classifies_measurement_skipped() {
+    // A zero-millisecond budget is report-only; the measured plan must be
+    // Skipped (never Failed) regardless of how long the stand-in takes.
     let mut skeleton = tiny_skeleton();
-    // 0 milliseconds is unreachable: even the loop overhead exceeds it.
     skeleton.budget_millis = 0;
-    // Force a failed classification by re-classifying the Skipped outcome.
-    // The skeleton stand-in is too cheap to deterministically exceed any
-    // non-zero millisecond budget on hosted CI, so we exercise the failure
-    // branch by running the plan with budget 0 and confirming the
-    // classification reports `skipped` (not `failed`) and that a separate
-    // test exercises the `failed` path through a unit-level helper. This
-    // test therefore asserts the only honest shape for a zero-millisecond
-    // budget is Skipped.
     let measurement = plan_perf_harness(&skeleton);
+    assert_eq!(measurement.status, SkeletonStatus::Skipped);
     assert_ne!(measurement.status, SkeletonStatus::Failed);
 }
 
 #[test]
-fn perf_harness_tight_budget_classifies_measurement_failed() {
-    // Exercise the `failed` classification deterministically by setting a
-    // budget that the in-process microbenchmark cannot honor (1 microsecond).
+fn perf_harness_fail_on_budget_value_overrides_descriptor_budget() {
+    // Exercise the override logic via the injected-value helper so the test
+    // never mutates process-global environment state (which would race the
+    // other integration tests cargo runs concurrently in this binary).
     let mut skeleton = tiny_skeleton();
-    skeleton.budget_millis = 1;
-    // The 1-millisecond budget is still reachable; force the failure path
-    // by setting budget to 0 (Skipped) and then asserting that the helper
-    // function for the failure path is reachable from the public surface.
-    // The real failure gate is exercised in the integration test below via
-    // the CLI; here we assert the helper is importable and the report
-    // shape is stable.
-    skeleton.budget_millis = 0;
-    let measurement = plan_perf_harness(&skeleton);
-    assert_eq!(measurement.status, SkeletonStatus::Skipped);
-    // Public surface exposes the failure outcome via SkeletonStatus::Failed.
-    let _ = SkeletonStatus::Failed;
-}
-
-#[test]
-fn perf_harness_fail_on_budget_env_overrides_descriptor_budget() {
-    // Set the env var; the override path is non-trivial enough to warrant
-    // a dedicated test even when the override value leaves the gate green.
-    let previous = std::env::var_os(FAIL_ON_BUDGET_ENV);
-    // SAFETY: tests in this binary run on a single thread for env writes
-    // (the perf-harness integration tests do not spawn threads that read
-    // the same variable).
-    unsafe {
-        std::env::set_var(FAIL_ON_BUDGET_ENV, "0");
-    }
-    let mut skeleton = tiny_skeleton();
-    apply_fail_on_budget_override(&mut skeleton);
+    apply_fail_on_budget_value(&mut skeleton, "0");
     assert_eq!(
         skeleton.budget_millis, 0,
         "FAIL_ON_BUDGET=0 should disable the gate (budget=0)"
     );
-    match previous {
-        Some(value) => unsafe {
-            std::env::set_var(FAIL_ON_BUDGET_ENV, value);
-        },
-        None => unsafe {
-            std::env::remove_var(FAIL_ON_BUDGET_ENV);
-        },
-    }
+
+    let mut skeleton = tiny_skeleton();
+    apply_fail_on_budget_value(&mut skeleton, "  7  ");
+    assert_eq!(
+        skeleton.budget_millis, 7,
+        "a numeric override should set the budget (after trimming whitespace)"
+    );
+
+    let mut skeleton = tiny_skeleton();
+    let original = skeleton.budget_millis;
+    apply_fail_on_budget_value(&mut skeleton, "not-a-number");
+    assert_eq!(
+        skeleton.budget_millis, original,
+        "a non-numeric override must leave the descriptor budget unchanged"
+    );
 }
 
 #[test]

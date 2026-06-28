@@ -305,27 +305,25 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
 
     let budget = skeleton.budget();
     let total_millis = total.as_millis() as u64;
-    let (status, message) = match budget {
-        None => (
-            SkeletonStatus::Skipped,
-            "budget is 0; report-only (no gate)".to_string(),
-        ),
-        Some(budget) if total <= budget => (
-            SkeletonStatus::Passed,
+    let status = classify_skeleton_status(total, budget);
+    let message = match status {
+        SkeletonStatus::Skipped => "budget is 0; report-only (no gate)".to_string(),
+        SkeletonStatus::Passed => {
+            let budget = budget.expect("passed status implies a configured budget");
             format!(
                 "total {total_millis}ms within budget {}ms",
                 budget.as_millis()
-            ),
-        ),
-        Some(budget) => (
-            SkeletonStatus::Failed,
+            )
+        }
+        SkeletonStatus::Failed => {
+            let budget = budget.expect("failed status implies a configured budget");
             format!(
                 "total {total_millis}ms exceeded budget {}ms (p50={}us p95={}us)",
                 budget.as_millis(),
                 p50,
                 p95,
-            ),
-        ),
+            )
+        }
     };
 
     SkeletonMeasurement {
@@ -339,6 +337,21 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
         budget_millis: skeleton.budget_millis,
         status,
         message,
+    }
+}
+
+/// Classify a measured total against an optional budget. Split out as a
+/// pure function so the failure-classification path can be exercised
+/// deterministically in tests without relying on host timing.
+///
+/// * `None` budget (report-only) -> [`SkeletonStatus::Skipped`].
+/// * `total <= budget` -> [`SkeletonStatus::Passed`].
+/// * `total > budget` -> [`SkeletonStatus::Failed`].
+pub fn classify_skeleton_status(total: Duration, budget: Option<Duration>) -> SkeletonStatus {
+    match budget {
+        None => SkeletonStatus::Skipped,
+        Some(budget) if total <= budget => SkeletonStatus::Passed,
+        Some(_) => SkeletonStatus::Failed,
     }
 }
 
@@ -667,15 +680,20 @@ pub fn apply_fail_on_budget_override(skeleton: &mut SkeletonDescriptor) {
     let Ok(value) = std::env::var(FAIL_ON_BUDGET_ENV) else {
         return;
     };
+    apply_fail_on_budget_value(skeleton, &value);
+}
+
+/// Apply a raw budget-override value (the contents of
+/// [`FAIL_ON_BUDGET_ENV`]) to `skeleton`. Split out from
+/// [`apply_fail_on_budget_override`] so tests can exercise the override
+/// logic without mutating process-global environment state (which races
+/// other integration tests running concurrently). A non-numeric value is
+/// ignored, leaving the descriptor budget unchanged. An explicit `0`
+/// disables the gate (report-only) just like setting the budget to `0`.
+pub fn apply_fail_on_budget_value(skeleton: &mut SkeletonDescriptor, value: &str) {
     let Ok(parsed) = value.trim().parse::<u64>() else {
         return;
     };
-    if parsed == 0 {
-        // Explicit zero is honored as a way to disable the gate in a
-        // single CI leg without touching the descriptor.
-        skeleton.budget_millis = 0;
-        return;
-    }
     skeleton.budget_millis = parsed;
 }
 

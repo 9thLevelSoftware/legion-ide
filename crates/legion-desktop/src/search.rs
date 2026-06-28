@@ -64,7 +64,7 @@ impl DesktopSearchViewModel {
                     row.line_number + 1,
                     row.range.start.character + 1,
                     truncated,
-                    row.snippet
+                    normalize_snippet(&row.snippet)
                 )
             })
             .collect::<Vec<_>>();
@@ -83,4 +83,14 @@ impl DesktopSearchViewModel {
             diagnostic_rows,
         }
     }
+}
+
+/// Normalize a search snippet for single-line row display by replacing control
+/// characters (newlines, carriage returns, tabs, etc.) with spaces so embedded
+/// control characters cannot break the one-line `path:line:col snippet` format.
+fn normalize_snippet(snippet: &str) -> String {
+    snippet
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
 }

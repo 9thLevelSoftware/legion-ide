@@ -3,39 +3,13 @@
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Context-manifest DTOs and structured assembly helpers.
-pub mod manifest;
-pub use manifest::{ContextManifestAssembly, ContextManifestSources};
-
-/// Provider capability matrices used by assisted-AI routing surfaces.
-pub mod capability;
-/// Editable plan artifact contracts for Legion Workflows.
-pub mod plan;
-/// Deterministic risk-rule DTOs and evaluation helpers.
-pub mod risk;
-/// Structured delegated-task scope DTOs.
-pub mod scope;
-/// Schema-validated native tool registry definitions.
-pub mod tools;
-pub use capability::AssistedAiCapabilityMatrix;
-pub use plan::{
-    EditablePlanArtifact, EditablePlanRevisionArtifact, EditablePlanRevisionAuditRow,
-    EditablePlanRevisionDiffSummary, EditablePlanRevisionSectionDiff, EditablePlanSection,
-    EditablePlanSectionKind,
-};
-pub use scope::{DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind};
-pub use tools::{
-    LegionToolCallFeedback, LegionToolCallFeedbackKind, LegionToolKind, LegionToolSchemaDefinition,
-    delegated_task_tool_call_feedback, tool_schema_definitions, validate_tool_call_feedback,
-    validate_tool_schema_definition,
-};
 /// User-facing product name.
 ///
 /// Internal crates and package names use the canonical `legion-*` namespace.
@@ -191,12 +165,23 @@ pub struct TimestampMillis(pub u64);
 
 impl TimestampMillis {
     /// Returns current timestamp in milliseconds.
+    ///
+    /// If the system clock is set before the unix epoch the timestamp
+    /// saturates to `0`; values beyond `u64::MAX` milliseconds saturate to
+    /// `u64::MAX` rather than wrapping silently. Use [`TimestampMillis::try_now`]
+    /// when the `duration_since` error needs to be surfaced.
     pub fn now() -> Self {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+        Self::try_now().unwrap_or(Self(0))
+    }
 
-        Self(millis)
+    /// Returns the current timestamp in milliseconds, surfacing the
+    /// `duration_since` error when the system clock predates the unix epoch.
+    ///
+    /// The millisecond count is clamped to `u64::MAX` instead of wrapping when
+    /// it would overflow `u64`.
+    pub fn try_now() -> Result<Self, SystemTimeError> {
+        let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        Ok(Self(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)))
     }
 }
 
@@ -9497,6 +9482,53 @@ pub struct DelegatedTaskRuntimeReadiness {
     pub schema_version: u16,
 }
 
+/// Splits a path-like label into normalized, lowercased components.
+///
+/// Both `/` and `\` are treated as separators so the comparison is independent
+/// of the platform that produced the label. Empty and `.` components are
+/// dropped so trailing separators and redundant current-directory markers do
+/// not affect matching.
+fn normalized_path_components(label: &str) -> Vec<String> {
+    label
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|component| !component.is_empty() && *component != ".")
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// Returns `true` when `target` falls under the `protected` pattern using
+/// component/boundary-aware matching rather than a raw substring test.
+///
+/// The match succeeds when the protected pattern's normalized components appear
+/// as a contiguous run of components within the target. Patterns that do not
+/// look like paths (no separators and no usable components) fall back to a
+/// conservative case-insensitive substring check so the gate continues to
+/// fail closed for opaque labels.
+fn delegated_target_matches_protected_pattern(target: &str, protected: &str) -> bool {
+    if protected.trim().is_empty() {
+        return false;
+    }
+
+    let protected_components = normalized_path_components(protected);
+    if protected_components.is_empty() {
+        // Not a usable path pattern; fall back to a conservative,
+        // case-insensitive substring match so opaque labels still fail closed.
+        return target
+            .to_ascii_lowercase()
+            .contains(&protected.trim().to_ascii_lowercase());
+    }
+
+    let target_components = normalized_path_components(target);
+    if target_components.len() < protected_components.len() {
+        return false;
+    }
+
+    target_components
+        .windows(protected_components.len())
+        .any(|window| window == protected_components.as_slice())
+}
+
 /// Evaluates delegated-task runtime readiness using fail-closed security gates.
 pub fn evaluate_delegated_task_runtime_readiness(
     input: DelegatedTaskRuntimeReadinessInput,
@@ -9516,7 +9548,7 @@ pub fn evaluate_delegated_task_runtime_readiness(
         contract
             .protected_path_patterns
             .iter()
-            .any(|protected| !protected.is_empty() && target.contains(protected))
+            .any(|protected| delegated_target_matches_protected_pattern(target, protected))
     }) {
         stop_gates.push(DelegatedRuntimeStopGate::ProtectedFileTarget);
     }
@@ -26077,6 +26109,52 @@ pub fn legion_workflow_projection_from_sessions(
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn timestamp_now_is_non_zero_and_does_not_panic() {
+        // try_now succeeds on a sane clock and now() agrees with it.
+        let now = TimestampMillis::now();
+        assert!(now.0 > 0);
+        assert!(TimestampMillis::try_now().is_ok());
+    }
+
+    #[test]
+    fn protected_pattern_matches_on_component_boundary() {
+        // Exact component run matches regardless of separator style.
+        assert!(delegated_target_matches_protected_pattern(
+            "repo/src/secrets/key.pem",
+            "secrets/key.pem",
+        ));
+        assert!(delegated_target_matches_protected_pattern(
+            "repo\\src\\secrets\\key.pem",
+            "secrets/key.pem",
+        ));
+        // Single protected directory anywhere in the path.
+        assert!(delegated_target_matches_protected_pattern(
+            "repo/.git/config",
+            ".git",
+        ));
+    }
+
+    #[test]
+    fn protected_pattern_rejects_cross_boundary_substring() {
+        // ".gitignore" should not match a ".git" directory pattern even though
+        // it contains the substring ".git".
+        assert!(!delegated_target_matches_protected_pattern(
+            "repo/.gitignore",
+            ".git",
+        ));
+        // Partial component names do not match.
+        assert!(!delegated_target_matches_protected_pattern(
+            "repo/src/secretsmith/key.pem",
+            "secrets",
+        ));
+        // Empty pattern never matches.
+        assert!(!delegated_target_matches_protected_pattern(
+            "repo/anything",
+            "",
+        ));
+    }
 
     #[test]
     fn workspace_open_request_serde_round_trip() {

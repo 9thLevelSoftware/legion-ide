@@ -8,6 +8,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use legion_platform::{PtyKillMode, PtyRequest, PtyService};
@@ -524,6 +525,27 @@ struct RuntimeSession {
     next_sequence: u64,
     correlation_id: CorrelationId,
     causality_id: CausalityId,
+    /// Effective per-session output byte limit (already clamped to the runtime
+    /// configuration maximum at launch).
+    output_byte_limit: u64,
+    /// Wall-clock deadline derived from the launch policy `timeout_seconds`.
+    /// `None` only when the configured timeout would overflow the clock.
+    deadline: Option<Instant>,
+    /// Set under the registry lock before an irreversible close/kill backend
+    /// call so concurrent lifecycle operations fail closed instead of acting on
+    /// a session that is being torn down.
+    closing: bool,
+}
+
+/// Session-owned identity and limits resolved under the registry lock for a
+/// single lifecycle operation.
+struct LifecycleContext {
+    platform_session_id: String,
+    sequence: EventSequence,
+    correlation_id: CorrelationId,
+    causality_id: CausalityId,
+    output_byte_limit: u64,
+    deadline: Option<Instant>,
 }
 
 impl<P: PtyService> TerminalRuntime<P> {
@@ -550,6 +572,25 @@ impl<P: PtyService> TerminalRuntime<P> {
                 reason: "terminal command metadata is required".to_string(),
             });
         }
+        // Per-launch policy bounds are clamped to the runtime configuration and
+        // then actually enforced (Finding 1/2): the smaller of the policy/config
+        // output limit is applied to projections, and a deadline is derived from
+        // the policy timeout so it is enforced during polling.
+        //
+        // NOTE: `policy.cwd_policy` is a descriptive label only. This boundary
+        // receives no concrete working-directory path (the launch request and
+        // the policy contract carry no path), so the runtime cannot enforce a
+        // cwd here. Forwarding an actual directory requires a path field added by
+        // the policy-owning caller in `legion-protocol`/`legion-app`, which is
+        // outside this crate. The PTY is therefore spawned in the platform
+        // default cwd; this is documented to avoid mistaking validation for
+        // enforcement.
+        let effective_limit = request
+            .policy
+            .output_byte_limit
+            .min(self.config.max_output_bytes);
+        let deadline =
+            Instant::now().checked_add(Duration::from_secs(request.policy.timeout_seconds));
         let session = self
             .pty
             .spawn_pty(&PtyRequest {
@@ -560,11 +601,8 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
-        let redacted = redact_terminal_projection(&session.output, self.config.max_output_bytes);
-        let byte_count = session
-            .output
-            .len()
-            .min(self.config.max_output_bytes as usize) as u64;
+        let redacted = redact_terminal_projection(&session.output, effective_limit);
+        let byte_count = session.output.len().min(effective_limit as usize) as u64;
         let terminal_session_id = next_terminal_session_id();
         let native_pty = session.id.starts_with("native-");
         let backend = if native_pty {
@@ -588,6 +626,9 @@ impl<P: PtyService> TerminalRuntime<P> {
                         next_sequence: event_sequence.0.saturating_add(1),
                         correlation_id,
                         causality_id,
+                        output_byte_limit: effective_limit,
+                        deadline,
+                        closing: false,
                     },
                 );
         }
@@ -607,7 +648,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                 backend,
                 native_pty,
                 byte_count,
-                session.output.len() as u64 > self.config.max_output_bytes
+                session.output.len() as u64 > effective_limit
             ),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
@@ -622,7 +663,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                     sequence: audit.event_sequence,
                     redacted_payload: redacted,
                     byte_count,
-                    truncated: session.output.len() as u64 > self.config.max_output_bytes,
+                    truncated: session.output.len() as u64 > effective_limit,
                     redaction: RedactionHint::MetadataOnly,
                     schema_version: 1,
                 };
@@ -644,19 +685,18 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_input(&input).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        let (platform_session_id, sequence, _session_correlation_id, causality_id) =
-            self.session_for_lifecycle(input.session_id)?;
+        let ctx = self.session_for_lifecycle(input.session_id, false)?;
         self.pty
-            .write_pty(&platform_session_id, &input.payload)
+            .write_pty(&ctx.platform_session_id, &input.payload)
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
         self.audit_record(
             input.session_id,
             TerminalRuntimeState::Running,
-            sequence,
+            ctx.sequence,
             input.correlation_id,
-            causality_id,
+            ctx.causality_id,
             format!(
                 "state=running action=input pty=true input_bytes={} correlation={}",
                 input.payload.len(),
@@ -674,19 +714,18 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_resize(&resize).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        let (platform_session_id, sequence, correlation_id, causality_id) =
-            self.session_for_lifecycle(resize.session_id)?;
+        let ctx = self.session_for_lifecycle(resize.session_id, false)?;
         self.pty
-            .resize_pty(&platform_session_id, resize.cols, resize.rows)
+            .resize_pty(&ctx.platform_session_id, resize.cols, resize.rows)
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
         self.audit_record(
             resize.session_id,
             TerminalRuntimeState::Running,
-            sequence,
-            correlation_id,
-            causality_id,
+            ctx.sequence,
+            ctx.correlation_id,
+            ctx.causality_id,
             format!(
                 "state=running action=resize pty=true cols={} rows={}",
                 resize.cols, resize.rows
@@ -709,18 +748,53 @@ impl<P: PtyService> TerminalRuntime<P> {
                 reason: "terminal output poll requires valid event identity".to_string(),
             });
         }
-        let platform_session_id = self.platform_session_id(request.session_id)?;
+        // Caller-supplied identity is only validated as request metadata; the
+        // authoritative audit identity comes from the session registry
+        // (Finding 5).
+        let ctx = self.session_for_lifecycle(request.session_id, false)?;
+        // Enforce the launch deadline fail-closed (Finding 1): an expired
+        // session is terminated and removed before any further output flows.
+        if let Some(deadline) = ctx.deadline
+            && Instant::now() >= deadline
+        {
+            let _ = self.pty.kill_pty(&ctx.platform_session_id, PtyKillMode::Terminate);
+            self.remove_session(request.session_id)?;
+            let audit = self.audit_record(
+                request.session_id,
+                TerminalRuntimeState::Exited,
+                ctx.sequence,
+                ctx.correlation_id,
+                ctx.causality_id,
+                "state=exited action=output pty=true reason=timeout".to_string(),
+            )?;
+            let output = TerminalOutputChunk {
+                session_id: audit.session_id,
+                sequence: audit.event_sequence,
+                redacted_payload: String::new(),
+                byte_count: 0,
+                truncated: false,
+                redaction: RedactionHint::MetadataOnly,
+                schema_version: 1,
+            };
+            validate_terminal_output_chunk(&output).map_err(|err| {
+                TerminalRuntimeError::Denied {
+                    reason: err.message,
+                }
+            })?;
+            return Ok(TerminalRuntimeOutputPollOutcome { output, audit });
+        }
+        let effective_limit = ctx.output_byte_limit.min(self.config.max_output_bytes);
         let read = self
             .pty
-            .read_pty(&platform_session_id, self.config.max_output_bytes as usize)
+            .read_pty(&ctx.platform_session_id, effective_limit as usize)
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
         if read.exited && !read.truncated {
             self.remove_session(request.session_id)?;
         }
-        let redacted = redact_terminal_projection(&read.output, self.config.max_output_bytes);
-        let byte_count = read.output.len().min(self.config.max_output_bytes as usize) as u64;
+        let redacted = redact_terminal_projection(&read.output, effective_limit);
+        let byte_count = read.output.len().min(effective_limit as usize) as u64;
         let state = if read.exited {
             TerminalRuntimeState::Exited
         } else {
@@ -729,9 +803,9 @@ impl<P: PtyService> TerminalRuntime<P> {
         let audit = self.audit_record(
             request.session_id,
             state,
-            request.event_sequence,
-            request.correlation_id,
-            request.causality_id,
+            ctx.sequence,
+            ctx.correlation_id,
+            ctx.causality_id,
             format!(
                 "state={} action=output pty=true output_bytes={} truncated={} exit_code={:?}",
                 if read.exited { "exited" } else { "running" },
@@ -748,7 +822,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                     redacted_payload: redacted,
                     byte_count,
                     truncated: read.truncated
-                        || read.output.len() as u64 > self.config.max_output_bytes,
+                        || read.output.len() as u64 > effective_limit,
                     redaction: RedactionHint::MetadataOnly,
                     schema_version: 1,
                 };
@@ -773,19 +847,24 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_close_request(&request).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        let platform_session_id = self.platform_session_id(request.session_id)?;
-        self.pty
-            .close_pty(&platform_session_id)
-            .map_err(|err| TerminalRuntimeError::Backend {
+        // Mark the session closing under the registry lock before the
+        // irreversible backend call so a concurrent input/resize/poll fails
+        // closed (Finding 6); roll back the flag if the backend call fails so
+        // the session remains usable.
+        let ctx = self.session_for_lifecycle(request.session_id, true)?;
+        if let Err(err) = self.pty.close_pty(&ctx.platform_session_id) {
+            self.clear_closing(request.session_id);
+            return Err(TerminalRuntimeError::Backend {
                 reason: err.to_string(),
-            })?;
+            });
+        }
         let _ = self.remove_session(request.session_id)?;
         self.audit_record(
             request.session_id,
             TerminalRuntimeState::Exited,
-            request.event_sequence,
-            request.correlation_id,
-            request.causality_id,
+            ctx.sequence,
+            ctx.correlation_id,
+            ctx.causality_id,
             "state=exited action=close pty=true".to_string(),
         )
     }
@@ -799,22 +878,28 @@ impl<P: PtyService> TerminalRuntime<P> {
         validate_terminal_kill_request(&request).map_err(|err| TerminalRuntimeError::Denied {
             reason: err.message,
         })?;
-        let platform_session_id = self.platform_session_id(request.session_id)?;
         let mode = match request.escalation {
             TerminalKillEscalation::Interrupt => PtyKillMode::Interrupt,
             TerminalKillEscalation::Terminate => PtyKillMode::Terminate,
             TerminalKillEscalation::KillTree => PtyKillMode::KillTree,
         };
-        self.pty
-            .kill_pty(&platform_session_id, mode)
-            .map_err(|err| TerminalRuntimeError::Backend {
+        // Interrupt keeps the session alive; terminate/kill-tree remove it, so
+        // only those escalations mark the session closing (Finding 6).
+        let terminal = request.escalation != TerminalKillEscalation::Interrupt;
+        let ctx = self.session_for_lifecycle(request.session_id, terminal)?;
+        if let Err(err) = self.pty.kill_pty(&ctx.platform_session_id, mode) {
+            if terminal {
+                self.clear_closing(request.session_id);
+            }
+            return Err(TerminalRuntimeError::Backend {
                 reason: err.to_string(),
-            })?;
-        let state = if request.escalation == TerminalKillEscalation::Interrupt {
-            TerminalRuntimeState::Running
-        } else {
+            });
+        }
+        let state = if terminal {
             let _ = self.remove_session(request.session_id)?;
             TerminalRuntimeState::Exited
+        } else {
+            TerminalRuntimeState::Running
         };
         let state_label = if state == TerminalRuntimeState::Exited {
             "exited"
@@ -824,9 +909,9 @@ impl<P: PtyService> TerminalRuntime<P> {
         self.audit_record(
             request.session_id,
             state,
-            request.event_sequence,
-            request.correlation_id,
-            request.causality_id,
+            ctx.sequence,
+            ctx.correlation_id,
+            ctx.causality_id,
             format!(
                 "state={state_label} action=kill pty=true escalation={:?} kill_tree={}",
                 request.escalation, request.kill_tree_authorized
@@ -893,7 +978,8 @@ impl<P: PtyService> TerminalRuntime<P> {
     fn session_for_lifecycle(
         &self,
         session_id: TerminalSessionId,
-    ) -> Result<(String, EventSequence, CorrelationId, CausalityId), TerminalRuntimeError> {
+        mark_closing: bool,
+    ) -> Result<LifecycleContext, TerminalRuntimeError> {
         let mut sessions = self
             .sessions
             .lock()
@@ -903,26 +989,31 @@ impl<P: PtyService> TerminalRuntime<P> {
         let session = sessions
             .get_mut(&session_id)
             .ok_or_else(|| missing_session_error(session_id))?;
-        Ok((
-            session.platform_session_id.clone(),
-            session.next_sequence(),
-            session.correlation_id,
-            session.causality_id,
-        ))
+        if session.closing {
+            return Err(TerminalRuntimeError::Backend {
+                reason: format!("terminal session {} is closing", session_id.0),
+            });
+        }
+        let ctx = LifecycleContext {
+            platform_session_id: session.platform_session_id.clone(),
+            sequence: session.next_sequence(),
+            correlation_id: session.correlation_id,
+            causality_id: session.causality_id,
+            output_byte_limit: session.output_byte_limit,
+            deadline: session.deadline,
+        };
+        if mark_closing {
+            session.closing = true;
+        }
+        Ok(ctx)
     }
 
-    fn platform_session_id(
-        &self,
-        session_id: TerminalSessionId,
-    ) -> Result<String, TerminalRuntimeError> {
-        self.sessions
-            .lock()
-            .map_err(|_| TerminalRuntimeError::Backend {
-                reason: "terminal runtime session registry is unavailable".to_string(),
-            })?
-            .get(&session_id)
-            .map(|session| session.platform_session_id.clone())
-            .ok_or_else(|| missing_session_error(session_id))
+    fn clear_closing(&self, session_id: TerminalSessionId) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(session) = sessions.get_mut(&session_id)
+        {
+            session.closing = false;
+        }
     }
 
     fn remove_session(
@@ -1009,20 +1100,7 @@ fn missing_session_error(session_id: TerminalSessionId) -> TerminalRuntimeError 
 }
 
 fn redact_terminal_projection(output: &str, limit: u64) -> String {
-    let mut projected = output.to_string();
-    for (needle, replacement) in [
-        ("OPENAI_API_KEY", "[redacted]"),
-        ("aws_secret_access_key", "[redacted]"),
-        ("Authorization: Bearer", "Authorization: [redacted]"),
-        ("authorization: bearer", "authorization: [redacted]"),
-        ("ghp_", "[redacted]"),
-        ("gho_", "[redacted]"),
-        ("xoxb-", "[redacted]"),
-        ("sk-", "[redacted]"),
-        ("secret", "[redacted]"),
-    ] {
-        projected = projected.replace(needle, replacement);
-    }
+    let mut projected = redact_secrets(output);
     let limit = limit as usize;
     if projected.len() > limit {
         let mut end = limit;
@@ -1032,6 +1110,120 @@ fn redact_terminal_projection(output: &str, limit: u64) -> String {
         projected.truncate(end);
     }
     projected
+}
+
+/// Redact credentials from a terminal projection by consuming the full
+/// credential value (not just a marker prefix), case-insensitively for headers
+/// and environment assignments, and by collapsing known token shapes.
+fn redact_secrets(input: &str) -> String {
+    const REDACTED: &str = "[redacted]";
+    let lower = input.to_ascii_lowercase();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    // Treat the start of the string as a word boundary so a leading assignment
+    // such as `OPENAI_API_KEY=...` is recognized.
+    let mut prev_is_ws = true;
+    'outer: while i < input.len() {
+        let rest_lower = &lower[i..];
+
+        // Authorization header: redact the entire value to end of line so the
+        // scheme and token (e.g. `Bearer <token>`) are both removed.
+        if rest_lower.starts_with("authorization:") {
+            let header_len = "authorization:".len();
+            out.push_str(&input[i..i + header_len]);
+            out.push(' ');
+            out.push_str(REDACTED);
+            let line_end = input[i + header_len..]
+                .find('\n')
+                .map(|p| i + header_len + p)
+                .unwrap_or(input.len());
+            i = line_end;
+            prev_is_ws = false;
+            continue;
+        }
+
+        // Sensitive environment/config assignment: NAME=value, value consumed
+        // through a delimiter.
+        if prev_is_ws
+            && let Some((eq_end, value_end)) = match_sensitive_assignment(input, &lower, i)
+        {
+            out.push_str(&input[i..eq_end]);
+            out.push_str(REDACTED);
+            i = value_end;
+            prev_is_ws = false;
+            continue;
+        }
+
+        // Token shapes: prefix followed by the token body.
+        for prefix in ["ghp_", "gho_", "xoxb-", "sk-"] {
+            if rest_lower.starts_with(prefix) {
+                let mut end = i + prefix.len();
+                while end < input.len() {
+                    let c = input[end..].chars().next().unwrap_or('\0');
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        end += c.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                out.push_str(REDACTED);
+                i = end;
+                prev_is_ws = false;
+                continue 'outer;
+            }
+        }
+
+        // Bare well-known credential names (no `=`), longest first.
+        for marker in ["openai_api_key", "aws_secret_access_key", "secret"] {
+            if rest_lower.starts_with(marker) {
+                out.push_str(REDACTED);
+                i += marker.len();
+                prev_is_ws = false;
+                continue 'outer;
+            }
+        }
+
+        let c = input[i..].chars().next().unwrap_or('\0');
+        prev_is_ws = c.is_whitespace();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// If `input[start..]` begins with a sensitive `NAME=value` assignment, return
+/// the byte offset just past `=` and the byte offset where the value ends
+/// (whitespace, quote, or end of input).
+fn match_sensitive_assignment(input: &str, lower: &str, start: usize) -> Option<(usize, usize)> {
+    let mut ident_end = start;
+    while ident_end < input.len() {
+        let c = input[ident_end..].chars().next().unwrap_or('\0');
+        if c.is_ascii_alphanumeric() || c == '_' {
+            ident_end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if ident_end == start || !input[ident_end..].starts_with('=') {
+        return None;
+    }
+    let ident_lower = &lower[start..ident_end];
+    let sensitive = ["secret", "token", "password", "passwd", "api_key", "access_key", "apikey"]
+        .iter()
+        .any(|kw| ident_lower.contains(kw));
+    if !sensitive {
+        return None;
+    }
+    let eq_end = ident_end + 1;
+    let mut value_end = eq_end;
+    while value_end < input.len() {
+        let c = input[value_end..].chars().next().unwrap_or('\0');
+        if c.is_whitespace() || c == '"' || c == '\'' {
+            break;
+        }
+        value_end += c.len_utf8();
+    }
+    Some((eq_end, value_end))
 }
 
 fn uuid_from_value(value: u64) -> uuid::Uuid {
@@ -1665,5 +1857,141 @@ mod tests {
             }),
             Err(TerminalRuntimeError::Denied { .. })
         ));
+    }
+
+    #[test]
+    fn terminal_runtime_enforces_per_launch_output_byte_limit() {
+        let mut config = TerminalRuntimeConfig::enabled();
+        config.max_output_bytes = 1024;
+        let runtime = TerminalRuntime::new(config, FakePty::native("abcdefghij"));
+        let outcome = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: TerminalLaunchPolicyContract {
+                    output_byte_limit: 4,
+                    ..policy()
+                },
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        // The smaller per-launch limit (4) wins over the global config max (1024).
+        assert_eq!(outcome.output.byte_count, 4);
+        assert!(outcome.output.truncated);
+    }
+
+    #[test]
+    fn terminal_runtime_poll_uses_session_owned_event_identity() {
+        let runtime =
+            TerminalRuntime::new(TerminalRuntimeConfig::enabled(), FakePty::native("ok"));
+        let launch = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        let session_id = launch.audit.session_id;
+        // The caller supplies arbitrary identity (value 7); the audit must use
+        // the session-owned monotonic sequence and correlation instead.
+        let poll = runtime
+            .poll_output(poll_request(session_id, 7))
+            .expect("poll");
+        assert_eq!(
+            poll.audit.event_sequence.0,
+            launch.audit.event_sequence.0 + 1
+        );
+        assert_eq!(poll.audit.correlation_id, launch.audit.correlation_id);
+        assert_ne!(poll.audit.correlation_id, CorrelationId(7));
+    }
+
+    #[test]
+    fn terminal_runtime_poll_enforces_launch_deadline_fail_closed() {
+        let pty = FakePty::native("still-running");
+        let runtime = TerminalRuntime::new(TerminalRuntimeConfig::enabled(), pty.clone());
+        let launch = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        let session_id = launch.audit.session_id;
+        // Force the deadline into the past to simulate timeout expiry.
+        {
+            let mut sessions = runtime.sessions.lock().expect("registry");
+            let session = sessions.get_mut(&session_id).expect("session");
+            session.deadline = Some(Instant::now() - Duration::from_secs(1));
+        }
+        let poll = runtime.poll_output(poll_request(session_id, 5)).expect("poll");
+        assert_eq!(poll.audit.state, TerminalRuntimeState::Exited);
+        assert!(poll.audit.metadata_summary.contains("reason=timeout"));
+        assert!(
+            pty.calls()
+                .contains(&"kill:native-unix-pty-test:Terminate".to_string())
+        );
+        // Session removed; subsequent operations fail closed.
+        assert!(matches!(
+            runtime.resize(TerminalResize {
+                session_id,
+                cols: 80,
+                rows: 24,
+            }),
+            Err(TerminalRuntimeError::Backend { .. })
+        ));
+    }
+
+    #[test]
+    fn terminal_runtime_rejects_operations_on_closing_session() {
+        let runtime =
+            TerminalRuntime::new(TerminalRuntimeConfig::enabled(), FakePty::native(""));
+        let launch = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "test".to_string(),
+                args: vec![],
+            })
+            .expect("native launch");
+        let session_id = launch.audit.session_id;
+        // Simulate an in-flight close having marked the session closing.
+        {
+            let mut sessions = runtime.sessions.lock().expect("registry");
+            sessions.get_mut(&session_id).expect("session").closing = true;
+        }
+        assert!(matches!(
+            runtime.input(TerminalInput {
+                session_id,
+                correlation_id: CorrelationId(1),
+                payload: "x".to_string(),
+            }),
+            Err(TerminalRuntimeError::Backend { .. })
+        ));
+    }
+
+    #[test]
+    fn redact_secrets_consumes_full_credential_values() {
+        let bearer = redact_terminal_projection("Authorization: Bearer abc.def-123\n", 4096);
+        assert_eq!(bearer, "Authorization: [redacted]\n");
+
+        let lower_header = redact_terminal_projection("authorization: bearer SEKRET", 4096);
+        assert_eq!(lower_header, "authorization: [redacted]");
+
+        let mixed_header = redact_terminal_projection("AuThOrIzAtIoN: Bearer tok", 4096);
+        assert_eq!(mixed_header, "AuThOrIzAtIoN: [redacted]");
+
+        let env = redact_terminal_projection("OPENAI_API_KEY=sk-livetoken123 next", 4096);
+        assert_eq!(env, "OPENAI_API_KEY=[redacted] next");
+
+        let aws = redact_terminal_projection("aws_secret_access_key=AKIAEXAMPLEVALUE", 4096);
+        assert_eq!(aws, "aws_secret_access_key=[redacted]");
+
+        let gh = redact_terminal_projection("token ghp_ABC123def_456 done", 4096);
+        assert_eq!(gh, "token [redacted] done");
+
+        let slack = redact_terminal_projection("xoxb-1-2-abcDEF and sk-xyz789", 4096);
+        assert_eq!(slack, "[redacted] and [redacted]");
+
+        // No false positives on ordinary text.
+        let clean = redact_terminal_projection("hello world output", 4096);
+        assert_eq!(clean, "hello world output");
     }
 }

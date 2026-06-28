@@ -42,7 +42,10 @@ use legion_security::TrustState;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const STORAGE_CHECKSUM_ALGORITHM: &str = "legion-storage-stable-sum-v1";
+const STORAGE_CHECKSUM_ALGORITHM: &str = "legion-storage-sha256-v1";
+/// Legacy non-cryptographic checksum algorithm retained only for verifying backups
+/// written before the SHA-256 upgrade.
+const LEGACY_STORAGE_CHECKSUM_ALGORITHM: &str = "legion-storage-stable-sum-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Lightweight record for persisted workspace configuration snapshots.
@@ -387,7 +390,7 @@ impl StorageMigrationRegistry {
             location_label: backup_path.to_string_lossy().into_owned(),
             checksum: StorageChecksum {
                 algorithm: STORAGE_CHECKSUM_ALGORITHM.to_string(),
-                value: stable_storage_sum(&bytes),
+                value: storage_checksum(&bytes),
                 schema_version: 1,
             },
             event_sequence: EventSequence(correlation_id.0.max(1)),
@@ -408,15 +411,19 @@ impl StorageMigrationRegistry {
     ) -> StorageResult<StorageRecoveryOutcome> {
         validate_storage_backup_marker(backup).map_err(StorageError::from_protocol)?;
         validate_storage_repair_request(repair).map_err(StorageError::from_protocol)?;
-        if backup.checksum.algorithm != STORAGE_CHECKSUM_ALGORITHM {
-            return Err(StorageError::Failed {
-                message: "storage backup checksum algorithm mismatch".to_string(),
-            });
-        }
         let bytes = fs::read(&backup.location_label).map_err(|err| StorageError::Failed {
             message: format!("read storage backup: {err}"),
         })?;
-        if stable_storage_sum(&bytes) != backup.checksum.value {
+        let computed = if backup.checksum.algorithm == STORAGE_CHECKSUM_ALGORITHM {
+            storage_checksum(&bytes)
+        } else if backup.checksum.algorithm == LEGACY_STORAGE_CHECKSUM_ALGORITHM {
+            stable_storage_sum(&bytes)
+        } else {
+            return Err(StorageError::Failed {
+                message: "storage backup checksum algorithm mismatch".to_string(),
+            });
+        };
+        if computed != backup.checksum.value {
             return Err(StorageError::Failed {
                 message: "storage backup checksum mismatch".to_string(),
             });
@@ -488,11 +495,128 @@ fn write_file_atomically(path: &Path, body: &[u8]) -> StorageResult<()> {
     result
 }
 
+/// Legacy non-cryptographic checksum. Retained only to verify backups written before
+/// the SHA-256 upgrade; it is order-insensitive and MUST NOT be used for new markers.
 fn stable_storage_sum(bytes: &[u8]) -> String {
     let sum = bytes
         .iter()
         .fold(0u64, |acc, byte| acc.wrapping_add(*byte as u64));
     format!("sum:{sum}:len:{}", bytes.len())
+}
+
+/// Compute the integrity checksum for a storage payload as a lowercase SHA-256 hex digest.
+///
+/// Unlike [`stable_storage_sum`], this is collision-resistant and order-sensitive, so byte
+/// permutations or swaps that preserve the naive sum and length are detected.
+fn storage_checksum(bytes: &[u8]) -> String {
+    let digest = sha256_digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
+
+/// Pure-Rust SHA-256 (FIPS 180-4) over an in-memory byte slice, returning the 32-byte digest.
+///
+/// Implemented inline to avoid adding a new crate dependency to `legion-storage`.
+fn sha256_digest(message: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    let mut hash: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    let bit_len = (message.len() as u64).wrapping_mul(8);
+    let mut padded = message.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (index, word) in w.iter_mut().enumerate().take(16) {
+            let base = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[base],
+                chunk[base + 1],
+                chunk[base + 2],
+                chunk[base + 3],
+            ]);
+        }
+        for index in 16..64 {
+            let s0 = w[index - 15].rotate_right(7)
+                ^ w[index - 15].rotate_right(18)
+                ^ (w[index - 15] >> 3);
+            let s1 = w[index - 2].rotate_right(17)
+                ^ w[index - 2].rotate_right(19)
+                ^ (w[index - 2] >> 10);
+            w[index] = w[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = hash[0];
+        let mut b = hash[1];
+        let mut c = hash[2];
+        let mut d = hash[3];
+        let mut e = hash[4];
+        let mut f = hash[5];
+        let mut g = hash[6];
+        let mut h = hash[7];
+
+        for index in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[index])
+                .wrapping_add(w[index]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        hash[0] = hash[0].wrapping_add(a);
+        hash[1] = hash[1].wrapping_add(b);
+        hash[2] = hash[2].wrapping_add(c);
+        hash[3] = hash[3].wrapping_add(d);
+        hash[4] = hash[4].wrapping_add(e);
+        hash[5] = hash[5].wrapping_add(f);
+        hash[6] = hash[6].wrapping_add(g);
+        hash[7] = hash[7].wrapping_add(h);
+    }
+
+    let mut digest = [0u8; 32];
+    for (index, word) in hash.iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,6 +628,16 @@ struct PersistedState {
     sessions: HashMap<String, SessionRecord>,
     #[serde(default)]
     dock_layouts: HashMap<String, DockLayoutStorageRecord>,
+    #[serde(default)]
+    protocol_workspace_configs: HashMap<WorkspaceId, WorkspaceConfigSnapshot>,
+    #[serde(default)]
+    protocol_file_metadata: HashMap<FileId, FileMetadata>,
+    #[serde(default)]
+    protocol_sessions: HashMap<String, WorkspaceSessionRecord>,
+    // Persisted as a flat list because `protocol_trust` is keyed by a `(WorkspaceId, PrincipalId)`
+    // tuple, which serde_json cannot encode as a JSON map key. The map is rebuilt on load.
+    #[serde(default)]
+    protocol_trust: Vec<TrustRecord>,
     #[serde(default)]
     protocol_proposal_audit: HashMap<ProposalId, ProposalAuditRecord>,
     #[serde(default)]
@@ -547,6 +681,10 @@ impl From<&InMemoryStorage> for PersistedState {
             metadata: value.metadata.clone(),
             sessions: value.sessions.clone(),
             dock_layouts: value.dock_layouts.clone(),
+            protocol_workspace_configs: value.protocol_workspace_configs.clone(),
+            protocol_file_metadata: value.protocol_file_metadata.clone(),
+            protocol_sessions: value.protocol_sessions.clone(),
+            protocol_trust: value.protocol_trust.values().cloned().collect(),
             protocol_proposal_audit: value.protocol_proposal_audit.clone(),
             protocol_assisted_ai_audit: value.protocol_assisted_ai_audit.clone(),
             protocol_delegated_task_audit_linkage: value
@@ -675,10 +813,21 @@ impl InMemoryStorageRepositoryPort {
         envelope: EventEnvelope,
     ) -> ProtocolResult<StorageRepositoryResponse> {
         let metadata = event_metadata_record(&envelope);
-        let emitted = self.event_sink.emit(EventSinkRequest { envelope });
-        let stored = self.handle(StorageRepositoryRequest::SaveEventMetadata(metadata));
-        emitted?;
-        stored
+        // Persist and validate the audit metadata first so we never emit an event that lacks a
+        // durable audit record. If the store fails, propagate the error and emit nothing.
+        let stored = self.handle(StorageRepositoryRequest::SaveEventMetadata(metadata))?;
+        // The record is now persisted. If emit fails, surface an explicit partial-failure error
+        // rather than discarding the persisted record or silently succeeding.
+        self.event_sink
+            .emit(EventSinkRequest { envelope })
+            .map_err(|err| ProtocolError {
+                code: "storage_event_emit_failed_after_store".to_string(),
+                message: format!(
+                    "event metadata persisted but sink emit failed: {}",
+                    err.message
+                ),
+            })?;
+        Ok(stored)
     }
 
     /// Consume the adapter and return the wrapped in-memory store.
@@ -747,10 +896,17 @@ impl From<PersistedState> for InMemoryStorage {
             metadata: value.metadata,
             sessions: value.sessions,
             dock_layouts: value.dock_layouts,
-            protocol_workspace_configs: HashMap::new(),
-            protocol_file_metadata: HashMap::new(),
-            protocol_sessions: HashMap::new(),
-            protocol_trust: HashMap::new(),
+            protocol_workspace_configs: value.protocol_workspace_configs,
+            protocol_file_metadata: value.protocol_file_metadata,
+            protocol_sessions: value.protocol_sessions,
+            protocol_trust: value
+                .protocol_trust
+                .into_iter()
+                .map(|record| {
+                    let key = (record.workspace_id, record.principal_id.clone());
+                    (key, record)
+                })
+                .collect(),
             protocol_proposal_audit: value.protocol_proposal_audit,
             protocol_assisted_ai_audit: value.protocol_assisted_ai_audit,
             protocol_delegated_task_audit_linkage: value.protocol_delegated_task_audit_linkage,
@@ -784,17 +940,27 @@ impl FileBackedStorage {
         }
 
         let state = match fs::read_to_string(&path) {
-            Ok(contents) => {
-                let persisted: PersistedState = serde_json::from_str(&contents).map_err(|_| {
+            Ok(contents) => match serde_json::from_str::<PersistedState>(&contents) {
+                Ok(persisted) => InMemoryStorage::from(persisted),
+                Err(_) => {
                     let quarantine = Self::quarantine_path(&path);
-                    let _ = fs::rename(&path, &quarantine);
-                    StorageError::Corrupt {
-                        path: path.to_string_lossy().into_owned(),
-                        quarantine_path: quarantine.to_string_lossy().into_owned(),
-                    }
-                })?;
-                InMemoryStorage::from(persisted)
-            }
+                    // Only report the file as quarantined if the move actually succeeded. A failed
+                    // rename must not leave the corrupt primary in place while claiming otherwise.
+                    return match fs::rename(&path, &quarantine) {
+                        Ok(()) => Err(StorageError::Corrupt {
+                            path: path.to_string_lossy().into_owned(),
+                            quarantine_path: quarantine.to_string_lossy().into_owned(),
+                        }),
+                        Err(rename_err) => Err(StorageError::Failed {
+                            message: format!(
+                                "storage corruption detected at `{}` but quarantine to `{}` failed: {rename_err}",
+                                path.display(),
+                                quarantine.display()
+                            ),
+                        }),
+                    };
+                }
+            },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => InMemoryStorage::new(),
             Err(err) => {
                 return Err(StorageError::Failed {
@@ -2533,6 +2699,8 @@ mod tests {
                 title: Some("text-edit".to_string()),
                 byte_count: Some(4),
             },
+            checkpoint_rollback_projection: None,
+            risk_rule_ids: Vec::new(),
             diagnostics: Vec::new(),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
@@ -4035,5 +4203,223 @@ mod tests {
 
         let quarantine = FileBackedStorage::quarantine_path(&path);
         let _ = fs::remove_file(quarantine);
+    }
+
+    #[test]
+    fn file_backed_storage_roundtrips_protocol_workspace_metadata_session_and_trust() {
+        let path = temp_storage_path("protocol-core-roundtrip");
+        let workspace_id = WorkspaceId(4242);
+        let principal_id = PrincipalId("trust-principal".to_string());
+
+        let config = WorkspaceConfigSnapshot {
+            workspace_id,
+            root_path: CanonicalPath("C:/repo".to_string()),
+            merged: HashMap::from([("theme".to_string(), "dark".to_string())]),
+            trust_state: WorkspaceTrustState::Trusted,
+            captured_at: legion_protocol::TimestampMillis(10),
+            schema_version: "1".to_string(),
+        };
+        let metadata = FileMetadata {
+            canonical_path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+            file_id: None,
+            workspace_id: Some(workspace_id),
+            kind: legion_protocol::FileKind::File,
+            size_bytes: Some(128),
+            modified_at: Some(legion_protocol::TimestampMillis(11)),
+            read_only: false,
+            permissions: None,
+            hash: Some("abc123".to_string()),
+            fingerprint: None,
+            content_version: None,
+            workspace_generation: None,
+            schema_version: 1,
+        };
+        let session = WorkspaceSessionRecord {
+            session_id: "session-protocol".to_string(),
+            last_workspace: Some(workspace_id),
+            last_workspace_path: Some(CanonicalPath("C:/repo".to_string())),
+            open_tabs: Vec::new(),
+            active_tab: None,
+            active_buffer: None,
+            tab_groups: Vec::new(),
+            layout_splits: Vec::new(),
+            explorer_expansion: Vec::new(),
+            panel_state: legion_protocol::SessionPanelState {
+                bottom_visible: true,
+                side_visible: true,
+                active_panel: Some("explorer".to_string()),
+                bottom_height_px: Some(200),
+                side_width_px: Some(320),
+            },
+            dock_layouts: Vec::new(),
+            workbench_settings: legion_protocol::WorkbenchSettingsRecord::default(),
+            memory_snapshot_json: None,
+            dirty_indicators: Vec::new(),
+            saved_at: legion_protocol::TimestampMillis(12),
+            schema_version: 1,
+        };
+        let trust = TrustRecord {
+            workspace_id,
+            principal_id: principal_id.clone(),
+            trust_state: WorkspaceTrustState::Trusted,
+            decision_id: None,
+            correlation_id: CorrelationId(5),
+            recorded_at: legion_protocol::TimestampMillis(13),
+            schema_version: 1,
+        };
+
+        {
+            let mut storage = FileBackedStorage::open(&path).expect("open storage");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveWorkspaceConfig(
+                    config.clone(),
+                ))
+                .expect("save workspace config");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveFileMetadata(
+                    metadata.clone(),
+                ))
+                .expect("save file metadata");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveSessionRecord(
+                    session.clone(),
+                ))
+                .expect("save session record");
+            storage
+                .state
+                .handle_protocol_request(StorageRepositoryRequest::SaveTrustRecord(trust.clone()))
+                .expect("save trust record");
+            storage.flush().expect("flush storage");
+        }
+
+        let mut reopened = FileBackedStorage::open(&path).expect("reopen storage");
+
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadWorkspaceConfig(workspace_id))
+            .expect("read workspace config")
+        {
+            StorageRepositoryResponse::WorkspaceConfig(Some(loaded)) => {
+                assert_eq!(loaded.workspace_id, workspace_id);
+                assert_eq!(loaded.merged.get("theme").map(String::as_str), Some("dark"));
+            }
+            other => panic!("unexpected workspace config response: {other:?}"),
+        }
+
+        let file_id = FileId(legion_protocol_stable_hash(&metadata.canonical_path.0));
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadFileMetadata(file_id))
+            .expect("read file metadata")
+        {
+            StorageRepositoryResponse::FileMetadata(Some(loaded)) => {
+                assert_eq!(loaded.canonical_path, metadata.canonical_path);
+                assert_eq!(loaded.hash.as_deref(), Some("abc123"));
+            }
+            other => panic!("unexpected file metadata response: {other:?}"),
+        }
+
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadSessionRecord {
+                session_id: "session-protocol".to_string(),
+            })
+            .expect("read session record")
+        {
+            StorageRepositoryResponse::SessionRecord(loaded) => {
+                assert_eq!(loaded.expect("session record").session_id, "session-protocol");
+            }
+            other => panic!("unexpected session record response: {other:?}"),
+        }
+
+        match reopened
+            .state
+            .handle_protocol_request(StorageRepositoryRequest::ReadTrustRecord {
+                workspace_id,
+                principal_id: principal_id.clone(),
+            })
+            .expect("read trust record")
+        {
+            StorageRepositoryResponse::TrustRecord(Some(loaded)) => {
+                assert_eq!(loaded.principal_id, principal_id);
+                assert_eq!(loaded.trust_state, WorkspaceTrustState::Trusted);
+            }
+            other => panic!("unexpected trust record response: {other:?}"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn storage_checksum_is_collision_resistant_and_order_sensitive() {
+        // Known SHA-256 vectors confirm the digest is computed correctly.
+        assert_eq!(
+            storage_checksum(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            storage_checksum(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        // Byte permutations that preserve sum+len (and therefore fool the legacy checksum)
+        // produce different SHA-256 digests.
+        let original = [1u8, 2, 3, 4];
+        let swapped = [4u8, 3, 2, 1];
+        assert_eq!(stable_storage_sum(&original), stable_storage_sum(&swapped));
+        assert_ne!(storage_checksum(&original), storage_checksum(&swapped));
+    }
+
+    #[test]
+    fn record_event_persists_before_emitting_and_fails_closed_on_store_error() {
+        fn envelope() -> EventEnvelope {
+            EventEnvelope {
+                schema_version: 1,
+                event_id: event_id(),
+                parent_event_id: None,
+                causality_id: non_nil_causality_id(),
+                event: "proposal.audit_recorded".to_string(),
+                severity: legion_protocol::EventSeverity::Info,
+                retention: RetentionLabel::Audit,
+                redaction: RedactionHint::MetadataOnly,
+                correlation_id: CorrelationId(7),
+                workspace_id: Some(WorkspaceId(1)),
+                sequence: EventSequence(1),
+                principal_id: Some(PrincipalId("tester".to_string())),
+                occurred_at: legion_protocol::TimestampMillis(1),
+                payload: serde_json::json!({}),
+            }
+        }
+
+        let recorder = legion_observability::InMemoryEventSink::new();
+        let port = InMemoryStorageRepositoryPort::with_event_sink(SharedEventSink::new(
+            recorder.clone(),
+        ));
+
+        // Store failure must fail closed: no audit metadata persisted AND no event emitted.
+        port.fail_next_event_metadata_write();
+        port.record_event(envelope())
+            .expect_err("record_event must fail when the store fails");
+        assert!(
+            recorder.events().expect("read sink").is_empty(),
+            "no event may be emitted when the audit store write fails"
+        );
+
+        // Success path: metadata persisted and exactly one event emitted.
+        port.record_event(envelope()).expect("record_event succeeds");
+        let emitted = recorder.events().expect("read sink");
+        assert_eq!(emitted.len(), 1);
+        match port
+            .handle(StorageRepositoryRequest::ReadEventMetadata(event_id()))
+            .expect("read event metadata")
+        {
+            StorageRepositoryResponse::EventMetadata(Some(loaded)) => {
+                assert_eq!(loaded.event_id, event_id());
+            }
+            other => panic!("unexpected event metadata response: {other:?}"),
+        }
     }
 }

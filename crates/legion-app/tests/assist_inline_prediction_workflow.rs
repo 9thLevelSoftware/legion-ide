@@ -126,7 +126,10 @@ fn assist_inline_prediction_request_projects_and_accepts_bounded_ghost_text() {
         .dispatch_ui_intent(CommandDispatchIntent::Undo { buffer_id })
         .expect("undo inline accept");
     assert!(matches!(undo, AppCommandOutcome::Edited(_)));
-    assert_eq!(app.editor().text(buffer_id).expect("undo text"), "fn main() {}\n");
+    assert_eq!(
+        app.editor().text(buffer_id).expect("undo text"),
+        "fn main() {}\n"
+    );
     assert_eq!(app.editor().redo_len(buffer_id).expect("redo len"), 1);
     assert_eq!(app.editor().undo_len(buffer_id).expect("undo len"), 0);
 
