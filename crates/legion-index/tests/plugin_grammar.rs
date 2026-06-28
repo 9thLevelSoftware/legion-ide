@@ -9,6 +9,13 @@ use legion_protocol::{
     PluginTreeSitterGrammarContribution, SemanticGrammarVersion, SemanticModelVersion,
     SemanticPrivacyScope, WorkspaceGeneration, WorkspaceId,
 };
+use std::sync::Mutex;
+
+// The plugin tree-sitter grammar registry is process-global, and both tests in
+// this binary reset/register/read it. Serialize them so one test's reset cannot
+// race another's register-then-parse sequence (which would drop the expected
+// fallback diagnostic).
+static REGISTRY_GUARD: Mutex<()> = Mutex::new(());
 
 fn document(language_id: &str) -> SourceDocument {
     SourceDocument::with_versions(
@@ -26,6 +33,7 @@ fn document(language_id: &str) -> SourceDocument {
 
 #[test]
 fn plugin_grammar_registry_marks_language_supported_but_uses_lexical_fallback() {
+    let _guard = REGISTRY_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     reset_plugin_tree_sitter_grammar_registry_for_tests();
 
     let language_id = LanguageId("rust-plugin".to_string());
@@ -74,6 +82,7 @@ fn plugin_grammar_registry_marks_language_supported_but_uses_lexical_fallback() 
 
 #[test]
 fn bundled_rust_still_parses_via_tree_sitter() {
+    let _guard = REGISTRY_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     reset_plugin_tree_sitter_grammar_registry_for_tests();
 
     let parser = TreeSitterParser::new();

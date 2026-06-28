@@ -26,9 +26,7 @@ use legion_protocol::{
     validate_legion_worker_result, validate_legion_workflow_session,
     validate_phase4_runtime_audit_record,
 };
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -544,7 +542,7 @@ struct BaseTargetState {
     modified_at: Option<TimestampMillis>,
     /// Raw base bytes when readable; `None` if the read failed.
     content: Option<Vec<u8>>,
-    /// `DefaultHasher` digest of the base bytes when readable.
+    /// Stable FNV-1a digest of the base bytes when readable.
     content_hash: Option<u64>,
 }
 
@@ -567,11 +565,9 @@ impl BaseTargetState {
                 TimestampMillis(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
             });
         let content = std::fs::read(path).ok();
-        let content_hash = content.as_ref().map(|bytes| {
-            let mut hasher = DefaultHasher::new();
-            bytes.hash(&mut hasher);
-            hasher.finish()
-        });
+        let content_hash = content
+            .as_ref()
+            .map(|bytes| stable_hash_128(bytes) as u64);
         Some(Self {
             len: metadata.len(),
             modified_at,
@@ -592,7 +588,7 @@ impl BaseTargetState {
             file_content_version: self.content_hash.map(legion_protocol::FileContentVersion),
             workspace_generation: None,
             expected_fingerprint: self.content_hash.map(|hash| FileFingerprint {
-                algorithm: "std-default-hasher-v1".to_string(),
+                algorithm: "fnv1a-64-v1".to_string(),
                 value: format!("{hash:016x}"),
             }),
             expected_file_length: Some(self.len),
@@ -681,20 +677,32 @@ fn compute_minimal_edit(base: &[u8], modified: &str) -> legion_protocol::EditBat
     }
 }
 
+/// Deterministic, cross-version-stable 128-bit FNV-1a hash.
+///
+/// Unlike `std::collections::hash_map::DefaultHasher`, FNV-1a is a fixed
+/// published specification, so identifiers and fingerprints derived from it stay
+/// stable across compiler versions, platforms, and runs. The unit-separator
+/// (`\u{1f}`) between domain prefix and payload prevents prefix-collision
+/// ambiguity between distinct id namespaces.
+fn stable_hash_128(bytes: &[u8]) -> u128 {
+    // FNV-1a (128-bit) constants.
+    const FNV_OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= byte as u128;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// Derives a deterministic [`legion_protocol::FileId`] from a sandbox-relative
 /// path so edit payloads can address a base target without an open buffer.
 fn derive_file_id(relative_path: &str) -> legion_protocol::FileId {
-    let mut high_hasher = DefaultHasher::new();
-    "legion.delegated.file_id.high".hash(&mut high_hasher);
-    relative_path.hash(&mut high_hasher);
-    let high = high_hasher.finish();
-
-    let mut low_hasher = DefaultHasher::new();
-    "legion.delegated.file_id.low".hash(&mut low_hasher);
-    relative_path.hash(&mut low_hasher);
-    let low = low_hasher.finish();
-
-    legion_protocol::FileId(((high as u128) << 64) | low as u128)
+    legion_protocol::FileId(stable_hash_128(
+        format!("legion.delegated.file_id\u{1f}{relative_path}").as_bytes(),
+    ))
 }
 
 /// Metadata-only output from a Legion workflow coordinator action.
@@ -1347,30 +1355,18 @@ fn has_dependency_path(
 /// single audit/cancellation identity. Deterministic for a given
 /// `(worker_id, correlation_id)` pair so replays stay stable.
 fn derive_cancellation_token(worker_id: &str, correlation_id: u64) -> CancellationTokenId {
-    let mut high_hasher = DefaultHasher::new();
-    "legion.workflow.cancellation.high".hash(&mut high_hasher);
-    worker_id.hash(&mut high_hasher);
-    correlation_id.hash(&mut high_hasher);
-    let high = high_hasher.finish();
-
-    let mut low_hasher = DefaultHasher::new();
-    "legion.workflow.cancellation.low".hash(&mut low_hasher);
-    correlation_id.hash(&mut low_hasher);
-    worker_id.hash(&mut low_hasher);
-    let low = low_hasher.finish();
-
-    CancellationTokenId(uuid::Uuid::from_u128(((high as u128) << 64) | low as u128))
+    CancellationTokenId(uuid::Uuid::from_u128(stable_hash_128(
+        format!("legion.workflow.cancellation\u{1f}{worker_id}\u{1f}{correlation_id}").as_bytes(),
+    )))
 }
 
 /// Derives a per-worker event sequence so provider-route audit records do not
 /// all collapse onto a single sequence value. Deterministic for a given
 /// `(worker_id, correlation_id)` pair.
 fn derive_event_sequence(worker_id: &str, correlation_id: u64) -> EventSequence {
-    let mut hasher = DefaultHasher::new();
-    "legion.workflow.event_sequence".hash(&mut hasher);
-    worker_id.hash(&mut hasher);
-    correlation_id.hash(&mut hasher);
-    EventSequence(hasher.finish())
+    EventSequence(stable_hash_128(
+        format!("legion.workflow.event_sequence\u{1f}{worker_id}\u{1f}{correlation_id}").as_bytes(),
+    ) as u64)
 }
 
 fn provider_route_request_from_worker(

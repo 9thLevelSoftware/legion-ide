@@ -1,5 +1,6 @@
 //! Renderer timing metrics for the desktop adapter.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Maximum retained samples per timing series. Older samples are evicted once
@@ -53,8 +54,10 @@ impl Default for FrameTimingSummary {
 pub struct FrameTimingRecorder {
     origin: Instant,
     pending_input: Option<Instant>,
-    input_paint_samples: Vec<InputPaintSample>,
-    frame_durations_ms: Vec<f64>,
+    // Bounded sliding windows. `VecDeque` gives O(1) front eviction once the
+    // retention cap is reached (a `Vec` would shift every element on each evict).
+    input_paint_samples: VecDeque<InputPaintSample>,
+    frame_durations_ms: VecDeque<f64>,
 }
 
 impl Default for FrameTimingRecorder {
@@ -69,8 +72,8 @@ impl FrameTimingRecorder {
         Self {
             origin: Instant::now(),
             pending_input: None,
-            input_paint_samples: Vec::new(),
-            frame_durations_ms: Vec::new(),
+            input_paint_samples: VecDeque::new(),
+            frame_durations_ms: VecDeque::new(),
         }
     }
 
@@ -91,9 +94,9 @@ impl FrameTimingRecorder {
         };
         let duration = at.saturating_duration_since(input_at);
         if self.input_paint_samples.len() >= MAX_RETAINED_SAMPLES {
-            self.input_paint_samples.remove(0);
+            self.input_paint_samples.pop_front();
         }
-        self.input_paint_samples.push(InputPaintSample {
+        self.input_paint_samples.push_back(InputPaintSample {
             input_at_ms: millis(input_at.saturating_duration_since(self.origin)),
             paint_at_ms: millis(at.saturating_duration_since(self.origin)),
             duration_ms: millis(duration),
@@ -108,14 +111,14 @@ impl FrameTimingRecorder {
     /// Records one frame duration.
     pub fn record_frame_duration(&mut self, duration: Duration) {
         if self.frame_durations_ms.len() >= MAX_RETAINED_SAMPLES {
-            self.frame_durations_ms.remove(0);
+            self.frame_durations_ms.pop_front();
         }
-        self.frame_durations_ms.push(millis(duration));
+        self.frame_durations_ms.push_back(millis(duration));
     }
 
-    /// Returns recorded input-to-paint samples.
-    pub fn input_paint_samples(&self) -> &[InputPaintSample] {
-        &self.input_paint_samples
+    /// Returns recorded input-to-paint samples in insertion order (oldest first).
+    pub fn input_paint_samples(&self) -> impl ExactSizeIterator<Item = &InputPaintSample> + '_ {
+        self.input_paint_samples.iter()
     }
 
     /// Returns a metadata-only timing summary.
@@ -143,14 +146,14 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-fn average(values: &[f64]) -> f64 {
+fn average(values: &VecDeque<f64>) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
     values.iter().sum::<f64>() / values.len() as f64
 }
 
-fn population_variance(values: &[f64], average: f64) -> f64 {
+fn population_variance(values: &VecDeque<f64>, average: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
