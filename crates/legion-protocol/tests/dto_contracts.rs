@@ -807,6 +807,7 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
             byte_offset: Some(12),
             utf16_offset: Some(10),
         },
+        cursors: Vec::new(),
         scroll: ViewportScroll {
             top_line: 120,
             left_column: 4,
@@ -875,6 +876,7 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
             }
         ],
         "cursor": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
+        "cursors": [],
         "scroll": {"top_line": 120, "left_column": 4},
         "dimensions": {"width_px": 1280, "height_px": 720},
         "line_wrapping_policy": "viewport",
@@ -4105,6 +4107,8 @@ fn dto_contracts_storage_request_response_schema_golden() {
         correlation_id: CorrelationId(901),
         causality_id: causality_id(),
         payload_summary: payload_summary(),
+        checkpoint_rollback_projection: None,
+        risk_rule_ids: Vec::new(),
         diagnostics: vec![diagnostic("audit")],
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
@@ -4710,6 +4714,7 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
             byte_offset: Some(20),
             utf16_offset: Some(18),
         },
+        cursors: Vec::new(),
         scroll: ViewportScroll {
             top_line: 1,
             left_column: 0,
@@ -4746,6 +4751,7 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
             "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
         }],
         "cursor": {"line": 2, "character": 4, "byte_offset": 20, "utf16_offset": 18},
+        "cursors": [],
         "scroll": {"top_line": 1, "left_column": 0},
         "dimensions": {"width_px": 1280, "height_px": 720},
         "line_wrapping_policy": "off",

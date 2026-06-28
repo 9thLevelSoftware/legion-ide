@@ -969,11 +969,14 @@ impl FileSystemService for NativeFileSystem {
     }
 
     fn list_directory(&self, path: &Path) -> Result<Vec<PathBuf>, PlatformError> {
-        let mut entries = fs::read_dir(path)
-            .map_err(|err| PlatformError::from_io_error("list directory", path, err))?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>();
+        let read_dir = fs::read_dir(path)
+            .map_err(|err| PlatformError::from_io_error("list directory", path, err))?;
+        let mut entries = Vec::new();
+        for entry in read_dir {
+            let entry = entry
+                .map_err(|err| PlatformError::from_io_error("list directory", path, err))?;
+            entries.push(entry.path());
+        }
         entries.sort();
         Ok(entries)
     }
@@ -981,6 +984,9 @@ impl FileSystemService for NativeFileSystem {
 
 impl ProcessService for NativeProcessService {
     fn execute(&self, request: &ProcessRequest) -> Result<ProcessResult, PlatformError> {
+        use std::io::Read;
+        use std::process::Stdio;
+
         if request.cancelled {
             return Err(PlatformError::Cancelled {
                 operation: "execute".to_string(),
@@ -1000,31 +1006,117 @@ impl ProcessService for NativeProcessService {
             command.env(key, value);
         }
 
-        let output = command
-            .output()
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Place the child in its own process group so a timeout can take down the
+        // whole descendant tree, not just the direct child.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                command.pre_exec(|| {
+                    nix::unistd::setpgid(
+                        nix::unistd::Pid::from_raw(0),
+                        nix::unistd::Pid::from_raw(0),
+                    )
+                    .map_err(|err| io::Error::from_raw_os_error(err as i32))?;
+                    Ok(())
+                });
+            }
+        }
+
+        let mut child = command
+            .spawn()
             .map_err(|err| PlatformError::ProcessSpawnFailure {
                 operation: "execute".to_string(),
                 command: request.command.clone(),
                 message: err.to_string(),
             })?;
 
+        // Drain stdout/stderr on dedicated threads so a child that fills its pipe
+        // buffers cannot deadlock against the timeout polling loop below.
+        let stdout_reader = child.stdout.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = pipe.read_to_end(&mut buf);
+                buf
+            })
+        });
+        let stderr_reader = child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = pipe.read_to_end(&mut buf);
+                buf
+            })
+        });
+
+        let exit_status = if let Some(timeout) = request.timeout {
+            let poll_interval = Duration::from_millis(10);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if started.elapsed() > timeout {
+                            terminate_timed_out_process(&mut child);
+                            return Err(PlatformError::Timeout {
+                                operation: format!("process `{}`", request.command),
+                                duration: started.elapsed(),
+                            });
+                        }
+                        std::thread::sleep(poll_interval);
+                    }
+                    Err(err) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(PlatformError::from_io_error(
+                            "execute",
+                            PathBuf::from(&request.command),
+                            err,
+                        ));
+                    }
+                }
+            }
+        } else {
+            child.wait().map_err(|err| {
+                PlatformError::from_io_error("execute", PathBuf::from(&request.command), err)
+            })?
+        };
+
         let elapsed = started.elapsed();
-        if let Some(timeout) = request.timeout
-            && elapsed > timeout
-        {
-            return Err(PlatformError::Timeout {
-                operation: format!("process `{}`", request.command),
-                duration: elapsed,
-            });
-        }
+        let stdout = stdout_reader
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default();
+        let stderr = stderr_reader
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default();
 
         Ok(ProcessResult {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8(output.stdout).unwrap_or_default(),
-            stderr: String::from_utf8(output.stderr).unwrap_or_default(),
+            exit_code: exit_status.code().unwrap_or(-1),
+            stdout: String::from_utf8(stdout).unwrap_or_default(),
+            stderr: String::from_utf8(stderr).unwrap_or_default(),
             elapsed,
         })
     }
+}
+
+/// Forcibly terminates a process that exceeded its timeout, taking down its
+/// descendant process group on Unix, then reaps the child to avoid a zombie.
+fn terminate_timed_out_process(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // The child is its own process-group leader (see `execute`), so signal
+        // the whole group to take down any descendants it spawned.
+        let pid = child.id() as i32;
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(-pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 const PTY_OUTPUT_LIMIT: usize = 256 * 1024;
@@ -1832,7 +1924,15 @@ impl PtyService for NativePtyService {
                         }
                     };
                     let pid = child.id() as i32;
-                    let target = if matches!(mode, PtyKillMode::Interrupt | PtyKillMode::KillTree) {
+                    // The PTY child is a session/group leader (via `setsid`), so
+                    // signalling the negative PID reaches the whole process group.
+                    // `Terminate` (used by `close_pty`) must target the group too,
+                    // otherwise grandchildren survive a SIGTERM aimed only at the
+                    // leader.
+                    let target = if matches!(
+                        mode,
+                        PtyKillMode::Interrupt | PtyKillMode::KillTree | PtyKillMode::Terminate
+                    ) {
                         nix::unistd::Pid::from_raw(-pid)
                     } else {
                         nix::unistd::Pid::from_raw(pid)
@@ -1843,11 +1943,21 @@ impl PtyService for NativePtyService {
                     }
                     if wait_unix_child_exit(child, Duration::from_millis(500))? {
                         let _ = sessions.remove(session_id);
+                        return Ok(());
+                    }
+                    // Escalate to SIGKILL on the whole process group, then reap the
+                    // leader before dropping the session entry.
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(-pid),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                    if wait_unix_child_exit(child, Duration::from_millis(500))? {
+                        let _ = sessions.remove(session_id);
                         Ok(())
                     } else {
                         Err(PlatformError::PtyUnavailable {
                             reason: format!(
-                                "Unix PTY session `{session_id}` did not exit after {signal:?}"
+                                "Unix PTY session `{session_id}` did not exit after {signal:?} and SIGKILL"
                             ),
                         })
                     }
@@ -2228,6 +2338,64 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "visible|");
         assert!(!result.stdout.contains("sk-secret"));
+    }
+
+    #[test]
+    fn process_execution_enforces_timeout_while_child_runs() {
+        let process = NativeProcessService;
+        #[cfg(windows)]
+        let (command, args) = (
+            "ping".to_string(),
+            vec![
+                "-n".to_string(),
+                "10".to_string(),
+                "127.0.0.1".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = (
+            "sh".to_string(),
+            vec!["-c".to_string(), "sleep 10".to_string()],
+        );
+
+        let started = Instant::now();
+        let result = process.execute(&ProcessRequest {
+            command,
+            args,
+            cwd: None,
+            env: Vec::new(),
+            timeout: Some(Duration::from_millis(200)),
+            cancelled: false,
+        });
+
+        assert!(
+            matches!(result, Err(PlatformError::Timeout { .. })),
+            "expected timeout error, got {result:?}"
+        );
+        // The timeout must abort the child instead of blocking until it exits
+        // (~10s), so the call has to return well before that.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "execute did not abort the child promptly after the timeout"
+        );
+    }
+
+    #[test]
+    fn list_directory_lists_entries_sorted() {
+        let service = NativeFileSystem;
+        let dir = env::temp_dir().join(format!(
+            "legion-platform-list-dir-{}",
+            NATIVE_PTY_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        fs::write(dir.join("b.txt"), b"b").expect("write b");
+        fs::write(dir.join("a.txt"), b"a").expect("write a");
+
+        let entries = service.list_directory(&dir).expect("list directory");
+        assert_eq!(entries, vec![dir.join("a.txt"), dir.join("b.txt")]);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

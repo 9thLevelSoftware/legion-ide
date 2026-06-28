@@ -2,6 +2,11 @@
 
 use std::time::{Duration, Instant};
 
+/// Maximum retained samples per timing series. Older samples are evicted once
+/// this cap is reached so a long-running session cannot grow the sample vectors
+/// (or the work `summary()` does over them) without bound.
+const MAX_RETAINED_SAMPLES: usize = 4096;
+
 /// Metadata-only input-to-paint sample.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputPaintSample {
@@ -85,6 +90,9 @@ impl FrameTimingRecorder {
             return;
         };
         let duration = at.saturating_duration_since(input_at);
+        if self.input_paint_samples.len() >= MAX_RETAINED_SAMPLES {
+            self.input_paint_samples.remove(0);
+        }
         self.input_paint_samples.push(InputPaintSample {
             input_at_ms: millis(input_at.saturating_duration_since(self.origin)),
             paint_at_ms: millis(at.saturating_duration_since(self.origin)),
@@ -99,6 +107,9 @@ impl FrameTimingRecorder {
 
     /// Records one frame duration.
     pub fn record_frame_duration(&mut self, duration: Duration) {
+        if self.frame_durations_ms.len() >= MAX_RETAINED_SAMPLES {
+            self.frame_durations_ms.remove(0);
+        }
         self.frame_durations_ms.push(millis(duration));
     }
 

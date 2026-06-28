@@ -335,15 +335,45 @@ fn session_restore_corrupt_json_returns_typed_error() {
 }
 
 #[test]
-fn session_restore_store_rejects_raw_source_markers() {
+fn session_restore_store_rejects_raw_source_markers_in_payload_field() {
     let workspace = TempWorkspace::new("legion_desktop_session_restore_marker");
     let session_state = workspace.path().join("session.json");
     let mut record = minimal_record(workspace.path());
-    record.session_id = "source_body".to_string();
+    // A raw buffer/source marker that leaks into the only free-form
+    // payload-carrying field must be rejected.
+    record.memory_snapshot_json =
+        Some(r#"{"small_buffer_preview":"fn leaked() {}"}"#.to_string());
 
     let error =
         DesktopSessionStore::save(&session_state, &record).expect_err("raw marker rejected");
     assert!(matches!(error, DesktopSessionError::RawSourceMarker(_)));
+}
+
+#[test]
+fn session_restore_store_allows_marker_like_benign_metadata() {
+    // Regression: structured inspection scans only the raw-payload-carrying
+    // field, so benign metadata that merely contains a marker-like substring
+    // (here a `session_id` and an explorer path) must NOT be rejected.
+    let workspace = TempWorkspace::new("legion_desktop_session_restore_benign_marker");
+    let session_state = workspace.path().join("session.json");
+    let mut record = minimal_record(workspace.path());
+    record.session_id = "source_body".to_string();
+    record.explorer_expansion = vec![CanonicalPath(
+        workspace
+            .path()
+            .join("small_buffer_preview")
+            .to_string_lossy()
+            .into_owned(),
+    )];
+    record.memory_snapshot_json = None;
+
+    DesktopSessionStore::save(&session_state, &record)
+        .expect("benign marker-like metadata must not be rejected");
+
+    let loaded = DesktopSessionStore::load(&session_state)
+        .expect("benign session should load")
+        .expect("benign session should exist");
+    assert_eq!(loaded.session_id, "source_body");
 }
 
 #[test]

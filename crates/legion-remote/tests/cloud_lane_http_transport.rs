@@ -134,15 +134,59 @@ where
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept connection");
-        let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).expect("read request");
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let request = read_full_http_request(&mut stream);
         let response = handler(&request);
         stream
             .write_all(response.as_bytes())
             .expect("write response");
+        let _ = stream.flush();
     });
     format!("http://127.0.0.1:{port}")
+}
+
+/// Reads a complete HTTP request (headers plus Content-Length-delimited body)
+/// rather than a single fixed-size read, so segmented or larger-than-buffer
+/// requests are not truncated before assertions.
+fn read_full_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut scratch = [0u8; 1024];
+    let header_end = loop {
+        let read = stream.read(&mut scratch).expect("read request bytes");
+        assert!(read > 0, "client closed connection before sending request");
+        buffer.extend_from_slice(&scratch[..read]);
+        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+    let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+    let content_length = header_text
+        .lines()
+        .find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("content-length:") {
+                line.split_once(':')
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    while buffer.len() < header_end + content_length {
+        let read = stream.read(&mut scratch).expect("read request body");
+        assert!(read > 0, "client closed connection before sending body");
+        buffer.extend_from_slice(&scratch[..read]);
+    }
+    String::from_utf8_lossy(&buffer).to_string()
+}
+
+/// Base URL for tests that must reject before any network I/O. Points at a
+/// reserved, unroutable address so an accidental request fails fast instead of
+/// silently succeeding.
+fn unreachable_base_url() -> String {
+    "http://127.0.0.1:1".to_string()
 }
 
 fn http_ok_json(body: &str) -> String {
@@ -292,7 +336,9 @@ fn http_transport_submit_task_sends_headers_and_body() {
 
 #[test]
 fn http_transport_disabled_policy_rejects_before_network() {
-    let base_url = serve_one(|_| panic!("server should never be called when policy is disabled"));
+    // No listener is spawned: an unreachable base URL guarantees any accidental
+    // network attempt fails loudly instead of leaking a blocked accept() thread.
+    let base_url = unreachable_base_url();
 
     let transport = HttpLegionCloudLaneTransport::new(transport_config(&base_url)).unwrap();
     let mut client = LegionCloudLaneClient::new(
@@ -312,7 +358,9 @@ fn http_transport_disabled_policy_rejects_before_network() {
 
 #[test]
 fn http_transport_forbidden_upload_rejects_before_network() {
-    let base_url = serve_one(|_| panic!("server should never be called when upload is forbidden"));
+    // No listener is spawned: an unreachable base URL guarantees any accidental
+    // network attempt fails loudly instead of leaking a blocked accept() thread.
+    let base_url = unreachable_base_url();
 
     let transport = HttpLegionCloudLaneTransport::new(transport_config(&base_url)).unwrap();
     let mut client = LegionCloudLaneClient::new(transport, enabled_client_config());
@@ -327,7 +375,9 @@ fn http_transport_forbidden_upload_rejects_before_network() {
 
 #[test]
 fn http_transport_cost_cap_rejects_before_network() {
-    let base_url = serve_one(|_| panic!("server should never be called when cost exceeds cap"));
+    // No listener is spawned: an unreachable base URL guarantees any accidental
+    // network attempt fails loudly instead of leaking a blocked accept() thread.
+    let base_url = unreachable_base_url();
 
     let transport = HttpLegionCloudLaneTransport::new(transport_config(&base_url)).unwrap();
     let mut client = LegionCloudLaneClient::new(

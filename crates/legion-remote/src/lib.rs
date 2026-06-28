@@ -343,7 +343,41 @@ fn validate_cloud_task_id(task_id: &LegionCloudLaneTaskId) -> Result<(), RemoteR
             reason: "cloud lane task id must be non-empty".to_string(),
         });
     }
+    if task_id
+        .0
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '/' | '\\' | '?' | '#'))
+    {
+        return Err(RemoteRuntimeError::InvalidOperation {
+            reason: "cloud lane task id must not contain path, query, or control characters"
+                .to_string(),
+        });
+    }
     Ok(())
+}
+
+/// Percent-encodes a string for safe inclusion as a single URL path segment.
+///
+/// Characters permitted in an RFC 3986 path segment (`pchar`: unreserved,
+/// sub-delims, `:` and `@`) are passed through verbatim; everything else
+/// (including `/`, `?`, `#`, and control bytes) is percent-encoded so a task id
+/// cannot alter the request path or query.
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            // unreserved
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
+            // sub-delims
+            | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
+            // additional pchar
+            | b':' | b'@' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn validate_cloud_task_response_id(
@@ -993,6 +1027,7 @@ impl RemoteSessionRuntime {
         }
         if operation.session_id != self.session_id()
             || operation.operation_id.0 == 0
+            || operation.operation_id != operation_id
             || operation.schema_version == 0
         {
             return Err(RemoteRuntimeError::InvalidOperation {
@@ -1060,7 +1095,8 @@ impl RemoteSessionRuntime {
             .expect("file checked above");
         entry.content = replacement;
         entry.content_version = FileContentVersion(entry.content_version.0.saturating_add(1));
-        entry.snapshot_id = preconditions.snapshot_id;
+        entry.snapshot_id =
+            derived_snapshot_id(&operation.path.0, entry.content_version, operation_id);
         entry.fingerprint = metadata_fingerprint(&entry.content);
         Ok(
             RemoteOperationOutcome::new(operation_id, RemoteOperationDisposition::Accepted, None)
@@ -1087,12 +1123,14 @@ impl RemoteSessionRuntime {
             .proposal_id
             .expect("mutation gate checked proposal id");
         let content = format!("remote-created-by-proposal:{}", proposal_id.0);
+        let content_version = FileContentVersion(1);
+        let fingerprint = metadata_fingerprint(&content);
         let entry = RemoteFileEntry {
             file_id: FileId(stable_hash_u128(&operation.path.0) | 1),
             content,
-            content_version: FileContentVersion(1),
-            snapshot_id: preconditions.snapshot_id,
-            fingerprint: metadata_fingerprint("remote-created-by-proposal"),
+            content_version,
+            snapshot_id: derived_snapshot_id(&operation.path.0, content_version, operation_id),
+            fingerprint,
         };
         self.files.insert(operation.path.0.clone(), entry);
         Ok(
@@ -1163,10 +1201,11 @@ impl RemoteSessionRuntime {
         if preconditions.expected_fingerprint.as_ref() != Some(&existing.fingerprint) {
             return Ok(stale(operation_id, "remote_fingerprint_mismatch"));
         }
-        let entry = self
+        let mut entry = self
             .files
             .remove(&operation.path.0)
             .expect("file checked above");
+        entry.snapshot_id = derived_snapshot_id(&destination.0, entry.content_version, operation_id);
         self.files.insert(destination.0.clone(), entry);
         Ok(
             RemoteOperationOutcome::new(operation_id, RemoteOperationDisposition::Accepted, None)
@@ -1186,6 +1225,12 @@ impl RemoteSessionRuntime {
         if !preconditions.has_required_write_guards() {
             return Some(denied(operation_id, "remote_write_guard_invalid"));
         }
+        if validate_capability(&preconditions.capability_decision, "remote.fs.write").is_err() {
+            return Some(denied(operation_id, "remote_write_capability_denied"));
+        }
+        if preconditions.principal_id != self.descriptor.authority.principal_id {
+            return Some(denied(operation_id, "remote_write_principal_mismatch"));
+        }
         if preconditions.workspace_generation != self.workspace_generation {
             return Some(stale(operation_id, "remote_workspace_generation_mismatch"));
         }
@@ -1204,6 +1249,7 @@ impl RemoteSessionRuntime {
         validate_cancellation_token(descriptor.cancellation_token_id)?;
         if descriptor.session_id != self.session_id()
             || descriptor.operation_id.0 == 0
+            || descriptor.operation_id != operation_id
             || descriptor.command_label.trim().is_empty()
             || descriptor.schema_version == 0
         {
@@ -1578,6 +1624,17 @@ fn metadata_fingerprint(content: &str) -> FileFingerprint {
     }
 }
 
+/// Derives a fresh post-mutation snapshot id bound to the path, resulting content
+/// version, and accepting operation so each accepted mutation advances snapshot state.
+fn derived_snapshot_id(
+    path: &str,
+    content_version: FileContentVersion,
+    operation_id: RemoteOperationId,
+) -> SnapshotId {
+    let seed = format!("{path}:{}:{}", content_version.0, operation_id.0);
+    SnapshotId(stable_hash_u128(&seed) | 1)
+}
+
 fn stable_hash_u128(value: &str) -> u128 {
     let mut hash: u128 = 0xcbf2_9ce4_8422_2325;
     for byte in value.bytes() {
@@ -1661,7 +1718,7 @@ impl HttpLegionCloudLaneTransport {
         format!("{}{path}", self.config.base_url.trim_end_matches('/'))
     }
 
-    fn common_headers(&self) -> reqwest::header::HeaderMap {
+    fn common_headers(&self) -> Result<reqwest::header::HeaderMap, RemoteRuntimeError> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -1669,16 +1726,21 @@ impl HttpLegionCloudLaneTransport {
         );
         if let Some((label, value)) = &self.config.auth_token {
             let auth_value = format!("{label} {value}");
-            if let Ok(header_value) = reqwest::header::HeaderValue::from_str(&auth_value) {
-                headers.insert(reqwest::header::AUTHORIZATION, header_value);
-            }
+            let header_value = reqwest::header::HeaderValue::from_str(&auth_value).map_err(|err| {
+                RemoteRuntimeError::InvalidOperation {
+                    reason: format!("configured authorization header value is invalid: {err}"),
+                }
+            })?;
+            headers.insert(reqwest::header::AUTHORIZATION, header_value);
         }
-        if let Ok(identity_value) =
-            reqwest::header::HeaderValue::from_str(&self.config.client_identity_label)
-        {
-            headers.insert("X-Legion-Client-Identity", identity_value);
-        }
-        headers
+        let identity_value =
+            reqwest::header::HeaderValue::from_str(&self.config.client_identity_label).map_err(
+                |err| RemoteRuntimeError::InvalidOperation {
+                    reason: format!("configured client identity header value is invalid: {err}"),
+                },
+            )?;
+        headers.insert("X-Legion-Client-Identity", identity_value);
+        Ok(headers)
     }
 
     fn send_with_body(
@@ -1688,7 +1750,7 @@ impl HttpLegionCloudLaneTransport {
         body: Option<&serde_json::Value>,
     ) -> Result<reqwest::blocking::Response, RemoteRuntimeError> {
         let mut request = self.client.request(method, url);
-        request = request.headers(self.common_headers());
+        request = request.headers(self.common_headers()?);
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -1746,7 +1808,10 @@ impl LegionCloudLaneTransport for HttpLegionCloudLaneTransport {
         &mut self,
         task_id: &LegionCloudLaneTaskId,
     ) -> Result<Vec<LegionCloudLaneTaskEvent>, RemoteRuntimeError> {
-        let url = self.url(&format!("/v1/cloud/tasks/{}/events", task_id.0));
+        let url = self.url(&format!(
+            "/v1/cloud/tasks/{}/events",
+            encode_path_segment(&task_id.0)
+        ));
         let response = self.send_with_body(reqwest::Method::GET, &url, None)?;
         let response = Self::expect_ok(response)?;
         Self::parse_json(response)
@@ -1762,7 +1827,10 @@ impl LegionCloudLaneTransport for HttpLegionCloudLaneTransport {
             "cancellation_token": cancellation_token.0,
             "reason_label": reason_label,
         });
-        let url = self.url(&format!("/v1/cloud/tasks/{}/cancel", task_id.0));
+        let url = self.url(&format!(
+            "/v1/cloud/tasks/{}/cancel",
+            encode_path_segment(&task_id.0)
+        ));
         let response = self.send_with_body(reqwest::Method::POST, &url, Some(&body))?;
         let response = Self::expect_ok(response)?;
         Self::parse_json(response)
@@ -1772,7 +1840,10 @@ impl LegionCloudLaneTransport for HttpLegionCloudLaneTransport {
         &mut self,
         task_id: &LegionCloudLaneTaskId,
     ) -> Result<LegionCloudLaneProposalResponse, RemoteRuntimeError> {
-        let url = self.url(&format!("/v1/cloud/tasks/{}/proposal", task_id.0));
+        let url = self.url(&format!(
+            "/v1/cloud/tasks/{}/proposal",
+            encode_path_segment(&task_id.0)
+        ));
         let response = self.send_with_body(reqwest::Method::GET, &url, None)?;
         let response = Self::expect_ok(response)?;
         Self::parse_json(response)
@@ -1782,7 +1853,10 @@ impl LegionCloudLaneTransport for HttpLegionCloudLaneTransport {
         &mut self,
         task_id: &LegionCloudLaneTaskId,
     ) -> Result<Vec<LegionEvidenceRecord>, RemoteRuntimeError> {
-        let url = self.url(&format!("/v1/cloud/tasks/{}/evidence", task_id.0));
+        let url = self.url(&format!(
+            "/v1/cloud/tasks/{}/evidence",
+            encode_path_segment(&task_id.0)
+        ));
         let response = self.send_with_body(reqwest::Method::GET, &url, None)?;
         let response = Self::expect_ok(response)?;
         Self::parse_json(response)

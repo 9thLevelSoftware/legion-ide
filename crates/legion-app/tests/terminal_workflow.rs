@@ -1,19 +1,86 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use legion_app::{AppCommandOutcome, AppComposition};
-use legion_protocol::{PrincipalId, TerminalPanelStatusKind, WorkspaceTrustState};
+use legion_protocol::{
+    PrincipalId, TerminalPanelProjection, TerminalPanelStatusKind, TerminalSessionId,
+    WorkspaceTrustState,
+};
 use legion_ui::CommandDispatchIntent;
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn create_root() -> std::path::PathBuf {
+/// Drop-guarded temporary workspace root. Removes the directory on drop with a prefix/location
+/// check (legion-terminal-workflow- + pid) so a panic mid-test never leaks the temp root.
+struct TempWorkspace {
+    root: std::path::PathBuf,
+}
+
+impl std::ops::Deref for TempWorkspace {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl AsRef<std::path::Path> for TempWorkspace {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let temp_root = std::env::temp_dir();
+        let prefix = format!("legion-terminal-workflow-{}-", std::process::id());
+        let file_name = self.root.file_name().and_then(|name| name.to_str());
+        if self.root.starts_with(&temp_root)
+            && file_name.is_some_and(|name| name.starts_with(&prefix))
+        {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn create_root() -> TempWorkspace {
     let root = std::env::temp_dir().join(format!(
         "legion-terminal-workflow-{}-{}",
         std::process::id(),
         TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&root).expect("create temp root");
-    root
+    TempWorkspace { root }
+}
+
+const TERMINAL_POLL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Re-dispatches `TerminalOutputPoll` until `condition` holds or a generous deadline elapses,
+/// returning the matching projection. PTY output is asynchronous, so a fixed iteration count
+/// can race on a loaded host; on timeout this panics with the last projection for diagnosis.
+fn poll_terminal_until(
+    app: &mut AppComposition,
+    session_id: TerminalSessionId,
+    mut condition: impl FnMut(&TerminalPanelProjection) -> bool,
+) -> TerminalPanelProjection {
+    let deadline = std::time::Instant::now() + TERMINAL_POLL_DEADLINE;
+    loop {
+        let projection = match app
+            .dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id })
+            .expect("terminal output poll")
+        {
+            AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
+            other => panic!("expected terminal projection, got {other:?}"),
+        };
+        if condition(&projection) {
+            return projection;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "terminal poll timed out after {TERMINAL_POLL_DEADLINE:?}; last projection: {projection:?}"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 #[test]
@@ -66,9 +133,6 @@ fn terminal_denial_is_visible_and_fail_closed() {
             .unwrap_or_default()
             .contains("untrusted")
     );
-
-    std::fs::remove_dir_all(&root).ok();
-    std::fs::remove_dir_all(&untrusted_root).ok();
 }
 
 #[test]
@@ -137,14 +201,9 @@ fn terminal_fixture_lifecycle_projects_status() {
         other => panic!("expected terminal projection, got {other:?}"),
     };
     let expect_finish_markers = cfg!(unix);
-    for _ in 0..20 {
-        projection = match app
-            .dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id })
-            .expect("terminal output poll")
-        {
-            AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
-            other => panic!("expected terminal projection, got {other:?}"),
-        };
+    // Wait until the expected output markers appear before searching; the result is re-fetched
+    // by the TerminalSearch dispatch below, so the polled projection itself is discarded.
+    let _ = poll_terminal_until(&mut app, session_id, |projection| {
         let has_ready = projection
             .output_rows
             .iter()
@@ -153,11 +212,8 @@ fn terminal_fixture_lifecycle_projects_status() {
             .output_rows
             .iter()
             .any(|row| row.redacted_payload.contains("command block finished"));
-        if (expect_finish_markers && has_finish) || (!expect_finish_markers && has_ready) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+        (expect_finish_markers && has_finish) || (!expect_finish_markers && has_ready)
+    });
     projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalSearch {
             session_id,
@@ -224,8 +280,6 @@ fn terminal_fixture_lifecycle_projects_status() {
         projection.output_rows
     );
     assert!(projection.active_session_id.is_some());
-
-    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
@@ -287,6 +341,4 @@ fn terminal_workflow_cannot_mutate_editor_or_disk() {
         std::fs::read_to_string(&target).expect("disk text"),
         "unchanged\n"
     );
-
-    std::fs::remove_dir_all(&root).ok();
 }

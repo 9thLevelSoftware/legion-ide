@@ -157,7 +157,12 @@ impl CollaborationSessionRuntime {
                         .to_string(),
                 });
             }
-            participant_map.insert(participant.participant_id, participant);
+            let participant_id = participant.participant_id;
+            if participant_map.insert(participant_id, participant).is_some() {
+                return Err(CollaborationRuntimeError::InvalidParticipant {
+                    reason: "duplicate participant id in session roster".to_string(),
+                });
+            }
         }
 
         let initial_text = initial_text.into();
@@ -305,6 +310,48 @@ impl CollaborationSessionRuntime {
             });
         }
 
+        // Finding 17: enforce that the operation's declared causal base is already
+        // satisfied by accepted sequences. A dependency on a not-yet-accepted
+        // sequence from any participant means we are missing operations and must
+        // request resync instead of replaying against an incomplete log.
+        for entry in &operation.preconditions.base_vector.entries {
+            let accepted = self
+                .participant_sequences
+                .get(&entry.participant_id)
+                .copied()
+                .unwrap_or(0);
+            if accepted < entry.sequence {
+                let gap = CollaborationCausalGap {
+                    session_id: operation.session_id,
+                    participant_id: entry.participant_id,
+                    expected_sequence: entry.sequence,
+                    observed_sequence: accepted,
+                    reason_code: "base_vector_gap".to_string(),
+                };
+                let acknowledgement = self.acknowledge(
+                    &operation,
+                    CollaborationAcknowledgementStatus::GapDetected,
+                    Some("base_vector_gap"),
+                );
+                self.causal_gaps.push(gap.clone());
+                self.acknowledgements.push(acknowledgement.clone());
+                return Ok(CollaborationSubmitOutcome {
+                    acknowledgement,
+                    document_text: self.current_text.clone(),
+                    causal_gap: Some(gap),
+                });
+            }
+        }
+
+        // Finding 18: the replay path performs a real operational-transform
+        // inclusion step (see `replay_operations`). Each operation's byte range is
+        // transformed against every previously-applied *concurrent* operation (one
+        // the author did not observe) so that concurrent edits sharing a base
+        // converge on the correct bytes instead of the wrong-but-in-bounds bytes a
+        // raw replay would target. When two concurrent edits genuinely touch the
+        // same bytes the transform cannot resolve the overlap; replay surfaces that
+        // as a `Conflict`, which is translated below into a fail-closed resync
+        // request rather than silently corrupting the document.
         let previous_text = self.current_text.clone();
         self.operations.push(operation.clone());
         match replay_operations(&self.initial_text, &self.ordered_operations()) {
@@ -429,9 +476,19 @@ impl CollaborationSessionRuntime {
 
         match envelope.payload {
             CollaborationTransportPayload::Operation(operation) => {
+                if envelope.sender_participant_id != operation.author_participant_id {
+                    return Err(CollaborationRuntimeError::InvalidOperation {
+                        reason: "transport sender does not match operation author".to_string(),
+                    });
+                }
                 Ok(Some(self.submit_operation(*operation)?))
             }
             CollaborationTransportPayload::Presence(projection) => {
+                if envelope.sender_participant_id != projection.participant_id {
+                    return Err(CollaborationRuntimeError::InvalidOperation {
+                        reason: "transport sender does not match presence participant".to_string(),
+                    });
+                }
                 self.publish_presence(projection)?;
                 Ok(None)
             }
@@ -780,40 +837,169 @@ fn operation_order_key(operation: &CollaborationDocumentOperation) -> (u64, u128
     )
 }
 
+/// The byte footprint of an operation as it was actually applied to the running
+/// document during replay. `start`/`old_len` describe the bytes it spanned in the
+/// document state immediately before it was applied (i.e. after every operation
+/// ordered ahead of it), and `new_len` is the length of the text it wrote there.
+struct AppliedFootprint<'a> {
+    operation: &'a CollaborationDocumentOperation,
+    start: i64,
+    old_len: i64,
+    new_len: i64,
+}
+
+impl AppliedFootprint<'_> {
+    fn end(&self) -> i64 {
+        self.start + self.old_len
+    }
+
+    fn delta(&self) -> i64 {
+        self.new_len - self.old_len
+    }
+
+    fn is_insert(&self) -> bool {
+        self.old_len == 0
+    }
+}
+
+/// Replays accepted operations in deterministic total order, transforming each
+/// operation's byte range against every previously-applied *concurrent*
+/// operation (operational-transform inclusion). Because the total order is the
+/// same on every replica, transforming raw author-supplied ranges forward past
+/// the concurrent edits that preceded them yields a convergent *and correct*
+/// document instead of the wrong-but-in-bounds bytes a naive raw replay targets.
+///
+/// Causal ancestors (operations the author already observed, per
+/// [`depends_on`]) are skipped: their effect is already baked into the range the
+/// author supplied. When a concurrent edit genuinely touches the same bytes as
+/// the operation being placed, the overlap cannot be transformed away and a
+/// [`CollaborationRuntimeError::Conflict`] is returned so the caller can fail
+/// closed with a resync request rather than corrupt the document.
 fn replay_operations(
     initial_text: &str,
     operations: &[CollaborationDocumentOperation],
 ) -> Result<String, CollaborationRuntimeError> {
     let mut text = initial_text.to_string();
+    let mut applied: Vec<AppliedFootprint<'_>> = Vec::new();
+
     for operation in operations {
-        apply_operation(&mut text, operation)?;
+        if !mutates_text(&operation.kind) {
+            // Cursor/selection/undo/noop/resync operations carry no byte payload
+            // and therefore neither move nor are moved by the document text.
+            continue;
+        }
+
+        let range = byte_range(operation.range)?;
+        let insert = matches!(
+            operation.kind,
+            CollaborationDocumentOperationKind::Insert { .. }
+        );
+        // Inserts collapse to a zero-width point at the range start; delete and
+        // replace span the supplied range.
+        let mut start = range.start as i64;
+        let mut end = if insert { start } else { range.end as i64 };
+
+        for footprint in &applied {
+            if depends_on(operation, footprint.operation) {
+                // Operation observed this earlier edit: its range is already
+                // expressed relative to that edit, so no shift is required.
+                continue;
+            }
+            transform_against(&mut start, &mut end, insert, footprint)?;
+        }
+
+        if start < 0 || end < start {
+            return Err(CollaborationRuntimeError::Conflict {
+                reason: "transformed operation range is invalid".to_string(),
+            });
+        }
+
+        let replacement = match &operation.kind {
+            CollaborationDocumentOperationKind::Insert { text: inserted } => inserted.as_str(),
+            CollaborationDocumentOperationKind::Replace { text: replacement } => {
+                replacement.as_str()
+            }
+            CollaborationDocumentOperationKind::Delete => "",
+            _ => unreachable!("non-mutating operations are skipped above"),
+        };
+
+        replace_range(
+            &mut text,
+            ByteRange::new(start as u64, end as u64),
+            replacement,
+        )?;
+
+        applied.push(AppliedFootprint {
+            operation,
+            start,
+            old_len: end - start,
+            new_len: replacement.len() as i64,
+        });
     }
+
     Ok(text)
 }
 
-fn apply_operation(
-    text: &mut String,
-    operation: &CollaborationDocumentOperation,
+/// Operational-transform inclusion of a single operation's `[start, end)` range
+/// against one already-applied concurrent `footprint`. Mutates the range in
+/// place, or returns a [`CollaborationRuntimeError::Conflict`] when the two edits
+/// genuinely overlap the same bytes and cannot be reconciled deterministically.
+fn transform_against(
+    start: &mut i64,
+    end: &mut i64,
+    insert: bool,
+    footprint: &AppliedFootprint<'_>,
 ) -> Result<(), CollaborationRuntimeError> {
-    match &operation.kind {
-        CollaborationDocumentOperationKind::Insert { text: inserted } => {
-            let range = byte_range(operation.range)?;
-            replace_range(text, ByteRange::new(range.start, range.start), inserted)
+    let other_start = footprint.start;
+    let other_end = footprint.end();
+    let delta = footprint.delta();
+
+    if insert {
+        let point = *start;
+        if footprint.is_insert() {
+            // Two concurrent inserts. Ties (same point) resolve by total order:
+            // the earlier-applied insert keeps the position and this one shifts
+            // after it, which is consistent on every replica.
+            if point >= other_start {
+                *start += delta;
+                *end += delta;
+            }
+        } else if point <= other_start {
+            // Insertion point is at or before the replaced region: unaffected.
+        } else if point >= other_end {
+            // Insertion point is after the replaced region: shift by net delta.
+            *start += delta;
+            *end += delta;
+        } else {
+            // Insertion point falls strictly inside concurrently replaced bytes.
+            return Err(CollaborationRuntimeError::Conflict {
+                reason: "concurrent insert targets bytes removed by a concurrent edit".to_string(),
+            });
         }
-        CollaborationDocumentOperationKind::Delete => {
-            let range = byte_range(operation.range)?;
-            replace_range(text, range, "")
-        }
-        CollaborationDocumentOperationKind::Replace { text: replacement } => {
-            let range = byte_range(operation.range)?;
-            replace_range(text, range, replacement)
-        }
-        CollaborationDocumentOperationKind::CursorMove
-        | CollaborationDocumentOperationKind::SelectionUpdate
-        | CollaborationDocumentOperationKind::UndoCompensation
-        | CollaborationDocumentOperationKind::NoopAcknowledgement
-        | CollaborationDocumentOperationKind::ResyncRequest => Ok(()),
+    } else if other_end <= *start {
+        // Concurrent edit is entirely before this range: shift by net delta.
+        *start += delta;
+        *end += delta;
+    } else if other_start >= *end {
+        // Concurrent edit is entirely after this range: unaffected.
+    } else {
+        // The two ranges overlap on shared bytes; a deterministic transform
+        // cannot preserve both edits, so surface a conflict to fail closed.
+        return Err(CollaborationRuntimeError::Conflict {
+            reason: "concurrent edits overlap the same bytes".to_string(),
+        });
     }
+
+    Ok(())
+}
+
+fn mutates_text(kind: &CollaborationDocumentOperationKind) -> bool {
+    matches!(
+        kind,
+        CollaborationDocumentOperationKind::Insert { .. }
+            | CollaborationDocumentOperationKind::Delete
+            | CollaborationDocumentOperationKind::Replace { .. }
+    )
 }
 
 fn byte_range(range: Option<TextRange>) -> Result<ByteRange, CollaborationRuntimeError> {
@@ -1044,7 +1230,10 @@ mod tests {
                     text: "XY".to_string(),
                 },
                 Some(TextRange::byte(2, 4)),
-                vec![],
+                vec![CollaborationVersionVectorEntry {
+                    participant_id: CollaborationParticipantId(1),
+                    sequence: 1,
+                }],
             ))
             .expect("replace applies");
         runtime
@@ -1228,5 +1417,337 @@ mod tests {
             presence_rejected,
             Err(CollaborationRuntimeError::InvalidSessionState { .. })
         ));
+    }
+
+    fn envelope(
+        sender: u128,
+        payload: CollaborationTransportPayload,
+    ) -> CollaborationTransportEnvelope {
+        CollaborationTransportEnvelope {
+            session_id: CollaborationSessionId(1001),
+            sender_participant_id: CollaborationParticipantId(sender),
+            correlation_id: CorrelationId(5),
+            causality_id: causality_id(7),
+            payload,
+            schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn duplicate_participant_id_is_rejected() {
+        let mut first = participant(1);
+        first.display_label = "first".to_string();
+        let mut second = participant(1);
+        second.principal_id = PrincipalId("impostor".to_string());
+        second.display_label = "second".to_string();
+
+        let result = CollaborationSessionRuntime::new(
+            descriptor(),
+            vec![first, second],
+            "abc",
+            CollaborationRuntimeConfig::enabled(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CollaborationRuntimeError::InvalidParticipant { .. })
+        ));
+    }
+
+    #[test]
+    fn transport_rejects_spoofed_operation_sender() {
+        let mut runtime = runtime(2, "abc");
+        // Operation authored by participant 1 but sent under participant 2's id.
+        let op = operation(
+            10,
+            1,
+            1,
+            CollaborationDocumentOperationKind::Insert {
+                text: "!".to_string(),
+            },
+            Some(TextRange::byte(3, 3)),
+            vec![],
+        );
+        let result = runtime.handle_transport_envelope(envelope(
+            2,
+            CollaborationTransportPayload::Operation(Box::new(op)),
+        ));
+        assert!(matches!(
+            result,
+            Err(CollaborationRuntimeError::InvalidOperation { .. })
+        ));
+        assert_eq!(runtime.document_text(), "abc");
+        assert!(runtime.operations().is_empty());
+    }
+
+    #[test]
+    fn transport_rejects_spoofed_presence_sender() {
+        let mut runtime = runtime(2, "abc");
+        let projection = CollaborationPresenceProjection {
+            session_id: CollaborationSessionId(1001),
+            participant_id: CollaborationParticipantId(1),
+            cursor: None,
+            selections: Vec::new(),
+            activity_label: Some("spoof".to_string()),
+            reconnecting: false,
+            schema_version: 1,
+        };
+        let result = runtime.handle_transport_envelope(envelope(
+            2,
+            CollaborationTransportPayload::Presence(projection),
+        ));
+        assert!(matches!(
+            result,
+            Err(CollaborationRuntimeError::InvalidOperation { .. })
+        ));
+        assert!(runtime.presence().is_empty());
+    }
+
+    #[test]
+    fn transport_accepts_matching_operation_sender() {
+        let mut runtime = runtime(2, "abc");
+        let op = operation(
+            10,
+            1,
+            1,
+            CollaborationDocumentOperationKind::Insert {
+                text: "!".to_string(),
+            },
+            Some(TextRange::byte(3, 3)),
+            vec![],
+        );
+        let outcome = runtime
+            .handle_transport_envelope(envelope(
+                1,
+                CollaborationTransportPayload::Operation(Box::new(op)),
+            ))
+            .expect("matching sender is accepted")
+            .expect("operation produces an outcome");
+        assert_eq!(
+            outcome.acknowledgement.status,
+            CollaborationAcknowledgementStatus::Accepted
+        );
+        assert_eq!(runtime.document_text(), "abc!");
+    }
+
+    #[test]
+    fn base_vector_dependency_on_unseen_sequence_emits_gap() {
+        let mut runtime = runtime(2, "abc");
+        // Participant 2 claims to depend on participant 1's sequence 1, which has
+        // never been accepted: this must be reported as a causal gap, not applied.
+        let outcome = runtime
+            .submit_operation(operation(
+                20,
+                2,
+                1,
+                CollaborationDocumentOperationKind::Insert {
+                    text: "?".to_string(),
+                },
+                Some(TextRange::byte(0, 0)),
+                vec![CollaborationVersionVectorEntry {
+                    participant_id: CollaborationParticipantId(1),
+                    sequence: 1,
+                }],
+            ))
+            .expect("gap returns acknowledgement");
+
+        assert_eq!(
+            outcome.acknowledgement.status,
+            CollaborationAcknowledgementStatus::GapDetected
+        );
+        let gap = outcome.causal_gap.expect("gap is emitted");
+        assert_eq!(gap.participant_id, CollaborationParticipantId(1));
+        assert_eq!(gap.expected_sequence, 1);
+        assert_eq!(gap.observed_sequence, 0);
+        assert_eq!(runtime.document_text(), "abc");
+        assert!(runtime.operations().is_empty());
+    }
+
+    #[test]
+    fn concurrent_destructive_operation_is_fail_closed() {
+        let mut runtime = runtime(2, "abcdef");
+        // Participant 1 deletes a range.
+        runtime
+            .submit_operation(operation(
+                10,
+                1,
+                1,
+                CollaborationDocumentOperationKind::Delete,
+                Some(TextRange::byte(1, 3)),
+                vec![],
+            ))
+            .expect("delete applies");
+        assert_eq!(runtime.document_text(), "adef");
+
+        // Participant 2 issues a concurrent Replace that did not observe the delete
+        // (empty base vector). Its raw byte range would corrupt the document, so it
+        // must be rejected with a resync request rather than silently applied.
+        let outcome = runtime
+            .submit_operation(operation(
+                20,
+                2,
+                1,
+                CollaborationDocumentOperationKind::Replace {
+                    text: "XY".to_string(),
+                },
+                Some(TextRange::byte(2, 4)),
+                vec![],
+            ))
+            .expect("concurrent destructive returns acknowledgement");
+        assert_eq!(
+            outcome.acknowledgement.status,
+            CollaborationAcknowledgementStatus::ResyncRequired
+        );
+        assert_eq!(runtime.document_text(), "adef");
+        assert_eq!(runtime.operations().len(), 1);
+    }
+
+    /// Finding 18 (a): two concurrent inserts at different offsets, both based on
+    /// the same (empty) version vector, must be transformed against each other so
+    /// the document converges on the *correct* interleaving regardless of arrival
+    /// order, not merely on some shared-but-wrong byte sequence.
+    fn concurrent_inserts() -> [CollaborationDocumentOperation; 2] {
+        [
+            operation(
+                10,
+                1,
+                1,
+                CollaborationDocumentOperationKind::Insert {
+                    text: "X".to_string(),
+                },
+                Some(TextRange::byte(1, 1)),
+                vec![],
+            ),
+            operation(
+                20,
+                2,
+                1,
+                CollaborationDocumentOperationKind::Insert {
+                    text: "Y".to_string(),
+                },
+                Some(TextRange::byte(4, 4)),
+                vec![],
+            ),
+        ]
+    }
+
+    #[test]
+    fn concurrent_inserts_at_distinct_offsets_transform_to_correct_text() {
+        let [first, second] = concurrent_inserts();
+
+        let mut forward = runtime(2, "abcdef");
+        for op in [first.clone(), second.clone()] {
+            let outcome = forward.submit_operation(op).expect("insert applies");
+            assert_eq!(
+                outcome.acknowledgement.status,
+                CollaborationAcknowledgementStatus::Accepted
+            );
+        }
+
+        let mut reverse = runtime(2, "abcdef");
+        for op in [second, first] {
+            reverse.submit_operation(op).expect("insert applies");
+        }
+
+        // X is inserted before original index 1 and Y before original index 4.
+        // The later insert's offset is shifted right by the earlier insert.
+        assert_eq!(forward.document_text(), "aXbcdYef");
+        assert_eq!(reverse.document_text(), "aXbcdYef");
+    }
+
+    /// Finding 18 (b): a concurrent insert that lands before a concurrent delete
+    /// must shift the delete's target so it still removes the bytes the author
+    /// meant to remove, rather than deleting the raw (now stale) byte range.
+    #[test]
+    fn concurrent_insert_shifts_a_later_deletes_target() {
+        for order in [[10_u128, 20], [20, 10]] {
+            let insert = operation(
+                10,
+                1,
+                1,
+                CollaborationDocumentOperationKind::Insert {
+                    text: "X".to_string(),
+                },
+                Some(TextRange::byte(1, 1)),
+                vec![],
+            );
+            let delete = operation(
+                20,
+                2,
+                1,
+                CollaborationDocumentOperationKind::Delete,
+                Some(TextRange::byte(3, 5)),
+                vec![],
+            );
+
+            let mut runtime = runtime(2, "abcdef");
+            for id in order {
+                let op = if id == 10 {
+                    insert.clone()
+                } else {
+                    delete.clone()
+                };
+                let outcome = op_submit(&mut runtime, op);
+                assert_eq!(
+                    outcome.acknowledgement.status,
+                    CollaborationAcknowledgementStatus::Accepted
+                );
+            }
+
+            // Delete of original [3,5) removes "de"; insert "X" at 1 shifts that
+            // deletion right by one byte so the result is "aXbcf", not "aXbdf".
+            assert_eq!(runtime.document_text(), "aXbcf");
+        }
+    }
+
+    /// Finding 18 (c): two concurrent edits that genuinely touch the same bytes
+    /// cannot be transformed into a single correct result, so the second one is
+    /// rejected with a resync request and the document is left untouched rather
+    /// than silently corrupted.
+    #[test]
+    fn genuinely_overlapping_concurrent_edits_request_resync() {
+        let mut runtime = runtime(2, "abcdef");
+        let accepted = runtime
+            .submit_operation(operation(
+                10,
+                1,
+                1,
+                CollaborationDocumentOperationKind::Delete,
+                Some(TextRange::byte(1, 4)),
+                vec![],
+            ))
+            .expect("first delete applies");
+        assert_eq!(
+            accepted.acknowledgement.status,
+            CollaborationAcknowledgementStatus::Accepted
+        );
+        assert_eq!(runtime.document_text(), "aef");
+
+        // Participant 2 concurrently deletes [2,5), which overlaps the bytes the
+        // first delete already removed. The overlap is irreconcilable.
+        let outcome = runtime
+            .submit_operation(operation(
+                20,
+                2,
+                1,
+                CollaborationDocumentOperationKind::Delete,
+                Some(TextRange::byte(2, 5)),
+                vec![],
+            ))
+            .expect("overlapping delete returns acknowledgement");
+        assert_eq!(
+            outcome.acknowledgement.status,
+            CollaborationAcknowledgementStatus::ResyncRequired
+        );
+        // The document is unchanged and the conflicting op was not retained.
+        assert_eq!(runtime.document_text(), "aef");
+        assert_eq!(runtime.operations().len(), 1);
+    }
+
+    fn op_submit(
+        runtime: &mut CollaborationSessionRuntime,
+        op: CollaborationDocumentOperation,
+    ) -> CollaborationSubmitOutcome {
+        runtime.submit_operation(op).expect("operation applies")
     }
 }

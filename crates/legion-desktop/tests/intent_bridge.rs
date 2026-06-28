@@ -20,6 +20,8 @@ use legion_ui::{
     SearchScopeProjection, Shell, ThemePreferenceProjection, ToastVerbosityProjection,
 };
 
+mod common;
+
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
     TextCoordinate {
         line,
@@ -1014,7 +1016,9 @@ fn intent_bridge_preserves_app_boundary() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bridge.rs"))
         .expect("bridge source should be readable");
 
-    assert!(!source.contains("AppComposition"));
-    assert!(!source.contains("WorkspaceActor"));
-    assert!(!source.contains("EditorEngine"));
+    common::assert_source_excludes(
+        &source,
+        "src/bridge.rs",
+        &["AppComposition", "WorkspaceActor", "EditorEngine"],
+    );
 }

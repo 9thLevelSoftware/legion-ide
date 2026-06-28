@@ -37,6 +37,8 @@ use legion_ui::{
     TOAST_VISIBLE_LIMIT, ThemePreferenceProjection, ToastVerbosityProjection,
 };
 
+mod common;
+
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
     TextCoordinate {
         line,
@@ -174,7 +176,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
         file_id: Some(FileId(2)),
         file_path: Some(CanonicalPath("Cargo.toml".to_string())),
         viewport: None,
-        state: legion_ui::ActiveBufferProjectionState::Full,
+        degraded: false,
         small_buffer_preview: Some("[workspace]\nmembers = []".to_string()),
         dirty: true,
     };
@@ -421,7 +423,7 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
             }),
             schema_version: 1,
         }),
-        state: legion_ui::ActiveBufferProjectionState::Degraded,
+        degraded: true,
         small_buffer_preview: None,
         dirty: false,
     };
@@ -453,6 +455,8 @@ fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 width_px: 800,
                 height_px: 600,
             },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
             mode: ViewportProjectionMode::Normal,
             line_slices: vec![ViewportLineSlice {
                 line_number: 0,
@@ -478,7 +482,7 @@ fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
             large_file_status: None,
             schema_version: 2,
         }),
-        state: legion_ui::ActiveBufferProjectionState::Streaming,
+        degraded: false,
         small_buffer_preview: None,
         dirty: false,
     };
@@ -569,7 +573,7 @@ fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
             large_file_status: None,
             schema_version: 2,
         }),
-        state: legion_ui::ActiveBufferProjectionState::Full,
+        degraded: false,
         small_buffer_preview: None,
         dirty: false,
     };
@@ -585,7 +589,7 @@ fn assist_inline_prediction_snapshot() -> legion_ui::ShellProjectionSnapshot {
         file_id: Some(FileId(2)),
         file_path: Some(CanonicalPath("src/lib.rs".to_string())),
         viewport: None,
-        state: legion_ui::ActiveBufferProjectionState::Full,
+        degraded: false,
         small_buffer_preview: Some("let future = call();".to_string()),
         dirty: false,
     };
@@ -1374,16 +1378,12 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
     );
 
     let streaming_model = DesktopProjectionViewModel::from_snapshot(&streaming_snapshot());
-    assert_eq!(streaming_model.active_buffer_lines[0], "[streaming mode]");
-    assert!(
-        streaming_model
-            .active_buffer_lines
-            .iter()
-            .any(|row| row.contains("Chunked viewport slices are shown instead of the whole file."))
+    // There is no separate "streaming" buffer state; a chunked viewport renders
+    // its line slices directly, each prefixed with the 1-based line number.
+    assert_eq!(
+        streaming_model.active_buffer_lines,
+        vec!["   1: visible streaming line".to_string()]
     );
-    assert!(streaming_model.active_buffer_lines.iter().any(|row| {
-        row.contains("Whole-file materialization and eager line metrics stay disabled here.")
-    }));
     assert!(
         streaming_model
             .active_buffer_lines
@@ -1580,6 +1580,5 @@ fn projection_rendering_tests_preserve_app_boundary() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/view.rs"))
         .expect("renderer source should be readable");
 
-    assert!(!source.contains("legion_app"));
-    assert!(!source.contains("AppComposition"));
+    common::assert_source_excludes(&source, "src/view.rs", &["legion_app", "AppComposition"]);
 }

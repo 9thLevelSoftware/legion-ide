@@ -34,6 +34,11 @@ use serde_json::{Value, json};
 /// LSP `Content-Length` frame header terminator.
 const HEADER_SEPARATOR: &str = "\r\n\r\n";
 
+/// Maximum framed payload the mock will allocate for, mirroring the
+/// production `LspFramer::MAX_FRAME_PAYLOAD_BYTES` bound so a hostile or
+/// buggy peer cannot drive an unbounded allocation via `Content-Length`.
+const MAX_FRAME_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -136,6 +141,10 @@ fn main() {
                 return;
             }
             "$/cancelRequest" => None,
+            // Accept the request but never answer it, modeling a server that
+            // goes silent after receiving a request. The client must bound the
+            // wait with its own timeout rather than blocking forever.
+            "mock.silent" => None,
             "mock.echo" => {
                 let params = envelope.get("params").cloned().unwrap_or(Value::Null);
                 Some(json!({
@@ -218,13 +227,17 @@ fn main() {
                 ]
             })),
             other => {
-                // Surface a JSON-RPC error for unknown methods so the
-                // consumer can map it through the standard error path.
-                Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": {"code": -32601, "message": format!("mock: unknown method: {other}")},
-                }))
+                // Surface a JSON-RPC error for unknown *requests* so the
+                // consumer can map it through the standard error path. Unknown
+                // *notifications* (no `id`) get no response, per JSON-RPC; the
+                // mock must not emit `"id": null` for them.
+                id.map(|id| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32601, "message": format!("mock: unknown method: {other}")},
+                    })
+                })
             }
         };
 
@@ -298,6 +311,12 @@ fn read_frame<R: Read + BufRead>(reader: &mut R) -> Result<Vec<u8>, MockIoError>
         .trim()
         .parse()
         .map_err(|err| MockIoError::Protocol(format!("invalid Content-Length: {err}")))?;
+
+    if length > MAX_FRAME_PAYLOAD_BYTES {
+        return Err(MockIoError::Protocol(format!(
+            "Content-Length {length} exceeds max {MAX_FRAME_PAYLOAD_BYTES}"
+        )));
+    }
 
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload)?;

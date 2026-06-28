@@ -2,6 +2,9 @@
 
 #![warn(missing_docs)]
 
+pub mod redaction;
+pub mod streaming;
+
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
@@ -617,10 +620,18 @@ impl<'a> ProviderRouter<'a> {
             .with_metadata("route_id", request.route_id.clone()),
         )?;
 
+        if completion.provider != request.provider_id || completion.model != request.model_label {
+            return Ok(self.refused_response(
+                &request,
+                "provider.identity_mismatch",
+                "provider returned a different provider/model than requested",
+            ));
+        }
+
         Ok(AssistedAiProviderRouteResponse {
             route_id: request.route_id.clone(),
             invocation_state: AssistedAiProviderInvocationState::Completed,
-            route_decision: allowed_route_decision(),
+            route_decision: allowed_route_decision(request.schema_version),
             provider_id: request.provider_id.clone(),
             model_label: request.model_label.clone(),
             output_labels: route_output_labels(&completion),
@@ -681,14 +692,14 @@ fn capability_granted(response: &CapabilityResponse) -> bool {
         || matches!(response, CapabilityResponse::Granted(_))
 }
 
-fn allowed_route_decision() -> AssistedAiRouteDecision {
+fn allowed_route_decision(schema_version: u16) -> AssistedAiRouteDecision {
     AssistedAiRouteDecision {
         disposition: AssistedAiRequestDisposition::MetadataOnlyReady,
         provider_invocation: AssistedAiProviderInvocationState::Completed,
         refusal: None,
         reasons: vec!["provider.completed.metadata_only".to_string()],
         redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
+        schema_version,
     }
 }
 
@@ -817,6 +828,30 @@ mod tests {
             request: ChatCompletionRequest,
         ) -> Result<ChatCompletionResponse, ProviderError> {
             Err(ProviderError::unsupported(request.provider, "complete"))
+        }
+
+        fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+            Err(ProviderError::unsupported(request.provider, "embed"))
+        }
+    }
+
+    struct MismatchedIdentityProvider;
+
+    impl ModelProvider for MismatchedIdentityProvider {
+        fn provider_id(&self) -> ProviderId {
+            "local".to_string()
+        }
+
+        fn complete(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, ProviderError> {
+            Ok(ChatCompletionResponse {
+                provider: "impostor".to_string(),
+                model: "other-model".to_string(),
+                text: "metadata-only".to_string(),
+                metadata: HashMap::new(),
+            })
         }
 
         fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
@@ -1159,6 +1194,44 @@ mod tests {
             response.refusal.as_ref().unwrap().reason_code,
             "provider.completion_unavailable"
         );
+    }
+
+    #[test]
+    fn router_refuses_when_provider_returns_mismatched_identity() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(MismatchedIdentityProvider));
+        let broker = DenyByDefaultBroker::default();
+        let router = ProviderRouter::new(&registry, &broker);
+
+        let response = router
+            .route_completion(route_request(AssistedAiProviderClass::LocalLoopback))
+            .expect("identity mismatch is represented as metadata");
+
+        assert_eq!(
+            response.invocation_state,
+            AssistedAiProviderInvocationState::Refused
+        );
+        assert_eq!(
+            response.refusal.as_ref().unwrap().reason_code,
+            "provider.identity_mismatch"
+        );
+    }
+
+    #[test]
+    fn route_decision_propagates_request_schema_version() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(LocalProvider));
+        let broker = DenyByDefaultBroker::default();
+        let router = ProviderRouter::new(&registry, &broker);
+        let mut request = route_request(AssistedAiProviderClass::LocalLoopback);
+        request.schema_version = 2;
+
+        let response = router
+            .route_completion(request)
+            .expect("route completes");
+
+        assert_eq!(response.schema_version, 2);
+        assert_eq!(response.route_decision.schema_version, 2);
     }
 
     #[test]

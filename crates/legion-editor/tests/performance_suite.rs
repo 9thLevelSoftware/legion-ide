@@ -343,6 +343,7 @@ fn ci_large_file_degraded_open_and_viewport_are_bounded() {
 }
 
 #[test]
+#[ignore = "performance suite: 100MB report-only measurement"]
 fn large_file_100mb_degraded_mode_measurement() {
     let mut engine = EditorEngine::new();
     let size = 100 * 1024 * 1024;
@@ -680,6 +681,46 @@ fn ci_collaboration_snapshot_consumer_overhead_p95_p99() {
     assert!(consumer.accepted_events > 0);
 }
 
+/// Default-run companion to `undo_redo_latency_under_edit_burst`: a small
+/// deterministic burst that exercises the undo/redo paths and asserts content
+/// correctness on every run (the heavy latency benchmark stays `#[ignore]`).
+#[test]
+fn undo_redo_round_trips_content_for_default_runs() {
+    let mut engine = EditorEngine::new();
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(111), "burst-small.txt", "a")
+        .expect("open buffer");
+
+    for _ in 0..16 {
+        engine
+            .apply_edit(
+                buffer,
+                TextEdit::insert(TextPosition::new(0, 0), "x"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("apply edit");
+    }
+    assert_eq!(
+        engine.text(buffer).expect("text after edits"),
+        format!("{}a", "x".repeat(16))
+    );
+
+    for _ in 0..16 {
+        let _ = engine.undo(buffer, None).expect("undo");
+    }
+    assert_eq!(engine.text(buffer).expect("text after undo"), "a");
+
+    for _ in 0..16 {
+        let _ = engine.redo(buffer, None).expect("redo");
+    }
+    assert_eq!(
+        engine.text(buffer).expect("text after redo"),
+        format!("{}a", "x".repeat(16))
+    );
+}
+
 #[test]
 #[ignore = "performance suite: undo/redo latency"]
 fn undo_redo_latency_under_edit_burst() {
@@ -715,6 +756,38 @@ fn undo_redo_latency_under_edit_burst() {
     eprintln!("undo_total={undo_total:?} redo_total={redo_total:?}");
     assert!(undo_total < Duration::from_secs(3));
     assert!(redo_total < Duration::from_secs(3));
+}
+
+/// Default-run companion to `snapshot_retention_and_release`: a small
+/// deterministic retention check that runs on every `cargo test` while the
+/// heavier benchmark variant stays `#[ignore]`.
+#[test]
+fn snapshot_retention_and_release_for_default_runs() {
+    let mut engine = EditorEngine::new();
+    let buffer = engine
+        .open_buffer(WorkspaceId(1), FileId(112), "retention-small.txt", "seed")
+        .expect("open buffer");
+
+    for _ in 0..4 {
+        engine
+            .apply_edit(
+                buffer,
+                TextEdit::insert(TextPosition::new(0, 0), "x"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("apply edit");
+    }
+
+    let pin_before_save = engine.pinned_snapshot_count();
+    let save = engine.request_save(buffer, None).expect("request save");
+    let pin_after_save = engine.pinned_snapshot_count();
+    assert!(pin_after_save >= pin_before_save);
+
+    engine.acknowledge_save(save.request_id, true);
+    let pin_after_ack = engine.pinned_snapshot_count();
+    assert!(pin_after_ack <= pin_after_save);
 }
 
 #[test]

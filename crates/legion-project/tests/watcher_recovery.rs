@@ -117,17 +117,27 @@ fn watcher_recovery_overflow_then_rescan_emits_recovery_event() {
         "expected overflow event"
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(80));
-
-    let second = actor
-        .poll_watcher_events(opened.workspace_id)
-        .expect("second watcher poll");
-    assert!(
-        second
+    // Recovery is gated behind the watcher poll debounce, so instead of a single
+    // fixed sleep we poll in a bounded retry loop until the Modified recovery
+    // event appears (or an overall deadline elapses). Debounced polls return an
+    // empty batch without advancing recovery, so we keep retrying.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let recovered = loop {
+        let events = actor
+            .poll_watcher_events(opened.workspace_id)
+            .expect("second watcher poll");
+        if events
             .iter()
-            .any(|event| matches!(event.kind, WatcherEventKind::Modified)),
-        "expected recovery completion event"
-    );
+            .any(|event| matches!(event.kind, WatcherEventKind::Modified))
+        {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(recovered, "expected recovery completion event");
 
     let events = sink.events().expect("watcher observability events");
     let names = events

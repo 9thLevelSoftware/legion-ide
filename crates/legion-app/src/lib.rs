@@ -42,9 +42,9 @@ use legion_memory::{
     MemoryConsentState, MemoryService, MemoryServiceSnapshot,
 };
 use legion_observability::{
-    SharedEventSink, agent_replay_manifest_recorded_event, collaboration_audit_recorded_event,
-    event_metadata_record, phase4_runtime_audit_recorded_event, plugin_event_envelope,
-    proposal_applied_event, proposal_approved_event, proposal_audit_record,
+    ObservabilityError, SharedEventSink, agent_replay_manifest_recorded_event,
+    collaboration_audit_recorded_event, event_metadata_record, phase4_runtime_audit_recorded_event,
+    plugin_event_envelope, proposal_applied_event, proposal_approved_event, proposal_audit_record,
     proposal_audit_recorded_event, proposal_created_event, proposal_failed_event,
     proposal_previewed_event, proposal_rejected_event, proposal_rolled_back_event,
     proposal_validated_event, remote_audit_recorded_event, save_denied_event,
@@ -5242,16 +5242,27 @@ fn parse_terminal_shell_output(payload: &str) -> TerminalShellOutputProjection {
 
     while cursor < bytes.len() {
         if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b']' {
+            let osc_start = cursor;
             cursor += 2;
             let seq_start = cursor;
+            let mut terminated = false;
             while cursor < bytes.len() {
                 if bytes[cursor] == 0x07 {
+                    terminated = true;
                     break;
                 }
                 if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'\\' {
+                    terminated = true;
                     break;
                 }
                 cursor += 1;
+            }
+            if !terminated {
+                // Unterminated OSC sequence (e.g. split across read chunks):
+                // emit the raw bytes verbatim instead of silently dropping the
+                // trailing remainder of the output.
+                visible_output.push_str(&payload[osc_start..]);
+                break;
             }
             let sequence = &payload[seq_start..cursor];
             if let Some(parsed_cwd) = terminal_shell_cwd_from_osc(sequence) {
@@ -5289,8 +5300,65 @@ fn parse_terminal_shell_output(payload: &str) -> TerminalShellOutputProjection {
 fn terminal_shell_cwd_from_osc(sequence: &str) -> Option<String> {
     let value = sequence.strip_prefix("7;")?;
     let value = value.strip_prefix("file://")?;
-    let path = value.split_once('/')?.1;
-    Some(format!("/{}", path.trim_start_matches('/')))
+
+    // OSC 7 carries `file://HOST/PATH`. `file:///PATH` yields an empty host.
+    let (host, raw_path) = value.split_once('/')?;
+    let host = percent_decode(host);
+    let host = if host.eq_ignore_ascii_case("localhost") {
+        String::new()
+    } else {
+        host
+    };
+
+    // Percent-decode each path segment independently so encoded separators are
+    // not misinterpreted as path boundaries.
+    let decoded_path = raw_path
+        .split('/')
+        .map(percent_decode)
+        .collect::<Vec<_>>()
+        .join("/");
+
+    // Windows drive-letter path: file:///C:/Users -> C:/Users
+    if host.is_empty() && is_windows_drive_prefix(&decoded_path) {
+        return Some(decoded_path);
+    }
+
+    // UNC path: file://server/share/... -> //server/share/...
+    if !host.is_empty() {
+        return Some(format!("//{host}/{}", decoded_path.trim_start_matches('/')));
+    }
+
+    Some(format!("/{}", decoded_path.trim_start_matches('/')))
+}
+
+/// Percent-decode a URL component, leaving invalid escapes untouched.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let high = (bytes[index + 1] as char).to_digit(16);
+            let low = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(high), Some(low)) = (high, low) {
+                decoded.push((high * 16 + low) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Returns true when `path` begins with a Windows drive prefix such as `C:`.
+fn is_windows_drive_prefix(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
+    )
 }
 
 fn terminal_shell_exit_code_from_osc(sequence: &str) -> Option<i32> {
@@ -5385,10 +5453,15 @@ impl TerminalWorkflow {
         command_label: String,
         event_context: EventContext,
     ) -> TerminalPanelProjection {
+        // The security broker classifies the actual binary that will be
+        // launched (a shell), not the user-facing command label. Passing the
+        // display label here would classify as an unknown command and be denied
+        // by the terminal launch taxonomy guard.
+        let (command, args) = terminal_shell_command();
         let decision = self.capability_decision(
             &context,
             "terminal.launch",
-            Some(command_label.as_str()),
+            Some(command.as_str()),
             event_context,
         );
         let policy = Self::policy_projection(&context, "terminal.launch", &decision);
@@ -5431,7 +5504,6 @@ impl TerminalWorkflow {
             timeout_seconds: 30,
             schema_version: 1,
         };
-        let (command, args) = terminal_shell_command();
         let runtime_label = std::any::type_name::<
             legion_terminal::TerminalRuntime<legion_platform::NativePtyService>,
         >();
@@ -10165,6 +10237,11 @@ struct SaveWorkflowOutput {
 struct SaveWorkflowFailure {
     request_id: uuid::Uuid,
     response: ProposalResponse,
+    /// When the workspace write already committed to disk but a *post-commit*
+    /// audit step failed, this carries the committed save so the caller can
+    /// reconcile editor state with the on-disk content instead of leaving the
+    /// buffer dirty while disk holds the new bytes.
+    committed: Option<SaveWorkflowOutput>,
 }
 
 #[derive(Debug)]
@@ -10190,6 +10267,7 @@ impl SaveWorkflowService {
                     event_context.correlation_id,
                     event_context.causality_id,
                 ),
+                committed: None,
             })?;
         let proposal = proposal_coordinator.build_save_proposal(
             &save,
@@ -10222,6 +10300,7 @@ impl SaveWorkflowService {
             return Err(SaveWorkflowFailure {
                 request_id: save.request_id,
                 response: validation,
+                committed: None,
             });
         }
         let preview = proposal_coordinator
@@ -10240,6 +10319,7 @@ impl SaveWorkflowService {
             return Err(SaveWorkflowFailure {
                 request_id: save.request_id,
                 response: preview,
+                committed: None,
             });
         }
 
@@ -10247,6 +10327,7 @@ impl SaveWorkflowService {
             return Err(SaveWorkflowFailure {
                 request_id: save.request_id,
                 response: validation,
+                committed: None,
             });
         };
         let workspace_save = WorkspaceSaveRequest {
@@ -10276,9 +10357,15 @@ impl SaveWorkflowService {
                     &applied.response,
                     Some(&applied),
                 ) {
+                    // The workspace write already committed to disk; surface the
+                    // post-commit audit failure but carry the committed save so
+                    // the caller can reconcile editor state with disk rather than
+                    // leaving the buffer dirty over already-persisted content.
+                    let request_id = save.request_id;
                     return Err(SaveWorkflowFailure {
-                        request_id: save.request_id,
+                        request_id,
                         response,
+                        committed: Some(SaveWorkflowOutput { save, applied }),
                     });
                 }
                 Ok(SaveWorkflowOutput { save, applied })
@@ -10294,6 +10381,7 @@ impl SaveWorkflowService {
                 Err(SaveWorkflowFailure {
                     request_id: save.request_id,
                     response,
+                    committed: None,
                 })
             }
         }
@@ -10308,7 +10396,21 @@ impl SaveWorkflowService {
         applied: Option<&legion_project::WorkspaceSaveApplied>,
     ) -> Result<(), ProposalResponse> {
         let audit_required = Self::audit_before_success_required(response);
-        for envelope in Self::events_for_response(proposal_coordinator, proposal, response) {
+        let events = match Self::events_for_response(proposal_coordinator, proposal, response) {
+            Ok(events) => events,
+            Err(error) => {
+                // An envelope could not be built (invalid core ids). Fail closed
+                // by routing the proposal into the audit-failure path rather than
+                // silently dropping the lifecycle event.
+                return Err(Self::record_audit_storage_failed_response(
+                    proposal_coordinator,
+                    proposal,
+                    response,
+                    Self::observability_protocol_error(error),
+                ));
+            }
+        };
+        for envelope in events {
             let metadata = event_metadata_record(&envelope);
             if let Err(error) = proposal_coordinator.emit(envelope)
                 && audit_required
@@ -10334,7 +10436,19 @@ impl SaveWorkflowService {
         }
 
         if let Some(transition) = Self::transition_for_response(response) {
-            let audit = proposal_audit_record(proposal, transition);
+            let audit = match proposal_audit_record(proposal, transition) {
+                Ok(audit) => audit,
+                Err(error) => {
+                    // Mismatched proposal/transition ids corrupt the audit trail;
+                    // fail closed instead of persisting a malformed record.
+                    return Err(Self::record_audit_storage_failed_response(
+                        proposal_coordinator,
+                        proposal,
+                        response,
+                        Self::observability_protocol_error(error),
+                    ));
+                }
+            };
             if let Err(error) =
                 storage.handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit))
                 && audit_required
@@ -10347,11 +10461,21 @@ impl SaveWorkflowService {
                 ));
             }
             if audit_required {
-                let envelope = proposal_audit_recorded_event(
+                let envelope = match proposal_audit_recorded_event(
                     proposal,
                     transition,
                     proposal_coordinator.next_sequence(),
-                );
+                ) {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        return Err(Self::record_audit_storage_failed_response(
+                            proposal_coordinator,
+                            proposal,
+                            response,
+                            Self::observability_protocol_error(error),
+                        ));
+                    }
+                };
                 let metadata = event_metadata_record(&envelope);
                 if let Err(error) = proposal_coordinator.emit(envelope) {
                     return Err(Self::record_audit_storage_failed_response(
@@ -10420,6 +10544,13 @@ impl SaveWorkflowService {
         }
     }
 
+    fn observability_protocol_error(error: ObservabilityError) -> ProtocolError {
+        ProtocolError {
+            code: "observability_envelope_invalid".to_string(),
+            message: error.to_string(),
+        }
+    }
+
     fn record_audit_storage_failed_response(
         proposal_coordinator: &mut AppProposalCoordinator,
         proposal: &WorkspaceProposal,
@@ -10437,28 +10568,28 @@ impl SaveWorkflowService {
         proposal_coordinator: &mut AppProposalCoordinator,
         proposal: &WorkspaceProposal,
         response: &ProposalResponse,
-    ) -> Vec<EventEnvelope> {
-        match response {
+    ) -> Result<Vec<EventEnvelope>, ObservabilityError> {
+        Ok(match response {
             ProposalResponse::Created(transition) => vec![proposal_created_event(
                 proposal,
                 transition.causality_id,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Validated(transition) => vec![proposal_validated_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Previewed { transition, .. } => vec![proposal_previewed_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Applied(transition) => vec![proposal_applied_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Denied { transition, reason } => {
                 let save_target = save_event_target(proposal);
                 let generic_event = proposal_rejected_event(
@@ -10473,7 +10604,7 @@ impl SaveWorkflowService {
                         }
                     },
                     proposal_coordinator.next_sequence(),
-                );
+                )?;
 
                 let mut events = vec![generic_event];
                 if let Some(save_target) = save_target {
@@ -10484,7 +10615,7 @@ impl SaveWorkflowService {
                         transition.causality_id,
                         proposal_coordinator.next_sequence(),
                         format!("{reason:?}"),
-                    ));
+                    )?);
                 }
                 events
             }
@@ -10493,23 +10624,23 @@ impl SaveWorkflowService {
                 transition,
                 *reason,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::RolledBack { transition, reason } => {
                 vec![proposal_rolled_back_event(
                     proposal,
                     transition,
                     *reason,
                     proposal_coordinator.next_sequence(),
-                )]
+                )?]
             }
             ProposalResponse::Stale { transition, stale } => {
                 let Some(save_target) = save_event_target(proposal) else {
-                    return vec![proposal_rejected_event(
+                    return Ok(vec![proposal_rejected_event(
                         proposal,
                         transition,
                         legion_protocol::ProposalRejectionReason::ValidationFailed,
                         proposal_coordinator.next_sequence(),
-                    )];
+                    )?]);
                 };
                 vec![stale_proposal_rejected_event(
                     save_target.workspace_id,
@@ -10519,32 +10650,32 @@ impl SaveWorkflowService {
                     proposal_coordinator.next_sequence(),
                     transition.proposal_id,
                     stale.reason,
-                )]
+                )?]
             }
             ProposalResponse::Conflict { transition, .. } => vec![proposal_rejected_event(
                 proposal,
                 transition,
                 legion_protocol::ProposalRejectionReason::ValidationFailed,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Rejected { transition, reason } => vec![proposal_rejected_event(
                 proposal,
                 transition,
                 *reason,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Approved(transition) => vec![proposal_approved_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Cancelled { transition, .. } => vec![proposal_rejected_event(
                 proposal,
                 transition,
                 legion_protocol::ProposalRejectionReason::Cancelled,
                 proposal_coordinator.next_sequence(),
-            )],
-        }
+            )?],
+        })
     }
 
     fn transition_for_response(
@@ -13054,9 +13185,13 @@ impl AppComposition {
     }
 
     fn emit_transaction_event(&mut self, descriptor: &TextTransactionDescriptor) {
-        let envelope =
-            transaction_event(descriptor, true, None, self.event_sequence_generator.next());
-        self.emit_event(envelope);
+        // The envelope only fails to build on invalid core ids; skip emitting in
+        // that case rather than aborting the surrounding editor operation.
+        if let Ok(envelope) =
+            transaction_event(descriptor, true, None, self.event_sequence_generator.next())
+        {
+            self.emit_event(envelope);
+        }
     }
 
     /// Set the app-owned product mode used to authorize AI dispatch.
@@ -14747,6 +14882,18 @@ impl AppComposition {
         let projection = PluginContributionProjection {
             plugin_id: manifest.plugin_id,
             contributions: manifest.contributions.clone(),
+            permission_review_rows: manifest
+                .requested_capabilities
+                .iter()
+                .enumerate()
+                .map(|(index, capability)| {
+                    format!(
+                        "permission review {}: capability={}",
+                        index + 1,
+                        capability.0
+                    )
+                })
+                .collect(),
             status_label: "loaded".to_string(),
         };
         let plugin_id = self
@@ -15322,11 +15469,25 @@ impl AppComposition {
                 correlation_id,
                 causality_id,
             );
-            let host_output = acp_host_command
-                .run(&sandbox_path, &target_file_absolute, &contract.plan_id.0)
-                .map_err(|e| {
-                    AppCompositionError::AiRuntime(format!("ACP host command failed to start: {e}"))
-                })?;
+            let host_output = match acp_host_command.run(
+                &sandbox_path,
+                &target_file_absolute,
+                &contract.plan_id.0,
+            ) {
+                Ok(output) => output,
+                Err(e) => {
+                    // The sandbox was already allocated; clean it up before the
+                    // early return and surface any cleanup failure alongside the
+                    // original error.
+                    let message = match orchestrator.cleanup(&permission) {
+                        Ok(()) => format!("ACP host command failed to start: {e}"),
+                        Err(cleanup_err) => format!(
+                            "ACP host command failed to start: {e}; additionally sandbox cleanup failed: {cleanup_err}"
+                        ),
+                    };
+                    return Err(AppCompositionError::AiRuntime(message));
+                }
+            };
             let stdout_label = String::from_utf8_lossy(&host_output.stdout);
             let stderr_label = String::from_utf8_lossy(&host_output.stderr);
             let _spawn_message_id = self.delegate_workflow.record_system_message(
@@ -15362,9 +15523,20 @@ impl AppComposition {
                     stderr_label.trim()
                 )));
             }
-            proposal_content = std::fs::read_to_string(&target_file_absolute).map_err(|e| {
-                AppCompositionError::AiRuntime(format!("Failed to read ACP host proposal: {e}"))
-            })?;
+            proposal_content = match std::fs::read_to_string(&target_file_absolute) {
+                Ok(content) => content,
+                Err(e) => {
+                    // Clean up the allocated sandbox before the early return and
+                    // surface any cleanup failure alongside the original error.
+                    let message = match orchestrator.cleanup(&permission) {
+                        Ok(()) => format!("Failed to read ACP host proposal: {e}"),
+                        Err(cleanup_err) => format!(
+                            "Failed to read ACP host proposal: {e}; additionally sandbox cleanup failed: {cleanup_err}"
+                        ),
+                    };
+                    return Err(AppCompositionError::AiRuntime(message));
+                }
+            };
         }
 
         let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
@@ -17681,7 +17853,20 @@ impl AppComposition {
                 Ok(AppSaveOutcome::Saved(output.save))
             }
             Err(failure) => {
-                if failure.request_id != uuid::Uuid::nil() {
+                if let Some(committed) = failure.committed {
+                    // The on-disk write already committed before the post-commit
+                    // audit failed. Reconcile editor state with disk (mark the
+                    // buffer saved) so we never leave a dirty buffer over content
+                    // that is already persisted, then surface the audit failure.
+                    self.editor.acknowledge_save_outcome(
+                        committed.save.request_id,
+                        SaveAcknowledgement::Saved,
+                    );
+                    self.active_documents
+                        .bind_saved_buffer(committed.save.buffer_id, committed.applied);
+                    self.active_documents
+                        .clear_dirty_prompt_for(committed.save.buffer_id);
+                } else if failure.request_id != uuid::Uuid::nil() {
                     self.editor.acknowledge_save_outcome(
                         failure.request_id,
                         acknowledgement_for_response(&failure.response),
@@ -24019,6 +24204,44 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parse_terminal_keeps_unterminated_osc_bytes() {
+        // OSC introducer with no BEL/ST terminator must not silently drop the
+        // trailing bytes of the output.
+        let payload = "before\x1b]7;file://localhost/home";
+        let parsed = parse_terminal_shell_output(payload);
+        assert_eq!(parsed.visible_output, "before\x1b]7;file://localhost/home");
+        assert_eq!(parsed.cwd, None);
+    }
+
+    #[test]
+    fn parse_terminal_handles_terminated_osc() {
+        let payload = "out\x1b]7;file:///home/user\x07tail";
+        let parsed = parse_terminal_shell_output(payload);
+        assert_eq!(parsed.visible_output, "outtail");
+        assert_eq!(parsed.cwd.as_deref(), Some("/home/user"));
+    }
+
+    #[test]
+    fn osc7_cwd_decodes_windows_drive_and_percent() {
+        assert_eq!(
+            terminal_shell_cwd_from_osc("7;file:///C:/Users/My%20Project").as_deref(),
+            Some("C:/Users/My Project")
+        );
+    }
+
+    #[test]
+    fn osc7_cwd_handles_localhost_and_unc() {
+        assert_eq!(
+            terminal_shell_cwd_from_osc("7;file://localhost/home/user").as_deref(),
+            Some("/home/user")
+        );
+        assert_eq!(
+            terminal_shell_cwd_from_osc("7;file://server/share/dir").as_deref(),
+            Some("//server/share/dir")
+        );
+    }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()

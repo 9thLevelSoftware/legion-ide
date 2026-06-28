@@ -160,17 +160,60 @@ fn open_workspace_with_counting_fs(
     (actor, opened)
 }
 
-fn create_temp_workspace() -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "legion-project-path-boundary-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |value| value.as_millis() as u64)
-            + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&root).expect("create temp workspace");
-    std::fs::canonicalize(root).expect("canonicalize temp workspace")
+/// RAII temp workspace: owns the root directory (and any tracked outside-the-root
+/// fixtures) and removes them on drop, so a panic mid-test cannot leak the
+/// fixture. Derefs to `Path` so existing call sites keep working unchanged.
+struct TempWorkspace {
+    root: PathBuf,
+    outside_paths: Vec<PathBuf>,
+}
+
+impl TempWorkspace {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "legion-project-path-boundary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |value| value.as_millis() as u64)
+                + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("create temp workspace");
+        let root = std::fs::canonicalize(root).expect("canonicalize temp workspace");
+        Self {
+            root,
+            outside_paths: Vec::new(),
+        }
+    }
+
+    /// Track an outside-the-root fixture file so it is removed on drop; returns
+    /// the path for convenience.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn track_outside(&mut self, path: PathBuf) -> PathBuf {
+        self.outside_paths.push(path.clone());
+        path
+    }
+}
+
+impl std::ops::Deref for TempWorkspace {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.root
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        for path in &self.outside_paths {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn create_temp_workspace() -> TempWorkspace {
+    TempWorkspace::new()
 }
 
 #[allow(clippy::result_large_err)]
@@ -272,8 +315,6 @@ fn semantic_discovery_snapshot_reports_safe_workspace_policy_outcomes() {
             && record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::PolicyDenied)
             && record.policy.metadata_only
     }));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -341,8 +382,6 @@ fn semantic_discovery_delta_reports_external_deleted_and_changed_outcomes() {
         record.policy.skip_reason == Some(WorkspaceDiscoverySkipReason::External)
             && record.policy.decision == WorkspaceDiscoveryDecision::Excluded
     }));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -363,8 +402,6 @@ fn resolve_and_write_reject_parent_escape() {
         .open_new_file_text(opened.workspace_id, escape)
         .expect_err("new-file open should fail");
     assert!(matches!(write_err, WorkspaceError::PathOutsideRoot { .. }));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -379,8 +416,6 @@ fn nonexistent_child_path_inside_root_is_allowed() {
         .read_file_text(opened.workspace_id, "new/deep/file.txt")
         .expect("read nested child");
     assert_eq!(text, "ok");
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -429,8 +464,6 @@ fn stale_save_preserves_disk_content_and_returns_typed_response() {
         ProposalResponse::Conflict { .. } => {}
         other => panic!("expected stale or conflict response, got {other:?}"),
     }
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -466,8 +499,6 @@ fn oversized_save_denied_by_path_limit_before_atomic_write() {
         }
         other => panic!("expected denied response, got {other:?}"),
     }
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -503,8 +534,6 @@ fn oversized_save_denied_by_file_write_limit_before_atomic_write() {
         }
         other => panic!("expected denied response, got {other:?}"),
     }
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -533,8 +562,6 @@ fn in_limit_save_uses_stricter_limit_and_writes_once() {
         std::fs::read_to_string(&target).expect("saved content"),
         "1234"
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[cfg(windows)]
@@ -559,8 +586,6 @@ fn windows_drive_letter_case_is_accepted_inside_root() {
     );
     save_new_file(&actor, opened.workspace_id, &candidate, "case-ok")
         .expect("case-insensitive write should succeed");
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[cfg(windows)]
@@ -579,8 +604,6 @@ fn windows_long_path_prefix_inside_root_is_accepted() {
 
     save_new_file(&actor, opened.workspace_id, &long_prefixed, "long")
         .expect("long-prefix write should succeed");
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[cfg(unix)]
@@ -588,13 +611,14 @@ fn windows_long_path_prefix_inside_root_is_accepted() {
 fn symlink_escape_outside_root_is_rejected() {
     use std::os::unix::fs as unix_fs;
 
-    let root = create_temp_workspace();
+    let mut root = create_temp_workspace();
     let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
 
-    let outside = root
+    let outside_path = root
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("legion-project-path-boundary-outside.txt");
+    let outside = root.track_outside(outside_path);
     std::fs::write(&outside, "outside").expect("write outside file");
 
     let link_path = root.join("link-outside.txt");
@@ -604,7 +628,4 @@ fn symlink_escape_outside_root_is_rejected() {
         .read_file_text(opened.workspace_id, link_path.to_string_lossy())
         .expect_err("symlink escape should fail");
     assert!(matches!(err, WorkspaceError::PathOutsideRoot { .. }));
-
-    let _ = std::fs::remove_file(outside);
-    let _ = std::fs::remove_dir_all(root);
 }

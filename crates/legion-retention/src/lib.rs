@@ -423,18 +423,21 @@ impl RetentionFixtureVault {
                 reason: err.message,
             }
         })?;
+        // Lease expiry is an absolute epoch-ms timestamp: the configured TTL
+        // measured from now, clamped to never outlive the consent grant.
+        let now_ms = legion_protocol::TimestampMillis::now().0;
+        let expires_at = legion_protocol::TimestampMillis(
+            now_ms
+                .saturating_add(self.policy.ttl_ms)
+                .min(grant.expires_at.0),
+        );
         let lease = RawSourceRetentionLease {
             lease_id: format!(
                 "lease:{}:{}",
                 request.workspace_id.0, request.correlation_id.0
             ),
             consent: grant,
-            expires_at: request
-                .paths
-                .first()
-                .map_or(legion_protocol::TimestampMillis(self.policy.ttl_ms), |_| {
-                    legion_protocol::TimestampMillis(self.policy.ttl_ms)
-                }),
+            expires_at,
             schema_version: 1,
         };
         let descriptor = RawSourceRetentionBundleDescriptor {
@@ -528,9 +531,23 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
         let index_path = root.join("index.json");
         let index = if index_path.exists() {
             let text = fs::read_to_string(&index_path).map_err(io_error)?;
-            serde_json::from_str(&text).map_err(|err| RawSourceVaultError::Io {
-                message: format!("decode vault index: {err}"),
-            })?
+            match serde_json::from_str(&text) {
+                Ok(index) => index,
+                Err(err) => {
+                    // A corrupt index is preserved (quarantined) and the open
+                    // fails closed rather than silently starting with empty
+                    // metadata that would orphan retained .vault files.
+                    let quarantine =
+                        root.join(format!("index.json.corrupt-{}", TimestampMillis::now().0));
+                    let _ = fs::rename(&index_path, &quarantine);
+                    return Err(RawSourceVaultError::Io {
+                        message: format!(
+                            "decode vault index: {err}; corrupt index quarantined to {}",
+                            quarantine.display()
+                        ),
+                    });
+                }
+            }
         } else {
             PersistedVaultIndex {
                 schema_version: 1,
@@ -585,13 +602,21 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             }
         })?;
         let key = self.key_bytes()?;
+        // Lease expiry is an absolute epoch-ms timestamp: the configured TTL
+        // measured from now, clamped to never outlive the consent grant.
+        let now_ms = TimestampMillis::now().0;
+        let expires_at = TimestampMillis(
+            now_ms
+                .saturating_add(self.policy.ttl_ms)
+                .min(grant.expires_at.0),
+        );
         let lease = RawSourceRetentionLease {
             lease_id: format!(
                 "lease:{}:{}",
                 request.workspace_id.0, request.correlation_id.0
             ),
             consent: grant,
-            expires_at: TimestampMillis(self.policy.ttl_ms),
+            expires_at,
             schema_version: 1,
         };
         let aad = vault_aad(
@@ -626,7 +651,6 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 reason: "encrypted raw-source bundle exceeds configured vault limit".to_string(),
             });
         }
-        fs::write(self.bundle_path(&bundle_id), &sealed.bytes).map_err(io_error)?;
         let descriptor = RawSourceRetentionBundleDescriptor {
             bundle_id: bundle_id.clone(),
             lease_id: lease.lease_id.clone(),
@@ -636,6 +660,17 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             integrity: sealed.ciphertext_digest,
             schema_version: 1,
         };
+
+        // Stage the ciphertext to a temp file and the metadata in memory, then
+        // persist the index first. The ciphertext is only published (renamed
+        // into place) after the index is durable, so a flush failure cannot
+        // leave an orphaned .vault file unreferenced by the persisted index.
+        let bundle_path = self.bundle_path(&bundle_id);
+        let temp_path = self
+            .root
+            .join(format!("{}.vault.tmp", safe_name(&bundle_id)));
+        fs::write(&temp_path, &sealed.bytes).map_err(io_error)?;
+
         self.index
             .key_references
             .insert(bundle_id.clone(), key_reference.key_id.clone());
@@ -643,8 +678,23 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
         self.index
             .lease_expirations
             .insert(bundle_id.clone(), lease.expires_at);
-        self.index.bundles.insert(bundle_id, descriptor.clone());
-        self.flush_index()?;
+        self.index
+            .bundles
+            .insert(bundle_id.clone(), descriptor.clone());
+
+        if let Err(err) = self.flush_index() {
+            self.revert_bundle_index(&bundle_id);
+            let _ = fs::remove_file(&temp_path);
+            return Err(err);
+        }
+        if let Err(err) = fs::rename(&temp_path, &bundle_path) {
+            // The index was persisted but the ciphertext could not be published;
+            // roll back so we never keep a descriptor referencing a missing file.
+            self.revert_bundle_index(&bundle_id);
+            let _ = self.flush_index();
+            let _ = fs::remove_file(&temp_path);
+            return Err(io_error(err));
+        }
         Ok((lease, descriptor))
     }
 
@@ -1171,7 +1221,13 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 bundle_id: tombstone.bundle_id,
             });
         }
-        fs::remove_file(self.bundle_path(&tombstone.bundle_id)).map_err(io_error)?;
+        // A missing ciphertext is recoverable: still drop the index entries and
+        // record the tombstone rather than leaving a dangling descriptor.
+        match fs::remove_file(self.bundle_path(&tombstone.bundle_id)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(io_error(err)),
+        }
         self.index.bundles.remove(&tombstone.bundle_id);
         self.index.key_references.remove(&tombstone.bundle_id);
         self.index.envelopes.remove(&tombstone.bundle_id);
@@ -1208,8 +1264,11 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 causality_id: legion_protocol::CausalityId(uuid::Uuid::now_v7()),
                 schema_version: 1,
             };
-            self.delete_bundle(tombstone)?;
-            removed += 1;
+            // Accumulate per-bundle outcomes instead of aborting the whole purge
+            // on the first failure; skip bundles that fail and continue.
+            if self.delete_bundle(tombstone).is_ok() {
+                removed += 1;
+            }
         }
         Ok(removed)
     }
@@ -1225,10 +1284,19 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             });
         }
         let mut packed = Vec::new();
+        let mut total_bytes: u64 = 0;
         for file in files {
             if !request.paths.contains(&file.path) {
                 return Err(RawSourceVaultError::Denied {
                     reason: "raw-source file is outside capture request scope".to_string(),
+                });
+            }
+            // Enforce the consent-bound byte budget on the raw source bytes so a
+            // caller cannot exceed `request.max_bytes` up to the vault config limit.
+            total_bytes = total_bytes.saturating_add(file.bytes.len() as u64);
+            if total_bytes > request.max_bytes {
+                return Err(RawSourceVaultError::Denied {
+                    reason: "raw-source capture exceeds consent-bound byte budget".to_string(),
                 });
             }
             packed.extend_from_slice(file.path.0.as_bytes());
@@ -1237,6 +1305,14 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             packed.extend_from_slice(&file.bytes);
         }
         Ok(packed)
+    }
+
+    /// Revert in-memory index mutations staged for a single bundle capture.
+    fn revert_bundle_index(&mut self, bundle_id: &str) {
+        self.index.bundles.remove(bundle_id);
+        self.index.lease_expirations.remove(bundle_id);
+        self.index.envelopes.remove(bundle_id);
+        self.index.key_references.remove(bundle_id);
     }
 
     fn bundle_path(&self, bundle_id: &str) -> PathBuf {
@@ -1248,7 +1324,28 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             serde_json::to_string_pretty(&self.index).map_err(|err| RawSourceVaultError::Io {
                 message: format!("encode vault index: {err}"),
             })?;
-        fs::write(self.root.join("index.json"), text).map_err(io_error)
+        // Atomic write: a partially written or disk-full update must never
+        // truncate the live index. Write to a temp file, fsync it, then rename
+        // it over the target and fsync the parent directory.
+        let index_path = self.root.join("index.json");
+        let temp_path = self.root.join("index.json.tmp");
+        {
+            let mut file = fs::File::create(&temp_path).map_err(io_error)?;
+            use std::io::Write as _;
+            file.write_all(text.as_bytes()).map_err(io_error)?;
+            file.sync_all().map_err(io_error)?;
+        }
+        fs::rename(&temp_path, &index_path).map_err(|err| {
+            let _ = fs::remove_file(&temp_path);
+            io_error(err)
+        })?;
+        // Best-effort durability of the rename itself. Syncing a directory
+        // handle is not supported on all platforms (notably Windows), so a
+        // failure here is intentionally ignored.
+        if let Ok(dir) = fs::File::open(&self.root) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
     }
 
     fn key_bytes(&self) -> Result<Zeroizing<Vec<u8>>, RawSourceVaultError> {
@@ -2025,7 +2122,29 @@ mod tests {
     }
 
     #[test]
-    fn file_backed_vault_delete_fails_when_ciphertext_is_missing() {
+    fn file_backed_vault_rejects_capture_exceeding_consent_byte_budget() {
+        let root = temp_vault_root("byte-budget");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        // request().max_bytes is 1024; supply more raw bytes than the budget.
+        let oversized = vec![RawSourceVaultFile {
+            path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+            bytes: vec![b'a'; 2048],
+        }];
+        assert!(matches!(
+            vault.capture_bundle(grant(), request(), oversized),
+            Err(RawSourceVaultError::Denied { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_backed_vault_delete_tolerates_missing_ciphertext() {
         let root = temp_vault_root("delete-missing-ciphertext");
         let mut vault = FileBackedRawSourceVault::open_production(
             &root,
@@ -2056,11 +2175,13 @@ mod tests {
             )),
             schema_version: 1,
         };
+        vault
+            .delete_bundle(tombstone)
+            .expect("delete tolerates missing ciphertext");
         assert!(matches!(
-            vault.delete_bundle(tombstone),
-            Err(RawSourceVaultError::Io { .. })
+            vault.read_bundle_descriptor(&descriptor.bundle_id),
+            Err(RawSourceVaultError::BundleMissing { .. })
         ));
-        assert!(vault.read_bundle_descriptor(&descriptor.bundle_id).is_ok());
         let _ = fs::remove_dir_all(root);
     }
 

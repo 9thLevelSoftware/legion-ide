@@ -13,16 +13,20 @@ use legion_desktop::{
     },
 };
 use legion_protocol::{
-    CapabilityId, CollaborationGuiProjection, CollaborationParticipantId,
-    CollaborationPresenceProjection, CollaborationSessionGuiRow, CollaborationSessionId,
-    CollaborationSessionState, CollaborationSharedProposalGuiRow, FileFingerprint, PrincipalId,
-    ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
-    ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
-    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
-    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
-    ProtocolTextRange, RedactionHint, TextCoordinate, TimestampMillis, WorkspaceId,
+    CapabilityDecision, CapabilityDecisionId, CapabilityId, CausalityId, CollaborationGuiProjection,
+    CollaborationOperationId, CollaborationParticipantId, CollaborationPresenceProjection,
+    CollaborationSessionGuiRow, CollaborationSessionId, CollaborationSessionState,
+    CollaborationSharedProposalApproval, CollaborationSharedProposalDisposition,
+    CollaborationSharedProposalGuiRow, CollaborationTransportEnvelope, CollaborationTransportPayload,
+    CorrelationId, FileFingerprint, PrincipalId, ProposalContextManifestSummary, ProposalDiffSummary,
+    ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection, ProposalLedgerRow,
+    ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel,
+    ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, TextCoordinate, TimestampMillis,
+    WorkspaceId,
 };
 use legion_ui::{CommandDispatchIntent, Shell};
+use uuid::Uuid;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -396,4 +400,176 @@ fn collaboration_gui_workflow_reports_join_and_presence_outcomes() {
             .small_buffer_text()
             .is_some_and(|text| text == "seed")
     );
+}
+
+/// Loopback/fake collaboration transport: drive remote presence, a
+/// proposal-mediated shared edit, and an explicit denial (conflict) through the
+/// production ingestion seam, then assert the projected GUI rows AND that the
+/// local buffer is never mutated by metadata-only collaboration traffic.
+#[test]
+fn collaboration_gui_loopback_transport_projects_presence_conflict_and_proposal_without_buffer_mutation()
+ {
+    let (workspace, mut runtime) = open_runtime();
+    let buffer_path = workspace.path().join("collab.txt");
+
+    runtime
+        .enable_local_collaboration_runtime()
+        .expect("collaboration runtime should enable through app policy");
+
+    // Join through the production action path so the app registers the session
+    // and its owner participant (participant 1) with collaboration permissions.
+    let joined = runtime
+        .handle_action(DesktopAction::JoinCollaborationSession {
+            session_id: CollaborationSessionId(91),
+        })
+        .expect("join should dispatch through app authority");
+    assert!(matches!(
+        joined,
+        DesktopWorkflowOutcome::CollaborationUpdated {
+            status: DesktopCollaborationStatus::Joined,
+            ..
+        }
+    ));
+
+    // 1) Remote presence event: a reconnecting presence projection flows through
+    // the real transport ingestion path. Presence is metadata-only and must not
+    // apply any editor operation.
+    let presence_envelope = CollaborationTransportEnvelope {
+        session_id: CollaborationSessionId(91),
+        sender_participant_id: CollaborationParticipantId(1),
+        correlation_id: CorrelationId(9101),
+        causality_id: CausalityId(Uuid::now_v7()),
+        payload: CollaborationTransportPayload::Presence(CollaborationPresenceProjection {
+            session_id: CollaborationSessionId(91),
+            participant_id: CollaborationParticipantId(1),
+            cursor: Some(coord(0, 2, 2)),
+            selections: vec![range(0, 2)],
+            activity_label: Some("reconnecting".to_string()),
+            reconnecting: true,
+            schema_version: 1,
+        }),
+        schema_version: 1,
+    };
+    let presence_outcome = runtime
+        .ingest_collaboration_transport_envelope(presence_envelope)
+        .expect("presence envelope should ingest through the production path");
+    assert!(
+        presence_outcome.is_none(),
+        "presence is metadata-only and must not apply an editor operation"
+    );
+
+    // 2) Proposal event: register a shared collaboration proposal gate that
+    // requires two approvers, then approve as participant 1 and explicitly deny
+    // (conflict) as participant 2 -- both through app-owned authority.
+    runtime
+        .register_shared_collaboration_proposal(
+            CollaborationSessionId(91),
+            ProposalId(41),
+            vec![CollaborationParticipantId(1), CollaborationParticipantId(2)],
+            vec![CollaborationParticipantId(1), CollaborationParticipantId(2)],
+            vec![CollaborationOperationId(7201)],
+        )
+        .expect("shared proposal registration should succeed");
+    runtime
+        .record_shared_collaboration_approval(shared_approval(
+            CollaborationParticipantId(1),
+            CollaborationSharedProposalDisposition::Approved,
+            None,
+        ))
+        .expect("approval should record through app authority");
+    runtime
+        .record_shared_collaboration_approval(shared_approval(
+            CollaborationParticipantId(2),
+            CollaborationSharedProposalDisposition::Denied,
+            Some("remote reviewer rejected the shared edit".to_string()),
+        ))
+        .expect("denial should record through app authority");
+
+    let snapshot = runtime.projection_snapshot();
+
+    // Presence row reflects the reconnecting remote participant.
+    assert!(
+        snapshot
+            .collaboration_presence_projections
+            .iter()
+            .any(|presence| presence.participant_id == CollaborationParticipantId(1)
+                && presence.reconnecting),
+        "reconnecting presence should be projected from the transport envelope"
+    );
+    let gui = &snapshot.collaboration_gui_projection;
+    assert_eq!(gui.reconnecting_session_count, 1);
+    assert!(
+        gui.session_rows
+            .iter()
+            .any(|row| row.session_id == CollaborationSessionId(91)
+                && row.reconnecting_participant_count == 1
+                && row.status_label == "reconnecting"),
+        "session row should surface the reconnecting participant"
+    );
+
+    // Shared-proposal row reflects the approval and the conflicting denial.
+    let shared = gui
+        .shared_proposal_rows
+        .iter()
+        .find(|row| {
+            row.session_id == CollaborationSessionId(91) && row.proposal_id == ProposalId(41)
+        })
+        .expect("shared proposal row should be projected");
+    assert_eq!(shared.required_approver_count, 2);
+    assert_eq!(shared.approval_count, 1);
+    assert_eq!(shared.denial_count, 1);
+    assert_eq!(shared.applied_operation_count, 1);
+    assert_eq!(shared.status_label, "shared proposal denied by 1");
+
+    // The projected desktop GUI rows surface the same metadata.
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert!(
+        model
+            .collaboration_rows
+            .iter()
+            .any(|row| row.contains("collaboration session 91") && row.contains("reconnecting=1"))
+    );
+    assert!(
+        model
+            .collaboration_rows
+            .iter()
+            .any(|row| row.contains("shared proposal session 91 proposal 41"))
+    );
+
+    // Local buffer immutability: metadata-only collaboration traffic must never
+    // mutate the active buffer text or the on-disk file.
+    assert!(
+        snapshot
+            .active_buffer_projection
+            .small_buffer_text()
+            .is_some_and(|text| text == "seed"),
+        "active buffer must remain immutable under presence/proposal traffic"
+    );
+    assert_eq!(
+        fs::read_to_string(&buffer_path).expect("local file readable"),
+        "seed",
+        "collaboration metadata traffic must not mutate local disk"
+    );
+}
+
+fn shared_approval(
+    participant_id: CollaborationParticipantId,
+    disposition: CollaborationSharedProposalDisposition,
+    denial_reason: Option<String>,
+) -> CollaborationSharedProposalApproval {
+    CollaborationSharedProposalApproval {
+        session_id: CollaborationSessionId(91),
+        proposal_id: ProposalId(41),
+        participant_id,
+        disposition,
+        capability_decision: CapabilityDecision {
+            decision_id: CapabilityDecisionId(4101),
+            granted: true,
+            capability: CapabilityId("collaboration.proposal.approve".to_string()),
+            reason: None,
+        },
+        applied_operation_ids: vec![CollaborationOperationId(7201)],
+        denial_reason,
+        schema_version: 1,
+    }
 }

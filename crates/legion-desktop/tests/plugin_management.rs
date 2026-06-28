@@ -73,6 +73,7 @@ fn plugin_projection(plugin_id: PluginId) -> PluginContributionProjection {
         plugin_id,
         contributions: vec![PluginContribution::Command(command_descriptor())],
         status_label: "loaded".to_string(),
+        permission_review_rows: Vec::new(),
     }
 }
 

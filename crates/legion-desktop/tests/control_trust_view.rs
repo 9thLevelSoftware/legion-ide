@@ -184,11 +184,14 @@ fn trust_details_render_privacy_egress_redaction_and_consent_rows() {
         .expect("shell projection");
     let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
 
+    // Privacy records are surfaced most-sensitive-first, so the metadata-only
+    // record is not necessarily the first "privacy record" row. Locate the
+    // metadata-only redaction record explicitly and assert it renders its egress.
     let privacy_row = model
         .trust_rows
         .iter()
-        .find(|row| row.contains("privacy record"))
-        .expect("privacy row should be present");
+        .find(|row| row.contains("privacy record") && row.contains("MetadataOnly"))
+        .expect("metadata-only privacy record row should be present");
     assert!(privacy_row.contains("egress=LocalOnly"));
     assert!(privacy_row.contains("MetadataOnly"));
 

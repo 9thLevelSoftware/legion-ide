@@ -153,15 +153,68 @@ fn indexed_workspace_search_refreshes_after_file_changes() {
     assert_eq!(first.hit_count, 1);
 
     fs::write(&file, "nothing to see here\n").expect("overwrite file");
-    sleep(Duration::from_millis(120));
-    let _ = actor
-        .poll_watcher_events(opened.workspace_id)
-        .expect("poll watcher events");
 
-    let second = actor
-        .search_workspace_stream(query, |_| true)
-        .expect("second search");
+    // Bounded poll loop instead of a single fixed sleep: drain watcher events
+    // and re-run the indexed search until the modification is observed (index
+    // invalidated to zero hits) or the overall deadline elapses.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let second = loop {
+        let _ = actor
+            .poll_watcher_events(opened.workspace_id)
+            .expect("poll watcher events");
+        let result = actor
+            .search_workspace_stream(query.clone(), |_| true)
+            .expect("second search");
+        if result.hit_count == 0 || Instant::now() >= deadline {
+            break result;
+        }
+        sleep(Duration::from_millis(20));
+    };
     assert_eq!(second.hit_count, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn indexed_workspace_search_matches_live_scan_for_dozens_of_files() {
+    // Non-ignored coverage for a larger (multi-file) fixture, complementing the
+    // #[ignore]d 500-file benchmark below so default runs still validate indexed
+    // vs live equivalence beyond a single file.
+    let root = create_temp_workspace();
+    for index in 0..32 {
+        let body = if index % 3 == 0 {
+            "needle here\nfiller\n"
+        } else {
+            "filler only\n"
+        };
+        fs::write(root.join(format!("file-{index:03}.txt")), body).expect("write file");
+    }
+
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    let live_query = WorkspaceSearchQuery {
+        workspace_id: opened.workspace_id,
+        pattern: SearchPattern::literal("needle", true, false).expect("literal search"),
+        search_text: "needle".to_string(),
+        filters: WorkspaceSearchFilters::default(),
+        result_limit: 1000,
+        batch_size: 8,
+        use_indexed_backend: false,
+    };
+    let indexed_query = WorkspaceSearchQuery {
+        use_indexed_backend: true,
+        ..live_query.clone()
+    };
+
+    let live = actor
+        .search_workspace_stream(live_query, |_| true)
+        .expect("live search");
+    let indexed = actor
+        .search_workspace_stream(indexed_query, |_| true)
+        .expect("indexed search");
+
+    assert!(live.hit_count > 0, "fixture should produce matches");
+    assert_eq!(indexed.hit_count, live.hit_count);
+    assert_eq!(indexed.omitted_hit_count, live.omitted_hit_count);
+    assert_eq!(indexed.omitted_file_count, live.omitted_file_count);
     let _ = fs::remove_dir_all(root);
 }
 

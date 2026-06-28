@@ -431,13 +431,16 @@ impl<'a> EditorEventContext<'a> {
         applied: bool,
         reason: Option<&str>,
     ) {
-        let envelope = transaction_event(
+        // Building the envelope only fails when the transaction's core ids are
+        // invalid; drop the event in that case rather than aborting the edit.
+        if let Ok(envelope) = transaction_event(
             &record.to_protocol_descriptor(),
             applied,
             reason,
             self.sequence(),
-        );
-        let _ = self.event_sink.emit(EventSinkRequest { envelope });
+        ) {
+            let _ = self.event_sink.emit(EventSinkRequest { envelope });
+        }
     }
 }
 
@@ -1044,6 +1047,14 @@ impl EditorEngine {
                 .map(|selection| Self::protocol_range(&state.buffer, selection.range))
                 .collect::<Result<Vec<_>, _>>()?,
             cursor: Self::protocol_coordinate_from_offset(&state.buffer, state.buffer.try_byte_offset(cursor)?)?,
+            cursors: state
+                .cursors
+                .iter()
+                .map(|cursor| {
+                    let offset = state.buffer.try_byte_offset(cursor.position)?;
+                    Self::protocol_coordinate_from_offset(&state.buffer, offset)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             scroll: request.scroll,
             dimensions: request.dimensions,
             line_wrapping_policy: legion_protocol::LineWrappingPolicy::Off,
@@ -1064,7 +1075,7 @@ impl EditorEngine {
                 ],
                 bounded_search_enabled: true,
                 message: format!(
-                    "Large file degraded mode is active for {} bytes; viewport payloads are chunked and Phase 1 saves fail closed.",
+                    "Large file degraded mode is active for {} bytes; viewport payloads are chunked and saves assemble the full file from chunks on request.",
                     descriptor.byte_len
                 ),
             }),
@@ -1148,19 +1159,31 @@ impl EditorEngine {
         let mut staged_buffer = state.buffer.clone();
         let mut deltas = Vec::with_capacity(plan.edits.len());
 
+        // `plan.edits` is ordered descending by start offset so that applying an
+        // edit never shifts the offsets of edits that have not been applied yet.
         for prepared in &plan.edits {
             staged_buffer.try_replace_range(prepared.start, prepared.end, &prepared.new_text)?;
-            let changed_end = prepared.start + prepared.new_text.len();
-            let utf16 = staged_buffer
-                .line_index()
-                .utf16_range(prepared.start, changed_end)?;
-            deltas.push(ChangedDelta {
-                byte_range: ByteRange::new(prepared.start as u64, changed_end as u64),
-                utf16_range: utf16,
-            });
         }
 
-        deltas.reverse();
+        // Recompute each delta against the *final* staged buffer. Iterating
+        // ascending (the reverse of `plan.edits`) lets us carry a running
+        // cumulative length shift introduced by lower-offset edits so each
+        // recorded byte/UTF-16 range reflects its position in the post-edit
+        // buffer rather than the original coordinates.
+        let mut cumulative_shift: i64 = 0;
+        for prepared in plan.edits.iter().rev() {
+            let final_start = (prepared.start as i64 + cumulative_shift) as usize;
+            let final_end = final_start + prepared.new_text.len();
+            let utf16 = staged_buffer
+                .line_index()
+                .utf16_range(final_start, final_end)?;
+            deltas.push(ChangedDelta {
+                byte_range: ByteRange::new(final_start as u64, final_end as u64),
+                utf16_range: utf16,
+            });
+            let removed = (prepared.end - prepared.start) as i64;
+            cumulative_shift += prepared.new_text.len() as i64 - removed;
+        }
 
         let next_version = BufferVersion(plan.pre_version.0 + 1);
         staged_buffer.set_version(next_version);
@@ -1872,6 +1895,12 @@ impl EditorEngine {
             .buffers
             .get_mut(&buffer_id)
             .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        for cursor in &cursors {
+            // Reject positions that cannot be resolved against the buffer so
+            // only valid editor state is persisted (viewport projection later
+            // assumes every stored cursor maps to a real byte offset).
+            state.buffer.try_byte_offset(cursor.position)?;
+        }
         state.cursors = cursors;
         Ok(())
     }
@@ -1886,6 +1915,18 @@ impl EditorEngine {
             .buffers
             .get_mut(&buffer_id)
             .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        for selection in &selections {
+            // Validate both endpoints and ordering so projection (which calls
+            // protocol_range on every stored selection) cannot fail on state we
+            // accepted here.
+            let start = state.buffer.try_byte_offset(selection.range.start)?;
+            let end = state.buffer.try_byte_offset(selection.range.end)?;
+            if start > end {
+                return Err(EditorError::InvalidEdit(
+                    "selection range start must be <= end",
+                ));
+            }
+        }
         state.selections = selections;
         Ok(())
     }
@@ -2366,13 +2407,21 @@ impl EditorPort for EditorEnginePort {
                 Self::open_buffer_text(&mut engine, request).map_err(Self::protocol_error)
             }
             EditorRequest::ApplyTransaction(descriptor) => {
+                // A `TextTransactionDescriptor` carries only changed-range
+                // metadata (no replacement text), so the buffer cannot be
+                // mutated from it. Returning `EditorResponse::Transaction`
+                // would falsely report an applied transaction. Validate buffer
+                // identity for a clear diagnostic, then fail closed and direct
+                // callers to `ApplyEdit`, which performs the real mutation.
                 let metadata = engine
                     .buffer_metadata(descriptor.buffer_id)
                     .map_err(Self::protocol_error)?;
                 if metadata.workspace_id == descriptor.workspace_id
                     && metadata.file_id == descriptor.file_id
                 {
-                    Ok(EditorResponse::Transaction(descriptor))
+                    Err(ProtocolError::unsupported(
+                        "ApplyTransaction cannot mutate from a descriptor; use ApplyEdit",
+                    ))
                 } else {
                     Err(ProtocolError {
                         code: "editor_transaction_mismatch".to_string(),
@@ -2421,8 +2470,15 @@ impl EditorPort for EditorEnginePort {
                 .map(EditorResponse::Completion)
                 .map_err(Self::protocol_error),
             EditorRequest::Snapshot(snapshot) => Ok(EditorResponse::Snapshot(snapshot)),
-            EditorRequest::Overlay(overlay) => {
-                Ok(EditorResponse::OverlayApplied(overlay.overlay_id))
+            EditorRequest::Overlay(_overlay) => {
+                // Diagnostic overlays are not yet wired into buffer state
+                // (`set_overlays` results are never projected), and the request
+                // carries no buffer identity to resolve a target. Returning
+                // `OverlayApplied` would falsely report a stored overlay, so
+                // fail closed until overlay routing is implemented.
+                Err(ProtocolError::unsupported(
+                    "diagnostic overlay application is not supported by the editor engine",
+                ))
             }
         }
     }

@@ -4,11 +4,19 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use legion_protocol::WorkspaceSessionRecord;
 use thiserror::Error;
 
+/// Markers that indicate raw buffer/source payload leaked into a
+/// raw-payload-carrying record field (currently only `memory_snapshot_json`).
+///
+/// These are inspected *only* against the known free-form payload field rather
+/// than against the whole serialized document, so benign metadata (session ids,
+/// file titles, panel labels, paths) that happens to contain a marker-like
+/// substring is not falsely rejected.
 const RAW_SOURCE_MARKERS: &[&str] = &[
     "small_buffer_preview",
     "source_body",
@@ -61,13 +69,13 @@ impl DesktopSessionStore {
             path: path.to_path_buf(),
             source,
         })?;
-        reject_raw_source_markers(&json)?;
         let record = serde_json::from_str::<WorkspaceSessionRecord>(&json).map_err(|source| {
             DesktopSessionError::Json {
                 path: path.to_path_buf(),
                 source,
             }
         })?;
+        reject_raw_source_markers(&record)?;
         validate_record(&record)?;
         Ok(Some(record))
     }
@@ -78,13 +86,13 @@ impl DesktopSessionStore {
         record: &WorkspaceSessionRecord,
     ) -> Result<(), DesktopSessionError> {
         validate_record(record)?;
+        reject_raw_source_markers(record)?;
         let path = path.as_ref();
         let json =
             serde_json::to_string_pretty(record).map_err(|source| DesktopSessionError::Json {
                 path: path.to_path_buf(),
                 source,
             })?;
-        reject_raw_source_markers(&json)?;
         save_crash_safe(path, &json)
     }
 }
@@ -103,10 +111,20 @@ fn validate_record(record: &WorkspaceSessionRecord) -> Result<(), DesktopSession
     Ok(())
 }
 
-fn reject_raw_source_markers(json: &str) -> Result<(), DesktopSessionError> {
+/// Inspect only the record's free-form raw-payload-carrying field for leaked
+/// buffer/source markers. Restricting the scan to `memory_snapshot_json` (the
+/// single field that can legitimately carry an opaque embedded JSON blob)
+/// avoids false positives where benign metadata such as a `session_id`, file
+/// title, or panel label happens to contain a marker-like substring.
+fn reject_raw_source_markers(
+    record: &WorkspaceSessionRecord,
+) -> Result<(), DesktopSessionError> {
+    let Some(memory_snapshot) = record.memory_snapshot_json.as_deref() else {
+        return Ok(());
+    };
     if let Some(marker) = RAW_SOURCE_MARKERS
         .iter()
-        .find(|marker| json.contains(**marker))
+        .find(|marker| memory_snapshot.contains(**marker))
     {
         return Err(DesktopSessionError::RawSourceMarker((*marker).to_string()));
     }
@@ -152,13 +170,13 @@ fn write_and_verify_temp(
         path: temp_path.to_path_buf(),
         source,
     })?;
-    reject_raw_source_markers(&written)?;
     let record = serde_json::from_str::<WorkspaceSessionRecord>(&written).map_err(|source| {
         DesktopSessionError::Json {
             path: final_path.to_path_buf(),
             source,
         }
     })?;
+    reject_raw_source_markers(&record)?;
     validate_record(&record)?;
     Ok(())
 }
@@ -174,13 +192,21 @@ fn publish_temp_session(final_path: &Path, temp_path: &Path) -> Result<(), Deskt
     })
 }
 
+/// Monotonic counter giving each in-process save a unique temp-file nonce so
+/// two concurrent saves of the same destination never collide.
+static TEMP_SESSION_NONCE: AtomicU64 = AtomicU64::new(0);
+
 fn temporary_session_path(path: &Path, suffix: &str) -> PathBuf {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("session.json");
-    path.with_file_name(format!(".{file_name}.{}.{}", std::process::id(), suffix))
+    let nonce = TEMP_SESSION_NONCE.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        ".{file_name}.{}.{nonce}.{suffix}",
+        std::process::id()
+    ))
 }
 
 #[cfg(windows)]

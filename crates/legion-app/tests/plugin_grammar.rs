@@ -1,7 +1,7 @@
 use legion_app::AppComposition;
 use legion_index::{
-    DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, ParseRequest, ParserWorker, SourceDocument,
-    TREE_SITTER_EXTRACTION_VERSION, TreeSitterParser, tree_sitter_supports_language,
+    DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LEXICAL_EXTRACTION_VERSION, ParseRequest,
+    ParserWorker, SourceDocument, TreeSitterParser, tree_sitter_supports_language,
 };
 use legion_protocol::{
     CanonicalPath, CapabilityId, FileContentVersion, FileId, LanguageId, PluginActivationEvent,
@@ -76,8 +76,14 @@ fn document(language_id: &str) -> SourceDocument {
     )
 }
 
+/// Validates manifest *metadata* registration only: that loading a plugin manifest with a
+/// tree-sitter grammar contribution registers the language and that the built-in tree-sitter
+/// parser can subsequently parse it. The declared `artifact_uri` is a metadata placeholder;
+/// this test deliberately does not create, validate, or load the `.wasm` artifact. Artifact
+/// existence/loadability is out of scope here and should be covered by a dedicated
+/// artifact-validation test once the loader enforces it.
 #[test]
-fn app_plugin_manifest_registers_tree_sitter_grammar_through_phase_five_channel() {
+fn app_plugin_manifest_registers_tree_sitter_grammar_metadata_through_phase_five_channel() {
     let mut app = AppComposition::new();
     let language_id = LanguageId("rust-plugin-app-test".to_string());
     assert!(!tree_sitter_supports_language(&language_id));
@@ -95,11 +101,21 @@ fn app_plugin_manifest_registers_tree_sitter_grammar_through_phase_five_channel(
             grammar_version: SemanticGrammarVersion(DEFAULT_GRAMMAR_VERSION.to_string()),
             model_version: SemanticModelVersion(DEFAULT_MODEL_VERSION.to_string()),
         })
-        .expect("plugin grammar should parse after app registration");
+        .expect("plugin grammar should parse via lexical fallback after app registration");
 
+    // A registered plugin tree-sitter grammar has no loaded-grammar worker yet, so the
+    // parser must NOT parse it as bundled Rust; it falls back to the lexical parser and
+    // emits a diagnostic (review finding F045: support flag must not imply tree-sitter parsing).
     assert_eq!(
         outcome.syntax_tree.cache_key.parser_version,
-        TREE_SITTER_EXTRACTION_VERSION
+        LEXICAL_EXTRACTION_VERSION
+    );
+    assert!(
+        outcome
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == "index.tree_sitter.plugin_grammar_unsupported"),
+        "plugin-grammar fallback must emit a diagnostic"
     );
     assert!(outcome.syntax_tree.node_count > 0);
 }

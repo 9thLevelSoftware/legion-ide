@@ -461,7 +461,7 @@ fn palette_command_mode_covers_registered_command_catalog() {
     let source = workspace.write("src/main.rs", "fn main() {}\n");
     let mut resolved_cases = 0;
 
-    for case in cases {
+    for case in &cases {
         let mut app = open_app(workspace.path(), Some(&source));
         let initial_buffer_id = app.active_buffer_id().expect("active buffer");
         if case.dirty_before_save {
@@ -497,7 +497,7 @@ fn palette_command_mode_covers_registered_command_catalog() {
             .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
             .expect("command selection should dispatch");
 
-        match case.expected_outcome {
+        match &case.expected_outcome {
             ExpectedOutcome::Save => assert!(matches!(outcome, AppCommandOutcome::Save(_))),
             ExpectedOutcome::SaveAll => {
                 assert!(matches!(outcome, AppCommandOutcome::SaveAll(_)))
@@ -525,9 +525,72 @@ fn palette_command_mode_covers_registered_command_catalog() {
         resolved_cases += 1;
     }
 
-    let coverage_percent = (resolved_cases as f32 / 13.0) * 100.0;
+    // Every listed case must resolve. The denominator is the actual case count, not a
+    // magic number decoupled from the table.
+    let coverage_percent = (resolved_cases as f32 / cases.len() as f32) * 100.0;
     assert!(
-        coverage_percent >= 95.0,
-        "command coverage report: {resolved_cases}/13 commands resolved ({coverage_percent:.1}%)"
+        (coverage_percent - 100.0).abs() < f32::EPSILON,
+        "command coverage report: {resolved_cases}/{} cases resolved ({coverage_percent:.1}%)",
+        cases.len()
+    );
+
+    // Guard against catalog drift: derive the registered command catalog from a live palette
+    // projection and assert every registered command is either exercised above or explicitly
+    // allowlisted (git mutations need a real repository / query argument and are covered by the
+    // git_workflow integration tests). A new command added without a case or allowlist entry
+    // fails here with a catalog-vs-cases diff.
+    let mut catalog_app = open_app(workspace.path(), Some(&source));
+    catalog_app
+        .dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Command,
+            query: ">".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        })
+        .expect("command palette should open for catalog enumeration");
+    let catalog_titles: std::collections::BTreeSet<String> = catalog_app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection
+        .results
+        .iter()
+        .filter(|result| result.kind == PaletteResultKind::Command)
+        .map(|result| result.title.clone())
+        .collect();
+    assert!(
+        !catalog_titles.is_empty(),
+        "registered command catalog should not be empty"
+    );
+
+    let case_titles: std::collections::BTreeSet<String> = cases
+        .iter()
+        .map(|case| case.expected_title.to_string())
+        .collect();
+
+    let allowlisted: std::collections::BTreeSet<String> = [
+        "Git: Switch Branch",
+        "Git: Create Branch",
+        "Git: Delete Branch",
+        "Git: Stash Changes",
+        "Git: Prune Worktrees",
+        "Git: Remove Worktree",
+        "Git: Commit Staged Changes",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    let stale_cases: Vec<&String> = case_titles.difference(&catalog_titles).collect();
+    assert!(
+        stale_cases.is_empty(),
+        "test cases reference commands missing from the catalog (stale/renamed): {stale_cases:?}"
+    );
+
+    let covered: std::collections::BTreeSet<String> =
+        case_titles.union(&allowlisted).cloned().collect();
+    let uncovered: Vec<&String> = catalog_titles.difference(&covered).collect();
+    assert!(
+        uncovered.is_empty(),
+        "registered commands missing a test case (add a CommandCase or allowlist entry): \
+         {uncovered:?}"
     );
 }

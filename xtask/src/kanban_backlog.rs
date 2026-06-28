@@ -40,8 +40,11 @@ pub struct BacklogCard {
     pub readiness_row: String,
     #[serde(default)]
     pub files: Vec<String>,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
+    // No `#[serde(default)]`: an omitted `dependencies` field deserializes to
+    // `None` (a missing required field) while `dependencies = []` is `Some(vec![])`
+    // (an explicit, empty-but-present list). This lets `check_required_fields`
+    // distinguish "field omitted" from "intentionally empty".
+    pub dependencies: Option<Vec<String>>,
     #[serde(default)]
     pub verification: Vec<String>,
     #[serde(default)]
@@ -172,7 +175,7 @@ pub fn validate_backlog(backlog: &KanbanBacklog) -> Result<(), KanbanBacklogVali
     for epic in &backlog.epics {
         for feature in &epic.features {
             for task in &feature.tasks {
-                for dep in &task.dependencies {
+                for dep in task.dependencies.iter().flatten() {
                     if !all_ids.contains(dep) {
                         return Err(KanbanBacklogValidationError::UnknownDependency {
                             card_id: task.id.clone(),
@@ -195,7 +198,8 @@ fn check_required_fields(task: &BacklogCard) -> Result<(), KanbanBacklogValidati
             "mode" => !task.mode.trim().is_empty(),
             "readiness_row" => !task.readiness_row.trim().is_empty(),
             "files" => !task.files.is_empty(),
-            "dependencies" => true, // Vec may be empty; presence of the field is sufficient.
+            // The list may be empty, but the field must be present (`Some`).
+            "dependencies" => task.dependencies.is_some(),
             "verification" => !task.verification.is_empty(),
             "acceptance" => !task.acceptance.is_empty(),
             "stop_condition" => !task.stop_condition.trim().is_empty(),
@@ -261,7 +265,7 @@ mod tests {
             mode: "Manual".to_string(),
             readiness_row: "PR-UI-001".to_string(),
             files: vec!["docs/MODES.md".to_string()],
-            dependencies: vec![],
+            dependencies: Some(vec![]),
             verification: vec!["cargo test".to_string()],
             acceptance: vec!["done".to_string()],
             stop_condition: "stop".to_string(),

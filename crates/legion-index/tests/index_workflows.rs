@@ -2864,9 +2864,18 @@ fn rename_preview_payload_is_proposal_only_and_preserves_preconditions() {
         legion_protocol::WorkspaceEditSourceKind::SemanticRefactor
     );
     assert_eq!(payload.required_capability.0, "editor.write");
+    // A single-file symbol map cannot prove cross-file references were searched, so the
+    // rename preview must report partial coverage and surface a diagnostic.
     assert_eq!(
         payload.target_coverage.coverage_kind,
-        ProposalTargetCoverageKind::Complete
+        ProposalTargetCoverageKind::Partial
+    );
+    assert!(
+        payload
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == "index.rename.single_file_coverage"),
+        "rename preview must warn that cross-file references were not searched"
     );
     assert_eq!(payload.file_edits.len(), 1);
     assert_eq!(payload.file_edits[0].edits.edits.len(), 2);

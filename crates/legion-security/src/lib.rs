@@ -6,6 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use legion_protocol::{
@@ -131,9 +132,13 @@ impl NormalizedPolicyPath {
     }
 
     fn starts_with(&self, root: &Self) -> bool {
-        if let Some(expected_prefix) = &root.prefix
-            && self.prefix.as_ref() != Some(expected_prefix)
-        {
+        // Prefix must match exactly in both directions. A relative root (no prefix,
+        // e.g. "./") must never be treated as containing an absolute candidate such
+        // as "/tmp/file", and an absolute root must never match a relative candidate.
+        // The previous logic skipped the prefix check entirely when the root had no
+        // prefix, so the default "./" roots (prefix None, no segments) matched every
+        // absolute path and silently allowed access.
+        if self.prefix != root.prefix {
             return false;
         }
 
@@ -172,10 +177,22 @@ impl PathPolicy {
             return false;
         }
 
-        allowed.iter().any(|root| {
-            NormalizedPolicyPath::parse(root)
-                .map(|root| candidate.starts_with(&root))
-                .unwrap_or(false)
+        allowed.iter().any(|root| match NormalizedPolicyPath::parse(root) {
+            None => false,
+            Some(root) => {
+                // A relative, non-escaping candidate (e.g. a workspace-relative
+                // path or a glob pattern such as `**/*.rs`) is interpreted
+                // relative to the configured root, so it is in scope under any
+                // absolute root. `parse` already rejected `..` escapes by
+                // returning `None`, and an absolute candidate against a relative
+                // root still falls through to the exact prefix check below
+                // (preventing a relative root from authorizing an absolute path).
+                if candidate.prefix.is_none() && root.prefix.is_some() {
+                    true
+                } else {
+                    candidate.starts_with(&root)
+                }
+            }
         })
     }
 }
@@ -402,16 +419,51 @@ impl CommandTaxonomy {
         }
     }
 
-    /// Classifies command by token prefix.
+    /// Classifies command by verb and, for multiplexer binaries like `git`, by
+    /// subcommand. Classifying only on the first token treats `git push` (network
+    /// mutation) the same as `git status` (read), so the subcommand is inspected
+    /// for known mutating/networking verbs before falling back to the binary class.
     pub fn classify(&self, command: &str) -> CommandClass {
+        // An explicit full-command mapping always wins so operators can allowlist
+        // exact invocations.
+        if let Some(class) = self.by_name.get(command).copied() {
+            return class;
+        }
+
+        let mut tokens = command.split_whitespace();
+        let Some(first) = tokens.next() else {
+            return CommandClass::Unknown;
+        };
+
+        if first == "git" {
+            return match tokens.next() {
+                Some(subcommand) => Self::classify_git_subcommand(subcommand),
+                // Bare `git` only prints help/version; treat as read.
+                None => CommandClass::Read,
+            };
+        }
+
         self.by_name
-            .get(command)
+            .get(first)
             .copied()
-            .or_else(|| {
-                let first = command.split_whitespace().next().unwrap_or("unknown");
-                self.by_name.get(first).copied()
-            })
             .unwrap_or(CommandClass::Unknown)
+    }
+
+    /// Classifies a `git` subcommand by its mutation/network behavior.
+    fn classify_git_subcommand(subcommand: &str) -> CommandClass {
+        match subcommand {
+            // Subcommands that reach the network.
+            "push" | "pull" | "fetch" | "clone" | "remote" | "submodule" | "ls-remote" => {
+                CommandClass::Network
+            }
+            // Subcommands that mutate working tree, index, or history.
+            "clean" | "checkout" | "switch" | "restore" | "reset" | "commit" | "merge"
+            | "rebase" | "revert" | "cherry-pick" | "stash" | "apply" | "am" | "rm" | "mv"
+            | "add" | "tag" | "branch" | "gc" | "prune" | "filter-branch" | "update-ref"
+            | "update-index" | "write-tree" | "commit-tree" => CommandClass::Mutate,
+            // status/log/diff/show/blame and other inspection verbs are read-only.
+            _ => CommandClass::Read,
+        }
     }
 }
 
@@ -1069,13 +1121,25 @@ pub fn product_mode_capability_decision(
 }
 
 /// Deny-by-default broker stub.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DenyByDefaultBroker {
     /// Optional static policy override set.
     pub policy: SecurityPolicy,
     /// Namespace for all generated decisions.
     pub namespace: CapabilityNamespace,
-    counter: u64,
+    // Monotonic decision counter behind interior mutability so generated decision
+    // ids advance on the real instance even when `handle` only has `&self`.
+    counter: AtomicU64,
+}
+
+impl Clone for DenyByDefaultBroker {
+    fn clone(&self) -> Self {
+        Self {
+            policy: self.policy.clone(),
+            namespace: self.namespace.clone(),
+            counter: AtomicU64::new(self.counter.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl Default for DenyByDefaultBroker {
@@ -1083,7 +1147,7 @@ impl Default for DenyByDefaultBroker {
         Self {
             policy: SecurityPolicy::default(),
             namespace: CapabilityNamespace("default".to_string()),
-            counter: 0,
+            counter: AtomicU64::new(0),
         }
     }
 }
@@ -1094,8 +1158,49 @@ impl DenyByDefaultBroker {
         Self {
             policy,
             namespace,
-            counter: 0,
+            counter: AtomicU64::new(0),
         }
+    }
+
+    /// Pin filesystem read/write authority to a concrete workspace root.
+    ///
+    /// The broker is usually constructed before a workspace path is known, so
+    /// its default path policy uses the relative `"./"` placeholder. Because
+    /// absolute path matching is anchored on an exact prefix, that placeholder
+    /// never authorizes an *absolute* in-workspace path. Opening a workspace
+    /// pins the policy to the canonical root so that absolute reads/writes
+    /// inside the workspace are allowed, while `"./"` is retained so that
+    /// relative, non-escaping in-workspace paths and glob patterns remain
+    /// authorized. Paths that escape the workspace (`..` overflow) or live
+    /// outside an absolute root are still denied (fail closed).
+    ///
+    /// Roots are only replaced when they are still auto-managed (empty or
+    /// containing the `"./"` sentinel). Callers that configured an explicit,
+    /// tighter scope are preserved unchanged.
+    pub fn pin_workspace_path_roots(&mut self, canonical_root: impl Into<String>) {
+        let root = canonical_root.into();
+        if Self::path_roots_auto_managed(&self.policy.path_policy.readable_roots) {
+            self.policy.path_policy.readable_roots = vec![root.clone(), "./".to_string()];
+        }
+        if Self::path_roots_auto_managed(&self.policy.path_policy.writable_roots) {
+            self.policy.path_policy.writable_roots = vec![root, "./".to_string()];
+        }
+    }
+
+    /// Returns true when a path-root list is the auto-managed default the broker
+    /// is allowed to replace on workspace open (empty, or containing a relative
+    /// `"."`/`"./"` sentinel).
+    fn path_roots_auto_managed(roots: &[String]) -> bool {
+        roots.is_empty()
+            || roots.iter().any(|root| {
+                let trimmed = root.trim().replace('\\', "/");
+                trimmed == "." || trimmed == "./"
+            })
+    }
+
+    /// Advances the monotonic decision counter and returns the next decision id.
+    fn next_decision_id(&self) -> CapabilityDecisionId {
+        CapabilityDecisionId(self.counter.fetch_add(1, Ordering::Relaxed).saturating_add(1))
     }
 
     /// Pure policy matrix for a capability request.
@@ -1124,8 +1229,7 @@ impl DenyByDefaultBroker {
         path: Option<&str>,
         context: CapabilityRequestContext,
     ) -> SecurityDecision {
-        self.counter = self.counter.saturating_add(1);
-        let decision_id = CapabilityDecisionId(self.counter);
+        let decision_id = self.next_decision_id();
 
         if !self.namespace_policy_enabled(&self.namespace) {
             return SecurityDecision::deny(format!("namespace {} disabled", self.namespace.0));
@@ -1352,6 +1456,7 @@ impl DenyByDefaultBroker {
         &self,
         trust: TrustState,
         capability: &str,
+        path: Option<&str>,
         context: &CapabilityRequestContext,
     ) -> SecurityDecision {
         if self.policy.remote_policy.require_trusted_workspace && trust != TrustState::Trusted {
@@ -1400,18 +1505,33 @@ impl DenyByDefaultBroker {
                 }
             }
             "remote.fs.read" | "remote.fs.write" => {
-                if self.policy.remote_policy.runtime_sessions_enabled
-                    && self.policy.remote_policy.filesystem_enabled
+                if !(self.policy.remote_policy.runtime_sessions_enabled
+                    && self.policy.remote_policy.filesystem_enabled)
                 {
-                    if capability == "remote.fs.write"
-                        && let Some(decision) = self.write_size_decision(context)
-                    {
-                        return decision;
-                    }
-                    SecurityDecision::allow()
-                } else {
-                    SecurityDecision::deny("remote filesystem is disabled by policy")
+                    return SecurityDecision::deny("remote filesystem is disabled by policy");
                 }
+                // Remote filesystem access is still bound by the path policy
+                // (readable/writable/blocked roots). A missing target path cannot be
+                // scoped, so it fails closed.
+                let Some(target_path) = path else {
+                    return SecurityDecision::deny(
+                        "remote filesystem access requires target path",
+                    );
+                };
+                let access = if capability == "remote.fs.write" {
+                    PathAccess::Write
+                } else {
+                    PathAccess::Read
+                };
+                if !self.policy.path_policy.can_access(target_path, access) {
+                    return SecurityDecision::deny("remote path access denied by policy");
+                }
+                if capability == "remote.fs.write"
+                    && let Some(decision) = self.write_size_decision(context)
+                {
+                    return decision;
+                }
+                SecurityDecision::allow()
             }
             "remote.process.launch" | "remote.pty.input" | "remote.terminal.access" => {
                 if self.policy.remote_policy.runtime_sessions_enabled
@@ -1778,7 +1898,7 @@ impl DenyByDefaultBroker {
         }
 
         if capability.starts_with("remote.") {
-            return self.remote_capability_decision(trust, &capability, context);
+            return self.remote_capability_decision(trust, &capability, path, context);
         }
 
         if capability.starts_with("telemetry.") {
@@ -1850,42 +1970,80 @@ impl DenyByDefaultBroker {
         }
 
         if let Some(rest) = capability.strip_prefix("fs.") {
-            return if rest == "write" {
-                if self.policy.file_write_policy.deny_when_untrusted && trust != TrustState::Trusted
-                {
-                    SecurityDecision::deny("file write denied for untrusted workspace")
-                } else if let Some(decision) = self.write_size_decision(context) {
-                    decision
-                } else if let Some(target_path) = path {
-                    if !self
-                        .policy
-                        .path_policy
-                        .can_access(target_path, PathAccess::Write)
+            return match rest {
+                "write" => {
+                    if self.policy.file_write_policy.deny_when_untrusted
+                        && trust != TrustState::Trusted
                     {
-                        SecurityDecision::deny("path write denied by policy")
-                    } else if let Some(ext) = Path::new(target_path)
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                    {
-                        let ext = format!(".{ext}");
-                        if self
+                        SecurityDecision::deny("file write denied for untrusted workspace")
+                    } else if let Some(decision) = self.write_size_decision(context) {
+                        decision
+                    } else if let Some(target_path) = path {
+                        if !self
                             .policy
-                            .file_write_policy
-                            .blocked_extensions
-                            .contains(&ext)
+                            .path_policy
+                            .can_access(target_path, PathAccess::Write)
                         {
-                            SecurityDecision::deny("file extension blocked by policy")
+                            SecurityDecision::deny("path write denied by policy")
+                        } else if let Some(ext) = Path::new(target_path)
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                        {
+                            let ext = format!(".{ext}");
+                            if self
+                                .policy
+                                .file_write_policy
+                                .blocked_extensions
+                                .contains(&ext)
+                            {
+                                SecurityDecision::deny("file extension blocked by policy")
+                            } else {
+                                SecurityDecision::allow()
+                            }
                         } else {
                             SecurityDecision::allow()
                         }
                     } else {
-                        SecurityDecision::allow()
+                        // A write with no target path cannot be scoped against the
+                        // path policy; fail closed rather than allowing it.
+                        SecurityDecision::deny("file write requires target path")
                     }
-                } else {
-                    SecurityDecision::allow()
                 }
-            } else {
-                SecurityDecision::allow()
+                "read" => {
+                    if let Some(target_path) = path {
+                        if self
+                            .policy
+                            .path_policy
+                            .can_access(target_path, PathAccess::Read)
+                        {
+                            SecurityDecision::allow()
+                        } else {
+                            SecurityDecision::deny("path read denied by policy")
+                        }
+                    } else {
+                        SecurityDecision::deny("file read requires target path")
+                    }
+                }
+                "list" => {
+                    if let Some(target_path) = path {
+                        if self
+                            .policy
+                            .path_policy
+                            .can_access(target_path, PathAccess::List)
+                        {
+                            SecurityDecision::allow()
+                        } else {
+                            SecurityDecision::deny("path list denied by policy")
+                        }
+                    } else {
+                        SecurityDecision::deny("file list requires target path")
+                    }
+                }
+                // Every disk-touching fs capability must be scoped against the path
+                // policy; unknown fs.* subcommands are denied by default.
+                _ => SecurityDecision::deny(format!(
+                    "capability fs.{rest} denied by deny-by-default"
+                )),
             };
         }
 
@@ -1910,13 +2068,29 @@ impl DenyByDefaultBroker {
                 let Some(command) = context.command_binary.as_deref() else {
                     return SecurityDecision::deny("terminal launch requires command metadata");
                 };
-                if matches!(
-                    self.policy.command_taxonomy.classify(command),
-                    CommandClass::Network
-                ) {
-                    return SecurityDecision::deny(
-                        "terminal launch denied for network-capable command",
-                    );
+                // Only shells/language tooling and read-only inspection binaries are
+                // valid launch targets. Network, mutating, and unrecognized binaries
+                // are denied so terminal.launch cannot be used to bypass cmd.*
+                // classification (e.g. `git push` mis-classified as a read command).
+                match self.policy.command_taxonomy.classify(command) {
+                    CommandClass::Network => {
+                        return SecurityDecision::deny(
+                            "terminal launch denied for network-capable command",
+                        );
+                    }
+                    CommandClass::Mutate => {
+                        return SecurityDecision::deny(
+                            "terminal launch denied for mutating command",
+                        );
+                    }
+                    CommandClass::Unknown => {
+                        return SecurityDecision::deny(
+                            "terminal launch denied for unrecognized command",
+                        );
+                    }
+                    CommandClass::Terminal
+                    | CommandClass::LanguageServer
+                    | CommandClass::Read => {}
                 }
             }
             return SecurityDecision::allow();
@@ -1928,8 +2102,39 @@ impl DenyByDefaultBroker {
             }
 
             return match rest {
-                "launch" => SecurityDecision::allow(),
-                _ => SecurityDecision::allow(),
+                "launch" => {
+                    let Some(binary) = context.lsp_server_binary.as_deref() else {
+                        return SecurityDecision::deny(
+                            "lsp launch requires server binary metadata",
+                        );
+                    };
+                    if !self
+                        .policy
+                        .lsp_policy
+                        .allowed_binaries
+                        .iter()
+                        .any(|allowed| allowed == binary)
+                    {
+                        return SecurityDecision::deny(format!(
+                            "lsp server binary {binary} not allowlisted by policy"
+                        ));
+                    }
+                    if self.policy.lsp_policy.deny_network_refresh
+                        && matches!(
+                            self.policy.command_taxonomy.classify(binary),
+                            CommandClass::Network
+                        )
+                    {
+                        return SecurityDecision::deny(
+                            "lsp network-refresh launch denied by policy",
+                        );
+                    }
+                    SecurityDecision::allow()
+                }
+                // Unknown lsp.* subcommands are denied by default.
+                _ => SecurityDecision::deny(format!(
+                    "capability lsp.{rest} denied by deny-by-default"
+                )),
             };
         }
 
@@ -1947,9 +2152,15 @@ impl DenyByDefaultBroker {
 
         if let Some(rest) = capability.strip_prefix("cmd.") {
             let class = self.policy.command_taxonomy.classify(rest);
+            // Unrecognized commands are deny-by-default for non-trusted workspaces so
+            // an unknown verb cannot slip through, alongside the explicitly risky
+            // mutate/terminal/network classes.
             if matches!(
                 class,
-                CommandClass::Mutate | CommandClass::Terminal | CommandClass::Network
+                CommandClass::Mutate
+                    | CommandClass::Terminal
+                    | CommandClass::Network
+                    | CommandClass::Unknown
             ) && trust != TrustState::Trusted
             {
                 SecurityDecision::deny(format!("command {rest} denied for untrusted workspace"))
@@ -1993,6 +2204,7 @@ impl DenyByDefaultBroker {
                     | CommandClass::Terminal
                     | CommandClass::Network
                     | CommandClass::LanguageServer
+                    | CommandClass::Unknown
             );
         }
 
@@ -2014,8 +2226,6 @@ impl CapabilityBrokerPort for DenyByDefaultBroker {
         &self,
         request: CapabilityRequest,
     ) -> legion_protocol::ProtocolResult<CapabilityResponse> {
-        let mut owned = self.clone();
-
         match request {
             CapabilityRequest::Request {
                 principal_id,
@@ -2028,29 +2238,41 @@ impl CapabilityBrokerPort for DenyByDefaultBroker {
             } => {
                 let trust_state: TrustState = workspace_trust_state.into();
                 let decision = if trust_state == TrustState::Unknown
-                    && owned.requires_trusted_workspace_for_request(&capability_id.0)
+                    && self.requires_trusted_workspace_for_request(&capability_id.0)
                 {
-                    owned.counter = owned.counter.saturating_add(1);
+                    let _ = self.next_decision_id();
                     SecurityDecision::deny(format!(
                         "capability {} denied: workspace trust state is unknown",
                         capability_id.0
                     ))
+                } else if !self.namespace_policy_enabled(&self.namespace) {
+                    let _ = self.next_decision_id();
+                    SecurityDecision::deny(format!("namespace {} disabled", self.namespace.0))
                 } else {
-                    owned.decide_with_request_context(
+                    let generated_decision_id = self.next_decision_id();
+                    self.decide_with_context(
                         trust_state,
                         principal_id.clone(),
                         capability_id.clone(),
                         target_path.as_ref().map(|value| value.0.as_str()),
-                        context,
+                        &context,
+                        generated_decision_id,
                     )
                 };
-                let resolved_decision_id =
-                    decision_id.unwrap_or(CapabilityDecisionId(owned.counter));
+                let resolved_decision_id = decision_id
+                    .unwrap_or(CapabilityDecisionId(self.counter.load(Ordering::Relaxed)));
 
                 Ok(decision.into_protocol(resolved_decision_id, principal_id, capability_id))
             }
-            CapabilityRequest::Grant(grant) => Ok(CapabilityResponse::Granted(grant)),
-            CapabilityRequest::Deny(deny) => Ok(CapabilityResponse::Denied(deny)),
+            // Grant/Deny envelopes are caller-supplied and are not authoritative
+            // decisions. Echoing them back would let any caller mint a granted
+            // response without going through the policy engine, so they are rejected
+            // at this boundary; only Request envelopes are evaluated.
+            CapabilityRequest::Grant(_) | CapabilityRequest::Deny(_) => {
+                Err(legion_protocol::ProtocolError::validation(
+                    "capability broker only accepts Request envelopes; Grant/Deny payloads are not authoritative",
+                ))
+            }
         }
     }
 }
@@ -2411,7 +2633,16 @@ mod tests {
         };
         let mut broker = DenyByDefaultBroker::new(policy, CapabilityNamespace("test".to_string()));
 
+        // Remote filesystem access is bound by the path policy and requires a target
+        // path; a workspace-relative path is accepted under the default "./" roots.
         let fs_write = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("remote.fs.write".to_string()),
+            Some("./remote/file.txt"),
+        );
+        // A remote filesystem request without a target path fails closed.
+        let fs_write_no_path = broker.decide(
             TrustState::Trusted,
             PrincipalId("principal-1".to_string()),
             CapabilityId("remote.fs.write".to_string()),
@@ -2425,6 +2656,9 @@ mod tests {
         );
 
         assert!(matches!(fs_write, SecurityDecision::Allow));
+        assert!(
+            matches!(fs_write_no_path, SecurityDecision::Deny(reason) if reason.contains("target path"))
+        );
         assert!(matches!(process, SecurityDecision::Deny(_)));
     }
 
@@ -3783,5 +4017,164 @@ mod tests {
                 .iter()
                 .any(|finding| finding.marker_label == "slack-bot-token-prefix")
         );
+    }
+
+    #[test]
+    fn default_path_policy_does_not_allow_absolute_paths() {
+        // Regression: the default "./" roots previously matched every absolute path
+        // because an empty relative root skipped the prefix check.
+        let policy = PathPolicy::default();
+        assert!(!policy.can_access("/tmp/file", PathAccess::Read));
+        assert!(!policy.can_access("/etc/passwd", PathAccess::Read));
+        assert!(!policy.can_access("/var/data", PathAccess::Write));
+        // Workspace-relative access is still permitted under the default roots.
+        assert!(policy.can_access("./workspace/file.rs", PathAccess::Read));
+    }
+
+    #[test]
+    fn fs_read_requires_path_and_honors_path_policy() {
+        let mut broker = DenyByDefaultBroker::default();
+        let no_path = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("fs.read".to_string()),
+            None,
+        );
+        assert!(matches!(no_path, SecurityDecision::Deny(reason) if reason.contains("target path")));
+
+        let absolute = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("fs.read".to_string()),
+            Some("/etc/passwd"),
+        );
+        assert!(matches!(absolute, SecurityDecision::Deny(_)));
+
+        let relative = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("fs.read".to_string()),
+            Some("./workspace/file.rs"),
+        );
+        assert!(matches!(relative, SecurityDecision::Allow));
+    }
+
+    #[test]
+    fn fs_write_without_path_fails_closed() {
+        let mut broker = DenyByDefaultBroker::default();
+        let decision = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("fs.write".to_string()),
+            None,
+        );
+        assert!(matches!(decision, SecurityDecision::Deny(reason) if reason.contains("target path")));
+    }
+
+    #[test]
+    fn git_subcommands_are_classified_by_verb() {
+        let taxonomy = CommandTaxonomy::new();
+        assert_eq!(taxonomy.classify("git push"), CommandClass::Network);
+        assert_eq!(taxonomy.classify("git fetch origin"), CommandClass::Network);
+        assert_eq!(taxonomy.classify("git clean -fd"), CommandClass::Mutate);
+        assert_eq!(taxonomy.classify("git checkout main"), CommandClass::Mutate);
+        assert_eq!(taxonomy.classify("git status"), CommandClass::Read);
+        assert_eq!(taxonomy.classify("git"), CommandClass::Read);
+    }
+
+    #[test]
+    fn cmd_git_push_is_denied_for_untrusted_workspace() {
+        let mut broker = DenyByDefaultBroker::default();
+        let decision = broker.decide(
+            TrustState::Untrusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("cmd.git push".to_string()),
+            None,
+        );
+        assert!(matches!(decision, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn lsp_launch_requires_allowlisted_binary() {
+        let mut broker = DenyByDefaultBroker::default();
+        let missing = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("lsp.launch".to_string()),
+            None,
+        );
+        assert!(matches!(missing, SecurityDecision::Deny(reason) if reason.contains("server binary")));
+
+        let denied = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("lsp.launch".to_string()),
+            None,
+            CapabilityRequestContext {
+                lsp_server_binary: Some("evil-server".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(denied, SecurityDecision::Deny(reason) if reason.contains("not allowlisted")));
+
+        let allowed = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("lsp.launch".to_string()),
+            None,
+            CapabilityRequestContext {
+                lsp_server_binary: Some("rust-analyzer".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(allowed, SecurityDecision::Allow));
+
+        let unknown_subcommand = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-1".to_string()),
+            CapabilityId("lsp.refresh".to_string()),
+            None,
+        );
+        assert!(matches!(unknown_subcommand, SecurityDecision::Deny(_)));
+    }
+
+    #[test]
+    fn broker_rejects_grant_and_deny_envelopes() {
+        let broker = DenyByDefaultBroker::default();
+        let grant = broker.handle(CapabilityRequest::Grant(CapabilityGrant {
+            decision_id: CapabilityDecisionId(1),
+            principal_id: PrincipalId("attacker".to_string()),
+            capability_id: CapabilityId("fs.write".to_string()),
+            namespace: CapabilityNamespace("default".to_string()),
+            expires_at: None,
+        }));
+        assert!(grant.is_err());
+    }
+
+    #[test]
+    fn handle_generates_monotonic_decision_ids() {
+        let broker = DenyByDefaultBroker::default();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let response = broker
+                .handle(CapabilityRequest::Request {
+                    principal_id: PrincipalId("u".to_string()),
+                    capability_id: CapabilityId("fs.read".to_string()),
+                    workspace_trust_state: WorkspaceTrustState::Trusted,
+                    target_path: Some(legion_protocol::CanonicalPath(
+                        "./workspace/file.rs".to_string(),
+                    )),
+                    decision_id: None,
+                    context: Default::default(),
+                    correlation_id: CorrelationId(1),
+                })
+                .expect("decision");
+            if let CapabilityResponse::Decision(decision) = response {
+                ids.push(decision.decision_id.0);
+            } else {
+                panic!("expected decision response");
+            }
+        }
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 }

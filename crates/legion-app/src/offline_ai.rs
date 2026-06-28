@@ -408,13 +408,23 @@ impl DelegatedTaskProposalGenerator {
 }
 
 fn validate_containment(base: &Path, path: &Path) -> Result<(), OfflineAiError> {
-    let base_absolute =
-        std::fs::canonicalize(base).unwrap_or_else(|_| std::env::current_dir().unwrap().join(base));
+    let current_dir = || {
+        std::env::current_dir().map_err(|error| {
+            OfflineAiError::InvalidMetadata(format!(
+                "current directory unavailable for containment check: {error}"
+            ))
+        })
+    };
+
+    let base_absolute = match std::fs::canonicalize(base) {
+        Ok(canonical) => canonical,
+        Err(_) => current_dir()?.join(base),
+    };
 
     let path_absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().unwrap().join(path)
+        current_dir()?.join(path)
     };
 
     let mut clean_components = Vec::new();
@@ -429,7 +439,14 @@ fn validate_containment(base: &Path, path: &Path) -> Result<(), OfflineAiError> 
     }
 
     let clean_path: PathBuf = clean_components.into_iter().collect();
-    let clean_stripped = strip_windows_unc_prefix(&clean_path);
+
+    // Resolve symlinks by canonicalizing the longest existing ancestor and
+    // re-appending the not-yet-existent tail (which cannot contain symlinks).
+    // This prevents a symlink placed inside the sandbox from escaping it,
+    // which a purely lexical normalization would miss.
+    let resolved_path = canonicalize_existing_prefix(&clean_path).unwrap_or(clean_path);
+
+    let clean_stripped = strip_windows_unc_prefix(&resolved_path);
     let base_stripped = strip_windows_unc_prefix(&base_absolute);
 
     if !clean_stripped.starts_with(&base_stripped) {
@@ -438,6 +455,31 @@ fn validate_containment(base: &Path, path: &Path) -> Result<(), OfflineAiError> 
         ));
     }
     Ok(())
+}
+
+/// Canonicalize the longest existing ancestor of `path` and re-append the
+/// remaining (non-existent) components. Returns `None` only when no ancestor
+/// can be canonicalized. The re-appended tail cannot contain symlinks because
+/// those path elements do not exist on disk yet.
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(cursor) {
+            let mut resolved = canonical;
+            for component in tail.iter().rev() {
+                resolved.push(component);
+            }
+            return Some(resolved);
+        }
+        match (cursor.parent(), cursor.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                cursor = parent;
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn strip_windows_unc_prefix(path: &Path) -> PathBuf {
@@ -1282,6 +1324,7 @@ mod tests {
         );
         AssistedAiProviderRouteRequest {
             route_id: "offline-route".to_string(),
+            prompt_prefix: String::new(),
             provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
             model_label: "offline".to_string(),
             provider_class: AssistedAiProviderClass::LocalLoopback,
