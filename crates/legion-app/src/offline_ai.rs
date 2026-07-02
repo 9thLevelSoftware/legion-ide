@@ -285,6 +285,9 @@ impl DelegatedTaskSandboxOrchestrator {
     }
 }
 
+/// NOTE: `crates/legion-agent/src/lib.rs::reap_orphaned_sandboxes` mirrors
+/// this logic for `ai`-feature builds — apply any change to both.
+///
 /// Removes orphaned sandbox directories under `delegated_tasks_root`.
 ///
 /// Mirrors `legion_agent::reap_orphaned_sandboxes` for offline builds, which
@@ -1529,5 +1532,45 @@ mod tests {
             correlation_id: CorrelationId(1),
             causality_id: CausalityId(uuid::Uuid::from_u128(1)),
         }
+    }
+
+    fn reap_temp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "legion-app-offline-reap-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    #[test]
+    fn reap_orphaned_sandboxes_removes_orphans_and_preserves_active_and_unrelated() {
+        let root = reap_temp_root("basic");
+        std::fs::create_dir_all(root.join("task-orphan-1")).unwrap();
+        std::fs::write(root.join("task-orphan-1/marker.txt"), "stale").unwrap();
+        std::fs::create_dir_all(root.join("task-active-1")).unwrap();
+        std::fs::create_dir_all(root.join("not-a-task-dir")).unwrap();
+
+        let removed = reap_orphaned_sandboxes(&root, &["active-1".to_string()])
+            .expect("reap succeeds");
+
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].ends_with("task-orphan-1"));
+        assert!(!root.join("task-orphan-1").exists(), "orphan removed");
+        assert!(root.join("task-active-1").exists(), "active lane preserved");
+        assert!(
+            root.join("not-a-task-dir").exists(),
+            "non-task dirs untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reap_orphaned_sandboxes_on_missing_root_is_a_noop() {
+        let root = reap_temp_root("missing").join("does-not-exist");
+        let removed = reap_orphaned_sandboxes(&root, &[]).expect("noop on missing root");
+        assert!(removed.is_empty());
     }
 }

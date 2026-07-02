@@ -327,6 +327,9 @@ impl DelegatedTaskSandboxOrchestrator {
     }
 }
 
+/// NOTE: `crates/legion-app/src/offline_ai.rs::reap_orphaned_sandboxes`
+/// mirrors this logic for offline builds — apply any change to both.
+///
 /// Removes orphaned sandbox directories under `delegated_tasks_root`.
 ///
 /// A directory is an orphan when its name starts with `task-` and its
