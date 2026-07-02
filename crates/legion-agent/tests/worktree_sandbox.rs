@@ -1,4 +1,4 @@
-use legion_agent::DelegatedTaskSandboxOrchestrator;
+use legion_agent::{DelegatedTaskSandboxOrchestrator, reap_orphaned_sandboxes};
 use legion_protocol::{
     CapabilityId, DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
     DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass,
@@ -97,8 +97,73 @@ fn initialize_holds_the_sandbox_lease_immediately_on_return() {
 
     orchestrator.cleanup(&permission).expect("cleanup sandbox");
     assert!(
+        !sandbox_path.exists(),
+        "sandbox directory should be removed by cleanup"
+    );
+    // Ownership rule: cleanup() releases the lock but must NOT unlink the
+    // lease file itself — only the reaper removes lock files, and only
+    // while holding the lock it just re-acquired (race-free). A leftover,
+    // now-unlocked lock file after cleanup is expected and safe: it will
+    // be swept up by the next `reap_orphaned_sandboxes` call.
+    assert!(
+        lease_path.exists(),
+        "cleanup must leave the (now-unlocked) lease file in place; \
+         unlinking it is exclusively the reaper's job"
+    );
+    let probe = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lease_path)
+        .expect("open leftover lease file for probing");
+    assert!(
+        probe.try_lock().is_ok(),
+        "the leftover lease file must be unlocked after cleanup releases it"
+    );
+    drop(probe);
+
+    fs::remove_dir_all(&source_root).expect("remove temp source root");
+    let _ = fs::remove_file(&lease_path);
+}
+
+#[test]
+fn reap_removes_a_leftover_unlocked_lease_file_left_by_cleanup() {
+    let source_root = unique_temp_dir("legion-agent-worktree-source-lease-reap");
+    fs::write(source_root.join("README.md"), "workspace root\n").expect("write root file");
+
+    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_workspace_root(
+        &source_root,
+        "lease-leftover-reaped",
+    );
+    let permission = approved_sandbox_permission("sandbox:init-lease-reap");
+
+    orchestrator
+        .initialize(&permission)
+        .expect("initialize sandbox");
+    let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+    let lease_path = lease_path_for(&sandbox_path);
+
+    orchestrator.cleanup(&permission).expect("cleanup sandbox");
+    assert!(
+        !sandbox_path.exists(),
+        "sandbox directory should be gone after cleanup"
+    );
+    assert!(
+        lease_path.exists(),
+        "cleanup leaves the unlocked lease file behind for the reaper"
+    );
+
+    // The reaper only scans `task-*` directories directly under a given
+    // root, so point it at the lease file's parent directory (the shared
+    // `target/delegated-tasks` root under this crate).
+    let delegated_tasks_root = lease_path
+        .parent()
+        .expect("lease file has a parent directory")
+        .to_path_buf();
+    reap_orphaned_sandboxes(&delegated_tasks_root, &[]).expect("reap succeeds");
+
+    assert!(
         !lease_path.exists(),
-        "lease file should be removed by cleanup"
+        "the next reap pass must remove the leftover lease file left by cleanup"
     );
 
     fs::remove_dir_all(&source_root).expect("remove temp source root");

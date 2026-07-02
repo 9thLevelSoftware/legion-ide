@@ -344,12 +344,19 @@ impl DelegatedTaskSandboxOrchestrator {
                 std::fs::remove_dir_all(&self.sandbox_path)?;
             }
         }
-        // Drop the lease before attempting to remove the lock file: on
-        // Windows an open (even unlocked) file handle can prevent deletion.
-        // Best-effort — another clone of this orchestrator may still hold
-        // the lease, in which case the removal simply fails and is ignored.
+        // Release the lease, but do NOT unlink the lock file here. Ownership
+        // rule: an orchestrator never removes its lease path after releasing
+        // the lock; only the reaper does, and only while re-acquiring the
+        // lock immediately beforehand (see `remove_stale_lease_files`). If
+        // cleanup dropped the lock and then called `remove_file`, a
+        // restarted same-run-id lane could acquire the now-unlocked lease
+        // in the gap between the drop and the unlink — cleanup's
+        // `remove_file` would then delete the NEW owner's lock file out
+        // from under it. Leaving the (now-unlocked) lock file in place is
+        // safe: it is indistinguishable from any other stale lease and will
+        // be cleaned up by the next `reap_orphaned_sandboxes` call, which
+        // removes it race-free by holding the lock across the removal.
         self.lease = None;
-        let _ = std::fs::remove_file(self.lease_path());
         Ok(())
     }
 }
@@ -413,6 +420,18 @@ fn lease_path_for_sandbox(sandbox_path: &Path) -> PathBuf {
 /// acquires the lease BEFORE creating the sandbox directory — so a reaper
 /// scan can never observe a freshly-published `task-<id>` dir that does not
 /// yet have its lease in place.
+///
+/// Lease-unlink ownership rule: an orchestrator's `cleanup()` releases its
+/// lease handle but deliberately never removes the `.lock` file itself —
+/// only this reaper does, and only while holding the lock it just
+/// (re-)acquired (both in the main loop above and in
+/// `remove_stale_lease_files` below). This is intentional: if `cleanup`
+/// dropped the lock and then unlinked the file, a restarted same-run-id
+/// lane could acquire the now-unlocked lease in the gap between the drop
+/// and the unlink, and `cleanup`'s removal would then delete that new
+/// owner's lock file instead of the stale one it meant to clean up.
+/// Removal is race-free only when it happens while the remover still holds
+/// the lock, which only the reaper does.
 pub fn reap_orphaned_sandboxes(
     delegated_tasks_root: &Path,
     active_run_ids: &[&str],
@@ -477,11 +496,31 @@ enum ReapableLease {
     Absent,
 }
 
+/// Classifies a lease-file `open()` error for `acquire_reapable_lease`.
+/// Only `NotFound` means "no lease file exists" (legacy sandbox, or a lease
+/// that was never created) — every other error (permission denied, sharing
+/// violation, I/O error, etc.) is ambiguous and must be treated the same as
+/// "lease is held elsewhere": fail-closed toward NOT reaping, since we
+/// cannot distinguish a transient/permission failure to open an
+/// owner-locked file from genuine absence. Extracted as a standalone
+/// function so the classification itself is unit-testable without needing
+/// to simulate real OS-level permission or sharing-violation errors, which
+/// is awkward to do portably across Windows and Unix in an integration
+/// test.
+fn open_error_means_no_lease_file(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
 /// Attempts to acquire the lease for a sandbox slated for reaping, and
 /// returns the still-locked handle on success so the caller can hold it
 /// through the delete (closing the TOCTOU window between "reapable" and
 /// "reaped"). Returns `None` when the lease is currently held elsewhere
 /// (owner alive: `try_lock` fails) — fail-closed toward NOT deleting.
+/// Returns `None` on any lease-file open error other than `NotFound` too
+/// (see `open_error_means_no_lease_file`): a permission or sharing-violation
+/// error opening the lease file is ambiguous and must not be treated as
+/// "no lease" — an owner could plausibly hold the file in a way that also
+/// prevents this call from opening it.
 fn acquire_reapable_lease(lease_path: &Path) -> Option<ReapableLease> {
     match std::fs::OpenOptions::new()
         .read(true)
@@ -492,7 +531,8 @@ fn acquire_reapable_lease(lease_path: &Path) -> Option<ReapableLease> {
             Ok(()) => Some(ReapableLease::Locked(lock_file)),
             Err(_) => None,
         },
-        Err(_) => Some(ReapableLease::Absent),
+        Err(error) if open_error_means_no_lease_file(&error) => Some(ReapableLease::Absent),
+        Err(_) => None,
     }
 }
 
@@ -1561,6 +1601,39 @@ mod tests {
     use legion_protocol::{AssistedAiTrustProjectionKind, WorkspaceId};
     use legion_security::DenyByDefaultBroker;
 
+    #[test]
+    fn open_error_means_no_lease_file_is_true_only_for_not_found() {
+        // NotFound (no lease file exists yet, or a legacy sandbox predating
+        // the lease protocol) is the only error classified as "safe to
+        // treat as an absent lease" — everything else must fail closed
+        // toward "possibly protected, do not reap", since a permission or
+        // sharing-violation error opening the lease file cannot be
+        // distinguished from an owner holding it in a way that also blocks
+        // this call from opening it. A real OS-level permission-denied or
+        // sharing-violation error is awkward to simulate portably across
+        // Windows and Unix in an integration test, so the classification
+        // itself is exercised directly here via synthetic `io::Error`
+        // values of each kind instead.
+        assert!(open_error_means_no_lease_file(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+
+        let non_absent_kinds = [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::AlreadyExists,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::TimedOut,
+        ];
+        for kind in non_absent_kinds {
+            assert!(
+                !open_error_means_no_lease_file(&std::io::Error::from(kind)),
+                "error kind {kind:?} must fail closed (not be treated as an absent lease)"
+            );
+        }
+    }
+
     fn route_request() -> AssistedAiProviderRouteRequest {
         let trust = trust_reference(
             "offline-test",
@@ -1896,8 +1969,64 @@ mod tests {
 
         orchestrator.cleanup(&permission).expect("cleanup sandbox");
         assert!(
+            !sandbox_path.exists(),
+            "sandbox directory should be removed by cleanup"
+        );
+        // Ownership rule: cleanup() releases the lock but must NOT unlink
+        // the lease file itself — only the reaper removes lock files, and
+        // only while holding the lock it just re-acquired (race-free). A
+        // leftover, now-unlocked lock file after cleanup is expected and
+        // safe: it will be swept up by the next `reap_orphaned_sandboxes`
+        // call.
+        assert!(
+            lease_path.exists(),
+            "cleanup must leave the (now-unlocked) lease file in place; \
+             unlinking it is exclusively the reaper's job"
+        );
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path)
+            .expect("open leftover lease file for probing");
+        assert!(
+            probe.try_lock().is_ok(),
+            "the leftover lease file must be unlocked after cleanup releases it"
+        );
+        drop(probe);
+        let _ = std::fs::remove_file(&lease_path);
+    }
+
+    #[test]
+    fn reap_removes_a_leftover_unlocked_lease_file_left_by_cleanup() {
+        let mut orchestrator =
+            DelegatedTaskSandboxOrchestrator::new("offline-lease-leftover-reaped");
+        let permission = approved_sandbox_permission("sandbox:offline-init-lease-reap");
+
+        orchestrator
+            .initialize(&permission)
+            .expect("initialize sandbox");
+        let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+        let lease_path = lease_path_for(&sandbox_path);
+
+        orchestrator.cleanup(&permission).expect("cleanup sandbox");
+        assert!(
+            !sandbox_path.exists(),
+            "sandbox directory should be gone after cleanup"
+        );
+        assert!(
+            lease_path.exists(),
+            "cleanup leaves the unlocked lease file behind for the reaper"
+        );
+
+        let delegated_tasks_root = lease_path
+            .parent()
+            .expect("lease file has a parent directory")
+            .to_path_buf();
+        reap_orphaned_sandboxes(&delegated_tasks_root, &[]).expect("reap succeeds");
+
+        assert!(
             !lease_path.exists(),
-            "lease file should be removed by cleanup"
+            "the next reap pass must remove the leftover lease file left by cleanup"
         );
     }
 
