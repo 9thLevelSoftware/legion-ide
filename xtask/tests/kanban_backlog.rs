@@ -225,6 +225,8 @@ fn collect_all_ids_returns_feature_and_task_ids() {
                     verification: vec![],
                     acceptance: vec![],
                     stop_condition: "n/a".to_string(),
+                    status: "todo".to_string(),
+                    evidence: None,
                 }],
             }],
         }],
@@ -261,4 +263,133 @@ fn from_file_reports_parse_error() {
         msg.contains("unable to parse kanban backlog"),
         "unexpected error message: {msg}"
     );
+}
+
+#[test]
+fn status_defaults_to_todo_when_absent() {
+    let dir = TempDir::new("status-default");
+    let path = dir.write("backlog.toml", minimal_valid_backlog_toml());
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    assert_eq!(backlog.epics[0].features[0].tasks[0].status, "todo");
+    validate_backlog(&backlog).expect("default status of todo should validate");
+}
+
+#[test]
+fn status_accepts_all_valid_values() {
+    for status in ["todo", "in-progress", "done", "blocked"] {
+        let toml_src = if status == "done" {
+            // `done` requires non-empty evidence; supply it so this test
+            // isolates the status-vocabulary check, not the evidence rule.
+            format!(
+                "{}\nevidence = \"plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md\"\n",
+                minimal_valid_backlog_toml().replace(
+                    "stop_condition = \"Manual mode policy still forbids AI\"",
+                    &format!(
+                        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"{status}\""
+                    )
+                )
+            )
+        } else {
+            minimal_valid_backlog_toml().replace(
+                "stop_condition = \"Manual mode policy still forbids AI\"",
+                &format!(
+                    "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"{status}\""
+                ),
+            )
+        };
+        let dir = TempDir::new(&format!("status-valid-{status}"));
+        let path = dir.write("backlog.toml", &toml_src);
+        let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+        assert_eq!(backlog.epics[0].features[0].tasks[0].status, status);
+        validate_backlog(&backlog)
+            .unwrap_or_else(|err| panic!("status `{status}` should validate, got: {err}"));
+    }
+}
+
+#[test]
+fn status_rejects_invalid_value() {
+    let toml_src = minimal_valid_backlog_toml().replace(
+        "stop_condition = \"Manual mode policy still forbids AI\"",
+        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"shipped\"",
+    );
+    let dir = TempDir::new("status-invalid");
+    let path = dir.write("backlog.toml", &toml_src);
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    let err = validate_backlog(&backlog).expect_err("invalid status value should be rejected");
+    match err {
+        KanbanBacklogValidationError::InvalidStatus { card_id, status } => {
+            assert_eq!(card_id, "P0.F1.T1");
+            assert_eq!(status, "shipped");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn done_status_without_evidence_is_rejected() {
+    let toml_src = minimal_valid_backlog_toml().replace(
+        "stop_condition = \"Manual mode policy still forbids AI\"",
+        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"done\"",
+    );
+    let dir = TempDir::new("done-no-evidence");
+    let path = dir.write("backlog.toml", &toml_src);
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    let err = validate_backlog(&backlog)
+        .expect_err("a task marked done without evidence must be rejected");
+    match err {
+        KanbanBacklogValidationError::MissingEvidenceForDone { card_id } => {
+            assert_eq!(card_id, "P0.F1.T1");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn done_status_with_blank_evidence_is_rejected() {
+    let toml_src = minimal_valid_backlog_toml().replace(
+        "stop_condition = \"Manual mode policy still forbids AI\"",
+        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"done\"\nevidence = \"   \"",
+    );
+    let dir = TempDir::new("done-blank-evidence");
+    let path = dir.write("backlog.toml", &toml_src);
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    let err = validate_backlog(&backlog)
+        .expect_err("a task marked done with blank evidence must be rejected");
+    match err {
+        KanbanBacklogValidationError::MissingEvidenceForDone { card_id } => {
+            assert_eq!(card_id, "P0.F1.T1");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn done_status_with_evidence_is_accepted() {
+    let toml_src = minimal_valid_backlog_toml().replace(
+        "stop_condition = \"Manual mode policy still forbids AI\"",
+        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"done\"\nevidence = \"plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md\"",
+    );
+    let dir = TempDir::new("done-with-evidence");
+    let path = dir.write("backlog.toml", &toml_src);
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    validate_backlog(&backlog).expect("done status with non-empty evidence should validate");
+    assert_eq!(
+        backlog.epics[0].features[0].tasks[0].evidence.as_deref(),
+        Some("plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md")
+    );
+}
+
+#[test]
+fn evidence_without_done_status_is_allowed() {
+    // `evidence` is a generally optional field; it is only required when
+    // `status = "done"`. A todo/in-progress task may still carry a partial
+    // evidence pointer without failing validation.
+    let toml_src = minimal_valid_backlog_toml().replace(
+        "stop_condition = \"Manual mode policy still forbids AI\"",
+        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"in-progress\"\nevidence = \"plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md\"",
+    );
+    let dir = TempDir::new("evidence-no-done");
+    let path = dir.write("backlog.toml", &toml_src);
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    validate_backlog(&backlog).expect("evidence without done status should still validate");
 }
