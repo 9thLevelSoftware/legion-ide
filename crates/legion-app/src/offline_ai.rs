@@ -32,6 +32,7 @@ use legion_protocol::{
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 /// Deterministic provider id used by existing app projections in offline builds.
 pub const DETERMINISTIC_LOCAL_PROVIDER_ID: &str = "offline-ai-disabled";
@@ -206,6 +207,12 @@ fn legal_transition(from: AgentRunState, to: AgentRunState) -> bool {
 pub struct DelegatedTaskSandboxOrchestrator {
     sandbox_path: PathBuf,
     is_worktree: bool,
+    /// Exclusive lock handle over the sandbox's `.lock` lease file. `Arc`
+    /// keeps this orchestrator `Clone`: every clone shares the same lease,
+    /// so the lease outlives any single clone and is only released when the
+    /// last clone drops it (or `cleanup` clears it explicitly). Best-effort:
+    /// `None` if the lease could not be acquired (see `initialize`).
+    lease: Option<Arc<std::fs::File>>,
 }
 
 impl DelegatedTaskSandboxOrchestrator {
@@ -215,12 +222,19 @@ impl DelegatedTaskSandboxOrchestrator {
         Self {
             sandbox_path,
             is_worktree: false,
+            lease: None,
         }
     }
 
     /// Returns the sandbox path.
     pub fn sandbox_path(&self) -> &Path {
         &self.sandbox_path
+    }
+
+    /// Returns the sibling lease file path for this sandbox
+    /// (`task-<run_id>.lock` next to `task-<run_id>/`).
+    fn lease_path(&self) -> PathBuf {
+        lease_path_for_sandbox(&self.sandbox_path)
     }
 
     /// Initializes the sandbox, preferring a git worktree and falling back to a directory.
@@ -245,14 +259,32 @@ impl DelegatedTaskSandboxOrchestrator {
         match output {
             Ok(output) if output.status.success() => {
                 self.is_worktree = true;
-                Ok(())
             }
             _ => {
                 self.is_worktree = false;
                 std::fs::create_dir_all(&self.sandbox_path)?;
-                Ok(())
             }
         }
+
+        // Acquire a best-effort exclusive lease on the sandbox's sibling
+        // `.lock` file so a cross-process `reap_orphaned_sandboxes` call
+        // can distinguish this live sandbox from an abandoned one. Lease
+        // acquisition is not a correctness gate: if it fails for any
+        // reason (permissions, unsupported filesystem, contention on an
+        // extremely unlikely stale lock), the sandbox still initializes
+        // successfully without protection.
+        if let Ok(lock_file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.lease_path())
+            && lock_file.try_lock().is_ok()
+        {
+            self.lease = Some(Arc::new(lock_file));
+        }
+
+        Ok(())
     }
 
     /// Cleans up the sandbox.
@@ -281,8 +313,30 @@ impl DelegatedTaskSandboxOrchestrator {
                 std::fs::remove_dir_all(&self.sandbox_path)?;
             }
         }
+        // Drop the lease before attempting to remove the lock file: on
+        // Windows an open (even unlocked) file handle can prevent deletion.
+        // Best-effort — another clone of this orchestrator may still hold
+        // the lease, in which case the removal simply fails and is ignored.
+        self.lease = None;
+        let _ = std::fs::remove_file(self.lease_path());
         Ok(())
     }
+}
+
+/// Returns the sibling lease file path for a `task-<run_id>` sandbox
+/// directory: `task-<run_id>.lock` next to it.
+fn lease_path_for_sandbox(sandbox_path: &Path) -> PathBuf {
+    let mut lease_path = sandbox_path.to_path_buf();
+    let file_name = sandbox_path
+        .file_name()
+        .map(|name| {
+            let mut name = name.to_os_string();
+            name.push(".lock");
+            name
+        })
+        .unwrap_or_else(|| std::ffi::OsString::from("task.lock"));
+    lease_path.set_file_name(file_name);
+    lease_path
 }
 
 /// NOTE: `crates/legion-agent/src/lib.rs::reap_orphaned_sandboxes` mirrors
@@ -296,6 +350,18 @@ impl DelegatedTaskSandboxOrchestrator {
 /// `active_run_ids`. Attempts `git worktree remove --force` first and falls
 /// back to plain directory removal. Returns the paths that were removed. A
 /// missing root is a successful no-op.
+///
+/// Lock-file lease protocol: each sandbox may have a sibling
+/// `task-<run_id>.lock` file (see `DelegatedTaskSandboxOrchestrator`). A
+/// sandbox is only reaped if its lease file is absent (legacy sandbox from
+/// before this protocol existed, or one whose owner already released the
+/// lease) or its lease can be acquired here (owner is gone). If the lease
+/// is currently held elsewhere, `try_lock` fails and the reaper treats the
+/// owner as alive and skips that sandbox entirely — fail-closed toward NOT
+/// deleting. This makes the empty `active_run_ids` list used at startup
+/// safe even when another process instance has live sandboxes under the
+/// same relative root. Stale `.lock` files whose sandbox directory no
+/// longer exists are removed as housekeeping when they can be locked.
 pub fn reap_orphaned_sandboxes(
     delegated_tasks_root: &Path,
     active_run_ids: &[&str],
@@ -318,6 +384,11 @@ pub fn reap_orphaned_sandboxes(
             continue;
         }
         let path = entry.path();
+        let lease_path = lease_path_for_sandbox(&path);
+        if !sandbox_lease_is_reapable(&lease_path) {
+            // Owner process is alive and holding the lease: skip, do not delete.
+            continue;
+        }
         let worktree_removed = Command::new("git")
             .arg("worktree")
             .arg("remove")
@@ -329,9 +400,58 @@ pub fn reap_orphaned_sandboxes(
         if !worktree_removed {
             std::fs::remove_dir_all(&path)?;
         }
+        let _ = std::fs::remove_file(&lease_path);
         removed.push(path);
     }
+    remove_stale_lease_files(delegated_tasks_root)?;
     Ok(removed)
+}
+
+/// Returns `true` when a sandbox's sibling `.lock` file does not currently
+/// protect a live owner: either the file does not exist (legacy sandbox, or
+/// no lease was ever acquired), or it exists and this call can acquire an
+/// exclusive lock on it (the previous owner released it or is gone). Any
+/// `try_lock` error is treated as "still held elsewhere" and returns
+/// `false`, fail-closed toward not deleting the sandbox.
+fn sandbox_lease_is_reapable(lease_path: &Path) -> bool {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lease_path)
+    {
+        Ok(lock_file) => lock_file.try_lock().is_ok(),
+        Err(_) => true,
+    }
+}
+
+/// Housekeeping: removes `task-<id>.lock` files whose corresponding
+/// `task-<id>` sandbox directory no longer exists, when the lock can be
+/// acquired (i.e. is not held by a live process). This can happen if a
+/// sandbox directory was removed by means other than `cleanup`/`reap`.
+fn remove_stale_lease_files(delegated_tasks_root: &Path) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(delegated_tasks_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".lock") else {
+            continue;
+        };
+        if !stem.starts_with("task-") {
+            continue;
+        }
+        if delegated_tasks_root.join(stem).exists() {
+            continue;
+        }
+        if sandbox_lease_is_reapable(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
 }
 
 fn validate_sandbox_permission(
@@ -1571,5 +1691,71 @@ mod tests {
         let root = reap_temp_root("missing").join("does-not-exist");
         let removed = reap_orphaned_sandboxes(&root, &[]).expect("noop on missing root");
         assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn reap_orphaned_sandboxes_skips_locked_lease_and_removes_once_released() {
+        let root = reap_temp_root("leased");
+        std::fs::create_dir_all(root.join("task-live-1")).unwrap();
+        std::fs::write(root.join("task-live-1/marker.txt"), "live").unwrap();
+        let lease_path = root.join("task-live-1.lock");
+
+        // Simulate the owning process/orchestrator holding an exclusive
+        // lease. A same-process second `File::open` yields a distinct file
+        // description, so the reaper's `try_lock` on its own handle
+        // genuinely contends with this one (mirroring real cross-process
+        // contention).
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease_path)
+            .expect("create lease file");
+        holder.try_lock().expect("test holds the lease");
+
+        let removed = reap_orphaned_sandboxes(&root, &[]).expect("reap succeeds");
+        assert!(
+            removed.is_empty(),
+            "locked lease must protect its sandbox from reaping"
+        );
+        assert!(
+            root.join("task-live-1").exists(),
+            "live sandbox must survive while its lease is held"
+        );
+        assert!(lease_path.exists(), "lock file must survive too");
+
+        drop(holder);
+        let removed = reap_orphaned_sandboxes(&root, &[]).expect("reap succeeds after release");
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].ends_with("task-live-1"));
+        assert!(
+            !root.join("task-live-1").exists(),
+            "sandbox removed once lease is released"
+        );
+        assert!(
+            !lease_path.exists(),
+            "lock file removed alongside its sandbox"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reap_orphaned_sandboxes_still_removes_legacy_sandboxes_without_a_lease_file() {
+        let root = reap_temp_root("legacy");
+        std::fs::create_dir_all(root.join("task-legacy-1")).unwrap();
+        std::fs::write(root.join("task-legacy-1/marker.txt"), "no lease").unwrap();
+
+        let removed = reap_orphaned_sandboxes(&root, &[]).expect("reap succeeds");
+
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].ends_with("task-legacy-1"));
+        assert!(
+            !root.join("task-legacy-1").exists(),
+            "legacy sandbox without a lease file must still be reaped"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
