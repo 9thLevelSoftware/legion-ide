@@ -13073,6 +13073,43 @@ impl AppComposition {
         self.acp_host_command = Some(AcpHostCommand::new(program, args));
     }
 
+    /// Removes delegated-task sandbox directories left behind by crashed or
+    /// abandoned lanes from a prior process. Intended to be called once by a
+    /// production entry point before any delegated lane starts in the current
+    /// process — never from a constructor or test harness, since those may run
+    /// concurrently with other live sandboxes under the same relative path.
+    ///
+    /// Uses the default sandbox root (`target/delegated-tasks`, relative to
+    /// the current working directory).
+    pub fn reap_orphaned_delegated_task_sandboxes(&self) -> std::io::Result<Vec<PathBuf>> {
+        self.reap_orphaned_delegated_task_sandboxes_at(Path::new("target/delegated-tasks"))
+    }
+
+    /// Same as [`Self::reap_orphaned_delegated_task_sandboxes`], but against an
+    /// explicit `delegated_tasks_root` rather than the default. Exists so
+    /// callers (and tests) can target an isolated, temp-scoped root instead of
+    /// the process-relative default.
+    ///
+    /// The orphan-detection rule (a `task-<run-id>` directory whose run id is
+    /// not in the empty "active" list, since this only ever runs before any
+    /// lane in the current process has started) lives in `legion-agent` when
+    /// the `ai` feature is enabled. Offline builds have no `legion-agent`
+    /// dependency, so this mirrors the same directory-walk logic locally
+    /// rather than pulling that crate in just for this helper.
+    pub fn reap_orphaned_delegated_task_sandboxes_at(
+        &self,
+        delegated_tasks_root: &Path,
+    ) -> std::io::Result<Vec<PathBuf>> {
+        #[cfg(feature = "ai")]
+        {
+            legion_agent::reap_orphaned_sandboxes(delegated_tasks_root, &[])
+        }
+        #[cfg(not(feature = "ai"))]
+        {
+            offline_ai::reap_orphaned_sandboxes(delegated_tasks_root, &[])
+        }
+    }
+
     /// Current app-owned product mode.
     pub fn product_mode(&self) -> AppProductMode {
         self.product_mode

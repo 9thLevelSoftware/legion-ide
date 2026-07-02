@@ -15,6 +15,21 @@ fn main() -> Result<()> {
 
     let root = env::current_dir()?;
     let mut app = AppComposition::new();
+    match app.reap_orphaned_delegated_task_sandboxes() {
+        Ok(removed) if !removed.is_empty() => {
+            eprintln!(
+                "Reaped {} orphaned delegated-task sandbox(es):",
+                removed.len()
+            );
+            for path in &removed {
+                eprintln!("  {}", path.display());
+            }
+        }
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!("Warning: failed to reap orphaned delegated-task sandboxes: {err}");
+        }
+    }
     app.open_workspace(
         root,
         WorkspaceTrustState::Trusted,

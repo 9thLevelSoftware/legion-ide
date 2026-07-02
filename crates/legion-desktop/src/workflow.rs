@@ -2116,6 +2116,14 @@ pub fn run_from_env() -> Result<()> {
 }
 
 fn run_native(config: DesktopLaunchConfig) -> Result<()> {
+    // Reap sandboxes orphaned by a crashed/abandoned lane from a prior
+    // process, before this process's `DesktopRuntime` (and any delegated
+    // lane it may start) comes up. Deliberately not done inside
+    // `DesktopRuntime::open` itself, since that constructor is also used by
+    // the headless test harness and unit tests, which may run concurrently
+    // against the same relative `target/delegated-tasks` path.
+    reap_orphaned_delegated_task_sandboxes_at_startup();
+
     let native_options = desktop_native_options(WINDOW_TITLE);
     eframe::run_native(
         WINDOW_TITLE,
@@ -2127,6 +2135,29 @@ fn run_native(config: DesktopLaunchConfig) -> Result<()> {
         }),
     )
     .map_err(|error| anyhow!(error.to_string()))
+}
+
+/// Reaps delegated-task sandboxes orphaned by a crashed/abandoned lane from a
+/// prior process, using the default `target/delegated-tasks` root. Failures
+/// are logged and otherwise ignored — a reap failure must never block desktop
+/// startup.
+fn reap_orphaned_delegated_task_sandboxes_at_startup() {
+    let app = AppComposition::new();
+    match app.reap_orphaned_delegated_task_sandboxes() {
+        Ok(removed) if !removed.is_empty() => {
+            eprintln!(
+                "Reaped {} orphaned delegated-task sandbox(es):",
+                removed.len()
+            );
+            for path in &removed {
+                eprintln!("  {}", path.display());
+            }
+        }
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!("Warning: failed to reap orphaned delegated-task sandboxes: {err}");
+        }
+    }
 }
 
 /// Build the native desktop options shared by normal and smoke launches.

@@ -285,6 +285,52 @@ impl DelegatedTaskSandboxOrchestrator {
     }
 }
 
+/// Removes orphaned sandbox directories under `delegated_tasks_root`.
+///
+/// Mirrors `legion_agent::reap_orphaned_sandboxes` for offline builds, which
+/// have no dependency on `legion-agent`. A directory is an orphan when its
+/// name starts with `task-` and its run-id suffix is not in
+/// `active_run_ids`. Attempts `git worktree remove --force` first and falls
+/// back to plain directory removal. Returns the paths that were removed. A
+/// missing root is a successful no-op.
+pub fn reap_orphaned_sandboxes(
+    delegated_tasks_root: &Path,
+    active_run_ids: &[String],
+) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut removed = Vec::new();
+    if !delegated_tasks_root.exists() {
+        return Ok(removed);
+    }
+    for entry in std::fs::read_dir(delegated_tasks_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(run_id) = name.strip_prefix("task-") else {
+            continue;
+        };
+        if active_run_ids.iter().any(|active| active == run_id) {
+            continue;
+        }
+        let path = entry.path();
+        let worktree_removed = Command::new("git")
+            .arg("worktree")
+            .arg("remove")
+            .arg("--force")
+            .arg(&path)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !worktree_removed {
+            std::fs::remove_dir_all(&path)?;
+        }
+        removed.push(path);
+    }
+    Ok(removed)
+}
+
 fn validate_sandbox_permission(
     permission: &DelegatedTaskToolPermissionRequest,
     operation: &str,
