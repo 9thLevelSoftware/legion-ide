@@ -1,5 +1,7 @@
 # Legion IDE v8.0.0 — GA Release Checklist & Freeze Criteria
 
+> **STATUS: FORWARD-LOOKING TEMPLATE — NOT A CURRENT RELEASE ARTIFACT.** No v8.0.0 release exists or is scheduled. The workspace version is 0.1.0 and the product is pre-beta; see `plans/product-readiness-ledger.md` for current status. CI references in this document (e.g. `.github/workflows/ci.yml`) describe a future pipeline that is not yet configured, and some referenced companion documents (e.g. `handoff.md`, `stable-channel-approval.md`) do not exist yet.
+
 > Companion to [`migration-policy.md`](./migration-policy.md),
 > [`rollback-policy.md`](./rollback-policy.md), [`handoff.md`](./handoff.md), and
 > [`stable-channel-approval.md`](./stable-channel-approval.md) under this
