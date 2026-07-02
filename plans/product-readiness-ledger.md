@@ -62,4 +62,4 @@ The beta loop is not accepted until a user can open a large repository, install 
 
 ## Dogfood Evidence
 
-Weekly Legion-on-Legion dogfood runs should use `dogfood/legion-on-legion-weekly-journal-template.md`. A journal entry is evidence only when it names the branch, commit, OS, workflow attempted, evidence path, result, and product-readiness impact.
+Weekly Legion-on-Legion dogfood runs should use `plans/dogfood/legion-on-legion-weekly-journal-template.md`. A journal entry is evidence only when it names the branch, commit, OS, workflow attempted, evidence path, result, and product-readiness impact.
