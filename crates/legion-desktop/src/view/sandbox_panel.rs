@@ -99,7 +99,7 @@ fn host_profile_summary() -> SandboxProfileSummary {
                 .profile
                 .notes
                 .into_iter()
-                .chain(profile.notes.into_iter())
+                .chain(profile.notes)
                 .collect(),
         };
     }
@@ -114,7 +114,7 @@ fn host_profile_summary() -> SandboxProfileSummary {
                 .profile
                 .notes
                 .into_iter()
-                .chain(profile.notes.into_iter())
+                .chain(profile.notes)
                 .collect(),
         };
     }
