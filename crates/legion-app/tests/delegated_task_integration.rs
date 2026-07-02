@@ -519,18 +519,15 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
 
 #[test]
 fn reap_orphaned_delegated_task_sandboxes_removes_preseeded_orphan_and_reports_it() {
-    let reap_root = std::env::temp_dir().join(format!(
-        "legion_app_reap_test_{}",
-        uuid::Uuid::now_v7()
-    ));
+    let reap_root =
+        std::env::temp_dir().join(format!("legion_app_reap_test_{}", uuid::Uuid::now_v7()));
     fs::create_dir_all(reap_root.join("task-orphan-plan")).expect("orphan dir should be created");
     fs::write(
         reap_root.join("task-orphan-plan/marker.txt"),
         "stale sandbox from a crashed lane",
     )
     .expect("marker file should be written");
-    fs::create_dir_all(reap_root.join("not-a-task-dir"))
-        .expect("unrelated dir should be created");
+    fs::create_dir_all(reap_root.join("not-a-task-dir")).expect("unrelated dir should be created");
 
     let app = AppComposition::new();
     let removed = app
