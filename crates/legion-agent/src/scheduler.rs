@@ -3,7 +3,7 @@
 use crate::AgentError;
 use legion_protocol::{
     LegionWorkflowDependencyState, LegionWorkflowSession, LegionWorkflowWorkerAssignment,
-    LegionWorkflowWorkerId, LegionWorkflowWorkerState,
+    LegionWorkflowWorkerState,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -32,13 +32,6 @@ fn dependencies_satisfied_for(
         })
 }
 
-fn worker_id_set(worker_ids: &[LegionWorkflowWorkerId]) -> HashSet<String> {
-    worker_ids
-        .iter()
-        .map(|worker_id| worker_id.0.clone())
-        .collect()
-}
-
 fn worker_lookup(
     session: &LegionWorkflowSession,
 ) -> HashMap<String, LegionWorkflowWorkerAssignment> {
@@ -47,28 +40,6 @@ fn worker_lookup(
         .iter()
         .cloned()
         .map(|worker| (worker.worker_id.0.clone(), worker))
-        .collect()
-}
-
-/// Returns workers that are ready to run now, preserving session order.
-pub(crate) fn ready_workers(
-    session: &LegionWorkflowSession,
-    completed_worker_ids: &[LegionWorkflowWorkerId],
-    blocked_worker_ids: &[LegionWorkflowWorkerId],
-) -> Vec<LegionWorkflowWorkerAssignment> {
-    let completed_worker_ids = worker_id_set(completed_worker_ids);
-    let blocked_worker_ids = worker_id_set(blocked_worker_ids);
-
-    session
-        .worker_assignments
-        .iter()
-        .filter(|worker| {
-            !completed_worker_ids.contains(&worker.worker_id.0)
-                && !blocked_worker_ids.contains(&worker.worker_id.0)
-                && worker_can_be_scheduled(worker.state)
-                && dependencies_satisfied_for(session, &worker.worker_id.0, &completed_worker_ids)
-        })
-        .cloned()
         .collect()
 }
 

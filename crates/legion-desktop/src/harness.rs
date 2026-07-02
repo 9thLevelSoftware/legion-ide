@@ -24,7 +24,7 @@
 //! ```
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -87,7 +87,7 @@ impl HeadlessTestWorkspace {
     }
 
     /// Open a `DesktopRuntime` for this workspace with an initial file.
-    pub fn open_runtime_with_file(&self, file: &PathBuf) -> DesktopRuntime {
+    pub fn open_runtime_with_file(&self, file: &Path) -> DesktopRuntime {
         DesktopRuntime::open(DesktopLaunchConfig::new(
             self.root.clone(),
             Some(file.to_string_lossy().into_owned()),

@@ -18,16 +18,8 @@
 //! 4. `DesktopRuntime::ingest_lsp_publish_diagnostics_for_buffer` refreshes
 //!    the projection snapshot so the desktop harness sees the updated rows.
 
-use legion_protocol::{
-    BufferId, BufferVersion, FileFingerprint, FileId, LanguageProblemProjection,
-    LspDiagnosticSummary, ProtocolDiagnosticSeverity, SemanticPrivacyScope, SnapshotId,
-    WorkspaceId,
-};
+use legion_protocol::{FileFingerprint, ProtocolDiagnosticSeverity};
 use serde_json::Value;
-
-use crate::{
-    LspDiagnosticProjectionContext, LspProjectedDiagnostics, LspRuntimeError, LspRuntimeResult,
-};
 
 /// Metadata-only fingerprint for a diagnostic message.
 ///

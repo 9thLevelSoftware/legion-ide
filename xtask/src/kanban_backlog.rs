@@ -51,7 +51,22 @@ pub struct BacklogCard {
     pub acceptance: Vec<String>,
     #[serde(default)]
     pub stop_condition: String,
+    /// Closed-vocabulary progress marker: `todo` (default), `in-progress`,
+    /// `done`, or `blocked`. Validated by [`validate_backlog`].
+    #[serde(default = "default_status")]
+    pub status: String,
+    /// Optional pointer to the evidence file/command output backing this
+    /// card's status. Required and must be non-blank when `status = "done"`.
+    #[serde(default)]
+    pub evidence: Option<String>,
 }
+
+fn default_status() -> String {
+    "todo".to_string()
+}
+
+/// Closed vocabulary of valid `status` values for a backlog task.
+const VALID_STATUS_VALUES: &[&str] = &["todo", "in-progress", "done", "blocked"];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct BacklogFeature {
@@ -117,6 +132,13 @@ pub enum KanbanBacklogValidationError {
         card_id: String,
         dependency: String,
     },
+    InvalidStatus {
+        card_id: String,
+        status: String,
+    },
+    MissingEvidenceForDone {
+        card_id: String,
+    },
 }
 
 impl std::fmt::Display for KanbanBacklogValidationError {
@@ -134,6 +156,15 @@ impl std::fmt::Display for KanbanBacklogValidationError {
             } => write!(
                 f,
                 "card `{card_id}` declares unknown dependency `{dependency}`"
+            ),
+            KanbanBacklogValidationError::InvalidStatus { card_id, status } => write!(
+                f,
+                "card `{card_id}` has invalid status `{status}` (expected one of: {})",
+                VALID_STATUS_VALUES.join(", ")
+            ),
+            KanbanBacklogValidationError::MissingEvidenceForDone { card_id } => write!(
+                f,
+                "card `{card_id}` is marked `done` but has no non-empty `evidence` field"
             ),
         }
     }
@@ -167,6 +198,7 @@ pub fn validate_backlog(backlog: &KanbanBacklog) -> Result<(), KanbanBacklogVali
                     });
                 }
                 check_required_fields(task)?;
+                check_status_and_evidence(task)?;
             }
         }
     }
@@ -212,6 +244,33 @@ fn check_required_fields(task: &BacklogCard) -> Result<(), KanbanBacklogValidati
             });
         }
     }
+    Ok(())
+}
+
+/// Validate the closed-vocabulary `status` field and the done-requires-evidence
+/// rule: a task claiming `status = "done"` without a non-blank `evidence`
+/// pointer is exactly the kind of unverifiable done-claim this repo forbids.
+fn check_status_and_evidence(task: &BacklogCard) -> Result<(), KanbanBacklogValidationError> {
+    if !VALID_STATUS_VALUES.contains(&task.status.as_str()) {
+        return Err(KanbanBacklogValidationError::InvalidStatus {
+            card_id: task.id.clone(),
+            status: task.status.clone(),
+        });
+    }
+
+    if task.status == "done" {
+        let has_evidence = task
+            .evidence
+            .as_deref()
+            .map(|e| !e.trim().is_empty())
+            .unwrap_or(false);
+        if !has_evidence {
+            return Err(KanbanBacklogValidationError::MissingEvidenceForDone {
+                card_id: task.id.clone(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -269,6 +328,8 @@ mod tests {
             verification: vec!["cargo test".to_string()],
             acceptance: vec!["done".to_string()],
             stop_condition: "stop".to_string(),
+            status: default_status(),
+            evidence: None,
         }
     }
 

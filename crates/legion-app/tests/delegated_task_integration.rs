@@ -516,3 +516,32 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     );
     assert_eq!(outcome.projection.tool_permission_request_count, 1);
 }
+
+#[test]
+fn reap_orphaned_delegated_task_sandboxes_removes_preseeded_orphan_and_reports_it() {
+    let reap_root =
+        std::env::temp_dir().join(format!("legion_app_reap_test_{}", uuid::Uuid::now_v7()));
+    fs::create_dir_all(reap_root.join("task-orphan-plan")).expect("orphan dir should be created");
+    fs::write(
+        reap_root.join("task-orphan-plan/marker.txt"),
+        "stale sandbox from a crashed lane",
+    )
+    .expect("marker file should be written");
+    fs::create_dir_all(reap_root.join("not-a-task-dir")).expect("unrelated dir should be created");
+
+    let removed = AppComposition::reap_orphaned_delegated_task_sandboxes_at(&reap_root)
+        .expect("reap should succeed");
+
+    assert_eq!(removed.len(), 1);
+    assert!(removed[0].ends_with("task-orphan-plan"));
+    assert!(
+        !reap_root.join("task-orphan-plan").exists(),
+        "orphaned sandbox should be removed"
+    );
+    assert!(
+        reap_root.join("not-a-task-dir").exists(),
+        "non-task directories must be left untouched"
+    );
+
+    let _ = fs::remove_dir_all(&reap_root);
+}

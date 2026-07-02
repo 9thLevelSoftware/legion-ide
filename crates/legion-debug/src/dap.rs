@@ -69,6 +69,25 @@ pub struct DapClientOutcome {
     pub console: Vec<DebugConsoleEntry>,
 }
 
+/// Inputs used to construct a metadata-only [`DebugAdapterAuditRecord`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DapAuditRecordInput {
+    /// Debug session identifier.
+    session_id: DebugSessionId,
+    /// Internal lifecycle state reached by this operation.
+    lifecycle_state: DapLifecycleState,
+    /// Adapter type used for the session.
+    adapter_type: String,
+    /// Event sequence.
+    event_sequence: EventSequence,
+    /// Correlation identifier.
+    correlation_id: CorrelationId,
+    /// Causal chain identifier.
+    causality_id: CausalityId,
+    /// Metadata-only summary.
+    metadata_summary: String,
+}
+
 /// Metadata-only DAP client runtime.
 #[derive(Debug)]
 pub struct DapClientRuntime {
@@ -127,19 +146,19 @@ impl DapClientRuntime {
             .insert(session_id.clone(), request.adapter_type.clone());
 
         let sequence = EventSequence(1);
-        let audit = self.audit_record(
-            session_id.clone(),
-            DapLifecycleState::Paused,
-            request.adapter_type.clone(),
-            sequence,
-            CorrelationId(request.workspace_id.0 as u64),
-            CausalityId(uuid_from_value(request.workspace_id.0 as u64)),
-            format!(
+        let audit = self.audit_record(DapAuditRecordInput {
+            session_id: session_id.clone(),
+            lifecycle_state: DapLifecycleState::Paused,
+            adapter_type: request.adapter_type.clone(),
+            event_sequence: sequence,
+            correlation_id: CorrelationId(request.workspace_id.0 as u64),
+            causality_id: CausalityId(uuid_from_value(request.workspace_id.0 as u64)),
+            metadata_summary: format!(
                 "action=initialize,launch state=paused adapter={} initialized=true breakpoints={}",
                 request.adapter_type,
                 request.breakpoints.len()
             ),
-        )?;
+        })?;
         let breakpoints = request
             .breakpoints
             .into_iter()
@@ -234,15 +253,15 @@ impl DapClientRuntime {
             DebugStepKind::Out => "out",
             DebugStepKind::Back => "back",
         };
-        let audit = self.audit_record(
-            session_id.clone(),
-            DapLifecycleState::Paused,
-            adapter_type.clone(),
-            EventSequence(2),
-            CorrelationId(2),
-            CausalityId(uuid_from_value(2)),
-            format!("action=step state=paused step={label}"),
-        )?;
+        let audit = self.audit_record(DapAuditRecordInput {
+            session_id: session_id.clone(),
+            lifecycle_state: DapLifecycleState::Paused,
+            adapter_type: adapter_type.clone(),
+            event_sequence: EventSequence(2),
+            correlation_id: CorrelationId(2),
+            causality_id: CausalityId(uuid_from_value(2)),
+            metadata_summary: format!("action=step state=paused step={label}"),
+        })?;
         Ok(DapClientOutcome {
             audit,
             lifecycle_state: DapLifecycleState::Paused,
@@ -288,22 +307,16 @@ impl DapClientRuntime {
 
     fn audit_record(
         &self,
-        session_id: DebugSessionId,
-        lifecycle_state: DapLifecycleState,
-        adapter_type: String,
-        event_sequence: EventSequence,
-        correlation_id: CorrelationId,
-        causality_id: CausalityId,
-        metadata_summary: String,
+        input: DapAuditRecordInput,
     ) -> Result<DebugAdapterAuditRecord, DapClientError> {
         let audit = DebugAdapterAuditRecord {
-            session_id,
-            state: lifecycle_state.as_debug_session_state(),
-            adapter_type,
-            event_sequence,
-            correlation_id,
-            causality_id,
-            metadata_summary,
+            session_id: input.session_id,
+            state: input.lifecycle_state.as_debug_session_state(),
+            adapter_type: input.adapter_type,
+            event_sequence: input.event_sequence,
+            correlation_id: input.correlation_id,
+            causality_id: input.causality_id,
+            metadata_summary: input.metadata_summary,
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         };

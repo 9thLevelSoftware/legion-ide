@@ -16,10 +16,17 @@
 # Validation is performed by `cargo run -p xtask -- verify-kanban-backlog`
 # which checks unique ids, required fields, and that every dependency
 # resolves to an epic, feature, or task in the same file.
+#
+# Optional per-task fields: `status` (todo | in-progress | done | blocked;
+# defaults to todo) and `evidence` (path to the evidence file/command output
+# backing the status). A task marked `status = "done"` MUST carry a
+# non-empty `evidence` value; the validator rejects done-without-evidence.
+#
+# Epic mapping to v0.2 milestones: P0→M7, P1-P2→M8, P3-P4→M9, P5→M10, P6→M11, P7-P8→M12, P9→M13
 
 [meta]
 plan = ".hermes/plans/2026-06-13_173122-legion-current-to-ga-kanban-plan.md"
-milestone = "M0"
+milestone = "M8"
 
 # ---------------------------------------------------------------------------
 # EPIC P0 — Truth, taxonomy, and Kanban import
@@ -284,6 +291,8 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo run -p xtask -- no-egui-textedit"]
     acceptance = ["The CI gate fails if egui::TextEdit is reintroduced into the code canvas."]
     stop_condition = "Allowlist must remain empty for the code canvas."
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P1.F3.T2"

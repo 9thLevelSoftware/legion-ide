@@ -1,5 +1,7 @@
 # Legion IDE v8.0.0 — Rollback Policy
 
+> **STATUS: FORWARD-LOOKING TEMPLATE — NOT A CURRENT RELEASE ARTIFACT.** No v8.0.0 release exists or is scheduled. The workspace version is 0.1.0 and the product is pre-beta; see `plans/product-readiness-ledger.md` for current status. CI references in this document (e.g. `.github/workflows/ci.yml`) describe a future pipeline that is not yet configured, and some referenced companion documents (e.g. `handoff.md`, `stable-channel-approval.md`) do not exist yet.
+
 > Companion to `release-checklist.md`, `migration-policy.md`, and
 > `handoff.md` under this directory. This document governs the
 > decision authority, branch naming, telemetry steps, and maximum

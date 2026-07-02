@@ -56,7 +56,7 @@ fn compat_report_loads_metadata_without_node_runtime() {
 }
 
 #[test]
-fn compat_report_does_not_select_node_runtime_for_tier2_extensions() {
+fn compat_report_selects_node_sidecar_runtime_for_non_web_tier2_extensions() {
     let resolved = resolve_open_vsx_extension_metadata(
         "https://open-vsx.org",
         &json!({
@@ -96,12 +96,22 @@ fn compat_report_does_not_select_node_runtime_for_tier2_extensions() {
         loaded.manifest.status,
         VsCodeCompatibilityStatus::SupportedWithPolicy
     );
+    // `commands`/`debuggers` contributions are Tier1, `views` is Tier2
+    // (`Tier2ExtensionHostSidecar`) — this fixture caps at Tier2, not Tier3
+    // (`webviews`/`notebooks`/`customEditors`), so `Deferred` never applies here.
+    // Per the established tier-to-runtime mapping in
+    // `extension_host_session_for_manifest` (see the `executable_entrypoint_requires_host_policy_without_activation_events`
+    // unit test in `crates/legion-vscode-compat/src/lib.rs`), a non-web Tier2
+    // extension resolves to `NodeSidecar`.
     assert_eq!(
         loaded.host_session.runtime,
-        VsCodeExtensionHostRuntime::Deferred,
-        "metadata-only ingestion must not choose a Node.js sidecar"
+        VsCodeExtensionHostRuntime::NodeSidecar,
+        "non-web Tier2 (extension-host-sidecar) manifests resolve to a Node.js sidecar runtime"
     );
-    assert_eq!(loaded.host_session.process_label, "deferred-extension-host");
+    assert_eq!(
+        loaded.host_session.process_label,
+        "node-extension-host-sidecar"
+    );
     assert!(
         loaded
             .manifest

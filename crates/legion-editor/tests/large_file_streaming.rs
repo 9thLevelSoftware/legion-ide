@@ -21,6 +21,14 @@ fn deterministic_large_text(byte_len: usize) -> String {
 
 #[test]
 fn large_file_100mb_open_and_scroll_stays_streaming() {
+    // 100MB is far above the default full-cache byte budget
+    // (`DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES`, 5MB), so per the accepted WS-MANUAL-02
+    // product contract (see `plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md`
+    // and `crates/legion-editor/tests/large_file_scale.rs`), a buffer this size opens in
+    // `BufferMode::Degraded`/`ViewportProjectionMode::DegradedLargeFile`. Degraded mode is
+    // itself the streaming path: viewport payloads stay chunked/bounded and saves assemble
+    // the full file from chunks on request, rather than caching the whole file in memory.
+    // This test verifies that streaming behavior holds at 100MB scale.
     let mut engine = EditorEngine::new();
     let text = deterministic_large_text(LARGE_FILE_BYTES);
     let buffer = engine
@@ -49,11 +57,11 @@ fn large_file_100mb_open_and_scroll_stays_streaming() {
 
     assert_eq!(
         engine.buffer_mode(buffer).expect("buffer mode"),
-        legion_editor::BufferMode::Normal,
-        "100MB files should remain in streaming mode instead of degrading to the full-cache fallback",
+        legion_editor::BufferMode::Degraded,
+        "100MB files exceed the full-cache budget and must open in degraded (chunked/streaming) mode",
     );
-    assert_eq!(viewport.mode, ViewportProjectionMode::Normal);
-    assert!(viewport.large_file_status.is_none());
+    assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
+    assert!(viewport.large_file_status.is_some());
     assert_eq!(viewport.visible_range.start.line, scroll_line);
     assert!(!viewport.line_slices.is_empty());
     assert!(

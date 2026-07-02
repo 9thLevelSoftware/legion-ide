@@ -9,6 +9,7 @@ Run from repo root:
 ```sh
 cargo run -p xtask -- check-deps
 cargo run -p xtask -- docs-hygiene
+cargo run -p xtask -- claim-audit
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
@@ -76,7 +77,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-No GitHub Actions CI workflow is currently configured, so local developer machines must install the CLI before running the full verification suite.
+The only GitHub Actions workflow is `.github/workflows/legion-bench.yml` (weekly live-mode legion-bench, not a full CI gate), so local developer machines must install the CLI before running the full verification suite.
 
 ## Evidence naming
 

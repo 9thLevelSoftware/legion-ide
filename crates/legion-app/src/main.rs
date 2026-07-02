@@ -14,6 +14,21 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "scratch.txt".to_string());
 
     let root = env::current_dir()?;
+    match AppComposition::reap_orphaned_delegated_task_sandboxes() {
+        Ok(removed) if !removed.is_empty() => {
+            eprintln!(
+                "Reaped {} orphaned delegated-task sandbox(es):",
+                removed.len()
+            );
+            for path in &removed {
+                eprintln!("  {}", path.display());
+            }
+        }
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!("Warning: failed to reap orphaned delegated-task sandboxes: {err}");
+        }
+    }
     let mut app = AppComposition::new();
     app.open_workspace(
         root,

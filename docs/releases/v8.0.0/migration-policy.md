@@ -1,5 +1,7 @@
 # Legion IDE v8.0.0 — Migration Policy
 
+> **STATUS: FORWARD-LOOKING TEMPLATE — NOT A CURRENT RELEASE ARTIFACT.** No v8.0.0 release exists or is scheduled. The workspace version is 0.1.0 and the product is pre-beta; see `plans/product-readiness-ledger.md` for current status. CI references in this document (e.g. `.github/workflows/ci.yml`) describe a future pipeline that is not yet configured, and some referenced companion documents (e.g. `handoff.md`, `stable-channel-approval.md`) do not exist yet.
+
 > Companion to `release-checklist.md` and `rollback-policy.md` under this
 > directory. This document governs how the v8.0.0 GA cut moves user save
 > data forward from v7.x and how the server-side data shape is staged

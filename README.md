@@ -45,6 +45,7 @@ Run these before claiming code work is complete:
 ```bash
 cargo run -p xtask -- check-deps
 cargo run -p xtask -- docs-hygiene
+cargo run -p xtask -- claim-audit
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets --no-fail-fast
@@ -70,7 +71,7 @@ cargo deny --version
 
 If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
-No GitHub Actions CI workflow is currently configured. Local developer machines must install the CLI before using `scripts/run-phase-gates.*`; those local gates are the active verification source.
+A single GitHub Actions workflow (`.github/workflows/legion-bench.yml`) runs the legion-bench live-mode benchmark weekly (and on manual dispatch) across Linux, Windows, and macOS runners and uploads the report artifact. It is not a full CI gate: local developer machines must install the CLI before using `scripts/run-phase-gates.*`, and those local gates remain the active verification source for all other checks.
 
 ## CLI Proof
 

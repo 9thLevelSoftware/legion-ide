@@ -28,6 +28,7 @@ const DEFAULT_PHASE13_FINAL_GATES_PATH: &str =
     "plans/evidence/gui-productization/phase-13-final-gates.md";
 const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/phase-13-runbook.md";
 const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
+const DEFAULT_CLAIM_AUDIT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md";
 const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
@@ -473,6 +474,13 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH)]
         allowlist: String,
     },
+    /// Fail when current public docs make product claims the
+    /// product-readiness ledger does not support.
+    ClaimAudit {
+        /// Path to the product readiness ledger markdown.
+        #[arg(long, default_value = DEFAULT_CLAIM_AUDIT_LEDGER_PATH)]
+        ledger: String,
+    },
     /// Forbid egui::TextEdit in the desktop code-canvas/editor render path.
     NoEguiTextedit {
         /// Path to no-egui-textedit TOML configuration.
@@ -593,6 +601,7 @@ fn main() {
             }
         }
         Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
+        Commands::ClaimAudit { ledger } => run_claim_audit_command(&ledger),
         Commands::NoEguiTextedit { config } => run_no_egui_textedit_command(&config),
         Commands::ReleasePipeline {
             config,
@@ -670,6 +679,110 @@ fn run_docs_hygiene_command(allowlist: &str) -> i32 {
             }
             1
         }
+    }
+}
+
+fn run_claim_audit_command(ledger: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("claim audit failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+
+    let ledger_path = workspace_root.join(ledger);
+    let ledger_text = match fs::read_to_string(&ledger_path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!(
+                "claim audit failed: unable to read readiness ledger `{}`: {err}",
+                ledger_path.display()
+            );
+            return 1;
+        }
+    };
+    let ledger_rows = match xtask::claim_audit::parse_ledger_rows(&ledger_text) {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("claim audit failed: {err}");
+            return 1;
+        }
+    };
+    let all_validated = ledger_rows
+        .iter()
+        .all(|row| row.status == "Product workflow validated");
+
+    // Canonical public-doc scan set: README.md, HERMESGOAL.md, and
+    // top-level docs/*.md only. docs/releases/ (forward templates),
+    // docs/superpowers/ (plans quote forbidden phrases as code literals),
+    // and plans/evidence/ (historical) are intentionally excluded, matching
+    // how docs-hygiene allowlists archived material.
+    let mut scan_files: Vec<String> = vec!["README.md".to_string(), "HERMESGOAL.md".to_string()];
+    let docs_dir = workspace_root.join("docs");
+    if let Ok(entries) = fs::read_dir(&docs_dir) {
+        let mut docs_files: Vec<String> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| format!("docs/{name}"))
+            })
+            .collect();
+        docs_files.sort();
+        scan_files.extend(docs_files);
+    }
+
+    let mut violations: Vec<xtask::claim_audit::ClaimViolation> = Vec::new();
+    let mut readme_text = String::new();
+    for rel_path in &scan_files {
+        let path = workspace_root.join(rel_path);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!(
+                    "claim audit failed: unable to read `{}`: {err}",
+                    path.display()
+                );
+                return 1;
+            }
+        };
+        if rel_path == "README.md" {
+            readme_text = text.clone();
+        }
+        violations.extend(xtask::claim_audit::audit_text(rel_path, &text));
+    }
+
+    if !all_validated && !xtask::claim_audit::readme_caveat_present(&readme_text) {
+        violations.push(xtask::claim_audit::ClaimViolation::MissingReadmeCaveat);
+    }
+
+    if violations.is_empty() {
+        println!("claim audit passed");
+        0
+    } else {
+        eprintln!("claim audit found {} violation(s):", violations.len());
+        for violation in &violations {
+            match violation {
+                xtask::claim_audit::ClaimViolation::ForbiddenPhrase {
+                    file,
+                    line_number,
+                    phrase,
+                } => {
+                    eprintln!("{file}:{line_number}: forbidden claim phrase `{phrase}`");
+                }
+                xtask::claim_audit::ClaimViolation::MissingReadmeCaveat => {
+                    eprintln!(
+                        "README.md: missing required caveat sentence \
+                         (\"Legion is not yet a general-availability desktop product\") \
+                         while ledger rows remain below `Product workflow validated`"
+                    );
+                }
+            }
+        }
+        1
     }
 }
 
