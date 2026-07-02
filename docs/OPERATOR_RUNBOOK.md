@@ -9,6 +9,7 @@ Run from repo root:
 ```sh
 cargo run -p xtask -- check-deps
 cargo run -p xtask -- docs-hygiene
+cargo run -p xtask -- claim-audit
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
