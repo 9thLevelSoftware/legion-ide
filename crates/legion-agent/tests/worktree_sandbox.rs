@@ -5,7 +5,7 @@ use legion_protocol::{
     delegated_task_tool_permission_request,
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn initialize_copies_workspace_contents_when_git_worktree_is_unavailable() {
@@ -44,6 +44,96 @@ fn initialize_copies_workspace_contents_when_git_worktree_is_unavailable() {
     );
 
     fs::remove_dir_all(&source_root).expect("remove temp source root");
+}
+
+/// Derives the sibling `.lock` lease path for a sandbox dir, mirroring the
+/// private `lease_path_for_sandbox` convention inside `legion-agent`
+/// (`task-<run_id>.lock` next to `task-<run_id>/`), since that helper is not
+/// part of the public API.
+fn lease_path_for(sandbox_path: &Path) -> PathBuf {
+    let mut lease_path = sandbox_path.to_path_buf();
+    let mut file_name = sandbox_path
+        .file_name()
+        .expect("sandbox path has a file name")
+        .to_os_string();
+    file_name.push(".lock");
+    lease_path.set_file_name(file_name);
+    lease_path
+}
+
+#[test]
+fn initialize_holds_the_sandbox_lease_immediately_on_return() {
+    let source_root = unique_temp_dir("legion-agent-worktree-source-lease");
+    fs::write(source_root.join("README.md"), "workspace root\n").expect("write root file");
+
+    let mut orchestrator =
+        DelegatedTaskSandboxOrchestrator::with_workspace_root(&source_root, "lease-held-on-return");
+    let permission = approved_sandbox_permission("sandbox:init-lease");
+
+    orchestrator
+        .initialize(&permission)
+        .expect("initialize sandbox");
+
+    let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+    let lease_path = lease_path_for(&sandbox_path);
+    assert!(
+        lease_path.exists(),
+        "lease file should exist immediately after initialize() returns"
+    );
+
+    // The orchestrator itself must still be holding the lock: a fresh,
+    // independent handle attempting to lock the same file must fail.
+    let probe = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lease_path)
+        .expect("open lease file for probing");
+    assert!(
+        probe.try_lock().is_err(),
+        "a second handle must not be able to lock the sandbox's lease while \
+         the orchestrator still holds it"
+    );
+    drop(probe);
+
+    orchestrator.cleanup(&permission).expect("cleanup sandbox");
+    assert!(
+        !lease_path.exists(),
+        "lease file should be removed by cleanup"
+    );
+
+    fs::remove_dir_all(&source_root).expect("remove temp source root");
+}
+
+#[test]
+fn failed_initialize_leaves_no_stale_lease_file() {
+    // Force the fallback (non-worktree) path to fail by pointing
+    // `source_root` at a path that does not exist: `copy_workspace_tree`
+    // will fail to read it, causing `initialize` to return an error after a
+    // lease was already acquired. The lease file must not survive that
+    // failure.
+    let missing_source_root =
+        unique_temp_dir("legion-agent-worktree-missing-source").join("does-not-exist");
+
+    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_workspace_root(
+        &missing_source_root,
+        "failed-init-no-stale-lock",
+    );
+    let permission = approved_sandbox_permission("sandbox:init-failure");
+
+    let result = orchestrator.initialize(&permission);
+    assert!(
+        result.is_err(),
+        "initialize should fail when the workspace root does not exist"
+    );
+
+    let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+    let lease_path = lease_path_for(&sandbox_path);
+    assert!(
+        !lease_path.exists(),
+        "a failed initialize must not leave a stale lease file behind"
+    );
+
+    let _ = fs::remove_dir_all(&sandbox_path);
 }
 
 fn approved_sandbox_permission(

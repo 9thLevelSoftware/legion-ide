@@ -93,6 +93,42 @@ fn mixed_line_with_one_negated_and_one_unnegated_occurrence_flags_only_the_unneg
 }
 
 #[test]
+fn substring_negation_marker_inside_another_word_does_not_negate() {
+    // Codex counterexample: "notification" contains "not" as a literal
+    // substring, but "not" does not occur there on a word boundary (the
+    // character right after it, 'i', is alphanumeric), so it must not
+    // suppress the claim.
+    let violations = audit_text(
+        "README.md",
+        "Notification support is production-ready today",
+    );
+    assert_eq!(
+        violations.len(),
+        1,
+        "\"not\" inside \"notification\" must not be treated as a negation marker"
+    );
+    assert!(matches!(
+        violations[0],
+        ClaimViolation::ForbiddenPhrase {
+            phrase: "production-ready",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn contraction_negation_marker_still_negates() {
+    // "n't" legitimately follows a letter in a contraction ("isn't"), so it
+    // must still count as a negation marker even though its leading
+    // character is alphanumeric.
+    let violations = audit_text("README.md", "Legion isn't production-ready yet.");
+    assert!(
+        violations.is_empty(),
+        "the \"n't\" contraction marker must still negate despite following a letter"
+    );
+}
+
+#[test]
 fn ledger_rows_parse() {
     let ledger = "| Track | Gate | Acceptance Criteria | Current Status | Current Evidence |\n\
                   | --- | --- | --- | --- | --- |\n\

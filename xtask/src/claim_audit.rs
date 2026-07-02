@@ -43,11 +43,18 @@ pub struct LedgerRow {
 /// treated as negated — and therefore not flagged — only when one of the
 /// following holds for that specific occurrence:
 ///
-/// 1. A negation marker (`not`, `n't`, `never`, `until`) appears within the
-///    [`NEGATION_LOOKBEHIND_CHARS`] characters immediately preceding the
-///    phrase on the line ("Legion is **not** production-ready").
+/// 1. A negation marker (`not`, `n't`, `never`, `until`) occurs on a word
+///    boundary within the [`NEGATION_LOOKBEHIND_CHARS`] characters
+///    immediately preceding the phrase on the line ("Legion is **not**
+///    production-ready"). Word-boundary means the characters immediately
+///    before and after the marker occurrence are non-alphanumeric (or the
+///    marker sits at a window/string edge) — this prevents `"not"` from
+///    matching inside `"notification"`. `n't` is special-cased to require
+///    only a *trailing* boundary, since it legitimately follows letters in
+///    contractions ("isn't", "doesn't").
 /// 2. The phrase is immediately followed (allowing whitespace) by one of
-///    [`NEGATION_FOLLOWUPS`] ("production-ready **is not** reached").
+///    [`NEGATION_FOLLOWUPS`] ("production-ready **is not** reached" — "is
+///    not" is a strict prefix, so this also covers "is not reached").
 ///
 /// This is deliberately phrase-local rather than line-global: a negation
 /// marker anywhere else on the line must never suppress a genuine claim
@@ -70,7 +77,7 @@ fn phrase_is_negated(lower_line: &str, phrase_start: usize, phrase_end: usize) -
     let preceding = &lower_line[lookbehind_start..phrase_start];
     if NEGATION_MARKERS
         .iter()
-        .any(|marker| preceding.contains(marker))
+        .any(|marker| marker_occurs_on_word_boundary(preceding, marker))
     {
         return true;
     }
@@ -79,6 +86,39 @@ fn phrase_is_negated(lower_line: &str, phrase_start: usize, phrase_end: usize) -
     NEGATION_FOLLOWUPS
         .iter()
         .any(|followup| following.starts_with(followup))
+}
+
+/// Returns `true` if `marker` occurs anywhere in `text` such that it sits on
+/// a word boundary: the character immediately before and the character
+/// immediately after the occurrence are both either absent (window edge) or
+/// non-alphanumeric. This rejects e.g. `"not"` inside `"notification"`,
+/// where the trailing boundary check fails (`i` is alphanumeric).
+///
+/// `n't` is special-cased to require only the trailing boundary, since as a
+/// contraction suffix it always legitimately follows a letter ("isn't",
+/// "doesn't", "won't") — requiring a leading boundary too would make it
+/// unmatchable in practice.
+fn marker_occurs_on_word_boundary(text: &str, marker: &str) -> bool {
+    let requires_leading_boundary = marker != "n't";
+    let mut search_from = 0;
+    while let Some(relative_start) = text[search_from..].find(marker) {
+        let start = search_from + relative_start;
+        let end = start + marker.len();
+        let leading_ok = !requires_leading_boundary
+            || text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric());
+        let trailing_ok = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if leading_ok && trailing_ok {
+            return true;
+        }
+        search_from = end;
+    }
+    false
 }
 
 pub fn audit_text(file: &str, text: &str) -> Vec<ClaimViolation> {

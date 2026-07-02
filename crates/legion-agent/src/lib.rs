@@ -274,14 +274,48 @@ impl DelegatedTaskSandboxOrchestrator {
     }
 
     /// Initializes the sandbox using `git worktree add` with fallback to copy-based isolation.
+    ///
+    /// Ordering is deliberate and load-bearing: the lease is acquired
+    /// *before* the sandbox directory is created (published), not after. A
+    /// concurrent `reap_orphaned_sandboxes` call only treats a `task-<id>`
+    /// dir as protected if its sibling `.lock` is present and held; if the
+    /// dir were published first, a reaper scan landing in the gap between
+    /// dir creation and lease acquisition would see a lease-less directory
+    /// and could delete it mid-initialization. Acquiring the lease first
+    /// closes that window: by the time the sandbox dir exists at all, its
+    /// protection (if acquired) is already in place.
     pub fn initialize(
         &mut self,
         permission: &DelegatedTaskToolPermissionRequest,
     ) -> Result<(), std::io::Error> {
         validate_sandbox_permission(permission, "initialize")?;
+        // Create the delegated-tasks root (the sandbox dir's parent) first —
+        // this is shared, pre-existing infrastructure, not the sandbox
+        // itself, so publishing it early is not a TOCTOU concern.
         if let Some(parent) = self.sandbox_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        // Acquire a best-effort exclusive lease on the sandbox's sibling
+        // `.lock` file BEFORE the sandbox directory is created, so a
+        // concurrent reaper can never observe a published sandbox without
+        // its protection already in place. Lease acquisition is not a
+        // correctness gate: if it fails for any reason (permissions,
+        // unsupported filesystem, contention on an extremely unlikely stale
+        // lock), the sandbox still initializes successfully without
+        // protection — but the directory is only created after this
+        // attempt, regardless of whether it succeeded.
+        let lease_path = self.lease_path();
+        let acquired_lease = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease_path)
+        {
+            Ok(lock_file) if lock_file.try_lock().is_ok() => Some(Arc::new(lock_file)),
+            _ => None,
+        };
 
         // Try git worktree first. Pass the path as an OsStr so a non-UTF-8
         // PathBuf cannot panic the process.
@@ -296,38 +330,38 @@ impl DelegatedTaskSandboxOrchestrator {
             .arg("HEAD")
             .output();
 
-        match output {
+        let publish_result: Result<(), std::io::Error> = match output {
             Ok(output) if output.status.success() => {
                 self.is_worktree = true;
+                Ok(())
             }
             _ => {
                 self.is_worktree = false;
-                std::fs::create_dir_all(&self.sandbox_path)?;
-                if let Some(source_root) = &self.source_root {
-                    copy_workspace_tree(source_root, &self.sandbox_path)?;
-                }
+                std::fs::create_dir_all(&self.sandbox_path).and_then(|()| {
+                    if let Some(source_root) = &self.source_root {
+                        copy_workspace_tree(source_root, &self.sandbox_path)
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
+        };
+
+        match publish_result {
+            Ok(()) => {
+                self.lease = acquired_lease;
+                Ok(())
+            }
+            Err(error) => {
+                // Sandbox publication failed after a lease was acquired:
+                // best-effort release the lock and remove the now-orphaned
+                // lease file so it is not mistaken for a live lease by a
+                // later reap pass (there is no sandbox dir left to protect).
+                drop(acquired_lease);
+                let _ = std::fs::remove_file(&lease_path);
+                Err(error)
             }
         }
-
-        // Acquire a best-effort exclusive lease on the sandbox's sibling
-        // `.lock` file so a cross-process `reap_orphaned_sandboxes` call
-        // can distinguish this live sandbox from an abandoned one. Lease
-        // acquisition is not a correctness gate: if it fails for any
-        // reason (permissions, unsupported filesystem, contention on an
-        // extremely unlikely stale lock), the sandbox still initializes
-        // successfully without protection.
-        if let Ok(lock_file) = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.lease_path())
-            && lock_file.try_lock().is_ok()
-        {
-            self.lease = Some(Arc::new(lock_file));
-        }
-
-        Ok(())
     }
 
     /// Cleans up the sandbox.
@@ -417,6 +451,13 @@ fn lease_path_for_sandbox(sandbox_path: &Path) -> PathBuf {
 /// main loop below removes each reaped sandbox's `.lock` file itself
 /// (while still holding its lease) before `remove_stale_lease_files` runs
 /// afterward, so the two passes never double-process the same lock file.
+///
+/// Publish-side TOCTOU note: this reaper's fail-closed check only protects
+/// against deleting a sandbox once it is published. The other half of the
+/// guarantee lives in `DelegatedTaskSandboxOrchestrator::initialize`, which
+/// acquires the lease BEFORE creating the sandbox directory — so a reaper
+/// scan can never observe a freshly-published `task-<id>` dir that does not
+/// yet have its lease in place.
 pub fn reap_orphaned_sandboxes(
     delegated_tasks_root: &Path,
     active_run_ids: &[&str],
