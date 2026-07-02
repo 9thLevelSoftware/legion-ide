@@ -13081,8 +13081,12 @@ impl AppComposition {
     ///
     /// Uses the default sandbox root (`target/delegated-tasks`, relative to
     /// the current working directory).
-    pub fn reap_orphaned_delegated_task_sandboxes(&self) -> std::io::Result<Vec<PathBuf>> {
-        self.reap_orphaned_delegated_task_sandboxes_at(Path::new("target/delegated-tasks"))
+    ///
+    /// An associated function (not a method): it uses no instance state, and
+    /// callers are expected to invoke it before constructing an
+    /// `AppComposition` at all.
+    pub fn reap_orphaned_delegated_task_sandboxes() -> std::io::Result<Vec<PathBuf>> {
+        Self::reap_orphaned_delegated_task_sandboxes_at(Path::new("target/delegated-tasks"))
     }
 
     /// Same as [`Self::reap_orphaned_delegated_task_sandboxes`], but against an
@@ -13097,7 +13101,6 @@ impl AppComposition {
     /// dependency, so this mirrors the same directory-walk logic locally
     /// rather than pulling that crate in just for this helper.
     pub fn reap_orphaned_delegated_task_sandboxes_at(
-        &self,
         delegated_tasks_root: &Path,
     ) -> std::io::Result<Vec<PathBuf>> {
         #[cfg(feature = "ai")]

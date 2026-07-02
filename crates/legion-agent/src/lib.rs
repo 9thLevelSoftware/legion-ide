@@ -339,7 +339,7 @@ impl DelegatedTaskSandboxOrchestrator {
 /// paths that were removed. A missing root is a successful no-op.
 pub fn reap_orphaned_sandboxes(
     delegated_tasks_root: &Path,
-    active_run_ids: &[String],
+    active_run_ids: &[&str],
 ) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut removed = Vec::new();
     if !delegated_tasks_root.exists() {
@@ -355,7 +355,7 @@ pub fn reap_orphaned_sandboxes(
         let Some(run_id) = name.strip_prefix("task-") else {
             continue;
         };
-        if active_run_ids.iter().any(|active| active == run_id) {
+        if active_run_ids.contains(&run_id) {
             continue;
         }
         let path = entry.path();

@@ -529,9 +529,7 @@ fn reap_orphaned_delegated_task_sandboxes_removes_preseeded_orphan_and_reports_i
     .expect("marker file should be written");
     fs::create_dir_all(reap_root.join("not-a-task-dir")).expect("unrelated dir should be created");
 
-    let app = AppComposition::new();
-    let removed = app
-        .reap_orphaned_delegated_task_sandboxes_at(&reap_root)
+    let removed = AppComposition::reap_orphaned_delegated_task_sandboxes_at(&reap_root)
         .expect("reap should succeed");
 
     assert_eq!(removed.len(), 1);

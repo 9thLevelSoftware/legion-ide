@@ -2142,8 +2142,7 @@ fn run_native(config: DesktopLaunchConfig) -> Result<()> {
 /// are logged and otherwise ignored — a reap failure must never block desktop
 /// startup.
 fn reap_orphaned_delegated_task_sandboxes_at_startup() {
-    let app = AppComposition::new();
-    match app.reap_orphaned_delegated_task_sandboxes() {
+    match AppComposition::reap_orphaned_delegated_task_sandboxes() {
         Ok(removed) if !removed.is_empty() => {
             eprintln!(
                 "Reaped {} orphaned delegated-task sandbox(es):",
