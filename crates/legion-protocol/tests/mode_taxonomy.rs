@@ -4,9 +4,7 @@
 //! runtime-surface policy, and docs anchor. If a new mode is added
 //! without updating the canonical taxonomy, these tests fail closed.
 
-use legion_protocol::{
-    CANONICAL_PRODUCT_MODES, CanonicalProductMode, ProductMode, ProductRuntimeSurface,
-};
+use legion_protocol::{CANONICAL_PRODUCT_MODES, ProductMode, ProductRuntimeSurface};
 
 #[test]
 fn every_product_mode_has_a_non_empty_label() {

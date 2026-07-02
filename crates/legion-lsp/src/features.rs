@@ -29,10 +29,7 @@
 
 use serde_json::{Value, json};
 
-use legion_protocol::{
-    BufferId, BufferVersion, CanonicalPath, FileId, LanguageId, SnapshotId, TextCoordinate,
-    WorkspaceId,
-};
+use legion_protocol::TextCoordinate;
 
 /// Build a JSON-RPC `textDocument/completion` request.
 pub fn completion_request(id: u64, text_document_uri: &str, position: &TextCoordinate) -> Value {
