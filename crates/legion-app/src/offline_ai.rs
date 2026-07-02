@@ -248,6 +248,13 @@ impl DelegatedTaskSandboxOrchestrator {
     /// and could delete it mid-initialization. Acquiring the lease first
     /// closes that window: by the time the sandbox dir exists at all, its
     /// protection (if acquired) is already in place.
+    ///
+    /// Lease-unlink ownership rule applies here too: on publication
+    /// failure, the now-orphaned lease file is removed while
+    /// `acquired_lease` is still held, then the handle is dropped — never
+    /// the reverse. See the ownership-rule note on `reap_orphaned_sandboxes`
+    /// for why a lease path must only ever be unlinked while its lock is
+    /// held.
     pub fn initialize(
         &mut self,
         permission: &DelegatedTaskToolPermissionRequest,
@@ -308,11 +315,25 @@ impl DelegatedTaskSandboxOrchestrator {
             }
             Err(error) => {
                 // Sandbox publication failed after a lease was acquired:
-                // best-effort release the lock and remove the now-orphaned
-                // lease file so it is not mistaken for a live lease by a
-                // later reap pass (there is no sandbox dir left to protect).
-                drop(acquired_lease);
+                // best-effort remove the now-orphaned lease file so it is
+                // not mistaken for a live lease by a later reap pass (there
+                // is no sandbox dir left to protect). This follows the same
+                // hold-through-remove ownership rule as the reaper: a lease
+                // path is only ever unlinked while its lock is still held,
+                // so `remove_file` runs BEFORE `acquired_lease` is dropped,
+                // not after. On Windows, std opens files with
+                // FILE_SHARE_DELETE, so `remove_file` on a path we hold an
+                // open (locked) handle to succeeds by marking the file
+                // delete-on-close; the directory entry disappears once
+                // `acquired_lease` is dropped below. On Unix, unlinking a
+                // file while `flock`ed is unconditionally fine. Safe here
+                // for an additional, simpler reason too — no sandbox
+                // directory was ever published, so there is nothing another
+                // process could be protecting — but following the same
+                // sequencing everywhere keeps the invariant uniform rather
+                // than relying on a case-by-case justification.
                 let _ = std::fs::remove_file(&lease_path);
+                drop(acquired_lease);
                 Err(error)
             }
         }
@@ -421,17 +442,27 @@ fn lease_path_for_sandbox(sandbox_path: &Path) -> PathBuf {
 /// scan can never observe a freshly-published `task-<id>` dir that does not
 /// yet have its lease in place.
 ///
-/// Lease-unlink ownership rule: an orchestrator's `cleanup()` releases its
-/// lease handle but deliberately never removes the `.lock` file itself —
-/// only this reaper does, and only while holding the lock it just
-/// (re-)acquired (both in the main loop above and in
-/// `remove_stale_lease_files` below). This is intentional: if `cleanup`
-/// dropped the lock and then unlinked the file, a restarted same-run-id
-/// lane could acquire the now-unlocked lease in the gap between the drop
-/// and the unlink, and `cleanup`'s removal would then delete that new
-/// owner's lock file instead of the stale one it meant to clean up.
-/// Removal is race-free only when it happens while the remover still holds
-/// the lock, which only the reaper does.
+/// Lease-unlink ownership rule (uniform across this file): a lease path is
+/// only ever unlinked while its lock is still held — never drop-then-unlink.
+/// Dropping the lock first and unlinking after leaves a window in which a
+/// restarted same-run-id lane can acquire the now-unlocked lease before the
+/// unlink runs, so the unlink would then delete that NEW owner's lock file
+/// instead of the stale one it meant to remove. Every removal site in this
+/// module follows hold-through-remove-then-drop:
+/// - This reaper's main loop above and `remove_stale_lease_files` below
+///   both remove a lock file only while still holding the lock they just
+///   (re-)acquired for that purpose.
+/// - `DelegatedTaskSandboxOrchestrator::initialize`'s publish-failure path
+///   removes the now-orphaned lease file while still holding
+///   `acquired_lease`, then drops it.
+/// - `DelegatedTaskSandboxOrchestrator::cleanup`, by contrast, never
+///   unlinks the lease file at all — it only releases the lock. Lock-file
+///   removal for a *successfully cleaned-up* sandbox is exclusively this
+///   reaper's job (a leftover unlocked lock file is swept up by the next
+///   `reap_orphaned_sandboxes` call), since `cleanup` has no way to hold
+///   the lock through a remove without reintroducing the same race for
+///   *its own* case (the sandbox may be reused by a restarted same-run-id
+///   lane immediately after cleanup, before any reap runs).
 pub fn reap_orphaned_sandboxes(
     delegated_tasks_root: &Path,
     active_run_ids: &[&str],
