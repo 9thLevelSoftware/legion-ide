@@ -404,6 +404,19 @@ fn lease_path_for_sandbox(sandbox_path: &Path) -> PathBuf {
 /// safe even when another process instance has live sandboxes under the
 /// same relative root. Stale `.lock` files whose sandbox directory no
 /// longer exists are removed as housekeeping when they can be locked.
+///
+/// TOCTOU note: `acquire_reapable_lease` returns the still-locked file
+/// handle rather than a bool, and every caller here holds that handle for
+/// the entire duration of the delete (`remove_dir_all`/`remove_file`) before
+/// dropping it. This closes the window between "lease looked reapable" and
+/// "sandbox actually deleted" during which a restarted orchestrator could
+/// otherwise re-acquire the lease and start using a sandbox the reaper is
+/// mid-delete on.
+///
+/// Ordering guarantee: within a single `reap_orphaned_sandboxes` call, the
+/// main loop below removes each reaped sandbox's `.lock` file itself
+/// (while still holding its lease) before `remove_stale_lease_files` runs
+/// afterward, so the two passes never double-process the same lock file.
 pub fn reap_orphaned_sandboxes(
     delegated_tasks_root: &Path,
     active_run_ids: &[&str],
@@ -427,10 +440,10 @@ pub fn reap_orphaned_sandboxes(
         }
         let path = entry.path();
         let lease_path = lease_path_for_sandbox(&path);
-        if !sandbox_lease_is_reapable(&lease_path) {
+        let Some(held_lease) = acquire_reapable_lease(&lease_path) else {
             // Owner process is alive and holding the lease: skip, do not delete.
             continue;
-        }
+        };
         let worktree_removed = Command::new("git")
             .arg("worktree")
             .arg("remove")
@@ -442,34 +455,57 @@ pub fn reap_orphaned_sandboxes(
         if !worktree_removed {
             std::fs::remove_dir_all(&path)?;
         }
+        // Remove the lock file while still holding `held_lease`. On
+        // Windows, std opens files with FILE_SHARE_DELETE, so calling
+        // `remove_file` on a path we hold an open (locked) handle to
+        // succeeds by marking the file delete-on-close; the directory
+        // entry disappears once `held_lease` drops below. On Unix,
+        // unlinking a file while `flock`ed is unconditionally fine.
         let _ = std::fs::remove_file(&lease_path);
+        drop(held_lease);
         removed.push(path);
     }
     remove_stale_lease_files(delegated_tasks_root)?;
     Ok(removed)
 }
 
-/// Returns `true` when a sandbox's sibling `.lock` file does not currently
-/// protect a live owner: either the file does not exist (legacy sandbox, or
-/// no lease was ever acquired), or it exists and this call can acquire an
-/// exclusive lock on it (the previous owner released it or is gone). Any
-/// `try_lock` error is treated as "still held elsewhere" and returns
-/// `false`, fail-closed toward not deleting the sandbox.
-fn sandbox_lease_is_reapable(lease_path: &Path) -> bool {
+/// A lease held for the duration of a reap delete. `Locked` means this call
+/// acquired and now holds the file's exclusive lock; `Absent` means there
+/// was no lease file to lock in the first place (legacy sandbox, or no
+/// lease was ever acquired). Either way the sandbox is safe to reap. Kept
+/// alive (not `_`-discarded) by callers until after the delete completes:
+/// the `File` in `Locked` is a pure RAII guard, held only for its `Drop`
+/// side effect (releasing the OS lock), and is never read otherwise.
+enum ReapableLease {
+    Locked(#[allow(dead_code)] std::fs::File),
+    Absent,
+}
+
+/// Attempts to acquire the lease for a sandbox slated for reaping, and
+/// returns the still-locked handle on success so the caller can hold it
+/// through the delete (closing the TOCTOU window between "reapable" and
+/// "reaped"). Returns `None` when the lease is currently held elsewhere
+/// (owner alive: `try_lock` fails) — fail-closed toward NOT deleting.
+fn acquire_reapable_lease(lease_path: &Path) -> Option<ReapableLease> {
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(lease_path)
     {
-        Ok(lock_file) => lock_file.try_lock().is_ok(),
-        Err(_) => true,
+        Ok(lock_file) => match lock_file.try_lock() {
+            Ok(()) => Some(ReapableLease::Locked(lock_file)),
+            Err(_) => None,
+        },
+        Err(_) => Some(ReapableLease::Absent),
     }
 }
 
 /// Housekeeping: removes `task-<id>.lock` files whose corresponding
 /// `task-<id>` sandbox directory no longer exists, when the lock can be
 /// acquired (i.e. is not held by a live process). This can happen if a
-/// sandbox directory was removed by means other than `cleanup`/`reap`.
+/// sandbox directory was removed by means other than `cleanup`/`reap`. Holds
+/// the acquired lease through the `remove_file` call for the same TOCTOU
+/// reasons as the main reap loop above.
 fn remove_stale_lease_files(delegated_tasks_root: &Path) -> Result<(), std::io::Error> {
     for entry in std::fs::read_dir(delegated_tasks_root)? {
         let entry = entry?;
@@ -489,8 +525,9 @@ fn remove_stale_lease_files(delegated_tasks_root: &Path) -> Result<(), std::io::
         if delegated_tasks_root.join(stem).exists() {
             continue;
         }
-        if sandbox_lease_is_reapable(&path) {
+        if let Some(held_lease) = acquire_reapable_lease(&path) {
             let _ = std::fs::remove_file(&path);
+            drop(held_lease);
         }
     }
     Ok(())

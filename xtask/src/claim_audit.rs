@@ -17,8 +17,11 @@ const NEGATION_MARKERS: [&str; 4] = ["not", "n't", "never", "until"];
 /// a real violation.
 const NEGATION_LOOKBEHIND_CHARS: usize = 30;
 /// Phrases immediately following a forbidden-phrase match (after optional
-/// whitespace) that negate it, e.g. "production-ready is not reached".
-const NEGATION_FOLLOWUPS: [&str; 3] = ["is not", "has not", "is not reached"];
+/// whitespace) that negate it, e.g. "production-ready is not reached". Note
+/// "is not reached" is intentionally omitted: it is a strict superstring of
+/// "is not", which already matches via `starts_with` and therefore covers
+/// it.
+const NEGATION_FOLLOWUPS: [&str; 2] = ["is not", "has not"];
 
 #[derive(Debug)]
 pub enum ClaimViolation {
