@@ -20,6 +20,25 @@ fn negated_claim_is_allowed() {
 }
 
 #[test]
+fn unrelated_negation_elsewhere_on_the_line_does_not_suppress_a_real_claim() {
+    // Codex counterexample: a `not` later in the line (governing a
+    // different clause) must not blanket-suppress a genuine claim earlier
+    // in the same line.
+    let violations = audit_text(
+        "README.md",
+        "Legion is generally available, but auto-update is not validated.",
+    );
+    assert_eq!(violations.len(), 1);
+    assert!(matches!(
+        violations[0],
+        ClaimViolation::ForbiddenPhrase {
+            phrase: "generally available",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn ledger_rows_parse() {
     let ledger = "| Track | Gate | Acceptance Criteria | Current Status | Current Evidence |\n\
                   | --- | --- | --- | --- | --- |\n\
