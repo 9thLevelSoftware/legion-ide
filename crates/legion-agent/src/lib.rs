@@ -24,7 +24,7 @@ use legion_protocol::{
     AssistedAiContractError, AssistedAiEditProposalOutput, AssistedAiOperationClass,
     AssistedAiProposalTargetIntent, AssistedAiProviderClass, AssistedAiProviderRouteRequest,
     AssistedAiTrustProjectionReference, CancellationTokenId, CanonicalPath, CapabilityId,
-    CausalityId, CorrelationId, DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionProfile,
+    CausalityId, CorrelationId, DelegatedTaskToolPermissionProfile,
     DelegatedTaskToolPermissionRequest, EventSequence, FileFingerprint, LegionEvidenceKind,
     LegionEvidencePrivacyScope, LegionEvidenceRecord, LegionEvidenceSource, LegionModelCapability,
     LegionProviderLocalityPreference, LegionProviderPrivacyPolicy, LegionProviderRouteHealth,
