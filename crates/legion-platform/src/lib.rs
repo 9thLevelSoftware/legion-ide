@@ -19,6 +19,9 @@ use std::{
 #[cfg(windows)]
 use std::sync::Arc;
 
+/// Windows ConPTY parity metadata contracts.
+pub mod windows;
+
 use legion_protocol::{CanonicalPath, EventSequence, WatcherEvent, WatcherEventKind, WorkspaceId};
 use thiserror::Error;
 
@@ -973,8 +976,8 @@ impl FileSystemService for NativeFileSystem {
             .map_err(|err| PlatformError::from_io_error("list directory", path, err))?;
         let mut entries = Vec::new();
         for entry in read_dir {
-            let entry = entry
-                .map_err(|err| PlatformError::from_io_error("list directory", path, err))?;
+            let entry =
+                entry.map_err(|err| PlatformError::from_io_error("list directory", path, err))?;
             entries.push(entry.path());
         }
         entries.sort();
@@ -1246,19 +1249,21 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
 
 #[cfg(windows)]
 fn spawn_windows_conpty(request: &PtyRequest) -> Result<WindowsPtySessionHandle, PlatformError> {
-    use std::mem::{size_of, zeroed};
-    use std::ptr;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Console::{COORD, CreatePseudoConsole, HPCON, ResizePseudoConsole};
-    use windows::Win32::System::Pipes::CreatePipe;
-    use windows::Win32::System::Threading::{
+    use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use ::windows::Win32::System::Console::{
+        COORD, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+    };
+    use ::windows::Win32::System::Pipes::CreatePipe;
+    use ::windows::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
         InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
         STARTUPINFOEXW, UpdateProcThreadAttribute,
     };
-    use windows::core::{PCWSTR, PWSTR};
+    use ::windows::core::{PCWSTR, PWSTR};
+    use std::mem::{size_of, zeroed};
+    use std::ptr;
 
     let mut input_read = HANDLE::default();
     let mut input_write = HANDLE::default();
@@ -1385,8 +1390,8 @@ fn spawn_windows_conpty(request: &PtyRequest) -> Result<WindowsPtySessionHandle,
 #[cfg(windows)]
 fn spawn_windows_output_reader(output_read: usize, output: Arc<Mutex<Vec<u8>>>) {
     std::thread::spawn(move || {
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows::Win32::Storage::FileSystem::ReadFile;
+        use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use ::windows::Win32::Storage::FileSystem::ReadFile;
         let handle = HANDLE(output_read as *mut core::ffi::c_void);
         let mut buffer = [0u8; 4096];
         loop {
@@ -1471,8 +1476,8 @@ fn write_windows_conpty_input(
     handle: &WindowsPtySessionHandle,
     bytes: &[u8],
 ) -> Result<(), PlatformError> {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::WriteFile;
+    use ::windows::Win32::Foundation::HANDLE;
+    use ::windows::Win32::Storage::FileSystem::WriteFile;
 
     let mut offset = 0usize;
     while offset < bytes.len() {
@@ -1502,8 +1507,8 @@ fn write_windows_conpty_input(
 fn windows_session_exited(
     handle: &WindowsPtySessionHandle,
 ) -> Result<(bool, Option<i32>), PlatformError> {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::Threading::GetExitCodeProcess;
+    use ::windows::Win32::Foundation::HANDLE;
+    use ::windows::Win32::System::Threading::GetExitCodeProcess;
     let mut exit_code = 0u32;
     unsafe {
         GetExitCodeProcess(
@@ -1523,9 +1528,9 @@ fn windows_session_exited(
 
 #[cfg(windows)]
 fn close_windows_session(handle: WindowsPtySessionHandle, terminate: bool) {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Console::{ClosePseudoConsole, HPCON};
-    use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+    use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use ::windows::Win32::System::Console::{ClosePseudoConsole, HPCON};
+    use ::windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
     unsafe {
         let process = HANDLE(handle.process as *mut core::ffi::c_void);
         if terminate {
@@ -1549,11 +1554,11 @@ fn close_removed_pty_session(handle: NativePtySessionHandle, _terminate: bool) {
 
 #[cfg(windows)]
 fn close_windows_conpty_handles(
-    conpty: Option<windows::Win32::System::Console::HPCON>,
-    handles: &[windows::Win32::Foundation::HANDLE],
+    conpty: Option<::windows::Win32::System::Console::HPCON>,
+    handles: &[::windows::Win32::Foundation::HANDLE],
 ) {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Console::ClosePseudoConsole;
+    use ::windows::Win32::Foundation::CloseHandle;
+    use ::windows::Win32::System::Console::ClosePseudoConsole;
     unsafe {
         if let Some(conpty) = conpty {
             ClosePseudoConsole(conpty);
@@ -1813,7 +1818,7 @@ impl PtyService for NativePtyService {
             NativePtySessionHandle::Unix { master, .. } => resize_unix_pty(master, cols, rows),
             #[cfg(windows)]
             NativePtySessionHandle::Windows(handle) => {
-                use windows::Win32::System::Console::{COORD, HPCON, ResizePseudoConsole};
+                use ::windows::Win32::System::Console::{COORD, HPCON, ResizePseudoConsole};
                 unsafe {
                     ResizePseudoConsole(
                         HPCON(handle.conpty as isize),
@@ -2346,11 +2351,7 @@ mod tests {
         #[cfg(windows)]
         let (command, args) = (
             "ping".to_string(),
-            vec![
-                "-n".to_string(),
-                "10".to_string(),
-                "127.0.0.1".to_string(),
-            ],
+            vec!["-n".to_string(), "10".to_string(), "127.0.0.1".to_string()],
         );
         #[cfg(not(windows))]
         let (command, args) = (

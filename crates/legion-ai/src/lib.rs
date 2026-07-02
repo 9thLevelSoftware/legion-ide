@@ -2,8 +2,14 @@
 
 #![warn(missing_docs)]
 
+/// Advisory model-assisted risk classifier outputs.
+pub mod classifier;
+/// Context manifest assembly helpers.
+pub mod manifest;
 pub mod redaction;
 pub mod streaming;
+
+pub use manifest::assemble_context_manifest;
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
@@ -1226,9 +1232,7 @@ mod tests {
         let mut request = route_request(AssistedAiProviderClass::LocalLoopback);
         request.schema_version = 2;
 
-        let response = router
-            .route_completion(request)
-            .expect("route completes");
+        let response = router.route_completion(request).expect("route completes");
 
         assert_eq!(response.schema_version, 2);
         assert_eq!(response.route_decision.schema_version, 2);

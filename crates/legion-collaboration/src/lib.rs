@@ -158,7 +158,10 @@ impl CollaborationSessionRuntime {
                 });
             }
             let participant_id = participant.participant_id;
-            if participant_map.insert(participant_id, participant).is_some() {
+            if participant_map
+                .insert(participant_id, participant)
+                .is_some()
+            {
                 return Err(CollaborationRuntimeError::InvalidParticipant {
                     reason: "duplicate participant id in session roster".to_string(),
                 });

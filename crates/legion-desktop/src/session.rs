@@ -116,9 +116,7 @@ fn validate_record(record: &WorkspaceSessionRecord) -> Result<(), DesktopSession
 /// single field that can legitimately carry an opaque embedded JSON blob)
 /// avoids false positives where benign metadata such as a `session_id`, file
 /// title, or panel label happens to contain a marker-like substring.
-fn reject_raw_source_markers(
-    record: &WorkspaceSessionRecord,
-) -> Result<(), DesktopSessionError> {
+fn reject_raw_source_markers(record: &WorkspaceSessionRecord) -> Result<(), DesktopSessionError> {
     let Some(memory_snapshot) = record.memory_snapshot_json.as_deref() else {
         return Ok(());
     };

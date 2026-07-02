@@ -2,18 +2,35 @@
 
 #![warn(missing_docs)]
 
+/// Parsed communication log lines for agent workflows.
+pub mod comm;
+/// Approved-plan DAG helpers for Legion workflow coordination.
+pub mod dag;
+/// Merge-readiness reports with verification-evidence citations.
+pub mod merge_readiness;
+/// Editable plan construction helpers for agent workflows.
+pub mod plan;
+/// Task scheduling and lane management.
+pub mod scheduler;
+/// Scope enforcement for delegated task tool calls.
+pub mod scope;
+/// Tool definitions and re-exports.
+pub mod tools;
+
+pub use scope::{tool_call_feedback_for_scope_denial, validate_delegated_task_tool_call};
+
 use legion_protocol::{
     AgentReplayManifest, AgentRunId, AgentRunState, AgentStateTransitionRecord,
     AssistedAiContractError, AssistedAiEditProposalOutput, AssistedAiOperationClass,
     AssistedAiProposalTargetIntent, AssistedAiProviderClass, AssistedAiProviderRouteRequest,
     AssistedAiTrustProjectionReference, CancellationTokenId, CanonicalPath, CapabilityId,
-    CausalityId, CorrelationId, DelegatedTaskToolPermissionProfile,
+    CausalityId, CorrelationId, DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionProfile,
     DelegatedTaskToolPermissionRequest, EventSequence, FileFingerprint, LegionEvidenceKind,
     LegionEvidencePrivacyScope, LegionEvidenceRecord, LegionEvidenceSource, LegionModelCapability,
     LegionProviderLocalityPreference, LegionProviderPrivacyPolicy, LegionProviderRouteHealth,
     LegionProviderRouteMetadata, LegionTaskFileScope, LegionTaskOutputContract, LegionTaskPacket,
-    LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan, LegionWorkerResult,
-    LegionWorkerResultKind, LegionWorkflowConflict, LegionWorkflowConflictId,
+    LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan, LegionToolKind,
+    LegionWorkerResult, LegionWorkerResultKind, LegionWorkflowConflict, LegionWorkflowConflictId,
     LegionWorkflowConflictKind, LegionWorkflowConflictState, LegionWorkflowDependencyState,
     LegionWorkflowMergeReadiness, LegionWorkflowModelBackend, LegionWorkflowSession,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
@@ -65,6 +82,16 @@ pub enum AgentError {
     /// Legion workflow dependency graph contains a cycle.
     #[error("legion workflow dependency cycle detected")]
     LegionWorkflowDependencyCycle,
+    /// Delegated task tool call was denied by scope policy.
+    #[error("delegated task scope denied: {tool:?} ({reason})")]
+    DelegatedTaskScopeDenied {
+        /// Tool that was denied.
+        tool: LegionToolKind,
+        /// Target path that was denied, if any.
+        target_path: Option<String>,
+        /// Reason for denial.
+        reason: String,
+    },
 }
 
 /// Mutation-safe output produced by the agent state machine.
@@ -201,6 +228,7 @@ fn legal_transition(from: AgentRunState, to: AgentRunState) -> bool {
 #[derive(Debug, Clone)]
 pub struct DelegatedTaskSandboxOrchestrator {
     sandbox_path: PathBuf,
+    source_root: Option<PathBuf>,
     is_worktree: bool,
 }
 
@@ -210,6 +238,17 @@ impl DelegatedTaskSandboxOrchestrator {
         let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{}", run_id));
         Self {
             sandbox_path,
+            source_root: None,
+            is_worktree: false,
+        }
+    }
+
+    /// Creates a new orchestrator that isolates a specific workspace root.
+    pub fn with_workspace_root(source_root: &Path, run_id: &str) -> Self {
+        let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{}", run_id));
+        Self {
+            sandbox_path,
+            source_root: Some(source_root.to_path_buf()),
             is_worktree: false,
         }
     }
@@ -231,7 +270,11 @@ impl DelegatedTaskSandboxOrchestrator {
 
         // Try git worktree first. Pass the path as an OsStr so a non-UTF-8
         // PathBuf cannot panic the process.
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        if let Some(source_root) = &self.source_root {
+            command.arg("-C").arg(source_root);
+        }
+        let output = command
             .arg("worktree")
             .arg("add")
             .arg(&self.sandbox_path)
@@ -246,6 +289,9 @@ impl DelegatedTaskSandboxOrchestrator {
             _ => {
                 self.is_worktree = false;
                 std::fs::create_dir_all(&self.sandbox_path)?;
+                if let Some(source_root) = &self.source_root {
+                    copy_workspace_tree(source_root, &self.sandbox_path)?;
+                }
                 Ok(())
             }
         }
@@ -279,6 +325,28 @@ impl DelegatedTaskSandboxOrchestrator {
         }
         Ok(())
     }
+}
+
+fn copy_workspace_tree(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path == destination {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&destination_path)?;
+            copy_workspace_tree(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_sandbox_permission(
@@ -456,11 +524,9 @@ impl DelegatedTaskProposalGenerator {
             .components()
             .map(|component| {
                 component.as_os_str().to_str().ok_or_else(|| {
-                    AgentError::InvalidMetadata(
-                        AssistedAiContractError::InvalidProposalMetadata {
-                            reason: "Proposal target path is not valid UTF-8".to_string(),
-                        },
-                    )
+                    AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
+                        reason: "Proposal target path is not valid UTF-8".to_string(),
+                    })
                 })
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -541,9 +607,7 @@ impl BaseTargetState {
             .modified()
             .ok()
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|elapsed| {
-                TimestampMillis(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-            });
+            .map(|elapsed| TimestampMillis(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)));
         let content_hash = std::fs::read(path)
             .ok()
             .map(|bytes| stable_hash_128(&bytes) as u64);

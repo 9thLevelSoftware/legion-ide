@@ -67,8 +67,11 @@ pub fn assistant_rail_rows(
                     } => {
                         // Bind (and consume) the proposal for the first complete
                         // block; later/incomplete blocks get no binding.
-                        let bound_proposal_id =
-                            if complete { unbound_proposal.take() } else { None };
+                        let bound_proposal_id = if complete {
+                            unbound_proposal.take()
+                        } else {
+                            None
+                        };
                         AssistantRailSegmentViewModel::CodeBlock(AssistantRailCodeBlockViewModel {
                             language,
                             code,
@@ -230,7 +233,10 @@ mod tests {
     fn assistant_rail_rows_do_not_bind_incomplete_block() {
         // A streaming (unterminated) fence must never be applyable even when a
         // proposal is present.
-        let rows = assistant_rail_rows(&["```rust\nfn streaming() {}".to_string()], Some(ProposalId(3)));
+        let rows = assistant_rail_rows(
+            &["```rust\nfn streaming() {}".to_string()],
+            Some(ProposalId(3)),
+        );
         match &rows[0].segments[0] {
             AssistantRailSegmentViewModel::CodeBlock(code_block) => {
                 assert!(!code_block.complete);

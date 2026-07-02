@@ -26,8 +26,10 @@ members = [
     "crates/legion-remote",
     "crates/legion-remote-transport",
     "crates/legion-terminal",
+    "crates/legion-debug",
     "crates/legion-telemetry",
     "crates/legion-retention",
+    "crates/legion-sandbox",
     "crates/legion-cli",
 ]
 
@@ -57,6 +59,8 @@ globset = "0.4"
 ignore = "0.4"
 tantivy = "0.26.1"
 cargo_metadata = "0.18"
+wasmtime = "46.0.1"
+wat = "1.252.0"
 eframe = "0.34.2"
 egui = "0.34.2"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
@@ -92,5 +96,7 @@ legion-collaboration = { path = "crates/legion-collaboration" }
 legion-remote = { path = "crates/legion-remote" }
 legion-remote-transport = { path = "crates/legion-remote-transport" }
 legion-terminal = { path = "crates/legion-terminal" }
+legion-debug = { path = "crates/legion-debug" }
 legion-telemetry = { path = "crates/legion-telemetry" }
 legion-retention = { path = "crates/legion-retention" }
+legion-sandbox = { path = "crates/legion-sandbox" }

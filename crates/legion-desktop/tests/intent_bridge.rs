@@ -14,10 +14,11 @@ use legion_protocol::{
 };
 use legion_ui::ui::{DailyEditingProjection, EditorTabProjection, EditorTabsProjection};
 use legion_ui::{
-    ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
-    AssistInlinePredictionStatusProjection, CommandDispatchIntent, DebugConfigurationProjection,
-    DebugStepKindProjection, ExplorerNodeProjection, ExplorerProjection, PaletteMode,
-    SearchScopeProjection, Shell, ThemePreferenceProjection, ToastVerbosityProjection,
+    ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,
+    AssistInlinePredictionRowProjection, AssistInlinePredictionStatusProjection,
+    CommandDispatchIntent, DebugConfigurationProjection, DebugStepKindProjection,
+    ExplorerNodeProjection, ExplorerProjection, PaletteMode, SearchScopeProjection, Shell,
+    ThemePreferenceProjection, ToastVerbosityProjection,
 };
 
 mod common;
@@ -41,6 +42,7 @@ fn range(start: u64, end: u64) -> ProtocolTextRange {
 fn snapshot_with_active_buffer() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Bridge").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(9)),
         ..ActiveBufferProjection::empty()
     };

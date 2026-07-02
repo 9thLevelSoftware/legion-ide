@@ -9,10 +9,12 @@ fn proposal_content_payload_requires_redaction() {
 
     assert!(!report.passed());
     assert!(report.redaction_required);
-    assert!(report
-        .findings
-        .iter()
-        .any(|finding| finding.marker_label == "raw-proposal-content"));
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.marker_label == "raw-proposal-content")
+    );
 }
 
 #[test]
@@ -24,10 +26,12 @@ fn terminal_excerpt_payload_requires_redaction() {
 
     assert!(!report.passed());
     assert!(report.redaction_required);
-    assert!(report
-        .findings
-        .iter()
-        .any(|finding| finding.marker_label == "raw-terminal-excerpts"));
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.marker_label == "raw-terminal-excerpts")
+    );
 }
 
 #[test]
@@ -39,12 +43,16 @@ fn retained_and_ejected_context_payload_requires_redaction() {
 
     assert!(!report.passed());
     assert!(report.redaction_required);
-    assert!(report
-        .findings
-        .iter()
-        .any(|finding| finding.marker_label == "retained-context"));
-    assert!(report
-        .findings
-        .iter()
-        .any(|finding| finding.marker_label == "ejected-context"));
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.marker_label == "retained-context")
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.marker_label == "ejected-context")
+    );
 }

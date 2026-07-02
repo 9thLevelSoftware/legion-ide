@@ -19,11 +19,8 @@ fn outside_scope_write_is_denied_and_audited() {
 #[test]
 fn unapproved_egress_is_denied_and_audited() {
     let scope = SandboxScope::workspace_only("/tmp/legion-workspace");
-    let mut sandbox = ActivatedSandbox::activate(
-        SandboxPlatform::MacOS,
-        SandboxBackend::Seatbelt,
-        scope,
-    );
+    let mut sandbox =
+        ActivatedSandbox::activate(SandboxPlatform::MacOS, SandboxBackend::Seatbelt, scope);
 
     let decision = sandbox.authorize_egress("https://example.exfiltration.invalid");
 

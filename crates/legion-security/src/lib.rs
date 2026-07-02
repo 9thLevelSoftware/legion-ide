@@ -177,23 +177,25 @@ impl PathPolicy {
             return false;
         }
 
-        allowed.iter().any(|root| match NormalizedPolicyPath::parse(root) {
-            None => false,
-            Some(root) => {
-                // A relative, non-escaping candidate (e.g. a workspace-relative
-                // path or a glob pattern such as `**/*.rs`) is interpreted
-                // relative to the configured root, so it is in scope under any
-                // absolute root. `parse` already rejected `..` escapes by
-                // returning `None`, and an absolute candidate against a relative
-                // root still falls through to the exact prefix check below
-                // (preventing a relative root from authorizing an absolute path).
-                if candidate.prefix.is_none() && root.prefix.is_some() {
-                    true
-                } else {
-                    candidate.starts_with(&root)
+        allowed
+            .iter()
+            .any(|root| match NormalizedPolicyPath::parse(root) {
+                None => false,
+                Some(root) => {
+                    // A relative, non-escaping candidate (e.g. a workspace-relative
+                    // path or a glob pattern such as `**/*.rs`) is interpreted
+                    // relative to the configured root, so it is in scope under any
+                    // absolute root. `parse` already rejected `..` escapes by
+                    // returning `None`, and an absolute candidate against a relative
+                    // root still falls through to the exact prefix check below
+                    // (preventing a relative root from authorizing an absolute path).
+                    if candidate.prefix.is_none() && root.prefix.is_some() {
+                        true
+                    } else {
+                        candidate.starts_with(&root)
+                    }
                 }
-            }
-        })
+            })
     }
 }
 
@@ -1200,7 +1202,11 @@ impl DenyByDefaultBroker {
 
     /// Advances the monotonic decision counter and returns the next decision id.
     fn next_decision_id(&self) -> CapabilityDecisionId {
-        CapabilityDecisionId(self.counter.fetch_add(1, Ordering::Relaxed).saturating_add(1))
+        CapabilityDecisionId(
+            self.counter
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1),
+        )
     }
 
     /// Pure policy matrix for a capability request.
@@ -1514,9 +1520,7 @@ impl DenyByDefaultBroker {
                 // (readable/writable/blocked roots). A missing target path cannot be
                 // scoped, so it fails closed.
                 let Some(target_path) = path else {
-                    return SecurityDecision::deny(
-                        "remote filesystem access requires target path",
-                    );
+                    return SecurityDecision::deny("remote filesystem access requires target path");
                 };
                 let access = if capability == "remote.fs.write" {
                     PathAccess::Write
@@ -2088,9 +2092,7 @@ impl DenyByDefaultBroker {
                             "terminal launch denied for unrecognized command",
                         );
                     }
-                    CommandClass::Terminal
-                    | CommandClass::LanguageServer
-                    | CommandClass::Read => {}
+                    CommandClass::Terminal | CommandClass::LanguageServer | CommandClass::Read => {}
                 }
             }
             return SecurityDecision::allow();
@@ -4040,7 +4042,9 @@ mod tests {
             CapabilityId("fs.read".to_string()),
             None,
         );
-        assert!(matches!(no_path, SecurityDecision::Deny(reason) if reason.contains("target path")));
+        assert!(
+            matches!(no_path, SecurityDecision::Deny(reason) if reason.contains("target path"))
+        );
 
         let absolute = broker.decide(
             TrustState::Trusted,
@@ -4068,7 +4072,9 @@ mod tests {
             CapabilityId("fs.write".to_string()),
             None,
         );
-        assert!(matches!(decision, SecurityDecision::Deny(reason) if reason.contains("target path")));
+        assert!(
+            matches!(decision, SecurityDecision::Deny(reason) if reason.contains("target path"))
+        );
     }
 
     #[test]
@@ -4103,7 +4109,9 @@ mod tests {
             CapabilityId("lsp.launch".to_string()),
             None,
         );
-        assert!(matches!(missing, SecurityDecision::Deny(reason) if reason.contains("server binary")));
+        assert!(
+            matches!(missing, SecurityDecision::Deny(reason) if reason.contains("server binary"))
+        );
 
         let denied = broker.decide_with_request_context(
             TrustState::Trusted,
@@ -4115,7 +4123,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(matches!(denied, SecurityDecision::Deny(reason) if reason.contains("not allowlisted")));
+        assert!(
+            matches!(denied, SecurityDecision::Deny(reason) if reason.contains("not allowlisted"))
+        );
 
         let allowed = broker.decide_with_request_context(
             TrustState::Trusted,

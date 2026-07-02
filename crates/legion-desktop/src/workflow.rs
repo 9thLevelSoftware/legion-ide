@@ -1,12 +1,12 @@
 //! Desktop runtime workflow boundary.
 
+#[cfg(not(target_os = "windows"))]
+use std::process::Command;
 use std::{
     collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
 };
-#[cfg(not(target_os = "windows"))]
-use std::process::Command;
 
 use anyhow::{Result, anyhow};
 use legion_app::{
@@ -747,6 +747,24 @@ impl DesktopRuntime {
 
     /// Ingest a collaboration transport envelope through the app-owned
     /// collaboration runtime and refresh the projection.
+    /// Ingest LSP publishDiagnostics for a specific buffer and refresh the projection.
+    pub fn ingest_lsp_publish_diagnostics_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        params: &serde_json::Value,
+        disclose_ranges: bool,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<()> {
+        self.app.ingest_lsp_publish_diagnostics_for_buffer(
+            buffer_id,
+            params,
+            disclose_ranges,
+            request_id,
+        )?;
+        self.refresh_projection()?;
+        Ok(())
+    }
+
     ///
     /// This is the production ingestion seam used by loopback/fake collaboration
     /// transports: presence, conflict, and operation envelopes flow through the
@@ -758,7 +776,9 @@ impl DesktopRuntime {
         &mut self,
         envelope: CollaborationTransportEnvelope,
     ) -> Result<Option<AppCommandOutcome>> {
-        let outcome = self.app.receive_collaboration_transport_envelope(envelope)?;
+        let outcome = self
+            .app
+            .receive_collaboration_transport_envelope(envelope)?;
         self.refresh_projection()?;
         Ok(outcome)
     }
@@ -2157,10 +2177,7 @@ impl DesktopEframeApp {
     /// The eframe app owns the runtime, so headless harnesses use this seam to
     /// dispatch an action and then assert through [`Self::runtime_snapshot`]
     /// exactly as production keyboard/command handling would.
-    pub fn handle_action(
-        &mut self,
-        action: DesktopAction,
-    ) -> Result<DesktopWorkflowOutcome> {
+    pub fn handle_action(&mut self, action: DesktopAction) -> Result<DesktopWorkflowOutcome> {
         self.runtime.handle_action(action)
     }
 
@@ -2464,8 +2481,9 @@ impl DesktopEframeApp {
                                             DesktopAction::MovePaletteSelection { delta },
                                         );
                                     }
-                                    self.runtime
-                                        .dispatch_ui_action(DesktopAction::DispatchPaletteSelection);
+                                    self.runtime.dispatch_ui_action(
+                                        DesktopAction::DispatchPaletteSelection,
+                                    );
                                 }
                             }
                         }
@@ -2744,6 +2762,16 @@ fn editor_text_input_actions(
     actions
 }
 
+/// Test seam for exercising editor text input synthesis without a native window.
+pub fn test_editor_text_input_actions(
+    ui: &egui::Ui,
+    events: &[egui::Event],
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+) -> Vec<DesktopAction> {
+    editor_text_input_actions(ui, events, snapshot, editor_input_enabled)
+}
+
 fn editor_keyboard_control_actions(
     input: &egui::InputState,
     snapshot: &ShellProjectionSnapshot,
@@ -2856,6 +2884,21 @@ fn editor_keyboard_control_actions(
     }
 
     actions
+}
+
+/// Test seam for exercising editor keyboard-control synthesis without a native window.
+pub fn test_editor_keyboard_control_actions(
+    input: &egui::InputState,
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+    ime_composition_active: bool,
+) -> Vec<DesktopAction> {
+    editor_keyboard_control_actions(
+        input,
+        snapshot,
+        editor_input_enabled,
+        ime_composition_active,
+    )
 }
 
 fn cursor_or_selection_action(

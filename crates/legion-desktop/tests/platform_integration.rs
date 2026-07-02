@@ -2,12 +2,13 @@ use legion_desktop::platform::{
     DesktopPlatformAdapterChecks, NativePlatformObservation, build_platform_smoke_snapshot,
 };
 use legion_protocol::BufferId;
-use legion_ui::{ActiveBufferProjection, Shell};
+use legion_ui::{ActiveBufferProjection, ActiveBufferProjectionState, Shell};
 
 #[test]
 fn platform_snapshot_records_projection_and_adapter_statuses() {
     let mut snapshot = Shell::empty("Platform Smoke").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(7)),
         ..ActiveBufferProjection::empty()
     };
@@ -43,6 +44,7 @@ fn platform_snapshot_records_projection_and_adapter_statuses() {
 fn platform_snapshot_keeps_accessibility_labels_metadata_only() {
     let mut snapshot = Shell::empty("Metadata").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(11)),
         small_buffer_preview: Some("SECRET_DIRTY_BODY".to_string()),
         ..ActiveBufferProjection::empty()

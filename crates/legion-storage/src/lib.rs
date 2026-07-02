@@ -2,6 +2,9 @@
 
 #![warn(missing_docs)]
 
+/// Plan revision ledger and audit persistence helpers.
+pub mod plan;
+
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -4330,7 +4333,10 @@ mod tests {
             .expect("read session record")
         {
             StorageRepositoryResponse::SessionRecord(loaded) => {
-                assert_eq!(loaded.expect("session record").session_id, "session-protocol");
+                assert_eq!(
+                    loaded.expect("session record").session_id,
+                    "session-protocol"
+                );
             }
             other => panic!("unexpected session record response: {other:?}"),
         }
@@ -4395,9 +4401,8 @@ mod tests {
         }
 
         let recorder = legion_observability::InMemoryEventSink::new();
-        let port = InMemoryStorageRepositoryPort::with_event_sink(SharedEventSink::new(
-            recorder.clone(),
-        ));
+        let port =
+            InMemoryStorageRepositoryPort::with_event_sink(SharedEventSink::new(recorder.clone()));
 
         // Store failure must fail closed: no audit metadata persisted AND no event emitted.
         port.fail_next_event_metadata_write();
@@ -4409,7 +4414,8 @@ mod tests {
         );
 
         // Success path: metadata persisted and exactly one event emitted.
-        port.record_event(envelope()).expect("record_event succeeds");
+        port.record_event(envelope())
+            .expect("record_event succeeds");
         let emitted = recorder.events().expect("read sink");
         assert_eq!(emitted.len(), 1);
         match port

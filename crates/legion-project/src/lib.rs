@@ -3199,10 +3199,12 @@ impl WorkspaceActor {
         } else {
             state.root_path.join(path)
         };
-        let normalized = self
-            .fs
-            .normalize_path(&absolute)
-            .map_err(WorkspaceError::Platform)?;
+        // Resolve symlinks like macOS /var → /private/var. For paths that do
+        // not exist yet (new-file/create flows), canonicalize the nearest
+        // existing parent and rebuild the candidate path under that canonical
+        // parent so security policy sees the same root spelling it pinned on
+        // workspace open.
+        let normalized = self.canonicalize_with_parent_fallback(&absolute)?;
         self.check_path_within_root(state, &normalized)?;
         Ok(normalized)
     }

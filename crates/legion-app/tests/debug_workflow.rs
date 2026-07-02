@@ -41,7 +41,7 @@ edition = "2024"
 }
 
 #[test]
-fn debug_workflow_persists_breakpoints_launches_fixture_and_projects_docks() {
+fn debug_workflow_persists_breakpoints_launches_runtime_and_projects_docks() {
     let root = create_root();
     let source = root.join("src/main.rs");
     let mut app = AppComposition::new();
@@ -59,7 +59,7 @@ fn debug_workflow_persists_breakpoints_launches_fixture_and_projects_docks() {
         .text(buffer_id)
         .expect("active text")
         .to_string();
-    app.enable_debug_fixture_for_tests();
+    app.enable_debug_runtime_for_tests();
 
     let configs = app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshDebugConfigurations)
@@ -98,7 +98,7 @@ fn debug_workflow_persists_breakpoints_launches_fixture_and_projects_docks() {
 
     projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::LaunchDebugSession { configuration_id })
-        .expect("launch debug fixture")
+        .expect("launch debug runtime")
     {
         AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
         other => panic!("expected debug projection, got {other:?}"),
@@ -267,7 +267,7 @@ fn debug_workflow_resets_state_on_workspace_switch() {
     app.open_file(first_source.to_string_lossy())
         .expect("open first source");
     let first_buffer = app.active_buffer_id().expect("first active buffer");
-    app.enable_debug_fixture_for_tests();
+    app.enable_debug_runtime_for_tests();
 
     let projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshDebugConfigurations)

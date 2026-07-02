@@ -2,6 +2,11 @@
 
 #![warn(missing_docs)]
 
+/// LSP diagnostics projection module.
+pub mod diagnostics;
+/// LSP feature request builders and projection module.
+pub mod features;
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -514,15 +519,22 @@ impl LanguageServerAdapterRegistry {
     }
 
     /// Returns the stable tier-2 adapter registry used by the smoke tests.
+    ///
+    /// When the `CARGO_BIN_EXE_mock_lsp_server` environment variable is set
+    /// (as it is during `cargo test`), the rust-analyzer entry uses the mock
+    /// server binary so integration tests can exercise the product registry
+    /// path without requiring a real rust-analyzer installation.
     pub fn tier_two() -> Self {
         let workspace_id = legion_protocol::WorkspaceId(1);
+        let rust_command = std::env::var("CARGO_BIN_EXE_mock_lsp_server")
+            .unwrap_or_else(|_| "rust-analyzer".to_string());
         let mut registry = Self::new();
         registry.register(LanguageServerAdapterPlan::system_path(
             legion_protocol::LanguageServerId(101),
             workspace_id,
             legion_protocol::LanguageId("rust".to_string()),
             "rust-analyzer",
-            "rust-analyzer",
+            &rust_command,
             Vec::new(),
             true,
         ));
@@ -2108,7 +2120,10 @@ impl LspStdioProcess {
     /// [`Self::read_envelope_until`] when an unresponsive server must be
     /// bounded by a deadline.
     pub fn read_envelope(&mut self) -> LspRuntimeResult<Option<JsonRpcEnvelope>> {
-        let reader = self.reader.as_ref().ok_or(LspRuntimeError::SessionNotRunning)?;
+        let reader = self
+            .reader
+            .as_ref()
+            .ok_or(LspRuntimeError::SessionNotRunning)?;
         match reader.rx.recv() {
             Ok(StdoutReaderEvent::Frame(envelope)) => Ok(Some(*envelope)),
             Ok(StdoutReaderEvent::Eof) => Ok(None),
@@ -2124,11 +2139,11 @@ impl LspStdioProcess {
     /// arrives. Unlike [`Self::read_envelope`], this bounds the wait even
     /// when the server goes fully silent, because the actual blocking pipe
     /// read happens on a background thread and this only waits on a channel.
-    pub fn read_envelope_until(
-        &mut self,
-        deadline: Instant,
-    ) -> LspRuntimeResult<LspReadOutcome> {
-        let reader = self.reader.as_ref().ok_or(LspRuntimeError::SessionNotRunning)?;
+    pub fn read_envelope_until(&mut self, deadline: Instant) -> LspRuntimeResult<LspReadOutcome> {
+        let reader = self
+            .reader
+            .as_ref()
+            .ok_or(LspRuntimeError::SessionNotRunning)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         match reader.rx.recv_timeout(remaining) {
             Ok(StdoutReaderEvent::Frame(envelope)) => Ok(LspReadOutcome::Envelope(*envelope)),

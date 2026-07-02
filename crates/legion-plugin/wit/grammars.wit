@@ -1,0 +1,13 @@
+package legion:plugin;
+
+interface grammars {
+    record grammar-contribution {
+        language-id: string,
+        grammar-name: string,
+        artifact-uri: string,
+        artifact-hash: string,
+        required-capability: string,
+    }
+
+    register-grammar: func(contribution: grammar-contribution);
+}

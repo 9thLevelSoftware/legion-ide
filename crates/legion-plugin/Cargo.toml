@@ -13,3 +13,7 @@ legion-storage = { workspace = true }
 legion-platform = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+wasmtime = { workspace = true }
+
+[dev-dependencies]
+wat = { workspace = true }

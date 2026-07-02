@@ -86,7 +86,12 @@ pub struct SandboxDecision {
 }
 
 impl SandboxDecision {
-    fn allow(platform: SandboxPlatform, backend: SandboxBackend, action: SandboxAction, reason: impl Into<String>) -> Self {
+    fn allow(
+        platform: SandboxPlatform,
+        backend: SandboxBackend,
+        action: SandboxAction,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             allowed: true,
             audit: SandboxAuditEvent {
@@ -99,7 +104,12 @@ impl SandboxDecision {
         }
     }
 
-    fn deny(platform: SandboxPlatform, backend: SandboxBackend, action: SandboxAction, reason: impl Into<String>) -> Self {
+    fn deny(
+        platform: SandboxPlatform,
+        backend: SandboxBackend,
+        action: SandboxAction,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             allowed: false,
             audit: SandboxAuditEvent {
@@ -149,7 +159,11 @@ pub struct ActivatedSandbox {
 
 impl ActivatedSandbox {
     /// Activates a sandbox for the chosen platform and backend.
-    pub fn activate(platform: SandboxPlatform, backend: SandboxBackend, scope: SandboxScope) -> Self {
+    pub fn activate(
+        platform: SandboxPlatform,
+        backend: SandboxBackend,
+        scope: SandboxScope,
+    ) -> Self {
         let mut sandbox = Self {
             platform,
             backend,
@@ -361,16 +375,16 @@ mod tests {
     #[test]
     fn raw_egress_without_permission_fails_closed_and_audits() {
         let scope = SandboxScope::workspace_only("/workspace/project");
-        let mut sandbox = ActivatedSandbox::activate(
-            SandboxPlatform::MacOS,
-            SandboxBackend::Seatbelt,
-            scope,
-        );
+        let mut sandbox =
+            ActivatedSandbox::activate(SandboxPlatform::MacOS, SandboxBackend::Seatbelt, scope);
 
         let decision = sandbox.authorize_egress("https://example.com");
 
         assert!(!decision.allowed);
-        assert!(matches!(decision.audit.action, SandboxAction::Egress { .. }));
+        assert!(matches!(
+            decision.audit.action,
+            SandboxAction::Egress { .. }
+        ));
         assert!(decision.audit.reason.contains("raw egress denied"));
     }
 

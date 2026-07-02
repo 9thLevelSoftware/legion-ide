@@ -26,6 +26,7 @@ use legion_ai_providers::{
 #[cfg(not(feature = "ai"))]
 pub mod offline_ai;
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
+use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
 use legion_editor::{
     BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
     TextEdit, TextPosition, TextRange as EditorTextRange,
@@ -163,8 +164,8 @@ use legion_security::{
 };
 use legion_storage::InMemoryStorageRepositoryPort;
 use legion_terminal::{
-    DapAdapterFixtureConfig, DapAdapterFixtureOutcome, DapAdapterFixtureRuntime, TerminalRuntime,
-    TerminalRuntimeConfig, TerminalRuntimeLaunchRequest, TerminalRuntimeOutputPollRequest,
+    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeLaunchRequest,
+    TerminalRuntimeOutputPollRequest,
 };
 use legion_tracker::{
     LegionWorkflowTrackerLedger, LegionWorkflowTrackerRecord, TrackerLedger, TrackerRunLedgerRecord,
@@ -187,9 +188,9 @@ use legion_ui::ui::{
     ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
-    ActiveBufferProjection, CommandDispatchIntent, DockMode, ExplorerNodeProjection,
-    ExplorerProjection, ExplorerSelectionProjection, GitConflictChoiceProjection,
-    ShellLayoutProjection, ShellProjectionSnapshot,
+    ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
+    ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
+    GitConflictChoiceProjection, ShellLayoutProjection, ShellProjectionSnapshot,
 };
 #[cfg(not(feature = "ai"))]
 use offline_ai::{
@@ -598,7 +599,7 @@ mod daily_editing_save_all_internal_tests {
     }
     #[test]
     fn terminal_shell_output_parser_strips_markers_and_extracts_metadata() {
-        let parsed = parse_terminal_shell_output(
+        let parsed = legion_terminal::osc::parse_terminal_shell_output(
             "\x1b]7;file://localhost/tmp/workspace\x1b\\output\x1b]133;D;7\x1b\\",
         );
 
@@ -5182,7 +5183,6 @@ impl LanguageToolingWorkflow {
 
 struct TerminalWorkflow {
     projection: TerminalPanelProjection,
-    fixture_enabled: bool,
     runtime: TerminalRuntime<legion_platform::NativePtyService>,
     security_broker: DenyByDefaultBroker,
     last_audit: Option<legion_protocol::TerminalAuditRecord>,
@@ -5226,150 +5226,6 @@ fn terminal_shell_command() -> (String, Vec<String>) {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TerminalShellOutputProjection {
-    visible_output: String,
-    cwd: Option<String>,
-    exit_code: Option<i32>,
-}
-
-fn parse_terminal_shell_output(payload: &str) -> TerminalShellOutputProjection {
-    let mut visible_output = String::new();
-    let mut cwd = None;
-    let mut exit_code = None;
-    let bytes = payload.as_bytes();
-    let mut cursor = 0;
-
-    while cursor < bytes.len() {
-        if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b']' {
-            let osc_start = cursor;
-            cursor += 2;
-            let seq_start = cursor;
-            let mut terminated = false;
-            while cursor < bytes.len() {
-                if bytes[cursor] == 0x07 {
-                    terminated = true;
-                    break;
-                }
-                if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'\\' {
-                    terminated = true;
-                    break;
-                }
-                cursor += 1;
-            }
-            if !terminated {
-                // Unterminated OSC sequence (e.g. split across read chunks):
-                // emit the raw bytes verbatim instead of silently dropping the
-                // trailing remainder of the output.
-                visible_output.push_str(&payload[osc_start..]);
-                break;
-            }
-            let sequence = &payload[seq_start..cursor];
-            if let Some(parsed_cwd) = terminal_shell_cwd_from_osc(sequence) {
-                cwd = Some(parsed_cwd);
-            }
-            if let Some(parsed_exit_code) = terminal_shell_exit_code_from_osc(sequence) {
-                exit_code = Some(parsed_exit_code);
-            }
-            if cursor < bytes.len()
-                && bytes[cursor] == 0x1b
-                && cursor + 1 < bytes.len()
-                && bytes[cursor + 1] == b'\\'
-            {
-                cursor += 2;
-            } else if cursor < bytes.len() && bytes[cursor] == 0x07 {
-                cursor += 1;
-            }
-            continue;
-        }
-
-        let Some(ch) = payload[cursor..].chars().next() else {
-            break;
-        };
-        visible_output.push(ch);
-        cursor += ch.len_utf8();
-    }
-
-    TerminalShellOutputProjection {
-        visible_output,
-        cwd,
-        exit_code,
-    }
-}
-
-fn terminal_shell_cwd_from_osc(sequence: &str) -> Option<String> {
-    let value = sequence.strip_prefix("7;")?;
-    let value = value.strip_prefix("file://")?;
-
-    // OSC 7 carries `file://HOST/PATH`. `file:///PATH` yields an empty host.
-    let (host, raw_path) = value.split_once('/')?;
-    let host = percent_decode(host);
-    let host = if host.eq_ignore_ascii_case("localhost") {
-        String::new()
-    } else {
-        host
-    };
-
-    // Percent-decode each path segment independently so encoded separators are
-    // not misinterpreted as path boundaries.
-    let decoded_path = raw_path
-        .split('/')
-        .map(percent_decode)
-        .collect::<Vec<_>>()
-        .join("/");
-
-    // Windows drive-letter path: file:///C:/Users -> C:/Users
-    if host.is_empty() && is_windows_drive_prefix(&decoded_path) {
-        return Some(decoded_path);
-    }
-
-    // UNC path: file://server/share/... -> //server/share/...
-    if !host.is_empty() {
-        return Some(format!("//{host}/{}", decoded_path.trim_start_matches('/')));
-    }
-
-    Some(format!("/{}", decoded_path.trim_start_matches('/')))
-}
-
-/// Percent-decode a URL component, leaving invalid escapes untouched.
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let high = (bytes[index + 1] as char).to_digit(16);
-            let low = (bytes[index + 2] as char).to_digit(16);
-            if let (Some(high), Some(low)) = (high, low) {
-                decoded.push((high * 16 + low) as u8);
-                index += 3;
-                continue;
-            }
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-/// Returns true when `path` begins with a Windows drive prefix such as `C:`.
-fn is_windows_drive_prefix(path: &str) -> bool {
-    let mut chars = path.chars();
-    matches!(
-        (chars.next(), chars.next()),
-        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
-    )
-}
-
-fn terminal_shell_exit_code_from_osc(sequence: &str) -> Option<i32> {
-    let value = sequence.strip_prefix("133;")?;
-    let (command, parameters) = value.split_once(';')?;
-    if command != "D" {
-        return None;
-    }
-    parameters.split(';').next()?.parse().ok()
-}
-
 fn terminal_command_block_start_payload(byte_count: usize, cwd: Option<&str>) -> String {
     match cwd {
         Some(cwd) => format!(
@@ -5404,7 +5260,6 @@ impl Default for TerminalWorkflow {
     fn default() -> Self {
         Self {
             projection: TerminalPanelProjection::empty(),
-            fixture_enabled: false,
             runtime: TerminalRuntime::new(
                 TerminalRuntimeConfig::default(),
                 legion_platform::NativePtyService,
@@ -5426,8 +5281,7 @@ impl TerminalWorkflow {
         self.projection.clone()
     }
 
-    fn enable_fixture(&mut self) {
-        self.fixture_enabled = true;
+    fn enable_runtime_for_tests(&mut self) {
         self.runtime = TerminalRuntime::new(
             TerminalRuntimeConfig::enabled(),
             legion_platform::NativePtyService,
@@ -5476,17 +5330,6 @@ impl TerminalWorkflow {
                 reason: decision
                     .reason
                     .unwrap_or_else(|| "terminal launch denied by policy".to_string()),
-                event_context,
-                session_id: None,
-                action: "launch".to_string(),
-                clear_active_session: true,
-            });
-        }
-        if !self.fixture_enabled {
-            return self.deny(TerminalDenial {
-                workspace_id: context.workspace_id,
-                policy,
-                reason: "Terminal fixture runtime is disabled".to_string(),
                 event_context,
                 session_id: None,
                 action: "launch".to_string(),
@@ -5551,7 +5394,8 @@ impl TerminalWorkflow {
                     ),
                 );
                 if outcome.output.byte_count > 0 || !outcome.output.redacted_payload.is_empty() {
-                    self.push_terminal_output(outcome.output, false);
+                    let shell_projection = outcome.shell_projection.clone();
+                    self.push_terminal_output(outcome.output, false, Some(&shell_projection));
                 }
                 self.projection()
             }
@@ -5743,7 +5587,8 @@ impl TerminalWorkflow {
                     self.projection.active_session_id = None;
                 }
                 if outcome.output.byte_count > 0 || !outcome.output.redacted_payload.is_empty() {
-                    self.push_terminal_output(outcome.output, false);
+                    let shell_projection = outcome.shell_projection.clone();
+                    self.push_terminal_output(outcome.output, false, Some(&shell_projection));
                 }
                 self.projection.generated_at = TimestampMillis::now();
                 self.record_audit(
@@ -6112,20 +5957,36 @@ impl TerminalWorkflow {
         &mut self,
         output: legion_protocol::TerminalOutputChunk,
         is_stderr: bool,
+        shell_projection: Option<&legion_terminal::osc::TerminalShellProjection>,
     ) {
-        let shell_projection = parse_terminal_shell_output(&output.redacted_payload);
-        if let Some(cwd) = shell_projection.cwd.clone() {
+        let parsed_projection;
+        let (visible_output, cwd, exit_code) = if let Some(shell_projection) = shell_projection {
+            (
+                output.redacted_payload.clone(),
+                shell_projection.cwd.clone(),
+                shell_projection.exit_code,
+            )
+        } else {
+            parsed_projection =
+                legion_terminal::osc::parse_terminal_shell_output(&output.redacted_payload);
+            (
+                parsed_projection.visible_output.clone(),
+                parsed_projection.cwd.clone(),
+                parsed_projection.exit_code,
+            )
+        };
+        if let Some(cwd) = cwd {
             self.current_cwd = Some(cwd);
         }
-        if !shell_projection.visible_output.trim().is_empty() {
+        if !visible_output.trim().is_empty() {
             self.push_row(
                 output.session_id,
-                shell_projection.visible_output,
+                visible_output,
                 output.byte_count,
                 is_stderr,
             );
         }
-        if let Some(exit_code) = shell_projection.exit_code
+        if let Some(exit_code) = exit_code
             && let Some(started_at) = self.active_command_started_at.take()
         {
             let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -6181,8 +6042,8 @@ impl TerminalWorkflow {
 #[derive(Debug, Clone)]
 struct DebugWorkflow {
     projection: DebugProjection,
-    fixture_enabled: bool,
-    fixture: DapAdapterFixtureRuntime,
+    runtime_enabled: bool,
+    runtime: DapClientRuntime,
     configurations: Vec<DebugLaunchConfiguration>,
     breakpoints: Vec<DebugBreakpointRecord>,
     pending_breakpoint_deletes: Vec<(WorkspaceId, DebugBreakpointId)>,
@@ -6206,8 +6067,8 @@ impl Default for DebugWorkflow {
     fn default() -> Self {
         Self {
             projection: DebugProjection::empty(),
-            fixture_enabled: false,
-            fixture: DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::default()),
+            runtime_enabled: false,
+            runtime: DapClientRuntime::new(DapClientConfig::default()),
             configurations: Vec::new(),
             breakpoints: Vec::new(),
             pending_breakpoint_deletes: Vec::new(),
@@ -6223,12 +6084,12 @@ impl DebugWorkflow {
         self.projection.clone()
     }
 
-    fn enable_fixture(&mut self) {
-        self.fixture_enabled = true;
-        self.fixture = DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::enabled());
+    fn enable_runtime(&mut self) {
+        self.runtime_enabled = true;
+        self.runtime = DapClientRuntime::new(DapClientConfig::enabled());
         self.projection.status = DebugStatusProjection {
             kind: DebugStatusKindProjection::Idle,
-            message: "Debug fixture enabled".to_string(),
+            message: "Debug runtime enabled".to_string(),
         };
         self.projection.generated_at = TimestampMillis::now();
     }
@@ -6241,10 +6102,10 @@ impl DebugWorkflow {
         self.last_audit = None;
         self.next_sequence = 0;
         self.next_watch = 0;
-        self.fixture = if self.fixture_enabled {
-            DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::enabled())
+        self.runtime = if self.runtime_enabled {
+            DapClientRuntime::new(DapClientConfig::enabled())
         } else {
-            DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::default())
+            DapClientRuntime::new(DapClientConfig::default())
         };
     }
 
@@ -6365,8 +6226,8 @@ impl DebugWorkflow {
         if context.trust != WorkspaceTrustState::Trusted {
             return self.deny("debug launch requires a trusted workspace".to_string());
         }
-        if !self.fixture_enabled {
-            return self.deny("Debug fixture runtime is disabled".to_string());
+        if !self.runtime_enabled {
+            return self.deny("Debug runtime is disabled".to_string());
         }
         let Some(config) = self
             .configurations
@@ -6399,12 +6260,12 @@ impl DebugWorkflow {
             breakpoints,
             schema_version: 1,
         };
-        match self.fixture.launch(request) {
+        match self.runtime.launch(request) {
             Ok(outcome) => {
-                self.apply_fixture_outcome(outcome);
+                self.apply_runtime_outcome(outcome);
                 self.projection.status = DebugStatusProjection {
                     kind: DebugStatusKindProjection::Paused,
-                    message: "Debug fixture paused at breakpoint".to_string(),
+                    message: "Debug runtime paused at breakpoint".to_string(),
                 };
                 self.projection.session_state = Some(DebugSessionState::Paused);
                 self.projection.generated_at = TimestampMillis::now();
@@ -6433,9 +6294,9 @@ impl DebugWorkflow {
             return self.deny(format!("debug session {} is not active", session_id.0));
         }
         let protocol_kind = debug_step_kind(kind);
-        match self.fixture.step(session_id, protocol_kind) {
+        match self.runtime.step(session_id, protocol_kind) {
             Ok(outcome) => {
-                self.apply_fixture_outcome(outcome);
+                self.apply_runtime_outcome(outcome);
                 self.projection.status = DebugStatusProjection {
                     kind: DebugStatusKindProjection::Paused,
                     message: "Debug step completed".to_string(),
@@ -6515,7 +6376,7 @@ impl DebugWorkflow {
         self.projection()
     }
 
-    fn apply_fixture_outcome(&mut self, outcome: DapAdapterFixtureOutcome) {
+    fn apply_runtime_outcome(&mut self, outcome: DapClientOutcome) {
         self.last_audit = Some(outcome.audit.clone());
         self.projection.active_session_id = Some(outcome.audit.session_id.clone());
         for verified in outcome.breakpoints {
@@ -9894,6 +9755,11 @@ impl ProjectionBuilder {
                 .as_ref()
                 .map(|path| CanonicalPath(path.clone())),
             viewport,
+            state: if degraded {
+                ActiveBufferProjectionState::Degraded
+            } else {
+                ActiveBufferProjectionState::Full
+            },
             degraded,
             small_buffer_preview: if degraded {
                 None
@@ -18337,14 +18203,24 @@ impl AppComposition {
         Ok(self.refresh_git_projection())
     }
 
-    /// Enable the deterministic terminal fixture for app integration tests.
-    pub fn enable_terminal_fixture_for_tests(&mut self) {
-        self.terminal_workflow.enable_fixture();
+    /// Enable the real terminal runtime for app integration tests.
+    ///
+    /// Launch is still gated by the normal terminal capability policy; this
+    /// helper only enables the app-owned runtime and test security policy so
+    /// integration tests exercise the production terminal path instead of a
+    /// separate fixture toggle.
+    pub fn enable_terminal_runtime_for_tests(&mut self) {
+        self.terminal_workflow.enable_runtime_for_tests();
     }
 
-    /// Enable the deterministic DAP debug fixture for app integration tests.
+    /// Enable the DAP debug runtime for app integration tests.
+    pub fn enable_debug_runtime_for_tests(&mut self) {
+        self.debug_workflow.enable_runtime();
+    }
+
+    /// Compatibility alias for older debug integration tests.
     pub fn enable_debug_fixture_for_tests(&mut self) {
-        self.debug_workflow.enable_fixture();
+        self.enable_debug_runtime_for_tests();
     }
 
     /// Return the current app-owned language tooling projection.
@@ -24210,7 +24086,7 @@ mod tests {
         // OSC introducer with no BEL/ST terminator must not silently drop the
         // trailing bytes of the output.
         let payload = "before\x1b]7;file://localhost/home";
-        let parsed = parse_terminal_shell_output(payload);
+        let parsed = legion_terminal::osc::parse_terminal_shell_output(payload);
         assert_eq!(parsed.visible_output, "before\x1b]7;file://localhost/home");
         assert_eq!(parsed.cwd, None);
     }
@@ -24218,7 +24094,7 @@ mod tests {
     #[test]
     fn parse_terminal_handles_terminated_osc() {
         let payload = "out\x1b]7;file:///home/user\x07tail";
-        let parsed = parse_terminal_shell_output(payload);
+        let parsed = legion_terminal::osc::parse_terminal_shell_output(payload);
         assert_eq!(parsed.visible_output, "outtail");
         assert_eq!(parsed.cwd.as_deref(), Some("/home/user"));
     }
@@ -24226,7 +24102,11 @@ mod tests {
     #[test]
     fn osc7_cwd_decodes_windows_drive_and_percent() {
         assert_eq!(
-            terminal_shell_cwd_from_osc("7;file:///C:/Users/My%20Project").as_deref(),
+            legion_terminal::osc::parse_terminal_shell_output(
+                "\x1b]7;file:///C:/Users/My%20Project\x1b\\"
+            )
+            .cwd
+            .as_deref(),
             Some("C:/Users/My Project")
         );
     }
@@ -24234,11 +24114,19 @@ mod tests {
     #[test]
     fn osc7_cwd_handles_localhost_and_unc() {
         assert_eq!(
-            terminal_shell_cwd_from_osc("7;file://localhost/home/user").as_deref(),
+            legion_terminal::osc::parse_terminal_shell_output(
+                "\x1b]7;file://localhost/home/user\x1b\\"
+            )
+            .cwd
+            .as_deref(),
             Some("/home/user")
         );
         assert_eq!(
-            terminal_shell_cwd_from_osc("7;file://server/share/dir").as_deref(),
+            legion_terminal::osc::parse_terminal_shell_output(
+                "\x1b]7;file://server/share/dir\x1b\\"
+            )
+            .cwd
+            .as_deref(),
             Some("//server/share/dir")
         );
     }

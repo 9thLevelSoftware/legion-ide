@@ -55,22 +55,95 @@ impl Default for BatchRuntimeApplyPolicy {
     }
 }
 
+impl BatchRuntimeApplyPolicy {
+    /// Returns true when the given trust state is sufficient for batch runtime apply.
+    ///
+    /// Only `Trusted` workspaces pass this check. Untrusted, unknown, or missing
+    /// trust states are rejected regardless of the `enabled` flag.
+    pub fn allows_workspace_trust(
+        &self,
+        trust: Option<legion_protocol::WorkspaceTrustState>,
+    ) -> bool {
+        matches!(trust, Some(legion_protocol::WorkspaceTrustState::Trusted))
+    }
+
+    /// Returns true when runtime apply is disabled for the given trust state.
+    ///
+    /// Runtime apply is disabled when the policy is disabled OR the workspace
+    /// is not trusted. Both conditions must be satisfied for apply to proceed.
+    pub fn runtime_apply_disabled(
+        &self,
+        trust: Option<legion_protocol::WorkspaceTrustState>,
+    ) -> bool {
+        !self.enabled || !self.allows_workspace_trust(trust)
+    }
+}
+
 /// Gate evaluated before a proposal may be applied to the workspace.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProposalApplyGate {
+    /// Policy decision from the security broker.
+    policy_decision: super::SecurityDecision,
     /// Require explicit human approval before apply.
     pub require_human_approval: bool,
     /// Require a trusted workspace before apply.
     pub require_trusted_workspace: bool,
+    /// Whether explicit human approval has been recorded.
+    human_approval_recorded: bool,
+    /// Advisory classifier output. This is never authoritative for apply.
+    classifier_recommendation: Option<legion_protocol::ProposalRiskLabel>,
+}
+
+impl ProposalApplyGate {
+    /// Creates a proposal apply gate from the authoritative policy decision.
+    pub fn new(policy_decision: super::SecurityDecision) -> Self {
+        Self {
+            policy_decision,
+            require_human_approval: true,
+            require_trusted_workspace: true,
+            human_approval_recorded: false,
+            classifier_recommendation: None,
+        }
+    }
+
+    /// Records whether human approval has been provided.
+    pub fn with_human_approval_recorded(mut self, recorded: bool) -> Self {
+        self.human_approval_recorded = recorded;
+        self
+    }
+
+    /// Adds an advisory classifier recommendation.
+    pub fn with_classifier_recommendation(
+        mut self,
+        recommendation: Option<legion_protocol::ProposalRiskLabel>,
+    ) -> Self {
+        self.classifier_recommendation = recommendation;
+        self
+    }
+
+    /// Returns the advisory classifier recommendation, if any.
+    pub fn classifier_recommendation(&self) -> Option<legion_protocol::ProposalRiskLabel> {
+        self.classifier_recommendation
+    }
+
+    /// Returns the authoritative policy decision.
+    pub fn policy_decision(&self) -> &super::SecurityDecision {
+        &self.policy_decision
+    }
+
+    /// Returns true only when policy allows and the human gate is satisfied.
+    pub fn can_apply(&self) -> bool {
+        matches!(self.policy_decision, super::SecurityDecision::Allow)
+            && (!self.require_human_approval || self.human_approval_recorded)
+    }
 }
 
 impl Default for ProposalApplyGate {
     fn default() -> Self {
-        // Fail closed: both human approval and a trusted workspace are required by default.
-        Self {
-            require_human_approval: true,
-            require_trusted_workspace: true,
-        }
+        // Fail closed: policy denies by default, human approval and trust are required.
+        Self::new(super::SecurityDecision::Deny(
+            "proposal apply gate default deny".to_string(),
+        ))
     }
 }
 

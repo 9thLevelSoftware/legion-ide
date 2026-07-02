@@ -115,7 +115,7 @@ fn terminal_denial_is_visible_and_fail_closed() {
             PrincipalId("principal-terminal".to_string()),
         )
         .expect("open untrusted workspace");
-    untrusted.enable_terminal_fixture_for_tests();
+    untrusted.enable_terminal_runtime_for_tests();
     let denied = untrusted
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
@@ -156,7 +156,7 @@ fn terminal_fixture_lifecycle_projects_status() {
         .text(buffer_id)
         .expect("active buffer text")
         .to_string();
-    app.enable_terminal_fixture_for_tests();
+    app.enable_terminal_runtime_for_tests();
 
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
@@ -303,7 +303,7 @@ fn terminal_workflow_cannot_mutate_editor_or_disk() {
         .text(buffer_id)
         .expect("active buffer text")
         .to_string();
-    app.enable_terminal_fixture_for_tests();
+    app.enable_terminal_runtime_for_tests();
 
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {

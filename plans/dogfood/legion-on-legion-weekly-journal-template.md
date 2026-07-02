@@ -1,47 +1,61 @@
-# Legion-on-Legion Weekly Dogfood Journal Template
+# Legion-on-Legion Weekly Dogfood Journal
 
-## Week
+Use this template for weekly dogfood runs where Legion is used to develop itself.
 
-- Week starting:
-- Legion branch / commit:
-- Host OS and display setup:
-- Primary workspace opened:
-- Daily-driver hours attempted:
+## Instructions
 
-## Workflows Exercised
+1. Copy this template to `plans/evidence/dogfood/YYYY-MM-DD-dogfood-journal.md`.
+2. Fill in every field. If a field does not apply, write "N/A" with a reason.
+3. Run the dogfood workflow using the current build on the named branch/commit.
+4. Record evidence paths for any failures or blockers.
 
-| Workflow | Attempted | Evidence path | Result | Notes |
-| --- | --- | --- | --- | --- |
-| Manual edit/open/save/search | No |  | Not run |  |
-| Rust LSP completion/diagnostics/rename | No |  | Not run |  |
-| Terminal task | No |  | Not run |  |
-| Git diff/stage/commit/review | No |  | Not run |  |
-| Assist context manifest and proposal | No |  | Not run |  |
-| Delegate worktree/sandbox task | No |  | Not run |  |
-| Automate/fleet command center | No |  | Not run |  |
-| Packaging/update/crash/support path | No |  | Not run |  |
+## Template
 
-## Friction Log
+```
+# Dogfood Journal — YYYY-MM-DD
 
-| Time | Surface | Symptom | Repro steps | Severity | Follow-up issue or plan link |
-| --- | --- | --- | --- | --- | --- |
+## Session
 
-## Trust and Policy Observations
+- **Branch:**
+- **Commit SHA:**
+- **OS / Platform:**
+- **Build method:** (local cargo build / packaged installer / other)
+- **Legion version / channel:**
 
-- Egress posture observed:
-- Proposal review clarity:
-- Privacy inspector clarity:
-- Audit/evidence export clarity:
-- Capability prompts or denials:
+## Workflow Attempted
+
+Describe the workflow tried during this session (e.g., edit Rust code, use LSP completion, run tests, review git diff, use Assist for a refactor, delegate a task).
+
+## Modes Used
+
+- [ ] Manual
+- [ ] Assist
+- [ ] Delegate
+- [ ] Legion Workflows
+
+## Evidence
+
+| Item | Path / Description |
+| --- | --- |
+| Screenshots | |
+| Terminal output | |
+| Test results | |
+| Logs / traces | |
+
+## Result
+
+- **Outcome:** (success / partial / blocked)
+- **What worked:**
+- **What failed:**
+- **Blockers encountered:**
 
 ## Product-Readiness Impact
 
-| Readiness gate | Evidence added | Status impact | Reason |
-| --- | --- | --- | --- |
+Does this session change any product-readiness claim? If so, which row and what evidence?
 
-## End-of-Week Decision
+## Follow-Up
 
-- Continue dogfooding next week:
-- Required fixes before next dogfood session:
-- Evidence files added:
-- Commands run:
+- [ ] Issues filed:
+- [ ] Fixes needed:
+- [ ] Ledger updates:
+```

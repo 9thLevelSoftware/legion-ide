@@ -1205,7 +1205,8 @@ impl RemoteSessionRuntime {
             .files
             .remove(&operation.path.0)
             .expect("file checked above");
-        entry.snapshot_id = derived_snapshot_id(&destination.0, entry.content_version, operation_id);
+        entry.snapshot_id =
+            derived_snapshot_id(&destination.0, entry.content_version, operation_id);
         self.files.insert(destination.0.clone(), entry);
         Ok(
             RemoteOperationOutcome::new(operation_id, RemoteOperationDisposition::Accepted, None)
@@ -1726,19 +1727,20 @@ impl HttpLegionCloudLaneTransport {
         );
         if let Some((label, value)) = &self.config.auth_token {
             let auth_value = format!("{label} {value}");
-            let header_value = reqwest::header::HeaderValue::from_str(&auth_value).map_err(|err| {
-                RemoteRuntimeError::InvalidOperation {
-                    reason: format!("configured authorization header value is invalid: {err}"),
-                }
-            })?;
+            let header_value =
+                reqwest::header::HeaderValue::from_str(&auth_value).map_err(|err| {
+                    RemoteRuntimeError::InvalidOperation {
+                        reason: format!("configured authorization header value is invalid: {err}"),
+                    }
+                })?;
             headers.insert(reqwest::header::AUTHORIZATION, header_value);
         }
-        let identity_value =
-            reqwest::header::HeaderValue::from_str(&self.config.client_identity_label).map_err(
-                |err| RemoteRuntimeError::InvalidOperation {
-                    reason: format!("configured client identity header value is invalid: {err}"),
-                },
-            )?;
+        let identity_value = reqwest::header::HeaderValue::from_str(
+            &self.config.client_identity_label,
+        )
+        .map_err(|err| RemoteRuntimeError::InvalidOperation {
+            reason: format!("configured client identity header value is invalid: {err}"),
+        })?;
         headers.insert("X-Legion-Client-Identity", identity_value);
         Ok(headers)
     }

@@ -28,8 +28,9 @@ impl TempRepo {
             .as_nanos();
         let pid = std::process::id();
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir()
-            .join(format!("legion-release-pipeline-{name}-{pid}-{stamp}-{seq}"));
+        let root = std::env::temp_dir().join(format!(
+            "legion-release-pipeline-{name}-{pid}-{stamp}-{seq}"
+        ));
         fs::create_dir_all(&root).expect("create temp repo root");
         fs::write(
             root.join("Cargo.toml"),

@@ -13,17 +13,17 @@ use legion_desktop::{
     },
 };
 use legion_protocol::{
-    CapabilityDecision, CapabilityDecisionId, CapabilityId, CausalityId, CollaborationGuiProjection,
-    CollaborationOperationId, CollaborationParticipantId, CollaborationPresenceProjection,
-    CollaborationSessionGuiRow, CollaborationSessionId, CollaborationSessionState,
-    CollaborationSharedProposalApproval, CollaborationSharedProposalDisposition,
-    CollaborationSharedProposalGuiRow, CollaborationTransportEnvelope, CollaborationTransportPayload,
-    CorrelationId, FileFingerprint, PrincipalId, ProposalContextManifestSummary, ProposalDiffSummary,
-    ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection, ProposalLedgerRow,
-    ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel,
-    ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
-    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, TextCoordinate, TimestampMillis,
-    WorkspaceId,
+    CapabilityDecision, CapabilityDecisionId, CapabilityId, CausalityId,
+    CollaborationGuiProjection, CollaborationOperationId, CollaborationParticipantId,
+    CollaborationPresenceProjection, CollaborationSessionGuiRow, CollaborationSessionId,
+    CollaborationSessionState, CollaborationSharedProposalApproval,
+    CollaborationSharedProposalDisposition, CollaborationSharedProposalGuiRow,
+    CollaborationTransportEnvelope, CollaborationTransportPayload, CorrelationId, FileFingerprint,
+    PrincipalId, ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind,
+    ProposalId, ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
+    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
+    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
+    ProtocolTextRange, RedactionHint, TextCoordinate, TimestampMillis, WorkspaceId,
 };
 use legion_ui::{CommandDispatchIntent, Shell};
 use uuid::Uuid;
@@ -492,8 +492,10 @@ fn collaboration_gui_loopback_transport_projects_presence_conflict_and_proposal_
         snapshot
             .collaboration_presence_projections
             .iter()
-            .any(|presence| presence.participant_id == CollaborationParticipantId(1)
-                && presence.reconnecting),
+            .any(
+                |presence| presence.participant_id == CollaborationParticipantId(1)
+                    && presence.reconnecting
+            ),
         "reconnecting presence should be projected from the transport envelope"
     );
     let gui = &snapshot.collaboration_gui_projection;

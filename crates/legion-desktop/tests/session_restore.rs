@@ -68,6 +68,15 @@ fn open_runtime(root: &Path, initial_file: Option<&Path>, session_state: &Path) 
     .expect("desktop runtime should open")
 }
 
+fn canonical_path(path: &Path) -> CanonicalPath {
+    CanonicalPath(
+        fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 fn tab_titles(runtime: &DesktopRuntime) -> Vec<String> {
     runtime
         .projection_snapshot()
@@ -165,7 +174,7 @@ fn session_restore_saves_metadata_and_restores_tabs_focus_layout_explorer() {
     assert_eq!(tab_titles(&restored), vec!["first.txt", "second.txt"]);
     assert_eq!(
         snapshot.active_buffer_projection.file_path.as_ref(),
-        Some(&CanonicalPath(second.to_string_lossy().into_owned()))
+        Some(&canonical_path(&second))
     );
     assert_eq!(
         snapshot.active_buffer_projection.small_buffer_text(),
@@ -341,8 +350,7 @@ fn session_restore_store_rejects_raw_source_markers_in_payload_field() {
     let mut record = minimal_record(workspace.path());
     // A raw buffer/source marker that leaks into the only free-form
     // payload-carrying field must be rejected.
-    record.memory_snapshot_json =
-        Some(r#"{"small_buffer_preview":"fn leaked() {}"}"#.to_string());
+    record.memory_snapshot_json = Some(r#"{"small_buffer_preview":"fn leaked() {}"}"#.to_string());
 
     let error =
         DesktopSessionStore::save(&session_state, &record).expect_err("raw marker rejected");

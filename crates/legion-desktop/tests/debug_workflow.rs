@@ -322,7 +322,10 @@ fn debug_workflow_protocol_dap_server_validates_launch_step_evaluate_and_errors(
     let failed_match = error_client
         .match_response(error_server.respond(&failed_launch))
         .expect("a failed launch is still a well-formed response");
-    assert!(!failed_match.success, "failed launch must propagate failure");
+    assert!(
+        !failed_match.success,
+        "failed launch must propagate failure"
+    );
     assert_eq!(
         error_client.phase(),
         DapClientPhase::Ready,
@@ -386,7 +389,9 @@ fn debug_workflow_protocol_dap_server_validates_launch_step_evaluate_and_errors(
     client
         .match_response(server.respond(&threads))
         .expect("threads response should match");
-    let stack_trace = client.prepare_stack_trace(1).expect("stackTrace while paused");
+    let stack_trace = client
+        .prepare_stack_trace(1)
+        .expect("stackTrace while paused");
     let stack_response = server.respond(&stack_trace);
     client
         .match_response(stack_response.clone())

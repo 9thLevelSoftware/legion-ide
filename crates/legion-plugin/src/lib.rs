@@ -6,6 +6,11 @@
 
 #![warn(missing_docs)]
 
+pub mod host;
+pub mod registry;
+
+pub use host::{PluginAuditEntry, PluginAuditKind, WasmPluginHost};
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Mutex,
@@ -206,10 +211,13 @@ impl PluginRuntimeHost {
     /// (`host_calls_used` and `output_bytes_used`) so quotas are enforced per
     /// invocation rather than over the plugin's lifetime.
     pub fn begin_invocation(&mut self, plugin_id: PluginId) -> ProtocolResult<()> {
-        let plugin = self.plugins.get_mut(&plugin_id).ok_or_else(|| ProtocolError {
-            code: "plugin_not_loaded".to_string(),
-            message: "plugin is not loaded".to_string(),
-        })?;
+        let plugin = self
+            .plugins
+            .get_mut(&plugin_id)
+            .ok_or_else(|| ProtocolError {
+                code: "plugin_not_loaded".to_string(),
+                message: "plugin is not loaded".to_string(),
+            })?;
         plugin.host_calls_used = 0;
         plugin.output_bytes_used = 0;
         plugin.state = PluginRuntimeState::Running;
@@ -218,20 +226,20 @@ impl PluginRuntimeHost {
 
     /// End a plugin invocation, returning the plugin to an idle state.
     pub fn end_invocation(&mut self, plugin_id: PluginId) -> ProtocolResult<()> {
-        let plugin = self.plugins.get_mut(&plugin_id).ok_or_else(|| ProtocolError {
-            code: "plugin_not_loaded".to_string(),
-            message: "plugin is not loaded".to_string(),
-        })?;
+        let plugin = self
+            .plugins
+            .get_mut(&plugin_id)
+            .ok_or_else(|| ProtocolError {
+                code: "plugin_not_loaded".to_string(),
+                message: "plugin is not loaded".to_string(),
+            })?;
         plugin.state = PluginRuntimeState::Idle;
         Ok(())
     }
 
     /// Verify a command contribution belongs to a loaded/activated plugin that
     /// declared the required capability, then return the registered command id.
-    pub fn register_command(
-        &self,
-        descriptor: &PluginCommandDescriptor,
-    ) -> ProtocolResult<String> {
+    pub fn register_command(&self, descriptor: &PluginCommandDescriptor) -> ProtocolResult<String> {
         let registered = self.plugins.values().any(|plugin| {
             matches!(
                 plugin.state,

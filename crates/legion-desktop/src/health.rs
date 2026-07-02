@@ -237,7 +237,10 @@ impl DesktopOperationalHealthSnapshot {
     #[must_use]
     pub fn to_markdown(&self) -> String {
         let mut lines = vec![
-            format!("workspace_label: {}", normalize_markdown(&self.workspace_label)),
+            format!(
+                "workspace_label: {}",
+                normalize_markdown(&self.workspace_label)
+            ),
             format!("open_tab_count: {}", self.open_tab_count),
             format!("dirty_tab_count: {}", self.dirty_tab_count),
             format!("status_message_count: {}", self.status_message_count),

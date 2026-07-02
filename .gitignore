@@ -10,6 +10,15 @@
 /.kilo/
 /.kilocode/
 /.serena/
+/.omh/
+
+# Local OS/build/test noise
+.DS_Store
+/.cargo-target-*/
+/.m5gate-*.log
+/.tmp/
+__pycache__/
+*.pyc
 
 # Hermes local audit/agent workspace. Move durable reports into audit-reports/ or plans/ before committing.
 /.hermes/

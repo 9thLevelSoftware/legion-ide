@@ -203,7 +203,7 @@ fn terminal_actions_cannot_mutate_editor_or_disk() {
     assert_eq!(denied_terminal.status.kind, TerminalPanelStatusKind::Denied);
     assert!(denied_terminal.active_session_id.is_none());
 
-    app.enable_terminal_fixture_for_tests();
+    app.enable_terminal_runtime_for_tests();
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
@@ -313,7 +313,7 @@ fn rust_analyzer_runnable_code_lens_launches_the_terminal_fixture() {
     .expect("open workspace");
     app.open_file(source.to_string_lossy())
         .expect("open source file");
-    app.enable_terminal_fixture_for_tests();
+    app.enable_terminal_runtime_for_tests();
 
     let buffer_id = app.active_buffer_id().expect("active buffer");
     let code_lens_payload = json!([

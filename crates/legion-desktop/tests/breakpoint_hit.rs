@@ -96,27 +96,37 @@ fn breakpoint_hit_surfaces_locals_in_the_debug_panel() {
         DebugStatusKindProjection::Paused
     );
     assert_eq!(snapshot.debug_projection.breakpoints.len(), 1);
-    assert!(snapshot.debug_projection.breakpoints[0]
-        .session_id
-        .is_none());
+    assert!(
+        snapshot.debug_projection.breakpoints[0]
+            .session_id
+            .is_none()
+    );
 
     let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
-    assert!(model
-        .debug_rows
-        .iter()
-        .any(|row| row.contains("debug breakpoint")));
-    assert!(model
-        .debug_rows
-        .iter()
-        .any(|row| row.contains("debug frame")));
-    assert!(model
-        .debug_rows
-        .iter()
-        .any(|row| row.contains("debug variable")));
-    assert!(model
-        .debug_rows
-        .iter()
-        .any(|row| row.contains("debug console")));
+    assert!(
+        model
+            .debug_rows
+            .iter()
+            .any(|row| row.contains("debug breakpoint"))
+    );
+    assert!(
+        model
+            .debug_rows
+            .iter()
+            .any(|row| row.contains("debug frame"))
+    );
+    assert!(
+        model
+            .debug_rows
+            .iter()
+            .any(|row| row.contains("debug variable"))
+    );
+    assert!(
+        model
+            .debug_rows
+            .iter()
+            .any(|row| row.contains("debug console"))
+    );
     assert!(model.debug_rows.iter().any(|row| row.contains("count")));
 
     let session_id = snapshot
@@ -139,11 +149,13 @@ fn breakpoint_hit_surfaces_locals_in_the_debug_panel() {
         continued.debug_projection.status.kind,
         DebugStatusKindProjection::Paused
     );
-    assert!(continued
-        .debug_projection
-        .console
-        .iter()
-        .any(|entry| entry.message_label.contains("continue")));
+    assert!(
+        continued
+            .debug_projection
+            .console
+            .iter()
+            .any(|entry| entry.message_label.contains("continue"))
+    );
 
     fs::remove_dir_all(root).ok();
 }
@@ -235,7 +247,8 @@ impl FakeDapServer {
             }),
             _ => json!({}),
         };
-        let response = DapProtocolMessage::response(self.next_seq(), decoded.seq, command, true, body);
+        let response =
+            DapProtocolMessage::response(self.next_seq(), decoded.seq, command, true, body);
         let response_framed =
             encode_dap_message(&response).expect("adapter response should encode to the wire");
         decode_dap_message(&response_framed).expect("client should decode the adapter response")
@@ -365,7 +378,9 @@ fn breakpoint_hit_protocol_dap_server_binds_breakpoint_and_surfaces_locals() {
     client
         .match_response(server.respond(&threads))
         .expect("threads response should match");
-    let stack_trace = client.prepare_stack_trace(1).expect("stackTrace while paused");
+    let stack_trace = client
+        .prepare_stack_trace(1)
+        .expect("stackTrace while paused");
     let stack_response = server.respond(&stack_trace);
     client
         .match_response(stack_response.clone())

@@ -13,7 +13,7 @@ use legion_desktop::{
     workflow::DesktopLaunchConfig,
 };
 use legion_protocol::{BufferId, TextCoordinate};
-use legion_ui::{ActiveBufferProjection, Shell};
+use legion_ui::{ActiveBufferProjection, ActiveBufferProjectionState, Shell};
 
 mod common;
 
@@ -225,6 +225,7 @@ fn platform_smoke_launch_config_parses_smoke_flags() {
 fn platform_smoke_adapter_paths_route_without_metrics_payloads() {
     let mut snapshot = Shell::empty("Smoke").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(42)),
         ..ActiveBufferProjection::empty()
     };

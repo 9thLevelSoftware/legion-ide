@@ -1,7 +1,8 @@
 //! Network egress policy helpers.
 
 use crate::{
-    SandboxAction, SandboxAuditEvent, SandboxBackend, SandboxDecision, SandboxPlatform, SandboxScope,
+    SandboxAction, SandboxAuditEvent, SandboxBackend, SandboxDecision, SandboxPlatform,
+    SandboxScope,
 };
 
 /// Canonicalizes a raw egress target to an authority string for policy matching.
@@ -114,8 +115,14 @@ mod tests {
 
     #[test]
     fn canonicalizes_scheme_authority_and_path_before_matching() {
-        assert_eq!(canonicalize_egress_target("https://localhost:8080/v1/status"), Some("localhost:8080".to_string()));
-        assert_eq!(canonicalize_egress_target("localhost"), Some("localhost".to_string()));
+        assert_eq!(
+            canonicalize_egress_target("https://localhost:8080/v1/status"),
+            Some("localhost:8080".to_string())
+        );
+        assert_eq!(
+            canonicalize_egress_target("localhost"),
+            Some("localhost".to_string())
+        );
     }
 
     #[test]

@@ -17,7 +17,9 @@ use legion_protocol::{
     TerminalPanelStatusKind, TerminalRuntimeState, TerminalScrollbackProjection,
     TerminalSearchProjection, TimestampMillis,
 };
-use legion_ui::{ActiveBufferProjection, CommandDispatchIntent, Shell};
+use legion_ui::{
+    ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, Shell,
+};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -194,6 +196,7 @@ fn desktop_phase4_dispatch_stays_projection_only() {
 
     let mut snapshot = empty;
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(5)),
         ..ActiveBufferProjection::empty()
     };

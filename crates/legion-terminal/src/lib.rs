@@ -2,6 +2,15 @@
 
 #![warn(missing_docs)]
 
+/// Windows ConPTY parity metadata contracts.
+pub mod conpty;
+/// Renderer-friendly terminal grid projection helpers.
+pub mod grid;
+/// OSC 7/133 shell metadata parsing.
+pub mod osc;
+/// Per-session terminal metadata tracking.
+pub mod session;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -365,6 +374,8 @@ pub struct TerminalRuntimeLaunchOutcome {
     pub audit: TerminalAuditRecord,
     /// Bounded redacted projection chunk.
     pub output: TerminalOutputChunk,
+    /// OSC 7/133 shell metadata parsed from this launch chunk.
+    pub shell_projection: crate::osc::TerminalShellProjection,
 }
 
 /// Terminal output poll request.
@@ -387,6 +398,8 @@ pub struct TerminalRuntimeOutputPollOutcome {
     pub audit: TerminalAuditRecord,
     /// Bounded redacted projection chunk.
     pub output: TerminalOutputChunk,
+    /// OSC 7/133 shell metadata parsed from this poll chunk.
+    pub shell_projection: crate::osc::TerminalShellProjection,
 }
 
 /// Terminal fixture configuration.
@@ -535,6 +548,8 @@ struct RuntimeSession {
     /// call so concurrent lifecycle operations fail closed instead of acting on
     /// a session that is being torn down.
     closing: bool,
+    /// Latest advisory OSC 7/133 metadata observed for this session.
+    metadata: session::TerminalSessionMetadata,
 }
 
 /// Session-owned identity and limits resolved under the registry lock for a
@@ -556,6 +571,21 @@ impl<P: PtyService> TerminalRuntime<P> {
             pty,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Return the latest advisory OSC 7/133 metadata for a live session.
+    ///
+    /// Shell-emitted cwd/exit-code metadata is projection metadata only and must
+    /// not be used as security policy authority.
+    pub fn session_metadata(
+        &self,
+        session_id: TerminalSessionId,
+    ) -> Option<session::TerminalSessionMetadata> {
+        self.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(&session_id)
+                .map(|session| session.metadata.clone())
+        })
     }
 
     /// Launch a terminal command and return metadata-only audit/projection records.
@@ -601,7 +631,9 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
-        let redacted = redact_terminal_projection(&session.output, effective_limit);
+        let shell_projection = crate::osc::parse_terminal_shell_output(&session.output);
+        let redacted =
+            redact_terminal_projection(&shell_projection.visible_output, effective_limit);
         let byte_count = session.output.len().min(effective_limit as usize) as u64;
         let terminal_session_id = next_terminal_session_id();
         let native_pty = session.id.starts_with("native-");
@@ -613,6 +645,8 @@ impl<P: PtyService> TerminalRuntime<P> {
         let event_sequence = EventSequence(terminal_session_id.0);
         let correlation_id = CorrelationId(terminal_session_id.0);
         let causality_id = CausalityId(uuid_from_value(terminal_session_id.0));
+        let mut metadata = session::TerminalSessionMetadata::default();
+        metadata.apply_shell_projection(&shell_projection);
         if native_pty {
             self.sessions
                 .lock()
@@ -629,6 +663,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                         output_byte_limit: effective_limit,
                         deadline,
                         closing: false,
+                        metadata,
                     },
                 );
         }
@@ -675,6 +710,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                 output
             },
             audit,
+            shell_projection,
         };
         Ok(output)
     }
@@ -757,7 +793,9 @@ impl<P: PtyService> TerminalRuntime<P> {
         if let Some(deadline) = ctx.deadline
             && Instant::now() >= deadline
         {
-            let _ = self.pty.kill_pty(&ctx.platform_session_id, PtyKillMode::Terminate);
+            let _ = self
+                .pty
+                .kill_pty(&ctx.platform_session_id, PtyKillMode::Terminate);
             self.remove_session(request.session_id)?;
             let audit = self.audit_record(
                 request.session_id,
@@ -781,7 +819,11 @@ impl<P: PtyService> TerminalRuntime<P> {
                     reason: err.message,
                 }
             })?;
-            return Ok(TerminalRuntimeOutputPollOutcome { output, audit });
+            return Ok(TerminalRuntimeOutputPollOutcome {
+                output,
+                audit,
+                shell_projection: crate::osc::TerminalShellProjection::default(),
+            });
         }
         let effective_limit = ctx.output_byte_limit.min(self.config.max_output_bytes);
         let read = self
@@ -790,10 +832,13 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
+        let shell_projection = crate::osc::parse_terminal_shell_output(&read.output);
+        self.apply_session_metadata(request.session_id, &shell_projection)?;
         if read.exited && !read.truncated {
             self.remove_session(request.session_id)?;
         }
-        let redacted = redact_terminal_projection(&read.output, effective_limit);
+        let redacted =
+            redact_terminal_projection(&shell_projection.visible_output, effective_limit);
         let byte_count = read.output.len().min(effective_limit as usize) as u64;
         let state = if read.exited {
             TerminalRuntimeState::Exited
@@ -821,8 +866,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                     sequence: audit.event_sequence,
                     redacted_payload: redacted,
                     byte_count,
-                    truncated: read.truncated
-                        || read.output.len() as u64 > effective_limit,
+                    truncated: read.truncated || read.output.len() as u64 > effective_limit,
                     redaction: RedactionHint::MetadataOnly,
                     schema_version: 1,
                 };
@@ -834,6 +878,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                 output
             },
             audit,
+            shell_projection,
         };
         Ok(output)
     }
@@ -1014,6 +1059,24 @@ impl<P: PtyService> TerminalRuntime<P> {
         {
             session.closing = false;
         }
+    }
+
+    fn apply_session_metadata(
+        &self,
+        session_id: TerminalSessionId,
+        projection: &crate::osc::TerminalShellProjection,
+    ) -> Result<(), TerminalRuntimeError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| TerminalRuntimeError::Backend {
+                reason: "terminal runtime session registry is unavailable".to_string(),
+            })?;
+        let session = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| missing_session_error(session_id))?;
+        session.metadata.apply_shell_projection(projection);
+        Ok(())
     }
 
     fn remove_session(
@@ -1208,9 +1271,17 @@ fn match_sensitive_assignment(input: &str, lower: &str, start: usize) -> Option<
         return None;
     }
     let ident_lower = &lower[start..ident_end];
-    let sensitive = ["secret", "token", "password", "passwd", "api_key", "access_key", "apikey"]
-        .iter()
-        .any(|kw| ident_lower.contains(kw));
+    let sensitive = [
+        "secret",
+        "token",
+        "password",
+        "passwd",
+        "api_key",
+        "access_key",
+        "apikey",
+    ]
+    .iter()
+    .any(|kw| ident_lower.contains(kw));
     if !sensitive {
         return None;
     }
@@ -1465,6 +1536,43 @@ mod tests {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         }
+    }
+
+    #[test]
+    fn terminal_runtime_tracks_osc_metadata_per_session() {
+        let runtime = TerminalRuntime::new(
+            TerminalRuntimeConfig::enabled(),
+            FakePty::native_scripted_reads(vec![PtyReadResult {
+                id: "native-unix-pty-test".to_string(),
+                output: "\x1b]7;file:///repo\x1b\\visible\x1b]133;D;3\x1b\\".to_string(),
+                exited: false,
+                exit_code: None,
+                truncated: false,
+            }]),
+        );
+        let launched = runtime
+            .launch(TerminalRuntimeLaunchRequest {
+                policy: policy(),
+                command: "bash".to_string(),
+                args: vec![],
+            })
+            .expect("launch");
+        let session_id = launched.audit.session_id;
+
+        let output = runtime
+            .poll_output(poll_request(session_id, 120))
+            .expect("poll osc output");
+        assert_eq!(output.output.redacted_payload, "visible");
+
+        let metadata = runtime
+            .session_metadata(session_id)
+            .expect("session metadata should be queryable");
+        assert_eq!(metadata.cwd.as_deref(), Some("/repo"));
+        assert_eq!(metadata.exit_code, Some(3));
+        assert_eq!(
+            metadata.boundary,
+            Some(crate::osc::TerminalShellBoundary::CommandFinished)
+        );
     }
 
     #[test]
@@ -1881,8 +1989,7 @@ mod tests {
 
     #[test]
     fn terminal_runtime_poll_uses_session_owned_event_identity() {
-        let runtime =
-            TerminalRuntime::new(TerminalRuntimeConfig::enabled(), FakePty::native("ok"));
+        let runtime = TerminalRuntime::new(TerminalRuntimeConfig::enabled(), FakePty::native("ok"));
         let launch = runtime
             .launch(TerminalRuntimeLaunchRequest {
                 policy: policy(),
@@ -1922,7 +2029,9 @@ mod tests {
             let session = sessions.get_mut(&session_id).expect("session");
             session.deadline = Some(Instant::now() - Duration::from_secs(1));
         }
-        let poll = runtime.poll_output(poll_request(session_id, 5)).expect("poll");
+        let poll = runtime
+            .poll_output(poll_request(session_id, 5))
+            .expect("poll");
         assert_eq!(poll.audit.state, TerminalRuntimeState::Exited);
         assert!(poll.audit.metadata_summary.contains("reason=timeout"));
         assert!(
@@ -1942,8 +2051,7 @@ mod tests {
 
     #[test]
     fn terminal_runtime_rejects_operations_on_closing_session() {
-        let runtime =
-            TerminalRuntime::new(TerminalRuntimeConfig::enabled(), FakePty::native(""));
+        let runtime = TerminalRuntime::new(TerminalRuntimeConfig::enabled(), FakePty::native(""));
         let launch = runtime
             .launch(TerminalRuntimeLaunchRequest {
                 policy: policy(),

@@ -894,10 +894,8 @@ fn beta_acceptance_e2e_vsix_install_proposal_diff_and_verification_through_runti
         "seeding a delegated plan should project at least one verification run"
     );
     assert!(
-        verification_rows
-            .iter()
-            .all(|row| row.command_body_redacted
-                && row.redaction_hints.contains(&RedactionHint::MetadataOnly)),
+        verification_rows.iter().all(|row| row.command_body_redacted
+            && row.redaction_hints.contains(&RedactionHint::MetadataOnly)),
         "projected verification runs must be metadata-only with redacted command body"
     );
     assert!(

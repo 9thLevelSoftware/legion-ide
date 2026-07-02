@@ -826,12 +826,23 @@ pub struct ActiveBufferProjection {
     pub file_path: Option<CanonicalPath>,
     /// Bounded viewport projection instead of unbounded text.
     pub viewport: Option<legion_protocol::ViewportProjection>,
+    /// Degraded/full state for the active buffer projection.
+    pub state: ActiveBufferProjectionState,
     /// Degraded status from the application layer.
     pub degraded: bool,
     /// Bounded small-buffer preview, requested explicitly.
     pub small_buffer_preview: Option<String>,
     /// Dirty indicator projected from the editor engine.
     pub dirty: bool,
+}
+
+/// Degraded/full state for the active buffer projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveBufferProjectionState {
+    /// Full projection is available.
+    Full,
+    /// Projection is degraded (streaming, large file, etc.).
+    Degraded,
 }
 
 impl ActiveBufferProjection {
@@ -843,6 +854,7 @@ impl ActiveBufferProjection {
             file_id: None,
             file_path: None,
             viewport: None,
+            state: ActiveBufferProjectionState::Degraded,
             degraded: false,
             small_buffer_preview: None,
             dirty: false,
@@ -3823,7 +3835,9 @@ impl Shell {
                     row.signed_off_count,
                     row.sign_off_count,
                     row.linked_proposals.len(),
-                    sanitize_terminal_text(row.directive_artifact_id.as_deref().unwrap_or("<none>")),
+                    sanitize_terminal_text(
+                        row.directive_artifact_id.as_deref().unwrap_or("<none>")
+                    ),
                     sanitize_terminal_text(row.spec_artifact_id.as_deref().unwrap_or("<none>")),
                     sanitize_terminal_text(
                         row.task_graph_artifact_id.as_deref().unwrap_or("<none>")
@@ -5863,6 +5877,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("a.md".to_string())),
                 viewport: None,
+                state: ActiveBufferProjectionState::Full,
                 degraded: false,
                 small_buffer_preview: Some("first".to_string()),
                 dirty: false,
@@ -6149,6 +6164,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("large.txt".to_string())),
                 viewport: Some(degraded_viewport_projection()),
+                state: ActiveBufferProjectionState::Degraded,
                 degraded: true,
                 small_buffer_preview: None,
                 dirty: false,
@@ -6221,6 +6237,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("a.md".to_string())),
                 viewport: None,
+                state: ActiveBufferProjectionState::Full,
                 degraded: false,
                 small_buffer_preview: Some("first".to_string()),
                 dirty: false,
@@ -6287,6 +6304,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("a.md".to_string())),
                 viewport: None,
+                state: ActiveBufferProjectionState::Full,
                 degraded: false,
                 small_buffer_preview: Some("first".to_string()),
                 dirty: true,

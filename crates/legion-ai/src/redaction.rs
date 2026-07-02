@@ -54,7 +54,9 @@ pub fn redact_model_bound_output(output: &str, max_bytes: usize) -> ModelBoundOu
     let mut redacted_text = output.to_string();
 
     for (pattern, replacement) in redaction_patterns() {
-        redacted_text = pattern.replace_all(&redacted_text, *replacement).into_owned();
+        redacted_text = pattern
+            .replace_all(&redacted_text, *replacement)
+            .into_owned();
     }
 
     let truncated = if redacted_text.len() > max_bytes {

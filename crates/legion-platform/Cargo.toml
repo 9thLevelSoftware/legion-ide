@@ -9,6 +9,10 @@ publish.workspace = true
 legion-protocol = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+default = []
+windows = []
+
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 

@@ -18,13 +18,13 @@ use legion_protocol::{
     CorrelationId, EventSequence, FileFingerprint, LanguageId, LanguageServerId, LspRequestId,
     PrincipalId, ProposalAffectedTarget, ProposalContextManifestSummary, ProposalDiffSummary,
     ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection, ProposalLedgerRow,
-    ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel,
-    ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
+    ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
+    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, RedactionHint, RemoteFilesystemOperation,
-    RemoteFilesystemOperationKind, RemoteGuiProjection, RemoteLspDescriptor, RemoteProposalReviewGuiRow,
-    RemoteOperationId, RemotePtyDescriptor, RemoteTransportEnvelope, RemoteTransportPayload,
-    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionGuiRow, RemoteWorkspaceSessionId,
-    TerminalSessionId, TimestampMillis, WorkspaceId,
+    RemoteFilesystemOperationKind, RemoteGuiProjection, RemoteLspDescriptor, RemoteOperationId,
+    RemoteProposalReviewGuiRow, RemotePtyDescriptor, RemoteTransportEnvelope,
+    RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionGuiRow,
+    RemoteWorkspaceSessionId, TerminalSessionId, TimestampMillis, WorkspaceId,
 };
 use legion_remote::RemoteOperationDisposition;
 use legion_ui::{CommandDispatchIntent, Shell};
@@ -466,7 +466,10 @@ fn remote_workspace_gui_loopback_transport_projects_lifecycle_descriptors_and_pr
             }),
         ))
         .expect("pty descriptor should ingest through the production path");
-    assert_eq!(pty_outcome.disposition, RemoteOperationDisposition::Accepted);
+    assert_eq!(
+        pty_outcome.disposition,
+        RemoteOperationDisposition::Accepted
+    );
 
     // 3) LSP descriptor event flows through the production path.
     let lsp_outcome = runtime
@@ -484,7 +487,10 @@ fn remote_workspace_gui_loopback_transport_projects_lifecycle_descriptors_and_pr
             }),
         ))
         .expect("lsp descriptor should ingest through the production path");
-    assert_eq!(lsp_outcome.disposition, RemoteOperationDisposition::Accepted);
+    assert_eq!(
+        lsp_outcome.disposition,
+        RemoteOperationDisposition::Accepted
+    );
 
     // Connected session row exposes terminal and LSP descriptor availability.
     let connected_snapshot = runtime.projection_snapshot();

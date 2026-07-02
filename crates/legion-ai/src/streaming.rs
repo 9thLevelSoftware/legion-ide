@@ -33,12 +33,10 @@ pub fn split_markdown_stream(input: &str) -> Vec<MarkdownStreamSegment> {
         text_lines.clear();
     };
 
-    let flush_code = |
-        segments: &mut Vec<MarkdownStreamSegment>,
-        code_lines: &mut Vec<&str>,
-        code_language: &mut Option<String>,
-        complete: bool,
-    | {
+    let flush_code = |segments: &mut Vec<MarkdownStreamSegment>,
+                      code_lines: &mut Vec<&str>,
+                      code_language: &mut Option<String>,
+                      complete: bool| {
         // Empty code blocks (e.g. a placeholder fence with only a language
         // label) are intentionally preserved: an opening fence was observed,
         // so the segment is real even when it carries no body.
@@ -102,7 +100,10 @@ mod tests {
         let segments = split_markdown_stream("before\n\n```rust\nfn demo() {}\n```\nafter\n");
 
         assert_eq!(segments.len(), 3);
-        assert_eq!(segments[0], MarkdownStreamSegment::Text("before\n\n".to_string()));
+        assert_eq!(
+            segments[0],
+            MarkdownStreamSegment::Text("before\n\n".to_string())
+        );
         assert_eq!(
             segments[1],
             MarkdownStreamSegment::CodeBlock {
@@ -111,7 +112,10 @@ mod tests {
                 complete: true,
             }
         );
-        assert_eq!(segments[2], MarkdownStreamSegment::Text("after\n".to_string()));
+        assert_eq!(
+            segments[2],
+            MarkdownStreamSegment::Text("after\n".to_string())
+        );
     }
 
     #[test]
@@ -119,7 +123,10 @@ mod tests {
         let segments = split_markdown_stream("before\n```rust\n```\nafter\n");
 
         assert_eq!(segments.len(), 3);
-        assert_eq!(segments[0], MarkdownStreamSegment::Text("before\n".to_string()));
+        assert_eq!(
+            segments[0],
+            MarkdownStreamSegment::Text("before\n".to_string())
+        );
         assert_eq!(
             segments[1],
             MarkdownStreamSegment::CodeBlock {
@@ -128,7 +135,10 @@ mod tests {
                 complete: true,
             }
         );
-        assert_eq!(segments[2], MarkdownStreamSegment::Text("after\n".to_string()));
+        assert_eq!(
+            segments[2],
+            MarkdownStreamSegment::Text("after\n".to_string())
+        );
     }
 
     #[test]
@@ -136,7 +146,10 @@ mod tests {
         let segments = split_markdown_stream("intro\n```python\n");
 
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0], MarkdownStreamSegment::Text("intro\n".to_string()));
+        assert_eq!(
+            segments[0],
+            MarkdownStreamSegment::Text("intro\n".to_string())
+        );
         assert_eq!(
             segments[1],
             MarkdownStreamSegment::CodeBlock {
@@ -152,7 +165,10 @@ mod tests {
         let segments = split_markdown_stream("intro\n```python\nprint('hi')\n");
 
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0], MarkdownStreamSegment::Text("intro\n".to_string()));
+        assert_eq!(
+            segments[0],
+            MarkdownStreamSegment::Text("intro\n".to_string())
+        );
         assert_eq!(
             segments[1],
             MarkdownStreamSegment::CodeBlock {

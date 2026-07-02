@@ -132,9 +132,9 @@ pub fn plan_windows_package(
         ));
     }
 
-    // Resolve the effective target triple. A non-Windows host cannot produce a
-    // Windows executable from the host target, so an explicit triple is
-    // required to avoid pointing the plan at a host binary with no `.exe`.
+    // Resolve the effective target triple. Planning is metadata-only and must
+    // work on non-Windows hosts for dry-run/manifest tests; an explicit triple
+    // simply selects the target subdirectory and cargo `--target` args.
     let target_triple = match &config.target_triple {
         Some(triple) => {
             if triple.trim().is_empty() {
@@ -142,12 +142,7 @@ pub fn plan_windows_package(
             }
             Some(triple.as_str())
         }
-        None => {
-            if !cfg!(target_os = "windows") {
-                return Err(PackagePlanError::MissingWindowsTargetTriple);
-            }
-            None
-        }
+        None => None,
     };
 
     let mut target_dir = config.workspace_root.join("target");

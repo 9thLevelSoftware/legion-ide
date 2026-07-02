@@ -1,0 +1,40 @@
+name: Legion Bench
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  live:
+    name: Legion bench live weekly (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Legion bench live mode
+        run: cargo run -p xtask -- legion-bench --mode live
+
+      - name: Legion bench verify
+        run: cargo run -p xtask -- verify-legion-bench
+
+      - name: Upload legion bench report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: legion-bench-report-${{ matrix.os }}
+          path: target/legion-bench/legion_bench_report.toml
+          if-no-files-found: warn

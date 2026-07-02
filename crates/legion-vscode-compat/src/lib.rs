@@ -164,16 +164,22 @@ pub fn manifest_from_package_json(
     collect_activation_diagnostics(&activation_events, &mut diagnostics);
     collect_contribution_diagnostics(&contributions, &mut diagnostics);
 
-    let required_tier =
-        required_tier(&activation_events, &contributions, has_executable_entrypoint);
+    let required_tier = required_tier(
+        &activation_events,
+        &contributions,
+        has_executable_entrypoint,
+    );
     let status = aggregate_status(
         required_tier,
         &activation_events,
         &contributions,
         &diagnostics,
     );
-    let requested_capabilities =
-        requested_capabilities(&activation_events, &contributions, has_executable_entrypoint);
+    let requested_capabilities = requested_capabilities(
+        &activation_events,
+        &contributions,
+        has_executable_entrypoint,
+    );
 
     Ok(VsCodeExtensionManifest {
         extension_id: VsCodeExtensionId(format!("{publisher}.{name}")),

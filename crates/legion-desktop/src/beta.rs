@@ -571,12 +571,7 @@ fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<BetaWorkf
     errors
 }
 
-fn record_gate_error(
-    errors: &mut Vec<BetaWorkflowError>,
-    passed: bool,
-    label: &str,
-    status: &str,
-) {
+fn record_gate_error(errors: &mut Vec<BetaWorkflowError>, passed: bool, label: &str, status: &str) {
     if !passed {
         errors.push(BetaWorkflowError::Failed {
             detail: format!("{label}: {status}"),
@@ -688,9 +683,7 @@ fn run_language_actions(runtime: &mut DesktopRuntime) -> String {
     )
 }
 
-fn run_terminal_actions(
-    runtime: &mut DesktopRuntime,
-) -> (String, BetaTerminalPolicyDecision) {
+fn run_terminal_actions(runtime: &mut DesktopRuntime) -> (String, BetaTerminalPolicyDecision) {
     let _ = runtime.handle_action(DesktopAction::TerminalLaunch {
         command_label: "beta fixture check".to_string(),
     });
@@ -783,7 +776,10 @@ fn position(byte_offset: u64) -> TextCoordinate {
 fn beta_smoke_command(config: &BetaWorkflowConfig) -> String {
     [
         "cargo run -p legion-desktop -- --beta-smoke".to_string(),
-        format!("--workspace {}", shell_quote_path(&config.real_workspace_root)),
+        format!(
+            "--workspace {}",
+            shell_quote_path(&config.real_workspace_root)
+        ),
         format!(
             "--beta-workspace {}",
             shell_quote_path(&config.beta_workspace_root)

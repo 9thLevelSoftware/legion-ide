@@ -24,6 +24,21 @@ pub const PRODUCT_ENV_PREFIX: &str = "LEGION";
 /// Legacy environment-variable prefix retained for compatibility.
 pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
 
+/// Structured context manifest assembly helpers.
+pub mod manifest;
+pub mod plan;
+pub mod risk;
+pub mod scope;
+pub mod tools;
+
+pub use manifest::{ContextManifestAssembly, ContextManifestSources};
+pub use plan::{
+    EditablePlanArtifact, EditablePlanRevisionArtifact, EditablePlanRevisionAuditRow,
+    EditablePlanSection, EditablePlanSectionKind,
+};
+pub use scope::{DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind};
+pub use tools::LegionToolKind;
+
 // -----------------------------------------------------------------------------
 // Core identifiers and shared primitives
 // -----------------------------------------------------------------------------
@@ -181,7 +196,9 @@ impl TimestampMillis {
     /// it would overflow `u64`.
     pub fn try_now() -> Result<Self, SystemTimeError> {
         let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        Ok(Self(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)))
+        Ok(Self(
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+        ))
     }
 }
 

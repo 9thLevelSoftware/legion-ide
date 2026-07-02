@@ -320,7 +320,11 @@ fn run_smoke_window(
     // Gate required adapter paths: a missing or failed adapter path is a smoke
     // failure, not a silent pass.
     let adapter_checks = observations.adapter_checks();
-    push_adapter_gate(&mut errors, "clipboard", adapter_checks.clipboard_adapter_path);
+    push_adapter_gate(
+        &mut errors,
+        "clipboard",
+        adapter_checks.clipboard_adapter_path,
+    );
     push_adapter_gate(&mut errors, "ime", adapter_checks.ime_adapter_path);
     push_adapter_gate(
         &mut errors,

@@ -541,10 +541,9 @@ impl FileBackedTelemetrySpool {
         let path = path.as_ref().to_path_buf();
         let state: PersistedTelemetrySpool = if path.exists() {
             let text = fs::read_to_string(&path).map_err(io_error)?;
-            let decoded =
-                serde_json::from_str(&text).map_err(|err| TelemetrySpoolError::Io {
-                    message: format!("decode durable spool: {err}"),
-                })?;
+            let decoded = serde_json::from_str(&text).map_err(|err| TelemetrySpoolError::Io {
+                message: format!("decode durable spool: {err}"),
+            })?;
             validate_persisted_spool(&decoded, &config)?;
             decoded
         } else {

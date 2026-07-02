@@ -11,5 +11,9 @@ legion-protocol = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+default = []
+windows = ["legion-platform/windows"]
+
 [dev-dependencies]
 serde_json = { workspace = true }

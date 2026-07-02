@@ -4,11 +4,24 @@
 mod assistant_rail;
 mod code_canvas_painter;
 
+/// Agent communication row parsing and rendering.
+pub mod agent_comm;
+/// Editable plan editor projection.
+pub mod plan_editor;
+/// Sandbox panel projection.
+pub mod sandbox_panel;
+/// Renderer-backed scope picker for delegated tasks.
+pub mod scope_picker;
+/// Terminal panel render-model helpers.
+pub mod terminal_panel;
+
 #[cfg(feature = "ai")]
 pub use assistant_rail::{
     AssistantRailCodeBlockViewModel, AssistantRailRowViewModel, AssistantRailSegmentViewModel,
     assistant_rail_rows, render_streaming_assistant_rows,
 };
+pub use plan_editor::{DesktopPlanEditorViewModel, DesktopPlanSectionViewModel};
+pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -23,8 +36,8 @@ use legion_protocol::{
     LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
     PluginContributionProjection, PrivacyInspectorRedactionState, ProposalId,
     ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange,
-    RedactionHint, TerminalOutputRowProjection, TextCoordinate, ViewportLineTruncationState,
-    ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    TextCoordinate, ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, GitBlameLineProjection,
@@ -486,6 +499,8 @@ pub struct DesktopProjectionViewModel {
     pub collaboration_rows: Vec<String>,
     /// Remote workspace manager rows.
     pub remote_rows: Vec<String>,
+    /// Sandbox panel rows for delegated task runtime state.
+    pub sandbox_rows: Vec<String>,
     /// Empty, dirty, or degraded display flags.
     pub empty_or_degraded_flags: Vec<String>,
 }
@@ -597,6 +612,11 @@ impl DesktopProjectionViewModel {
         let command_palette_rows = command_palette_rows(snapshot);
         let dock_rows = dock_rows(snapshot, state);
         let dock_panel_rows = dock_panel_rows(snapshot, state);
+        let sandbox_rows = if snapshot.product_mode == DockMode::Delegate {
+            sandbox_panel::rows(snapshot)
+        } else {
+            Vec::new()
+        };
         let onboarding_rows = onboarding_rows(snapshot, state);
         Self {
             layout_title: snapshot.layout_projection.layout.title.clone(),
@@ -642,6 +662,7 @@ impl DesktopProjectionViewModel {
             plugin_rows: plugin_rows(snapshot),
             collaboration_rows: collaboration_rows(snapshot),
             remote_rows: remote_rows(snapshot),
+            sandbox_rows,
             empty_or_degraded_flags: flags,
         }
     }
@@ -3337,8 +3358,8 @@ fn render_proposal_cards(
             });
         });
     }
-    let hidden = ledger.rows.len().saturating_sub(PROPOSAL_CARD_LIMIT)
-        + ledger.omitted_row_count as usize;
+    let hidden =
+        ledger.rows.len().saturating_sub(PROPOSAL_CARD_LIMIT) + ledger.omitted_row_count as usize;
     if hidden > 0 {
         ui.label(theme::muted(format!("{hidden} more proposals")));
     }
@@ -3566,30 +3587,23 @@ fn render_terminal_stream(
     model: &DesktopProjectionViewModel,
 ) {
     let terminal = &snapshot.terminal_panel_projection;
+    let render_model = terminal_panel::TerminalPanelRenderModel::from_projection(terminal, 100);
     section_label(ui, "Terminal / Runtime", Some(theme::tokens().accent.cyan));
     theme::code_frame().show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::code_muted(format!(
-                    "status={:?}",
-                    terminal.status.kind
-                )));
-                if let Some(session_id) = terminal.active_session_id {
-                    ui.label(theme::code_muted(format!("session={}", session_id.0)));
+                ui.label(theme::code_muted(render_model.status_label.clone()));
+                if let Some(session_label) = &render_model.active_session_label {
+                    ui.label(theme::code_muted(session_label.clone()));
                 }
-                if let Some(runtime_state) = terminal.runtime_state {
-                    ui.label(theme::code_muted(format!("runtime={runtime_state:?}")));
+                if let Some(runtime_label) = &render_model.runtime_label {
+                    ui.label(theme::code_muted(runtime_label.clone()));
                 }
-                ui.label(theme::code_muted(format!(
-                    "visible={} omitted={} matches={}",
-                    terminal.scrollback.visible_row_count,
-                    terminal.scrollback.omitted_row_count,
-                    terminal.search.match_count
-                )));
-                if terminal.scrollback.truncated {
+                ui.label(theme::code_muted(render_model.scrollback_label.clone()));
+                if render_model.scrollback_truncated {
                     ui.label(theme::code_muted("scrollback truncated"));
                 }
-                if terminal.search.truncated {
+                if render_model.search_truncated {
                     ui.label(theme::code_muted("search truncated"));
                 }
             });
@@ -3635,22 +3649,20 @@ fn render_terminal_stream(
                         .striped(true)
                         .spacing([theme::tokens().spacing.sm as f32, 2.0])
                         .show(ui, |ui| {
-                            for row in terminal.output_rows.iter().take(100) {
-                                ui.label(theme::code_muted(format!("{:>4}", row.sequence.0)));
-                                ui.label(theme::code_muted(if row.is_stderr {
-                                    "stderr"
-                                } else {
-                                    "stdout"
-                                }));
+                            for row in render_model.grid.rows.iter() {
+                                ui.label(theme::code_muted(row.sequence_label.clone()));
+                                ui.label(theme::code_muted(row.stream_label.clone()));
                                 ui.horizontal_wrapped(|ui| {
-                                    render_terminal_payload(ui, &row.redacted_payload);
+                                    render_terminal_payload(ui, &row.payload);
                                 });
                                 ui.horizontal_wrapped(|ui| {
-                                    for badge in terminal_output_row_badges(row) {
-                                        ui.label(theme::code_muted(badge));
+                                    for badge in &row.badges {
+                                        ui.label(theme::code_muted(badge.clone()));
                                     }
-                                    if ui.small_button("Copy").clicked() {
-                                        ui.ctx().copy_text(row.redacted_payload.clone());
+                                    if ui.small_button("Copy").clicked()
+                                        && let Some(payload) = render_model.copy_row(row.sequence)
+                                    {
+                                        ui.ctx().copy_text(payload);
                                     }
                                 });
                                 ui.end_row();
@@ -3750,7 +3762,8 @@ fn render_terminal_payload(ui: &mut egui::Ui, payload: &str) {
     });
 }
 
-fn terminal_output_row_badges(row: &TerminalOutputRowProjection) -> Vec<String> {
+#[cfg(test)]
+fn terminal_output_row_badges(row: &legion_protocol::TerminalOutputRowProjection) -> Vec<String> {
     if let Some((prefix, detail)) = row.redacted_payload.split_once(" • ")
         && prefix.starts_with("command block ")
     {
@@ -3771,9 +3784,9 @@ fn terminal_output_row_badges(row: &TerminalOutputRowProjection) -> Vec<String> 
         badges.push("truncated".to_string());
     }
     badges.push(match row.redaction {
-        RedactionHint::None => "redacted=none".to_string(),
-        RedactionHint::MetadataOnly => "redacted=metadata-only".to_string(),
-        RedactionHint::Full => "redacted=full".to_string(),
+        legion_protocol::RedactionHint::None => "redacted=none".to_string(),
+        legion_protocol::RedactionHint::MetadataOnly => "redacted=metadata-only".to_string(),
+        legion_protocol::RedactionHint::Full => "redacted=full".to_string(),
     });
     badges.push(format!("{} bytes", row.byte_count));
     badges
@@ -7411,7 +7424,10 @@ fn plugin_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         // Surface the app-owned permission review rows shown before install
         // approval so the capability disclosure is visible in the plugin panel.
         rows.extend(projection.permission_review_rows.iter().map(|review| {
-            format!("plugin management plugin {} {}", projection.plugin_id.0, review)
+            format!(
+                "plugin management plugin {} {}",
+                projection.plugin_id.0, review
+            )
         }));
     }
     rows

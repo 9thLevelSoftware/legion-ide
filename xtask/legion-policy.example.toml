@@ -1,0 +1,206 @@
+# Example Legion signed policy bundle for a restrictive enterprise profile.
+# It keeps automation locked to a narrow allowlist, enforces a mode ceiling, and
+# leaves every export/retention surface disabled unless explicitly budgeted below.
+
+schema_version = 1
+bundle_id = "enterprise-restrictive"
+bundle_version = 1
+signature_label = "signed-by-enterprise-policy-service"
+mode_ceiling = "Assist"
+issued_at_utc = "2026-06-15T00:00:00Z"
+
+[security_policy.path_policy]
+writable_roots = [
+  "./workspace/",
+  "./scratch/",
+]
+readable_roots = [
+  "./workspace/",
+  "./scratch/",
+  "./reports/",
+]
+blocked_roots = [
+  ".secrets/",
+  "/etc/",
+  "/private/",
+]
+max_write_bytes = 65536
+
+[security_policy.command_taxonomy.by_name]
+ls = "Read"
+cat = "Read"
+git = "Read"
+rm = "Mutate"
+cp = "Mutate"
+mv = "Mutate"
+cargo = "LanguageServer"
+rustup = "LanguageServer"
+curl = "Network"
+wget = "Network"
+bash = "Terminal"
+sh = "Terminal"
+cmd = "Terminal"
+powershell = "Terminal"
+
+[security_policy.terminal_policy]
+max_output_bytes = 65536
+allow_untrusted = false
+allowed_capabilities = [
+  "terminal.launch",
+  "terminal.input",
+  "terminal.resize",
+  "terminal.close",
+]
+runtime_enabled = false
+max_command_timeout_seconds = 30
+
+[security_policy.lsp_policy]
+require_trusted_workspace = true
+allowed_binaries = [
+  "rust-analyzer",
+]
+deny_network_refresh = true
+
+[security_policy.plugin_policy]
+allowed_capabilities = [
+  "plugin.context.read",
+  "plugin.proposal.create",
+]
+namespace_required = true
+allow_in_untrusted_workspace = false
+deny_network = true
+deny_ambient_host_authority = true
+
+[security_policy.file_write_policy]
+deny_when_untrusted = true
+blocked_extensions = [
+  ".exe",
+  ".dll",
+  ".dylib",
+]
+max_bytes_per_write = 65536
+
+[security_policy.network_policy]
+allow_untrusted = false
+allowlist = [
+  "localhost",
+  "127.0.0.1",
+  "::1",
+]
+blocklist = [
+  "example.exfiltration.invalid",
+]
+air_gap = true
+local_provider_only = true
+
+[security_policy.ai_provider_policy]
+provider_invocation_enabled = true
+allow_local_provider = true
+allow_remote_provider = false
+deny_when_untrusted = true
+
+[security_policy.collaboration_policy]
+allowed_capabilities = [
+  "collaboration.session.create",
+  "collaboration.session.join",
+  "collaboration.operation.publish",
+  "collaboration.presence.publish",
+  "collaboration.proposal.approve",
+  "collaboration.replay.metadata",
+  "collaboration.audit.export",
+]
+require_trusted_workspace = true
+runtime_sessions_enabled = false
+presence_enabled = false
+shared_proposal_approval_enabled = false
+audit_export_enabled = false
+
+[security_policy.remote_policy]
+allowed_capabilities = [
+  "remote.session.connect",
+  "remote.fs.read",
+  "remote.fs.write",
+  "remote.process.launch",
+  "remote.pty.input",
+  "remote.terminal.access",
+  "remote.lsp.launch",
+  "remote.semantic.query",
+  "remote.cache.access",
+  "remote.egress",
+  "remote.audit.export",
+  "remote.offline.resume",
+  "remote.transport.connect",
+  "remote.transport.listen",
+  "remote.agent.package.activate",
+]
+require_trusted_workspace = true
+runtime_sessions_enabled = false
+filesystem_enabled = false
+execution_enabled = false
+lsp_enabled = false
+semantic_query_enabled = false
+audit_export_enabled = false
+agent_package_activation_enabled = false
+offline_resume_enabled = false
+
+[security_policy.cloud_lane_policy]
+allowed_capabilities = [
+  "cloud.lane.submit",
+  "cloud.lane.events.stream",
+  "cloud.lane.cancel",
+  "cloud.lane.proposal.fetch",
+  "cloud.lane.evidence.fetch",
+  "cloud.usage.meter",
+]
+require_trusted_workspace = true
+task_submission_enabled = true
+event_stream_enabled = false
+cancellation_enabled = false
+artifact_fetch_enabled = false
+max_upload_bytes = 1048576
+max_cost_cents = 250
+require_scope_visibility = true
+require_validated_task_packet = true
+require_hard_cost_cap = true
+
+[security_policy.telemetry_policy]
+export_enabled = false
+spool_write_enabled = false
+require_explicit_consent = true
+allowed_capabilities = [
+  "telemetry.export.hosted",
+  "telemetry.spool.write",
+  "telemetry.consent.revoke",
+]
+
+[security_policy.retention_policy]
+capture_enabled = false
+require_explicit_consent = true
+allowed_capabilities = [
+  "retention.raw_source.capture",
+  "retention.raw_source.read",
+  "retention.raw_source.delete",
+  "retention.raw_source.export",
+  "retention.raw_source.export.hosted",
+]
+
+[security_policy.storage_migration_policy]
+allowed_capabilities = [
+  "storage.migration.apply",
+  "storage.migration.repair",
+]
+apply_enabled = false
+repair_enabled = false
+explicit_repair_required = true
+
+[security_policy.proposal_auto_approval_policy]
+enabled = true
+allowed_rule_ids = [
+  "risk.path_scope",
+  "risk.file_count",
+  "risk.deletion_ratio",
+  "risk.dependency_or_lockfile_touch",
+  "risk.migration",
+  "risk.secrets_proximity",
+  "risk.binary_or_generated_file_change",
+]

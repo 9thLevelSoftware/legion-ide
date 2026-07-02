@@ -899,11 +899,9 @@ where
         if let Some(temperature) = request.temperature {
             payload["temperature"] = json!(temperature);
         }
-        let response = self.transport.post_json(
-            &self.endpoint("/chat/completions"),
-            bearer_token,
-            payload,
-        )?;
+        let response =
+            self.transport
+                .post_json(&self.endpoint("/chat/completions"), bearer_token, payload)?;
         let text = response
             .get("choices")
             .and_then(Value::as_array)
@@ -2166,11 +2164,13 @@ impl StdioMcpTransport {
         let expected_id = envelope.id.as_deref();
         let deadline = Instant::now() + STDIO_MCP_REQUEST_TIMEOUT;
         loop {
-            let remaining = deadline.checked_duration_since(Instant::now()).ok_or_else(|| {
-                McpClientError::Transport(
-                    "stdio MCP request timed out waiting for response".to_string(),
-                )
-            })?;
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    McpClientError::Transport(
+                        "stdio MCP request timed out waiting for response".to_string(),
+                    )
+                })?;
             let line = match session.responses.recv_timeout(remaining) {
                 Ok(Ok(line)) => line,
                 Ok(Err(error)) => return Err(McpClientError::Transport(error.to_string())),
