@@ -16,7 +16,9 @@ ignore = []
 # BASELINE of unavoidable transitive duplicates pulled by third-party crates at
 # differing versions (the eframe/egui/wgpu/winit/accesskit GUI stack, the
 # objc2/core-foundation Apple stack, the windows-*/redox/linux-raw platform
-# crates, the zbus/zvariant D-Bus stack, and proc-macro-crate's newer toml_edit).
+# crates, the zbus/zvariant D-Bus stack, proc-macro-crate's newer toml_edit, and
+# wasmtime's newer toml/serde_spanned/wasm-encoder chain pulled in via
+# wasmtime-internal-cache and wast/wat).
 # None are direct workspace dependencies at conflicting versions; resolving them
 # would require forking upstream. For each duplicated crate the NEWEST version is
 # kept as canonical and the older redundant version(s) are skipped. Because the
@@ -57,11 +59,15 @@ skip = [
     { crate = "rustc-hash@1.1.0" },
     { crate = "rustix@0.38.44" },
     { crate = "security-framework@2.11.1" },
+    { crate = "serde_spanned@0.6.9" },
     { crate = "smithay-client-toolkit@0.19.2" },
     { crate = "thiserror@1.0.69" },
     { crate = "thiserror-impl@1.0.69" },
+    { crate = "toml@0.8.23" },
     { crate = "toml_datetime@0.6.11" },
+    { crate = "toml_datetime@0.7.5+spec-1.1.0" },
     { crate = "toml_edit@0.22.27" },
+    { crate = "wasm-encoder@0.251.0" },
     { crate = "windows-sys@0.45.0" },
     { crate = "windows-sys@0.52.0" },
     { crate = "windows-sys@0.59.0" },
