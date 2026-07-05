@@ -258,6 +258,72 @@ fn main() {
                     }
                 }))
             }
+            "mock.registerThenDiagnose" => {
+                // Model rust-analyzer's client-side-watcher flow: the server
+                // sends a `client/registerCapability` REQUEST and only
+                // proceeds (here: publishes diagnostics) after the client
+                // ANSWERS it with a result. A client that silently drops the
+                // request never receives the diagnostics — the regression
+                // this arm exists to catch. Works as a request (final ack
+                // carries `id`) or a notification (no ack).
+                let register = json!({
+                    "jsonrpc": "2.0",
+                    "id": 9001,
+                    "method": "client/registerCapability",
+                    "params": {"registrations": [{
+                        "id": "workspace/didChangeWatchedFiles",
+                        "method": "workspace/didChangeWatchedFiles",
+                    }]},
+                });
+                if write_frame(&mut output, &register).is_err() {
+                    return;
+                }
+                let _ = output.flush();
+                wait_for_client_answer(&mut input, 9001, ExpectedAnswer::NullResult);
+                let diagnostics = json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {
+                        "uri": "file:///workspace/src/registered.rs",
+                        "diagnostics": [],
+                    },
+                });
+                if write_frame(&mut output, &diagnostics).is_err() {
+                    return;
+                }
+                let _ = output.flush();
+                id.map(|id| json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}))
+            }
+            "mock.unknownServerRequest" => {
+                // Same blocking shape, but a server→client request no client
+                // implements. The protocol-correct client answer is a
+                // MethodNotFound (-32601) ERROR, not silence: the server can
+                // then degrade gracefully instead of waiting forever.
+                let unknown = json!({
+                    "jsonrpc": "2.0",
+                    "id": 9002,
+                    "method": "mock/serverOnlyFeature",
+                    "params": {},
+                });
+                if write_frame(&mut output, &unknown).is_err() {
+                    return;
+                }
+                let _ = output.flush();
+                wait_for_client_answer(&mut input, 9002, ExpectedAnswer::MethodNotFound);
+                let diagnostics = json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {
+                        "uri": "file:///workspace/src/unknown.rs",
+                        "diagnostics": [],
+                    },
+                });
+                if write_frame(&mut output, &diagnostics).is_err() {
+                    return;
+                }
+                let _ = output.flush();
+                id.map(|id| json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}))
+            }
             other => {
                 // Surface a JSON-RPC error for unknown *requests* so the
                 // consumer can map it through the standard error path. Unknown
@@ -279,6 +345,67 @@ fn main() {
             }
             let _ = output.flush();
         }
+    }
+}
+
+/// Shape the mock demands of the client's answer to a server→client request.
+enum ExpectedAnswer {
+    /// A success response whose `result` is `null` (capability registration ack).
+    NullResult,
+    /// A JSON-RPC error response with code -32601.
+    MethodNotFound,
+}
+
+/// Blocks reading frames until the client answers the server→client request
+/// `expected_id`, asserting the answer's shape. Non-matching frames (client
+/// notifications, unrelated traffic) are ignored while waiting. Exits with
+/// status 3 on EOF or a wrong-shaped answer so tests fail loudly.
+fn wait_for_client_answer<R: Read + BufRead>(
+    reader: &mut R,
+    expected_id: u64,
+    expected: ExpectedAnswer,
+) {
+    loop {
+        let frame = match read_frame(reader) {
+            Ok(frame) => frame,
+            Err(err) => {
+                eprintln!(
+                    "mock_lsp_server: eof/error while waiting for answer to server request {expected_id}: {err}"
+                );
+                std::process::exit(3);
+            }
+        };
+        let Ok(envelope) = serde_json::from_slice::<Value>(&frame) else {
+            eprintln!("mock_lsp_server: invalid JSON while waiting for answer");
+            std::process::exit(3);
+        };
+        if envelope.get("id").and_then(Value::as_u64) != Some(expected_id) {
+            continue;
+        }
+        match expected {
+            ExpectedAnswer::NullResult => {
+                let result_is_null = envelope.get("result") == Some(&Value::Null);
+                if !result_is_null || envelope.get("error").is_some() {
+                    eprintln!(
+                        "mock_lsp_server: expected null-result answer to {expected_id}, got: {envelope}"
+                    );
+                    std::process::exit(3);
+                }
+            }
+            ExpectedAnswer::MethodNotFound => {
+                let code = envelope
+                    .get("error")
+                    .and_then(|e| e.get("code"))
+                    .and_then(Value::as_i64);
+                if code != Some(-32601) {
+                    eprintln!(
+                        "mock_lsp_server: expected -32601 error answer to {expected_id}, got: {envelope}"
+                    );
+                    std::process::exit(3);
+                }
+            }
+        }
+        return;
     }
 }
 
