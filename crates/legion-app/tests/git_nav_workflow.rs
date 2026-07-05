@@ -11,7 +11,7 @@ use std::{
 };
 
 use legion_app::{AppCommandOutcome, AppComposition};
-use legion_ui::{CommandDispatchIntent, GitHunkStageProjection};
+use legion_ui::CommandDispatchIntent;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
