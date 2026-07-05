@@ -621,6 +621,112 @@ mod daily_editing_save_all_internal_tests {
         assert_eq!(parsed.cwd.as_deref(), Some("/tmp/workspace"));
         assert_eq!(parsed.exit_code, Some(7));
     }
+
+    /// Regression for legion-smoke runs 28741840232 / 28747873556 (macos-latest).
+    ///
+    /// bash 3.2 delivered the zsh-deprecation banner, prompt, command echo,
+    /// cargo output, AND the GP-1 exit marker in ONE PTY read chunk. The
+    /// projection turned the whole chunk into ONE row capped at 240 chars,
+    /// which silently hid everything past the cap — including the exit
+    /// marker — from the projection and from scrollback search. A chunk is
+    /// a transport unit, not a display row: multi-line chunks must become
+    /// one row per line so the per-row cap only ever truncates a genuinely
+    /// long single line.
+    #[test]
+    fn terminal_multi_line_output_chunk_splits_into_per_line_rows() {
+        let mut workflow = TerminalWorkflow::default();
+        // Verbatim shape of the macOS CI chunk (row[2] of the failure dump).
+        let payload = "\r\nThe default interactive shell is now zsh.\r\n\
+                       To update your account to use zsh, please run `chsh -s /bin/zsh`.\r\n\
+                       For more details, please visit https://support.apple.com/kb/HT208050.\r\n\
+                       bash-3.2$ sh '/var/folders/8j/sfr9qqcj73j4p6nhwcfpr0th0000gn/T/gp1_smoke_test_26652.sh'\r\n\
+                       \r\nrunning 1 test\r\n.\r\n\
+                       test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\r\n\
+                       \r\nSMOKE_EXIT:0\r\nbash-3.2$ ";
+        let marker_at = payload.find("SMOKE_EXIT:0").expect("marker in payload");
+        assert!(
+            marker_at > 240,
+            "replay must place the marker past the per-row cap (found at {marker_at})"
+        );
+        let byte_count = payload.len() as u64;
+        let chunk = legion_protocol::TerminalOutputChunk {
+            session_id: TerminalSessionId(1),
+            sequence: EventSequence(1),
+            redacted_payload: payload.to_string(),
+            byte_count,
+            truncated: false,
+            redaction: RedactionHint::MetadataOnly,
+            schema_version: 1,
+        };
+        let shell_projection = legion_terminal::osc::TerminalShellProjection {
+            visible_output: payload.to_string(),
+            cwd: None,
+            exit_code: None,
+            boundary: None,
+        };
+
+        workflow.push_terminal_output(chunk, false, Some(&shell_projection));
+
+        let rows = &workflow.projection.output_rows;
+        assert!(
+            rows.len() > 1,
+            "multi-line chunk must produce one row per line, got {} row(s)",
+            rows.len()
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.redacted_payload.contains("SMOKE_EXIT:0")),
+            "line past the 240-char cap must survive as its own visible row; rows: {:?}",
+            rows.iter()
+                .map(|row| row.redacted_payload.as_str())
+                .collect::<Vec<_>>()
+        );
+        // No row is a merged multi-line blob.
+        assert!(
+            rows.iter()
+                .all(|row| !row.redacted_payload.trim_end_matches('\n').contains('\n')),
+            "no projected row may contain interior newlines"
+        );
+    }
+
+    /// Carriage-return redraws (bash 3.2 horizontal scroll, progress bars)
+    /// overwrite the line in a real terminal; the projection must keep the
+    /// final visible content of the line, not the concatenation of every
+    /// redraw window.
+    #[test]
+    fn terminal_carriage_return_redraw_keeps_final_line_content() {
+        let mut workflow = TerminalWorkflow::default();
+        let payload = "Compiling 1/10\rCompiling 5/10\rCompiling 10/10 done\r\nfinished\r\n";
+        let chunk = legion_protocol::TerminalOutputChunk {
+            session_id: TerminalSessionId(1),
+            sequence: EventSequence(1),
+            redacted_payload: payload.to_string(),
+            byte_count: payload.len() as u64,
+            truncated: false,
+            redaction: RedactionHint::MetadataOnly,
+            schema_version: 1,
+        };
+        let shell_projection = legion_terminal::osc::TerminalShellProjection {
+            visible_output: payload.to_string(),
+            cwd: None,
+            exit_code: None,
+            boundary: None,
+        };
+
+        workflow.push_terminal_output(chunk, false, Some(&shell_projection));
+
+        let payloads: Vec<&str> = workflow
+            .projection
+            .output_rows
+            .iter()
+            .map(|row| row.redacted_payload.as_str())
+            .collect();
+        assert_eq!(
+            payloads,
+            vec!["Compiling 10/10 done", "finished"],
+            "last redraw wins per line; \\r\\n is a line ending, not a redraw"
+        );
+    }
 }
 
 /// Typed save result returned by application save routing.
@@ -6126,13 +6232,15 @@ impl TerminalWorkflow {
         if let Some(cwd) = cwd {
             self.current_cwd = Some(cwd);
         }
-        if !visible_output.trim().is_empty() {
-            self.push_row(
-                output.session_id,
-                visible_output,
-                output.byte_count,
-                is_stderr,
-            );
+        // A chunk is a transport unit, not a display row: split into
+        // screen-visible lines so the per-row payload cap in `push_row`
+        // only ever truncates a genuinely long single line. Regression:
+        // legion-smoke 28741840232/28747873556 (macOS bash 3.2 delivered
+        // banner + prompt + output + exit marker as ONE chunk; the cap hid
+        // the marker).
+        for row_text in legion_terminal::osc::split_visible_rows(&visible_output) {
+            let row_bytes = row_text.len() as u64;
+            self.push_row(output.session_id, row_text, row_bytes, is_stderr);
         }
         if let Some(exit_code) = exit_code
             && let Some(started_at) = self.active_command_started_at.take()
