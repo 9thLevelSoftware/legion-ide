@@ -58,3 +58,24 @@ cargo run -p xtask -- verify-kanban-backlog → kanban backlog ok
 
 - PR-LANG-002: local history, commit validation, and worktree navigation add substrate evidence for GIT SCM surface.
 - PR-LANG-003: jj non-goal declared (new row).
+
+## Merged-tree standing-gate run (2026-07-05, branch m8/git-residual)
+
+Context: main merged (LSP substrate #34, terminal #36, containment #37, CI
+fixes #35/#38); working directory C:/Users/dasbl/RustroverProjects/
+legion-ide-git; Windows 11; builds -j 4. Merge resolutions: single
+workspace-form sha2 in legion-app (resolving the WS-LANG-01 direct-version
+duplicate; hex workspace-lift flagged for hygiene), legion-ui export union,
+ledger row union (main PR-LANG-001 + branch PR-LANG-002 enrichments).
+
+| Gate | Result |
+| --- | --- |
+| cargo fmt --all --check | PASS |
+| xtask check-deps / docs-hygiene / claim-audit / no-egui-textedit / verify-kanban-backlog | PASS |
+| xtask release-pipeline --dry-run + verify-release-pipeline | PASS |
+| cargo check --workspace --all-targets | PASS |
+| cargo test --workspace --all-targets --no-fail-fast | PASS (197 test binaries, 0 failures) |
+| cargo clippy --workspace --all-targets -- -D warnings | PASS (after machine-applied map_or/borrow fixes; git_nav/local_history/commit_validation suites re-run green) |
+| xtask perf-harness + verify-perf-harness | PASS |
+| cargo deny check | PASS |
+| xtask rust-analyzer-smoke | PASS (real rust-analyzer 1.95.0) |
