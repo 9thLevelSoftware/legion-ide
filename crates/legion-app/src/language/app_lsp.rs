@@ -241,6 +241,16 @@ impl LspSessionHandle {
         self.state = LspSessionState::Starting { rx };
     }
 
+    /// Force a restart: reset to `Idle` (discarding any current state) and
+    /// then call `start_for_workspace`.  This is the explicit user-triggered
+    /// restart path (PKT-LSP-C T1/T3).  If a startup thread is still running
+    /// it is orphaned (the channel will disconnect and the thread will exit
+    /// cleanly once the send fails).
+    pub fn restart_for_workspace(&mut self, workspace_root: &Path, trusted: bool) {
+        self.state = LspSessionState::Idle;
+        self.start_for_workspace(workspace_root, trusted);
+    }
+
     /// Non-blocking drain — call once per frame tick.
     ///
     /// If Starting and a result is available, transitions to Live (spawning

@@ -8387,6 +8387,10 @@ pub enum AppCommandRequest {
         /// Participant identifier selected from projection data.
         participant_id: CollaborationParticipantId,
     },
+    /// Start the language server session for the active workspace (PKT-LSP-C T1).
+    LspStartSession,
+    /// Restart the language server session, resetting the circuit breaker (PKT-LSP-C T1/T3).
+    LspRestartSession,
 }
 
 /// Minimal editor command port used by app command routing.
@@ -8667,7 +8671,9 @@ impl CommandExecutionService {
             | AppCommandRequest::InvokePluginCommand { .. }
             | AppCommandRequest::JoinCollaborationSession { .. }
             | AppCommandRequest::LeaveCollaborationSession { .. }
-            | AppCommandRequest::PublishCollaborationPresence { .. } => Ok(None),
+            | AppCommandRequest::PublishCollaborationPresence { .. }
+            | AppCommandRequest::LspStartSession
+            | AppCommandRequest::LspRestartSession => Ok(None),
             AppCommandRequest::RefreshExplorer => {
                 let workspace_id = state.require_workspace_id()?;
                 let tree = workspace.tree_snapshot(workspace_id)?;
@@ -9256,6 +9262,8 @@ impl CommandDispatcher {
                 session_id,
                 participant_id,
             }),
+            CommandDispatchIntent::LspStartSession => Ok(AppCommandRequest::LspStartSession),
+            CommandDispatchIntent::LspRestartSession => Ok(AppCommandRequest::LspRestartSession),
             CommandDispatchIntent::PreviewProposal { .. }
             | CommandDispatchIntent::ApproveProposal { .. }
             | CommandDispatchIntent::RejectProposal { .. }
@@ -12624,6 +12632,19 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             detail: "Restore default workbench settings",
             shortcut_label: None,
         },
+        // PKT-LSP-C T1: language server lifecycle commands.
+        PaletteCommandSpec {
+            id: "lsp-start-session",
+            title: "Language Server: Start",
+            detail: "Start the language server for the current workspace",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "lsp-restart-session",
+            title: "Language Server: Restart",
+            detail: "Restart the language server, resetting the circuit breaker",
+            shortcut_label: None,
+        },
     ]
 }
 
@@ -12659,6 +12680,9 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
             Some(CommandDispatchIntent::SetZoomPercent { zoom_percent: 100 })
         }
         "preferences-settings-reset" => Some(CommandDispatchIntent::ResetSettings),
+        // PKT-LSP-C T1: language server lifecycle palette commands.
+        "lsp-start-session" => Some(CommandDispatchIntent::LspStartSession),
+        "lsp-restart-session" => Some(CommandDispatchIntent::LspRestartSession),
         _ => None,
     }
 }
@@ -13791,12 +13815,11 @@ impl AppComposition {
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
 
-        // PKT-LSP-B T1 (D4): Start LSP session for trusted Rust workspaces.
-        // `start_for_workspace` checks for Cargo.toml and refuses immediately if
-        // absent, so this is always safe to call for any trusted workspace.
-        if trust == WorkspaceTrustState::Trusted {
-            self.lsp_session.start_for_workspace(root.as_ref(), true);
-        }
+        // PKT-LSP-C T1: LSP session start is now LAZY — triggered on first
+        // `.rs` buffer open or explicit palette command, not on workspace open.
+        // (The eager start was removed here; see `bind_opened_file` for the
+        // lazy trigger and `try_start_lsp_session_for_current_workspace` for
+        // the palette command path.)
 
         Ok(opened)
     }
@@ -14030,6 +14053,72 @@ impl AppComposition {
         self.lsp_session.set_live_health_for_test(health);
     }
 
+    /// Test-only: returns `true` if the LSP session handle is in the `Idle`
+    /// state (no start attempted).  Used by T1 tests to assert that lazy start
+    /// does NOT fire on workspace open.  PKT-LSP-C T1.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_is_idle_for_test(&self) -> bool {
+        self.lsp_session.is_idle()
+    }
+
+    /// Test-only: returns `true` if the LSP session handle is in the
+    /// `Starting` state.  Used by T1 tests to assert that lazy start fires
+    /// after the first `.rs` buffer is bound.  PKT-LSP-C T1.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_is_starting_for_test(&self) -> bool {
+        self.lsp_session.is_starting()
+    }
+
+    /// Test-only: returns the failure/refusal reason if the LSP session is in
+    /// a non-live terminal state, or `None`.  Used by T1 tests to assert
+    /// refusal when workspace is untrusted.  PKT-LSP-C T1.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_failure_reason_for_test(&self) -> Option<&str> {
+        self.lsp_session.failure_reason()
+    }
+
+    /// Attempt to start the LSP session for the currently-open workspace.
+    ///
+    /// Called from the lazy-start trigger in `bind_opened_file` (first `.rs`
+    /// buffer open) and from the "Start language server" palette command.
+    /// If the session is already Starting or Live this is a no-op.
+    /// If the workspace is untrusted the session immediately enters Refused.
+    /// PKT-LSP-C T1.
+    fn try_start_lsp_session_for_current_workspace(&mut self) {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+            return;
+        };
+        let trust = self
+            .active_documents
+            .active_workspace_trust
+            .as_ref()
+            .cloned()
+            .unwrap_or(WorkspaceTrustState::Untrusted);
+        let trusted = trust == WorkspaceTrustState::Trusted;
+        self.lsp_session
+            .start_for_workspace(std::path::Path::new(&root), trusted);
+    }
+
+    /// Restart the LSP session for the currently-open workspace, resetting
+    /// any prior Refused/Failed/BackingOff state so the circuit breaker
+    /// gets a fresh attempt.
+    ///
+    /// Called from the "Restart language server" palette command (PKT-LSP-C T1/T3).
+    fn restart_lsp_session_for_current_workspace(&mut self) {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+            return;
+        };
+        let trust = self
+            .active_documents
+            .active_workspace_trust
+            .as_ref()
+            .cloned()
+            .unwrap_or(WorkspaceTrustState::Untrusted);
+        let trusted = trust == WorkspaceTrustState::Trusted;
+        self.lsp_session
+            .restart_for_workspace(std::path::Path::new(&root), trusted);
+    }
+
     /// Sends `textDocument/didChange` to the live LSP session after a buffer
     /// edit (PKT-LSP-B T3).  Fire-and-forget via worker channel: never blocks.
     fn notify_lsp_did_change(
@@ -14197,6 +14286,19 @@ impl AppComposition {
         self.language_tooling.refresh_retrieval_document(&document);
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
+
+        // PKT-LSP-C T1: Lazy LSP session start triggered on first language-matching
+        // buffer open.  Rust files (".rs") are the only supported language server
+        // language right now; extend this check when more servers land.
+        if identity
+            .canonical_path
+            .0
+            .to_ascii_lowercase()
+            .ends_with(".rs")
+        {
+            self.try_start_lsp_session_for_current_workspace();
+        }
+
         Ok(identity.file_id)
     }
 
@@ -15823,6 +15925,15 @@ impl AppComposition {
                 Ok(AppCommandOutcome::CollaborationPresencePublished(
                     session_id,
                 ))
+            }
+            // PKT-LSP-C T1: lazy-start palette commands.
+            AppCommandRequest::LspStartSession => {
+                self.try_start_lsp_session_for_current_workspace();
+                Ok(AppCommandOutcome::Noop)
+            }
+            AppCommandRequest::LspRestartSession => {
+                self.restart_lsp_session_for_current_workspace();
+                Ok(AppCommandOutcome::Noop)
             }
             _ => unreachable!("command execution service handled non-workflow command"),
         }
@@ -27387,5 +27498,173 @@ mod tests {
         assert_eq!(target.scheme, "https");
         assert_eq!(target.host, "[::1]");
         assert_eq!(target.port, Some(9443));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKT-LSP-C T1: Lazy session start — TDD tests
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod lsp_lazy_start_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("legion-lsp-t1-{prefix}-{nanos}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    /// After `open_workspace(Trusted)` the LSP session must stay `Idle`.
+    /// PKT-LSP-C T1: lazy start means no server is spawned at workspace open.
+    #[test]
+    fn t1_open_workspace_trusted_leaves_lsp_idle() {
+        let root = unique_temp_dir("ws-open");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+        assert!(
+            app.lsp_is_idle_for_test(),
+            "LSP session must remain Idle after workspace open (lazy start)"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Opening a non-.rs file must NOT trigger lazy LSP start.
+    /// PKT-LSP-C T1.
+    #[test]
+    fn t1_open_non_rs_file_does_not_trigger_lsp_start() {
+        let root = unique_temp_dir("non-rs");
+        let txt_path = root.join("readme.txt");
+        fs::write(&txt_path, "hello").expect("write txt");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+        let _ = app.open_file(txt_path.to_string_lossy().as_ref());
+        assert!(
+            app.lsp_is_idle_for_test(),
+            "LSP session must remain Idle after opening a non-.rs file"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Opening a `.rs` file must trigger lazy LSP start and move the session
+    /// out of `Idle`.  Without a `Cargo.toml` in the workspace root the
+    /// session transitions immediately to `Refused`.  PKT-LSP-C T1.
+    #[test]
+    fn t1_open_rs_file_triggers_lazy_lsp_start() {
+        let root = unique_temp_dir("rs-open");
+        let rs_path = root.join("main.rs");
+        fs::write(&rs_path, "fn main() {}").expect("write main.rs");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+        assert!(
+            app.lsp_is_idle_for_test(),
+            "must be Idle before first .rs open"
+        );
+        let _ = app.open_file(rs_path.to_string_lossy().as_ref());
+        assert!(
+            !app.lsp_is_idle_for_test(),
+            "LSP session must leave Idle after opening a .rs file (lazy start fired)"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// "Language Server: Start" and "Language Server: Restart" palette commands
+    /// must be discoverable via `palette_command_specs()`.  PKT-LSP-C T1.
+    #[test]
+    fn t1_palette_commands_registered() {
+        let specs = palette_command_specs();
+        assert!(
+            specs.iter().any(|s| s.id == "lsp-start-session"),
+            "lsp-start-session palette command must be registered"
+        );
+        assert!(
+            specs.iter().any(|s| s.id == "lsp-restart-session"),
+            "lsp-restart-session palette command must be registered"
+        );
+    }
+
+    /// `palette_command_intent` must route the two LSP commands to the correct
+    /// `CommandDispatchIntent` variants.  PKT-LSP-C T1.
+    #[test]
+    fn t1_palette_command_intent_routes_lsp_commands() {
+        assert!(
+            matches!(
+                palette_command_intent("lsp-start-session"),
+                Some(CommandDispatchIntent::LspStartSession)
+            ),
+            "lsp-start-session must map to LspStartSession"
+        );
+        assert!(
+            matches!(
+                palette_command_intent("lsp-restart-session"),
+                Some(CommandDispatchIntent::LspRestartSession)
+            ),
+            "lsp-restart-session must map to LspRestartSession"
+        );
+    }
+
+    /// After a Refused session, dispatching `LspRestartSession` must reset
+    /// state and attempt a new start (ending in Refused again if no Cargo.toml).
+    /// PKT-LSP-C T1/T3.
+    #[test]
+    fn t1_restart_resets_refused_session() {
+        let root = unique_temp_dir("restart");
+        let rs_path = root.join("lib.rs");
+        fs::write(&rs_path, "").expect("write lib.rs");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+
+        // Trigger lazy start: session will refuse (no Cargo.toml).
+        let _ = app.open_file(rs_path.to_string_lossy().as_ref());
+        assert!(
+            !app.lsp_is_idle_for_test(),
+            "should have left Idle after .rs open"
+        );
+        assert!(
+            !app.lsp_is_starting_for_test(),
+            "should not be Starting without Cargo.toml"
+        );
+        assert!(
+            app.lsp_failure_reason_for_test().is_some(),
+            "should have a failure reason (Refused: no Cargo.toml)"
+        );
+
+        // Restart via the palette command dispatch path.
+        let result = app.dispatch_ui_intent(CommandDispatchIntent::LspRestartSession);
+        assert!(result.is_ok(), "restart dispatch must succeed");
+        // Session was reset to Idle and re-attempted immediately; without
+        // Cargo.toml it ends up Refused again — still "not Idle".
+        assert!(
+            !app.lsp_is_idle_for_test(),
+            "session must have re-attempted (Refused again) after restart"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
