@@ -1635,7 +1635,7 @@ fn push_windows_backslashes(output: &mut String, count: usize) {
 fn windows_environment_block(vars: &[(String, String)]) -> Vec<u16> {
     // CreateProcessW requires the environment block to be sorted case-insensitively by key.
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
-    sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
+    sorted.sort_by_key(|(key, _)| key.to_ascii_uppercase());
     let mut block = Vec::new();
     for (key, value) in sorted {
         block.extend(wide_null(&format!("{key}={value}")));
