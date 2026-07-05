@@ -2699,18 +2699,13 @@ impl LspStdioSession {
     /// thread — that would steal frames from the correlation loop.
     pub fn try_drain_diagnostic_params(&mut self) -> Vec<serde_json::Value> {
         let mut raw_params = Vec::new();
-        loop {
-            match self.process.try_recv_envelope() {
-                Some(Ok(envelope)) => {
-                    if envelope.method.as_deref() == Some("textDocument/publishDiagnostics") {
-                        if let Some(params) = envelope.params.clone() {
-                            raw_params.push(params);
-                        }
-                    }
-                    self.record_notification(&envelope, None);
-                }
-                Some(Err(_)) | None => break,
+        while let Some(Ok(envelope)) = self.process.try_recv_envelope() {
+            if envelope.method.as_deref() == Some("textDocument/publishDiagnostics")
+                && let Some(params) = envelope.params.clone()
+            {
+                raw_params.push(params);
             }
+            self.record_notification(&envelope, None);
         }
         raw_params
     }

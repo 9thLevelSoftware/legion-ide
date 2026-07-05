@@ -2211,15 +2211,15 @@ impl DesktopRuntime {
         {
             self.definition_navigation_queued = false;
             // Navigate to the first definition location.  Non-fatal if unavailable.
-            if let Some(def) = snapshot.language_tooling_projection.definitions.first() {
-                if let (Some(path), Some(range)) = (&def.path, &def.range) {
-                    let _ =
-                        self.app
-                            .dispatch_ui_intent(CommandDispatchIntent::OpenPathAtPosition {
-                                path: path.0.clone(),
-                                position: range.start,
-                            });
-                }
+            if let Some(def) = snapshot.language_tooling_projection.definitions.first()
+                && let (Some(path), Some(range)) = (&def.path, &def.range)
+            {
+                let _ = self
+                    .app
+                    .dispatch_ui_intent(CommandDispatchIntent::OpenPathAtPosition {
+                        path: path.0.clone(),
+                        position: range.start,
+                    });
             }
         }
         self.last_definition_count = new_def_count;

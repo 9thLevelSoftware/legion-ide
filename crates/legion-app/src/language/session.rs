@@ -156,27 +156,26 @@ impl RustAnalyzerSession {
 
         // Parse capability summaries from the initialize result body.
         // Only populate when the handshake succeeded; an error result has no capabilities.
-        if self.health.init_status == LspResultStatus::Fresh {
-            if let Some(caps) = response
+        if self.health.init_status == LspResultStatus::Fresh
+            && let Some(caps) = response
                 .result
                 .get("capabilities")
                 .and_then(|v| v.as_object())
-            {
-                // Track the capability keys we care about for read-side gating.
-                for cap_name in ["hoverProvider", "definitionProvider", "completionProvider"] {
-                    let supported = caps
-                        .get(cap_name)
-                        .map(|v| v.as_bool().unwrap_or(false))
-                        .unwrap_or(false);
-                    self.health.capabilities.push(LspCapabilitySummary {
-                        capability: cap_name.to_string(),
-                        supported,
-                        dynamic_registration: false,
-                        option_hash: None,
-                        redaction_hints: Vec::new(),
-                        schema_version: 1,
-                    });
-                }
+        {
+            // Track the capability keys we care about for read-side gating.
+            for cap_name in ["hoverProvider", "definitionProvider", "completionProvider"] {
+                let supported = caps
+                    .get(cap_name)
+                    .map(|v| v.as_bool().unwrap_or(false))
+                    .unwrap_or(false);
+                self.health.capabilities.push(LspCapabilitySummary {
+                    capability: cap_name.to_string(),
+                    supported,
+                    dynamic_registration: false,
+                    option_hash: None,
+                    redaction_hints: Vec::new(),
+                    schema_version: 1,
+                });
             }
         }
 

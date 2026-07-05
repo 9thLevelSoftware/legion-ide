@@ -122,8 +122,10 @@ enum LspSessionState {
     Idle,
     /// Background thread has been spawned; waiting for the result.
     Starting { rx: mpsc::Receiver<LspStartResult> },
-    /// Session worker thread is live.
-    Live(LspWorkerHandle),
+    /// Session worker thread is live. Boxed: the worker handle (channels +
+    /// health record) dwarfs the other variants, and clippy's
+    /// large-enum-variant lint correctly flags the size asymmetry.
+    Live(Box<LspWorkerHandle>),
     /// Launch was refused (untrusted, no binary, policy denied, etc.).
     Refused { reason: String },
     /// Session started but handshake or discovery failed.
@@ -252,11 +254,11 @@ impl LspSessionHandle {
                 // Spawn the worker thread; it owns the session from here on.
                 let health = session.health().clone();
                 let worker = spawn_session_worker(session);
-                self.state = LspSessionState::Live(LspWorkerHandle {
+                self.state = LspSessionState::Live(Box::new(LspWorkerHandle {
                     health,
                     request_tx: worker.0,
                     result_rx: worker.1,
-                });
+                }));
                 true
             }
             Ok(Err(err)) => {
@@ -571,11 +573,11 @@ impl LspSessionHandle {
         let (request_tx, request_rx) = mpsc::sync_channel::<LspWorkerRequest>(64);
         let (_, result_rx) = mpsc::sync_channel::<LspWorkerResult>(1);
         std::mem::forget(request_rx);
-        self.state = LspSessionState::Live(LspWorkerHandle {
+        self.state = LspSessionState::Live(Box::new(LspWorkerHandle {
             health,
             request_tx,
             result_rx,
-        });
+        }));
     }
 }
 

@@ -4553,10 +4553,10 @@ impl ActiveDocumentController {
     /// `path`.  Returns `None` if no open buffer has that path.
     fn buffer_id_for_path(&self, path: &str) -> Option<BufferId> {
         // Check active buffer first (fast path).
-        if let Some(meta) = &self.active_file_metadata {
-            if meta.identity.canonical_path.0 == path {
-                return self.active_buffer_id;
-            }
+        if let Some(meta) = &self.active_file_metadata
+            && meta.identity.canonical_path.0 == path
+        {
+            return self.active_buffer_id;
         }
         // Fall back to iterating the open buffer metadata map.
         for (buffer_id, meta) in &self.buffer_file_metadata {
@@ -13754,10 +13754,10 @@ impl AppComposition {
             return; // session error; ignore
         };
         // Stale-response gate: discard if snapshot moved on since the request.
-        if let Ok(current_snapshot) = self.editor.current_snapshot(tag.buffer_id) {
-            if is_stale_response(lsp_outcome.issued_snapshot, current_snapshot.snapshot_id) {
-                return;
-            }
+        if let Ok(current_snapshot) = self.editor.current_snapshot(tag.buffer_id)
+            && is_stale_response(lsp_outcome.issued_snapshot, current_snapshot.snapshot_id)
+        {
+            return;
         }
         match tag.kind {
             LspReadKind::Completion => {
@@ -14002,25 +14002,25 @@ impl AppComposition {
     /// Completion threshold: 50 ms.  Hover threshold: 200 ms.
     pub fn tick_lsp_debounces(&mut self, now: Instant) -> Vec<LspDebounceEvent> {
         let mut fired = Vec::new();
-        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_completion_debounce {
-            if now.duration_since(armed_at) >= std::time::Duration::from_millis(50) {
-                self.lsp_ui_completion_debounce = None;
-                fired.push(LspDebounceEvent {
-                    buffer_id,
-                    position,
-                    kind: LspDebounceKind::Completion,
-                });
-            }
+        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_completion_debounce
+            && now.duration_since(armed_at) >= std::time::Duration::from_millis(50)
+        {
+            self.lsp_ui_completion_debounce = None;
+            fired.push(LspDebounceEvent {
+                buffer_id,
+                position,
+                kind: LspDebounceKind::Completion,
+            });
         }
-        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_hover_debounce {
-            if now.duration_since(armed_at) >= std::time::Duration::from_millis(200) {
-                self.lsp_ui_hover_debounce = None;
-                fired.push(LspDebounceEvent {
-                    buffer_id,
-                    position,
-                    kind: LspDebounceKind::Hover,
-                });
-            }
+        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_hover_debounce
+            && now.duration_since(armed_at) >= std::time::Duration::from_millis(200)
+        {
+            self.lsp_ui_hover_debounce = None;
+            fired.push(LspDebounceEvent {
+                buffer_id,
+                position,
+                kind: LspDebounceKind::Hover,
+            });
         }
         fired
     }
