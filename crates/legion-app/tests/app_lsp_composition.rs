@@ -88,17 +88,14 @@ fn trusted_rust_workspace_transitions_to_starting() {
         return;
     };
 
-    // Point discovery at the mock so we don't need a real rust-analyzer.
-    // SAFETY: test-only, single-threaded at this point.
-    unsafe { std::env::set_var("CARGO_BIN_EXE_mock_lsp_server", &mock_path) };
-
     let dir = tempdir_with_cargo_toml();
     let mut handle = LspSessionHandle::new();
-    handle.start_for_workspace(dir.path(), true);
+    // Pass mock path explicitly so no process-global env mutation is needed.
+    handle.start_for_workspace_with_server_path(dir.path(), true, Some(mock_path));
     // Handle must now be Starting (or already Live if startup was very fast).
     assert!(
         handle.is_starting() || handle.is_live(),
-        "handle must be Starting or Live after start_for_workspace"
+        "handle must be Starting or Live after start_for_workspace_with_server_path"
     );
 }
 
@@ -110,12 +107,10 @@ fn drain_yields_live_handle_with_mock_server() {
         return;
     };
 
-    // SAFETY: test-only, single-threaded at this point.
-    unsafe { std::env::set_var("CARGO_BIN_EXE_mock_lsp_server", &mock_path) };
-
     let dir = tempdir_with_cargo_toml();
     let mut handle = LspSessionHandle::new();
-    handle.start_for_workspace(dir.path(), true);
+    // Pass mock path explicitly — no unsafe env mutation needed.
+    handle.start_for_workspace_with_server_path(dir.path(), true, Some(mock_path));
 
     // Poll until the result arrives (or timeout).
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -166,8 +161,8 @@ fn app_composition_refused_lsp_projects_health_record() {
         legion_protocol::PrincipalId("test".to_string()),
     )
     .expect("open_workspace");
-    // No Cargo.toml → session refused.
-    assert!(app.drain_lsp_session() == false || app.drain_lsp_session() == false);
+    // No Cargo.toml → session refused immediately; drain returns false (no state change).
+    assert!(!app.drain_lsp_session());
     // Health record should reflect refused state (Unavailable or None).
     let health = app.lsp_server_health_record();
     // Either None (refused projects None for Idle) or Unavailable.
@@ -298,6 +293,255 @@ fn lsp_empty_diagnostics_clears_problems() {
     );
 }
 
+// ─── Task 3 (I3): ProblemsProjection full add-then-clear cycle ──────────────
+
+/// Verifies the full ProblemsProjection cycle at the app level:
+/// ingest a diagnostic → projection non-empty → ingest clear → projection empty.
+/// This is the T3 (doc-sync) strengthening required by the fix-round review.
+#[test]
+fn t3_diagnostics_projection_add_then_clear_cycle() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("cycle.rs");
+    std::fs::write(&src_file, "fn f() {}\n").expect("write");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    let uri = format!("file:///{}", src_file.to_string_lossy().replace('\\', "/"));
+
+    // Phase 1: inject diagnostic → projection and snapshot must show it.
+    let add_params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [{
+            "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} },
+            "severity": 1,
+            "message": "cycle-test error"
+        }]
+    });
+    let p1 = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &add_params, false, None)
+        .expect("ingest add");
+    assert!(
+        !p1.problems.is_empty(),
+        "ProblemsProjection must be non-empty after publishDiagnostics"
+    );
+
+    // Snapshot must also reflect the diagnostic.
+    let snap1 = app
+        .shell_projection_snapshot("test")
+        .expect("shell snapshot after add");
+    assert!(
+        !snap1.language_tooling_projection.problems.is_empty(),
+        "shell snapshot must contain the diagnostic after ingest"
+    );
+
+    // Phase 2: clear diagnostics → projection and snapshot must be empty.
+    let clear_params = serde_json::json!({ "uri": uri, "diagnostics": [] });
+    let p2 = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &clear_params, false, None)
+        .expect("ingest clear");
+    let lsp_count = p2
+        .problems
+        .iter()
+        .filter(|p| p.source_label.as_deref() != Some("legion-index"))
+        .count();
+    assert_eq!(
+        lsp_count, 0,
+        "ProblemsProjection must be empty after clearing publishDiagnostics"
+    );
+
+    let snap2 = app
+        .shell_projection_snapshot("test")
+        .expect("shell snapshot after clear");
+    let snap2_lsp_count = snap2
+        .language_tooling_projection
+        .problems
+        .iter()
+        .filter(|p| p.source_label.as_deref() != Some("legion-index"))
+        .count();
+    assert_eq!(
+        snap2_lsp_count, 0,
+        "shell snapshot must contain no LSP problems after clear"
+    );
+}
+
+// ─── Task 5 (I4): lsp_health_records via snapshot path ───────────────────────
+
+/// T5 (a): A refused/unavailable session projects an Unavailable health record
+/// through the real `shell_projection_snapshot` path.
+#[test]
+fn t5_refused_health_in_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        dir.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    // No Cargo.toml → session refuses immediately.
+    app.drain_lsp_session();
+
+    let health = app
+        .lsp_server_health_record()
+        .expect("refused session must produce a health record");
+    assert_eq!(
+        health.init_status,
+        legion_protocol::LspResultStatus::Unavailable,
+        "refused session must project Unavailable status"
+    );
+
+    // Check through the real snapshot path (the path production UI uses).
+    let snapshot = app
+        .shell_projection_snapshot("test")
+        .expect("snapshot must succeed");
+    let health_records = &snapshot.language_tooling_projection.lsp_health_records;
+    assert!(
+        !health_records.is_empty(),
+        "lsp_health_records must be non-empty for a refused session"
+    );
+    assert_eq!(
+        health_records[0].init_status,
+        legion_protocol::LspResultStatus::Unavailable,
+        "snapshot health record must be Unavailable for refused session"
+    );
+}
+
+/// T5 (b): An injected-live session projects a Fresh health record through
+/// the real `shell_projection_snapshot` path (end-to-end snapshot population).
+#[test]
+fn t5_injected_live_health_in_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        dir.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+
+    // Inject a live health record with Fresh status (no real server needed).
+    let health = fresh_health_record();
+    app.set_lsp_health_for_test(health);
+
+    let snapshot = app
+        .shell_projection_snapshot("test")
+        .expect("snapshot must succeed");
+    let health_records = &snapshot.language_tooling_projection.lsp_health_records;
+    assert!(
+        !health_records.is_empty(),
+        "lsp_health_records must be non-empty for a live session"
+    );
+    assert_eq!(
+        health_records[0].init_status,
+        legion_protocol::LspResultStatus::Fresh,
+        "snapshot health record must be Fresh for a live session"
+    );
+}
+
+// ─── Task 7 (I2/T7): Capability gating ───────────────────────────────────────
+
+/// When the server advertises no capabilities (or explicitly advertises false),
+/// hover, definition, and completion requests must be silently skipped (return false).
+#[test]
+fn t7_capability_gated_requests_skip_when_unsupported() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("main.rs");
+    std::fs::write(&src_file, "fn main() {}\n").expect("write");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    // Inject a health record advertising all capabilities as NOT supported.
+    let health = health_with_caps(&[
+        ("hoverProvider", false),
+        ("definitionProvider", false),
+        ("completionProvider", false),
+    ]);
+    app.set_lsp_health_for_test(health);
+
+    let pos = legion_protocol::TextCoordinate {
+        line: 0,
+        character: 0,
+        byte_offset: None,
+        utf16_offset: None,
+    };
+    assert!(
+        !app.issue_lsp_hover_request(buffer_id, pos),
+        "hover must be silently skipped when hoverProvider=false"
+    );
+    assert!(
+        !app.issue_lsp_definition_request(buffer_id, pos),
+        "definition must be silently skipped when definitionProvider=false"
+    );
+    assert!(
+        !app.issue_lsp_completion_request(buffer_id, pos),
+        "completion must be silently skipped when completionProvider=false"
+    );
+}
+
+/// When the server advertises hover=true but definition=false, only hover fires.
+#[test]
+fn t7_capability_gated_partial_support() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("main.rs");
+    std::fs::write(&src_file, "fn main() {}\n").expect("write");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    // Only hover is supported; definition and completion are not.
+    let health = health_with_caps(&[
+        ("hoverProvider", true),
+        ("definitionProvider", false),
+        ("completionProvider", false),
+    ]);
+    app.set_lsp_health_for_test(health);
+
+    let pos = legion_protocol::TextCoordinate {
+        line: 0,
+        character: 0,
+        byte_offset: None,
+        utf16_offset: None,
+    };
+    // hover returns true because it successfully issues the request.
+    assert!(
+        app.issue_lsp_hover_request(buffer_id, pos),
+        "hover must fire when hoverProvider=true"
+    );
+    assert!(
+        !app.issue_lsp_definition_request(buffer_id, pos),
+        "definition must skip when definitionProvider=false"
+    );
+    assert!(
+        !app.issue_lsp_completion_request(buffer_id, pos),
+        "completion must skip when completionProvider=false"
+    );
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 fn tempdir_with_cargo_toml() -> tempfile::TempDir {
@@ -308,4 +552,51 @@ fn tempdir_with_cargo_toml() -> tempfile::TempDir {
     )
     .expect("write Cargo.toml");
     dir
+}
+
+/// Build a `LspServerHealthRecord` with the given named capability flags.
+fn health_with_caps(caps: &[(&str, bool)]) -> legion_protocol::LspServerHealthRecord {
+    let capabilities = caps
+        .iter()
+        .map(|(name, supported)| legion_protocol::LspCapabilitySummary {
+            capability: name.to_string(),
+            supported: *supported,
+            dynamic_registration: false,
+            option_hash: None,
+            redaction_hints: Vec::new(),
+            schema_version: 1,
+        })
+        .collect();
+    legion_protocol::LspServerHealthRecord {
+        server_id: legion_protocol::LanguageServerId(1),
+        language_id: legion_protocol::LanguageId("rust".to_string()),
+        binary_provenance: legion_protocol::LspServerBinaryProvenance::Configured,
+        binary_path_hash: None,
+        artifact_hash: None,
+        version: None,
+        init_status: legion_protocol::LspResultStatus::Fresh,
+        capabilities,
+        diagnostics_latency_ms: None,
+        restart_count: 0,
+        download_decision_id: None,
+        schema_version: 1,
+    }
+}
+
+/// Build a `LspServerHealthRecord` with Fresh status and empty capabilities list.
+fn fresh_health_record() -> legion_protocol::LspServerHealthRecord {
+    legion_protocol::LspServerHealthRecord {
+        server_id: legion_protocol::LanguageServerId(1),
+        language_id: legion_protocol::LanguageId("rust".to_string()),
+        binary_provenance: legion_protocol::LspServerBinaryProvenance::Configured,
+        binary_path_hash: None,
+        artifact_hash: None,
+        version: None,
+        init_status: legion_protocol::LspResultStatus::Fresh,
+        capabilities: Vec::new(),
+        diagnostics_latency_ms: None,
+        restart_count: 0,
+        download_decision_id: None,
+        schema_version: 1,
+    }
 }

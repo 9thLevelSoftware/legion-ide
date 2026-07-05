@@ -29,4 +29,5 @@ thiserror = { workspace = true }
 [dev-dependencies]
 legion-agent = { workspace = true }
 legion-sandbox = { workspace = true }
+tempfile = "3"
 uuid = { workspace = true }

@@ -12,7 +12,7 @@ use std::{
 
 use legion_desktop::{
     bridge::DesktopAction,
-    workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
+    workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use legion_ui::DockMode;
 
@@ -102,4 +102,126 @@ fn product_mode_switch_accepts_keyboard_activation() {
         DockMode::Manual,
         "keyboard activation should select the Manual product mode"
     );
+}
+
+// ─── T4: Problems panel keyboard navigation ───────────────────────────────────
+
+/// `ProblemNext` moves the focused index forward and wraps around.
+#[test]
+fn t4_problem_next_increments_selection() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.root.join("main.rs");
+    std::fs::write(&file, "fn main() {}\n").expect("write file");
+    let mut runtime = open_runtime(workspace.path());
+
+    // ProblemNext on a runtime with no problems is a no-op (no crash).
+    let outcome = runtime
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext must not error");
+    assert_eq!(outcome, DesktopWorkflowOutcome::Noop);
+    assert_eq!(runtime.problems_selected_index_for_test(), 0);
+
+    // Open the file through the app so a buffer is created.
+    let src_file = file.to_string_lossy().to_string();
+    runtime
+        .app_mut_for_test()
+        .open_file(file.to_string_lossy())
+        .expect("open_file must succeed");
+    let uri = format!(
+        "file:///{}",
+        src_file.replace('\\', "/").trim_start_matches('/')
+    );
+    let buffer_id = runtime
+        .app_mut_for_test()
+        .active_buffer_id()
+        .expect("active buffer must exist after open_file");
+    let params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [
+            {
+                "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} },
+                "severity": 1, "message": "error 1"
+            },
+            {
+                "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1} },
+                "severity": 2, "message": "warning 2"
+            }
+        ]
+    });
+    runtime
+        .app_mut_for_test()
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &params, false, None)
+        .expect("inject diagnostics");
+
+    // ProblemNext moves from index 0 → 1.
+    runtime
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext");
+    assert_eq!(runtime.problems_selected_index_for_test(), 1);
+
+    // ProblemNext wraps 1 → 0.
+    runtime
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext wraps");
+    assert_eq!(runtime.problems_selected_index_for_test(), 0);
+}
+
+/// `ProblemPrev` moves the focused index backward and wraps around.
+#[test]
+fn t4_problem_prev_decrements_selection() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.root.join("lib.rs");
+    std::fs::write(&file, "pub fn f() {}\n").expect("write file");
+    let mut runtime = open_runtime(workspace.path());
+
+    // Open the file through the app so a buffer is created.
+    runtime
+        .app_mut_for_test()
+        .open_file(file.to_string_lossy())
+        .expect("open_file must succeed");
+    let src_file = file.to_string_lossy().to_string();
+    let uri = format!(
+        "file:///{}",
+        src_file.replace('\\', "/").trim_start_matches('/')
+    );
+    let buffer_id = runtime
+        .app_mut_for_test()
+        .active_buffer_id()
+        .expect("active buffer");
+    let params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [
+            { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} },
+              "severity": 1, "message": "e1" },
+            { "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1} },
+              "severity": 1, "message": "e2" }
+        ]
+    });
+    runtime
+        .app_mut_for_test()
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &params, false, None)
+        .expect("inject");
+
+    // Start at 0; ProblemPrev wraps to 1 (last item).
+    runtime
+        .handle_action(DesktopAction::ProblemPrev)
+        .expect("ProblemPrev");
+    assert_eq!(runtime.problems_selected_index_for_test(), 1);
+
+    // ProblemPrev again → 0.
+    runtime
+        .handle_action(DesktopAction::ProblemPrev)
+        .expect("ProblemPrev again");
+    assert_eq!(runtime.problems_selected_index_for_test(), 0);
+}
+
+/// `ProblemActivate` with no problems is a Noop (guard condition).
+#[test]
+fn t4_problem_activate_with_no_problems_is_noop() {
+    let workspace = TempWorkspace::new();
+    let mut runtime = open_runtime(workspace.path());
+    let outcome = runtime
+        .handle_action(DesktopAction::ProblemActivate)
+        .expect("ProblemActivate must not error");
+    assert_eq!(outcome, DesktopWorkflowOutcome::Noop);
 }

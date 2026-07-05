@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -5006,6 +5007,7 @@ impl LanguageToolingWorkflow {
                 kind_label: format!("{:?}", result.kind),
                 score_basis_points: result.score_basis_points,
                 degraded: false,
+                insert_text: None,
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
@@ -12995,6 +12997,30 @@ fn default_ai_registry() -> ProviderRegistry {
     make_stub_registry()
 }
 
+/// Which debounce timer fired (completion vs hover). App-side classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspDebounceKind {
+    /// The completion debounce timer elapsed; a completion request should fire.
+    Completion,
+    /// The hover debounce timer elapsed; a hover request should fire.
+    Hover,
+}
+
+/// A debounce event returned by [`AppComposition::tick_lsp_debounces`].
+///
+/// The desktop receives these events each frame and dispatches them as
+/// `CommandDispatchIntent` values through the app. The desktop never decides
+/// whether the elapsed threshold has been crossed — that logic lives here.
+#[derive(Debug, Clone)]
+pub struct LspDebounceEvent {
+    /// Buffer in which the triggering edit or cursor movement occurred.
+    pub buffer_id: BufferId,
+    /// Position at which the request should be issued.
+    pub position: TextCoordinate,
+    /// Which request kind fired.
+    pub kind: LspDebounceKind,
+}
+
 /// Root application composition.
 pub struct AppComposition {
     workspace: WorkspaceActor,
@@ -13034,6 +13060,14 @@ pub struct AppComposition {
     terminal_workflow: TerminalWorkflow,
     /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
     lsp_session: crate::language::LspSessionHandle,
+    /// Arming instant, buffer, and position for the completion debounce (I1).
+    lsp_ui_completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
+    /// Count of completions seen at the last pre-sync; used for new-arrival detection (I1).
+    lsp_ui_last_completion_count: usize,
+    /// Arming instant, buffer, and position for the hover debounce (I1).
+    lsp_ui_hover_debounce: Option<(Instant, BufferId, TextCoordinate)>,
+    /// Hover id last seen at auto-show time; prevents dismissed tooltip from re-opening (I1).
+    lsp_ui_last_hover_id: Option<String>,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -13102,6 +13136,10 @@ impl AppComposition {
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
             lsp_session: crate::language::LspSessionHandle::new(),
+            lsp_ui_completion_debounce: None,
+            lsp_ui_last_completion_count: 0,
+            lsp_ui_hover_debounce: None,
+            lsp_ui_last_hover_id: None,
         }
     }
 
@@ -13400,15 +13438,42 @@ impl AppComposition {
         let _ = self.ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &raw_params, true, None);
     }
 
+    /// Returns true when the live LSP server advertises support for `capability`.
+    ///
+    /// If the server has not yet advertised capabilities (empty list, e.g. during
+    /// startup or when the session is idle/refused), returns `false` so callers
+    /// silently skip the request rather than firing into a dead session.
+    ///
+    /// An empty capability list from a live session is treated as *not supported*
+    /// (fail-closed) rather than "assume all" — callers must wait until capabilities
+    /// are populated by a successful `initialize` handshake.
+    fn lsp_server_supports_capability(&self, capability: &str) -> bool {
+        let Some(record) = self.lsp_session.health_record() else {
+            return false; // No session at all.
+        };
+        if record.capabilities.is_empty() {
+            // No capability list published yet (e.g. startup refused, or initialize
+            // has not been called). Fail-closed: do not fire the request.
+            return false;
+        }
+        record
+            .capabilities
+            .iter()
+            .any(|c| c.capability == capability && c.supported)
+    }
+
     /// Issues a non-blocking LSP completion request on the worker thread.
     ///
-    /// Returns `false` if the session is not Live (caller can show semantic
-    /// completions from the existing projection instead).
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `completionProvider` in the initialize response (silent skip).
     pub fn issue_lsp_completion_request(
         &mut self,
         buffer_id: BufferId,
         position: TextCoordinate,
     ) -> bool {
+        if !self.lsp_server_supports_capability("completionProvider") {
+            return false;
+        }
         let Some(meta) = self
             .active_documents
             .metadata_for_buffer(buffer_id)
@@ -13434,11 +13499,17 @@ impl AppComposition {
     }
 
     /// Issues a non-blocking LSP hover request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `hoverProvider` in the initialize response (silent skip).
     pub fn issue_lsp_hover_request(
         &mut self,
         buffer_id: BufferId,
         position: TextCoordinate,
     ) -> bool {
+        if !self.lsp_server_supports_capability("hoverProvider") {
+            return false;
+        }
         let Some(meta) = self
             .active_documents
             .metadata_for_buffer(buffer_id)
@@ -13464,11 +13535,17 @@ impl AppComposition {
     }
 
     /// Issues a non-blocking LSP go-to-definition request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `definitionProvider` in the initialize response (silent skip).
     pub fn issue_lsp_definition_request(
         &mut self,
         buffer_id: BufferId,
         position: TextCoordinate,
     ) -> bool {
+        if !self.lsp_server_supports_capability("definitionProvider") {
+            return false;
+        }
         let Some(meta) = self
             .active_documents
             .metadata_for_buffer(buffer_id)
@@ -13491,6 +13568,14 @@ impl AppComposition {
         };
         self.lsp_session
             .issue_request("textDocument/definition", params, tag)
+    }
+
+    /// Test-only: inject a live health record with given capabilities, so tests
+    /// can drive capability-gated code paths without starting a real server.
+    /// Named with `_for_test` suffix to signal that production code must never
+    /// call this.
+    pub fn set_lsp_health_for_test(&mut self, health: legion_protocol::LspServerHealthRecord) {
+        self.lsp_session.set_live_health_for_test(health);
     }
 
     /// Sends `textDocument/didChange` to the live LSP session after a buffer
@@ -13521,6 +13606,79 @@ impl AppComposition {
     /// PKT-LSP-B T1 / D2.
     pub fn lsp_server_health_record(&self) -> Option<legion_protocol::LspServerHealthRecord> {
         self.lsp_session.health_record()
+    }
+
+    // ── LSP UI debounce authority (I1) ──────────────────────────────────────
+    // Timing and armed-state decisions live here; the desktop only forwards
+    // typed intents and renders (brief hard rule).
+
+    /// Arm the completion debounce.  Resets the timer to `now` on each call.
+    pub fn arm_lsp_completion_debounce(&mut self, buffer_id: BufferId, position: TextCoordinate) {
+        self.lsp_ui_completion_debounce = Some((Instant::now(), buffer_id, position));
+    }
+
+    /// Disarm the completion debounce without firing it.
+    pub fn disarm_lsp_completion_debounce(&mut self) {
+        self.lsp_ui_completion_debounce = None;
+    }
+
+    /// Arm the hover debounce.  Resets the settle timer to `now` on each call.
+    pub fn arm_lsp_hover_debounce(&mut self, buffer_id: BufferId, position: TextCoordinate) {
+        self.lsp_ui_hover_debounce = Some((Instant::now(), buffer_id, position));
+    }
+
+    /// Disarm the hover debounce without firing it.
+    pub fn disarm_lsp_hover_debounce(&mut self) {
+        self.lsp_ui_hover_debounce = None;
+    }
+
+    /// Check all armed debounces against `now`.  Returns events for any that
+    /// have elapsed; clears those timers.  Desktop dispatches returned events.
+    ///
+    /// Completion threshold: 50 ms.  Hover threshold: 200 ms.
+    pub fn tick_lsp_debounces(&mut self, now: Instant) -> Vec<LspDebounceEvent> {
+        let mut fired = Vec::new();
+        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_completion_debounce {
+            if now.duration_since(armed_at) >= std::time::Duration::from_millis(50) {
+                self.lsp_ui_completion_debounce = None;
+                fired.push(LspDebounceEvent {
+                    buffer_id,
+                    position,
+                    kind: LspDebounceKind::Completion,
+                });
+            }
+        }
+        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_hover_debounce {
+            if now.duration_since(armed_at) >= std::time::Duration::from_millis(200) {
+                self.lsp_ui_hover_debounce = None;
+                fired.push(LspDebounceEvent {
+                    buffer_id,
+                    position,
+                    kind: LspDebounceKind::Hover,
+                });
+            }
+        }
+        fired
+    }
+
+    /// Update the saved completion count after a refresh (auto-show detection).
+    pub fn pre_sync_lsp_completion_count(&mut self, count: usize) {
+        self.lsp_ui_last_completion_count = count;
+    }
+
+    /// Update the saved hover id after an auto-show or dismiss.
+    pub fn pre_sync_lsp_hover_id(&mut self, id: Option<String>) {
+        self.lsp_ui_last_hover_id = id;
+    }
+
+    /// Last completion count seen at a refresh; used by the desktop to detect new arrivals.
+    pub fn last_lsp_completion_count(&self) -> usize {
+        self.lsp_ui_last_completion_count
+    }
+
+    /// Last hover id that triggered auto-show; used by the desktop to skip re-opens.
+    pub fn last_lsp_hover_id(&self) -> Option<&str> {
+        self.lsp_ui_last_hover_id.as_deref()
     }
 
     /// Open a file through workspace authority and bind it into editor engine.

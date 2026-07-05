@@ -191,6 +191,19 @@ impl LspSessionHandle {
     /// If any condition is not met, transitions to `Refused` without spawning.
     /// If the handle is already Starting or Live, this is a no-op.
     pub fn start_for_workspace(&mut self, workspace_root: &Path, trusted: bool) {
+        self.start_for_workspace_with_server_path(workspace_root, trusted, None);
+    }
+
+    /// Like [`start_for_workspace`] but lets callers inject an explicit server
+    /// binary path rather than relying on PATH-based discovery.  Intended for
+    /// tests that want to point at a mock binary without mutating the process
+    /// environment (which is unsound in multi-threaded test processes).
+    pub fn start_for_workspace_with_server_path(
+        &mut self,
+        workspace_root: &Path,
+        trusted: bool,
+        configured_server_path: Option<PathBuf>,
+    ) {
         // Already running or started.
         if !self.is_idle() {
             return;
@@ -218,7 +231,7 @@ impl LspSessionHandle {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let result = startup_session(&root_path, &root_uri);
+            let result = startup_session(&root_path, &root_uri, configured_server_path);
             // Ignore send failure (handle was dropped while starting).
             let _ = tx.send(result);
         });
@@ -441,23 +454,26 @@ fn run_session_worker(
 
 /// Runs full startup sequence: discovery → launch → initialize.
 /// Called on the background startup thread only.
+///
+/// `configured_server_path` overrides PATH-based discovery when `Some`.
+/// Tests pass the mock binary path this way rather than mutating the process
+/// environment (which races in parallel test execution).
 fn startup_session(
     workspace_root: &Path,
     root_uri: &str,
+    configured_server_path: Option<PathBuf>,
 ) -> Result<RustAnalyzerSession, LanguageSessionError> {
-    let discovery = RustAnalyzerDiscovery {
-        path_env: std::env::var("PATH").ok(),
-        ..Default::default()
-    };
-
-    // Respect CARGO_BIN_EXE_mock_lsp_server for test environments.
-    let resolved_discovery = if let Ok(mock_path) = std::env::var("CARGO_BIN_EXE_mock_lsp_server") {
+    let resolved_discovery = if let Some(configured_path) = configured_server_path {
+        // Caller supplied an explicit binary path (e.g. mock server in tests).
         RustAnalyzerDiscovery {
-            configured_path: Some(PathBuf::from(mock_path)),
+            configured_path: Some(configured_path),
             ..Default::default()
         }
     } else {
-        discovery
+        RustAnalyzerDiscovery {
+            path_env: std::env::var("PATH").ok(),
+            ..Default::default()
+        }
     };
 
     let command = match resolved_discovery.resolve() {
@@ -467,8 +483,11 @@ fn startup_session(
         }
     };
 
-    let workspace_id = WorkspaceId(55);
-    let server_id = LanguageServerId(101);
+    // These IDs are fixed stubs valid for single-workspace operation.
+    // Multi-workspace support (P2.F1 onwards) will derive these from the
+    // workspace registry once it exists.
+    let workspace_id = WorkspaceId(1);
+    let server_id = LanguageServerId(1);
     let language_id = LanguageId("rust".to_string());
 
     let identity = LspConfiguredServerIdentity {
@@ -534,6 +553,27 @@ fn startup_session(
     let mut session = RustAnalyzerSession::launch(config, &mut launcher)?;
     session.initialize(root_uri)?;
     Ok(session)
+}
+
+impl LspSessionHandle {
+    /// Test-only: injects a live handle with the given health record and
+    /// disconnected dummy channels.  Allows tests to set specific capabilities
+    /// without starting a real server or touching the process environment.
+    /// Named with `_for_test` suffix to signal production code must not call
+    /// this.
+    pub fn set_live_health_for_test(&mut self, health: LspServerHealthRecord) {
+        // Use a generous capacity so `try_send` succeeds when the test probes
+        // `issue_request`. We leak the request receiver so the sender side
+        // doesn't see a disconnected channel — acceptable in tests.
+        let (request_tx, request_rx) = mpsc::sync_channel::<LspWorkerRequest>(64);
+        let (_, result_rx) = mpsc::sync_channel::<LspWorkerResult>(1);
+        std::mem::forget(request_rx);
+        self.state = LspSessionState::Live(LspWorkerHandle {
+            health,
+            request_tx,
+            result_rx,
+        });
+    }
 }
 
 /// Returns a synthetic Unavailable health record for refused/failed handles.

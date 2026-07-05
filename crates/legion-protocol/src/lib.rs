@@ -16142,6 +16142,11 @@ pub struct LanguageCompletionProjection {
     pub score_basis_points: u16,
     /// Whether this completion was produced from degraded semantic data.
     pub degraded: bool,
+    /// LSP `insertText` field when provided by the server and different from
+    /// the label. Used by `accept_completion` to insert the correct text.
+    /// `None` means fall back to `label` on insertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_text: Option<String>,
     /// Completion row schema version.
     pub schema_version: u16,
 }

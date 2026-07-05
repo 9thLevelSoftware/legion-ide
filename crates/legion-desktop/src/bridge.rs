@@ -659,6 +659,12 @@ pub enum DesktopAction {
         /// Zero-based line number from the problem range start.
         line: u32,
     },
+    /// Move keyboard focus to the next problem in the Problems panel (T4).
+    ProblemNext,
+    /// Move keyboard focus to the previous problem in the Problems panel (T4).
+    ProblemPrev,
+    /// Activate (navigate to) the currently focused problem in the Problems panel (T4).
+    ProblemActivate,
     /// Move selection down in the LSP completion popup (T6).
     CompletionNext,
     /// Move selection up in the LSP completion popup (T6).
@@ -1821,6 +1827,10 @@ impl DesktopCommandBridge {
                     },
                 })
             }
+            // T4: problems panel keyboard-nav intercepted in DesktopRuntime::handle_action.
+            DesktopAction::ProblemNext
+            | DesktopAction::ProblemPrev
+            | DesktopAction::ProblemActivate => DesktopBridgeOutput::Noop,
             // T6: completion popup actions are intercepted in DesktopRuntime::handle_action
             // before reaching the bridge.  These arms exist solely for exhaustiveness.
             DesktopAction::CompletionNext

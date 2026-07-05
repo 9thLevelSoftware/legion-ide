@@ -1205,6 +1205,13 @@ fn completion_projection_for_item(
         .map(|kind| format!("lsp.completion.kind.{kind}"))
         .unwrap_or_else(|| "lsp.completion.kind.unknown".to_string());
     let label = bounded_lsp_label(label, 120);
+    // Extract LSP `insertText` only when it differs from the label and is
+    // non-empty; identical values add no information.
+    let insert_text_raw = item
+        .get("insertText")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && *s != label.as_str());
+    let insert_text = insert_text_raw.map(|s| bounded_lsp_label(s, 512));
     Some(LanguageCompletionProjection {
         completion_id: format!("lsp-completion-{index}-{:016x}", stable_hash(&label)),
         label,
@@ -1218,6 +1225,7 @@ fn completion_projection_for_item(
             10_000u32.saturating_sub(penalty) as u16
         },
         degraded: item.get("insertText").is_none(),
+        insert_text,
         schema_version: 1,
     })
 }

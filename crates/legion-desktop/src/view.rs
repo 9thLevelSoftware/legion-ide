@@ -73,6 +73,8 @@ pub struct DesktopProjectionViewState {
     pub completion_selected_index: usize,
     /// Whether the LSP hover tooltip is currently visible (T7).
     pub hover_tooltip_visible: bool,
+    /// Keyboard-focused row index in the Problems panel (T4).
+    pub problems_selected_index: usize,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -86,6 +88,7 @@ impl Default for DesktopProjectionViewState {
             completion_popup_open: false,
             completion_selected_index: 0,
             hover_tooltip_visible: false,
+            problems_selected_index: 0,
         }
     }
 }
@@ -1052,7 +1055,13 @@ fn render_right_dock(
 ) {
     render_dock_side_summary(ui, DockSide::Right, model);
     match projected_product_mode(snapshot) {
-        DesktopProductMode::Manual => render_manual_context_inspector(ui, snapshot, model, actions),
+        DesktopProductMode::Manual => render_manual_context_inspector(
+            ui,
+            snapshot,
+            model,
+            state.problems_selected_index,
+            actions,
+        ),
         DesktopProductMode::Assist => {
             if snapshot.assisted_ai_projection.preview_ready_count > 0 {
                 render_pair_session_panel(ui, snapshot, model, actions)
@@ -2984,6 +2993,7 @@ fn render_manual_context_inspector(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
+    problems_selected_index: usize,
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Context", DesktopProductMode::Manual);
@@ -3004,7 +3014,8 @@ fn render_manual_context_inspector(
     }
     section_label(ui, "Problems", None);
     // D3: clickable per-diagnostic rows with file:line navigation.
-    render_problem_rows(ui, snapshot, actions);
+    // T4: pass keyboard-focused index for focus indicator rendering.
+    render_problem_rows(ui, snapshot, problems_selected_index, actions);
     section_label(ui, "LSP Health", None);
     render_compact_rows(
         ui,
@@ -3982,14 +3993,19 @@ fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
     });
 }
 
-/// Renders per-diagnostic problem rows as clickable labels (D3).
+/// Renders per-diagnostic problem rows as clickable labels (D3, T4).
 ///
 /// Each row shows `severity path:line message`. Clicking opens the file at
 /// the problem's start line via `DesktopAction::NavigateToProblem`.
 /// Problems without a path or range render as non-clickable text.
+///
+/// The row at `selected_index` is highlighted as the keyboard-focused row (T4).
+/// Focus is reached via tab-traversal; `ProblemNext`/`ProblemPrev`/`ProblemActivate`
+/// move selection and trigger navigation.
 fn render_problem_rows(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
+    selected_index: usize,
     actions: &mut Vec<DesktopAction>,
 ) {
     let problems = &snapshot.language_tooling_projection.problems;
@@ -3998,7 +4014,7 @@ fn render_problem_rows(
         return;
     }
     const LIMIT: usize = 12;
-    for problem in problems.iter().take(LIMIT) {
+    for (i, problem) in problems.iter().take(LIMIT).enumerate() {
         let location = problem
             .path
             .as_ref()
@@ -4010,10 +4026,16 @@ fn render_problem_rows(
                 }
             })
             .unwrap_or_else(|| "<unknown>".to_string());
-        let label = trim_middle(
+        let raw_label = trim_middle(
             &format!("{:?} {} {}", problem.severity, location, problem.message),
             110,
         );
+        // T4: prefix the keyboard-focused row with a focus indicator.
+        let label = if i == selected_index {
+            format!("› {raw_label}")
+        } else {
+            format!("  {raw_label}")
+        };
         // Only show clickable link if we have a path; otherwise plain text.
         if let (Some(path), nav_line) = (
             problem.path.as_ref().map(|p| p.0.clone()),
