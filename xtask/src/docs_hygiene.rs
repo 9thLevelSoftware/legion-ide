@@ -9,7 +9,9 @@ use serde::Deserialize;
 pub enum DocsHygieneViolationKind {
     BrokenRelativeLink,
     StaleDevilReference,
+    StaleModeTaxonomySection,
     StaleProductionPlanReference,
+    UnreadableFile,
 }
 
 const LATEST_PRODUCTION_MASTER_PLAN: &str = "legion-production-master-plan-v0.2.md";
@@ -93,11 +95,26 @@ pub fn run_docs_hygiene(
         if is_allowlisted(workspace_root, &path, config) {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                // Fail closed: an unreadable tracked Markdown file is a
+                // violation, not a silent skip, so the gate exits non-zero.
+                violations.push(DocsHygieneViolation {
+                    path: path
+                        .strip_prefix(workspace_root)
+                        .unwrap_or(&path)
+                        .to_path_buf(),
+                    line: 0,
+                    kind: DocsHygieneViolationKind::UnreadableFile,
+                    message: format!("unable to read tracked Markdown file: {err}"),
+                });
+                continue;
+            }
         };
         check_markdown_links(workspace_root, &path, &text, &mut violations);
         check_stale_devil_references(workspace_root, &path, &text, &mut violations);
+        check_stale_mode_taxonomy_sections(workspace_root, &path, &text, &mut violations);
         check_current_production_plan_reference(workspace_root, &path, &text, &mut violations);
     }
 
@@ -221,9 +238,12 @@ fn check_markdown_links(
             if normalized.starts_with('/') {
                 continue;
             }
-            let file_relative = file.parent().unwrap_or(root).join(&normalized);
-            let root_relative = root.join(&normalized);
-            if !file_relative.exists() && !root_relative.exists() {
+            // Resolve normal relative links only against the file's own
+            // parent directory. Root-relative links use explicit `/` syntax
+            // (handled above), so we must NOT also accept a link merely
+            // because it happens to resolve from the repo root.
+            let resolved = file.parent().unwrap_or(root).join(&normalized);
+            if !resolved.exists() {
                 violations.push(DocsHygieneViolation {
                     path: file.strip_prefix(root).unwrap_or(file).to_path_buf(),
                     line: line_number,
@@ -262,8 +282,19 @@ fn is_allowlisted(root: &Path, file: &Path, config: &DocsHygieneConfig) -> bool 
     let rel = repo_relative_path(file.strip_prefix(root).unwrap_or(file));
     config.allowlisted_paths.iter().any(|prefix| {
         let prefix = normalize_allowlist_prefix(prefix);
-        !prefix.is_empty() && rel.starts_with(&prefix)
+        path_has_prefix(&rel, &prefix)
     })
+}
+
+/// Match `rel` against `prefix` on path-segment boundaries so that an
+/// allowlist entry `docs/foo` matches `docs/foo` and `docs/foo/bar.md` but
+/// NOT a sibling such as `docs/foo-old.md`.
+fn path_has_prefix(rel: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return false;
+    }
+    rel == prefix || rel.starts_with(&format!("{prefix}/"))
 }
 
 fn repo_relative_path(path: &Path) -> String {
@@ -342,4 +373,69 @@ fn first_devil_token(line: &str) -> Option<&str> {
         return Some(&line[start..end]);
     }
     None
+}
+
+/// Stale mode-taxonomy section labels that are not part of the canonical
+/// v1 product mode taxonomy (P0.F1).
+///
+/// The canonical v1 product modes are: `Manual`, `Assist`, `Delegate`, and
+/// `Legion Workflows`. `Automate` is internal/legacy wording for the
+/// `LegionWorkflows` projection, and `Delegates` / `Delegated` are stale
+/// design labels. Allowing them in current user-facing docs would
+/// reintroduce the mode-taxonomy conflict this rule prevents.
+const STALE_MODE_TAXONOMY_LABELS: &[&str] = &["Automate", "Delegates", "Delegated"];
+
+fn check_stale_mode_taxonomy_sections(
+    root: &Path,
+    file: &Path,
+    text: &str,
+    violations: &mut Vec<DocsHygieneViolation>,
+) {
+    for (line_index, line) in text.lines().enumerate() {
+        let Some(label) = markdown_section_label(line) else {
+            continue;
+        };
+        for stale in STALE_MODE_TAXONOMY_LABELS {
+            if label == *stale {
+                violations.push(DocsHygieneViolation {
+                    path: file.strip_prefix(root).unwrap_or(file).to_path_buf(),
+                    line: line_index + 1,
+                    kind: DocsHygieneViolationKind::StaleModeTaxonomySection,
+                    message: format!(
+                        "stale mode-taxonomy section `{stale}`; canonical v1 modes are Manual, Assist, Delegate, Legion Workflows (see docs/MODES.md)"
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Extract the trimmed label from a Markdown `ATX` heading line of the
+/// form `## Label` (or `# Label`, `### Label`, …). Returns `None` for
+/// non-heading lines and for empty labels.
+fn markdown_section_label(line: &str) -> Option<&str> {
+    let trimmed_start = line.trim_start();
+    if !trimmed_start.starts_with('#') {
+        return None;
+    }
+    // Count leading '#' characters.
+    let hashes = trimmed_start
+        .bytes()
+        .take_while(|byte| *byte == b'#')
+        .count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let after_hashes = &trimmed_start[hashes..];
+    // Next char must be whitespace or end-of-line for a valid ATX heading.
+    match after_hashes.chars().next() {
+        Some(ch) if ch.is_whitespace() => {}
+        None => return None,
+        _ => return None,
+    }
+    let label = after_hashes.trim();
+    // Strip optional trailing closing ATX sequence (`###`).
+    let label = label.trim_end_matches('#');
+    let label = label.trim();
+    if label.is_empty() { None } else { Some(label) }
 }

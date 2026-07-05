@@ -4,7 +4,7 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, PoisonError};
 
 use legion_protocol::{
     ByteRange, CancellationTokenId, CanonicalPath, CapabilityId, EditBatch, FileContentVersion,
@@ -2459,7 +2459,9 @@ impl TreeSitterParser {
         language_id: &LanguageId,
         source: &str,
     ) -> IndexResult<Vec<TreeSitterHighlightCapture>> {
-        if !tree_sitter_supports_language(language_id) {
+        // The bundled highlight query is Rust-specific. Plugin-registered grammars
+        // have no loaded-grammar worker yet, so they must not be highlighted as Rust.
+        if !tree_sitter_language_is_bundled_rust(language_id) {
             return Ok(Vec::new());
         }
         tree_sitter_highlight_captures(source)
@@ -2505,7 +2507,9 @@ impl TreeSitterParser {
         language_id: &LanguageId,
         source: &str,
     ) -> IndexResult<Vec<TextChunkDescriptor>> {
-        if !tree_sitter_supports_language(language_id) {
+        // Chunk boundaries are derived from the bundled Rust grammar. Plugin-registered
+        // grammars have no loaded-grammar worker yet, so do not chunk them as Rust.
+        if !tree_sitter_language_is_bundled_rust(language_id) {
             return Ok(Vec::new());
         }
         tree_sitter_code_chunk_descriptors(source)
@@ -2518,8 +2522,25 @@ impl ParserWorker for TreeSitterParser {
     }
 
     fn parse(&self, request: ParseRequest) -> IndexResult<ParseOutcome> {
-        if !tree_sitter_supports_language(&request.document.language_id) {
-            return LexicalFallbackParser::new().parse(request);
+        // Only the bundled Rust grammar has a real tree-sitter worker. Languages that are
+        // merely registered as plugin grammars have no loaded-grammar worker yet, so they
+        // must not be parsed as Rust; route them to the lexical fallback with a diagnostic.
+        if !tree_sitter_language_is_bundled_rust(&request.document.language_id) {
+            let language_id = request.document.language_id.clone();
+            let canonical_path = request.document.identity.canonical_path.clone();
+            let mut outcome = LexicalFallbackParser::new().parse(request)?;
+            if plugin_tree_sitter_grammar_is_registered(&language_id) {
+                let note = diagnostic(
+                    "index.tree_sitter.plugin_grammar_unsupported",
+                    "registered plugin tree-sitter grammar has no loaded-grammar worker yet; using lexical fallback",
+                    ProtocolDiagnosticSeverity::Warning,
+                    Some(canonical_path),
+                    None,
+                );
+                outcome.file_index.diagnostics.push(note.clone());
+                outcome.diagnostics.push(note);
+            }
+            return Ok(outcome);
         }
 
         let Some(source) = source_text(&request.document) else {
@@ -2619,8 +2640,14 @@ pub fn tree_sitter_capture_kind(capture_name: &str) -> ViewportSemanticTokenKind
 
 /// Returns whether the bundled tree-sitter runtime or a registered plugin artifact supports a language identifier.
 pub fn tree_sitter_supports_language(language_id: &LanguageId) -> bool {
-    matches!(language_id.0.as_str(), "rust" | "rs")
+    tree_sitter_language_is_bundled_rust(language_id)
         || plugin_tree_sitter_grammar_is_registered(language_id)
+}
+
+/// Returns whether a language identifier maps to the bundled Rust grammar, which is the only
+/// grammar with a real loaded tree-sitter worker in this crate.
+fn tree_sitter_language_is_bundled_rust(language_id: &LanguageId) -> bool {
+    matches!(language_id.0.as_str(), "rust" | "rs")
 }
 
 /// Returns whether the bundled tree-sitter runtime supports a source path.
@@ -2655,9 +2682,11 @@ pub fn register_plugin_tree_sitter_grammars(
     plugin_id: PluginId,
     contributions: &[PluginContribution],
 ) -> usize {
+    // Recover from a poisoned lock rather than panicking the indexing process: a prior
+    // panic while holding the registry must not turn grammar registration into a crash.
     let mut registry = plugin_tree_sitter_grammar_registry()
         .lock()
-        .expect("plugin tree-sitter grammar registry should not be poisoned");
+        .unwrap_or_else(PoisonError::into_inner);
     let mut loaded = 0usize;
     for contribution in contributions {
         let PluginContribution::TreeSitterGrammar(grammar) = contribution else {
@@ -2681,7 +2710,7 @@ pub fn register_plugin_tree_sitter_grammars(
 fn plugin_tree_sitter_grammar_is_registered(language_id: &LanguageId) -> bool {
     plugin_tree_sitter_grammar_registry()
         .lock()
-        .expect("plugin tree-sitter grammar registry should not be poisoned")
+        .unwrap_or_else(PoisonError::into_inner)
         .contains_key(language_id)
 }
 
@@ -2689,7 +2718,7 @@ fn plugin_tree_sitter_grammar_is_registered(language_id: &LanguageId) -> bool {
 pub fn reset_plugin_tree_sitter_grammar_registry_for_tests() {
     plugin_tree_sitter_grammar_registry()
         .lock()
-        .expect("plugin tree-sitter grammar registry should not be poisoned")
+        .unwrap_or_else(PoisonError::into_inner)
         .clear();
 }
 
@@ -5293,8 +5322,12 @@ pub fn build_rename_preview_payload(
                 .unwrap_or("metadata-only symbol")
         ),
         source: legion_protocol::WorkspaceEditSourceKind::SemanticRefactor,
+        // A single `SymbolFileMapRecord` only carries the declaration and the reference
+        // ranges known from this file's shallow symbol map; it does not prove that the
+        // whole workspace was searched for cross-file references. Report coverage as
+        // partial so downstream preview/apply gates do not treat this rename as complete.
         target_coverage: ProposalTargetCoverage {
-            coverage_kind: ProposalTargetCoverageKind::Complete,
+            coverage_kind: ProposalTargetCoverageKind::Partial,
             targets: vec![ProposalAffectedTarget {
                 target_id: format!("rename-target-{}", symbol.file_id.0),
                 kind: ProposalTargetKind::ClosedFile,
@@ -5320,7 +5353,13 @@ pub fn build_rename_preview_payload(
         }],
         file_operations: Vec::new(),
         required_capability: CapabilityId("editor.write".to_string()),
-        diagnostics: Vec::new(),
+        diagnostics: vec![diagnostic(
+            "index.rename.single_file_coverage",
+            "rename preview was derived from a single-file symbol map; cross-file references were not searched and may be omitted",
+            ProtocolDiagnosticSeverity::Warning,
+            Some(symbol.path.clone()),
+            None,
+        )],
         schema_version: INDEX_SCHEMA_VERSION,
     }
 }

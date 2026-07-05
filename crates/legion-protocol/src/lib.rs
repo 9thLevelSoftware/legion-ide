@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +23,21 @@ pub const PRODUCT_ENV_PREFIX: &str = "LEGION";
 
 /// Legacy environment-variable prefix retained for compatibility.
 pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
+
+/// Structured context manifest assembly helpers.
+pub mod manifest;
+pub mod plan;
+pub mod risk;
+pub mod scope;
+pub mod tools;
+
+pub use manifest::{ContextManifestAssembly, ContextManifestSources};
+pub use plan::{
+    EditablePlanArtifact, EditablePlanRevisionArtifact, EditablePlanRevisionAuditRow,
+    EditablePlanSection, EditablePlanSectionKind,
+};
+pub use scope::{DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind};
+pub use tools::LegionToolKind;
 
 // -----------------------------------------------------------------------------
 // Core identifiers and shared primitives
@@ -165,12 +180,25 @@ pub struct TimestampMillis(pub u64);
 
 impl TimestampMillis {
     /// Returns current timestamp in milliseconds.
+    ///
+    /// If the system clock is set before the unix epoch the timestamp
+    /// saturates to `0`; values beyond `u64::MAX` milliseconds saturate to
+    /// `u64::MAX` rather than wrapping silently. Use [`TimestampMillis::try_now`]
+    /// when the `duration_since` error needs to be surfaced.
     pub fn now() -> Self {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+        Self::try_now().unwrap_or(Self(0))
+    }
 
-        Self(millis)
+    /// Returns the current timestamp in milliseconds, surfacing the
+    /// `duration_since` error when the system clock predates the unix epoch.
+    ///
+    /// The millisecond count is clamped to `u64::MAX` instead of wrapping when
+    /// it would overflow `u64`.
+    pub fn try_now() -> Result<Self, SystemTimeError> {
+        let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        Ok(Self(
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+        ))
     }
 }
 
@@ -580,6 +608,9 @@ pub struct ViewportProjection {
     pub selections: Vec<ProtocolTextRange>,
     /// Primary cursor coordinate.
     pub cursor: TextCoordinate,
+    /// Projected cursor coordinates in render order.
+    #[serde(default)]
+    pub cursors: Vec<TextCoordinate>,
     /// Scroll offsets.
     pub scroll: ViewportScroll,
     /// Viewport dimensions.
@@ -4946,6 +4977,12 @@ pub struct ProposalAuditRecord {
     pub causality_id: CausalityId,
     /// Payload summary.
     pub payload_summary: ProposalPayloadSummary,
+    /// Metadata-only checkpoint/rollback summary tied to the triggering proposal.
+    #[serde(default)]
+    pub checkpoint_rollback_projection: Option<CheckpointRollbackProjection>,
+    /// Stable rule ids cited by the audit decision.
+    #[serde(default)]
+    pub risk_rule_ids: Vec<String>,
     /// Diagnostics captured for the transition.
     pub diagnostics: Vec<ProtocolDiagnostic>,
     /// Redaction hints for persisted fields.
@@ -5157,6 +5194,8 @@ pub enum ContextManifestItemKind {
     TerminalSummary,
     /// User selection metadata.
     UserSelection,
+    /// Prompt-free rule or policy metadata.
+    Rule,
     /// Provider route metadata.
     ProviderRoute,
     /// Agent step metadata.
@@ -8159,6 +8198,218 @@ pub struct DelegatedTaskProposalHunkReview {
     pub schema_version: u16,
 }
 
+/// Metadata-only proposal diff anchor over an existing snapshot target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalDiffSurfaceAnchorProjection {
+    /// Stable target identifier when available.
+    pub target_id: Option<String>,
+    /// Owning workspace identifier when known.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Owning file identifier when known.
+    pub file_id: Option<FileId>,
+    /// Owning buffer identifier when known.
+    pub buffer_id: Option<BufferId>,
+    /// Canonical path when a path can be disclosed.
+    pub path: Option<CanonicalPath>,
+    /// Affected byte ranges from the proposal target coverage.
+    pub byte_ranges: Vec<ByteRange>,
+    /// Affected line ranges when the anchor is line-addressable.
+    pub line_ranges: Vec<LineIndexRange>,
+    /// Snapshot identifier when the source snapshot is known.
+    pub snapshot_id: Option<SnapshotId>,
+    /// Redaction hints that apply to the anchor.
+    pub redaction_hints: Vec<RedactionHint>,
+}
+
+/// Metadata-only proposal diff section for a single target buffer or path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalDiffSurfaceSectionProjection {
+    /// Stable section identifier.
+    pub section_id: String,
+    /// Owning proposal identifier.
+    pub proposal_id: ProposalId,
+    /// Stable target identifier when available.
+    pub target_id: Option<String>,
+    /// Display title for the section.
+    pub title: String,
+    /// Anchor metadata used to locate the section in an existing snapshot.
+    pub anchor: ProposalDiffSurfaceAnchorProjection,
+    /// Diff chunks grouped under this section.
+    pub chunks: Vec<ProposalDiffChunkDescriptor>,
+    /// Redaction hints that apply to the section.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Section DTO schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only proposal diff surface built from existing snapshots and anchors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalDiffSurfaceProjection {
+    /// Active section identifier when one is focused.
+    pub active_section_id: Option<String>,
+    /// Sections in deterministic display order.
+    pub sections: Vec<ProposalDiffSurfaceSectionProjection>,
+    /// Surface DTO schema version.
+    pub schema_version: u16,
+}
+
+impl ProposalDiffSurfaceAnchorProjection {
+    /// Construct an empty diff anchor.
+    pub fn empty() -> Self {
+        Self {
+            target_id: None,
+            workspace_id: None,
+            file_id: None,
+            buffer_id: None,
+            path: None,
+            byte_ranges: Vec::new(),
+            line_ranges: Vec::new(),
+            snapshot_id: None,
+            redaction_hints: Vec::new(),
+        }
+    }
+
+    fn from_target(target: Option<&ProposalAffectedTarget>) -> Self {
+        match target {
+            Some(target) => Self {
+                target_id: Some(target.target_id.clone()),
+                workspace_id: target.workspace_id,
+                file_id: target.file_id,
+                buffer_id: target.buffer_id,
+                path: target.path.clone(),
+                byte_ranges: target.byte_ranges.clone(),
+                line_ranges: Vec::new(),
+                snapshot_id: None,
+                redaction_hints: target.redaction_hints.clone(),
+            },
+            None => Self::empty(),
+        }
+    }
+}
+
+impl ProposalDiffSurfaceSectionProjection {
+    fn title_for_target(target: Option<&ProposalAffectedTarget>, fallback: &str) -> String {
+        target
+            .and_then(|target| {
+                target.path.as_ref().and_then(|path| {
+                    std::path::Path::new(&path.0)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .map(|name| name.to_string())
+                })
+            })
+            .or_else(|| target.map(|target| target.target_id.clone()))
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn from_target(
+        proposal_id: ProposalId,
+        section_index: usize,
+        target: Option<&ProposalAffectedTarget>,
+        chunks: Vec<ProposalDiffChunkDescriptor>,
+        fallback_title: &str,
+        redaction_hints: Vec<RedactionHint>,
+    ) -> Self {
+        let target_id = target
+            .map(|target| target.target_id.clone())
+            .or_else(|| chunks.first().and_then(|chunk| chunk.target_id.clone()));
+        let section_id = format!("proposal:{}:diff-section:{}", proposal_id.0, section_index);
+        Self {
+            section_id,
+            proposal_id,
+            target_id,
+            title: Self::title_for_target(target, fallback_title),
+            anchor: ProposalDiffSurfaceAnchorProjection::from_target(target),
+            chunks,
+            redaction_hints,
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for ProposalDiffSurfaceProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl ProposalDiffSurfaceProjection {
+    /// Construct an empty proposal diff surface.
+    pub fn empty() -> Self {
+        Self {
+            active_section_id: None,
+            sections: Vec::new(),
+            schema_version: 1,
+        }
+    }
+
+    /// Build a proposal diff surface from a ledger row and its available chunks.
+    pub fn from_ledger_row(row: &ProposalLedgerRow) -> Self {
+        Self::from_row_and_chunks(row, &row.diff_summary.chunks)
+    }
+
+    /// Build a proposal diff surface from a ledger row and externally synthesized chunks.
+    pub fn from_row_and_chunks(
+        row: &ProposalLedgerRow,
+        chunks: &[ProposalDiffChunkDescriptor],
+    ) -> Self {
+        let mut sections = Vec::new();
+        if row.target_coverage.targets.is_empty() {
+            sections.push(ProposalDiffSurfaceSectionProjection::from_target(
+                row.proposal_id,
+                0,
+                None,
+                chunks.to_vec(),
+                &row.title,
+                row.diff_summary.redaction_hints.clone(),
+            ));
+        } else {
+            let mut first_unassigned_chunks = Vec::new();
+            for (index, target) in row.target_coverage.targets.iter().enumerate() {
+                let mut section_chunks = chunks
+                    .iter()
+                    .filter(|chunk| chunk.target_id.as_deref() == Some(target.target_id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if index == 0 {
+                    first_unassigned_chunks = chunks
+                        .iter()
+                        .filter(|chunk| chunk.target_id.is_none())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                }
+                if index == 0 && !first_unassigned_chunks.is_empty() {
+                    section_chunks.extend(first_unassigned_chunks.clone());
+                }
+                sections.push(ProposalDiffSurfaceSectionProjection::from_target(
+                    row.proposal_id,
+                    index,
+                    Some(target),
+                    section_chunks,
+                    &row.title,
+                    row.diff_summary.redaction_hints.clone(),
+                ));
+            }
+            if sections.is_empty() {
+                sections.push(ProposalDiffSurfaceSectionProjection::from_target(
+                    row.proposal_id,
+                    0,
+                    None,
+                    chunks.to_vec(),
+                    &row.title,
+                    row.diff_summary.redaction_hints.clone(),
+                ));
+            }
+        }
+        Self {
+            active_section_id: sections.first().map(|section| section.section_id.clone()),
+            sections,
+            schema_version: 1,
+        }
+    }
+}
+
 /// Metadata-only Delegate proposal review queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegatedTaskProposalReview {
@@ -8168,6 +8419,9 @@ pub struct DelegatedTaskProposalReview {
     pub proposal_id: ProposalId,
     /// Hunk rows in deterministic order.
     pub hunks: Vec<DelegatedTaskProposalHunkReview>,
+    /// Metadata-only multibuffer diff surface derived from existing anchors.
+    #[serde(default)]
+    pub proposal_diff_surface: ProposalDiffSurfaceProjection,
     /// Number of accepted hunks.
     pub accepted_hunk_count: u32,
     /// Number of rejected hunks.
@@ -8283,6 +8537,7 @@ impl DelegatedTaskProposalReview {
             review_id: review_id.into(),
             proposal_id,
             hunks,
+            proposal_diff_surface: ProposalDiffSurfaceProjection::empty(),
             accepted_hunk_count,
             rejected_hunk_count,
             pending_hunk_count,
@@ -8478,6 +8733,84 @@ pub fn product_mode_allows_runtime_surface(
     }
 }
 
+/// Canonical user-facing v1 product mode taxonomy (P0.F1).
+///
+/// This struct is the public product contract for the four canonical modes
+/// the user sees in the UI, the command palette, the keyboard reference,
+/// the user guide, and the mode policy doc. Each entry must carry:
+///
+/// * a stable `label` that appears in user-facing surfaces,
+/// * a `shortcut_label` that the keyboard reference renders,
+/// * a `docs_anchor` that points at the matching section in `docs/MODES.md`,
+/// * a one-line `policy_summary` that the policy table surfaces can render.
+///
+/// Code that needs to reason about runtime surface policy or capabilities
+/// continues to use `ProductMode` + `product_mode_allows_runtime_surface`;
+/// the canonical taxonomy only constrains the user-facing labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalProductMode {
+    /// Underlying `ProductMode` variant this canonical entry projects to.
+    pub variant: ProductMode,
+    /// Stable user-facing label rendered in the UI, docs, and shortcuts.
+    pub label: &'static str,
+    /// Shortcut label rendered in the keyboard reference for this mode.
+    pub shortcut_label: &'static str,
+    /// Canonical `docs/MODES.md` anchor (path + `#section`) for this mode.
+    pub docs_anchor: &'static str,
+    /// One-line policy summary for surfaces that render the policy table.
+    pub policy_summary: &'static str,
+}
+
+/// Canonical v1 product mode taxonomy (P0.F1). Exactly four entries.
+///
+/// The list is the public product contract for the user-facing mode labels.
+/// Adding or renaming a mode requires updating this list, `docs/MODES.md`,
+/// `docs/KEYBOARD_REFERENCE.md`, `docs/USER_GUIDE.md`, and the
+/// `docs-hygiene` mode-taxonomy rule, in the same change.
+pub const CANONICAL_PRODUCT_MODES: &[CanonicalProductMode] = &[
+    CanonicalProductMode {
+        variant: ProductMode::Manual,
+        label: "Manual",
+        shortcut_label: "M",
+        docs_anchor: "docs/MODES.md#manual",
+        policy_summary: "Deterministic local IDE only; AI/network/cloud/worker surfaces denied.",
+    },
+    CanonicalProductMode {
+        variant: ProductMode::Assist,
+        label: "Assist",
+        shortcut_label: "A",
+        docs_anchor: "docs/MODES.md#assist",
+        policy_summary: "Human-in-control AI help; proposal-only edits, gated provider routes.",
+    },
+    CanonicalProductMode {
+        variant: ProductMode::Delegates,
+        label: "Delegate",
+        shortcut_label: "D",
+        docs_anchor: "docs/MODES.md#delegate",
+        policy_summary: "Bounded worker execution in disposable lanes; proposals + evidence, no direct workspace mutation.",
+    },
+    CanonicalProductMode {
+        variant: ProductMode::LegionWorkflows,
+        label: "Legion Workflows",
+        shortcut_label: "W",
+        docs_anchor: "docs/MODES.md#legion-workflows",
+        policy_summary: "Multi-step workflow orchestration with task graphs, validation gates, and human sign-off.",
+    },
+];
+
+/// Returns the canonical user-facing label for a `ProductMode` variant if
+/// the variant is part of the canonical v1 taxonomy, otherwise `None`.
+///
+/// Use this when rendering user-facing mode labels instead of
+/// `ProductMode::label`, so non-canonical internal/legacy wording (for
+/// example `Automate`) never reaches the user.
+pub fn canonical_product_mode_label(variant: ProductMode) -> Option<&'static str> {
+    CANONICAL_PRODUCT_MODES
+        .iter()
+        .find(|entry| entry.variant == variant)
+        .map(|entry| entry.label)
+}
+
 /// Classify a capability id into the product-mode runtime surface it needs.
 pub fn product_runtime_surface_for_capability(capability: &CapabilityId) -> ProductRuntimeSurface {
     let capability = capability.0.as_str();
@@ -8596,6 +8929,8 @@ pub enum ArtifactKind {
     Directive,
     /// Structured specification artifact.
     Spec,
+    /// Editable plan artifact.
+    Plan,
     /// Task graph artifact.
     TaskGraph,
     /// Isolated execution session artifact.
@@ -9164,6 +9499,53 @@ pub struct DelegatedTaskRuntimeReadiness {
     pub schema_version: u16,
 }
 
+/// Splits a path-like label into normalized, lowercased components.
+///
+/// Both `/` and `\` are treated as separators so the comparison is independent
+/// of the platform that produced the label. Empty and `.` components are
+/// dropped so trailing separators and redundant current-directory markers do
+/// not affect matching.
+fn normalized_path_components(label: &str) -> Vec<String> {
+    label
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|component| !component.is_empty() && *component != ".")
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// Returns `true` when `target` falls under the `protected` pattern using
+/// component/boundary-aware matching rather than a raw substring test.
+///
+/// The match succeeds when the protected pattern's normalized components appear
+/// as a contiguous run of components within the target. Patterns that do not
+/// look like paths (no separators and no usable components) fall back to a
+/// conservative case-insensitive substring check so the gate continues to
+/// fail closed for opaque labels.
+fn delegated_target_matches_protected_pattern(target: &str, protected: &str) -> bool {
+    if protected.trim().is_empty() {
+        return false;
+    }
+
+    let protected_components = normalized_path_components(protected);
+    if protected_components.is_empty() {
+        // Not a usable path pattern; fall back to a conservative,
+        // case-insensitive substring match so opaque labels still fail closed.
+        return target
+            .to_ascii_lowercase()
+            .contains(&protected.trim().to_ascii_lowercase());
+    }
+
+    let target_components = normalized_path_components(target);
+    if target_components.len() < protected_components.len() {
+        return false;
+    }
+
+    target_components
+        .windows(protected_components.len())
+        .any(|window| window == protected_components.as_slice())
+}
+
 /// Evaluates delegated-task runtime readiness using fail-closed security gates.
 pub fn evaluate_delegated_task_runtime_readiness(
     input: DelegatedTaskRuntimeReadinessInput,
@@ -9183,7 +9565,7 @@ pub fn evaluate_delegated_task_runtime_readiness(
         contract
             .protected_path_patterns
             .iter()
-            .any(|protected| !protected.is_empty() && target.contains(protected))
+            .any(|protected| delegated_target_matches_protected_pattern(target, protected))
     }) {
         stop_gates.push(DelegatedRuntimeStopGate::ProtectedFileTarget);
     }
@@ -20284,6 +20666,8 @@ pub struct PluginContributionProjection {
     pub plugin_id: PluginId,
     /// Contributions accepted for projection-only rendering.
     pub contributions: Vec<PluginContribution>,
+    /// Structured permission review rows shown before install approval.
+    pub permission_review_rows: Vec<String>,
     /// Metadata-only status label.
     pub status_label: String,
 }
@@ -21246,6 +21630,7 @@ pub struct EventMetadataRecord {
 }
 
 /// Storage repository request.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageRepositoryRequest {
     /// Save workspace config.
@@ -21386,6 +21771,7 @@ pub enum StorageRepositoryRequest {
 }
 
 /// Storage repository response.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageRepositoryResponse {
     /// Persisted marker.
@@ -22904,6 +23290,11 @@ fn contains_forbidden_collaboration_payload(value: &str) -> bool {
         "source_body",
         "raw_source",
         "raw_transcript",
+        "proposal_content",
+        "terminal_excerpt",
+        "terminal_excerpts",
+        "retained_context",
+        "ejected_context",
         "full_snapshot",
         "secret",
         "api_key",
@@ -22935,9 +23326,12 @@ fn contains_forbidden_phase8_payload(value: &str) -> bool {
         "raw_transcript",
         "terminal_output",
         "terminal_excerpt",
+        "terminal_excerpts",
         "process_output",
         "transport_payload",
         "proposal_content",
+        "retained_context",
+        "ejected_context",
         "raw_prompt",
         "provider_response",
         "full_snapshot",
@@ -25574,6 +25968,16 @@ pub fn evaluate_legion_workflow_merge_readiness(
     if session.verification_gates.is_empty() {
         blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
     }
+    if session.verification_gates.iter().any(|gate| {
+        gate.state == LegionWorkflowVerificationGateState::Passed
+            && gate
+                .evidence_artifact_id
+                .as_ref()
+                .map(|id| id.trim().is_empty())
+                .unwrap_or(true)
+    }) {
+        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
+    }
     if session.sign_off_records.is_empty() {
         blockers.push(LegionWorkflowMergeReadinessBlocker::MissingSignOff);
     }
@@ -25619,11 +26023,11 @@ pub fn evaluate_legion_workflow_merge_readiness(
     }) {
         blockers.push(LegionWorkflowMergeReadinessBlocker::FailedVerification);
     }
-    if session
-        .verification_gates
-        .iter()
-        .any(|gate| gate.state == LegionWorkflowVerificationGateState::Pending)
-    {
+    if session.verification_gates.iter().any(|gate| {
+        gate.state == LegionWorkflowVerificationGateState::Pending
+            || (gate.state == LegionWorkflowVerificationGateState::Passed
+                && gate.evidence_artifact_id.is_none())
+    }) {
         blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
     }
     if session
@@ -25773,6 +26177,52 @@ pub fn legion_workflow_projection_from_sessions(
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn timestamp_now_is_non_zero_and_does_not_panic() {
+        // try_now succeeds on a sane clock and now() agrees with it.
+        let now = TimestampMillis::now();
+        assert!(now.0 > 0);
+        assert!(TimestampMillis::try_now().is_ok());
+    }
+
+    #[test]
+    fn protected_pattern_matches_on_component_boundary() {
+        // Exact component run matches regardless of separator style.
+        assert!(delegated_target_matches_protected_pattern(
+            "repo/src/secrets/key.pem",
+            "secrets/key.pem",
+        ));
+        assert!(delegated_target_matches_protected_pattern(
+            "repo\\src\\secrets\\key.pem",
+            "secrets/key.pem",
+        ));
+        // Single protected directory anywhere in the path.
+        assert!(delegated_target_matches_protected_pattern(
+            "repo/.git/config",
+            ".git",
+        ));
+    }
+
+    #[test]
+    fn protected_pattern_rejects_cross_boundary_substring() {
+        // ".gitignore" should not match a ".git" directory pattern even though
+        // it contains the substring ".git".
+        assert!(!delegated_target_matches_protected_pattern(
+            "repo/.gitignore",
+            ".git",
+        ));
+        // Partial component names do not match.
+        assert!(!delegated_target_matches_protected_pattern(
+            "repo/src/secretsmith/key.pem",
+            "secrets",
+        ));
+        // Empty pattern never matches.
+        assert!(!delegated_target_matches_protected_pattern(
+            "repo/anything",
+            "",
+        ));
+    }
 
     #[test]
     fn workspace_open_request_serde_round_trip() {

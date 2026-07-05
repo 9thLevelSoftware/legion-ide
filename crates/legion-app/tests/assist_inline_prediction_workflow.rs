@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use legion_app::{AppCommandOutcome, AppComposition, AppCompositionError, AppProductMode};
 use legion_editor::{TextEdit, TextPosition};
-use legion_protocol::{PrincipalId, TextCoordinate, WorkspaceTrustState};
+use legion_protocol::{PrincipalId, TextCoordinate, TransactionSource, WorkspaceTrustState};
 use legion_ui::CommandDispatchIntent;
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -112,12 +112,26 @@ fn assist_inline_prediction_request_projects_and_accepts_bounded_ghost_text() {
         row.prediction_id == active.prediction_id
             && row.status == legion_ui::AssistInlinePredictionStatusProjection::Accepted
     }));
-    assert!(
-        app.editor()
-            .text(buffer_id)
-            .expect("editor text")
-            .contains("next edit line 1")
+    assert_eq!(
+        app.editor().text(buffer_id).expect("editor text"),
+        "fn main() {} // next edit line 1\n"
     );
+    assert_eq!(app.editor().undo_len(buffer_id).expect("undo len"), 1);
+    let tx_log = app.editor().transaction_log();
+    assert_eq!(tx_log.len(), 1);
+    assert!(matches!(tx_log[0].source, TransactionSource::User));
+    assert!(tx_log[0].undo_group_id.is_some());
+
+    let undo = app
+        .dispatch_ui_intent(CommandDispatchIntent::Undo { buffer_id })
+        .expect("undo inline accept");
+    assert!(matches!(undo, AppCommandOutcome::Edited(_)));
+    assert_eq!(
+        app.editor().text(buffer_id).expect("undo text"),
+        "fn main() {}\n"
+    );
+    assert_eq!(app.editor().redo_len(buffer_id).expect("redo len"), 1);
+    assert_eq!(app.editor().undo_len(buffer_id).expect("undo len"), 0);
 
     let _ = std::fs::remove_dir_all(root);
 }

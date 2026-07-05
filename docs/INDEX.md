@@ -34,9 +34,11 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../AGENTS.md` — concise agent/developer invariants and required phase gates. Lives at the repo root so that agents see it first.
 - `../ENGINEERING_STATUS.md` — historical audit status snapshot (date, branch, HEAD) for the prior engineering audit cycle. **Historical**; do not treat it as a current status report. See the "Current Status" section of `../README.md` and `../plans/product-readiness-ledger.md` for the current state.
 - `../plans/` — phase plans, evidence packages, ADRs, and the product-readiness ledger.
+- `../plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md` — **historical / supporting.** Pre-rename consolidated E2E plan and the original `plans/legion-e2e/source-package/` planning set. Do not use as current planning input; see `../.hermes/plans/2026-06-13_173122-legion-current-to-ga-kanban-plan.md` and `../plans/legion-production-master-plan-v0.2.md` for the current product path.
+- `../ENGINEERING_STATUS.md` and `../audit-reports/` — **historical / supporting.** Prior-cycle engineering and audit snapshots, preserved for traceability. Do not treat their counts, dates, or branch/HEAD values as current; see the "Current Status" section of `../README.md` and `../plans/product-readiness-ledger.md` for the current state.
 - `../plans/legion-production-master-plan-v0.2.md` — the current production master plan: current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, and milestones from accepted substrate evidence to production utility.
 - `../plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking v0.2 and the product-readiness ledger.
-- `../plans/legion-customizable-autonomy-continuation-plan-v0.1.md` — continuation plan re-centering the path forward on three pillars: an old-school manual IDE, deep customizability (config-as-code, keymaps, themes, layouts, profiles), and a configurable autonomy continuum (ADR-0041..0045, WS-21..WS-29, milestones C1..C5) scaling from zero AI to a gated full-automation envelope.
+- `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `../audit-reports/` — durable audit artifacts.
 
 ## How to use this index

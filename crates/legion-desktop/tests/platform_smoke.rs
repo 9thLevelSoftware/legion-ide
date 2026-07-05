@@ -1,8 +1,9 @@
 use std::{
     ffi::OsString,
     fs,
-    path::PathBuf,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use legion_desktop::{
@@ -12,7 +13,48 @@ use legion_desktop::{
     workflow::DesktopLaunchConfig,
 };
 use legion_protocol::{BufferId, TextCoordinate};
-use legion_ui::{ActiveBufferProjection, Shell};
+use legion_ui::{ActiveBufferProjection, ActiveBufferProjectionState, Shell};
+
+mod common;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Temporary directory with a unique (process id + nanos + counter) name and a
+/// Drop guard so cleanup runs even if the test panics before reaching the end.
+struct TempEvidenceDir {
+    root: PathBuf,
+}
+
+impl TempEvidenceDir {
+    fn new() -> Self {
+        let temp_root = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = temp_root.join(format!(
+            "legion_desktop_platform_smoke_{}_{}_{}",
+            std::process::id(),
+            nanos,
+            id
+        ));
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for TempEvidenceDir {
+    fn drop(&mut self) {
+        let temp_root = std::env::temp_dir();
+        if self.root.starts_with(&temp_root) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
 
 fn approx_eq(left: f64, right: f64) {
     assert!(
@@ -134,11 +176,8 @@ fn platform_smoke_report_markdown_contains_required_fields() {
 
 #[test]
 fn platform_smoke_report_writes_evidence_file() {
-    let root = std::env::temp_dir().join(format!(
-        "legion_desktop_platform_smoke_{}",
-        std::process::id()
-    ));
-    let evidence = root.join("evidence.md");
+    let workspace = TempEvidenceDir::new();
+    let evidence = workspace.path().join("evidence.md");
     let report = RendererSmokeReport::blocked(
         "cargo run -p legion-desktop -- --smoke".to_string(),
         &DesktopLaunchConfig::new(PathBuf::from("."), Some("Cargo.toml".to_string())),
@@ -153,14 +192,8 @@ fn platform_smoke_report_writes_evidence_file() {
     assert!(contents.contains("status: blocked"));
     assert!(contents.contains("blocked for test"));
 
-    if root.starts_with(std::env::temp_dir())
-        && root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("legion_desktop_platform_smoke_"))
-    {
-        let _ = fs::remove_dir_all(root);
-    }
+    // Cleanup runs via the `TempEvidenceDir` Drop guard, so it happens even if the
+    // assertions above panic.
 }
 
 #[test]
@@ -192,6 +225,7 @@ fn platform_smoke_launch_config_parses_smoke_flags() {
 fn platform_smoke_adapter_paths_route_without_metrics_payloads() {
     let mut snapshot = Shell::empty("Smoke").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(42)),
         ..ActiveBufferProjection::empty()
     };
@@ -226,9 +260,12 @@ fn platform_smoke_adapter_paths_route_without_metrics_payloads() {
         DesktopBridgeOutput::Intent(_)
     ));
 
+    // Metrics must remain metadata-only: the module's public API carries numeric
+    // aggregates, never owned text payloads. Assert the structural property
+    // (no `String` type and no `payload`/`text` fields) on the source with
+    // comments and string literals stripped, instead of matching brittle raw
+    // substrings like `String,` that are not tied to any payload API.
     let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/metrics.rs"))
         .expect("metrics source should be readable");
-    assert!(!source.contains("pub payload"));
-    assert!(!source.contains("pub text"));
-    assert!(!source.contains("String,"));
+    common::assert_source_excludes(&source, "src/metrics.rs", &["String", "payload", "text"]);
 }

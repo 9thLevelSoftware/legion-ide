@@ -19,8 +19,26 @@ struct TempGitRepo {
     root: PathBuf,
 }
 
+/// Returns true if a working `git` binary is available on PATH. Checked once.
+fn git_available() -> bool {
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
 impl TempGitRepo {
     fn new() -> Self {
+        assert!(
+            git_available(),
+            "git binary is not available on PATH; install git to run the git_workflow \
+             integration tests (run `git --version` to diagnose)"
+        );
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
@@ -80,6 +98,29 @@ fn run_git<const N: usize>(root: &Path, args: [&str; N]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Runs `git merge feature`, asserting it fails with conflicts and leaves at least one
+/// unmerged file. The discarded ExitStatus previously let a non-conflicting merge slip by.
+fn merge_feature_expecting_conflict(root: &Path) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["merge", "feature"])
+        .output()
+        .expect("git merge command should run");
+    assert!(
+        !output.status.success(),
+        "git merge feature should fail with conflicts\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let unmerged = run_git(root, ["diff", "--name-only", "--diff-filter=U"]);
+    assert!(
+        !unmerged.trim().is_empty(),
+        "git merge feature should leave unmerged files\nmerge stdout:\n{}\nmerge stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn projected_path_matches(path: &str, expected: &Path) -> bool {
@@ -317,11 +358,7 @@ fn git_workflow_resolves_conflicts_through_app_authority() {
     run_git(repo.path(), ["add", "."]);
     run_git(repo.path(), ["commit", "-m", "master"]);
 
-    let _ = Command::new("git")
-        .current_dir(repo.path())
-        .args(["merge", "feature"])
-        .output()
-        .expect("git merge command should run");
+    merge_feature_expecting_conflict(repo.path());
 
     let mut app = AppComposition::new();
     app.open_workspace(
@@ -421,11 +458,7 @@ fn git_workflow_resolves_conflict_and_syncs_open_buffer() {
     run_git(repo.path(), ["add", "."]);
     run_git(repo.path(), ["commit", "-m", "master"]);
 
-    let _ = Command::new("git")
-        .current_dir(repo.path())
-        .args(["merge", "feature"])
-        .output()
-        .expect("git merge command should run");
+    merge_feature_expecting_conflict(repo.path());
 
     let mut app = AppComposition::new();
     app.open_workspace(
@@ -571,11 +604,7 @@ fn git_workflow_rejects_conflict_resolution_when_buffer_is_dirty() {
     run_git(repo.path(), ["add", "."]);
     run_git(repo.path(), ["commit", "-m", "master"]);
 
-    let _ = Command::new("git")
-        .current_dir(repo.path())
-        .args(["merge", "feature"])
-        .output()
-        .expect("git merge command should run");
+    merge_feature_expecting_conflict(repo.path());
 
     let mut app = AppComposition::new();
     app.open_workspace(
@@ -683,11 +712,7 @@ fn git_workflow_rejects_conflict_resolution_from_subdirectory_when_buffer_dirty(
     run_git(repo.path(), ["add", "."]);
     run_git(repo.path(), ["commit", "-m", "master"]);
 
-    let _ = Command::new("git")
-        .current_dir(repo.path())
-        .args(["merge", "feature"])
-        .output()
-        .expect("git merge command should run");
+    merge_feature_expecting_conflict(repo.path());
 
     // Open workspace from a subdirectory of the repo.
     let subdir = repo.path().join("src");
@@ -807,11 +832,7 @@ fn git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer() {
     run_git(repo.path(), ["add", "."]);
     run_git(repo.path(), ["commit", "-m", "master"]);
 
-    let _ = Command::new("git")
-        .current_dir(repo.path())
-        .args(["merge", "feature"])
-        .output()
-        .expect("git merge command should run");
+    merge_feature_expecting_conflict(repo.path());
 
     // Open workspace from a subdirectory of the repo.
     let subdir = repo.path().join("src");

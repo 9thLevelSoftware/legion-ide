@@ -14,6 +14,8 @@ use legion_protocol::{
 };
 use legion_ui::{CommandDispatchIntent, DockMode, Shell};
 
+mod common;
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct TempWorkspace {
@@ -333,11 +335,13 @@ fn desktop_control_trust_bridge_preserves_projection_only_boundary() {
         fs::read_to_string(manifest_dir.join("src/bridge.rs")).expect("read bridge source");
     let view_source = fs::read_to_string(manifest_dir.join("src/view.rs")).expect("read view");
 
-    for source in [bridge_source, view_source] {
-        assert!(!source.contains("WorkspaceProposal"));
-        assert!(!source.contains("ProviderRouter"));
-        assert!(!source.contains("WorkspaceActor"));
-        assert!(!source.contains("EditorEngine"));
-    }
+    let forbidden = [
+        "WorkspaceProposal",
+        "ProviderRouter",
+        "WorkspaceActor",
+        "EditorEngine",
+    ];
+    common::assert_source_excludes(&bridge_source, "src/bridge.rs", &forbidden);
+    common::assert_source_excludes(&view_source, "src/view.rs", &forbidden);
     let _ = WorkspaceTrustState::Trusted;
 }

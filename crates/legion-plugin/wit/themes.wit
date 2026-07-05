@@ -1,0 +1,10 @@
+package legion:plugin;
+
+interface themes {
+    record theme-contribution {
+        label: string,
+        required-capability: string,
+    }
+
+    register-theme: func(contribution: theme-contribution);
+}

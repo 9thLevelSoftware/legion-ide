@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use legion_app::AppProductMode;
-use legion_protocol::TextCoordinate;
+use legion_protocol::{ProposalLifecycleState, TextCoordinate};
 use legion_ui::SearchScopeProjection;
 
 use crate::{
@@ -115,6 +115,67 @@ impl BetaWorkflowStatus {
     }
 }
 
+/// Typed outcome of the beta edit/save workflow step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BetaSaveOutcome {
+    /// The isolated beta file was edited and saved through proposal-mediated save.
+    Saved,
+    /// The save was rejected by the app (for example a conflict).
+    Rejected,
+    /// The step did not run because the workflow was blocked before it.
+    Blocked,
+    /// The step ran but produced an unexpected edit/save outcome.
+    Failed,
+}
+
+/// Typed terminal policy decision recorded by the beta workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BetaTerminalPolicyDecision {
+    /// Terminal launch was denied by default policy (the expected beta outcome).
+    Denied,
+    /// Terminal launch was allowed by policy.
+    Allowed,
+    /// The step did not run because the workflow was blocked before it.
+    Blocked,
+}
+
+/// Typed proposal interaction mode recorded by the beta workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BetaProposalMode {
+    /// The proposal was preview-only; no proposal reached an applied/approved state.
+    PreviewOnly,
+    /// A proposal reached an applied/approved state (must never happen in beta).
+    AutonomousApply,
+    /// The step did not run because the workflow was blocked before it.
+    Blocked,
+}
+
+/// Typed beta workflow error distinguishing blocked-environment failures from
+/// in-run gate/step failures, instead of relying only on a prose status string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BetaWorkflowError {
+    /// The workflow could not run in this environment (setup/runtime open failure).
+    Blocked {
+        /// Human-readable detail for the blocking condition.
+        detail: String,
+    },
+    /// A workflow gate or step check failed while the workflow was running.
+    Failed {
+        /// Human-readable detail for the failed check.
+        detail: String,
+    },
+}
+
+impl BetaWorkflowError {
+    /// Stable prose rendering used only for markdown evidence formatting.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Blocked { detail } | Self::Failed { detail } => detail,
+        }
+    }
+}
+
 /// Metadata-only beta workflow report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BetaWorkflowReport {
@@ -130,6 +191,8 @@ pub struct BetaWorkflowReport {
     pub browse_status: String,
     /// Edit/save status label.
     pub edit_save_status: String,
+    /// Typed edit/save outcome.
+    pub save_outcome: BetaSaveOutcome,
     /// Active-file search status label.
     pub active_file_search_status: String,
     /// Workspace search status label.
@@ -138,16 +201,20 @@ pub struct BetaWorkflowReport {
     pub language_status: String,
     /// Terminal policy status label.
     pub terminal_status: String,
+    /// Typed terminal policy decision.
+    pub terminal_decision: BetaTerminalPolicyDecision,
     /// Proposal lifecycle status label.
     pub proposal_status: String,
+    /// Typed proposal interaction mode.
+    pub proposal_mode: BetaProposalMode,
     /// Number of projected status messages.
     pub status_message_count: usize,
     /// Path to the metadata-only diagnostics export.
     pub diagnostics_export: PathBuf,
     /// Unsupported advanced surface labels.
     pub unsupported_surfaces: Vec<String>,
-    /// Metadata-only errors or blockers.
-    pub errors: Vec<String>,
+    /// Typed metadata-only errors or blockers.
+    pub errors: Vec<BetaWorkflowError>,
 }
 
 impl BetaWorkflowReport {
@@ -165,7 +232,7 @@ impl BetaWorkflowReport {
         } else {
             self.errors
                 .iter()
-                .map(|error| format!("- {error}"))
+                .map(|error| format!("- {}", error.message()))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -248,15 +315,20 @@ pub fn run_beta_workflow(config: BetaWorkflowConfig) -> Result<BetaWorkflowRepor
             beta_workspace_root: config.beta_workspace_root.clone(),
             browse_status: "blocked".to_string(),
             edit_save_status: "blocked".to_string(),
+            save_outcome: BetaSaveOutcome::Blocked,
             active_file_search_status: "blocked".to_string(),
             workspace_search_status: "blocked".to_string(),
             language_status: "blocked".to_string(),
             terminal_status: "blocked".to_string(),
+            terminal_decision: BetaTerminalPolicyDecision::Blocked,
             proposal_status: "blocked".to_string(),
+            proposal_mode: BetaProposalMode::Blocked,
             status_message_count: 0,
             diagnostics_export: config.diagnostics_export.clone(),
             unsupported_surfaces: unsupported_surfaces(),
-            errors: vec![error.to_string()],
+            errors: vec![BetaWorkflowError::Blocked {
+                detail: error.to_string(),
+            }],
         },
     };
 
@@ -282,7 +354,8 @@ fn run_beta_workflow_inner(
     config: BetaWorkflowConfig,
     command: String,
 ) -> Result<BetaWorkflowReport> {
-    let prepared = prepare_beta_workspace(&config.beta_workspace_root)?;
+    let prepared =
+        prepare_beta_workspace(&config.real_workspace_root, &config.beta_workspace_root)?;
     let launch_config = DesktopLaunchConfig::new(
         prepared.root.clone(),
         Some(prepared.main_rs.to_string_lossy().into_owned()),
@@ -291,17 +364,18 @@ fn run_beta_workflow_inner(
     .with_diagnostics_export(config.diagnostics_export.clone());
     let mut runtime = DesktopRuntime::open(launch_config)?;
     runtime.set_product_mode(AppProductMode::Assist)?;
-    let mut errors = Vec::new();
+    let mut errors: Vec<BetaWorkflowError> = Vec::new();
 
     let browse_status = run_browse_actions(&mut runtime);
-    let edit_save_status = run_edit_save_actions(&mut runtime, &prepared.main_rs, &mut errors);
+    let (edit_save_status, save_outcome) =
+        run_edit_save_actions(&mut runtime, &prepared.main_rs, &mut errors);
     let active_file_search_status =
         run_search_action(&mut runtime, SearchScopeProjection::ActiveFile, "beta");
     let workspace_search_status =
         run_search_action(&mut runtime, SearchScopeProjection::Workspace, "beta");
     let language_status = run_language_actions(&mut runtime);
-    let terminal_status = run_terminal_actions(&mut runtime);
-    let proposal_status = run_proposal_actions(&mut runtime);
+    let (terminal_status, terminal_decision) = run_terminal_actions(&mut runtime);
+    let (proposal_status, proposal_mode) = run_proposal_actions(&mut runtime);
 
     let _ = runtime.handle_action(DesktopAction::Quit);
     let final_snapshot = runtime.projection_snapshot();
@@ -330,11 +404,14 @@ fn run_beta_workflow_inner(
         beta_workspace_root: prepared.root,
         browse_status,
         edit_save_status,
+        save_outcome,
         active_file_search_status,
         workspace_search_status,
         language_status,
         terminal_status,
+        terminal_decision,
         proposal_status,
+        proposal_mode,
         status_message_count: final_snapshot.status_messages.len(),
         diagnostics_export: config.diagnostics_export,
         unsupported_surfaces: unsupported_surfaces(),
@@ -342,11 +419,19 @@ fn run_beta_workflow_inner(
     })
 }
 
-fn prepare_beta_workspace(path: &Path) -> Result<PreparedBetaWorkspace> {
-    let workspace_root = std::env::current_dir()
-        .context("resolve current directory")?
-        .canonicalize()
-        .context("canonicalize current directory")?;
+fn prepare_beta_workspace(
+    real_workspace_root: &Path,
+    path: &Path,
+) -> Result<PreparedBetaWorkspace> {
+    // Resolve relative beta workspace paths against the configured real
+    // workspace root rather than the process current directory, so the isolated
+    // workspace lands under the configured root's `target/` regardless of cwd.
+    let workspace_root = real_workspace_root.canonicalize().with_context(|| {
+        format!(
+            "canonicalize real workspace root `{}`",
+            real_workspace_root.display()
+        )
+    })?;
     let target_root = workspace_root.join("target");
     fs::create_dir_all(&target_root).context("create target directory")?;
     let target_root = target_root
@@ -428,7 +513,7 @@ struct BetaWorkflowGateInputs<'a> {
     diagnostics_export_label: &'a str,
 }
 
-fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<String> {
+fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<BetaWorkflowError> {
     let mut errors = Vec::new();
     record_gate_error(
         &mut errors,
@@ -486,9 +571,11 @@ fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<String> {
     errors
 }
 
-fn record_gate_error(errors: &mut Vec<String>, passed: bool, label: &str, status: &str) {
+fn record_gate_error(errors: &mut Vec<BetaWorkflowError>, passed: bool, label: &str, status: &str) {
     if !passed {
-        errors.push(format!("{label}: {status}"));
+        errors.push(BetaWorkflowError::Failed {
+            detail: format!("{label}: {status}"),
+        });
     }
 }
 
@@ -521,8 +608,8 @@ fn run_browse_actions(runtime: &mut DesktopRuntime) -> String {
 fn run_edit_save_actions(
     runtime: &mut DesktopRuntime,
     main_rs: &Path,
-    errors: &mut Vec<String>,
-) -> String {
+    errors: &mut Vec<BetaWorkflowError>,
+) -> (String, BetaSaveOutcome) {
     let edit = runtime.handle_action(DesktopAction::InsertText {
         text: EDIT_TEXT.to_string(),
         at: position(0),
@@ -530,19 +617,26 @@ fn run_edit_save_actions(
     let save = runtime.handle_action(DesktopAction::SaveActive);
     let saved_text = fs::read_to_string(main_rs).unwrap_or_default();
     if !saved_text.starts_with(EDIT_TEXT) {
-        errors.push("isolated beta file did not contain the saved beta edit".to_string());
+        errors.push(BetaWorkflowError::Failed {
+            detail: "isolated beta file did not contain the saved beta edit".to_string(),
+        });
     }
     match (edit, save) {
-        (Ok(DesktopWorkflowOutcome::Edited), Ok(DesktopWorkflowOutcome::Saved)) => {
-            "edited and saved isolated beta workspace file".to_string()
-        }
+        (Ok(DesktopWorkflowOutcome::Edited), Ok(DesktopWorkflowOutcome::Saved)) => (
+            "edited and saved isolated beta workspace file".to_string(),
+            BetaSaveOutcome::Saved,
+        ),
         (Ok(_), Ok(DesktopWorkflowOutcome::SaveRejected(reason))) => {
-            errors.push(format!("save rejected: {reason}"));
-            "save_rejected".to_string()
+            errors.push(BetaWorkflowError::Failed {
+                detail: format!("save rejected: {reason}"),
+            });
+            ("save_rejected".to_string(), BetaSaveOutcome::Rejected)
         }
         (edit, save) => {
-            errors.push(format!("unexpected edit/save outcomes: {edit:?} {save:?}"));
-            "failed".to_string()
+            errors.push(BetaWorkflowError::Failed {
+                detail: format!("unexpected edit/save outcomes: {edit:?} {save:?}"),
+            });
+            ("failed".to_string(), BetaSaveOutcome::Failed)
         }
     }
 }
@@ -589,29 +683,35 @@ fn run_language_actions(runtime: &mut DesktopRuntime) -> String {
     )
 }
 
-fn run_terminal_actions(runtime: &mut DesktopRuntime) -> String {
+fn run_terminal_actions(runtime: &mut DesktopRuntime) -> (String, BetaTerminalPolicyDecision) {
     let _ = runtime.handle_action(DesktopAction::TerminalLaunch {
         command_label: "beta fixture check".to_string(),
     });
     let terminal = &runtime.projection_snapshot().terminal_panel_projection;
     if terminal.last_denial.is_some() {
-        format!(
-            "terminal_denied_expected status={:?} rows={} omitted={}",
-            terminal.status.kind,
-            terminal.output_rows.len(),
-            terminal.scrollback.omitted_row_count
+        (
+            format!(
+                "terminal_denied_expected status={:?} rows={} omitted={}",
+                terminal.status.kind,
+                terminal.output_rows.len(),
+                terminal.scrollback.omitted_row_count
+            ),
+            BetaTerminalPolicyDecision::Denied,
         )
     } else {
-        format!(
-            "terminal_status={:?} rows={} omitted={}",
-            terminal.status.kind,
-            terminal.output_rows.len(),
-            terminal.scrollback.omitted_row_count
+        (
+            format!(
+                "terminal_status={:?} rows={} omitted={}",
+                terminal.status.kind,
+                terminal.output_rows.len(),
+                terminal.scrollback.omitted_row_count
+            ),
+            BetaTerminalPolicyDecision::Allowed,
         )
     }
 }
 
-fn run_proposal_actions(runtime: &mut DesktopRuntime) -> String {
+fn run_proposal_actions(runtime: &mut DesktopRuntime) -> (String, BetaProposalMode) {
     let outcome = runtime.handle_action(DesktopAction::StartAiProposal {
         instruction_label: "beta fixture proposal".to_string(),
     });
@@ -620,18 +720,47 @@ fn run_proposal_actions(runtime: &mut DesktopRuntime) -> String {
             proposal_id: Some(proposal_id),
             ..
         }) => proposal_id,
-        Ok(other) => return format!("unexpected proposal start {other:?}"),
-        Err(error) => return format!("error {error}"),
+        Ok(other) => {
+            return (
+                format!("unexpected proposal start {other:?}"),
+                BetaProposalMode::Blocked,
+            );
+        }
+        Err(error) => return (format!("error {error}"), BetaProposalMode::Blocked),
     };
     let _ = runtime.handle_action(DesktopAction::OpenProposalDetails { proposal_id });
     let preview = runtime.handle_action(DesktopAction::PreviewProposal { proposal_id });
     let snapshot = runtime.projection_snapshot();
-    format!(
-        "proposal={} preview={:?} ledger_rows={} selected={:?}",
-        proposal_id.0,
-        preview.ok(),
-        snapshot.proposal_ledger_projection.rows.len(),
-        snapshot.proposal_ledger_projection.selected_proposal_id
+    // Derive the typed proposal mode from the *structured* ledger lifecycle of
+    // the assisted-AI proposal specifically (matched by its id). An applied
+    // user-initiated save proposal is a different, legitimate record and must
+    // not be confused with an autonomous AI apply. The AI proposal reaching an
+    // applied/approved state would be the autonomous apply that beta forbids.
+    let proposal_mode = match snapshot
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .find(|row| row.proposal_id == proposal_id)
+    {
+        Some(row)
+            if matches!(
+                row.lifecycle.state,
+                ProposalLifecycleState::Applied | ProposalLifecycleState::Approved
+            ) =>
+        {
+            BetaProposalMode::AutonomousApply
+        }
+        _ => BetaProposalMode::PreviewOnly,
+    };
+    (
+        format!(
+            "proposal={} preview={:?} ledger_rows={} selected={:?}",
+            proposal_id.0,
+            preview.ok(),
+            snapshot.proposal_ledger_projection.rows.len(),
+            snapshot.proposal_ledger_projection.selected_proposal_id
+        ),
+        proposal_mode,
     )
 }
 
@@ -647,16 +776,44 @@ fn position(byte_offset: u64) -> TextCoordinate {
 fn beta_smoke_command(config: &BetaWorkflowConfig) -> String {
     [
         "cargo run -p legion-desktop -- --beta-smoke".to_string(),
-        format!("--workspace {}", config.real_workspace_root.display()),
-        format!("--beta-workspace {}", config.beta_workspace_root.display()),
-        format!("--evidence {}", config.evidence_path.display()),
-        format!("--session-state {}", config.session_state.display()),
+        format!(
+            "--workspace {}",
+            shell_quote_path(&config.real_workspace_root)
+        ),
+        format!(
+            "--beta-workspace {}",
+            shell_quote_path(&config.beta_workspace_root)
+        ),
+        format!("--evidence {}", shell_quote_path(&config.evidence_path)),
+        format!(
+            "--session-state {}",
+            shell_quote_path(&config.session_state)
+        ),
         format!(
             "--diagnostics-export {}",
-            config.diagnostics_export.display()
+            shell_quote_path(&config.diagnostics_export)
         ),
     ]
     .join(" ")
+}
+
+/// Render a path as a single, shell-safe argument so paths with spaces or shell
+/// metacharacters produce a re-runnable command line.
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.display().to_string())
+}
+
+/// POSIX shell single-quote a value, leaving simple unambiguous arguments bare.
+fn shell_quote(value: &str) -> String {
+    let is_simple = !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',')
+        });
+    if is_simple {
+        return value.to_string();
+    }
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 fn unsupported_surfaces() -> Vec<String> {
@@ -689,16 +846,16 @@ mod tests {
             diagnostics_export_label: "target/gui-phase7-diagnostics.md",
         });
 
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.contains("language workflow did not record cancellation"))
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.contains("diagnostics export was not written"))
-        );
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            BetaWorkflowError::Failed { detail }
+                if detail.contains("language workflow did not record cancellation")
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            BetaWorkflowError::Failed { detail }
+                if detail.contains("diagnostics export was not written")
+        )));
     }
 
     #[test]

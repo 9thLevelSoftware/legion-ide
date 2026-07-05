@@ -1,0 +1,10 @@
+name = "m1.fixture_search_50k"
+kind = "large_fixture_search"
+fixture_bytes = 0
+sample_count = 4
+fixture_file_count = 50000
+search_scan_limit = 1024
+search_match_limit = 128
+search_query = "module_49999"
+budget_millis = 250
+note = "50K-file fixture search benchmark"

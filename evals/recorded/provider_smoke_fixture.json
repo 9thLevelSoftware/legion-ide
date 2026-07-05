@@ -1,0 +1,14 @@
+{
+  "suite": "legion-ai-providers-smoke-v0",
+  "local": {
+    "provider_id": "deterministic-local",
+    "model": "local-smoke",
+    "prompt": "Write one short sentence.",
+    "embedding_input": "offline embedding smoke"
+  },
+  "hosted": {
+    "provider_id": "anthropic",
+    "model": "claude-3-haiku-20240307",
+    "prompt": "Reply with one short sentence."
+  }
+}

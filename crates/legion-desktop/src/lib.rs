@@ -9,6 +9,7 @@
 pub mod beta;
 pub mod bridge;
 pub mod diagnostics;
+pub mod harness;
 pub mod health;
 pub mod manual_perf;
 pub mod metrics;

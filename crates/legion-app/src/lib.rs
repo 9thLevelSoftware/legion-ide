@@ -31,6 +31,7 @@ pub mod offline_ai;
 pub mod language;
 
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
+use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
 use legion_editor::{
     BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
     TextEdit, TextPosition, TextRange as EditorTextRange,
@@ -47,9 +48,9 @@ use legion_memory::{
     MemoryConsentState, MemoryService, MemoryServiceSnapshot,
 };
 use legion_observability::{
-    SharedEventSink, agent_replay_manifest_recorded_event, collaboration_audit_recorded_event,
-    event_metadata_record, phase4_runtime_audit_recorded_event, plugin_event_envelope,
-    proposal_applied_event, proposal_approved_event, proposal_audit_record,
+    ObservabilityError, SharedEventSink, agent_replay_manifest_recorded_event,
+    collaboration_audit_recorded_event, event_metadata_record, phase4_runtime_audit_recorded_event,
+    plugin_event_envelope, proposal_applied_event, proposal_approved_event, proposal_audit_record,
     proposal_audit_recorded_event, proposal_created_event, proposal_failed_event,
     proposal_previewed_event, proposal_rejected_event, proposal_rolled_back_event,
     proposal_validated_event, remote_audit_recorded_event, save_denied_event,
@@ -168,8 +169,8 @@ use legion_security::{
 };
 use legion_storage::InMemoryStorageRepositoryPort;
 use legion_terminal::{
-    DapAdapterFixtureConfig, DapAdapterFixtureOutcome, DapAdapterFixtureRuntime, TerminalRuntime,
-    TerminalRuntimeConfig, TerminalRuntimeLaunchRequest, TerminalRuntimeOutputPollRequest,
+    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeLaunchRequest,
+    TerminalRuntimeOutputPollRequest,
 };
 use legion_tracker::{
     LegionWorkflowTrackerLedger, LegionWorkflowTrackerRecord, TrackerLedger, TrackerRunLedgerRecord,
@@ -192,9 +193,9 @@ use legion_ui::ui::{
     ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
-    ActiveBufferProjection, CommandDispatchIntent, DockMode, ExplorerNodeProjection,
-    ExplorerProjection, ExplorerSelectionProjection, GitConflictChoiceProjection,
-    ShellLayoutProjection, ShellProjectionSnapshot,
+    ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
+    ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
+    GitConflictChoiceProjection, ShellLayoutProjection, ShellProjectionSnapshot,
 };
 #[cfg(not(feature = "ai"))]
 use offline_ai::{
@@ -603,7 +604,7 @@ mod daily_editing_save_all_internal_tests {
     }
     #[test]
     fn terminal_shell_output_parser_strips_markers_and_extracts_metadata() {
-        let parsed = parse_terminal_shell_output(
+        let parsed = legion_terminal::osc::parse_terminal_shell_output(
             "\x1b]7;file://localhost/tmp/workspace\x1b\\output\x1b]133;D;7\x1b\\",
         );
 
@@ -5187,7 +5188,6 @@ impl LanguageToolingWorkflow {
 
 struct TerminalWorkflow {
     projection: TerminalPanelProjection,
-    fixture_enabled: bool,
     runtime: TerminalRuntime<legion_platform::NativePtyService>,
     security_broker: DenyByDefaultBroker,
     last_audit: Option<legion_protocol::TerminalAuditRecord>,
@@ -5231,82 +5231,6 @@ fn terminal_shell_command() -> (String, Vec<String>) {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TerminalShellOutputProjection {
-    visible_output: String,
-    cwd: Option<String>,
-    exit_code: Option<i32>,
-}
-
-fn parse_terminal_shell_output(payload: &str) -> TerminalShellOutputProjection {
-    let mut visible_output = String::new();
-    let mut cwd = None;
-    let mut exit_code = None;
-    let bytes = payload.as_bytes();
-    let mut cursor = 0;
-
-    while cursor < bytes.len() {
-        if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b']' {
-            cursor += 2;
-            let seq_start = cursor;
-            while cursor < bytes.len() {
-                if bytes[cursor] == 0x07 {
-                    break;
-                }
-                if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'\\' {
-                    break;
-                }
-                cursor += 1;
-            }
-            let sequence = &payload[seq_start..cursor];
-            if let Some(parsed_cwd) = terminal_shell_cwd_from_osc(sequence) {
-                cwd = Some(parsed_cwd);
-            }
-            if let Some(parsed_exit_code) = terminal_shell_exit_code_from_osc(sequence) {
-                exit_code = Some(parsed_exit_code);
-            }
-            if cursor < bytes.len()
-                && bytes[cursor] == 0x1b
-                && cursor + 1 < bytes.len()
-                && bytes[cursor + 1] == b'\\'
-            {
-                cursor += 2;
-            } else if cursor < bytes.len() && bytes[cursor] == 0x07 {
-                cursor += 1;
-            }
-            continue;
-        }
-
-        let Some(ch) = payload[cursor..].chars().next() else {
-            break;
-        };
-        visible_output.push(ch);
-        cursor += ch.len_utf8();
-    }
-
-    TerminalShellOutputProjection {
-        visible_output,
-        cwd,
-        exit_code,
-    }
-}
-
-fn terminal_shell_cwd_from_osc(sequence: &str) -> Option<String> {
-    let value = sequence.strip_prefix("7;")?;
-    let value = value.strip_prefix("file://")?;
-    let path = value.split_once('/')?.1;
-    Some(format!("/{}", path.trim_start_matches('/')))
-}
-
-fn terminal_shell_exit_code_from_osc(sequence: &str) -> Option<i32> {
-    let value = sequence.strip_prefix("133;")?;
-    let (command, parameters) = value.split_once(';')?;
-    if command != "D" {
-        return None;
-    }
-    parameters.split(';').next()?.parse().ok()
-}
-
 fn terminal_command_block_start_payload(byte_count: usize, cwd: Option<&str>) -> String {
     match cwd {
         Some(cwd) => format!(
@@ -5341,7 +5265,6 @@ impl Default for TerminalWorkflow {
     fn default() -> Self {
         Self {
             projection: TerminalPanelProjection::empty(),
-            fixture_enabled: false,
             runtime: TerminalRuntime::new(
                 TerminalRuntimeConfig::default(),
                 legion_platform::NativePtyService,
@@ -5363,8 +5286,7 @@ impl TerminalWorkflow {
         self.projection.clone()
     }
 
-    fn enable_fixture(&mut self) {
-        self.fixture_enabled = true;
+    fn enable_runtime_for_tests(&mut self) {
         self.runtime = TerminalRuntime::new(
             TerminalRuntimeConfig::enabled(),
             legion_platform::NativePtyService,
@@ -5390,10 +5312,15 @@ impl TerminalWorkflow {
         command_label: String,
         event_context: EventContext,
     ) -> TerminalPanelProjection {
+        // The security broker classifies the actual binary that will be
+        // launched (a shell), not the user-facing command label. Passing the
+        // display label here would classify as an unknown command and be denied
+        // by the terminal launch taxonomy guard.
+        let (command, args) = terminal_shell_command();
         let decision = self.capability_decision(
             &context,
             "terminal.launch",
-            Some(command_label.as_str()),
+            Some(command.as_str()),
             event_context,
         );
         let policy = Self::policy_projection(&context, "terminal.launch", &decision);
@@ -5414,17 +5341,6 @@ impl TerminalWorkflow {
                 clear_active_session: true,
             });
         }
-        if !self.fixture_enabled {
-            return self.deny(TerminalDenial {
-                workspace_id: context.workspace_id,
-                policy,
-                reason: "Terminal fixture runtime is disabled".to_string(),
-                event_context,
-                session_id: None,
-                action: "launch".to_string(),
-                clear_active_session: true,
-            });
-        }
 
         let launch_policy = legion_protocol::TerminalLaunchPolicyContract {
             principal_id: context.principal.clone(),
@@ -5436,7 +5352,6 @@ impl TerminalWorkflow {
             timeout_seconds: 30,
             schema_version: 1,
         };
-        let (command, args) = terminal_shell_command();
         let runtime_label = std::any::type_name::<
             legion_terminal::TerminalRuntime<legion_platform::NativePtyService>,
         >();
@@ -5484,7 +5399,8 @@ impl TerminalWorkflow {
                     ),
                 );
                 if outcome.output.byte_count > 0 || !outcome.output.redacted_payload.is_empty() {
-                    self.push_terminal_output(outcome.output, false);
+                    let shell_projection = outcome.shell_projection.clone();
+                    self.push_terminal_output(outcome.output, false, Some(&shell_projection));
                 }
                 self.projection()
             }
@@ -5676,7 +5592,8 @@ impl TerminalWorkflow {
                     self.projection.active_session_id = None;
                 }
                 if outcome.output.byte_count > 0 || !outcome.output.redacted_payload.is_empty() {
-                    self.push_terminal_output(outcome.output, false);
+                    let shell_projection = outcome.shell_projection.clone();
+                    self.push_terminal_output(outcome.output, false, Some(&shell_projection));
                 }
                 self.projection.generated_at = TimestampMillis::now();
                 self.record_audit(
@@ -6045,20 +5962,36 @@ impl TerminalWorkflow {
         &mut self,
         output: legion_protocol::TerminalOutputChunk,
         is_stderr: bool,
+        shell_projection: Option<&legion_terminal::osc::TerminalShellProjection>,
     ) {
-        let shell_projection = parse_terminal_shell_output(&output.redacted_payload);
-        if let Some(cwd) = shell_projection.cwd.clone() {
+        let parsed_projection;
+        let (visible_output, cwd, exit_code) = if let Some(shell_projection) = shell_projection {
+            (
+                output.redacted_payload.clone(),
+                shell_projection.cwd.clone(),
+                shell_projection.exit_code,
+            )
+        } else {
+            parsed_projection =
+                legion_terminal::osc::parse_terminal_shell_output(&output.redacted_payload);
+            (
+                parsed_projection.visible_output.clone(),
+                parsed_projection.cwd.clone(),
+                parsed_projection.exit_code,
+            )
+        };
+        if let Some(cwd) = cwd {
             self.current_cwd = Some(cwd);
         }
-        if !shell_projection.visible_output.trim().is_empty() {
+        if !visible_output.trim().is_empty() {
             self.push_row(
                 output.session_id,
-                shell_projection.visible_output,
+                visible_output,
                 output.byte_count,
                 is_stderr,
             );
         }
-        if let Some(exit_code) = shell_projection.exit_code
+        if let Some(exit_code) = exit_code
             && let Some(started_at) = self.active_command_started_at.take()
         {
             let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -6114,8 +6047,8 @@ impl TerminalWorkflow {
 #[derive(Debug, Clone)]
 struct DebugWorkflow {
     projection: DebugProjection,
-    fixture_enabled: bool,
-    fixture: DapAdapterFixtureRuntime,
+    runtime_enabled: bool,
+    runtime: DapClientRuntime,
     configurations: Vec<DebugLaunchConfiguration>,
     breakpoints: Vec<DebugBreakpointRecord>,
     pending_breakpoint_deletes: Vec<(WorkspaceId, DebugBreakpointId)>,
@@ -6139,8 +6072,8 @@ impl Default for DebugWorkflow {
     fn default() -> Self {
         Self {
             projection: DebugProjection::empty(),
-            fixture_enabled: false,
-            fixture: DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::default()),
+            runtime_enabled: false,
+            runtime: DapClientRuntime::new(DapClientConfig::default()),
             configurations: Vec::new(),
             breakpoints: Vec::new(),
             pending_breakpoint_deletes: Vec::new(),
@@ -6156,12 +6089,12 @@ impl DebugWorkflow {
         self.projection.clone()
     }
 
-    fn enable_fixture(&mut self) {
-        self.fixture_enabled = true;
-        self.fixture = DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::enabled());
+    fn enable_runtime(&mut self) {
+        self.runtime_enabled = true;
+        self.runtime = DapClientRuntime::new(DapClientConfig::enabled());
         self.projection.status = DebugStatusProjection {
             kind: DebugStatusKindProjection::Idle,
-            message: "Debug fixture enabled".to_string(),
+            message: "Debug runtime enabled".to_string(),
         };
         self.projection.generated_at = TimestampMillis::now();
     }
@@ -6174,10 +6107,10 @@ impl DebugWorkflow {
         self.last_audit = None;
         self.next_sequence = 0;
         self.next_watch = 0;
-        self.fixture = if self.fixture_enabled {
-            DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::enabled())
+        self.runtime = if self.runtime_enabled {
+            DapClientRuntime::new(DapClientConfig::enabled())
         } else {
-            DapAdapterFixtureRuntime::new(DapAdapterFixtureConfig::default())
+            DapClientRuntime::new(DapClientConfig::default())
         };
     }
 
@@ -6298,8 +6231,8 @@ impl DebugWorkflow {
         if context.trust != WorkspaceTrustState::Trusted {
             return self.deny("debug launch requires a trusted workspace".to_string());
         }
-        if !self.fixture_enabled {
-            return self.deny("Debug fixture runtime is disabled".to_string());
+        if !self.runtime_enabled {
+            return self.deny("Debug runtime is disabled".to_string());
         }
         let Some(config) = self
             .configurations
@@ -6332,12 +6265,12 @@ impl DebugWorkflow {
             breakpoints,
             schema_version: 1,
         };
-        match self.fixture.launch(request) {
+        match self.runtime.launch(request) {
             Ok(outcome) => {
-                self.apply_fixture_outcome(outcome);
+                self.apply_runtime_outcome(outcome);
                 self.projection.status = DebugStatusProjection {
                     kind: DebugStatusKindProjection::Paused,
-                    message: "Debug fixture paused at breakpoint".to_string(),
+                    message: "Debug runtime paused at breakpoint".to_string(),
                 };
                 self.projection.session_state = Some(DebugSessionState::Paused);
                 self.projection.generated_at = TimestampMillis::now();
@@ -6366,9 +6299,9 @@ impl DebugWorkflow {
             return self.deny(format!("debug session {} is not active", session_id.0));
         }
         let protocol_kind = debug_step_kind(kind);
-        match self.fixture.step(session_id, protocol_kind) {
+        match self.runtime.step(session_id, protocol_kind) {
             Ok(outcome) => {
-                self.apply_fixture_outcome(outcome);
+                self.apply_runtime_outcome(outcome);
                 self.projection.status = DebugStatusProjection {
                     kind: DebugStatusKindProjection::Paused,
                     message: "Debug step completed".to_string(),
@@ -6448,7 +6381,7 @@ impl DebugWorkflow {
         self.projection()
     }
 
-    fn apply_fixture_outcome(&mut self, outcome: DapAdapterFixtureOutcome) {
+    fn apply_runtime_outcome(&mut self, outcome: DapClientOutcome) {
         self.last_audit = Some(outcome.audit.clone());
         self.projection.active_session_id = Some(outcome.audit.session_id.clone());
         for verified in outcome.breakpoints {
@@ -9827,6 +9760,11 @@ impl ProjectionBuilder {
                 .as_ref()
                 .map(|path| CanonicalPath(path.clone())),
             viewport,
+            state: if degraded {
+                ActiveBufferProjectionState::Degraded
+            } else {
+                ActiveBufferProjectionState::Full
+            },
             degraded,
             small_buffer_preview: if degraded {
                 None
@@ -10170,6 +10108,11 @@ struct SaveWorkflowOutput {
 struct SaveWorkflowFailure {
     request_id: uuid::Uuid,
     response: ProposalResponse,
+    /// When the workspace write already committed to disk but a *post-commit*
+    /// audit step failed, this carries the committed save so the caller can
+    /// reconcile editor state with the on-disk content instead of leaving the
+    /// buffer dirty while disk holds the new bytes.
+    committed: Option<SaveWorkflowOutput>,
 }
 
 #[derive(Debug)]
@@ -10195,6 +10138,7 @@ impl SaveWorkflowService {
                     event_context.correlation_id,
                     event_context.causality_id,
                 ),
+                committed: None,
             })?;
         let proposal = proposal_coordinator.build_save_proposal(
             &save,
@@ -10227,6 +10171,7 @@ impl SaveWorkflowService {
             return Err(SaveWorkflowFailure {
                 request_id: save.request_id,
                 response: validation,
+                committed: None,
             });
         }
         let preview = proposal_coordinator
@@ -10245,6 +10190,7 @@ impl SaveWorkflowService {
             return Err(SaveWorkflowFailure {
                 request_id: save.request_id,
                 response: preview,
+                committed: None,
             });
         }
 
@@ -10252,6 +10198,7 @@ impl SaveWorkflowService {
             return Err(SaveWorkflowFailure {
                 request_id: save.request_id,
                 response: validation,
+                committed: None,
             });
         };
         let workspace_save = WorkspaceSaveRequest {
@@ -10281,9 +10228,15 @@ impl SaveWorkflowService {
                     &applied.response,
                     Some(&applied),
                 ) {
+                    // The workspace write already committed to disk; surface the
+                    // post-commit audit failure but carry the committed save so
+                    // the caller can reconcile editor state with disk rather than
+                    // leaving the buffer dirty over already-persisted content.
+                    let request_id = save.request_id;
                     return Err(SaveWorkflowFailure {
-                        request_id: save.request_id,
+                        request_id,
                         response,
+                        committed: Some(SaveWorkflowOutput { save, applied }),
                     });
                 }
                 Ok(SaveWorkflowOutput { save, applied })
@@ -10299,6 +10252,7 @@ impl SaveWorkflowService {
                 Err(SaveWorkflowFailure {
                     request_id: save.request_id,
                     response,
+                    committed: None,
                 })
             }
         }
@@ -10313,7 +10267,21 @@ impl SaveWorkflowService {
         applied: Option<&legion_project::WorkspaceSaveApplied>,
     ) -> Result<(), ProposalResponse> {
         let audit_required = Self::audit_before_success_required(response);
-        for envelope in Self::events_for_response(proposal_coordinator, proposal, response) {
+        let events = match Self::events_for_response(proposal_coordinator, proposal, response) {
+            Ok(events) => events,
+            Err(error) => {
+                // An envelope could not be built (invalid core ids). Fail closed
+                // by routing the proposal into the audit-failure path rather than
+                // silently dropping the lifecycle event.
+                return Err(Self::record_audit_storage_failed_response(
+                    proposal_coordinator,
+                    proposal,
+                    response,
+                    Self::observability_protocol_error(error),
+                ));
+            }
+        };
+        for envelope in events {
             let metadata = event_metadata_record(&envelope);
             if let Err(error) = proposal_coordinator.emit(envelope)
                 && audit_required
@@ -10339,7 +10307,19 @@ impl SaveWorkflowService {
         }
 
         if let Some(transition) = Self::transition_for_response(response) {
-            let audit = proposal_audit_record(proposal, transition);
+            let audit = match proposal_audit_record(proposal, transition) {
+                Ok(audit) => audit,
+                Err(error) => {
+                    // Mismatched proposal/transition ids corrupt the audit trail;
+                    // fail closed instead of persisting a malformed record.
+                    return Err(Self::record_audit_storage_failed_response(
+                        proposal_coordinator,
+                        proposal,
+                        response,
+                        Self::observability_protocol_error(error),
+                    ));
+                }
+            };
             if let Err(error) =
                 storage.handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit))
                 && audit_required
@@ -10352,11 +10332,21 @@ impl SaveWorkflowService {
                 ));
             }
             if audit_required {
-                let envelope = proposal_audit_recorded_event(
+                let envelope = match proposal_audit_recorded_event(
                     proposal,
                     transition,
                     proposal_coordinator.next_sequence(),
-                );
+                ) {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        return Err(Self::record_audit_storage_failed_response(
+                            proposal_coordinator,
+                            proposal,
+                            response,
+                            Self::observability_protocol_error(error),
+                        ));
+                    }
+                };
                 let metadata = event_metadata_record(&envelope);
                 if let Err(error) = proposal_coordinator.emit(envelope) {
                     return Err(Self::record_audit_storage_failed_response(
@@ -10425,6 +10415,13 @@ impl SaveWorkflowService {
         }
     }
 
+    fn observability_protocol_error(error: ObservabilityError) -> ProtocolError {
+        ProtocolError {
+            code: "observability_envelope_invalid".to_string(),
+            message: error.to_string(),
+        }
+    }
+
     fn record_audit_storage_failed_response(
         proposal_coordinator: &mut AppProposalCoordinator,
         proposal: &WorkspaceProposal,
@@ -10442,28 +10439,28 @@ impl SaveWorkflowService {
         proposal_coordinator: &mut AppProposalCoordinator,
         proposal: &WorkspaceProposal,
         response: &ProposalResponse,
-    ) -> Vec<EventEnvelope> {
-        match response {
+    ) -> Result<Vec<EventEnvelope>, ObservabilityError> {
+        Ok(match response {
             ProposalResponse::Created(transition) => vec![proposal_created_event(
                 proposal,
                 transition.causality_id,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Validated(transition) => vec![proposal_validated_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Previewed { transition, .. } => vec![proposal_previewed_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Applied(transition) => vec![proposal_applied_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Denied { transition, reason } => {
                 let save_target = save_event_target(proposal);
                 let generic_event = proposal_rejected_event(
@@ -10478,7 +10475,7 @@ impl SaveWorkflowService {
                         }
                     },
                     proposal_coordinator.next_sequence(),
-                );
+                )?;
 
                 let mut events = vec![generic_event];
                 if let Some(save_target) = save_target {
@@ -10489,7 +10486,7 @@ impl SaveWorkflowService {
                         transition.causality_id,
                         proposal_coordinator.next_sequence(),
                         format!("{reason:?}"),
-                    ));
+                    )?);
                 }
                 events
             }
@@ -10498,23 +10495,23 @@ impl SaveWorkflowService {
                 transition,
                 *reason,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::RolledBack { transition, reason } => {
                 vec![proposal_rolled_back_event(
                     proposal,
                     transition,
                     *reason,
                     proposal_coordinator.next_sequence(),
-                )]
+                )?]
             }
             ProposalResponse::Stale { transition, stale } => {
                 let Some(save_target) = save_event_target(proposal) else {
-                    return vec![proposal_rejected_event(
+                    return Ok(vec![proposal_rejected_event(
                         proposal,
                         transition,
                         legion_protocol::ProposalRejectionReason::ValidationFailed,
                         proposal_coordinator.next_sequence(),
-                    )];
+                    )?]);
                 };
                 vec![stale_proposal_rejected_event(
                     save_target.workspace_id,
@@ -10524,32 +10521,32 @@ impl SaveWorkflowService {
                     proposal_coordinator.next_sequence(),
                     transition.proposal_id,
                     stale.reason,
-                )]
+                )?]
             }
             ProposalResponse::Conflict { transition, .. } => vec![proposal_rejected_event(
                 proposal,
                 transition,
                 legion_protocol::ProposalRejectionReason::ValidationFailed,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Rejected { transition, reason } => vec![proposal_rejected_event(
                 proposal,
                 transition,
                 *reason,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Approved(transition) => vec![proposal_approved_event(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
-            )],
+            )?],
             ProposalResponse::Cancelled { transition, .. } => vec![proposal_rejected_event(
                 proposal,
                 transition,
                 legion_protocol::ProposalRejectionReason::Cancelled,
                 proposal_coordinator.next_sequence(),
-            )],
-        }
+            )?],
+        })
     }
 
     fn transition_for_response(
@@ -13059,9 +13056,13 @@ impl AppComposition {
     }
 
     fn emit_transaction_event(&mut self, descriptor: &TextTransactionDescriptor) {
-        let envelope =
-            transaction_event(descriptor, true, None, self.event_sequence_generator.next());
-        self.emit_event(envelope);
+        // The envelope only fails to build on invalid core ids; skip emitting in
+        // that case rather than aborting the surrounding editor operation.
+        if let Ok(envelope) =
+            transaction_event(descriptor, true, None, self.event_sequence_generator.next())
+        {
+            self.emit_event(envelope);
+        }
     }
 
     /// Set the app-owned product mode used to authorize AI dispatch.
@@ -13075,6 +13076,46 @@ impl AppComposition {
     /// Configure the optional ACP host command used by delegated tasks.
     pub fn set_acp_host_command(&mut self, program: impl Into<PathBuf>, args: Vec<String>) {
         self.acp_host_command = Some(AcpHostCommand::new(program, args));
+    }
+
+    /// Removes delegated-task sandbox directories left behind by crashed or
+    /// abandoned lanes from a prior process. Intended to be called once by a
+    /// production entry point before any delegated lane starts in the current
+    /// process — never from a constructor or test harness, since those may run
+    /// concurrently with other live sandboxes under the same relative path.
+    ///
+    /// Uses the default sandbox root (`target/delegated-tasks`, relative to
+    /// the current working directory).
+    ///
+    /// An associated function (not a method): it uses no instance state, and
+    /// callers are expected to invoke it before constructing an
+    /// `AppComposition` at all.
+    pub fn reap_orphaned_delegated_task_sandboxes() -> std::io::Result<Vec<PathBuf>> {
+        Self::reap_orphaned_delegated_task_sandboxes_at(Path::new("target/delegated-tasks"))
+    }
+
+    /// Same as [`Self::reap_orphaned_delegated_task_sandboxes`], but against an
+    /// explicit `delegated_tasks_root` rather than the default. Exists so
+    /// callers (and tests) can target an isolated, temp-scoped root instead of
+    /// the process-relative default.
+    ///
+    /// The orphan-detection rule (a `task-<run-id>` directory whose run id is
+    /// not in the empty "active" list, since this only ever runs before any
+    /// lane in the current process has started) lives in `legion-agent` when
+    /// the `ai` feature is enabled. Offline builds have no `legion-agent`
+    /// dependency, so this mirrors the same directory-walk logic locally
+    /// rather than pulling that crate in just for this helper.
+    pub fn reap_orphaned_delegated_task_sandboxes_at(
+        delegated_tasks_root: &Path,
+    ) -> std::io::Result<Vec<PathBuf>> {
+        #[cfg(feature = "ai")]
+        {
+            legion_agent::reap_orphaned_sandboxes(delegated_tasks_root, &[])
+        }
+        #[cfg(not(feature = "ai"))]
+        {
+            offline_ai::reap_orphaned_sandboxes(delegated_tasks_root, &[])
+        }
     }
 
     /// Current app-owned product mode.
@@ -14752,6 +14793,18 @@ impl AppComposition {
         let projection = PluginContributionProjection {
             plugin_id: manifest.plugin_id,
             contributions: manifest.contributions.clone(),
+            permission_review_rows: manifest
+                .requested_capabilities
+                .iter()
+                .enumerate()
+                .map(|(index, capability)| {
+                    format!(
+                        "permission review {}: capability={}",
+                        index + 1,
+                        capability.0
+                    )
+                })
+                .collect(),
             status_label: "loaded".to_string(),
         };
         let plugin_id = self
@@ -15327,11 +15380,25 @@ impl AppComposition {
                 correlation_id,
                 causality_id,
             );
-            let host_output = acp_host_command
-                .run(&sandbox_path, &target_file_absolute, &contract.plan_id.0)
-                .map_err(|e| {
-                    AppCompositionError::AiRuntime(format!("ACP host command failed to start: {e}"))
-                })?;
+            let host_output = match acp_host_command.run(
+                &sandbox_path,
+                &target_file_absolute,
+                &contract.plan_id.0,
+            ) {
+                Ok(output) => output,
+                Err(e) => {
+                    // The sandbox was already allocated; clean it up before the
+                    // early return and surface any cleanup failure alongside the
+                    // original error.
+                    let message = match orchestrator.cleanup(&permission) {
+                        Ok(()) => format!("ACP host command failed to start: {e}"),
+                        Err(cleanup_err) => format!(
+                            "ACP host command failed to start: {e}; additionally sandbox cleanup failed: {cleanup_err}"
+                        ),
+                    };
+                    return Err(AppCompositionError::AiRuntime(message));
+                }
+            };
             let stdout_label = String::from_utf8_lossy(&host_output.stdout);
             let stderr_label = String::from_utf8_lossy(&host_output.stderr);
             let _spawn_message_id = self.delegate_workflow.record_system_message(
@@ -15367,9 +15434,20 @@ impl AppComposition {
                     stderr_label.trim()
                 )));
             }
-            proposal_content = std::fs::read_to_string(&target_file_absolute).map_err(|e| {
-                AppCompositionError::AiRuntime(format!("Failed to read ACP host proposal: {e}"))
-            })?;
+            proposal_content = match std::fs::read_to_string(&target_file_absolute) {
+                Ok(content) => content,
+                Err(e) => {
+                    // Clean up the allocated sandbox before the early return and
+                    // surface any cleanup failure alongside the original error.
+                    let message = match orchestrator.cleanup(&permission) {
+                        Ok(()) => format!("Failed to read ACP host proposal: {e}"),
+                        Err(cleanup_err) => format!(
+                            "Failed to read ACP host proposal: {e}; additionally sandbox cleanup failed: {cleanup_err}"
+                        ),
+                    };
+                    return Err(AppCompositionError::AiRuntime(message));
+                }
+            };
         }
 
         let generator = DelegatedTaskProposalGenerator::new(sandbox_path.clone());
@@ -17686,7 +17764,20 @@ impl AppComposition {
                 Ok(AppSaveOutcome::Saved(output.save))
             }
             Err(failure) => {
-                if failure.request_id != uuid::Uuid::nil() {
+                if let Some(committed) = failure.committed {
+                    // The on-disk write already committed before the post-commit
+                    // audit failed. Reconcile editor state with disk (mark the
+                    // buffer saved) so we never leave a dirty buffer over content
+                    // that is already persisted, then surface the audit failure.
+                    self.editor.acknowledge_save_outcome(
+                        committed.save.request_id,
+                        SaveAcknowledgement::Saved,
+                    );
+                    self.active_documents
+                        .bind_saved_buffer(committed.save.buffer_id, committed.applied);
+                    self.active_documents
+                        .clear_dirty_prompt_for(committed.save.buffer_id);
+                } else if failure.request_id != uuid::Uuid::nil() {
                     self.editor.acknowledge_save_outcome(
                         failure.request_id,
                         acknowledgement_for_response(&failure.response),
@@ -18157,14 +18248,24 @@ impl AppComposition {
         Ok(self.refresh_git_projection())
     }
 
-    /// Enable the deterministic terminal fixture for app integration tests.
-    pub fn enable_terminal_fixture_for_tests(&mut self) {
-        self.terminal_workflow.enable_fixture();
+    /// Enable the real terminal runtime for app integration tests.
+    ///
+    /// Launch is still gated by the normal terminal capability policy; this
+    /// helper only enables the app-owned runtime and test security policy so
+    /// integration tests exercise the production terminal path instead of a
+    /// separate fixture toggle.
+    pub fn enable_terminal_runtime_for_tests(&mut self) {
+        self.terminal_workflow.enable_runtime_for_tests();
     }
 
-    /// Enable the deterministic DAP debug fixture for app integration tests.
+    /// Enable the DAP debug runtime for app integration tests.
+    pub fn enable_debug_runtime_for_tests(&mut self) {
+        self.debug_workflow.enable_runtime();
+    }
+
+    /// Compatibility alias for older debug integration tests.
     pub fn enable_debug_fixture_for_tests(&mut self) {
-        self.debug_workflow.enable_fixture();
+        self.enable_debug_runtime_for_tests();
     }
 
     /// Return the current app-owned language tooling projection.
@@ -24024,6 +24125,56 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parse_terminal_keeps_unterminated_osc_bytes() {
+        // OSC introducer with no BEL/ST terminator must not silently drop the
+        // trailing bytes of the output.
+        let payload = "before\x1b]7;file://localhost/home";
+        let parsed = legion_terminal::osc::parse_terminal_shell_output(payload);
+        assert_eq!(parsed.visible_output, "before\x1b]7;file://localhost/home");
+        assert_eq!(parsed.cwd, None);
+    }
+
+    #[test]
+    fn parse_terminal_handles_terminated_osc() {
+        let payload = "out\x1b]7;file:///home/user\x07tail";
+        let parsed = legion_terminal::osc::parse_terminal_shell_output(payload);
+        assert_eq!(parsed.visible_output, "outtail");
+        assert_eq!(parsed.cwd.as_deref(), Some("/home/user"));
+    }
+
+    #[test]
+    fn osc7_cwd_decodes_windows_drive_and_percent() {
+        assert_eq!(
+            legion_terminal::osc::parse_terminal_shell_output(
+                "\x1b]7;file:///C:/Users/My%20Project\x1b\\"
+            )
+            .cwd
+            .as_deref(),
+            Some("C:/Users/My Project")
+        );
+    }
+
+    #[test]
+    fn osc7_cwd_handles_localhost_and_unc() {
+        assert_eq!(
+            legion_terminal::osc::parse_terminal_shell_output(
+                "\x1b]7;file://localhost/home/user\x1b\\"
+            )
+            .cwd
+            .as_deref(),
+            Some("/home/user")
+        );
+        assert_eq!(
+            legion_terminal::osc::parse_terminal_shell_output(
+                "\x1b]7;file://server/share/dir\x1b\\"
+            )
+            .cwd
+            .as_deref(),
+            Some("//server/share/dir")
+        );
+    }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()

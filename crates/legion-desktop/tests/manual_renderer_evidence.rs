@@ -2,7 +2,7 @@ use legion_desktop::view::DesktopProjectionViewModel;
 use legion_protocol::{
     BufferId, CanonicalPath, FileId, WorkbenchFontFallbackDiagnostic, WorkspaceId,
 };
-use legion_ui::{ActiveBufferProjection, SettingsProjection, Shell};
+use legion_ui::{ActiveBufferProjection, ActiveBufferProjectionState, SettingsProjection, Shell};
 
 fn diagnostic(index: usize) -> WorkbenchFontFallbackDiagnostic {
     WorkbenchFontFallbackDiagnostic {
@@ -111,6 +111,7 @@ fn deterministic_renderer_evidence_covers_core_editor_states() {
     ] {
         let mut active_snapshot = Shell::empty("Evidence Active").projection_snapshot();
         active_snapshot.active_buffer_projection = ActiveBufferProjection {
+            state: ActiveBufferProjectionState::Full,
             workspace_id: Some(WorkspaceId(1)),
             buffer_id: Some(BufferId(2)),
             file_id: Some(FileId(3)),

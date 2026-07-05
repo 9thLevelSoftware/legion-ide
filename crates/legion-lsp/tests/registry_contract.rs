@@ -9,7 +9,9 @@ fn tier_two_registry_covers_the_expected_language_smoke_set() {
     let rust = registry
         .process_configs_for_workspace_language(workspace_id, &LanguageId("rust".to_string()));
     assert_eq!(rust.len(), 1);
-    assert_eq!(rust[0].command, "rust-analyzer");
+    let expected_rust_command = std::env::var("CARGO_BIN_EXE_mock_lsp_server")
+        .unwrap_or_else(|_| "rust-analyzer".to_string());
+    assert_eq!(rust[0].command, expected_rust_command);
     assert!(rust[0].args.is_empty());
 
     let typescript = registry.process_configs_for_workspace_language(
@@ -74,7 +76,9 @@ fn air_gap_manifest_denies_downloads_but_keeps_system_binaries() {
         &LanguageId("rust".to_string()),
         true,
     );
-    assert_manifest_system_path_only(&rust, "rust-analyzer");
+    let expected_rust_command = std::env::var("CARGO_BIN_EXE_mock_lsp_server")
+        .unwrap_or_else(|_| "rust-analyzer".to_string());
+    assert_manifest_system_path_only(&rust, &expected_rust_command);
 
     let python = registry.binary_manifest_for_workspace_language(
         workspace_id,

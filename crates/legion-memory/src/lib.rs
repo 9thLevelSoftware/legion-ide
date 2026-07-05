@@ -22,7 +22,13 @@ pub enum MemoryError {
     /// A metadata record failed protocol validation.
     #[error("invalid memory metadata: {0}")]
     InvalidMetadata(#[from] AssistedAiContractError),
+    /// A snapshot used an unsupported schema version.
+    #[error("unsupported memory snapshot schema version: {0}")]
+    UnsupportedSnapshotVersion(u16),
 }
+
+/// Highest memory snapshot schema version this build can restore.
+const SUPPORTED_SNAPSHOT_SCHEMA_VERSION: u16 = 1;
 
 /// Consent state for a memory candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +248,13 @@ impl MemoryService {
 
     /// Restore a memory service from a durable metadata-only snapshot.
     pub fn from_snapshot(snapshot: MemoryServiceSnapshot) -> Result<Self, MemoryError> {
+        if snapshot.schema_version == 0
+            || snapshot.schema_version > SUPPORTED_SNAPSHOT_SCHEMA_VERSION
+        {
+            return Err(MemoryError::UnsupportedSnapshotVersion(
+                snapshot.schema_version,
+            ));
+        }
         let service = Self {
             retained: snapshot.retained,
             workflow_retained: snapshot.workflow_retained,
@@ -302,7 +315,15 @@ impl MemoryService {
         if candidate.consent == MemoryConsentState::NotGranted {
             return Err(MemoryError::ConsentRequired);
         }
-        self.retained.push(candidate);
+        if let Some(existing) = self
+            .retained
+            .iter_mut()
+            .find(|existing| existing.candidate_id == candidate.candidate_id)
+        {
+            *existing = candidate;
+        } else {
+            self.retained.push(candidate);
+        }
         Ok(())
     }
 
@@ -337,7 +358,15 @@ impl MemoryService {
         if candidate.consent == MemoryConsentState::NotGranted {
             return Err(MemoryError::ConsentRequired);
         }
-        self.workflow_retained.push(candidate);
+        if let Some(existing) = self
+            .workflow_retained
+            .iter_mut()
+            .find(|existing| existing.candidate_id == candidate.candidate_id)
+        {
+            *existing = candidate;
+        } else {
+            self.workflow_retained.push(candidate);
+        }
         Ok(())
     }
 
@@ -369,7 +398,15 @@ impl MemoryService {
         if record.consent == LegionTraceConsentState::NotGranted {
             return Err(MemoryError::TraceConsentRequired);
         }
-        self.trace_retained.push(record);
+        if let Some(existing) = self
+            .trace_retained
+            .iter_mut()
+            .find(|existing| existing.trace_id == record.trace_id)
+        {
+            *existing = record;
+        } else {
+            self.trace_retained.push(record);
+        }
         Ok(())
     }
 
@@ -465,6 +502,13 @@ impl MemoryService {
 }
 
 fn validate_memory_candidate(candidate: &MemoryCandidateRecord) -> Result<(), MemoryError> {
+    if candidate.candidate_id.trim().is_empty() {
+        return Err(MemoryError::InvalidMetadata(
+            AssistedAiContractError::InvalidProposalMetadata {
+                reason: "memory candidate requires a non-empty candidate id".to_string(),
+            },
+        ));
+    }
     validate_phase4_runtime_audit_record(&Phase4RuntimeAuditRecord {
         audit_id: format!("memory:{}", candidate.candidate_id),
         run_id: candidate.run_id.clone(),
@@ -691,7 +735,7 @@ impl LegionWorkflowOutcomeCandidate {
             raw_payload_retained: false,
             correlation_id: session.correlation_id,
             causality_id: session.causality_id,
-            event_sequence: EventSequence(13),
+            event_sequence: EventSequence(session.generated_at.0),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: session.schema_version.max(1),
         };
@@ -1192,5 +1236,93 @@ mod tests {
             validate_legion_trace_record(&record),
             Err(MemoryError::InvalidMetadata(_))
         ));
+    }
+
+    #[test]
+    fn from_snapshot_rejects_unsupported_schema_versions() {
+        let mut snapshot = MemoryService::new().snapshot();
+
+        snapshot.schema_version = 0;
+        assert_eq!(
+            MemoryService::from_snapshot(snapshot.clone()).err(),
+            Some(MemoryError::UnsupportedSnapshotVersion(0))
+        );
+
+        snapshot.schema_version = SUPPORTED_SNAPSHOT_SCHEMA_VERSION + 1;
+        assert_eq!(
+            MemoryService::from_snapshot(snapshot.clone()).err(),
+            Some(MemoryError::UnsupportedSnapshotVersion(
+                SUPPORTED_SNAPSHOT_SCHEMA_VERSION + 1
+            ))
+        );
+
+        snapshot.schema_version = SUPPORTED_SNAPSHOT_SCHEMA_VERSION;
+        MemoryService::from_snapshot(snapshot).expect("supported version restores");
+    }
+
+    #[test]
+    fn memory_candidate_rejects_empty_candidate_id() {
+        let service = MemoryService::new();
+        let mut empty = candidate(MemoryConsentState::SessionOnly);
+        empty.candidate_id = "   ".to_string();
+
+        assert!(matches!(
+            service.propose_candidate(empty),
+            Err(MemoryError::InvalidMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn repeated_retain_does_not_duplicate_records() {
+        let mut service = MemoryService::new();
+        service
+            .retain(candidate(MemoryConsentState::ProjectLongTerm))
+            .expect("first retain");
+        service
+            .retain(candidate(MemoryConsentState::ProjectLongTerm))
+            .expect("second retain with same id");
+
+        assert_eq!(service.retained().len(), 1);
+        assert!(service.delete("memory-candidate"));
+        assert!(service.retained().is_empty());
+
+        // Workflow candidates dedupe by candidate id as well.
+        let workflow_candidate = LegionWorkflowOutcomeCandidate::from_session_metadata(
+            &legion_workflow_session(),
+            MemoryConsentState::ProjectLongTerm,
+            workflow_hash("workflow-dedupe"),
+        )
+        .expect("build workflow candidate");
+        service
+            .retain_legion_workflow_candidate(workflow_candidate.clone())
+            .expect("first workflow retain");
+        service
+            .retain_legion_workflow_candidate(workflow_candidate)
+            .expect("second workflow retain");
+        assert_eq!(service.retained_legion_workflow_candidates().len(), 1);
+
+        // Trace records dedupe by trace id as well.
+        let trace = trace_record(LegionTraceConsentState::MetadataOnly);
+        service
+            .retain_trace_record(trace.clone())
+            .expect("first trace retain");
+        service
+            .retain_trace_record(trace)
+            .expect("second trace retain");
+        assert_eq!(service.retained_trace_records().len(), 1);
+    }
+
+    #[test]
+    fn workflow_candidate_sequence_is_derived_from_session_metadata() {
+        let mut session = legion_workflow_session();
+        session.generated_at = legion_protocol::TimestampMillis(4242);
+        let candidate = LegionWorkflowOutcomeCandidate::from_session_metadata(
+            &session,
+            MemoryConsentState::SessionOnly,
+            workflow_hash("sequence-derivation"),
+        )
+        .expect("candidate builds");
+
+        assert_eq!(candidate.event_sequence, EventSequence(4242));
     }
 }

@@ -582,7 +582,7 @@ pub struct RemoteTransportStateMachine {
     peer_identity: Option<RemoteTransportPeerIdentity>,
     agent_package: Option<RemoteAgentPackageDescriptor>,
     seen_operations: HashSet<RemoteOperationId>,
-    accepted_sequences: VecDeque<EventSequence>,
+    accepted_sequences: VecDeque<(EventSequence, RemoteOperationId)>,
     inflight_operations: HashSet<RemoteOperationId>,
     duplicate_operations: u32,
     last_sequence: EventSequence,
@@ -730,9 +730,21 @@ impl RemoteTransportStateMachine {
         }
         self.seen_operations.insert(frame.operation_id);
         self.inflight_operations.insert(frame.operation_id);
-        self.accepted_sequences.push_back(frame.frame_sequence);
+        self.accepted_sequences
+            .push_back((frame.frame_sequence, frame.operation_id));
         while self.accepted_sequences.len() > self.config.replay_window_size as usize {
-            self.accepted_sequences.pop_front();
+            if let Some((_, evicted_operation)) = self.accepted_sequences.pop_front() {
+                // Slide the replay window, but keep still-in-flight (unacked)
+                // operation ids in the dedup set even after they leave the
+                // window. With `replay_window_size < max_inflight_frames` an
+                // unacked id could otherwise be dropped here; a duplicate frame
+                // for it would then bypass the duplicate check, be accepted as
+                // new, and corrupt replay/flow-control accounting. Retained ids
+                // are removed by `ack_frame` once acknowledged.
+                if !self.inflight_operations.contains(&evicted_operation) {
+                    self.seen_operations.remove(&evicted_operation);
+                }
+            }
         }
         self.last_sequence = frame.frame_sequence;
         if self.inflight_operations.len() as u32 >= self.config.max_inflight_frames {
@@ -754,6 +766,16 @@ impl RemoteTransportStateMachine {
                 reason: "acknowledged operation was not in flight".to_string(),
             });
         }
+        // If this operation already slid out of the replay window it was retained
+        // in the dedup set only because it was in-flight; now that it is acked,
+        // drop it so `seen_operations` stays bounded by the replay window.
+        if !self
+            .accepted_sequences
+            .iter()
+            .any(|(_, op)| *op == operation_id)
+        {
+            self.seen_operations.remove(&operation_id);
+        }
         self.state = RemoteTransportLifecycleState::Active;
         self.flow_control_window()
     }
@@ -772,6 +794,18 @@ impl RemoteTransportStateMachine {
         if !self.seen_operations.contains(&checkpoint.last_operation_id) {
             return Err(RemoteTransportCoreError::ReplayRejected {
                 reason: "checkpoint references an unseen operation".to_string(),
+            });
+        }
+        if checkpoint.event_sequence.0 > self.last_sequence.0 {
+            return Err(RemoteTransportCoreError::ReplayRejected {
+                reason: "checkpoint sequence is ahead of accepted frames".to_string(),
+            });
+        }
+        if let Some((lowest, _)) = self.accepted_sequences.front()
+            && checkpoint.event_sequence.0 < lowest.0
+        {
+            return Err(RemoteTransportCoreError::ReplayRejected {
+                reason: "checkpoint sequence is below the replay window".to_string(),
             });
         }
         self.last_checkpoint = Some(checkpoint.checkpoint_id);
@@ -897,7 +931,7 @@ impl RemoteTransportStateMachine {
                 reason: "replay window requires active session".to_string(),
             });
         };
-        let Some(lowest) = self.accepted_sequences.front().copied() else {
+        let Some(lowest) = self.accepted_sequences.front().map(|(seq, _)| *seq) else {
             return Err(RemoteTransportCoreError::ReplayRejected {
                 reason: "replay window has no accepted frames".to_string(),
             });
@@ -1846,5 +1880,111 @@ mod tests {
             machine.activate_agent_package(wrong_peer),
             Err(RemoteTransportCoreError::InvalidAgentPackage { .. })
         ));
+    }
+
+    #[test]
+    fn remote_transport_state_machine_retains_inflight_operations_then_bounds_after_ack() {
+        let mut machine = RemoteTransportStateMachine::new(RemoteTransportConfig {
+            replay_window_size: 2,
+            max_inflight_frames: 64,
+            ..RemoteTransportConfig::enabled()
+        });
+        machine.begin_handshake().expect("begin handshake");
+        machine.accept_handshake(handshake()).expect("handshake");
+        machine
+            .activate_agent_package(package())
+            .expect("activate package");
+        // last_sequence starts at the handshake sequence (6); accept five frames.
+        for sequence in 7..=11u64 {
+            machine
+                .try_accept_frame(ordered_frame(sequence, sequence))
+                .expect("accept frame");
+        }
+
+        // The replay window itself stays bounded to two frames...
+        let window = machine.replay_window().expect("replay window");
+        assert_eq!(window.lowest_accepted_sequence, EventSequence(10));
+        assert_eq!(window.highest_accepted_sequence, EventSequence(11));
+        // ...but operations that slid out of the window are RETAINED in the dedup
+        // set while still in flight (unacked). With replay_window_size (2) <
+        // max_inflight_frames (64), dropping them on window slide would let a
+        // duplicate frame for an unacked operation bypass the duplicate check.
+        assert_eq!(window.accepted_operation_count, 5);
+
+        // A duplicate frame for an unacked operation that already left the replay
+        // window is still detected as a duplicate (pre-fix this was accepted as a
+        // new frame and corrupted flow-control accounting).
+        assert!(matches!(
+            machine.try_accept_frame(ordered_frame(99, 7)),
+            Ok(RemoteTransportAcceptOutcome::Duplicate)
+        ));
+
+        // Acknowledging the out-of-window operations drops them from the dedup
+        // set, so it shrinks back to the replay-window bound.
+        for operation in 7..=9u128 {
+            machine
+                .ack_frame(RemoteOperationId(operation))
+                .expect("ack frame");
+        }
+        let window = machine.replay_window().expect("replay window");
+        assert_eq!(window.accepted_operation_count, 2);
+    }
+
+    #[test]
+    fn remote_transport_state_machine_rejects_out_of_window_checkpoint_sequence() {
+        let mut machine = RemoteTransportStateMachine::new(RemoteTransportConfig {
+            replay_window_size: 2,
+            max_inflight_frames: 64,
+            ..RemoteTransportConfig::enabled()
+        });
+        machine.begin_handshake().expect("begin handshake");
+        machine.accept_handshake(handshake()).expect("handshake");
+        machine
+            .activate_agent_package(package())
+            .expect("activate package");
+        for sequence in 7..=9u64 {
+            machine
+                .try_accept_frame(ordered_frame(sequence, sequence))
+                .expect("accept frame");
+        }
+        // Sequence ahead of the highest accepted frame is rejected.
+        let ahead = RemoteOperationLogCheckpoint {
+            checkpoint_id: RemoteOperationLogCheckpointId(99),
+            session_id: RemoteWorkspaceSessionId(1),
+            last_operation_id: RemoteOperationId(9),
+            version_vector: CollaborationVersionVector { entries: vec![] },
+            network_health: RemoteNetworkHealthState::Healthy,
+            event_sequence: EventSequence(20),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            machine.checkpoint(ahead),
+            Err(RemoteTransportCoreError::ReplayRejected { .. })
+        ));
+        // Sequence below the lowest retained accepted frame is rejected.
+        let stale = RemoteOperationLogCheckpoint {
+            checkpoint_id: RemoteOperationLogCheckpointId(100),
+            session_id: RemoteWorkspaceSessionId(1),
+            last_operation_id: RemoteOperationId(9),
+            version_vector: CollaborationVersionVector { entries: vec![] },
+            network_health: RemoteNetworkHealthState::Healthy,
+            event_sequence: EventSequence(7),
+            schema_version: 1,
+        };
+        assert!(matches!(
+            machine.checkpoint(stale),
+            Err(RemoteTransportCoreError::ReplayRejected { .. })
+        ));
+        // A checkpoint within the retained window is accepted.
+        let valid = RemoteOperationLogCheckpoint {
+            checkpoint_id: RemoteOperationLogCheckpointId(101),
+            session_id: RemoteWorkspaceSessionId(1),
+            last_operation_id: RemoteOperationId(9),
+            version_vector: CollaborationVersionVector { entries: vec![] },
+            network_health: RemoteNetworkHealthState::Healthy,
+            event_sequence: EventSequence(9),
+            schema_version: 1,
+        };
+        machine.checkpoint(valid).expect("checkpoint within window");
     }
 }

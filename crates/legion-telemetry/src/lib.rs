@@ -108,6 +108,9 @@ pub struct TelemetrySpoolStats {
     pub retry_after_ms: Option<u64>,
 }
 
+/// Supported on-disk durable spool schema version.
+const SUPPORTED_SPOOL_SCHEMA_VERSION: u16 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PersistedTelemetrySpool {
     schema_version: u16,
@@ -536,14 +539,16 @@ impl FileBackedTelemetrySpool {
         config: TelemetrySpoolConfig,
     ) -> Result<Self, TelemetrySpoolError> {
         let path = path.as_ref().to_path_buf();
-        let state = if path.exists() {
+        let state: PersistedTelemetrySpool = if path.exists() {
             let text = fs::read_to_string(&path).map_err(io_error)?;
-            serde_json::from_str(&text).map_err(|err| TelemetrySpoolError::Io {
+            let decoded = serde_json::from_str(&text).map_err(|err| TelemetrySpoolError::Io {
                 message: format!("decode durable spool: {err}"),
-            })?
+            })?;
+            validate_persisted_spool(&decoded, &config)?;
+            decoded
         } else {
             PersistedTelemetrySpool {
-                schema_version: 1,
+                schema_version: SUPPORTED_SPOOL_SCHEMA_VERSION,
                 ..PersistedTelemetrySpool::default()
             }
         };
@@ -583,6 +588,12 @@ impl FileBackedTelemetrySpool {
         endpoint: HostedTelemetryEndpointDescriptor,
         max_records: usize,
     ) -> Result<HostedTelemetryExportBatch, TelemetrySpoolError> {
+        if endpoint != consent.endpoint {
+            return Err(TelemetrySpoolError::InvalidMetadata {
+                reason: "hosted telemetry export endpoint does not match consent endpoint"
+                    .to_string(),
+            });
+        }
         let max_records = max_records
             .min(self.config.max_batch_records)
             .min(self.state.records.len());
@@ -834,6 +845,37 @@ fn sync_parent_directory_when_supported(parent: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn sync_parent_directory_when_supported(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn validate_persisted_spool(
+    state: &PersistedTelemetrySpool,
+    config: &TelemetrySpoolConfig,
+) -> Result<(), TelemetrySpoolError> {
+    if state.schema_version != SUPPORTED_SPOOL_SCHEMA_VERSION {
+        return Err(TelemetrySpoolError::InvalidMetadata {
+            reason: format!(
+                "unsupported durable spool schema version {} (supported {})",
+                state.schema_version, SUPPORTED_SPOOL_SCHEMA_VERSION
+            ),
+        });
+    }
+    if state.records.len() > config.max_records {
+        return Err(TelemetrySpoolError::InvalidMetadata {
+            reason: format!(
+                "durable spool contains {} records exceeding configured maximum {}",
+                state.records.len(),
+                config.max_records
+            ),
+        });
+    }
+    for record in &state.records {
+        validate_hosted_telemetry_spool_record(record).map_err(|err| {
+            TelemetrySpoolError::InvalidMetadata {
+                reason: format!("durable spool record invalid: {}", err.message),
+            }
+        })?;
+    }
     Ok(())
 }
 
@@ -1138,6 +1180,72 @@ mod tests {
             .expect("second batch");
 
         assert_ne!(first_batch.batch_id, second_batch.batch_id);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_batch_rejects_endpoint_not_matching_consent() {
+        let path = temp_spool_path("endpoint-mismatch");
+        let mut spool = FileBackedTelemetrySpool::open(&path, TelemetrySpoolConfig::enabled())
+            .expect("open spool");
+        spool.enqueue(record_with_id("record-1")).expect("enqueue");
+        let mut rogue = endpoint();
+        rogue.endpoint_id = "rogue".to_string();
+        rogue.endpoint_label = "https://attacker.invalid".to_string();
+        assert!(matches!(
+            spool.pending_batch(consent(), rogue, 1),
+            Err(TelemetrySpoolError::InvalidMetadata { .. })
+        ));
+        assert_eq!(spool.stats().pending_records, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backed_spool_open_rejects_unsupported_schema_version() {
+        let path = temp_spool_path("bad-schema");
+        fs::write(
+            &path,
+            r#"{"schema_version":999,"records":[],"dropped_records":0,"retry_after_ms":null}"#,
+        )
+        .expect("write corrupt spool");
+        assert!(matches!(
+            FileBackedTelemetrySpool::open(&path, TelemetrySpoolConfig::enabled()),
+            Err(TelemetrySpoolError::InvalidMetadata { .. })
+        ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backed_spool_open_rejects_oversized_persisted_file() {
+        let path = temp_spool_path("oversized");
+        {
+            let mut spool = FileBackedTelemetrySpool::open(
+                &path,
+                TelemetrySpoolConfig {
+                    enabled: true,
+                    max_records: 8,
+                    max_batch_records: 8,
+                },
+            )
+            .expect("open spool");
+            spool
+                .enqueue(record_with_id("record-1"))
+                .expect("enqueue 1");
+            let mut second = record_with_id("record-2");
+            second.event_sequence = EventSequence(2);
+            spool.enqueue(second).expect("enqueue 2");
+        }
+        assert!(matches!(
+            FileBackedTelemetrySpool::open(
+                &path,
+                TelemetrySpoolConfig {
+                    enabled: true,
+                    max_records: 1,
+                    max_batch_records: 1,
+                },
+            ),
+            Err(TelemetrySpoolError::InvalidMetadata { .. })
+        ));
         let _ = fs::remove_file(path);
     }
 

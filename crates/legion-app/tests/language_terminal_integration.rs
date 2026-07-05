@@ -203,7 +203,7 @@ fn terminal_actions_cannot_mutate_editor_or_disk() {
     assert_eq!(denied_terminal.status.kind, TerminalPanelStatusKind::Denied);
     assert!(denied_terminal.active_session_id.is_none());
 
-    app.enable_terminal_fixture_for_tests();
+    app.enable_terminal_runtime_for_tests();
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
@@ -216,25 +216,49 @@ fn terminal_actions_cannot_mutate_editor_or_disk() {
     assert_eq!(terminal.status.kind, TerminalPanelStatusKind::Running);
     let session_id = terminal.active_session_id.expect("active terminal session");
 
-    for intent in [
+    let dispatch_terminal = |app: &mut AppComposition, intent: CommandDispatchIntent| match app
+        .dispatch_ui_intent(intent)
+        .expect("terminal intent")
+    {
+        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
+        other => panic!("expected terminal projection, got {other:?}"),
+    };
+
+    terminal = dispatch_terminal(
+        &mut app,
         CommandDispatchIntent::TerminalInput {
             session_id,
             payload: "echo safe".to_string(),
         },
-        CommandDispatchIntent::TerminalOutputPoll { session_id },
+    );
+
+    // Real PTY output is asynchronous, so one poll can race on a slow host. Re-dispatch
+    // TerminalOutputPoll until output arrives or a generous deadline elapses.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while terminal.output_rows.is_empty() && std::time::Instant::now() < deadline {
+        terminal = dispatch_terminal(
+            &mut app,
+            CommandDispatchIntent::TerminalOutputPoll { session_id },
+        );
+        if terminal.output_rows.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    terminal = dispatch_terminal(
+        &mut app,
         CommandDispatchIntent::TerminalSearch {
             session_id,
             query: "safe".to_string(),
         },
-    ] {
-        terminal = match app.dispatch_ui_intent(intent).expect("terminal intent") {
-            AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
-            other => panic!("expected terminal projection, got {other:?}"),
-        };
-    }
+    );
+
     assert_eq!(terminal.status.kind, TerminalPanelStatusKind::Running);
     assert!(terminal.active_session_id.is_some());
-    assert!(!terminal.output_rows.is_empty());
+    assert!(
+        !terminal.output_rows.is_empty(),
+        "terminal output should be populated after polling; got {terminal:?}"
+    );
     assert_eq!(
         app.editor().text(buffer_id).expect("active editor text"),
         original_editor_text
@@ -289,7 +313,7 @@ fn rust_analyzer_runnable_code_lens_launches_the_terminal_fixture() {
     .expect("open workspace");
     app.open_file(source.to_string_lossy())
         .expect("open source file");
-    app.enable_terminal_fixture_for_tests();
+    app.enable_terminal_runtime_for_tests();
 
     let buffer_id = app.active_buffer_id().expect("active buffer");
     let code_lens_payload = json!([

@@ -826,12 +826,23 @@ pub struct ActiveBufferProjection {
     pub file_path: Option<CanonicalPath>,
     /// Bounded viewport projection instead of unbounded text.
     pub viewport: Option<legion_protocol::ViewportProjection>,
+    /// Degraded/full state for the active buffer projection.
+    pub state: ActiveBufferProjectionState,
     /// Degraded status from the application layer.
     pub degraded: bool,
     /// Bounded small-buffer preview, requested explicitly.
     pub small_buffer_preview: Option<String>,
     /// Dirty indicator projected from the editor engine.
     pub dirty: bool,
+}
+
+/// Degraded/full state for the active buffer projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveBufferProjectionState {
+    /// Full projection is available.
+    Full,
+    /// Projection is degraded (streaming, large file, etc.).
+    Degraded,
 }
 
 impl ActiveBufferProjection {
@@ -843,6 +854,7 @@ impl ActiveBufferProjection {
             file_id: None,
             file_path: None,
             viewport: None,
+            state: ActiveBufferProjectionState::Degraded,
             degraded: false,
             small_buffer_preview: None,
             dirty: false,
@@ -3010,8 +3022,9 @@ impl ToastStackProjection {
     ) -> Self {
         let mut toasts = messages
             .iter()
-            .filter(|message| toast_severity_included(message.severity, verbosity))
-            .map(ToastProjection::from_status_message)
+            .enumerate()
+            .filter(|(_, message)| toast_severity_included(message.severity, verbosity))
+            .map(|(index, message)| ToastProjection::from_status_message(message, index))
             .filter(|toast| !dismissed_ids.contains(&toast.id))
             .collect::<Vec<_>>();
         toasts.reverse();
@@ -3048,7 +3061,11 @@ impl Default for ToastStackProjection {
 
 impl ToastProjection {
     /// Build a toast from an existing status message.
-    pub fn from_status_message(message: &StatusMessageProjection) -> Self {
+    ///
+    /// `index` is the position of the message within its source status-message
+    /// list and is folded into the toast id so that two identical status
+    /// messages produce distinct ids (dismissing one no longer dismisses all).
+    pub fn from_status_message(message: &StatusMessageProjection, index: usize) -> Self {
         let mut parts = message.message.splitn(2, ':');
         let first = parts.next().unwrap_or("").trim();
         let second = parts.next().map(str::trim).filter(|body| !body.is_empty());
@@ -3059,7 +3076,7 @@ impl ToastProjection {
         };
         let body = second.map(ToString::to_string);
         Self {
-            id: toast_id(message.severity, &message.message),
+            id: toast_id(message.severity, &message.message, index),
             severity: message.severity,
             title,
             body,
@@ -3077,7 +3094,7 @@ fn severity_label(severity: StatusSeverity) -> &'static str {
     }
 }
 
-fn toast_id(severity: StatusSeverity, message: &str) -> u64 {
+fn toast_id(severity: StatusSeverity, message: &str, index: usize) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash ^= match severity {
         StatusSeverity::Info => 0,
@@ -3085,11 +3102,37 @@ fn toast_id(severity: StatusSeverity, message: &str) -> u64 {
         StatusSeverity::Error => 2,
     };
     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for byte in (index as u64).to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
     for byte in message.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+/// Escape control characters in untrusted projection text before it is written
+/// to a terminal, preventing ANSI/escape-sequence injection and terminal
+/// corruption. C0 controls (except newline and tab), DEL, and C1 controls are
+/// rendered as visible `\xNN` escapes; all other characters pass through.
+fn sanitize_terminal_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\n' | '\t' => out.push(ch),
+            c => {
+                let code = c as u32;
+                if code < 0x20 || code == 0x7f || (0x80..=0x9f).contains(&code) {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Projection snapshot provided to the shell by the application layer.
@@ -3172,6 +3215,10 @@ pub enum ShellCommandError {
     /// A command supplied a range with start after end.
     #[error("command range start must be <= end")]
     InvalidRange,
+    /// A command supplied a byte offset that is out of bounds or not on a
+    /// UTF-8 character boundary for the active buffer projection.
+    #[error("command position is out of bounds or not on a character boundary")]
+    InvalidPosition,
     /// A terminal command requires an active terminal session projection.
     #[error("active terminal session projection is missing")]
     ActiveTerminalSessionMissing,
@@ -3423,7 +3470,10 @@ impl Shell {
     /// Render basic status and file content.
     pub fn render(&self) {
         print!("\x1b[2J\x1b[H");
-        println!("{}", self.layout_projection.layout.title);
+        println!(
+            "{}",
+            sanitize_terminal_text(&self.layout_projection.layout.title)
+        );
         println!(
             "Mode: {:?} | {}x{}",
             self.layout_projection.mode,
@@ -3448,7 +3498,7 @@ impl Shell {
                     format!(
                         "{}{}{}",
                         if tab.active { "*" } else { "" },
-                        tab.title,
+                        sanitize_terminal_text(&tab.title),
                         if tab.dirty { " +" } else { "" }
                     )
                 })
@@ -3456,14 +3506,14 @@ impl Shell {
             println!("Tabs: {}", rows.join(" | "));
         }
         if let Some(prompt) = &self.daily_editing_projection.close_dirty_prompt {
-            println!("Close dirty: {}", prompt.message);
+            println!("Close dirty: {}", sanitize_terminal_text(&prompt.message));
         }
 
         if let Some(text) = self.active_buffer_projection.small_buffer_text() {
-            println!("{}", text);
+            println!("{}", sanitize_terminal_text(text));
         } else if let Some(viewport) = &self.active_buffer_projection.viewport {
             for slice in &viewport.line_slices {
-                println!("{}", slice.visible_text);
+                println!("{}", sanitize_terminal_text(&slice.visible_text));
             }
         } else {
             println!("<no active buffer>");
@@ -3479,7 +3529,7 @@ impl Shell {
             .as_ref()
             .map(|path| path.0.as_str())
             .unwrap_or("<no active file>");
-        println!("Path: {}", path);
+        println!("Path: {}", sanitize_terminal_text(path));
         if !self.command_registry_projection.commands.is_empty() {
             let registry = &self.command_registry_projection;
             let enabled_count = registry
@@ -3497,8 +3547,8 @@ impl Shell {
             for command in &registry.commands {
                 println!(
                     "- command {} scope={} enabled={} risk={:?} target={:?}",
-                    command.command_id,
-                    command.scope,
+                    sanitize_terminal_text(&command.command_id),
+                    sanitize_terminal_text(&command.scope),
                     command.enabled,
                     command.risk_label,
                     command.target
@@ -3511,8 +3561,8 @@ impl Shell {
                 println!(
                     "#{} [{}] {} | risk={:?} privacy={:?} rollback={:?} targets={} hunks={} redacted={}",
                     row.proposal_id.0,
-                    row.lifecycle.label,
-                    row.title,
+                    sanitize_terminal_text(&row.lifecycle.label),
+                    sanitize_terminal_text(&row.title),
                     row.risk_label,
                     row.privacy_label,
                     row.rollback,
@@ -3533,9 +3583,9 @@ impl Shell {
             for row in &ledger.rows {
                 println!(
                     "- artifact {} kind={:?} state={} raw_retained={} risk={:?} privacy={:?}",
-                    row.artifact_id,
+                    sanitize_terminal_text(&row.artifact_id),
                     row.kind,
-                    row.state_label,
+                    sanitize_terminal_text(&row.state_label),
                     row.raw_payload_retained,
                     row.risk_label,
                     row.privacy_label
@@ -3553,9 +3603,9 @@ impl Shell {
             for row in &verification.rows {
                 println!(
                     "- verification {} state={:?} class={} command_redacted={} evidence={:?}",
-                    row.run_id,
+                    sanitize_terminal_text(&row.run_id),
                     row.state,
-                    row.command_class_label,
+                    sanitize_terminal_text(&row.command_class_label),
                     row.command_body_redacted,
                     row.evidence_artifact_id
                 );
@@ -3590,10 +3640,10 @@ impl Shell {
                 .unwrap_or("none");
             println!(
                 "Context manifest {} | items={} excluded={} selected={} omitted={} risk={:?} privacy={:?} egress={:?}",
-                manifest.manifest_id,
+                sanitize_terminal_text(&manifest.manifest_id),
                 manifest.items.len(),
                 excluded_count,
-                selected_item_id,
+                sanitize_terminal_text(selected_item_id),
                 manifest.omitted_item_count,
                 manifest.risk_label,
                 manifest.privacy_label,
@@ -3602,7 +3652,7 @@ impl Shell {
             for item in &manifest.items {
                 println!(
                     "- {} {:?} {:?} ranges={} hashes={} risk={:?} privacy={:?}",
-                    item.item_id,
+                    sanitize_terminal_text(&item.item_id),
                     item.kind,
                     item.inclusion,
                     item.ranges.len(),
@@ -3626,7 +3676,7 @@ impl Shell {
             for record in &inspector.records {
                 println!(
                     "- {} {:?} {:?} ranges={} hashes={} risk={:?} privacy={:?} redaction={:?}",
-                    record.exposure_id,
+                    sanitize_terminal_text(&record.exposure_id),
                     record.source_kind,
                     record.inclusion,
                     record.ranges.len(),
@@ -3652,7 +3702,7 @@ impl Shell {
             for budget in &budgets.budgets {
                 println!(
                     "- {} {:?} state={:?} used={} ceiling={:?} risk={:?}",
-                    budget.budget_id,
+                    sanitize_terminal_text(&budget.budget_id),
                     budget.action_class,
                     budget.state,
                     budget.usage.used,
@@ -3716,7 +3766,7 @@ impl Shell {
             for provider in &assisted.providers {
                 println!(
                     "- provider {} class={:?} availability={:?} ops={} model_labels={} tool_labels={} risk={:?} privacy={:?}",
-                    provider.provider_id,
+                    sanitize_terminal_text(&provider.provider_id),
                     provider.provider_class,
                     provider.availability,
                     provider.supported_operation_count,
@@ -3729,8 +3779,8 @@ impl Shell {
             for route in &assisted.routes {
                 println!(
                     "- route {} provider={} op={:?} disposition={:?} invocation={:?} refused_budgets={}",
-                    route.request_id,
-                    route.provider_id,
+                    sanitize_terminal_text(&route.request_id),
+                    sanitize_terminal_text(&route.provider_id),
                     route.operation_class,
                     route.disposition,
                     route.provider_invocation,
@@ -3740,7 +3790,7 @@ impl Shell {
             for preview in &assisted.proposal_previews {
                 println!(
                     "- preview {} proposal={} readiness={:?} ready_preview={} ready_approval={} ready_apply={} targets={} hunks={} preconditions={}",
-                    preview.preview_id,
+                    sanitize_terminal_text(&preview.preview_id),
                     preview.proposal_id.0,
                     preview.readiness,
                     preview.ready_for_preview,
@@ -3765,16 +3815,18 @@ impl Shell {
             if let Some(prediction) = &assist.active_prediction {
                 println!(
                     "- ghost {} provider={} status={:?} latency={:?} stale={} range={} preview={}",
-                    prediction.prediction_id,
-                    prediction.provider_label,
+                    sanitize_terminal_text(&prediction.prediction_id),
+                    sanitize_terminal_text(&prediction.provider_label),
                     prediction.status,
                     prediction.latency_ms,
                     prediction.stale,
-                    prediction.apply_range_label,
-                    prediction
-                        .replacement_preview_label
-                        .as_deref()
-                        .unwrap_or("<none>")
+                    sanitize_terminal_text(&prediction.apply_range_label),
+                    sanitize_terminal_text(
+                        prediction
+                            .replacement_preview_label
+                            .as_deref()
+                            .unwrap_or("<none>")
+                    )
                 );
             }
         }
@@ -3840,11 +3892,15 @@ impl Shell {
                     row.signed_off_count,
                     row.sign_off_count,
                     row.linked_proposals.len(),
-                    row.directive_artifact_id.as_deref().unwrap_or("<none>"),
-                    row.spec_artifact_id.as_deref().unwrap_or("<none>"),
-                    row.task_graph_artifact_id.as_deref().unwrap_or("<none>"),
+                    sanitize_terminal_text(
+                        row.directive_artifact_id.as_deref().unwrap_or("<none>")
+                    ),
+                    sanitize_terminal_text(row.spec_artifact_id.as_deref().unwrap_or("<none>")),
+                    sanitize_terminal_text(
+                        row.task_graph_artifact_id.as_deref().unwrap_or("<none>")
+                    ),
                     row.merge_readiness.state,
-                    row.display_safe_labels.join("|")
+                    sanitize_terminal_text(&row.display_safe_labels.join("|"))
                 );
             }
         }
@@ -3865,12 +3921,16 @@ impl Shell {
                 language.cancellation_count
             );
             if let Some(hover) = &language.hover {
-                println!("- hover {} {}", hover.label, hover.summary);
+                println!(
+                    "- hover {} {}",
+                    sanitize_terminal_text(&hover.label),
+                    sanitize_terminal_text(&hover.summary)
+                );
             }
             for operation in &language.operations {
                 println!(
                     "- operation {} {:?} {:?} proposal={:?}",
-                    operation.operation_id,
+                    sanitize_terminal_text(&operation.operation_id),
                     operation.kind,
                     operation.status,
                     operation.proposal_id.map(|proposal| proposal.0)
@@ -3891,10 +3951,14 @@ impl Shell {
                 terminal.search.match_count
             );
             if let Some(denial) = &terminal.last_denial {
-                println!("- denial {}", denial);
+                println!("- denial {}", sanitize_terminal_text(denial));
             }
             for row in &terminal.output_rows {
-                println!("- [{}] {}", row.sequence.0, row.redacted_payload);
+                println!(
+                    "- [{}] {}",
+                    row.sequence.0,
+                    sanitize_terminal_text(&row.redacted_payload)
+                );
             }
         }
         if self.debug_projection.active_session_id.is_some()
@@ -3919,35 +3983,46 @@ impl Shell {
             for config in &debug.configurations {
                 println!(
                     "- debug config {} adapter={} program={}",
-                    config.configuration_id.0, config.adapter_type, config.program_label
+                    sanitize_terminal_text(&config.configuration_id.0),
+                    sanitize_terminal_text(&config.adapter_type),
+                    sanitize_terminal_text(&config.program_label)
                 );
             }
             for breakpoint in &debug.breakpoints {
                 println!(
                     "- debug breakpoint {} {}:{} verified={}",
-                    breakpoint.breakpoint_id.0,
-                    breakpoint.path.0,
+                    sanitize_terminal_text(&breakpoint.breakpoint_id.0),
+                    sanitize_terminal_text(&breakpoint.path.0),
                     breakpoint.line,
                     breakpoint.verified
                 );
             }
             for frame in &debug.stack_frames {
-                println!("- debug frame {} {}", frame.frame_id, frame.name);
+                println!(
+                    "- debug frame {} {}",
+                    frame.frame_id,
+                    sanitize_terminal_text(&frame.name)
+                );
             }
             for variable in &debug.variables {
                 println!(
                     "- debug variable {}={}",
-                    variable.name, variable.value_label
+                    sanitize_terminal_text(&variable.name),
+                    sanitize_terminal_text(&variable.value_label)
                 );
             }
             for watch in &debug.watches {
                 println!(
                     "- debug watch {}={}",
-                    watch.expression_label, watch.value_label
+                    sanitize_terminal_text(&watch.expression_label),
+                    sanitize_terminal_text(&watch.value_label)
                 );
             }
             for entry in &debug.console {
-                println!("- debug console {}", entry.message_label);
+                println!(
+                    "- debug console {}",
+                    sanitize_terminal_text(&entry.message_label)
+                );
             }
         }
         println!(
@@ -3994,7 +4069,7 @@ impl Shell {
         }
         if let Some(payload) = trimmed.strip_prefix(":assist-predict") {
             let buffer_id = self.active_buffer_id()?;
-            let position = self.command_position(payload.trim());
+            let position = self.command_position(payload.trim())?;
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::RequestAssistInlinePrediction {
                     buffer_id,
@@ -4083,7 +4158,7 @@ impl Shell {
         }
         if let Some(payload) = trimmed.strip_prefix(":hover") {
             let buffer_id = self.active_buffer_id()?;
-            let position = self.command_position(payload.trim());
+            let position = self.command_position(payload.trim())?;
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::RequestHover {
                     buffer_id,
@@ -4093,7 +4168,7 @@ impl Shell {
         }
         if let Some(payload) = trimmed.strip_prefix(":completion") {
             let buffer_id = self.active_buffer_id()?;
-            let position = self.command_position(payload.trim());
+            let position = self.command_position(payload.trim())?;
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::RequestCompletion {
                     buffer_id,
@@ -4103,7 +4178,7 @@ impl Shell {
         }
         if let Some(payload) = trimmed.strip_prefix(":definition") {
             let buffer_id = self.active_buffer_id()?;
-            let position = self.command_position(payload.trim());
+            let position = self.command_position(payload.trim())?;
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::GoToDefinition {
                     buffer_id,
@@ -4113,7 +4188,7 @@ impl Shell {
         }
         if let Some(payload) = trimmed.strip_prefix(":references") {
             let buffer_id = self.active_buffer_id()?;
-            let position = self.command_position(payload.trim());
+            let position = self.command_position(payload.trim())?;
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::FindReferences {
                     buffer_id,
@@ -4138,15 +4213,12 @@ impl Shell {
             let mut split = payload.splitn(2, ',');
             let first = split.next().unwrap_or_default().trim();
             let (position, new_name) = if let Some(name) = split.next() {
-                (
-                    first
-                        .parse::<usize>()
-                        .map(|offset| self.parse_pos(offset))
-                        .unwrap_or_else(|_| self.parse_pos(0)),
-                    name.trim(),
-                )
+                let offset = first
+                    .parse::<usize>()
+                    .map_err(|_| ShellCommandError::InvalidPosition)?;
+                (self.parse_pos(offset)?, name.trim())
             } else {
-                (self.parse_pos(0), first)
+                (self.parse_pos(0)?, first)
             };
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::RequestRenameProposal {
@@ -4301,7 +4373,7 @@ impl Shell {
         if let Some(payload) = trimmed.strip_prefix(":debug-run-to-cursor ") {
             let session_id = self.active_debug_session_id()?;
             let buffer_id = self.active_buffer_id()?;
-            let position = self.command_position(payload.trim());
+            let position = self.command_position(payload.trim())?;
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::DebugRunToCursor {
                     session_id,
@@ -4702,8 +4774,8 @@ impl Shell {
             if start > end {
                 return Err(ShellCommandError::InvalidRange);
             }
-            let start = self.parse_pos(start);
-            let end = self.parse_pos(end);
+            let start = self.parse_pos(start)?;
+            let end = self.parse_pos(end)?;
             return Ok(Some(self.push_intent(CommandDispatchIntent::Delete {
                 buffer_id,
                 range: ProtocolTextRange { start, end },
@@ -4719,8 +4791,8 @@ impl Shell {
             if start > end {
                 return Err(ShellCommandError::InvalidRange);
             }
-            let start = self.parse_pos(start);
-            let end = self.parse_pos(end);
+            let start = self.parse_pos(start)?;
+            let end = self.parse_pos(end)?;
             return Ok(Some(self.push_intent(CommandDispatchIntent::Replace {
                 buffer_id,
                 range: ProtocolTextRange { start, end },
@@ -4762,27 +4834,34 @@ impl Shell {
         intent
     }
 
-    fn command_position(&self, payload: &str) -> TextCoordinate {
+    fn command_position(&self, payload: &str) -> Result<TextCoordinate, ShellCommandError> {
         if payload.is_empty() {
             return self.parse_pos(0);
         }
-        payload
-            .parse::<usize>()
-            .map(|offset| self.parse_pos(offset))
-            .unwrap_or_else(|_| self.parse_pos(0))
+        match payload.parse::<usize>() {
+            Ok(offset) => self.parse_pos(offset),
+            // Non-numeric payloads are not valid offsets; reject rather than
+            // silently coercing to the start of the buffer.
+            Err(_) => Err(ShellCommandError::InvalidPosition),
+        }
     }
 
-    fn parse_pos(&self, byte_offset: usize) -> TextCoordinate {
+    fn parse_pos(&self, byte_offset: usize) -> Result<TextCoordinate, ShellCommandError> {
         if let Some(text) = self.active_buffer_projection.small_buffer_text() {
-            return text
-                .as_bytes()
-                .get(..byte_offset)
-                .map(|prefix| {
-                    let line = prefix.iter().filter(|b| **b == b'\n').count() as u32;
-                    let character = prefix.iter().rev().take_while(|b| **b != b'\n').count() as u32;
-                    protocol_text_coordinate(line, character, Some(byte_offset as u64))
-                })
-                .unwrap_or_else(|| protocol_text_coordinate(0, 0, Some(0)));
+            // Reject offsets past the end of the buffer or that land in the
+            // middle of a multi-byte UTF-8 character instead of coercing to
+            // (0, 0) and silently mis-counting.
+            if byte_offset > text.len() || !text.is_char_boundary(byte_offset) {
+                return Err(ShellCommandError::InvalidPosition);
+            }
+            let prefix = &text.as_bytes()[..byte_offset];
+            let line = prefix.iter().filter(|b| **b == b'\n').count() as u32;
+            let character = prefix.iter().rev().take_while(|b| **b != b'\n').count() as u32;
+            return Ok(protocol_text_coordinate(
+                line,
+                character,
+                Some(byte_offset as u64),
+            ));
         }
 
         if let Some(viewport) = &self.active_buffer_projection.viewport {
@@ -4790,15 +4869,41 @@ impl Shell {
             for (i, slice) in viewport.line_slices.iter().enumerate() {
                 let slice_len = slice.visible_text.len() + 1; // +1 for newline
                 if current_offset + slice_len > byte_offset {
-                    let character = (byte_offset - current_offset) as u32;
+                    let relative = byte_offset - current_offset;
+                    // Guard the character offset against the visible slice so we
+                    // do not split a multi-byte UTF-8 character. `relative` may
+                    // equal visible_text.len() (the synthetic trailing newline),
+                    // which is a valid boundary.
+                    if relative < slice.visible_text.len()
+                        && !slice.visible_text.is_char_boundary(relative)
+                    {
+                        return Err(ShellCommandError::InvalidPosition);
+                    }
+                    let character = relative as u32;
                     let line = viewport.scroll.top_line + i as u32;
-                    return protocol_text_coordinate(line, character, Some(byte_offset as u64));
+                    // Translate the viewport-relative offset into an absolute
+                    // buffer byte offset using the slice's byte range, and
+                    // validate it lies within that slice.
+                    let absolute = slice.byte_range.start + relative as u64;
+                    if absolute > slice.byte_range.end {
+                        return Err(ShellCommandError::InvalidPosition);
+                    }
+                    return Ok(protocol_text_coordinate(line, character, Some(absolute)));
                 }
                 current_offset += slice_len;
             }
+            // The offset fell outside every visible slice; reject it rather than
+            // returning a bogus (0, 0) coordinate.
+            return Err(ShellCommandError::InvalidPosition);
         }
 
-        protocol_text_coordinate(0, 0, Some(0))
+        // No buffer content is projected. Offset 0 is the only meaningful
+        // position (buffer start); anything else is out of bounds.
+        if byte_offset == 0 {
+            Ok(protocol_text_coordinate(0, 0, Some(0)))
+        } else {
+            Err(ShellCommandError::InvalidPosition)
+        }
     }
 }
 
@@ -5127,6 +5232,10 @@ fn empty_legion_workflow_projection() -> LegionWorkflowProjection {
 fn parse_proposal_id(payload: Option<&str>) -> Option<ProposalId> {
     payload
         .and_then(|value| value.trim().parse::<u64>().ok())
+        // ProposalId(0) is reserved as a sentinel (see
+        // empty_approval_checklist_projection / empty_checkpoint_rollback_projection),
+        // so reject it here just as parse_buffer_id rejects BufferId(0).
+        .filter(|value| *value != 0)
         .map(ProposalId)
 }
 
@@ -5369,6 +5478,208 @@ mod tests {
         assert_ne!(manual.right.pinned_default, automate.right.pinned_default);
     }
 
+    // --- P1.F2.T1: Manual-mode panel filtering regression suite ---
+    //
+    // These tests are the construction-time guarantee that Manual mode cannot
+    // expose any AI / provider / cloud / worker / delegation / collaboration
+    // / hosted-telemetry surface. They are intentionally written against the
+    // projection structures (PanelCapability, PanelRegistry, DockLayout) rather
+    // than against hard-coded panel id lists, so adding a new AI panel in the
+    // future without updating the mode filter will fail these tests.
+
+    use ProductRuntimeSurface::{
+        AssistedAi, Automation, CloudProvider, Collaboration as CollaborationSurface,
+        DelegatedTask, HostedTelemetry, ManualIde, NetworkEgress, PluginManagement, PluginRuntime,
+        RemoteWorkspace as RemoteSurface, WorkerRuntime,
+    };
+
+    /// Runtime surfaces that Manual mode MUST NOT expose under any panel.
+    const FORBIDDEN_MANUAL_SURFACES: &[ProductRuntimeSurface] = &[
+        AssistedAi,
+        CloudProvider,
+        NetworkEgress,
+        HostedTelemetry,
+        DelegatedTask,
+        WorkerRuntime,
+        Automation,
+        CollaborationSurface,
+        RemoteSurface,
+        PluginRuntime,
+    ];
+
+    /// Panels that the Manual dock layout MUST NOT reference.
+    const FORBIDDEN_MANUAL_PANEL_IDS: &[PanelId] = &[
+        PanelId::Assistant,
+        PanelId::Delegation,
+        PanelId::ApprovalQueue,
+        PanelId::AgentFleet,
+        PanelId::DecisionFeed,
+        PanelId::AgentLogs,
+        PanelId::Workflow,
+        PanelId::Collaboration,
+        PanelId::RemoteWorkspace,
+    ];
+
+    #[test]
+    fn manual_mode_allows_exactly_manual_ide_and_plugin_management() {
+        use ProductRuntimeSurface::{ManualIde, PluginManagement};
+        let allowed = [
+            ProductRuntimeSurface::ManualIde,
+            ProductRuntimeSurface::PluginManagement,
+        ];
+        for surface in [
+            ManualIde,
+            PluginManagement,
+            AssistedAi,
+            CloudProvider,
+            NetworkEgress,
+            HostedTelemetry,
+            DelegatedTask,
+            WorkerRuntime,
+            Automation,
+            CollaborationSurface,
+            RemoteSurface,
+            PluginRuntime,
+        ] {
+            let expected = allowed.contains(&surface);
+            let actual = product_mode_allows_runtime_surface(ProductMode::Manual, surface);
+            assert_eq!(
+                actual, expected,
+                "Manual mode filter for {surface:?} drifted from the construction-time allow-list"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_registry_visibility_matches_capability_allow_list() {
+        let registry = PanelRegistry::standard();
+        // Every forbidden surface in the standard registry must be hidden
+        // from Manual mode by construction, regardless of panel id.
+        for panel in registry.panels() {
+            let visible_in_manual = registry.is_visible_in(panel.id, DockMode::Manual);
+            let has_forbidden_capability = panel
+                .capabilities
+                .iter()
+                .any(|capability| FORBIDDEN_MANUAL_SURFACES.contains(capability));
+            assert!(
+                !(visible_in_manual && has_forbidden_capability),
+                "panel `{}` ({:?}) leaked into Manual mode despite capabilities {:?}",
+                panel.id.as_str(),
+                panel.title,
+                panel.capabilities,
+            );
+            // Conversely, every panel whose only capabilities are ManualIde
+            // (or empty, which defaults to ManualIde) must be visible in Manual.
+            let only_manual_capable = panel
+                .capabilities
+                .iter()
+                .all(|capability| matches!(capability, ManualIde | PluginManagement));
+            assert_eq!(
+                visible_in_manual,
+                only_manual_capable,
+                "panel `{}` ({:?}) visibility disagrees with its capability set {:?}",
+                panel.id.as_str(),
+                panel.title,
+                panel.capabilities,
+            );
+        }
+    }
+
+    #[test]
+    fn manual_dock_layout_never_references_forbidden_panels() {
+        let registry = PanelRegistry::standard();
+        let manual = DockLayout::standard(DockMode::Manual);
+
+        for side in [DockSide::Left, DockSide::Right, DockSide::Bottom] {
+            for panel_id in manual.visible_panel_ids(side, &registry) {
+                assert!(
+                    !FORBIDDEN_MANUAL_PANEL_IDS.contains(&panel_id),
+                    "Manual {side:?} layout exposed forbidden panel {panel_id:?}"
+                );
+                assert!(
+                    registry.is_visible_in(panel_id, DockMode::Manual),
+                    "Manual {side:?} layout referenced panel {panel_id:?} \
+                     that is not constructible in Manual mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn manual_visible_for_returns_only_ai_free_panels_and_nonempty() {
+        let registry = PanelRegistry::standard();
+        let visible: Vec<_> = registry
+            .visible_for(DockMode::Manual)
+            .into_iter()
+            .map(|panel| panel.id)
+            .collect();
+
+        // Manual must still have a usable baseline of editor / workspace
+        // surfaces — the filter is "hide AI chrome", not "hide everything".
+        assert!(
+            !visible.is_empty(),
+            "Manual mode filtered out every panel; nothing left to render"
+        );
+        for required in [
+            PanelId::ProjectExplorer,
+            PanelId::Terminal,
+            PanelId::Settings,
+        ] {
+            assert!(
+                visible.contains(&required),
+                "Manual mode is missing baseline panel {required:?}; visible={visible:?}"
+            );
+        }
+        for forbidden in FORBIDDEN_MANUAL_PANEL_IDS {
+            assert!(
+                !visible.contains(forbidden),
+                "Manual visible_for leaked forbidden panel {forbidden:?}; visible={visible:?}"
+            );
+        }
+        // And the AI-flag must agree with the capability set, so no
+        // requires_ai=true panel can sneak in.
+        for panel in registry.visible_for(DockMode::Manual) {
+            assert!(
+                !panel.requires_ai,
+                "panel `{}` ({:?}) has requires_ai=true but was visible in Manual",
+                panel.id.as_str(),
+                panel.title,
+            );
+        }
+    }
+
+    #[test]
+    fn manual_shell_projection_carries_no_forbidden_capability() {
+        // Build the standard Manual shell projection snapshot. The Shell
+        // itself is projection-only — this test asserts that the
+        // construction pipeline cannot produce a Manual shell whose
+        // dock-panel catalog references any AI/provider/cloud/worker
+        // surface, treating the registry + layout as the contract surface
+        // for "Manual mode chrome".
+        let registry = PanelRegistry::standard();
+        let layout = DockLayout::standard(DockMode::Manual);
+        let all_visible: Vec<PanelId> = [DockSide::Left, DockSide::Right, DockSide::Bottom]
+            .iter()
+            .flat_map(|side| layout.visible_panel_ids(*side, &registry))
+            .collect();
+
+        for panel_id in &all_visible {
+            let descriptor = registry
+                .panel(*panel_id)
+                .unwrap_or_else(|| panic!("layout referenced unknown panel {panel_id:?}"));
+            for capability in &descriptor.capabilities {
+                assert!(
+                    !FORBIDDEN_MANUAL_SURFACES.contains(capability),
+                    "Manual shell projection surface for panel `{}` carries \
+                     forbidden capability {capability:?}; \
+                     capabilities={:?}",
+                    descriptor.id.as_str(),
+                    descriptor.capabilities,
+                );
+            }
+        }
+    }
+
     fn test_coordinate(line: u32, character: u32) -> TextCoordinate {
         TextCoordinate {
             line,
@@ -5526,6 +5837,7 @@ mod tests {
             },
             selections: Vec::new(),
             cursor: test_coordinate(10, 0),
+            cursors: Vec::new(),
             scroll: ViewportScroll {
                 top_line: 10,
                 left_column: 0,
@@ -5622,6 +5934,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("a.md".to_string())),
                 viewport: None,
+                state: ActiveBufferProjectionState::Full,
                 degraded: false,
                 small_buffer_preview: Some("first".to_string()),
                 dirty: false,
@@ -5908,6 +6221,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("large.txt".to_string())),
                 viewport: Some(degraded_viewport_projection()),
+                state: ActiveBufferProjectionState::Degraded,
                 degraded: true,
                 small_buffer_preview: None,
                 dirty: false,
@@ -5980,6 +6294,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("a.md".to_string())),
                 viewport: None,
+                state: ActiveBufferProjectionState::Full,
                 degraded: false,
                 small_buffer_preview: Some("first".to_string()),
                 dirty: false,
@@ -6046,6 +6361,7 @@ mod tests {
                 file_id: Some(FileId(9)),
                 file_path: Some(CanonicalPath("a.md".to_string())),
                 viewport: None,
+                state: ActiveBufferProjectionState::Full,
                 degraded: false,
                 small_buffer_preview: Some("first".to_string()),
                 dirty: true,
@@ -6996,6 +7312,7 @@ mod tests {
                     required_capability: CapabilityId("plugin.command".to_string()),
                 },
             )],
+            permission_review_rows: Vec::new(),
             status_label: "loaded".to_string(),
         }];
 
@@ -7067,5 +7384,139 @@ mod tests {
             projection.selection.map(|sel| sel.file_id),
             Some(FileId(10))
         );
+    }
+
+    fn shell_with_small_buffer(text: &str) -> Shell {
+        let mut shell = Shell::empty("t");
+        shell.active_buffer_projection.buffer_id = Some(BufferId(2));
+        shell.active_buffer_projection.small_buffer_preview = Some(text.to_string());
+        shell.active_buffer_projection.viewport = None;
+        shell
+    }
+
+    fn shell_with_viewport() -> Shell {
+        let mut shell = Shell::empty("t");
+        shell.active_buffer_projection.buffer_id = Some(BufferId(2));
+        shell.active_buffer_projection.small_buffer_preview = None;
+        shell.active_buffer_projection.viewport = Some(degraded_viewport_projection());
+        shell
+    }
+
+    #[test]
+    fn sanitize_terminal_text_escapes_control_and_ansi_sequences() {
+        // ESC-based ANSI clear-screen plus raw C0 controls are neutralized.
+        let sanitized = sanitize_terminal_text("\x1b[2Jred\x07\rmalice");
+        assert_eq!(sanitized, "\\x1b[2Jred\\x07\\x0dmalice");
+        assert!(!sanitized.contains('\x1b'));
+        // DEL (0x7f) and C1 controls (0x80-0x9f) are escaped too.
+        assert_eq!(sanitize_terminal_text("\u{7f}\u{9b}"), "\\x7f\\x9b");
+        // Newline and tab are preserved; ordinary (including multibyte) text passes through.
+        assert_eq!(sanitize_terminal_text("a\n\tb"), "a\n\tb");
+        assert_eq!(sanitize_terminal_text("héllo"), "héllo");
+    }
+
+    #[test]
+    fn parse_pos_rejects_out_of_bounds_offset() {
+        let mut shell = shell_with_small_buffer("first");
+        assert_eq!(
+            shell.handle_command(":d 0,99").unwrap_err(),
+            ShellCommandError::InvalidPosition
+        );
+    }
+
+    #[test]
+    fn parse_pos_rejects_mid_codepoint_offset() {
+        // 'é' occupies bytes 3..5, so offset 4 splits a UTF-8 character.
+        let mut shell = shell_with_small_buffer("café");
+        assert_eq!(
+            shell.handle_command(":d 0,4").unwrap_err(),
+            ShellCommandError::InvalidPosition
+        );
+    }
+
+    #[test]
+    fn parse_pos_accepts_in_bounds_char_boundary_offsets() {
+        let mut shell = shell_with_small_buffer("café");
+        let intent = shell
+            .handle_command(":d 0,5")
+            .expect("in-bounds delete should parse")
+            .expect("intent emitted");
+        match intent {
+            CommandDispatchIntent::Delete { range, .. } => {
+                assert_eq!(range.start.byte_offset, Some(0));
+                assert_eq!(range.end.byte_offset, Some(5));
+            }
+            other => panic!("expected delete intent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_pos_viewport_returns_absolute_byte_offset() {
+        let mut shell = shell_with_viewport();
+        let intent = shell
+            .handle_command(":d 0,5")
+            .expect("viewport delete should parse")
+            .expect("intent emitted");
+        match intent {
+            CommandDispatchIntent::Delete { range, .. } => {
+                // First visible slice starts at absolute byte 1024 (not 0).
+                assert_eq!(range.start.byte_offset, Some(1024));
+                assert_eq!(range.end.byte_offset, Some(1029));
+                assert_eq!(range.start.line, 10);
+            }
+            other => panic!("expected delete intent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_pos_viewport_rejects_offset_outside_visible_slices() {
+        let mut shell = shell_with_viewport();
+        assert_eq!(
+            shell.handle_command(":d 0,1000").unwrap_err(),
+            ShellCommandError::InvalidPosition
+        );
+    }
+
+    #[test]
+    fn parse_proposal_id_rejects_zero_sentinel() {
+        assert_eq!(parse_proposal_id(Some("0")), None);
+        assert_eq!(parse_proposal_id(Some("   ")), None);
+        assert_eq!(parse_proposal_id(Some("42")), Some(ProposalId(42)));
+
+        let mut shell = Shell::empty("t");
+        let outcome = shell
+            .handle_command(":proposal-approve 0")
+            .expect("command should parse");
+        // Zero is a reserved sentinel, so no ApproveProposal intent is emitted.
+        assert_eq!(outcome, Some(CommandDispatchIntent::Noop));
+        assert!(
+            shell
+                .command_dispatch_intents
+                .iter()
+                .all(|intent| !matches!(intent, CommandDispatchIntent::ApproveProposal { .. }))
+        );
+    }
+
+    #[test]
+    fn toast_ids_distinguish_identical_status_messages() {
+        let messages = vec![
+            StatusMessageProjection {
+                severity: StatusSeverity::Warning,
+                message: "duplicate warning".to_string(),
+            },
+            StatusMessageProjection {
+                severity: StatusSeverity::Warning,
+                message: "duplicate warning".to_string(),
+            },
+        ];
+        let stack = ToastStackProjection::from_status_messages(&messages, &[]);
+        assert_eq!(stack.visible.len(), 2);
+        assert_ne!(stack.visible[0].id, stack.visible[1].id);
+
+        // Dismissing one identical toast must not collapse the other.
+        let dismissed = stack.visible[0].id;
+        let remaining = ToastStackProjection::from_status_messages(&messages, &[dismissed]);
+        assert_eq!(remaining.visible.len(), 1);
+        assert!(remaining.visible.iter().all(|toast| toast.id != dismissed));
     }
 }

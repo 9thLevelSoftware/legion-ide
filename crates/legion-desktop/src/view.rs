@@ -1,6 +1,27 @@
 //! Projection rendering for the desktop adapter.
 
+#[cfg(feature = "ai")]
+mod assistant_rail;
 mod code_canvas_painter;
+
+/// Agent communication row parsing and rendering.
+pub mod agent_comm;
+/// Editable plan editor projection.
+pub mod plan_editor;
+/// Sandbox panel projection.
+pub mod sandbox_panel;
+/// Renderer-backed scope picker for delegated tasks.
+pub mod scope_picker;
+/// Terminal panel render-model helpers.
+pub mod terminal_panel;
+
+#[cfg(feature = "ai")]
+pub use assistant_rail::{
+    AssistantRailCodeBlockViewModel, AssistantRailRowViewModel, AssistantRailSegmentViewModel,
+    assistant_rail_rows, render_streaming_assistant_rows,
+};
+pub use plan_editor::{DesktopPlanEditorViewModel, DesktopPlanSectionViewModel};
+pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -10,11 +31,12 @@ use std::time::Duration;
 use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 
 use legion_protocol::{
-    BufferId, DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
+    BufferId, ContextManifestEgressStatus, ContextManifestInclusionState,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
     LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, ProposalId, ProposalRejectionReason, ProposalRiskLabel,
-    ProtocolTextRange, RedactionHint, TerminalOutputRowProjection, TextCoordinate,
-    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    PluginContributionProjection, PrivacyInspectorRedactionState, ProposalId,
+    ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange,
+    TextCoordinate, ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
@@ -479,6 +501,8 @@ pub struct DesktopProjectionViewModel {
     pub collaboration_rows: Vec<String>,
     /// Remote workspace manager rows.
     pub remote_rows: Vec<String>,
+    /// Sandbox panel rows for delegated task runtime state.
+    pub sandbox_rows: Vec<String>,
     /// Empty, dirty, or degraded display flags.
     pub empty_or_degraded_flags: Vec<String>,
 }
@@ -590,6 +614,11 @@ impl DesktopProjectionViewModel {
         let command_palette_rows = command_palette_rows(snapshot);
         let dock_rows = dock_rows(snapshot, state);
         let dock_panel_rows = dock_panel_rows(snapshot, state);
+        let sandbox_rows = if snapshot.product_mode == DockMode::Delegate {
+            sandbox_panel::rows(snapshot)
+        } else {
+            Vec::new()
+        };
         let onboarding_rows = onboarding_rows(snapshot, state);
         Self {
             layout_title: snapshot.layout_projection.layout.title.clone(),
@@ -636,6 +665,7 @@ impl DesktopProjectionViewModel {
             plugin_rows: plugin_rows(snapshot),
             collaboration_rows: collaboration_rows(snapshot),
             remote_rows: remote_rows(snapshot),
+            sandbox_rows,
             empty_or_degraded_flags: flags,
         }
     }
@@ -1932,7 +1962,11 @@ fn render_code_lines(
                             .data_mut(|data| data.get_temp::<TextCoordinate>(drag_anchor_id));
                         actions.push(DesktopAction::SetSelection {
                             buffer_id: Some(buffer_id),
-                            range: drag_selection_range(anchor, current_cursor, coordinate),
+                            range: normalized_text_range(drag_selection_range(
+                                anchor,
+                                current_cursor,
+                                coordinate,
+                            )),
                         });
                     }
                     if response.drag_stopped() {
@@ -2641,8 +2675,16 @@ fn render_fleet_canvas(
                 {
                     actions.push(DesktopAction::PreviewProposal { proposal_id });
                 }
-                let _ = soft_button(ui, "Pause Workflow");
-                let _ = soft_button(ui, "Add Constraint");
+                // No projected action backs these controls yet; render them
+                // disabled rather than as live buttons whose clicks are dropped.
+                ui.add_enabled_ui(false, |ui| {
+                    soft_button(ui, "Pause Workflow")
+                        .on_disabled_hover_text("unavailable in this build");
+                });
+                ui.add_enabled_ui(false, |ui| {
+                    soft_button(ui, "Add Constraint")
+                        .on_disabled_hover_text("unavailable in this build");
+                });
             });
         });
         ui.horizontal(|ui| {
@@ -2655,11 +2697,8 @@ fn render_fleet_canvas(
                 "{} proposals",
                 snapshot.proposal_ledger_projection.rows.len()
             )));
-            ui.separator();
-            ui.label(theme::accent(
-                "confidence 87%",
-                theme::tokens().accent.green,
-            ));
+            // Confidence is not projected; omit it rather than show a fabricated
+            // hard-coded percentage.
         });
     });
     render_task_board(
@@ -3271,11 +3310,22 @@ fn render_proposal_cards(
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
-    if snapshot.proposal_ledger_projection.rows.is_empty() {
+    let ledger = &snapshot.proposal_ledger_projection;
+    if ledger.rows.is_empty() {
         ui.label(theme::muted("No pending proposals"));
         return;
     }
-    for row in snapshot.proposal_ledger_projection.rows.iter().take(4) {
+    const PROPOSAL_CARD_LIMIT: usize = 4;
+    for row in ledger.rows.iter().take(PROPOSAL_CARD_LIMIT) {
+        // Only proposals still awaiting a decision should expose Approve/Reject;
+        // terminal/applied/denied proposals render the controls disabled so a
+        // dropped click cannot re-trigger a lifecycle action.
+        let actionable = matches!(
+            row.lifecycle.state,
+            ProposalLifecycleState::Created
+                | ProposalLifecycleState::Validated
+                | ProposalLifecycleState::Previewed
+        );
         theme::card_frame_tinted(
             theme::tokens().bg.card,
             theme::dim(theme::tokens().accent.orange, 48),
@@ -3290,25 +3340,38 @@ fn render_proposal_cards(
                     risk_color(row.risk_label),
                 ));
             });
+            // Surface the lifecycle state so terminal proposals are legible.
+            ui.label(theme::muted(format!("status: {}", row.lifecycle.label)));
             ui.horizontal(|ui| {
-                if primary_button(ui, "Approve", theme::tokens().accent.green).clicked() {
-                    actions.push(DesktopAction::ApproveProposal {
-                        proposal_id: row.proposal_id,
-                    });
-                }
+                ui.add_enabled_ui(actionable, |ui| {
+                    if primary_button(ui, "Approve", theme::tokens().accent.green).clicked()
+                        && actionable
+                    {
+                        actions.push(DesktopAction::ApproveProposal {
+                            proposal_id: row.proposal_id,
+                        });
+                    }
+                });
                 if soft_button(ui, "Review").clicked() {
                     actions.push(DesktopAction::OpenProposalDetails {
                         proposal_id: row.proposal_id,
                     });
                 }
-                if soft_button(ui, "Reject").clicked() {
-                    actions.push(DesktopAction::RejectProposal {
-                        proposal_id: row.proposal_id,
-                        reason: ProposalRejectionReason::UserRejected,
-                    });
-                }
+                ui.add_enabled_ui(actionable, |ui| {
+                    if soft_button(ui, "Reject").clicked() && actionable {
+                        actions.push(DesktopAction::RejectProposal {
+                            proposal_id: row.proposal_id,
+                            reason: ProposalRejectionReason::UserRejected,
+                        });
+                    }
+                });
             });
         });
+    }
+    let hidden =
+        ledger.rows.len().saturating_sub(PROPOSAL_CARD_LIMIT) + ledger.omitted_row_count as usize;
+    if hidden > 0 {
+        ui.label(theme::muted(format!("{hidden} more proposals")));
     }
 }
 
@@ -3322,44 +3385,51 @@ fn render_delegated_hunk_review_controls(
         return;
     }
     section_label(ui, "Hunk Review", Some(theme::tokens().accent.violet));
-    for review in reviews.iter().take(4) {
-        theme::small_card_frame().show(ui, |ui| {
-            ui.label(theme::body_strong(format!(
-                "proposal {} accepted={} rejected={} pending={}",
-                review.proposal_id.0,
-                review.accepted_hunk_count,
-                review.rejected_hunk_count,
-                review.pending_hunk_count
-            )));
-            for hunk in review.hunks.iter().take(6) {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(theme::code_muted(trim_middle(&hunk.hunk_id, 36)));
-                    ui.label(theme::muted(format!("{:?}", hunk.disposition)));
-                    if soft_button(ui, "Accept").clicked() {
-                        actions.push(DesktopAction::ReviewDelegateProposalHunk {
-                            proposal_id: review.proposal_id,
-                            hunk_id: hunk.hunk_id.clone(),
-                            disposition: DelegatedTaskProposalHunkDisposition::Accepted,
-                        });
-                    }
-                    if soft_button(ui, "Reject").clicked() {
-                        actions.push(DesktopAction::ReviewDelegateProposalHunk {
-                            proposal_id: review.proposal_id,
-                            hunk_id: hunk.hunk_id.clone(),
-                            disposition: DelegatedTaskProposalHunkDisposition::Rejected,
-                        });
-                    }
-                    if soft_button(ui, "Pending").clicked() {
-                        actions.push(DesktopAction::ReviewDelegateProposalHunk {
-                            proposal_id: review.proposal_id,
-                            hunk_id: hunk.hunk_id.clone(),
-                            disposition: DelegatedTaskProposalHunkDisposition::Pending,
+    // Make every review and hunk reachable via scrolling rather than silently
+    // truncating, so hidden reviews/hunks can still be accepted/rejected/pending.
+    egui::ScrollArea::vertical()
+        .id_salt("delegated_hunk_review_scroll")
+        .max_height(280.0)
+        .show(ui, |ui| {
+            for review in reviews.iter() {
+                theme::small_card_frame().show(ui, |ui| {
+                    ui.label(theme::body_strong(format!(
+                        "proposal {} accepted={} rejected={} pending={}",
+                        review.proposal_id.0,
+                        review.accepted_hunk_count,
+                        review.rejected_hunk_count,
+                        review.pending_hunk_count
+                    )));
+                    for hunk in review.hunks.iter() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(theme::code_muted(trim_middle(&hunk.hunk_id, 36)));
+                            ui.label(theme::muted(format!("{:?}", hunk.disposition)));
+                            if soft_button(ui, "Accept").clicked() {
+                                actions.push(DesktopAction::ReviewDelegateProposalHunk {
+                                    proposal_id: review.proposal_id,
+                                    hunk_id: hunk.hunk_id.clone(),
+                                    disposition: DelegatedTaskProposalHunkDisposition::Accepted,
+                                });
+                            }
+                            if soft_button(ui, "Reject").clicked() {
+                                actions.push(DesktopAction::ReviewDelegateProposalHunk {
+                                    proposal_id: review.proposal_id,
+                                    hunk_id: hunk.hunk_id.clone(),
+                                    disposition: DelegatedTaskProposalHunkDisposition::Rejected,
+                                });
+                            }
+                            if soft_button(ui, "Pending").clicked() {
+                                actions.push(DesktopAction::ReviewDelegateProposalHunk {
+                                    proposal_id: review.proposal_id,
+                                    hunk_id: hunk.hunk_id.clone(),
+                                    disposition: DelegatedTaskProposalHunkDisposition::Pending,
+                                });
+                            }
                         });
                     }
                 });
             }
         });
-    }
 }
 
 fn render_delegated_tool_permission_controls(
@@ -3527,30 +3597,23 @@ fn render_terminal_stream(
     model: &DesktopProjectionViewModel,
 ) {
     let terminal = &snapshot.terminal_panel_projection;
+    let render_model = terminal_panel::TerminalPanelRenderModel::from_projection(terminal, 100);
     section_label(ui, "Terminal / Runtime", Some(theme::tokens().accent.cyan));
     theme::code_frame().show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::code_muted(format!(
-                    "status={:?}",
-                    terminal.status.kind
-                )));
-                if let Some(session_id) = terminal.active_session_id {
-                    ui.label(theme::code_muted(format!("session={}", session_id.0)));
+                ui.label(theme::code_muted(render_model.status_label.clone()));
+                if let Some(session_label) = &render_model.active_session_label {
+                    ui.label(theme::code_muted(session_label.clone()));
                 }
-                if let Some(runtime_state) = terminal.runtime_state {
-                    ui.label(theme::code_muted(format!("runtime={runtime_state:?}")));
+                if let Some(runtime_label) = &render_model.runtime_label {
+                    ui.label(theme::code_muted(runtime_label.clone()));
                 }
-                ui.label(theme::code_muted(format!(
-                    "visible={} omitted={} matches={}",
-                    terminal.scrollback.visible_row_count,
-                    terminal.scrollback.omitted_row_count,
-                    terminal.search.match_count
-                )));
-                if terminal.scrollback.truncated {
+                ui.label(theme::code_muted(render_model.scrollback_label.clone()));
+                if render_model.scrollback_truncated {
                     ui.label(theme::code_muted("scrollback truncated"));
                 }
-                if terminal.search.truncated {
+                if render_model.search_truncated {
                     ui.label(theme::code_muted("search truncated"));
                 }
             });
@@ -3596,22 +3659,20 @@ fn render_terminal_stream(
                         .striped(true)
                         .spacing([theme::tokens().spacing.sm as f32, 2.0])
                         .show(ui, |ui| {
-                            for row in terminal.output_rows.iter().take(100) {
-                                ui.label(theme::code_muted(format!("{:>4}", row.sequence.0)));
-                                ui.label(theme::code_muted(if row.is_stderr {
-                                    "stderr"
-                                } else {
-                                    "stdout"
-                                }));
+                            for row in render_model.grid.rows.iter() {
+                                ui.label(theme::code_muted(row.sequence_label.clone()));
+                                ui.label(theme::code_muted(row.stream_label.clone()));
                                 ui.horizontal_wrapped(|ui| {
-                                    render_terminal_payload(ui, &row.redacted_payload);
+                                    render_terminal_payload(ui, &row.payload);
                                 });
                                 ui.horizontal_wrapped(|ui| {
-                                    for badge in terminal_output_row_badges(row) {
-                                        ui.label(theme::code_muted(badge));
+                                    for badge in &row.badges {
+                                        ui.label(theme::code_muted(badge.clone()));
                                     }
-                                    if ui.small_button("Copy").clicked() {
-                                        ui.ctx().copy_text(row.redacted_payload.clone());
+                                    if ui.small_button("Copy").clicked()
+                                        && let Some(payload) = render_model.copy_row(row.sequence)
+                                    {
+                                        ui.ctx().copy_text(payload);
                                     }
                                 });
                                 ui.end_row();
@@ -3711,7 +3772,8 @@ fn render_terminal_payload(ui: &mut egui::Ui, payload: &str) {
     });
 }
 
-fn terminal_output_row_badges(row: &TerminalOutputRowProjection) -> Vec<String> {
+#[cfg(test)]
+fn terminal_output_row_badges(row: &legion_protocol::TerminalOutputRowProjection) -> Vec<String> {
     if let Some((prefix, detail)) = row.redacted_payload.split_once(" • ")
         && prefix.starts_with("command block ")
     {
@@ -3732,9 +3794,9 @@ fn terminal_output_row_badges(row: &TerminalOutputRowProjection) -> Vec<String> 
         badges.push("truncated".to_string());
     }
     badges.push(match row.redaction {
-        RedactionHint::None => "redacted=none".to_string(),
-        RedactionHint::MetadataOnly => "redacted=metadata-only".to_string(),
-        RedactionHint::Full => "redacted=full".to_string(),
+        legion_protocol::RedactionHint::None => "redacted=none".to_string(),
+        legion_protocol::RedactionHint::MetadataOnly => "redacted=metadata-only".to_string(),
+        legion_protocol::RedactionHint::Full => "redacted=full".to_string(),
     });
     badges.push(format!("{} bytes", row.byte_count));
     badges
@@ -4257,6 +4319,20 @@ pub fn drag_selection_range(
     ProtocolTextRange {
         start: drag_anchor.unwrap_or(current_cursor),
         end: coordinate,
+    }
+}
+
+/// Normalize a protocol text range so `start <= end`. A backwards drag (or any
+/// emit site that picks an anchor after the cursor) would otherwise produce an
+/// inverted range that downstream `set_selections` stores verbatim.
+fn normalized_text_range(range: ProtocolTextRange) -> ProtocolTextRange {
+    if (range.end.line, range.end.character) < (range.start.line, range.start.character) {
+        ProtocolTextRange {
+            start: range.end,
+            end: range.start,
+        }
+    } else {
+        range
     }
 }
 
@@ -5404,19 +5480,21 @@ fn large_file_banner_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     };
 
     let size_mb = status.byte_len as f64 / (1024.0 * 1024.0);
+    // Name the degraded state and capability reduction explicitly so the banner
+    // makes clear which editor features are unavailable for the large file.
     let mut rows = vec![format!(
-        "\u{26a0} Large file ({:.1} MB) \u{2014} some features disabled",
+        "\u{26a0} large-file degraded mode ({:.1} MB) \u{2014} capabilities reduced",
         size_mb
     )];
     if !status.message.is_empty() {
         rows.push(status.message.clone());
     }
-    rows.extend(
-        status
-            .disabled_overlay_reasons
-            .iter()
-            .map(|reason| format!("  \u{2022} {}", sanitize_large_file_reason(reason))),
-    );
+    rows.extend(status.disabled_overlay_reasons.iter().map(|reason| {
+        format!(
+            "  \u{2022} capability reduced: {}",
+            sanitize_large_file_reason(reason)
+        )
+    }));
     rows
 }
 
@@ -5490,10 +5568,19 @@ fn active_buffer_code_lines(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopCo
 fn git_relative_path(root_label: Option<&str>, file_path: Option<&str>) -> Option<String> {
     let root = root_label?;
     let file_path = file_path?;
-    let relative = file_path
-        .strip_prefix(root)?
-        .trim_start_matches(['/', '\\'])
-        .to_string();
+    let remainder = file_path.strip_prefix(root)?;
+    // Require a component boundary so root `/repo` does not match `/repo2/...`:
+    // the remainder must be empty, begin with a separator, or the root itself
+    // must already end with a separator.
+    let boundary_ok = remainder.is_empty()
+        || remainder.starts_with('/')
+        || remainder.starts_with('\\')
+        || root.ends_with('/')
+        || root.ends_with('\\');
+    if !boundary_ok {
+        return None;
+    }
+    let relative = remainder.trim_start_matches(['/', '\\']).to_string();
     (!relative.is_empty()).then_some(relative)
 }
 
@@ -5880,7 +5967,29 @@ fn trust_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             privacy.high_risk_record_count
         ));
     }
-    rows.extend(privacy.records.iter().take(10).map(|record| {
+    const PRIVACY_RECORD_LIMIT: usize = 10;
+    // Surface the most sensitive records first (denied / fully redacted /
+    // external egress / high-risk) so they are not hidden by the row cap, and
+    // report any omitted records explicitly.
+    let mut ordered_records: Vec<&_> = privacy.records.iter().collect();
+    ordered_records.sort_by_key(|record| {
+        let prioritized = record.inclusion == ContextManifestInclusionState::Denied
+            || record.redaction_state == PrivacyInspectorRedactionState::FullyRedacted
+            || matches!(
+                record.egress,
+                ContextManifestEgressStatus::RemoteApprovalRequired
+                    | ContextManifestEgressStatus::RemoteDenied
+                    | ContextManifestEgressStatus::ExternalEgressMetadata
+            )
+            || matches!(
+                record.risk_label,
+                ProposalRiskLabel::High | ProposalRiskLabel::Unknown
+            );
+        // `false` (prioritized) sorts before `true`; sort_by_key is stable so
+        // original ordering is preserved within each group.
+        !prioritized
+    });
+    rows.extend(ordered_records.iter().take(PRIVACY_RECORD_LIMIT).map(|record| {
         format!(
             "privacy record {}: {:?} {:?} risk={:?} privacy={:?} egress={:?} permission={} reasons={}",
             record.exposure_id,
@@ -5897,6 +6006,12 @@ fn trust_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             bounded_join(&record.reasons)
         )
     }));
+    if privacy.records.len() > PRIVACY_RECORD_LIMIT {
+        rows.push(format!(
+            "privacy records omitted from preview: {}",
+            privacy.records.len() - PRIVACY_RECORD_LIMIT
+        ));
+    }
     if let Some(refusal) = &privacy.refusal {
         rows.push(format!(
             "privacy refusal {}: {} scope={:?} capability={} risk={:?} reasons={}",
@@ -7328,6 +7443,14 @@ fn plugin_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
                 command.command_id,
                 command.title,
                 command.required_capability.0
+            )
+        }));
+        // Surface the app-owned permission review rows shown before install
+        // approval so the capability disclosure is visible in the plugin panel.
+        rows.extend(projection.permission_review_rows.iter().map(|review| {
+            format!(
+                "plugin management plugin {} {}",
+                projection.plugin_id.0, review
             )
         }));
     }

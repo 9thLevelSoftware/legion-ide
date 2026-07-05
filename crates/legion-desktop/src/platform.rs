@@ -193,7 +193,7 @@ fn adapter_status(passed: Option<bool>) -> String {
 
 fn high_dpi_status(pixels_per_point: Option<f32>) -> String {
     match pixels_per_point {
-        Some(scale) if scale > 1.0 => format!("os-observed scale {scale:.3}"),
+        Some(scale) if scale.is_finite() && scale > 0.0 => format!("os-observed scale {scale:.3}"),
         Some(_) | None => NOT_OBSERVED.to_string(),
     }
 }

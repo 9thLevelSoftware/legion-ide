@@ -1,7 +1,8 @@
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use legion_ai_providers::{
     McpClient, StdioMcpTransport, StdioMcpTransportConfig, StreamableHttpMcpTransport,
@@ -82,96 +83,15 @@ fn descriptor_registry(
     }
 }
 
-fn stdio_fixture_script() -> String {
-    r#"
-import json
-import sys
-
-spec = json.loads(sys.argv[1])
-initial_tool = spec["tool"]
-initial_resource = spec["resource"]
-initial_prompt = spec["prompt"]
-reloaded_tool = spec.get("reloaded_tool")
-reloaded_resource = spec.get("reloaded_resource")
-reloaded_prompt = spec.get("reloaded_prompt")
-state = {"tools": 0, "resources": 0, "prompts": 0}
-
-while True:
-    line = sys.stdin.readline()
-    if not line:
-        break
-    if not line.strip():
-        continue
-    request = json.loads(line)
-    method = request["method"]
-    if method == "tools/list":
-        state["tools"] += 1
-        if reloaded_tool is not None and state["tools"] >= 1:
-            tools = reloaded_tool
-        else:
-            tools = [initial_tool]
-        result = {"tools": tools}
-    elif method == "resources/list":
-        state["resources"] += 1
-        if reloaded_resource is not None and state["resources"] >= 1:
-            resources = reloaded_resource
-        else:
-            resources = [initial_resource]
-        result = {"resources": resources}
-    elif method == "prompts/list":
-        state["prompts"] += 1
-        if reloaded_prompt is not None and state["prompts"] >= 1:
-            prompts = reloaded_prompt
-        else:
-            prompts = [initial_prompt]
-        result = {"prompts": prompts}
-    elif method == "tools/call":
-        result = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": "called:" + request["params"]["name"],
-                }
-            ]
-        }
-    elif method == "resources/read":
-        result = {
-            "contents": [
-                {
-                    "uri": request["params"]["uri"],
-                    "mimeType": "application/json",
-                    "text": "{\"ok\":true}",
-                }
-            ]
-        }
-    elif method == "prompts/get":
-        result = {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": {
-                        "type": "text",
-                        "text": "prompt:" + request["params"]["name"],
-                    },
-                }
-            ]
-        }
-    else:
-        result = {"echo_method": method}
-    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
-"#
-    .to_string()
+/// Path to the Cargo-built stdio MCP fixture binary (no external runtime).
+fn fixture_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_mcp_stdio_fixture")
 }
 
 fn stdio_transport(spec: &Value) -> StdioMcpTransport {
     StdioMcpTransport::new(StdioMcpTransportConfig {
-        command: "python3".to_string(),
-        args: vec![
-            "-u".to_string(),
-            "-c".to_string(),
-            stdio_fixture_script(),
-            spec.to_string(),
-        ],
+        command: fixture_binary().to_string(),
+        args: vec!["conformance".to_string(), spec.to_string()],
     })
 }
 
@@ -227,14 +147,48 @@ fn write_http_response(stream: &mut TcpStream, response: &Value) {
     stream.flush().expect("flush HTTP response");
 }
 
+/// Maximum time the HTTP fixture thread will wait for the expected requests
+/// before giving up, so a client failure surfaces as an assertion (fewer than
+/// four recorded requests) rather than an indefinite `accept()`/`join()` hang.
+const HTTP_FIXTURE_DEADLINE: Duration = Duration::from_secs(20);
+/// Per-stream read/write timeout for the HTTP fixture.
+const HTTP_FIXTURE_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn spawn_http_fixture() -> (String, Arc<Mutex<Vec<Value>>>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("set HTTP fixture non-blocking");
     let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let requests_thread = Arc::clone(&requests);
     let handle = thread::spawn(move || {
-        for _ in 0..4 {
-            let (mut stream, _) = listener.accept().expect("accept HTTP request");
+        let deadline = Instant::now() + HTTP_FIXTURE_DEADLINE;
+        let mut handled = 0;
+        while handled < 4 {
+            if Instant::now() >= deadline {
+                // Give up rather than block forever; the test's request-count
+                // assertion will fail and surface the underlying problem.
+                break;
+            }
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(ref error) if error.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept HTTP request: {error}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("set HTTP stream blocking");
+            stream
+                .set_read_timeout(Some(HTTP_FIXTURE_STREAM_TIMEOUT))
+                .expect("set HTTP read timeout");
+            stream
+                .set_write_timeout(Some(HTTP_FIXTURE_STREAM_TIMEOUT))
+                .expect("set HTTP write timeout");
+            handled += 1;
             let request = read_http_request_json(&mut stream);
             let method = request["method"].as_str().expect("method string");
             requests_thread
@@ -565,32 +519,10 @@ fn custom_stdio_reference_server_reloads_after_list_changed() {
 }
 
 fn stdio_pid_transport() -> StdioMcpTransport {
-    let script = r#"
-import json, os, sys
-spec = json.loads(sys.argv[1])
-for raw_line in sys.stdin:
-    if not raw_line.strip():
-        continue
-    request = json.loads(raw_line)
-    method = request["method"]
-    if method == "tools/list":
-        result = {"tools": spec["tools"]}
-    elif method == "resources/list":
-        result = {"resources": spec["resources"]}
-    elif method == "prompts/list":
-        result = {"prompts": spec["prompts"]}
-    elif method == "tools/call":
-        result = {"content": [{"type": "text", "text": f'pid:{os.getpid()}'}]}
-    else:
-        result = {"echo_method": method}
-    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
-"#;
     StdioMcpTransport::new(StdioMcpTransportConfig {
-        command: "python3".to_string(),
+        command: fixture_binary().to_string(),
         args: vec![
-            "-u".to_string(),
-            "-c".to_string(),
-            script.to_string(),
+            "pid".to_string(),
             json!({
                 "tools": [{
                     "name": "fetch_url",

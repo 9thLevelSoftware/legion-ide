@@ -262,16 +262,50 @@ fn local_session(
     (session, plan_id)
 }
 
-fn temp_workspace(label: &str) -> PathBuf {
+/// Drop-guarded temporary workspace rooted in the system temp dir. Removes the directory
+/// on drop with a prefix/location check so a panic mid-test never leaks the workspace.
+struct TempWorkspace {
+    root: PathBuf,
+}
+
+impl std::ops::Deref for TempWorkspace {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl AsRef<std::path::Path> for TempWorkspace {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let temp_root = std::env::temp_dir();
+        let file_name = self.root.file_name().and_then(|name| name.to_str());
+        if self.root.starts_with(&temp_root)
+            && file_name.is_some_and(|name| name.starts_with("legion-workflow-integration-"))
+        {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn temp_workspace(label: &str) -> TempWorkspace {
     let id = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::current_dir()
-        .expect("current dir")
-        .join("target")
-        .join("legion-workflow-integration")
-        .join(format!("{label}-{id}"));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |value| value.as_nanos());
+    let root = std::env::temp_dir().join(format!(
+        "legion-workflow-integration-{}-{label}-{id}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&root).expect("create temp workspace");
     std::fs::write(root.join("main.txt"), "clean\n").expect("write temp file");
-    root
+    TempWorkspace { root }
 }
 
 fn automate_app() -> AppComposition {
@@ -499,8 +533,6 @@ fn legion_cloud_lane_app_submit_enforces_policy_and_projects_status() {
         1,
         "rejected cloud submit must not create a task row"
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -787,7 +819,6 @@ fn legion_workflow_dirty_main_workspace_blocks_merge_readiness() {
             .blockers
             .contains(&LegionWorkflowMergeReadinessBlocker::DirtyMainWorkspaceConflict)
     );
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -914,7 +945,6 @@ fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutatio
             .lifecycle_state,
         LegionWorkflowState::Completed
     );
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

@@ -6,8 +6,10 @@ use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use legion_ai::{
     BatchJobRequest, BatchJobResponse, ChatCompletionRequest, ChatCompletionResponse, ChatRole,
@@ -289,6 +291,45 @@ pub trait ProviderHttpTransport: Clone + Send + Sync + 'static {
     ) -> Result<Value, ProviderError>;
 }
 
+/// Connection-establishment timeout applied to every blocking HTTP request.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Overall request timeout applied to every blocking HTTP request.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Installs the process-wide rustls crypto provider if one is not already set.
+fn install_default_crypto_provider() -> Result<(), String> {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(()) => Ok(()),
+        Err(_) if rustls::crypto::CryptoProvider::get_default().is_some() => Ok(()),
+        Err(error) => Err(format!(
+            "failed to install rustls crypto provider: {error:?}"
+        )),
+    }
+}
+
+/// Returns a process-wide blocking reqwest client configured with connect and
+/// request timeouts so a hung endpoint cannot block the calling thread forever.
+fn shared_blocking_client() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            // Building a rustls-backed client requires a default crypto
+            // provider; install it eagerly so the first HTTPS request cannot
+            // panic the reqwest runtime thread.
+            install_default_crypto_provider()?;
+            reqwest::blocking::Client::builder()
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .timeout(HTTP_REQUEST_TIMEOUT)
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
 /// Reqwest-backed provider HTTP transport.
 #[derive(Debug, Clone, Default)]
 pub struct ReqwestProviderHttpTransport;
@@ -300,7 +341,11 @@ impl ProviderHttpTransport for ReqwestProviderHttpTransport {
         bearer_token: Option<&str>,
         payload: Value,
     ) -> Result<Value, ProviderError> {
-        let mut request = reqwest::blocking::Client::new()
+        let mut request = shared_blocking_client()
+            .map_err(|message| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message,
+            })?
             .post(endpoint)
             .json(&payload);
         if let Some(token) = bearer_token.filter(|token| !token.trim().is_empty()) {
@@ -566,7 +611,7 @@ where
         let mut payload = json!({
             "model": request.model,
             "input": input,
-            "store": Self::metadata_flag(&request.metadata, "openai.responses.store", true),
+            "store": Self::metadata_flag(&request.metadata, "openai.responses.store", false),
         });
         if let Some(max_tokens) = request.max_tokens {
             payload["max_output_tokens"] = json!(max_tokens);
@@ -839,21 +884,24 @@ where
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, ProviderError> {
         let bearer_token = self.bearer_token()?;
-        let response = self.transport.post_json(
-            &self.endpoint("/chat/completions"),
-            bearer_token,
-            json!({
-                "model": request.model,
-                "messages": request.messages.iter().map(|message| {
-                    json!({
-                        "role": chat_role_label(&message.role),
-                        "content": message.content,
-                    })
-                }).collect::<Vec<_>>(),
-                "max_tokens": request.max_tokens,
-                "temperature": request.temperature,
-            }),
-        )?;
+        let mut payload = json!({
+            "model": request.model,
+            "messages": request.messages.iter().map(|message| {
+                json!({
+                    "role": chat_role_label(&message.role),
+                    "content": message.content,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        if let Some(max_tokens) = request.max_tokens {
+            payload["max_tokens"] = json!(max_tokens);
+        }
+        if let Some(temperature) = request.temperature {
+            payload["temperature"] = json!(temperature);
+        }
+        let response =
+            self.transport
+                .post_json(&self.endpoint("/chat/completions"), bearer_token, payload)?;
         let text = response
             .get("choices")
             .and_then(Value::as_array)
@@ -1012,6 +1060,7 @@ pub struct AnthropicMessagesClient<T = ReqwestProviderHttpTransport> {
     id: ProviderId,
     base_url: String,
     api_key: Option<String>,
+    credential_kind: AnthropicCredentialKind,
     transport: T,
 }
 
@@ -1070,13 +1119,35 @@ pub fn anthropic_strict_tool_definition(
     })
 }
 
+/// Distinguishes how an Anthropic credential must be sent on the wire.
+///
+/// Anthropic API keys are sent via the `x-api-key` header, while OAuth/session
+/// auth tokens are sent via the `Authorization: Bearer` header. Sending an API
+/// key as a bearer token is rejected by the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnthropicCredentialKind {
+    /// Credential sent via the `x-api-key` header.
+    ApiKey,
+    /// Credential sent via the `Authorization: Bearer` header.
+    AuthToken,
+}
+
+/// An Anthropic credential paired with the header kind it must be sent as.
+#[derive(Debug, Clone, Copy)]
+pub struct AnthropicCredential<'a> {
+    /// The secret credential value.
+    pub value: &'a str,
+    /// Whether the value is an API key or an auth token.
+    pub kind: AnthropicCredentialKind,
+}
+
 /// Shared HTTP transport abstraction for Anthropic Messages API calls.
 pub trait AnthropicMessagesTransport: Clone + Send + Sync + 'static {
     /// POST a JSON payload and return the parsed JSON response.
     fn post_json(
         &self,
         endpoint: &str,
-        api_key: Option<&str>,
+        credential: Option<AnthropicCredential<'_>>,
         beta_header: Option<&str>,
         payload: Value,
     ) -> Result<Value, ProviderError>;
@@ -1085,30 +1156,47 @@ pub trait AnthropicMessagesTransport: Clone + Send + Sync + 'static {
     fn post_text(
         &self,
         endpoint: &str,
-        api_key: Option<&str>,
+        credential: Option<AnthropicCredential<'_>>,
         beta_header: Option<&str>,
         payload: Value,
     ) -> Result<String, ProviderError>;
+}
+
+/// Applies an optional Anthropic credential to a blocking request builder,
+/// selecting the correct authentication header for the credential kind.
+fn apply_anthropic_credential(
+    request: reqwest::blocking::RequestBuilder,
+    credential: Option<AnthropicCredential<'_>>,
+) -> reqwest::blocking::RequestBuilder {
+    match credential.filter(|credential| !credential.value.trim().is_empty()) {
+        Some(credential) => match credential.kind {
+            AnthropicCredentialKind::ApiKey => request.header("x-api-key", credential.value),
+            AnthropicCredentialKind::AuthToken => request.bearer_auth(credential.value),
+        },
+        None => request,
+    }
 }
 
 impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
     fn post_json(
         &self,
         endpoint: &str,
-        api_key: Option<&str>,
+        credential: Option<AnthropicCredential<'_>>,
         beta_header: Option<&str>,
         payload: Value,
     ) -> Result<Value, ProviderError> {
-        let mut request = reqwest::blocking::Client::new()
+        let mut request = shared_blocking_client()
+            .map_err(|message| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message,
+            })?
             .post(endpoint)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .json(&payload);
         if let Some(beta_header) = beta_header.filter(|value| !value.trim().is_empty()) {
             request = request.header("anthropic-beta", beta_header);
         }
-        if let Some(token) = api_key.filter(|token| !token.trim().is_empty()) {
-            request = request.bearer_auth(token);
-        }
+        request = apply_anthropic_credential(request, credential);
         let response = request
             .send()
             .map_err(|error| ProviderError::RequestFailed {
@@ -1132,20 +1220,22 @@ impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
     fn post_text(
         &self,
         endpoint: &str,
-        bearer_token: Option<&str>,
+        credential: Option<AnthropicCredential<'_>>,
         beta_header: Option<&str>,
         payload: Value,
     ) -> Result<String, ProviderError> {
-        let mut request = reqwest::blocking::Client::new()
+        let mut request = shared_blocking_client()
+            .map_err(|message| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message,
+            })?
             .post(endpoint)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .json(&payload);
         if let Some(beta_header) = beta_header.filter(|value| !value.trim().is_empty()) {
             request = request.header("anthropic-beta", beta_header);
         }
-        if let Some(token) = bearer_token.filter(|token| !token.trim().is_empty()) {
-            request = request.bearer_auth(token);
-        }
+        request = apply_anthropic_credential(request, credential);
         let response = request
             .send()
             .map_err(|error| ProviderError::RequestFailed {
@@ -1176,21 +1266,58 @@ impl Default for AnthropicMessagesClient<ReqwestProviderHttpTransport> {
 impl AnthropicMessagesClient<ReqwestProviderHttpTransport> {
     /// Creates an Anthropic adapter from environment configuration.
     pub fn from_env(id: impl Into<ProviderId>) -> Self {
-        let api_key = first_configured_value([
-            std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_API_KEY")).ok(),
-            std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_AUTH_TOKEN")).ok(),
-            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_API_KEY")).ok(),
-            std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_AUTH_TOKEN")).ok(),
-            std::env::var("ANTHROPIC_API_KEY").ok(),
-            std::env::var("ANTHROPIC_AUTH_TOKEN").ok(),
-        ]);
+        let (api_key, credential_kind) = Self::credential_from_env();
         let base_url = first_configured_value([
             std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
             std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
             std::env::var("ANTHROPIC_BASE_URL").ok(),
         ])
         .unwrap_or_else(|| "https://api.anthropic.com".to_string());
-        Self::with_transport(id, base_url, api_key, ReqwestProviderHttpTransport)
+        Self::with_transport_kind(
+            id,
+            base_url,
+            api_key,
+            credential_kind,
+            ReqwestProviderHttpTransport,
+        )
+    }
+
+    /// Reads the Anthropic credential from the environment, preserving the
+    /// existing precedence while recording whether the value is an API key
+    /// (`x-api-key`) or an auth token (`Authorization: Bearer`).
+    fn credential_from_env() -> (Option<String>, AnthropicCredentialKind) {
+        let candidates = [
+            (
+                std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_API_KEY")).ok(),
+                AnthropicCredentialKind::ApiKey,
+            ),
+            (
+                std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_AUTH_TOKEN")).ok(),
+                AnthropicCredentialKind::AuthToken,
+            ),
+            (
+                std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_API_KEY")).ok(),
+                AnthropicCredentialKind::ApiKey,
+            ),
+            (
+                std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_AUTH_TOKEN")).ok(),
+                AnthropicCredentialKind::AuthToken,
+            ),
+            (
+                std::env::var("ANTHROPIC_API_KEY").ok(),
+                AnthropicCredentialKind::ApiKey,
+            ),
+            (
+                std::env::var("ANTHROPIC_AUTH_TOKEN").ok(),
+                AnthropicCredentialKind::AuthToken,
+            ),
+        ];
+        for (value, kind) in candidates {
+            if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+                return (Some(value), kind);
+            }
+        }
+        (None, AnthropicCredentialKind::ApiKey)
     }
 }
 
@@ -1199,16 +1326,39 @@ where
     T: AnthropicMessagesTransport,
 {
     /// Creates an Anthropic adapter with an injected transport.
+    ///
+    /// The credential is treated as an API key (`x-api-key`). Use
+    /// [`AnthropicMessagesClient::with_transport_kind`] to supply an auth token
+    /// that must be sent via `Authorization: Bearer`.
     pub fn with_transport(
         id: impl Into<ProviderId>,
         base_url: impl Into<String>,
         api_key: Option<String>,
         transport: T,
     ) -> Self {
+        Self::with_transport_kind(
+            id,
+            base_url,
+            api_key,
+            AnthropicCredentialKind::ApiKey,
+            transport,
+        )
+    }
+
+    /// Creates an Anthropic adapter with an injected transport and an explicit
+    /// credential kind controlling which authentication header is sent.
+    pub fn with_transport_kind(
+        id: impl Into<ProviderId>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        credential_kind: AnthropicCredentialKind,
+        transport: T,
+    ) -> Self {
         Self {
             id: id.into(),
             base_url: normalize_base_url(base_url.into()),
             api_key,
+            credential_kind,
             transport,
         }
     }
@@ -1227,6 +1377,13 @@ where
                     "Anthropic API key or auth token is not configured",
                 )
             })
+    }
+
+    fn credential(&self) -> Result<AnthropicCredential<'_>, ProviderError> {
+        Ok(AnthropicCredential {
+            value: self.bearer_token()?,
+            kind: self.credential_kind,
+        })
     }
 
     fn request_messages(request: &ChatCompletionRequest) -> (Option<String>, Vec<Value>) {
@@ -1461,10 +1618,10 @@ where
         request: ChatCompletionRequest,
         extras: AnthropicRequestExtras,
     ) -> Result<ChatCompletionResponse, ProviderError> {
-        let bearer_token = self.bearer_token()?;
+        let credential = self.credential()?;
         let response = self.transport.post_json(
             &self.endpoint("/v1/messages"),
-            Some(bearer_token),
+            Some(credential),
             Self::beta_header_for_extras(&extras),
             self.completion_payload(&request, false, &extras),
         )?;
@@ -1485,10 +1642,10 @@ where
         request: ChatCompletionRequest,
         extras: AnthropicRequestExtras,
     ) -> Result<Vec<AnthropicSseEvent>, ProviderError> {
-        let bearer_token = self.bearer_token()?;
+        let credential = self.credential()?;
         let body = self.transport.post_text(
             &self.endpoint("/v1/messages"),
-            Some(bearer_token),
+            Some(credential),
             Self::beta_header_for_extras(&extras),
             self.completion_payload(&request, true, &extras),
         )?;
@@ -1517,10 +1674,10 @@ where
         request: ChatCompletionRequest,
         extras: AnthropicRequestExtras,
     ) -> Result<u32, ProviderError> {
-        let bearer_token = self.bearer_token()?;
+        let credential = self.credential()?;
         let response = self.transport.post_json(
             &self.endpoint("/v1/messages/count_tokens"),
-            Some(bearer_token),
+            Some(credential),
             Self::beta_header_for_extras(&extras),
             self.count_tokens_payload(&request, &extras),
         )?;
@@ -1908,16 +2065,25 @@ impl fmt::Debug for StdioMcpTransport {
     }
 }
 
+/// Per-request timeout for a single stdio MCP round trip.
+const STDIO_MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct StdioMcpSession {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    responses: mpsc::Receiver<std::io::Result<String>>,
+    reader: Option<JoinHandle<()>>,
 }
 
 impl Drop for StdioMcpSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // The reader thread owns the child's stdout; killing the child closes
+        // the pipe so the blocking read returns EOF and the thread exits.
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -1951,10 +2117,33 @@ impl StdioMcpTransport {
             .stdout
             .take()
             .ok_or_else(|| McpClientError::Transport("stdio MCP stdout unavailable".to_string()))?;
+        // Read stdout on a dedicated thread so a wedged or silent server cannot
+        // block the caller indefinitely: the request loop enforces a deadline
+        // over the channel rather than on a blocking pipe read.
+        let (sender, responses) = mpsc::channel::<std::io::Result<String>>();
+        let reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if sender.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
         Ok(StdioMcpSession {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            responses,
+            reader: Some(reader),
         })
     }
 
@@ -1973,20 +2162,31 @@ impl StdioMcpTransport {
             .map_err(|error| McpClientError::Transport(error.to_string()))?;
 
         let expected_id = envelope.id.as_deref();
-        let mut line = String::new();
+        let deadline = Instant::now() + STDIO_MCP_REQUEST_TIMEOUT;
         loop {
-            line.clear();
-            let byte_count = session
-                .stdout
-                .read_line(&mut line)
-                .map_err(|error| McpClientError::Transport(error.to_string()))?;
-            if byte_count == 0 {
-                let status = session.child.try_wait().ok().flatten();
-                return Err(McpClientError::Transport(match status {
-                    Some(status) => format!("stdio MCP server exited with {status}"),
-                    None => "stdio MCP server closed stdout".to_string(),
-                }));
-            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    McpClientError::Transport(
+                        "stdio MCP request timed out waiting for response".to_string(),
+                    )
+                })?;
+            let line = match session.responses.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(error)) => return Err(McpClientError::Transport(error.to_string())),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(McpClientError::Transport(
+                        "stdio MCP request timed out waiting for response".to_string(),
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let status = session.child.try_wait().ok().flatten();
+                    return Err(McpClientError::Transport(match status {
+                        Some(status) => format!("stdio MCP server exited with {status}"),
+                        None => "stdio MCP server closed stdout".to_string(),
+                    }));
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -2027,16 +2227,7 @@ pub struct StreamableHttpMcpTransport {
 }
 
 fn ensure_rustls_crypto_provider() -> Result<(), McpClientError> {
-    if rustls::crypto::CryptoProvider::get_default().is_some() {
-        return Ok(());
-    }
-    match rustls::crypto::ring::default_provider().install_default() {
-        Ok(()) => Ok(()),
-        Err(_) if rustls::crypto::CryptoProvider::get_default().is_some() => Ok(()),
-        Err(error) => Err(McpClientError::Transport(format!(
-            "failed to install rustls crypto provider: {error:?}"
-        ))),
-    }
+    install_default_crypto_provider().map_err(McpClientError::Transport)
 }
 
 impl StreamableHttpMcpTransport {
@@ -2056,7 +2247,8 @@ impl McpTransport for StreamableHttpMcpTransport {
                 "Streamable HTTP MCP endpoint must not be empty".to_string(),
             ));
         }
-        let response = reqwest::blocking::Client::new()
+        let response = shared_blocking_client()
+            .map_err(McpClientError::Transport)?
             .post(&self.config.endpoint)
             .json(envelope)
             .send()
@@ -2680,6 +2872,7 @@ mod tests {
     struct RecordedProviderCall {
         endpoint: String,
         bearer_token: Option<String>,
+        credential_kind: Option<AnthropicCredentialKind>,
         anthropic_version: Option<String>,
         anthropic_beta: Option<String>,
         payload: Value,
@@ -2704,6 +2897,7 @@ mod tests {
                 .push(RecordedProviderCall {
                     endpoint: endpoint.to_string(),
                     bearer_token: bearer_token.map(str::to_string),
+                    credential_kind: None,
                     anthropic_version: None,
                     anthropic_beta: None,
                     payload: payload.clone(),
@@ -2764,7 +2958,7 @@ mod tests {
         fn post_json(
             &self,
             endpoint: &str,
-            bearer_token: Option<&str>,
+            credential: Option<AnthropicCredential<'_>>,
             beta_header: Option<&str>,
             payload: Value,
         ) -> Result<Value, ProviderError> {
@@ -2773,7 +2967,8 @@ mod tests {
                 .expect("calls lock")
                 .push(RecordedProviderCall {
                     endpoint: endpoint.to_string(),
-                    bearer_token: bearer_token.map(str::to_string),
+                    bearer_token: credential.map(|credential| credential.value.to_string()),
+                    credential_kind: credential.map(|credential| credential.kind),
                     anthropic_version: Some(ANTHROPIC_API_VERSION.to_string()),
                     anthropic_beta: beta_header.map(str::to_string),
                     payload: payload.clone(),
@@ -2803,7 +2998,7 @@ mod tests {
         fn post_text(
             &self,
             endpoint: &str,
-            bearer_token: Option<&str>,
+            credential: Option<AnthropicCredential<'_>>,
             beta_header: Option<&str>,
             payload: Value,
         ) -> Result<String, ProviderError> {
@@ -2812,7 +3007,8 @@ mod tests {
                 .expect("calls lock")
                 .push(RecordedProviderCall {
                     endpoint: endpoint.to_string(),
-                    bearer_token: bearer_token.map(str::to_string),
+                    bearer_token: credential.map(|credential| credential.value.to_string()),
+                    credential_kind: credential.map(|credential| credential.kind),
                     anthropic_version: Some(ANTHROPIC_API_VERSION.to_string()),
                     anthropic_beta: beta_header.map(str::to_string),
                     payload: payload.clone(),
@@ -2927,6 +3123,107 @@ mod tests {
         assert_eq!(calls[0].payload["messages"][0]["role"], "user");
         assert_eq!(calls[1].endpoint, "https://provider.example/v1/embeddings");
         assert_eq!(calls[1].payload["input"][0], "embed me");
+    }
+
+    #[test]
+    fn shared_blocking_client_builds_with_timeouts() {
+        assert!(shared_blocking_client().is_ok());
+    }
+
+    #[test]
+    fn openai_compatible_provider_omits_unset_sampling_options() {
+        let transport = RecordingProviderTransport::default();
+        let provider = LlamaCppProvider::with_transport(
+            LLAMA_CPP_PROVIDER_ID,
+            "http://localhost:8080/v1/",
+            None,
+            transport.clone(),
+        );
+
+        provider
+            .complete(ChatCompletionRequest::new(
+                LLAMA_CPP_PROVIDER_ID,
+                "local-gguf",
+                "explain",
+            ))
+            .expect("llama.cpp completion parses");
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        // Unset sampling options must be omitted, not serialized as JSON null.
+        assert!(calls[0].payload.get("max_tokens").is_none());
+        assert!(calls[0].payload.get("temperature").is_none());
+    }
+
+    #[test]
+    fn openai_responses_store_defaults_to_false_without_metadata() {
+        let transport = RecordingProviderTransport::default();
+        let provider = OpenAiResponsesProvider::with_transport(
+            OPENAI_PROVIDER_ID,
+            "https://provider.example/v1/",
+            Some("test-key".to_string()),
+            transport.clone(),
+        );
+
+        provider
+            .complete(ChatCompletionRequest::new(
+                OPENAI_PROVIDER_ID,
+                "gpt-test",
+                "hello",
+            ))
+            .expect("responses completion parses");
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].payload["store"], false);
+    }
+
+    #[test]
+    fn anthropic_api_key_uses_x_api_key_and_auth_token_uses_bearer() {
+        let api_key_transport = RecordingProviderTransport::default();
+        let api_key_client = AnthropicMessagesClient::with_transport(
+            ANTHROPIC_PROVIDER_ID,
+            "https://api.anthropic.com/",
+            Some("sk-ant-key".to_string()),
+            api_key_transport.clone(),
+        );
+        api_key_client
+            .complete(ChatCompletionRequest::new(
+                ANTHROPIC_PROVIDER_ID,
+                "claude-test",
+                "hi",
+            ))
+            .expect("anthropic completion parses");
+        let api_calls = api_key_transport.calls();
+        assert_eq!(api_calls.len(), 1);
+        assert_eq!(
+            api_calls[0].credential_kind,
+            Some(AnthropicCredentialKind::ApiKey)
+        );
+        assert_eq!(api_calls[0].bearer_token, Some("sk-ant-key".to_string()));
+
+        let token_transport = RecordingProviderTransport::default();
+        let token_client = AnthropicMessagesClient::with_transport_kind(
+            ANTHROPIC_PROVIDER_ID,
+            "https://api.anthropic.com/",
+            Some("oauth-token".to_string()),
+            AnthropicCredentialKind::AuthToken,
+            token_transport.clone(),
+        );
+        token_client
+            .complete(ChatCompletionRequest::new(
+                ANTHROPIC_PROVIDER_ID,
+                "claude-test",
+                "hi",
+            ))
+            .expect("anthropic completion parses");
+        let token_calls = token_transport.calls();
+        assert_eq!(token_calls.len(), 1);
+        assert_eq!(
+            token_calls[0].credential_kind,
+            Some(AnthropicCredentialKind::AuthToken)
+        );
+        assert_eq!(token_calls[0].bearer_token, Some("oauth-token".to_string()));
     }
 
     #[test]

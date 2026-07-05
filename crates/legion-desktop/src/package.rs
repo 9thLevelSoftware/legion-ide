@@ -50,6 +50,9 @@ pub struct WindowsPackageConfig {
     pub output_dir: PathBuf,
     /// Cargo build profile.
     pub profile: PackageProfile,
+    /// Optional explicit cargo target triple to cross-compile the Windows
+    /// executable. Required when packaging from a non-Windows host.
+    pub target_triple: Option<String>,
 }
 
 impl WindowsPackageConfig {
@@ -64,7 +67,15 @@ impl WindowsPackageConfig {
             workspace_root: workspace_root.into(),
             output_dir: output_dir.into(),
             profile,
+            target_triple: None,
         }
+    }
+
+    /// Sets the cargo target triple used to cross-compile the Windows binary.
+    #[must_use]
+    pub fn with_target_triple(mut self, target_triple: impl Into<String>) -> Self {
+        self.target_triple = Some(target_triple.into());
+        self
     }
 }
 
@@ -94,6 +105,14 @@ pub enum PackagePlanError {
     /// The output directory is not named.
     #[error("output directory must not be empty")]
     EmptyOutputDirectory,
+    /// Packaging from a non-Windows host requires an explicit Windows target triple.
+    #[error(
+        "packaging a Windows executable from a non-Windows host requires an explicit target triple"
+    )]
+    MissingWindowsTargetTriple,
+    /// The configured target triple was empty.
+    #[error("target triple must not be empty")]
+    EmptyTargetTriple,
 }
 
 /// Builds a deterministic Windows package plan without touching the filesystem.
@@ -113,22 +132,43 @@ pub fn plan_windows_package(
         ));
     }
 
-    let executable_source = config
-        .workspace_root
-        .join("target")
+    // Resolve the effective target triple. Planning is metadata-only and must
+    // work on non-Windows hosts for dry-run/manifest tests; an explicit triple
+    // simply selects the target subdirectory and cargo `--target` args.
+    let target_triple = match &config.target_triple {
+        Some(triple) => {
+            if triple.trim().is_empty() {
+                return Err(PackagePlanError::EmptyTargetTriple);
+            }
+            Some(triple.as_str())
+        }
+        None => None,
+    };
+
+    let mut target_dir = config.workspace_root.join("target");
+    if let Some(triple) = target_triple {
+        target_dir = target_dir.join(triple);
+    }
+    let executable_source = target_dir
         .join(config.profile.as_str())
         .join(WINDOWS_EXECUTABLE_NAME);
     let executable_destination = config.output_dir.join(WINDOWS_EXECUTABLE_NAME);
     let manifest_path = config.output_dir.join(PACKAGE_MANIFEST_NAME);
 
+    let mut cargo_args: Vec<String> = config
+        .profile
+        .cargo_args()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if let Some(triple) = target_triple {
+        cargo_args.push("--target".to_string());
+        cargo_args.push(triple.to_string());
+    }
+
     Ok(WindowsPackagePlan {
         profile: config.profile,
-        cargo_args: config
-            .profile
-            .cargo_args()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+        cargo_args,
         executable_source,
         package_dir: config.output_dir.clone(),
         executable_destination,

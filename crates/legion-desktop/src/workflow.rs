@@ -1,10 +1,11 @@
 //! Desktop runtime workflow boundary.
 
+#[cfg(not(target_os = "windows"))]
+use std::process::Command;
 use std::{
     collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use anyhow::{Result, anyhow};
@@ -14,13 +15,16 @@ use legion_app::{
     AppSaveOutcome, AppSessionRestoreOutcome,
 };
 use legion_protocol::{
-    AgentRunId, BufferId, CanonicalPath, CollaborationSessionId, DelegatedTaskPlanContract,
-    DelegatedTaskPlanId, LegionWorkflowMergeReadinessState, LegionWorkflowSessionId, PRODUCT_NAME,
-    PluginDenialReason, PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
-    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
+    AgentRunId, BufferId, CanonicalPath, CollaborationOperationId, CollaborationParticipantId,
+    CollaborationSessionId, CollaborationSharedProposalApproval, CollaborationTransportEnvelope,
+    DelegatedTaskPlanContract, DelegatedTaskPlanId, LegionWorkflowMergeReadinessState,
+    LegionWorkflowSessionId, PRODUCT_NAME, PluginDenialReason, PluginHostCallResponse, PluginId,
+    PluginManifest, PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalResponse, ProtocolTextRange, RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor,
     RemoteWorkspaceSessionId, SessionDockLayout, SessionDockSideLayout, SessionPanelState,
     TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
+use legion_remote::RemoteOperationOutcome;
 use legion_ui::{
     CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
     SearchScopeProjection, SettingsProjection, Shell, ShellProjectionSnapshot,
@@ -675,6 +679,16 @@ impl DesktopRuntime {
         }
     }
 
+    /// Dispatch a UI-originated action, surfacing any failure as an error
+    /// status (and refreshing the projection) instead of silently discarding
+    /// the `Result`.
+    pub fn dispatch_ui_action(&mut self, action: DesktopAction) {
+        if let Err(error) = self.handle_action(action) {
+            self.set_status(StatusSeverity::Error, format!("Action failed: {error}"));
+            let _ = self.refresh_projection();
+        }
+    }
+
     /// Returns whether the adapter has requested shutdown.
     pub fn quit_requested(&self) -> bool {
         self.quit_requested
@@ -729,6 +743,99 @@ impl DesktopRuntime {
             "Remote workspace runtime enabled by app policy",
         );
         self.refresh_projection()
+    }
+
+    /// Ingest a collaboration transport envelope through the app-owned
+    /// collaboration runtime and refresh the projection.
+    /// Ingest LSP publishDiagnostics for a specific buffer and refresh the projection.
+    pub fn ingest_lsp_publish_diagnostics_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        params: &serde_json::Value,
+        disclose_ranges: bool,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<()> {
+        self.app.ingest_lsp_publish_diagnostics_for_buffer(
+            buffer_id,
+            params,
+            disclose_ranges,
+            request_id,
+        )?;
+        self.refresh_projection()?;
+        Ok(())
+    }
+
+    ///
+    /// This is the production ingestion seam used by loopback/fake collaboration
+    /// transports: presence, conflict, and operation envelopes flow through the
+    /// same `AppComposition::receive_collaboration_transport_envelope` path the
+    /// real transport uses. Operations that are accepted are applied through
+    /// editor authority; metadata-only payloads (presence and so on) never
+    /// mutate the active buffer.
+    pub fn ingest_collaboration_transport_envelope(
+        &mut self,
+        envelope: CollaborationTransportEnvelope,
+    ) -> Result<Option<AppCommandOutcome>> {
+        let outcome = self
+            .app
+            .receive_collaboration_transport_envelope(envelope)?;
+        self.refresh_projection()?;
+        Ok(outcome)
+    }
+
+    /// Register a shared collaboration proposal gate through app-owned authority
+    /// and refresh the projection so the shared-proposal row is visible.
+    pub fn register_shared_collaboration_proposal(
+        &mut self,
+        session_id: CollaborationSessionId,
+        proposal_id: ProposalId,
+        required_approvers: Vec<CollaborationParticipantId>,
+        authorized_approvers: Vec<CollaborationParticipantId>,
+        applied_operation_ids: Vec<CollaborationOperationId>,
+    ) -> Result<()> {
+        self.app.register_shared_collaboration_proposal(
+            session_id,
+            proposal_id,
+            required_approvers,
+            authorized_approvers,
+            applied_operation_ids,
+        );
+        self.refresh_projection()
+    }
+
+    /// Record a shared collaboration proposal approval or denial through
+    /// app-owned authority and refresh the projection.
+    pub fn record_shared_collaboration_approval(
+        &mut self,
+        approval: CollaborationSharedProposalApproval,
+    ) -> Result<()> {
+        self.app.record_shared_collaboration_approval(approval)?;
+        self.refresh_projection()
+    }
+
+    /// Ingest a remote transport envelope through the app-owned remote runtime
+    /// and refresh the projection.
+    ///
+    /// This is the production ingestion seam used by loopback/fake remote
+    /// backends: session-descriptor (reconnect/offline), PTY/LSP descriptor, and
+    /// proposal-mediated filesystem envelopes flow through the same
+    /// `AppComposition::receive_remote_transport_envelope` path the real remote
+    /// transport uses. Mutations remain proposal-mediated and never touch the
+    /// local workspace disk.
+    pub fn ingest_remote_transport_envelope(
+        &mut self,
+        envelope: RemoteTransportEnvelope,
+    ) -> Result<RemoteOperationOutcome> {
+        let outcome = self.app.receive_remote_transport_envelope(envelope)?;
+        self.refresh_projection()?;
+        Ok(outcome)
+    }
+
+    /// Return projection-safe remote session descriptors owned by the app remote
+    /// runtime. Callers use these as the authoritative source for round-tripping
+    /// modified session-descriptor envelopes (for example reconnect/offline).
+    pub fn remote_session_descriptors(&self) -> Vec<RemoteWorkspaceSessionDescriptor> {
+        self.app.remote_session_projections()
     }
 
     /// Enable the app-owned deterministic debug fixture for test harnesses.
@@ -934,6 +1041,8 @@ impl DesktopRuntime {
                 self.principal.clone(),
             ) {
                 Ok(_) => {
+                    self.workspace_root = root.clone();
+                    self.explorer_expansion.clear();
                     self.set_status(StatusSeverity::Info, format!("Opened {}", root.display()));
                     Ok(DesktopWorkflowOutcome::WorkspaceOpened)
                 }
@@ -2007,6 +2116,14 @@ pub fn run_from_env() -> Result<()> {
 }
 
 fn run_native(config: DesktopLaunchConfig) -> Result<()> {
+    // Reap sandboxes orphaned by a crashed/abandoned lane from a prior
+    // process, before this process's `DesktopRuntime` (and any delegated
+    // lane it may start) comes up. Deliberately not done inside
+    // `DesktopRuntime::open` itself, since that constructor is also used by
+    // the headless test harness and unit tests, which may run concurrently
+    // against the same relative `target/delegated-tasks` path.
+    reap_orphaned_delegated_task_sandboxes_at_startup();
+
     let native_options = desktop_native_options(WINDOW_TITLE);
     eframe::run_native(
         WINDOW_TITLE,
@@ -2020,6 +2137,28 @@ fn run_native(config: DesktopLaunchConfig) -> Result<()> {
     .map_err(|error| anyhow!(error.to_string()))
 }
 
+/// Reaps delegated-task sandboxes orphaned by a crashed/abandoned lane from a
+/// prior process, using the default `target/delegated-tasks` root. Failures
+/// are logged and otherwise ignored — a reap failure must never block desktop
+/// startup.
+fn reap_orphaned_delegated_task_sandboxes_at_startup() {
+    match AppComposition::reap_orphaned_delegated_task_sandboxes() {
+        Ok(removed) if !removed.is_empty() => {
+            eprintln!(
+                "Reaped {} orphaned delegated-task sandbox(es):",
+                removed.len()
+            );
+            for path in &removed {
+                eprintln!("  {}", path.display());
+            }
+        }
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!("Warning: failed to reap orphaned delegated-task sandboxes: {err}");
+        }
+    }
+}
+
 /// Build the native desktop options shared by normal and smoke launches.
 #[must_use]
 pub fn desktop_native_options(title: &str) -> eframe::NativeOptions {
@@ -2031,46 +2170,127 @@ pub fn desktop_native_options(title: &str) -> eframe::NativeOptions {
     }
 }
 
-struct DesktopEframeApp {
+/// Renderer-backed eframe app wrapping a [`DesktopRuntime`].
+///
+/// This is the adapter-local root widget. It is intentionally public so the
+/// headless input harness in `tests/headless_input.rs` can drive the same
+/// keyboard handler that production uses, without spinning up a real
+/// `winit` window.
+pub struct DesktopEframeApp {
     runtime: DesktopRuntime,
+    /// Persistent egui context reused across frames so frame-to-frame input
+    /// state (focus, modifiers, active widgets) survives between calls. A
+    /// fresh context per frame would silently drop that state.
+    ctx: egui::Context,
 }
 
 impl DesktopEframeApp {
-    fn new(runtime: DesktopRuntime) -> Self {
-        Self { runtime }
+    /// Build a desktop eframe app around an already-opened runtime.
+    pub fn new(runtime: DesktopRuntime) -> Self {
+        Self {
+            runtime,
+            ctx: egui::Context::default(),
+        }
+    }
+
+    /// Return a clone of the current app-owned shell projection snapshot.
+    ///
+    /// Used by the headless input harness to assert that synthetic input
+    /// flowed through to app-owned state without ever touching workspace
+    /// storage directly.
+    pub fn runtime_snapshot(&self) -> legion_ui::ShellProjectionSnapshot {
+        self.runtime.projection_snapshot()
+    }
+
+    /// Drive a desktop action through the wrapped runtime.
+    ///
+    /// The eframe app owns the runtime, so headless harnesses use this seam to
+    /// dispatch an action and then assert through [`Self::runtime_snapshot`]
+    /// exactly as production keyboard/command handling would.
+    pub fn handle_action(&mut self, action: DesktopAction) -> Result<DesktopWorkflowOutcome> {
+        self.runtime.handle_action(action)
+    }
+
+    /// Drive a synthetic [`egui::RawInput`] through the same keyboard handler
+    /// that production uses, then return the `egui::FullOutput` produced by
+    /// the frame.
+    ///
+    /// This is the headless test seam for `P1.F1`: it lets a CI test push a
+    /// keystroke into a real `egui::Context` and observe the resulting
+    /// app-owned projection without needing a native window. Renderer output
+    /// is discarded; the harness asserts through the projection snapshot.
+    pub fn run_headless_input(&mut self, raw_input: egui::RawInput) -> egui::FullOutput {
+        let ctx = self.ctx.clone();
+        ctx.run_ui(raw_input, |ui| {
+            // Editor text/shortcuts are routed by `handle_keyboard`; command
+            // palette text is routed through the overlay's `TextEdit`, the same
+            // path production uses. The heavy workbench view is intentionally
+            // not rendered here: it is irrelevant to input routing and rendering
+            // it repeatedly in a headless context is costly.
+            self.handle_keyboard(ui);
+            self.render_command_palette_overlay(ui.ctx());
+        })
+    }
+
+    /// Render one full application frame: keyboard handling, the projection
+    /// view, and the command-palette overlay.
+    fn render_app_frame(&mut self, ui: &mut egui::Ui) {
+        self.handle_keyboard(ui);
+        let snapshot = self.runtime.projection_snapshot();
+        let view_state = self.runtime.projection_view_state();
+        let output = self
+            .runtime
+            .view
+            .render_with_state(ui, &snapshot, &view_state);
+        for action in output.actions {
+            self.runtime.dispatch_ui_action(action);
+        }
+        if output.needs_repaint {
+            ui.ctx().request_repaint();
+        }
+        self.render_command_palette_overlay(ui.ctx());
+        if self.runtime.quit_requested() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     fn handle_keyboard(&mut self, ui: &egui::Ui) {
         let mut actions = Vec::new();
         let snapshot = self.runtime.projection_snapshot();
         let editor_input_enabled = self.runtime.editor_input_enabled(&snapshot);
-        ui.input(|input| {
-            let command = input.modifiers.command;
-            if snapshot.palette_projection.open {
-                if input.key_pressed(egui::Key::Escape) {
-                    actions.push(DesktopAction::ClosePalette);
-                }
-                if input.key_pressed(egui::Key::Enter) {
-                    actions.push(DesktopAction::DispatchPaletteSelection);
-                }
-                if input.key_pressed(egui::Key::ArrowUp) {
-                    actions.push(DesktopAction::MovePaletteSelection { delta: -1 });
-                }
-                if input.key_pressed(egui::Key::ArrowDown) {
-                    actions.push(DesktopAction::MovePaletteSelection { delta: 1 });
-                }
-                if input.key_pressed(egui::Key::PageUp) {
-                    actions.push(DesktopAction::MovePaletteSelection { delta: -8 });
-                }
-                if input.key_pressed(egui::Key::PageDown) {
-                    actions.push(DesktopAction::MovePaletteSelection { delta: 8 });
-                }
-                if input.key_pressed(egui::Key::Tab) {
-                    actions.push(DesktopAction::CompletePaletteSelection);
-                }
-                return;
-            }
 
+        // Clone the input state up front and release the context lock before
+        // doing anything else. `Context::input` takes the context's write lock
+        // for the duration of its closure, and `editor_text_input_actions` /
+        // `ime_composition_state` re-enter the context via `data_mut`/`data`.
+        // Running them inside the closure would deadlock on that lock, so all
+        // handling below works from the cloned snapshot instead.
+        let input = ui.input(|input| input.clone());
+        let command = input.modifiers.command;
+
+        if snapshot.palette_projection.open {
+            if input.key_pressed(egui::Key::Escape) {
+                actions.push(DesktopAction::ClosePalette);
+            }
+            if input.key_pressed(egui::Key::Enter) {
+                actions.push(DesktopAction::DispatchPaletteSelection);
+            }
+            if input.key_pressed(egui::Key::ArrowUp) {
+                actions.push(DesktopAction::MovePaletteSelection { delta: -1 });
+            }
+            if input.key_pressed(egui::Key::ArrowDown) {
+                actions.push(DesktopAction::MovePaletteSelection { delta: 1 });
+            }
+            if input.key_pressed(egui::Key::PageUp) {
+                actions.push(DesktopAction::MovePaletteSelection { delta: -8 });
+            }
+            if input.key_pressed(egui::Key::PageDown) {
+                actions.push(DesktopAction::MovePaletteSelection { delta: 8 });
+            }
+            if input.key_pressed(egui::Key::Tab) {
+                actions.push(DesktopAction::CompletePaletteSelection);
+            }
+        } else {
             if command && input.key_pressed(egui::Key::S) {
                 if input.modifiers.shift {
                     actions.push(DesktopAction::SaveAll);
@@ -2129,6 +2349,12 @@ impl DesktopEframeApp {
                     },
                 });
             }
+            if command && input.modifiers.alt && input.key_pressed(egui::Key::M) {
+                // Return to deterministic Manual mode from any assisted mode.
+                actions.push(DesktopAction::SetProductMode {
+                    mode: DockMode::Manual,
+                });
+            }
             if input.key_pressed(egui::Key::F5) {
                 actions.push(DesktopAction::RefreshExplorer);
             }
@@ -2152,15 +2378,15 @@ impl DesktopEframeApp {
                 .and_then(|buffer_id| ime_composition_state(ui, buffer_id))
                 .is_some_and(|composition| composition.active);
             actions.extend(editor_keyboard_control_actions(
-                input,
+                &input,
                 &snapshot,
                 editor_input_enabled,
                 ime_composition_active,
             ));
-        });
+        }
 
         for action in actions {
-            let _ = self.runtime.handle_action(action);
+            self.runtime.dispatch_ui_action(action);
         }
     }
 
@@ -2218,9 +2444,8 @@ impl DesktopEframeApp {
                         );
                         response.request_focus();
                         if response.changed() {
-                            let _ = self
-                                .runtime
-                                .handle_action(DesktopAction::UpdatePaletteQuery { query });
+                            self.runtime
+                                .dispatch_ui_action(DesktopAction::UpdatePaletteQuery { query });
                         }
 
                         ui.add_space(10.0);
@@ -2282,13 +2507,13 @@ impl DesktopEframeApp {
                                 if row_response.clicked() {
                                     let delta = index as i32 - palette.selected_index as i32;
                                     if delta != 0 {
-                                        let _ = self.runtime.handle_action(
+                                        self.runtime.dispatch_ui_action(
                                             DesktopAction::MovePaletteSelection { delta },
                                         );
                                     }
-                                    let _ = self
-                                        .runtime
-                                        .handle_action(DesktopAction::DispatchPaletteSelection);
+                                    self.runtime.dispatch_ui_action(
+                                        DesktopAction::DispatchPaletteSelection,
+                                    );
                                 }
                             }
                         }
@@ -2299,23 +2524,7 @@ impl DesktopEframeApp {
 
 impl eframe::App for DesktopEframeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.handle_keyboard(ui);
-        let snapshot = self.runtime.projection_snapshot();
-        let view_state = self.runtime.projection_view_state();
-        let output = self
-            .runtime
-            .view
-            .render_with_state(ui, &snapshot, &view_state);
-        for action in output.actions {
-            let _ = self.runtime.handle_action(action);
-        }
-        if output.needs_repaint {
-            ui.ctx().request_repaint();
-        }
-        self.render_command_palette_overlay(ui.ctx());
-        if self.runtime.quit_requested() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        self.render_app_frame(ui);
     }
 }
 
@@ -2451,6 +2660,33 @@ fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {
         })
 }
 
+/// Advance a text coordinate past `inserted`, used to keep batched insertions
+/// within one frame targeting sequential positions rather than the same offset.
+fn advance_text_coordinate(at: TextCoordinate, inserted: &str) -> TextCoordinate {
+    let mut line = at.line;
+    let mut character = at.character;
+    for ch in inserted.chars() {
+        match ch {
+            '\n' => {
+                line = line.saturating_add(1);
+                character = 0;
+            }
+            '\r' => {}
+            _ => character = character.saturating_add(1),
+        }
+    }
+    TextCoordinate {
+        line,
+        character,
+        byte_offset: at
+            .byte_offset
+            .map(|offset| offset.saturating_add(inserted.len() as u64)),
+        utf16_offset: at
+            .utf16_offset
+            .map(|offset| offset.saturating_add(inserted.encode_utf16().count() as u64)),
+    }
+}
+
 fn projected_scroll(snapshot: &ShellProjectionSnapshot) -> ViewportScroll {
     let active = active_buffer_for_input(snapshot);
     if let Some(state) = snapshot
@@ -2486,7 +2722,10 @@ fn editor_text_input_actions(
     let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id else {
         return Vec::new();
     };
-    let at = projected_cursor(snapshot);
+    // Track a running insertion coordinate so multiple text/paste/IME-commit
+    // events batched in a single frame target sequential positions instead of
+    // all re-inserting at the original cursor offset.
+    let mut at = projected_cursor(snapshot);
     let composition_id = ime_composition_state_id(buffer_id);
     let mut composition = ui.ctx().data_mut(|data| {
         data.get_temp::<ImeCompositionProjection>(composition_id)
@@ -2501,12 +2740,14 @@ fn editor_text_input_actions(
                     text: text.clone(),
                     at,
                 });
+                at = advance_text_coordinate(at, text);
             }
             egui::Event::Paste(text) if !text.is_empty() => {
                 actions.push(DesktopAction::ClipboardPaste {
                     text: text.clone(),
                     at,
                 });
+                at = advance_text_coordinate(at, text);
             }
             egui::Event::Copy if !composition.active && composition.preedit.is_empty() => {
                 actions.push(DesktopAction::ClipboardCopy);
@@ -2527,6 +2768,7 @@ fn editor_text_input_actions(
                         text: text.clone(),
                         at,
                     });
+                    at = advance_text_coordinate(at, text);
                 }
                 composition.active = false;
                 composition.preedit.clear();
@@ -2548,6 +2790,16 @@ fn editor_text_input_actions(
     });
 
     actions
+}
+
+/// Test seam for exercising editor text input synthesis without a native window.
+pub fn test_editor_text_input_actions(
+    ui: &egui::Ui,
+    events: &[egui::Event],
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+) -> Vec<DesktopAction> {
+    editor_text_input_actions(ui, events, snapshot, editor_input_enabled)
 }
 
 fn editor_keyboard_control_actions(
@@ -2664,6 +2916,21 @@ fn editor_keyboard_control_actions(
     actions
 }
 
+/// Test seam for exercising editor keyboard-control synthesis without a native window.
+pub fn test_editor_keyboard_control_actions(
+    input: &egui::InputState,
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+    ime_composition_active: bool,
+) -> Vec<DesktopAction> {
+    editor_keyboard_control_actions(
+        input,
+        snapshot,
+        editor_input_enabled,
+        ime_composition_active,
+    )
+}
+
 fn cursor_or_selection_action(
     buffer_id: BufferId,
     cursor: TextCoordinate,
@@ -2726,23 +2993,73 @@ fn ordered_range(first: TextCoordinate, second: TextCoordinate) -> ProtocolTextR
 }
 
 fn open_url_in_system_browser(url: &str) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("open");
-    #[cfg(target_os = "linux")]
-    let mut command = Command::new("xdg-open");
     #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.arg("/C").arg("start").arg("");
-        command
+    {
+        // Open via ShellExecuteW rather than `cmd /C start`, so URL
+        // metacharacters (`&`, `^`, `%`, ...) common in forge/GitLab MR URLs
+        // are not reinterpreted by the cmd parser.
+        open_url_windows(url)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(target_os = "macos")]
+        let mut command = Command::new("open");
+        #[cfg(target_os = "linux")]
+        let mut command = Command::new("xdg-open");
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let mut command = Command::new("open");
+        let status = command.arg(url).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("browser opener exited with status {status}"))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_windows(url: &str) -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut core::ffi::c_void,
+            lp_operation: *const u16,
+            lp_file: *const u16,
+            lp_parameters: *const u16,
+            lp_directory: *const u16,
+            n_show_cmd: i32,
+        ) -> *mut core::ffi::c_void;
+    }
+
+    const SW_SHOWNORMAL: i32 = 1;
+
+    let operation: Vec<u16> = OsStr::new("open").encode_wide().chain(Some(0)).collect();
+    // The URL is passed as the single lpFile argument; the shell treats it as
+    // one opaque string, so embedded metacharacters are not parsed.
+    let file: Vec<u16> = OsStr::new(url).encode_wide().chain(Some(0)).collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            core::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            SW_SHOWNORMAL,
+        )
     };
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let mut command = Command::new("open");
-    let status = command.arg(url).status()?;
-    if status.success() {
+
+    // ShellExecuteW returns a value greater than 32 on success.
+    if result as isize > 32 {
         Ok(())
     } else {
-        Err(anyhow!("browser opener exited with status {status}"))
+        Err(anyhow!(
+            "ShellExecuteW failed to open URL (code {})",
+            result as isize
+        ))
     }
 }
 
@@ -2825,6 +3142,7 @@ mod tests {
                 required_capability: CapabilityId("plugin.command".to_string()),
             })],
             status_label: "loaded".to_string(),
+            permission_review_rows: Vec::new(),
         }
     }
 
@@ -2852,11 +3170,28 @@ mod tests {
             egui::Event::Cut,
             egui::Event::Ime(egui::ImeEvent::Commit("漢".to_string())),
         ];
-        let at = TextCoordinate {
+        // F022: each text/paste/IME-commit event advances the running insertion
+        // coordinate, so batched events target sequential offsets rather than all
+        // re-inserting at the original cursor position.
+        let at_text = TextCoordinate {
             line: 0,
             character: 0,
             byte_offset: Some(0),
             utf16_offset: Some(0),
+        };
+        // After inserting "x" (1 char / 1 byte / 1 utf16).
+        let at_paste = TextCoordinate {
+            line: 0,
+            character: 1,
+            byte_offset: Some(1),
+            utf16_offset: Some(1),
+        };
+        // After pasting "clip" (4 chars / 4 bytes / 4 utf16).
+        let at_ime = TextCoordinate {
+            line: 0,
+            character: 5,
+            byte_offset: Some(5),
+            utf16_offset: Some(5),
         };
 
         egui::__run_test_ui(|ui| {
@@ -2865,17 +3200,17 @@ mod tests {
                 vec![
                     DesktopAction::InsertText {
                         text: "x".to_string(),
-                        at,
+                        at: at_text,
                     },
                     DesktopAction::ClipboardPaste {
                         text: "clip".to_string(),
-                        at,
+                        at: at_paste,
                     },
                     DesktopAction::ClipboardCopy,
                     DesktopAction::ClipboardCut,
                     DesktopAction::ImeCommit {
                         text: "漢".to_string(),
-                        at,
+                        at: at_ime,
                     },
                 ]
             );
@@ -2970,6 +3305,7 @@ mod tests {
             },
             selections: vec![],
             cursor: coordinate(7, 6),
+            cursors: vec![],
             scroll: ViewportScroll {
                 top_line: 0,
                 left_column: 0,

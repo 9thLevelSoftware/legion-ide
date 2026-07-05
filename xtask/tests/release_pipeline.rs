@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -17,11 +18,19 @@ struct TempRepo {
 
 impl TempRepo {
     fn new(name: &str) -> Self {
+        // Process id + monotonic counter keeps the temp dir unique even when
+        // tests run in parallel within the same nanosecond (clock granularity
+        // can be coarser than nanoseconds on some hosts).
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before epoch")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("legion-release-pipeline-{name}-{stamp}"));
+        let pid = std::process::id();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "legion-release-pipeline-{name}-{pid}-{stamp}-{seq}"
+        ));
         fs::create_dir_all(&root).expect("create temp repo root");
         fs::write(
             root.join("Cargo.toml"),
@@ -139,6 +148,37 @@ fn release_pipeline_write_descriptors_is_idempotent() {
 
     assert_eq!(first, second);
     assert_eq!(first_contents, second_contents);
+}
+
+#[test]
+fn release_pipeline_write_descriptors_rejects_file_name_collision() {
+    let repo = TempRepo::new("collision");
+    // Two distinct installer-target names that normalize to the same
+    // descriptor file stem (`legion-desktop-linux-x64`).
+    let installer = |name: &str| InstallerTargetConfig {
+        name: name.to_string(),
+        platform: "linux".to_string(),
+        target: "x86_64-unknown-linux-gnu".to_string(),
+        artifact: "deb".to_string(),
+        build_command: "cargo dist build --target x86_64-unknown-linux-gnu".to_string(),
+        verification_command: "dpkg-deb --info <artifact>".to_string(),
+    };
+    let config = ReleasePipelineConfig {
+        package_name: "legion-desktop".to_string(),
+        dist_tool: "cargo-dist".to_string(),
+        installer_targets: vec![
+            installer("legion-desktop linux x64"),
+            installer("legion-desktop-linux-x64"),
+        ],
+    };
+
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+        .expect("plan release pipeline");
+    let out_dir = repo.path("target/release-pipeline");
+
+    let err = write_descriptors(&plan, &out_dir)
+        .expect_err("colliding descriptor file names should be rejected");
+    assert!(err.contains("collision"), "unexpected error: {err}");
 }
 
 #[test]

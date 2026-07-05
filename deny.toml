@@ -7,13 +7,100 @@
 [advisories]
 unmaintained = "workspace"
 unsound = "workspace"
-yanked = "warn"
+yanked = "deny"
 unused-ignored-advisory = "warn"
-ignore = []
+# RUSTSEC-2026-0194 (quick-xml 0.39.4, quadratic-time attribute-duplicate check):
+# reached only transitively via plist 1.9.0 <- syntect 5.3.0 (bundled/local
+# .tmTheme syntax-highlighting theme parsing, not attacker-controlled network
+# XML). plist 1.9.0 is the latest release on crates.io and pins
+# `quick-xml = "^0.39.2"`, so no in-repo dependency bump can reach the fixed
+# 0.41.0 line (`cargo update -p quick-xml --precise 0.41.0` fails: no matching
+# version satisfies plist's constraint). Upstream plist must relax/bump its
+# quick-xml pin before this can be resolved from our side. Revisit when plist
+# releases a version compatible with quick-xml >=0.41.0.
+ignore = ["RUSTSEC-2026-0194"]
 
 [bans]
-multiple-versions = "warn"
+# Duplicate crate versions fail the gate. The `skip` list below is a REVIEWED
+# BASELINE of unavoidable transitive duplicates pulled by third-party crates at
+# differing versions (the eframe/egui/wgpu/winit/accesskit GUI stack, the
+# objc2/core-foundation Apple stack, the windows-*/redox/linux-raw platform
+# crates, the zbus/zvariant D-Bus stack, proc-macro-crate's newer toml_edit, and
+# wasmtime's newer toml/serde_spanned/wasm-encoder chain pulled in via
+# wasmtime-internal-cache and wast/wat).
+# None are direct workspace dependencies at conflicting versions; resolving them
+# would require forking upstream. For each duplicated crate the NEWEST version is
+# kept as canonical and the older redundant version(s) are skipped. Because the
+# baseline is version-pinned, any NEW duplicate (a new crate, or a new version of
+# an already-listed crate) still fails the gate and must be reviewed here.
+# Re-generate after dependency bumps with: cargo deny check bans
+multiple-versions = "deny"
 wildcards = "allow"
+skip = [
+    { crate = "accesskit_consumer@0.35.0" },
+    { crate = "bit-set@0.8.0" },
+    { crate = "bit-vec@0.8.0" },
+    { crate = "bitflags@1.3.2" },
+    { crate = "block2@0.5.1" },
+    { crate = "calloop@0.13.0" },
+    { crate = "calloop-wayland-source@0.3.0" },
+    { crate = "core-foundation@0.9.4" },
+    { crate = "downcast-rs@1.2.1" },
+    { crate = "foldhash@0.1.5" },
+    { crate = "getrandom@0.2.17" },
+    { crate = "getrandom@0.3.4" },
+    { crate = "hashbrown@0.14.5" },
+    { crate = "hashbrown@0.15.5" },
+    { crate = "hashbrown@0.16.1" },
+    { crate = "jni@0.21.1" },
+    { crate = "jni-sys@0.3.1" },
+    { crate = "linux-raw-sys@0.4.15" },
+    { crate = "objc2@0.5.2" },
+    { crate = "objc2-app-kit@0.2.2" },
+    { crate = "objc2-foundation@0.2.2" },
+    { crate = "objc2-metal@0.2.2" },
+    { crate = "objc2-quartz-core@0.2.2" },
+    { crate = "objc2-ui-kit@0.2.2" },
+    { crate = "r-efi@5.3.0" },
+    { crate = "rand_core@0.6.4" },
+    { crate = "redox_syscall@0.4.1" },
+    { crate = "redox_syscall@0.5.18" },
+    { crate = "rustc-hash@1.1.0" },
+    { crate = "rustix@0.38.44" },
+    { crate = "security-framework@2.11.1" },
+    { crate = "serde_spanned@0.6.9" },
+    { crate = "smithay-client-toolkit@0.19.2" },
+    { crate = "thiserror@1.0.69" },
+    { crate = "thiserror-impl@1.0.69" },
+    { crate = "toml@0.8.23" },
+    { crate = "toml_datetime@0.6.11" },
+    { crate = "toml_datetime@0.7.5+spec-1.1.0" },
+    { crate = "toml_edit@0.22.27" },
+    { crate = "wasm-encoder@0.251.0" },
+    { crate = "windows-sys@0.45.0" },
+    { crate = "windows-sys@0.52.0" },
+    { crate = "windows-sys@0.59.0" },
+    { crate = "windows-sys@0.60.2" },
+    { crate = "windows-targets@0.42.2" },
+    { crate = "windows-targets@0.52.6" },
+    { crate = "windows_aarch64_gnullvm@0.42.2" },
+    { crate = "windows_aarch64_gnullvm@0.52.6" },
+    { crate = "windows_aarch64_msvc@0.42.2" },
+    { crate = "windows_aarch64_msvc@0.52.6" },
+    { crate = "windows_i686_gnu@0.42.2" },
+    { crate = "windows_i686_gnu@0.52.6" },
+    { crate = "windows_i686_gnullvm@0.52.6" },
+    { crate = "windows_i686_msvc@0.42.2" },
+    { crate = "windows_i686_msvc@0.52.6" },
+    { crate = "windows_x86_64_gnu@0.42.2" },
+    { crate = "windows_x86_64_gnu@0.52.6" },
+    { crate = "windows_x86_64_gnullvm@0.42.2" },
+    { crate = "windows_x86_64_gnullvm@0.52.6" },
+    { crate = "windows_x86_64_msvc@0.42.2" },
+    { crate = "windows_x86_64_msvc@0.52.6" },
+    { crate = "winnow@0.7.15" },
+    { crate = "wit-bindgen@0.51.0" },
+]
 
 [licenses]
 # Phase 8 rustls/keyring review notes:
@@ -49,5 +136,10 @@ unused-allowed-license = "warn"
 ignore = true
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+# Fail closed on off-policy sources. The workspace resolves entirely from
+# crates.io (no git or alternate-registry dependencies); allowlists below
+# document the only sanctioned sources.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

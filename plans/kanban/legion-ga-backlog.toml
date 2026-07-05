@@ -1,0 +1,1889 @@
+# Legion IDE — machine-readable Kanban backlog (P0–P9)
+#
+# Generated from .hermes/plans/2026-06-13_173122-legion-current-to-ga-kanban-plan.md
+# (commit-era source of truth: 2026-06-13).
+#
+# Schema is TOML rather than YAML so validation can stay inside the
+# workspace `toml` crate that `xtask` already depends on, with no new
+# external dependency.
+#
+# Required fields per task: id, title, mode, readiness_row, files,
+# dependencies, verification, acceptance, stop_condition.
+# Required fields per feature: id, title. (tasks may be empty.)
+# Required fields per epic: id, title, milestone, readiness_rows.
+# Required top-level: [meta].plan, [meta].milestone.
+#
+# Validation is performed by `cargo run -p xtask -- verify-kanban-backlog`
+# which checks unique ids, required fields, and that every dependency
+# resolves to an epic, feature, or task in the same file.
+#
+# Optional per-task fields: `status` (todo | in-progress | done | blocked;
+# defaults to todo) and `evidence` (path to the evidence file/command output
+# backing the status). A task marked `status = "done"` MUST carry a
+# non-empty `evidence` value; the validator rejects done-without-evidence.
+#
+# Epic mapping to v0.2 milestones: P0→M7, P1-P2→M8, P3-P4→M9, P5→M10, P6→M11, P7-P8→M12, P9→M13
+
+[meta]
+plan = ".hermes/plans/2026-06-13_173122-legion-current-to-ga-kanban-plan.md"
+milestone = "M8"
+
+# ---------------------------------------------------------------------------
+# EPIC P0 — Truth, taxonomy, and Kanban import
+# Readiness rows: all; prerequisite for every milestone.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P0"
+title = "Truth, taxonomy, and Kanban import"
+milestone = "M0"
+readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-REL-001", "PR-AI-001", "PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-001", "PR-VSC-002"]
+
+  [[epics.features]]
+  id = "P0.F1"
+  title = "Canonical mode taxonomy"
+
+    [[epics.features.tasks]]
+    id = "P0.F1.T1"
+    title = "Decide canonical v1 modes: Manual, Assist, Delegate, Legion Workflows; treat Automate as internal/legacy"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["docs/MODES.md", "docs/KEYBOARD_REFERENCE.md", "docs/USER_GUIDE.md", "docs/INDEX.md", "mockups/design.md", "mockups/src/imports/design.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- docs-hygiene", "cargo test -p legion-protocol"]
+    acceptance = ["One mode table exists and is referenced from every doc page that mentions modes."]
+    stop_condition = "Manual mode policy still forbids AI/network/cloud/worker surfaces."
+
+    [[epics.features.tasks]]
+    id = "P0.F1.T2"
+    title = "Update docs/keys/UI/design to the canonical labels"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["docs/MODES.md", "docs/KEYBOARD_REFERENCE.md", "docs/USER_GUIDE.md", "docs/INDEX.md", "mockups/design.md", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P0.F1.T1"]
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["All docs and design surfaces agree on the same mode labels."]
+    stop_condition = "Reject any doc that still uses legacy labels outside the allowlist."
+
+    [[epics.features.tasks]]
+    id = "P0.F1.T3"
+    title = "Add a mode taxonomy regression test in legion-protocol/legion-ui"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-protocol/src/mode_policy.rs", "crates/legion-ui/src/projection.rs", "crates/legion-protocol/tests/mode_taxonomy.rs"]
+    dependencies = ["P0.F1.T1"]
+    verification = ["cargo test -p legion-protocol --test mode_taxonomy", "cargo test -p legion-ui"]
+    acceptance = ["Test asserts every product mode has a label, shortcut, runtime-surface policy, and docs anchor."]
+    stop_condition = "Regression test fails if a new mode is added without a docs anchor or runtime-surface policy."
+
+    [[epics.features.tasks]]
+    id = "P0.F1.T4"
+    title = "Add a docs-hygiene rule/static test rejecting legacy labels"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["xtask/src/docs_hygiene.rs", "docs/hygiene-allowlist.toml"]
+    dependencies = ["P0.F1.T1"]
+    verification = ["cargo run -p xtask -- docs-hygiene", "cargo test -p xtask --test docs_hygiene"]
+    acceptance = ["Legacy labels are rejected outside the archived-evidence allowlist."]
+    stop_condition = "Allowlist is intentionally narrow and reviewed in PR."
+
+  [[epics.features]]
+  id = "P0.F2"
+  title = "Broken and stale docs cleanup"
+
+    [[epics.features.tasks]]
+    id = "P0.F2.T1"
+    title = "Remove/replace plans/legion-customizable-autonomy-continuation-plan-v0.1.md links from README and docs index"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["README.md", "docs/INDEX.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["No broken reference to the missing plan remains."]
+    stop_condition = "If the plan is revived, the link is re-added deliberately."
+
+    [[epics.features.tasks]]
+    id = "P0.F2.T2"
+    title = "Mark older E2E and engineering audit files as supporting/historical in docs index"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["docs/INDEX.md", "plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md", "ENGINEERING_AUDIT.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Historical plan files are clearly marked supporting/historical."]
+    stop_condition = "Do not delete historical evidence; only re-label."
+
+    [[epics.features.tasks]]
+    id = "P0.F2.T3"
+    title = "Add current-state caveat to docs/USER_GUIDE.md (desktop proof vs full readiness)"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["docs/USER_GUIDE.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["New readers see the current product status before historical context."]
+    stop_condition = "Caveat is short and links to the readiness ledger."
+
+    [[epics.features.tasks]]
+    id = "P0.F2.T4"
+    title = "Keep Devil-era historical references allowlisted only in archived evidence"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["docs/hygiene-allowlist.toml", "audit-reports/"]
+    dependencies = ["P0.F2.T2"]
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Devil-era paths appear only in the allowlist and audit-reports/."]
+    stop_condition = "No new doc or projection code references Devil-era naming."
+
+  [[epics.features]]
+  id = "P0.F3"
+  title = "Kanban import schema"
+
+    [[epics.features.tasks]]
+    id = "P0.F3.T1"
+    title = "Convert the GA plan into a machine-readable backlog file (this file)"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["plans/kanban/legion-ga-backlog.toml"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- verify-kanban-backlog", "cargo test -p xtask --test kanban_backlog"]
+    acceptance = ["A Kanban board can be generated without manually interpreting prose."]
+    stop_condition = "Validation fails closed on missing or orphan entries."
+
+    [[epics.features.tasks]]
+    id = "P0.F3.T2"
+    title = "Add fields: epic, feature, task, dependency, mode, readiness row, files, verification, acceptance"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["plans/kanban/legion-ga-backlog.toml", "xtask/src/kanban_backlog.rs"]
+    dependencies = ["P0.F3.T1"]
+    verification = ["cargo test -p xtask --test kanban_backlog", "cargo run -p xtask -- verify-kanban-backlog"]
+    acceptance = ["All Kanban cards carry the required fields, enforced by the validator."]
+    stop_condition = "Adding a card without a verification or acceptance line fails the validator."
+
+    [[epics.features.tasks]]
+    id = "P0.F3.T3"
+    title = "Add an xtask subcommand that validates required fields and orphan dependencies"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["xtask/src/kanban_backlog.rs", "xtask/src/main.rs", "xtask/tests/kanban_backlog.rs"]
+    dependencies = ["P0.F3.T1", "P0.F3.T2"]
+    verification = ["cargo test -p xtask --test kanban_backlog", "cargo run -p xtask -- verify-kanban-backlog"]
+    acceptance = ["`verify-kanban-backlog` exits non-zero on any structural issue and reports the offending card."]
+    stop_condition = "Re-running on a known-good file is idempotent and prints a summary line."
+
+# ---------------------------------------------------------------------------
+# EPIC P1 — Renderer-backed Manual IDE proof
+# Readiness rows: PR-UI-001, PR-UI-002, PR-LANG-001, PR-LANG-002, PR-REL-001.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P1"
+title = "Renderer-backed Manual IDE proof"
+milestone = "M1"
+readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-REL-001"]
+
+  [[epics.features]]
+  id = "P1.F1"
+  title = "Real desktop input harness"
+
+    [[epics.features.tasks]]
+    id = "P1.F1.T1"
+    title = "Write failing test that sends synthetic key/mouse input into DesktopEframeApp::update"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-desktop/tests/headless_input.rs", "crates/legion-desktop/src/workflow.rs"]
+    dependencies = ["P0.F3.T1"]
+    verification = ["cargo test -p legion-desktop --test headless_input", "cargo run -p xtask -- no-egui-textedit"]
+    acceptance = ["CI proves at least one keystroke-to-app-authority path through desktop UI."]
+    stop_condition = "Test must fail before the harness seam is added, then pass after."
+
+    [[epics.features.tasks]]
+    id = "P1.F1.T2"
+    title = "Add a headless egui/eframe test harness seam without giving renderer product authority"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-desktop/src/harness.rs", "crates/legion-desktop/Cargo.toml"]
+    dependencies = ["P1.F1.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo run -p xtask -- no-egui-textedit"]
+    acceptance = ["legion-ui remains projection-only."]
+    stop_condition = "If legion-ui gains product authority, revert the seam."
+
+    [[epics.features.tasks]]
+    id = "P1.F1.T3"
+    title = "Port representative projection-only tests to the harness (open/edit/save/search/palette/mode switch)"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/tests/headless_input.rs", "crates/legion-desktop/tests/projection_rendering.rs"]
+    dependencies = ["P1.F1.T2"]
+    verification = ["cargo test -p legion-desktop --test headless_input", "cargo test -p legion-desktop --test projection_rendering"]
+    acceptance = ["Each representative workflow has at least one headless test driving it through the harness."]
+    stop_condition = "Re-enable the projection-only tests; do not delete them."
+
+    [[epics.features.tasks]]
+    id = "P1.F1.T4"
+    title = "Emit gui-headless-input-evidence.md with exact command output and scenario list"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["plans/evidence/gui-productization/gui-headless-input-evidence.md"]
+    dependencies = ["P1.F1.T3"]
+    verification = ["cargo run -p xtask -- docs-hygiene", "ls plans/evidence/gui-productization/gui-headless-input-evidence.md"]
+    acceptance = ["Evidence document exists and cites the exact SHA + command output it was generated from."]
+    stop_condition = "Stop if evidence is from an older SHA than the one being claimed as ready."
+
+  [[epics.features]]
+  id = "P1.F2"
+  title = "Manual layout and shell completion"
+
+    [[epics.features.tasks]]
+    id = "P1.F2.T1"
+    title = "Make Manual mode hide all AI/provider/cloud/worker surfaces by construction"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-ui/src/projection.rs", "crates/legion-protocol/src/mode_policy.rs", "crates/legion-protocol/tests/manual_mode_silence.rs"]
+    dependencies = ["P0.F1.T3"]
+    verification = ["cargo test -p legion-protocol --test manual_mode_silence"]
+    acceptance = ["Tests prove forbidden panels are absent in Manual mode."]
+    stop_condition = "If a new AI-visible chrome slips in, the test must fail closed."
+
+    [[epics.features.tasks]]
+    id = "P1.F2.T2"
+    title = "Complete top bar, status bar, dock layout, file tree, editor tabs, terminal/tests panel, problems/symbols panels"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-desktop/src/view/dock.rs", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P1.F1.T2"]
+    verification = ["cargo test -p legion-desktop", "cargo run -p xtask -- no-egui-textedit"]
+    acceptance = ["Every layout region has a projection and an integration test."]
+    stop_condition = "Do not introduce egui::TextEdit in the code canvas."
+
+    [[epics.features.tasks]]
+    id = "P1.F2.T3"
+    title = "Add keyboard-only navigation for all Manual surfaces"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/keymap.rs", "crates/legion-desktop/tests/keyboard_nav.rs"]
+    dependencies = ["P1.F2.T2"]
+    verification = ["cargo test -p legion-desktop --test keyboard_nav"]
+    acceptance = ["Every interactive surface can be reached and operated without a pointer."]
+    stop_condition = "Stop if any focusable surface lacks a keyboard path."
+
+    [[epics.features.tasks]]
+    id = "P1.F2.T4"
+    title = "Persist/restore layout metadata only (no code, no AI context)"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-storage/src/layout.rs", "crates/legion-app/src/lib.rs"]
+    dependencies = ["P1.F2.T2"]
+    verification = ["cargo test -p legion-storage", "cargo test -p legion-app"]
+    acceptance = ["Restart restores the layout; nothing AI-relevant is persisted."]
+    stop_condition = "If AI context is ever persisted, revert the change and add a regression test."
+
+  [[epics.features]]
+  id = "P1.F3"
+  title = "Code canvas productization"
+
+    [[epics.features.tasks]]
+    id = "P1.F3.T1"
+    title = "Preserve/verify no egui::TextEdit in the code canvas"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-desktop/src/view/code_canvas_painter.rs", "xtask/no-egui-textedit.toml"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- no-egui-textedit"]
+    acceptance = ["The CI gate fails if egui::TextEdit is reintroduced into the code canvas."]
+    stop_condition = "Allowlist must remain empty for the code canvas."
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
+
+    [[epics.features.tasks]]
+    id = "P1.F3.T2"
+    title = "Implement/harden row virtualization, gutter lanes, selection, cursor, multi-cursor projection, scroll behavior"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-editor/src/buffer_view.rs", "crates/legion-editor/src/selection.rs"]
+    dependencies = ["P1.F2.T2"]
+    verification = ["cargo test -p legion-editor", "cargo test -p legion-desktop"]
+    acceptance = ["Editor is usable via rendered desktop UI, not only API tests."]
+    stop_condition = "Stop if scroll jank exceeds the perf budget at GP-1 scale."
+
+    [[epics.features.tasks]]
+    id = "P1.F3.T3"
+    title = "Wire syntax/token styling from current legion-index/LSP data into the painter"
+    mode = "Manual"
+    readiness_row = "PR-LANG-001"
+    files = ["crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-index/src/highlight.rs", "crates/legion-lsp/src/diagnostics.rs"]
+    dependencies = ["P2.F1.T3"]
+    verification = ["cargo test -p legion-index", "cargo test -p legion-lsp"]
+    acceptance = ["Token styles follow the active grammar; LSP diagnostics appear in the gutter and problems panel."]
+    stop_condition = "Do not commit a custom style system outside the existing tokens."
+
+    [[epics.features.tasks]]
+    id = "P1.F3.T4"
+    title = "Add input conformance tests for keyboard, mouse, selection, clipboard, IME event plumbing, and focus"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/tests/input_conformance.rs", "crates/legion-editor/src/input.rs"]
+    dependencies = ["P1.F3.T2"]
+    verification = ["cargo test -p legion-desktop --test input_conformance"]
+    acceptance = ["Input-to-paint budget evidence is generated."]
+    stop_condition = "Stop on any input path that lacks a regression test."
+
+  [[epics.features]]
+  id = "P1.F4"
+  title = "Large-file streaming mode"
+
+    [[epics.features.tasks]]
+    id = "P1.F4.T1"
+    title = "Add failing 100MB open/scroll test marked ignored only until implementation starts"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-editor/tests/large_file_streaming.rs"]
+    dependencies = ["P1.F3.T2"]
+    verification = ["cargo test -p legion-editor --test large_file_streaming -- --ignored"]
+    acceptance = ["Test exists in ignored form, then is un-ignored once streaming mode is implemented."]
+    stop_condition = "Test must fail for the intended reason (streaming not implemented), not for setup reasons."
+
+    [[epics.features.tasks]]
+    id = "P1.F4.T2"
+    title = "Add streaming/chunked snapshot path that does not materialize full text for large files"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-text/src/rope.rs", "crates/legion-editor/src/buffer.rs", "crates/legion-text/src/snapshot.rs"]
+    dependencies = ["P1.F4.T1"]
+    verification = ["cargo test -p legion-text", "cargo test -p legion-editor"]
+    acceptance = ["100MB file opens within budget, scrolls, and does not block typing."]
+    stop_condition = "Stop if full text is materialized for any file above the streaming threshold."
+
+    [[epics.features.tasks]]
+    id = "P1.F4.T3"
+    title = "Update ActiveBufferProjection to distinguish full, degraded, and streaming states"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-protocol/src/projection.rs", "crates/legion-ui/src/projection.rs", "crates/legion-editor/src/buffer_view.rs"]
+    dependencies = ["P1.F4.T2"]
+    verification = ["cargo test -p legion-protocol", "cargo test -p legion-editor"]
+    acceptance = ["Projection explicitly enumerates the three states and consumers branch on it."]
+    stop_condition = "Do not add a fourth implicit state without updating tests."
+
+    [[epics.features.tasks]]
+    id = "P1.F4.T4"
+    title = "Wire UI badge and disabled-feature explanations for streaming mode"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P1.F4.T3"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
+    acceptance = ["Streaming mode is visible in the UI with a plain-language explanation."]
+    stop_condition = "Do not hide streaming-mode limitations from the user."
+
+    [[epics.features.tasks]]
+    id = "P1.F4.T5"
+    title = "Un-ignore/enforce the 100MB workload in the perf harness"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["xtask/src/perf_harness.rs", "xtask/tests/perf_harness.rs"]
+    dependencies = ["P1.F4.T2", "P8.F4.T1"]
+    verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness"]
+    acceptance = ["100MB workload is in the standard perf-harness run, not a side script."]
+    stop_condition = "Stop if the workload is hidden behind an opt-in flag in CI."
+
+# ---------------------------------------------------------------------------
+# EPIC P2 — Language, terminal, debug, search, and git daily-driver loop
+# Readiness rows: PR-LANG-001, PR-LANG-002, PR-UI-002.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P2"
+title = "Language, terminal, debug, search, and git daily-driver loop"
+milestone = "M1"
+readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
+
+  [[epics.features]]
+  id = "P2.F1"
+  title = "Rust LSP product path"
+
+    [[epics.features.tasks]]
+    id = "P2.F1.T1"
+    title = "Write a failing integration test launching a mock/rust-analyzer-compatible server through the product registry"
+    mode = "Manual"
+    readiness_row = "PR-LANG-001"
+    files = ["crates/legion-lsp/tests/rust_analyzer_launch.rs", "crates/legion-lsp/src/registry.rs"]
+    dependencies = []
+    verification = ["cargo test -p legion-lsp --test rust_analyzer_launch"]
+    acceptance = ["A mock server launch is proven through the product registry, not a test-only path."]
+    stop_condition = "Stop if the test bypasses the production registry."
+
+    [[epics.features.tasks]]
+    id = "P2.F1.T2"
+    title = "Add rust-analyzer binary resolution, workspace config, lifecycle supervision, restart/backoff, and status projection"
+    mode = "Manual"
+    readiness_row = "PR-LANG-001"
+    files = ["crates/legion-lsp/src/registry.rs", "crates/legion-lsp/src/supervision.rs", "crates/legion-protocol/src/projection.rs"]
+    dependencies = ["P2.F1.T1"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-protocol"]
+    acceptance = ["rust-analyzer lifecycle is supervised and projected; restart/backoff behavior is testable."]
+    stop_condition = "Do not silently swallow supervision failures."
+
+    [[epics.features.tasks]]
+    id = "P2.F1.T3"
+    title = "Wire diagnostics to gutter/problems panel through desktop harness"
+    mode = "Manual"
+    readiness_row = "PR-LANG-001"
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-lsp/src/diagnostics.rs", "crates/legion-app/src/lib.rs"]
+    dependencies = ["P1.F1.T2", "P2.F1.T2"]
+    verification = ["cargo test -p legion-desktop --test headless_input", "cargo test -p legion-lsp"]
+    acceptance = ["In the Legion repo, a real Rust diagnostic appears and clears after fixing."]
+    stop_condition = "Stop if diagnostics are wired only to the app API and not to the desktop harness."
+
+    [[epics.features.tasks]]
+    id = "P2.F1.T4"
+    title = "Wire completion, hover, definition, references, symbols, inlay hints, code lenses, and runnables"
+    mode = "Manual"
+    readiness_row = "PR-LANG-002"
+    files = ["crates/legion-lsp/src/features.rs", "crates/legion-desktop/src/view.rs"]
+    dependencies = ["P2.F1.T3"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-desktop"]
+    acceptance = ["Each LSP feature is reachable from the editor and is covered by a test."]
+    stop_condition = "Do not implement features that are not requested by the LSP server's capability set."
+
+    [[epics.features.tasks]]
+    id = "P2.F1.T5"
+    title = "Route write-side actions (rename, format, code actions, organize imports) through proposals"
+    mode = "Manual"
+    readiness_row = "PR-LANG-002"
+    files = ["crates/legion-lsp/src/features.rs", "crates/legion-app/src/proposal.rs", "crates/legion-protocol/src/proposal.rs"]
+    dependencies = ["P2.F1.T4", "P3.F1.T2"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-app"]
+    acceptance = ["Rename across files is reviewable and reversible."]
+    stop_condition = "Write-side actions must never bypass the proposal pipeline."
+
+  [[epics.features]]
+  id = "P2.F2"
+  title = "Real terminal runtime"
+
+    [[epics.features.tasks]]
+    id = "P2.F2.T1"
+    title = "Write failing test expecting trusted workspace terminal launch to produce real output"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-app/tests/terminal_workflow.rs"]
+    dependencies = []
+    verification = ["cargo test -p legion-app --test terminal_workflow"]
+    acceptance = ["Manual mode can run `cargo test` in a terminal tab and capture exit status metadata."]
+    stop_condition = "Test must fail because runtime is disabled, not because of fixture plumbing."
+
+    [[epics.features.tasks]]
+    id = "P2.F2.T2"
+    title = "Promote legion-terminal runtime behind explicit capability policy, not test-only fixture toggles"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-terminal/src/lib.rs", "crates/legion-app/src/lib.rs", "crates/legion-security/src/policy.rs"]
+    dependencies = ["P2.F2.T1"]
+    verification = ["cargo test -p legion-terminal", "cargo test -p legion-app", "cargo test -p legion-security"]
+    acceptance = ["Denied/untrusted terminal paths still fail closed."]
+    stop_condition = "Do not add a second ad-hoc test-only flag for terminal activation."
+
+    [[epics.features.tasks]]
+    id = "P2.F2.T3"
+    title = "Add terminal renderer grid, scrollback, input, resize, selection/copy, and kill escalation"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-terminal/src/grid.rs", "crates/legion-desktop/src/view/terminal_panel.rs"]
+    dependencies = ["P2.F2.T2"]
+    verification = ["cargo test -p legion-terminal", "cargo test -p legion-desktop"]
+    acceptance = ["Terminal panel renders, scrolls, accepts input, and respects resize events."]
+    stop_condition = "Stop if kill escalation silently drops a running process."
+
+    [[epics.features.tasks]]
+    id = "P2.F2.T4"
+    title = "Add OSC 133/OSC 7 command boundary and cwd/exit-code tracking"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-terminal/src/osc.rs", "crates/legion-terminal/src/session.rs"]
+    dependencies = ["P2.F2.T3"]
+    verification = ["cargo test -p legion-terminal"]
+    acceptance = ["OSC sequences are parsed and exposed as metadata; cwd/exit-code are queryable."]
+    stop_condition = "Do not trust shell-emitted metadata as security policy."
+
+    [[epics.features.tasks]]
+    id = "P2.F2.T5"
+    title = "Windows ConPTY parity task"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-terminal/src/conpty.rs", "crates/legion-platform/src/windows.rs"]
+    dependencies = ["P2.F2.T3"]
+    verification = ["cargo test -p legion-terminal --features windows", "cargo test -p legion-platform --features windows"]
+    acceptance = ["Trusted terminal runs equivalently on Windows via ConPTY."]
+    stop_condition = "Stop if Windows fallback is silently denied without surfacing it to the user."
+
+  [[epics.features]]
+  id = "P2.F3"
+  title = "Debug/test explorer runtime"
+
+    [[epics.features.tasks]]
+    id = "P2.F3.T1"
+    title = "Add DAP client runtime or promote existing state machine beyond fixture use"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-debug/src/dap.rs", "crates/legion-debug/src/state.rs", "crates/legion-app/src/lib.rs"]
+    dependencies = ["P2.F1.T2"]
+    verification = ["cargo test -p legion-debug", "cargo test -p legion-app"]
+    acceptance = ["DAP state machine drives a real adapter lifecycle, not only fixtures."]
+    stop_condition = "Do not block on full DAP coverage before at least one adapter is end-to-end."
+
+    [[epics.features.tasks]]
+    id = "P2.F3.T2"
+    title = "Wire CodeLLDB for Rust with policy-gated adapter resolution"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-debug/src/adapters/codelldb.rs", "crates/legion-security/src/policy.rs"]
+    dependencies = ["P2.F3.T1"]
+    verification = ["cargo test -p legion-debug", "cargo test -p legion-security"]
+    acceptance = ["Adapter binary resolution is policy-gated; untrusted workspaces cannot launch debug adapters."]
+    stop_condition = "Do not add a 'trust all adapters' switch."
+
+    [[epics.features.tasks]]
+    id = "P2.F3.T3"
+    title = "Persist breakpoints and hit them in a fixture Rust binary"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-debug/src/breakpoints.rs", "crates/legion-storage/src/debug.rs", "crates/legion-debug/tests/breakpoint_hit.rs"]
+    dependencies = ["P2.F3.T2"]
+    verification = ["cargo test -p legion-debug --test breakpoint_hit"]
+    acceptance = ["User can set a breakpoint, run a Rust test/binary, hit it, inspect locals, and continue."]
+    stop_condition = "Stop if a hit breakpoint is not surfaced to the user in a reachable panel."
+
+    [[epics.features.tasks]]
+    id = "P2.F3.T4"
+    title = "Build test explorer from LSP runnables / cargo test list"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-app/src/test_explorer.rs", "crates/legion-lsp/src/runnables.rs", "crates/legion-desktop/src/view/test_panel.rs"]
+    dependencies = ["P2.F1.T4"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-lsp"]
+    acceptance = ["Test list refreshes from LSP runnables and cargo test discovery."]
+    stop_condition = "Do not fall back to running `cargo test --list` on every refresh if LSP runnables are available."
+
+    [[epics.features.tasks]]
+    id = "P2.F3.T5"
+    title = "Expose debug/test results as metadata-only evidence for agents"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-agent/src/evidence.rs", "crates/legion-debug/src/evidence.rs"]
+    dependencies = ["P2.F3.T3"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-debug"]
+    acceptance = ["Agents see structured debug/test evidence; raw payloads stay in the secure boundary."]
+    stop_condition = "Stop if raw stack traces are exposed to agents without redaction."
+
+  [[epics.features]]
+  id = "P2.F4"
+  title = "Search/navigation/fuzzy command surface"
+
+    [[epics.features.tasks]]
+    id = "P2.F4.T1"
+    title = "Wire workspace search UI to real search APIs with streaming results and cancellation"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/view/search_panel.rs", "crates/legion-project/src/search.rs", "crates/legion-index/src/search.rs"]
+    dependencies = ["P1.F2.T2"]
+    verification = ["cargo test -p legion-project", "cargo test -p legion-index", "cargo test -p legion-desktop"]
+    acceptance = ["Search is fast enough for the Legion repo."]
+    stop_condition = "Stop if cancellation does not actually stop the underlying search job."
+
+    [[epics.features.tasks]]
+    id = "P2.F4.T2"
+    title = "Add multi-file search/replace as a workspace-edit proposal"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-app/src/proposal.rs", "crates/legion-project/src/search.rs", "crates/legion-protocol/src/proposal.rs"]
+    dependencies = ["P2.F4.T1", "P3.F2.T1"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-project"]
+    acceptance = ["Replace never mutates files outside proposal review."]
+    stop_condition = "Stop if any replace path writes without going through a proposal."
+
+    [[epics.features.tasks]]
+    id = "P2.F4.T3"
+    title = "Add fuzzy file finder, symbol finder, recent buffer switcher, and command palette coverage report"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/palette.rs", "crates/legion-index/src/fuzzy.rs", "crates/legion-desktop/tests/palette_coverage.rs"]
+    dependencies = ["P2.F4.T1"]
+    verification = ["cargo test -p legion-desktop --test palette_coverage"]
+    acceptance = ["Every command exposed in the palette is reachable from a keybinding or command-id list."]
+    stop_condition = "Stop if a palette entry lacks a test that proves it can dispatch."
+
+    [[epics.features.tasks]]
+    id = "P2.F4.T4"
+    title = "Add 50K/100K-file fixture benchmarks"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["xtask/src/perf_harness.rs", "plans/evidence/perf-harness-fixtures/"]
+    dependencies = ["P1.F1.T2"]
+    verification = ["cargo run -p xtask -- perf-harness"]
+    acceptance = ["Search is bounded for large fixtures."]
+    stop_condition = "Stop if the fixture is regenerated as a side effect of running the harness."
+
+  [[epics.features]]
+  id = "P2.F5"
+  title = "Git/SCM product UX"
+
+    [[epics.features.tasks]]
+    id = "P2.F5.T1"
+    title = "Wire live gutter diff/blame to desktop painter"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-project/src/git.rs"]
+    dependencies = ["P1.F3.T2"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
+    acceptance = ["GP-1: open Legion repo, edit, see diff, stage hunk, commit, and optionally push."]
+    stop_condition = "Stop if diff/blame data is read once and never refreshed."
+
+    [[epics.features.tasks]]
+    id = "P2.F5.T2"
+    title = "Add status panel, hunk/range staging, commit editor, push/fetch/pull actions"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/src/view/scm_panel.rs", "crates/legion-project/src/git.rs"]
+    dependencies = ["P2.F5.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
+    acceptance = ["Hunk staging and commit work end-to-end through the UI."]
+    stop_condition = "Do not bypass the workspace's path policy for push/fetch/pull."
+
+    [[epics.features.tasks]]
+    id = "P2.F5.T3"
+    title = "Add branch/worktree manager and agent worktree visibility"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-project/src/git.rs", "crates/legion-agent/src/worktree.rs", "crates/legion-desktop/src/view/scm_panel.rs"]
+    dependencies = ["P2.F5.T2", "P5.F2.T2"]
+    verification = ["cargo test -p legion-project", "cargo test -p legion-agent", "cargo test -p legion-desktop"]
+    acceptance = ["Agent worktrees are visible in the SCM panel; manual worktrees are managed by the user."]
+    stop_condition = "Stop if agent worktrees are hidden from the user."
+
+    [[epics.features.tasks]]
+    id = "P2.F5.T4"
+    title = "Keep network/auth operations policy-visible"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-project/src/git.rs", "crates/legion-security/src/policy.rs"]
+    dependencies = ["P2.F5.T2"]
+    verification = ["cargo test -p legion-security", "cargo test -p legion-project"]
+    acceptance = ["Every network/auth operation shows its policy decision to the user."]
+    stop_condition = "Stop if a network operation is allowed without an audit row."
+
+# ---------------------------------------------------------------------------
+# EPIC P3 — Proposal apply, checkpoints, and trust review
+# Readiness rows: PR-AI-002, PR-LANG-001/002, PR-ENT-002 later.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P3"
+title = "Proposal apply, checkpoints, and trust review"
+milestone = "M2"
+readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
+
+  [[epics.features]]
+  id = "P3.F1"
+  title = "Apply activation audit"
+
+    [[epics.features.tasks]]
+    id = "P3.F1.T1"
+    title = "Inventory every mutation route (manual save, text edit, closed-file, workspace edit, LSP action, AI proposal, batch, plugin, remote, collaboration)"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["docs/ARCHITECTURE_AUTHORITY_BOUNDARIES.md", "plans/evidence/mutation-route-inventory.md"]
+    dependencies = ["P0.F3.T1"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-security"]
+    acceptance = ["Every mutation route is documented with its current activation state."]
+    stop_condition = "Stop if any known route is missing from the inventory."
+
+    [[epics.features.tasks]]
+    id = "P3.F1.T2"
+    title = "For each accepted route, write failing stale/conflict/audit tests before enabling product apply"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/tests/apply_activation.rs", "crates/legion-project/src/proposal.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-app --test apply_activation"]
+    acceptance = ["Trusted local proposals can apply safely."]
+    stop_condition = "Test must fail for the intended reason (audit not wired) before implementation."
+
+    [[epics.features.tasks]]
+    id = "P3.F1.T3"
+    title = "Keep plugin/remote/collaboration/terminal-command apply routes denied until their own epics activate them"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-security/src/policy.rs", "crates/legion-app/src/lib.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-security", "cargo test -p legion-app"]
+    acceptance = ["Denied future surfaces remain visibly denied."]
+    stop_condition = "Stop if a denied surface becomes enabled without an explicit ADR + tests."
+
+    [[epics.features.tasks]]
+    id = "P3.F1.T4"
+    title = "Remove or narrow any `runtime_apply_disabled`-style flag only after evidence exists"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/src/lib.rs", "crates/legion-security/src/policy.rs", "crates/legion-app/tests/apply_activation.rs"]
+    dependencies = ["P3.F1.T2"]
+    verification = ["cargo test -p legion-app --test apply_activation", "cargo test -p legion-security"]
+    acceptance = ["Flags are removed/narrowed only with a paired test that proves the new behavior."]
+    stop_condition = "Stop if a flag is removed without replacing it with a more specific policy."
+
+  [[epics.features]]
+  id = "P3.F2"
+  title = "Multi-file proposal review surface"
+
+    [[epics.features.tasks]]
+    id = "P3.F2.T1"
+    title = "Build multibuffer/excerpt diff surface over existing snapshots and anchors"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-protocol/src/proposal.rs", "crates/legion-app/src/proposal.rs", "crates/legion-editor/src/diff.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-protocol", "cargo test -p legion-app", "cargo test -p legion-editor"]
+    acceptance = ["A 5-file AI/agent proposal can be reviewed, partially accepted, applied, and undone."]
+    stop_condition = "Stop if the diff surface duplicates a separate buffer model outside the proposal DTOs."
+
+    [[epics.features.tasks]]
+    id = "P3.F2.T2"
+    title = "Add per-file and per-hunk accept/reject/edit-in-place"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/src/proposal.rs", "crates/legion-desktop/src/view/proposal_review.rs"]
+    dependencies = ["P3.F2.T1"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-desktop"]
+    acceptance = ["Each hunk can be accepted, rejected, or edited in place within the review surface."]
+    stop_condition = "Stop if a per-hunk decision cannot be undone."
+
+    [[epics.features.tasks]]
+    id = "P3.F2.T3"
+    title = "Add evidence panel: test results, command summaries, context manifest, risk rules, provenance"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/src/proposal.rs", "crates/legion-desktop/src/view/proposal_review.rs", "crates/legion-agent/src/evidence.rs"]
+    dependencies = ["P3.F2.T1", "P4.F2.T1"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-agent"]
+    acceptance = ["Evidence panel shows structured fields, not freeform text dumps."]
+    stop_condition = "Stop if the evidence panel is allowed to render raw provider output."
+
+    [[epics.features.tasks]]
+    id = "P3.F2.T4"
+    title = "Add keyboard-first review workflow"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/keymap.rs", "crates/legion-desktop/tests/keyboard_nav.rs"]
+    dependencies = ["P3.F2.T2", "P1.F2.T3"]
+    verification = ["cargo test -p legion-desktop --test keyboard_nav"]
+    acceptance = ["Every review action is reachable from the keyboard."]
+    stop_condition = "Stop if any review action is mouse-only."
+
+  [[epics.features]]
+  id = "P3.F3"
+  title = "Checkpoints and rollback UX"
+
+    [[epics.features.tasks]]
+    id = "P3.F3.T1"
+    title = "Auto-create checkpoint before AI/agent proposal apply and batch operations"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/src/checkpoint.rs", "crates/legion-storage/src/checkpoint.rs", "crates/legion-app/src/proposal.rs"]
+    dependencies = ["P3.F1.T2"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-storage"]
+    acceptance = ["Every apply/batch leaves a checkpoint that can be restored."]
+    stop_condition = "Stop if a checkpoint is created but not surfaced to the user."
+
+    [[epics.features.tasks]]
+    id = "P3.F3.T2"
+    title = "Add checkpoint timeline and restore command"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/src/checkpoint.rs", "crates/legion-desktop/src/view/checkpoint_panel.rs"]
+    dependencies = ["P3.F3.T1"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-desktop"]
+    acceptance = ["Restore is a product feature, not just a hidden batch rollback primitive."]
+    stop_condition = "Stop if the timeline hides checkpoints that exist."
+
+    [[epics.features.tasks]]
+    id = "P3.F3.T3"
+    title = "Add test for apply -> manual edit -> checkpoint restore preserving non-conflicting manual edits"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/tests/checkpoint_restore.rs", "crates/legion-app/src/checkpoint.rs"]
+    dependencies = ["P3.F3.T2"]
+    verification = ["cargo test -p legion-app --test checkpoint_restore"]
+    acceptance = ["Restore does not stomp manual edits that did not conflict with the apply."]
+    stop_condition = "Stop if the test cannot enumerate what was preserved."
+
+    [[epics.features.tasks]]
+    id = "P3.F3.T4"
+    title = "Record checkpoint/restore metadata in audit ledger"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-storage/src/audit.rs", "crates/legion-app/src/checkpoint.rs"]
+    dependencies = ["P3.F3.T1"]
+    verification = ["cargo test -p legion-storage", "cargo test -p legion-app"]
+    acceptance = ["Every checkpoint and restore is queryable from the audit ledger."]
+    stop_condition = "Stop if a checkpoint cannot be correlated back to its triggering apply."
+
+  [[epics.features]]
+  id = "P3.F4"
+  title = "Graduated approvals and risk gates"
+
+    [[epics.features.tasks]]
+    id = "P3.F4.T1"
+    title = "Define deterministic risk rules: path scope, file count, deletion ratio, dependency/lockfile touch, migrations, secrets proximity, binary/generated file changes"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-security/src/risk.rs", "crates/legion-protocol/src/risk.rs", "crates/legion-security/tests/risk_rules.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-security --test risk_rules"]
+    acceptance = ["Each rule has a stable id and an enumerated test case."]
+    stop_condition = "Stop if a rule has no unit test for at least one deny and one allow case."
+
+    [[epics.features.tasks]]
+    id = "P3.F4.T2"
+    title = "Add envelope config for auto-approval of explicitly low-risk changes only"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-security/src/policy.rs", "crates/legion-app/src/proposal.rs", "xtask/legion-policy.example.toml"]
+    dependencies = ["P3.F4.T1"]
+    verification = ["cargo test -p legion-security", "cargo test -p legion-app"]
+    acceptance = ["Auto-approval is opt-in and cites deterministic rule IDs."]
+    stop_condition = "Stop if auto-approval can fire without a matching rule id in the audit row."
+
+    [[epics.features.tasks]]
+    id = "P3.F4.T3"
+    title = "Add visible risk strip and approval queue"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/approval_queue.rs", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P3.F4.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
+    acceptance = ["Medium/high-risk proposals pause and explain why."]
+    stop_condition = "Stop if a high-risk proposal can apply silently."
+
+    [[epics.features.tasks]]
+    id = "P3.F4.T4"
+    title = "Optional model-assisted classifier may recommend risk but never override policy/human authority"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/classifier.rs", "crates/legion-security/src/policy.rs"]
+    dependencies = ["P3.F4.T1"]
+    verification = ["cargo test -p legion-ai", "cargo test -p legion-security"]
+    acceptance = ["Classifier output is advisory; policy + human still gate the apply."]
+    stop_condition = "Stop if a classifier output can change a deterministic rule outcome."
+
+# ---------------------------------------------------------------------------
+# EPIC P4 — Assist mode product loop
+# Readiness rows: PR-AI-001, PR-AI-002.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P4"
+title = "Assist mode product loop"
+milestone = "M2"
+readiness_rows = ["PR-AI-001", "PR-AI-002"]
+
+  [[epics.features]]
+  id = "P4.F1"
+  title = "Provider activation and policy UX"
+
+    [[epics.features.tasks]]
+    id = "P4.F1.T1"
+    title = "Add provider setup UI for local-first default, BYOK hosted providers, and air-gap denial"
+    mode = "Assist"
+    readiness_row = "PR-AI-001"
+    files = ["crates/legion-desktop/src/view/provider_setup.rs", "crates/legion-ai-providers/src/lib.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-ai-providers", "cargo test -p legion-desktop"]
+    acceptance = ["Hosted provider call is impossible without explicit workspace consent."]
+    stop_condition = "Stop if a hosted provider is enabled by a single default toggle."
+
+    [[epics.features.tasks]]
+    id = "P4.F1.T2"
+    title = "Store keys through OS keyring/retention primitives; never raw config files"
+    mode = "Assist"
+    readiness_row = "PR-AI-001"
+    files = ["crates/legion-storage/src/secrets.rs", "crates/legion-ai-providers/src/lib.rs"]
+    dependencies = ["P4.F1.T1"]
+    verification = ["cargo test -p legion-storage", "cargo test -p legion-ai-providers"]
+    acceptance = ["Provider keys are never written to a tracked config file."]
+    stop_condition = "Stop if any test path leaves a key on disk."
+
+    [[epics.features.tasks]]
+    id = "P4.F1.T3"
+    title = "Add provider capability matrix for tools, structured output, streaming, vision, context length, thinking modes, and cost usage"
+    mode = "Assist"
+    readiness_row = "PR-AI-001"
+    files = ["crates/legion-ai-providers/src/capabilities.rs", "crates/legion-protocol/src/capability.rs"]
+    dependencies = ["P4.F1.T1"]
+    verification = ["cargo test -p legion-ai-providers", "cargo test -p legion-protocol"]
+    acceptance = ["Capabilities are queryable per provider and gated at activation time."]
+    stop_condition = "Stop if a capability is assumed without an explicit provider declaration."
+
+    [[epics.features.tasks]]
+    id = "P4.F1.T4"
+    title = "Add live/recorded smoke tests for local and hosted paths where credentials are available"
+    mode = "Assist"
+    readiness_row = "PR-AI-001"
+    files = ["crates/legion-ai-providers/tests/smoke.rs", "evals/recorded/"]
+    dependencies = ["P4.F1.T3"]
+    verification = ["cargo test -p legion-ai-providers --test smoke", "cargo run -p xtask -- legion-bench --mode recorded"]
+    acceptance = ["Recorded smoke tests run in offline CI; live smoke tests are gated by credential availability."]
+    stop_condition = "Stop if a smoke test silently skips on the default path."
+
+  [[epics.features]]
+  id = "P4.F2"
+  title = "Context manifest and privacy inspector"
+
+    [[epics.features.tasks]]
+    id = "P4.F2.T1"
+    title = "Assemble context from file, selection, symbols, diagnostics, terminal excerpts, memory, and rules"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/manifest.rs", "crates/legion-protocol/src/manifest.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-ai", "cargo test -p legion-protocol"]
+    acceptance = ["Manifest is a structured DTO, not a freeform prompt."]
+    stop_condition = "Stop if manifest items are added that bypass redaction."
+
+    [[epics.features.tasks]]
+    id = "P4.F2.T2"
+    title = "Show manifest before invocation with per-item exclusion"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/manifest_panel.rs", "crates/legion-ai/src/manifest.rs"]
+    dependencies = ["P4.F2.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-ai"]
+    acceptance = ["User can answer 'what left my machine?' before each AI run."]
+    stop_condition = "Stop if any item is sent before the user can exclude it."
+
+    [[epics.features.tasks]]
+    id = "P4.F2.T3"
+    title = "Add byte-for-byte egress equality test between manifest and sent request after redaction"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/tests/egress_equality.rs", "crates/legion-ai/src/manifest.rs"]
+    dependencies = ["P4.F2.T1"]
+    verification = ["cargo test -p legion-ai --test egress_equality"]
+    acceptance = ["The bytes sent equal the manifest minus redacted items, with no other delta."]
+    stop_condition = "Stop if the test cannot be made deterministic across providers."
+
+    [[epics.features.tasks]]
+    id = "P4.F2.T4"
+    title = "Add post-run privacy inspector with retention/deletion handles"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/privacy_inspector.rs", "crates/legion-retention/src/lib.rs"]
+    dependencies = ["P4.F2.T2"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-retention"]
+    acceptance = ["User can answer 'what left my machine?' after each AI run."]
+    stop_condition = "Stop if deletion does not actually remove the stored payload."
+
+  [[epics.features]]
+  id = "P4.F3"
+  title = "Ghost text and assistant rail"
+
+    [[epics.features.tasks]]
+    id = "P4.F3.T1"
+    title = "Wire ghost text to provider registry with cancellation/dismiss/accept feedback"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/ghost_text.rs", "crates/legion-editor/src/inline.rs"]
+    dependencies = ["P4.F1.T3", "P1.F3.T2"]
+    verification = ["cargo test -p legion-ai", "cargo test -p legion-editor"]
+    acceptance = ["Assist mode is useful without granting direct mutation authority."]
+    stop_condition = "Stop if ghost text can be auto-applied without an explicit accept."
+
+    [[epics.features.tasks]]
+    id = "P4.F3.T2"
+    title = "Add assistant rail commands: explain, fix, test, doc, refactor"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/rail.rs", "crates/legion-desktop/src/view/assistant_rail.rs"]
+    dependencies = ["P4.F3.T1"]
+    verification = ["cargo test -p legion-ai", "cargo test -p legion-desktop"]
+    acceptance = ["Each rail command is a tracked capability with a test."]
+    stop_condition = "Stop if a rail command can mutate without a proposal."
+
+    [[epics.features.tasks]]
+    id = "P4.F3.T3"
+    title = "Add streaming markdown/codeblock UI with apply-as-proposal buttons"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/assistant_rail.rs", "crates/legion-ai/src/streaming.rs"]
+    dependencies = ["P4.F3.T2", "P3.F2.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-ai"]
+    acceptance = ["Each streamed code block is rendered as an apply-as-proposal affordance."]
+    stop_condition = "Stop if apply bypasses the proposal pipeline."
+
+    [[epics.features.tasks]]
+    id = "P4.F3.T4"
+    title = "Add telemetry for suggestion latency/acceptance only under metadata/consent policy"
+    mode = "Assist"
+    readiness_row = "PR-AI-001"
+    files = ["crates/legion-observability/src/telemetry.rs", "crates/legion-ai/src/telemetry.rs"]
+    dependencies = ["P4.F3.T1"]
+    verification = ["cargo test -p legion-observability", "cargo test -p legion-ai"]
+    acceptance = ["Telemetry is metadata-only by default and is opt-in for richer fields."]
+    stop_condition = "Stop if telemetry is enabled before the consent gate is in place."
+
+  [[epics.features]]
+  id = "P4.F4"
+  title = "Inline edit loop"
+
+    [[epics.features.tasks]]
+    id = "P4.F4.T1"
+    title = "Selection/cursor instruction produces streaming diff overlay anchored to current text"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/inline.rs", "crates/legion-editor/src/inline.rs"]
+    dependencies = ["P4.F3.T1"]
+    verification = ["cargo test -p legion-ai", "cargo test -p legion-editor"]
+    acceptance = ["GP-2 works on a real repo: explain -> refactor -> review manifest -> apply -> undo."]
+    stop_condition = "Stop if the overlay ever desyncs from the buffer anchors."
+
+    [[epics.features.tasks]]
+    id = "P4.F4.T2"
+    title = "Accept/reject per hunk routes through proposal apply"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/inline.rs", "crates/legion-app/src/proposal.rs"]
+    dependencies = ["P4.F4.T1", "P3.F2.T2"]
+    verification = ["cargo test -p legion-ai", "cargo test -p legion-app"]
+    acceptance = ["Each inline hunk is applied through the same proposal pipeline as multi-file proposals."]
+    stop_condition = "Stop if inline hunk apply has a separate audit row from the proposal ledger."
+
+    [[epics.features.tasks]]
+    id = "P4.F4.T3"
+    title = "Undo integrates with editor history and checkpoint ledger"
+    mode = "Assist"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-app/src/checkpoint.rs", "crates/legion-editor/src/history.rs"]
+    dependencies = ["P4.F4.T2", "P3.F3.T1"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-editor"]
+    acceptance = ["Undo restores the prior buffer state and a checkpoint entry exists for the apply."]
+    stop_condition = "Stop if undo is silently skipped when the apply came from inline."
+
+# ---------------------------------------------------------------------------
+# EPIC P5 — Delegate mode agent harness
+# Readiness rows: PR-AI-002, PR-ENT-002 later, security.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P5"
+title = "Delegate mode agent harness"
+milestone = "M3"
+readiness_rows = ["PR-AI-002", "PR-ENT-002"]
+
+  [[epics.features]]
+  id = "P5.F1"
+  title = "Tool registry and execution loop"
+
+    [[epics.features.tasks]]
+    id = "P5.F1.T1"
+    title = "Add schema-validated tools: read, grep, glob, outline, edit-as-proposal, terminal command, MCP passthrough"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/tools.rs", "crates/legion-protocol/src/tools.rs", "crates/legion-agent/tests/tools_schema.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-agent --test tools_schema", "cargo test -p legion-protocol"]
+    acceptance = ["Native agent can complete a scoped test-add task with audited tool calls."]
+    stop_condition = "Stop if a tool is registered without a JSON schema test."
+
+    [[epics.features.tasks]]
+    id = "P5.F1.T2"
+    title = "Route every tool call through capability broker and observability causality chain"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/loop.rs", "crates/legion-security/src/policy.rs", "crates/legion-observability/src/audit.rs"]
+    dependencies = ["P5.F1.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-security", "cargo test -p legion-observability"]
+    acceptance = ["Every tool call has a paired audit row with the same causality id."]
+    stop_condition = "Stop if a tool call can execute without an audit row."
+
+    [[epics.features.tasks]]
+    id = "P5.F1.T3"
+    title = "Add retry/error feedback protocol for invalid tool calls"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/loop.rs", "crates/legion-protocol/src/tools.rs"]
+    dependencies = ["P5.F1.T2"]
+    verification = ["cargo test -p legion-agent"]
+    acceptance = ["Invalid tool calls are reported back to the model with structured errors."]
+    stop_condition = "Stop if a tool call retry loop can run unbounded."
+
+    [[epics.features.tasks]]
+    id = "P5.F1.T4"
+    title = "Add bounded output redaction and truncation policy"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/loop.rs", "crates/legion-ai/src/redaction.rs"]
+    dependencies = ["P5.F1.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-ai"]
+    acceptance = ["Tool output is bounded; secrets and large blobs are redacted before reaching the model."]
+    stop_condition = "Stop if a redaction rule is added without a test fixture for it."
+
+  [[epics.features]]
+  id = "P5.F2"
+  title = "Sandbox and worktree isolation"
+
+    [[epics.features.tasks]]
+    id = "P5.F2.T1"
+    title = "Implement OS sandbox layer: Seatbelt on macOS, bubblewrap/Landlock on Linux, restricted token/AppContainer or documented fallback on Windows"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-sandbox/src/seatbelt.rs", "crates/legion-sandbox/src/landlock.rs", "crates/legion-sandbox/src/windows.rs", "crates/legion-sandbox/src/lib.rs"]
+    dependencies = ["P3.F1.T1"]
+    verification = ["cargo test -p legion-sandbox", "cargo test -p legion-security"]
+    acceptance = ["Attempts to write outside scope or exfiltrate without permission fail closed and audit."]
+    stop_condition = "Stop if any platform silently falls back to 'no sandbox' without surfacing it."
+
+    [[epics.features.tasks]]
+    id = "P5.F2.T2"
+    title = "Ensure worker write scope is a disposable worktree/copy, not main workspace"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/worktree.rs", "crates/legion-project/src/worktree.rs"]
+    dependencies = ["P5.F2.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-project"]
+    acceptance = ["Worker writes are always inside a disposable scope; main workspace is never the direct target."]
+    stop_condition = "Stop if a worker can be configured to write to main without an explicit override."
+
+    [[epics.features.tasks]]
+    id = "P5.F2.T3"
+    title = "Add network egress policy and escape-attempt tests"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-sandbox/src/network.rs", "crates/legion-sandbox/tests/escape_attempts.rs", "crates/legion-security/src/policy.rs"]
+    dependencies = ["P5.F2.T1"]
+    verification = ["cargo test -p legion-sandbox --test escape_attempts", "cargo test -p legion-security"]
+    acceptance = ["Each escape attempt fixture fails closed and is logged in the audit ledger."]
+    stop_condition = "Stop if any escape-attempt fixture is allowlisted instead of denied."
+
+    [[epics.features.tasks]]
+    id = "P5.F2.T4"
+    title = "Surface sandbox strength/weakness in UI"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/sandbox_panel.rs", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P5.F2.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
+    acceptance = ["User can see which sandbox is active and any platform-specific caveats."]
+    stop_condition = "Stop if a weak sandbox is implied to be strong in the UI."
+
+  [[epics.features]]
+  id = "P5.F3"
+  title = "Delegate task UX"
+
+    [[epics.features.tasks]]
+    id = "P5.F3.T1"
+    title = "Build scope picker: files/module/repo, risk tolerance, allowed tools, forbidden paths"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/scope_picker.rs", "crates/legion-agent/src/scope.rs", "crates/legion-protocol/src/scope.rs"]
+    dependencies = ["P3.F4.T1", "P5.F1.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-agent", "cargo test -p legion-protocol"]
+    acceptance = ["Scope is a structured DTO; forbidden paths are enforced at tool-call time."]
+    stop_condition = "Stop if scope is stored as freeform text."
+
+    [[epics.features.tasks]]
+    id = "P5.F3.T2"
+    title = "Show worker live status, plan, tool calls, test evidence, and proposal bundle"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/worker_panel.rs", "crates/legion-agent/src/evidence.rs"]
+    dependencies = ["P5.F1.T2", "P3.F2.T3"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-agent"]
+    acceptance = ["GP-3 works on Legion itself: scoped task -> worker -> evidence -> review -> apply."]
+    stop_condition = "Stop if any field is silently omitted from the worker panel."
+
+    [[epics.features.tasks]]
+    id = "P5.F3.T3"
+    title = "Add cancellation/reap flow"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/loop.rs", "crates/legion-agent/src/worktree.rs"]
+    dependencies = ["P5.F1.T2"]
+    verification = ["cargo test -p legion-agent"]
+    acceptance = ["Cancelled workers stop accepting tool calls and reap their worktree + sandbox."]
+    stop_condition = "Stop if a cancelled worker can still write to its worktree."
+
+    [[epics.features.tasks]]
+    id = "P5.F3.T4"
+    title = "Add failure recovery states: blocked, needs approval, validation failed, conflict"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/state.rs", "crates/legion-desktop/src/view/worker_panel.rs"]
+    dependencies = ["P5.F3.T2", "P3.F4.T3"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-desktop"]
+    acceptance = ["Each state has an explicit UI affordance and a recovery test."]
+    stop_condition = "Stop if a state transitions silently into 'done' from 'failed'."
+
+# ---------------------------------------------------------------------------
+# EPIC P6 — Legion Workflows fleet console
+# Readiness rows: PR-AI-002, PR-ENT-002 later.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P6"
+title = "Legion Workflows fleet console"
+milestone = "M4"
+readiness_rows = ["PR-AI-002", "PR-ENT-002"]
+
+  [[epics.features]]
+  id = "P6.F1"
+  title = "Editable plan/spec artifact"
+
+    [[epics.features.tasks]]
+    id = "P6.F1.T1"
+    title = "Directive creates editable requirements/design/tasks plan artifact"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/plan.rs", "crates/legion-protocol/src/plan.rs", "crates/legion-desktop/src/view/plan_editor.rs"]
+    dependencies = ["P5.F1.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-protocol", "cargo test -p legion-desktop"]
+    acceptance = ["Workflow never starts from opaque instruction text; user can edit the plan first."]
+    stop_condition = "Stop if the plan is generated and immediately handed to the coordinator without user review."
+
+    [[epics.features.tasks]]
+    id = "P6.F1.T2"
+    title = "Plan revisions are diffable and audited"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/plan.rs", "crates/legion-storage/src/plan.rs"]
+    dependencies = ["P6.F1.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-storage"]
+    acceptance = ["Each plan revision has an audit row and a diffable representation."]
+    stop_condition = "Stop if revisions overwrite without preserving prior versions."
+
+    [[epics.features.tasks]]
+    id = "P6.F1.T3"
+    title = "Approved plan becomes DAG input for workflow coordinator"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/dag.rs", "crates/legion-agent/src/coordinator.rs"]
+    dependencies = ["P6.F1.T1"]
+    verification = ["cargo test -p legion-agent"]
+    acceptance = ["Approved plan produces a DAG with stable node ids; rejected plans do not produce a DAG."]
+    stop_condition = "Stop if the DAG is generated before plan approval."
+
+  [[epics.features]]
+  id = "P6.F2"
+  title = "Runtime activation of coordinator"
+
+    [[epics.features.tasks]]
+    id = "P6.F2.T1"
+    title = "Wire LegionWorkflowCoordinator to real Delegate workers"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/coordinator.rs", "crates/legion-agent/src/dag.rs"]
+    dependencies = ["P5.F1.T2", "P6.F1.T3"]
+    verification = ["cargo test -p legion-agent"]
+    acceptance = ["Coordinator dispatches tasks to real workers; mock workers are out of the product path."]
+    stop_condition = "Stop if the coordinator can be used with a mock worker outside of a tagged test."
+
+    [[epics.features.tasks]]
+    id = "P6.F2.T2"
+    title = "Schedule dependencies and parallel lanes"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/scheduler.rs", "crates/legion-agent/src/dag.rs"]
+    dependencies = ["P6.F2.T1"]
+    verification = ["cargo test -p legion-agent"]
+    acceptance = ["3-task DAG with one dependency runs with two parallel workers."]
+    stop_condition = "Stop if scheduler is allowed to skip a declared dependency."
+
+    [[epics.features.tasks]]
+    id = "P6.F2.T3"
+    title = "Detect conflicts and pause for human resolution"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/conflict.rs", "crates/legion-agent/src/coordinator.rs"]
+    dependencies = ["P6.F2.T2"]
+    verification = ["cargo test -p legion-agent"]
+    acceptance = ["A conflict scenario pauses the workflow and surfaces a human-resolution affordance."]
+    stop_condition = "Stop if a conflict can be auto-resolved without an explicit human sign-off."
+
+    [[epics.features.tasks]]
+    id = "P6.F2.T4"
+    title = "Aggregate verification evidence and merge-readiness"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/merge_readiness.rs", "crates/legion-agent/src/evidence.rs"]
+    dependencies = ["P6.F2.T2", "P3.F2.T3"]
+    verification = ["cargo test -p legion-agent"]
+    acceptance = ["Merge-readiness report cites verification evidence per branch/task."]
+    stop_condition = "Stop if merge-readiness can be true without an evidence row."
+
+  [[epics.features]]
+  id = "P6.F3"
+  title = "Fleet console UI"
+
+    [[epics.features.tasks]]
+    id = "P6.F3.T1"
+    title = "Kanban columns: Assigned, In Progress, Waiting on Human, Testing, Done"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/fleet_board.rs", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P6.F2.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
+    acceptance = ["Board columns are driven by coordinator state, not by hand-edited state."]
+    stop_condition = "Stop if a column is computed outside the coordinator."
+
+    [[epics.features.tasks]]
+    id = "P6.F3.T2"
+    title = "Cards: owner/model/status/progress/files/risk/test status/mini diff/last activity"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/fleet_card.rs", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P6.F3.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
+    acceptance = ["Each field is sourced from a structured coordinator projection, not a freeform string."]
+    stop_condition = "Stop if a card field is computed by parsing log text."
+
+    [[epics.features.tasks]]
+    id = "P6.F3.T3"
+    title = "Agent comm stream tags: PLAN, WRITE, TEST, REVIEW, ERROR, APPROVAL, COMPLETE"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/comm.rs", "crates/legion-desktop/src/view/agent_comm.rs"]
+    dependencies = ["P6.F3.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-desktop"]
+    acceptance = ["Each tag is enumerated and the stream renderer handles each one explicitly."]
+    stop_condition = "Stop if a freeform message can render in the comm stream without a tag."
+
+    [[epics.features.tasks]]
+    id = "P6.F3.T4"
+    title = "Risk monitor, approval queue, kill switch, budget meter"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-desktop/src/view/risk_monitor.rs", "crates/legion-agent/src/budget.rs", "crates/legion-agent/src/kill.rs"]
+    dependencies = ["P3.F4.T3", "P6.F3.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-agent"]
+    acceptance = ["GP-4 works end-to-end from UI."]
+    stop_condition = "Stop if the kill switch can be silently ignored by a worker."
+
+  [[epics.features]]
+  id = "P6.F4"
+  title = "External agent interoperability"
+
+    [[epics.features.tasks]]
+    id = "P6.F4.T1"
+    title = "Ratify ACP host scope or local adapter bridge scope"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["docs/adrs/", "plans/dependency-policy.md"]
+    dependencies = ["P0.F3.T1"]
+    verification = ["cargo run -p xtask -- check-deps", "cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["A fresh ADR exists and the dependency policy reflects the choice."]
+    stop_condition = "Stop if ACP is integrated before an ADR is ratified."
+
+    [[epics.features.tasks]]
+    id = "P6.F4.T2"
+    title = "Run one external agent in a Legion-governed worktree/sandbox"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/external.rs", "crates/legion-agent/src/worktree.rs", "crates/legion-sandbox/src/lib.rs"]
+    dependencies = ["P5.F2.T1", "P6.F4.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-sandbox"]
+    acceptance = ["External agent completes a scoped task without bypassing Legion policy."]
+    stop_condition = "Stop if the external agent can read outside the assigned scope."
+
+    [[epics.features.tasks]]
+    id = "P6.F4.T3"
+    title = "Convert external edits into Legion proposals and external logs into evidence artifacts"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-agent/src/external.rs", "crates/legion-app/src/proposal.rs", "crates/legion-agent/src/evidence.rs"]
+    dependencies = ["P6.F4.T2", "P3.F2.T1"]
+    verification = ["cargo test -p legion-agent", "cargo test -p legion-app"]
+    acceptance = ["Every external edit becomes a Legion proposal; every external log becomes an evidence row."]
+    stop_condition = "Stop if an external edit can land in the main workspace without a proposal."
+
+# ---------------------------------------------------------------------------
+# EPIC P7 — Plugin and extension runtime
+# Readiness rows: PR-VSC-001, PR-VSC-002 deferred.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P7"
+title = "Plugin and extension runtime"
+milestone = "M5"
+readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
+
+  [[epics.features]]
+  id = "P7.F1"
+  title = "WASM plugin host for v1 extension set"
+
+    [[epics.features.tasks]]
+    id = "P7.F1.T1"
+    title = "Add ADR/dependency-policy update for wasmtime or selected runtime"
+    mode = "Assist"
+    readiness_row = "PR-VSC-001"
+    files = ["docs/adrs/", "plans/dependency-policy.md", "Cargo.toml", "Cargo.lock"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- check-deps", "cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Dependency policy admits the chosen runtime and the ADR explains the choice."]
+    stop_condition = "Stop if the runtime is added to the workspace before the ADR is merged."
+
+    [[epics.features.tasks]]
+    id = "P7.F1.T2"
+    title = "Define minimal WIT ABI for grammars, themes, and LSP adapters"
+    mode = "Assist"
+    readiness_row = "PR-VSC-001"
+    files = ["crates/legion-plugin/wit/grammars.wit", "crates/legion-plugin/wit/themes.wit", "crates/legion-plugin/wit/lsp.wit"]
+    dependencies = ["P7.F1.T1"]
+    verification = ["cargo build -p legion-plugin"]
+    acceptance = ["WIT files compile and generate host bindings."]
+    stop_condition = "Stop if the WIT ABI drifts from a real plugin fixture's expected shape."
+
+    [[epics.features.tasks]]
+    id = "P7.F1.T3"
+    title = "Enforce quotas, crash containment, capability denial, and audit"
+    mode = "Assist"
+    readiness_row = "PR-VSC-001"
+    files = ["crates/legion-plugin/src/host.rs", "crates/legion-security/src/policy.rs", "crates/legion-plugin/tests/quotas.rs"]
+    dependencies = ["P7.F1.T2"]
+    verification = ["cargo test -p legion-plugin --test quotas", "cargo test -p legion-security"]
+    acceptance = ["A fixture .wasm plugin loads, runs, and cannot escape permissions."]
+    stop_condition = "Stop if a quota is allowed to be silently disabled per-plugin."
+
+    [[epics.features.tasks]]
+    id = "P7.F1.T4"
+    title = "Add hostile-plugin tests: loop, OOM, capability probing, workspace access"
+    mode = "Assist"
+    readiness_row = "PR-VSC-001"
+    files = ["crates/legion-plugin/tests/hostile.rs", "crates/legion-plugin/fixtures/hostile/"]
+    dependencies = ["P7.F1.T3"]
+    verification = ["cargo test -p legion-plugin --test hostile"]
+    acceptance = ["Each hostile fixture is contained and the audit row records the attempt."]
+    stop_condition = "Stop if a hostile fixture is allowlisted instead of denied."
+
+  [[epics.features]]
+  id = "P7.F2"
+  title = "Extension distribution and management UI"
+
+    [[epics.features.tasks]]
+    id = "P7.F2.T1"
+    title = "Add install/update/remove UI for signed extension artifacts"
+    mode = "Assist"
+    readiness_row = "PR-VSC-001"
+    files = ["crates/legion-desktop/src/view/extensions_panel.rs", "crates/legion-plugin/src/registry.rs"]
+    dependencies = ["P7.F1.T3"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-plugin"]
+    acceptance = ["User can install a safe bundled grammar/theme extension through product UI."]
+    stop_condition = "Stop if an unsigned artifact is allowed to install by default."
+
+    [[epics.features.tasks]]
+    id = "P7.F2.T2"
+    title = "Add manifest permission review"
+    mode = "Assist"
+    readiness_row = "PR-VSC-001"
+    files = ["crates/legion-desktop/src/view/extensions_panel.rs", "crates/legion-plugin/src/manifest.rs"]
+    dependencies = ["P7.F2.T1"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-plugin"]
+    acceptance = ["Each install prompts the user with a structured permission list."]
+    stop_condition = "Stop if permissions are summarized in a single 'trust this extension' toggle."
+
+    [[epics.features.tasks]]
+    id = "P7.F2.T3"
+    title = "Add tampered artifact rejection test"
+    mode = "Assist"
+    readiness_row = "PR-VSC-001"
+    files = ["crates/legion-plugin/tests/tampered.rs", "crates/legion-plugin/src/registry.rs"]
+    dependencies = ["P7.F2.T1"]
+    verification = ["cargo test -p legion-plugin --test tampered"]
+    acceptance = ["A tampered artifact is refused before any code runs."]
+    stop_condition = "Stop if a tampered artifact is allowed to load with a warning instead of a refusal."
+
+    [[epics.features.tasks]]
+    id = "P7.F2.T4"
+    title = "Keep VSIX metadata ingestion as compatibility reporting only; do not execute Node extensions"
+    mode = "Assist"
+    readiness_row = "PR-VSC-002"
+    files = ["crates/legion-vscode-compat/src/manifest.rs", "crates/legion-vscode-compat/src/lib.rs", "crates/legion-vscode-compat/tests/compat_report.rs"]
+    dependencies = []
+    verification = ["cargo test -p legion-vscode-compat --test compat_report"]
+    acceptance = ["VSIX metadata is reported but never executed; no Node runtime is required."]
+    stop_condition = "Stop if a VSIX extension path is wired to a Node runtime."
+
+# ---------------------------------------------------------------------------
+# EPIC P8 — Release, packaging, performance, accessibility
+# Readiness rows: PR-REL-001, PR-UI-001/002.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P8"
+title = "Release, packaging, performance, accessibility"
+milestone = "M5"
+readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
+
+  [[epics.features]]
+  id = "P8.F1"
+  title = "Real release signing and notarization"
+
+    [[epics.features.tasks]]
+    id = "P8.F1.T1"
+    title = "Define non-committed signer config: env/keyring/KMS/CI secret reference"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["xtask/release-pipeline.example.toml", "docs/OPERATOR_RUNBOOK.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- release-pipeline --dry-run", "cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Signer config exists in operator docs; no signing secret is committed."]
+    stop_condition = "Stop if any signing secret appears in the tracked tree."
+
+    [[epics.features.tasks]]
+    id = "P8.F1.T2"
+    title = "Add real signing path for macOS Developer ID/notarization, Windows Authenticode, Linux signatures"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["xtask/src/release_pipeline.rs", "xtask/release-pipeline.example.toml"]
+    dependencies = ["P8.F1.T1"]
+    verification = ["cargo run -p xtask -- release-pipeline --dry-run", "cargo run -p xtask -- verify-release-pipeline"]
+    acceptance = ["Release descriptors carry real signer/verifier status or an explicit unsigned-beta status."]
+    stop_condition = "Stop if a dry-run descriptor is silently accepted as a real signed descriptor."
+
+    [[epics.features.tasks]]
+    id = "P8.F1.T3"
+    title = "Add fresh-VM Gatekeeper/SmartScreen/install smoke evidence"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["plans/evidence/release/", ".github/workflows/"]
+    dependencies = ["P8.F1.T2"]
+    verification = ["ls plans/evidence/release/"]
+    acceptance = ["Fresh-VM install evidence is archived and cited from the readiness ledger."]
+    stop_condition = "Stop if smoke evidence is older than the current release descriptor."
+
+    [[epics.features.tasks]]
+    id = "P8.F1.T4"
+    title = "Preserve unsigned-beta policy if shipping before credentials exist"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["docs/OPERATOR_RUNBOOK.md", "plans/product-readiness-ledger.md"]
+    dependencies = ["P8.F1.T2"]
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["If unsigned-beta is shipped, the policy is documented in operator docs and readiness ledger."]
+    stop_condition = "Stop if unsigned-beta is shipped without the explicit policy."
+
+  [[epics.features]]
+  id = "P8.F2"
+  title = "Auto-update and rollback"
+
+    [[epics.features.tasks]]
+    id = "P8.F2.T1"
+    title = "Choose updater strategy and signed manifest format"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["docs/adrs/", "xtask/release-pipeline.example.toml"]
+    dependencies = ["P8.F1.T1"]
+    verification = ["cargo run -p xtask -- check-deps", "cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Strategy and manifest format are documented in an ADR and reflected in the pipeline config."]
+    stop_condition = "Stop if the updater is wired before the ADR is ratified."
+
+    [[epics.features.tasks]]
+    id = "P8.F2.T2"
+    title = "Implement stable/preview channels"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["xtask/src/release_pipeline.rs", "crates/legion-app/src/updater.rs"]
+    dependencies = ["P8.F2.T1"]
+    verification = ["cargo run -p xtask -- release-pipeline --channel stable", "cargo run -p xtask -- release-pipeline --channel preview"]
+    acceptance = ["Each channel produces its own descriptor with no cross-channel leakage."]
+    stop_condition = "Stop if a preview descriptor can be installed as stable."
+
+    [[epics.features.tasks]]
+    id = "P8.F2.T3"
+    title = "Test update -> rollback on all three OSes"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["plans/evidence/release/", ".github/workflows/"]
+    dependencies = ["P8.F2.T2"]
+    verification = ["ls plans/evidence/release/"]
+    acceptance = ["GP-5 update and rollback works."]
+    stop_condition = "Stop if rollback evidence is older than the current release descriptor."
+
+  [[epics.features]]
+  id = "P8.F3"
+  title = "Crash reporting and diagnostics"
+
+    [[epics.features.tasks]]
+    id = "P8.F3.T1"
+    title = "Add opt-in first-run crash consent"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["crates/legion-app/src/first_run.rs", "crates/legion-observability/src/telemetry.rs"]
+    dependencies = ["P4.F3.T4"]
+    verification = ["cargo test -p legion-app", "cargo test -p legion-observability"]
+    acceptance = ["Crash reporting is opt-in; the choice is stored in the audit ledger."]
+    stop_condition = "Stop if crash reporting is on by default."
+
+    [[epics.features.tasks]]
+    id = "P8.F3.T2"
+    title = "Integrate minidump capture and symbol upload"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["crates/legion-observability/src/minidump.rs", "crates/legion-app/src/lib.rs"]
+    dependencies = ["P8.F3.T1"]
+    verification = ["cargo test -p legion-observability", "cargo test -p legion-app"]
+    acceptance = ["Induced crash produces symbolicated report only when consented."]
+    stop_condition = "Stop if symbol upload runs before consent is recorded."
+
+    [[epics.features.tasks]]
+    id = "P8.F3.T3"
+    title = "Ensure diagnostics exports are metadata-only unless user explicitly includes raw data"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["crates/legion-observability/src/export.rs", "crates/legion-app/src/diagnostics.rs"]
+    dependencies = ["P8.F3.T2"]
+    verification = ["cargo test -p legion-observability", "cargo test -p legion-app"]
+    acceptance = ["Default export is metadata-only; raw-data export is a separate, opt-in action."]
+    stop_condition = "Stop if raw data can be exported as part of a default diagnostics bundle."
+
+  [[epics.features]]
+  id = "P8.F4"
+  title = "Real performance harness"
+
+    [[epics.features.tasks]]
+    id = "P8.F4.T1"
+    title = "Replace stand-ins with real input-to-paint, scroll jank, startup, memory ceiling, Legion repo, 100K-file fixture, and 100MB file workloads"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["xtask/src/perf_harness.rs", "xtask/tests/perf_harness.rs", "plans/evidence/perf-harness-fixtures/"]
+    dependencies = ["P1.F4.T2", "P2.F4.T4"]
+    verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness"]
+    acceptance = ["xtask perf-harness enforces product workloads, not only synthetic stand-ins."]
+    stop_condition = "Stop if any workload is hidden behind a non-default flag."
+
+    [[epics.features.tasks]]
+    id = "P8.F4.T2"
+    title = "Run on macOS, Windows, Linux CI matrix"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = [".github/workflows/"]
+    dependencies = ["P8.F4.T1"]
+    verification = ["cargo run -p xtask -- perf-harness", "cargo run -p xtask -- verify-perf-harness"]
+    acceptance = ["Perf-harness runs on all three OSes and archives the reports."]
+    stop_condition = "Stop if any OS job is allowed to silently skip."
+
+    [[epics.features.tasks]]
+    id = "P8.F4.T3"
+    title = "Add dashboard/report trend and regression threshold"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["xtask/src/perf_harness.rs", "plans/evidence/perf-harness-trend/"]
+    dependencies = ["P8.F4.T2"]
+    verification = ["cargo run -p xtask -- perf-harness --strict"]
+    acceptance = ["Each CI run archives a trend entry and the strict flag fails the build on regression."]
+    stop_condition = "Stop if the trend directory is not in the tracked tree."
+
+  [[epics.features]]
+  id = "P8.F5"
+  title = "Accessibility and platform parity"
+
+    [[epics.features.tasks]]
+    id = "P8.F5.T1"
+    title = "Add AccessKit product pass and screen-reader walkthroughs for GP-1..GP-3"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-ui/src/accessibility.rs", "crates/legion-desktop/src/accessibility.rs", "plans/evidence/accessibility/"]
+    dependencies = ["P1.F2.T3", "P3.F2.T4", "P5.F3.T2"]
+    verification = ["cargo test -p legion-ui", "cargo test -p legion-desktop", "ls plans/evidence/accessibility/"]
+    acceptance = ["Accessibility evidence is product-level, not just projection-level."]
+    stop_condition = "Stop if any GP walkthrough is missing a screen-reader transcript."
+
+    [[epics.features.tasks]]
+    id = "P8.F5.T2"
+    title = "Test keyboard-only operation, high contrast, reduced motion, focus order, live regions"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = ["crates/legion-desktop/tests/accessibility.rs", "crates/legion-ui/src/projection.rs"]
+    dependencies = ["P1.F2.T3"]
+    verification = ["cargo test -p legion-desktop --test accessibility"]
+    acceptance = ["Each accessibility setting is exercisable through a test or a recorded walkthrough."]
+    stop_condition = "Stop if any setting is implemented but not testable."
+
+    [[epics.features.tasks]]
+    id = "P8.F5.T3"
+    title = "Validate IME/CJK, clipboard, file dialogs, keyring, PTY/ConPTY, watcher behavior on all supported OSes"
+    mode = "Manual"
+    readiness_row = "PR-UI-002"
+    files = [".github/workflows/", "plans/evidence/platform-parity/"]
+    dependencies = ["P2.F2.T5", "P8.F4.T2"]
+    verification = ["ls plans/evidence/platform-parity/"]
+    acceptance = ["Each platform/OS combination has a recorded parity report."]
+    stop_condition = "Stop if a platform silently falls back to 'untested'."
+
+# ---------------------------------------------------------------------------
+# EPIC P9 — Evals, security, enterprise, and post-GA surfaces
+# Readiness rows: PR-AI-002, PR-ENT-001/002, PR-VSC-002 deferred.
+# ---------------------------------------------------------------------------
+[[epics]]
+id = "P9"
+title = "Evals, security, enterprise, and post-GA surfaces"
+milestone = "M6"
+readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
+
+  [[epics.features]]
+  id = "P9.F1"
+  title = "Legion-Bench and adversarial evals"
+
+    [[epics.features.tasks]]
+    id = "P9.F1.T1"
+    title = "Build 20-50 fixture repo tasks scored by tests, diff scope, cost, and turns"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["xtask/src/legion_bench.rs", "evals/legion-bench/"]
+    dependencies = ["P6.F2.T1"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo test -p xtask --test legion_bench"]
+    acceptance = ["Agent/product changes have measurable eval regression gates."]
+    stop_condition = "Stop if a fixture does not have a deterministic scoring rule."
+
+    [[epics.features.tasks]]
+    id = "P9.F1.T2"
+    title = "Add prompt-injection/exfiltration/hostile-file/tool-output fixtures"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["evals/legion-bench/hostile/", "xtask/src/legion_bench.rs"]
+    dependencies = ["P9.F1.T1"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded"]
+    acceptance = ["Each hostile fixture is scored and any successful exfiltration is a hard fail."]
+    stop_condition = "Stop if a hostile fixture is silently downgraded to a soft fail."
+
+    [[epics.features.tasks]]
+    id = "P9.F1.T3"
+    title = "Run offline in CI with recorded providers and optionally live on schedule"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = [".github/workflows/", "evals/recorded/"]
+    dependencies = ["P9.F1.T2"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo run -p xtask -- verify-legion-bench"]
+    acceptance = ["CI always runs recorded mode; live mode is opt-in and scheduled."]
+    stop_condition = "Stop if live mode is required for any CI gate."
+
+  [[epics.features]]
+  id = "P9.F2"
+  title = "Security hardening and org policy packs"
+
+    [[epics.features.tasks]]
+    id = "P9.F2.T1"
+    title = "Update public security model to match actual sandbox guarantees and Windows caveats"
+    mode = "Manual"
+    readiness_row = "PR-ENT-001"
+    files = ["docs/SECURITY.md", "docs/ARCHITECTURE_AUTHORITY_BOUNDARIES.md"]
+    dependencies = ["P5.F2.T1"]
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Security model matches the actual sandbox behavior, including documented Windows caveats."]
+    stop_condition = "Stop if any caveat is hidden from the public security doc."
+
+    [[epics.features.tasks]]
+    id = "P9.F2.T2"
+    title = "Add secret scanning for proposal content, terminal excerpts, and retained/ejected context"
+    mode = "Manual"
+    readiness_row = "PR-ENT-001"
+    files = ["crates/legion-security/src/secrets.rs", "crates/legion-ai/src/redaction.rs", "crates/legion-security/tests/secrets.rs"]
+    dependencies = ["P4.F2.T1", "P5.F1.T4"]
+    verification = ["cargo test -p legion-security --test secrets", "cargo test -p legion-ai"]
+    acceptance = ["Each secret-detection rule has a fixture and a test."]
+    stop_condition = "Stop if a rule is added without a fixture."
+
+    [[epics.features.tasks]]
+    id = "P9.F2.T3"
+    title = "Add signed policy bundles: provider allowlists, MCP/tool allowlists, mode ceilings, budget caps, retention/export rules"
+    mode = "Manual"
+    readiness_row = "PR-ENT-002"
+    files = ["crates/legion-security/src/policy.rs", "xtask/legion-policy.example.toml"]
+    dependencies = ["P3.F4.T2", "P5.F1.T2"]
+    verification = ["cargo test -p legion-security", "cargo run -p xtask -- check-deps"]
+    acceptance = ["Org policy pack enforces a restrictive enterprise profile end-to-end."]
+    stop_condition = "Stop if a policy bundle is honored only for some surfaces."
+
+    [[epics.features.tasks]]
+    id = "P9.F2.T4"
+    title = "Schedule external audit/pen test before strong enterprise claims"
+    mode = "Manual"
+    readiness_row = "PR-ENT-002"
+    files = ["docs/SECURITY.md", "plans/evidence/security/"]
+    dependencies = ["P9.F2.T3"]
+    verification = ["ls plans/evidence/security/"]
+    acceptance = ["An external audit/pen test is scheduled and its report is archived before any strong enterprise claim."]
+    stop_condition = "Stop if a strong enterprise claim is published before the audit is complete."
+
+  [[epics.features]]
+  id = "P9.F3"
+  title = "Collaboration, remote, Cloud Lane"
+
+    [[epics.features.tasks]]
+    id = "P9.F3.T1"
+    title = "Ratify CRDT/operation-layer ADR over the accepted collaboration substrate"
+    mode = "Legion Workflows"
+    readiness_row = "PR-ENT-002"
+    files = ["docs/adrs/"]
+    dependencies = ["P0.F3.T1"]
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["A fresh ADR exists and links the chosen CRDT/operation layer to the existing collaboration substrate."]
+    stop_condition = "Stop if collaboration is implemented before the ADR is ratified."
+
+    [[epics.features.tasks]]
+    id = "P9.F3.T2"
+    title = "Activate LAN/reference remote transport with reconnect/offline evidence"
+    mode = "Legion Workflows"
+    readiness_row = "PR-ENT-002"
+    files = ["crates/legion-remote/src/transport.rs", "plans/evidence/remote/"]
+    dependencies = ["P9.F3.T1"]
+    verification = ["ls plans/evidence/remote/"]
+    acceptance = ["Reconnect and offline behaviors are recorded as evidence."]
+    stop_condition = "Stop if reconnect logic is untested under a forced network drop."
+
+    [[epics.features.tasks]]
+    id = "P9.F3.T3"
+    title = "Productize Cloud Lane with visible upload scope, budget, cancellation, and egress manifest"
+    mode = "Legion Workflows"
+    readiness_row = "PR-ENT-002"
+    files = ["crates/legion-cloud/src/lib.rs", "crates/legion-desktop/src/view/cloud_lane.rs"]
+    dependencies = ["P9.F3.T1", "P4.F2.T1"]
+    verification = ["cargo test -p legion-cloud", "cargo test -p legion-desktop"]
+    acceptance = ["Every Cloud Lane upload is paired with a visible egress manifest and is cancellable mid-flight."]
+    stop_condition = "Stop if a Cloud Lane upload can complete without surfacing its manifest."
+
+    [[epics.features.tasks]]
+    id = "P9.F3.T4"
+    title = "Keep these out of GA unless explicitly pulled forward with evidence"
+    mode = "Legion Workflows"
+    readiness_row = "PR-ENT-002"
+    files = ["plans/product-readiness-ledger.md", "docs/OPERATOR_RUNBOOK.md"]
+    dependencies = ["P9.F3.T1"]
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Each surface has its own ADR, policy, tests, and product evidence before readiness status changes."]
+    stop_condition = "Stop if any of these surfaces flips readiness without all four artifacts."
+
+  [[epics.features]]
+  id = "P9.F4"
+  title = "Training flywheel"
+
+    [[epics.features.tasks]]
+    id = "P9.F4.T1"
+    title = "Convert consented acceptance/rejection metadata into eval/training candidates"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-observability/src/training.rs", "evals/training-candidates/"]
+    dependencies = ["P4.F3.T4", "P9.F1.T1"]
+    verification = ["cargo test -p legion-observability", "cargo run -p xtask -- legion-bench --mode recorded"]
+    acceptance = ["End-to-end consented trace -> adapter -> eval comparison is reproducible."]
+    stop_condition = "Stop if a non-consented trace can land in the training candidate set."
+
+    [[epics.features.tasks]]
+    id = "P9.F4.T2"
+    title = "Enforce raw trace opt-in, redaction, deletion handles, and export controls"
+    mode = "Legion Workflows"
+    readiness_row = "PR-ENT-002"
+    files = ["crates/legion-retention/src/training.rs", "crates/legion-observability/src/training.rs"]
+    dependencies = ["P9.F4.T1"]
+    verification = ["cargo test -p legion-retention", "cargo test -p legion-observability"]
+    acceptance = ["Raw trace storage is opt-in and redaction is enforced at the boundary."]
+    stop_condition = "Stop if a raw trace can be stored without an opt-in row."
+
+    [[epics.features.tasks]]
+    id = "P9.F4.T3"
+    title = "Run QLoRA/adapter training only from consented corpora and compare to Legion-Bench baseline"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["xtask/src/legion_bench.rs", "plans/evidence/training-flywheel/"]
+    dependencies = ["P9.F4.T1", "P9.F4.T2"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "ls plans/evidence/training-flywheel/"]
+    acceptance = ["Adapter training is reproducible and the comparison vs Legion-Bench baseline is archived."]
+    stop_condition = "Stop if a training run is not paired with a baseline comparison."

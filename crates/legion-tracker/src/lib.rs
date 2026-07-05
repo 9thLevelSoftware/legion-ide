@@ -200,6 +200,7 @@ impl LegionWorkflowTrackerRecord {
         }
         if self.merge_readiness_state == LegionWorkflowMergeReadinessState::Ready
             && (self.verification_gate_ids.is_empty()
+                || self.failed_verification_count > 0
                 || self.required_sign_off_count == 0
                 || self.signed_off_count < self.required_sign_off_count)
         {
@@ -478,6 +479,17 @@ mod tests {
         let mut record = legion_workflow_record();
         record.conflict_ids = vec![LegionWorkflowConflictId("conflict:tracker".to_string())];
         record.unresolved_conflict_count = 1;
+
+        assert!(matches!(
+            record.validate(),
+            Err(TrackerError::InvalidLegionWorkflowMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn legion_workflow_tracker_rejects_failed_verification_ready_state() {
+        let mut record = legion_workflow_record();
+        record.failed_verification_count = 1;
 
         assert!(matches!(
             record.validate(),

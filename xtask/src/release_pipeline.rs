@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -193,7 +194,10 @@ pub fn plan_release_pipeline(
 
     let version_stamp = build_version_stamp(
         &config.package_name,
-        &workspace_version,
+        // Use the channel-adjusted version so the stamp's package_version
+        // matches each descriptor's `version` (e.g. `0.1.0-preview` for the
+        // preview channel) instead of the unsuffixed workspace version.
+        &version,
         channel,
         &config.dist_tool,
         workspace_root,
@@ -233,6 +237,23 @@ pub fn write_descriptors(
     plan: &ReleasePipelinePlan,
     out_dir: &Path,
 ) -> Result<Vec<PathBuf>, String> {
+    // Detect descriptor file-name collisions before writing anything: the
+    // stem normalization maps distinct installer-target names (e.g.
+    // `linux x64` and `linux-x64`) onto the same `<stem>.toml`, which would
+    // otherwise silently overwrite a previously written descriptor.
+    let mut seen_stems = HashSet::with_capacity(plan.descriptors.len());
+    for descriptor in &plan.descriptors {
+        let stem = descriptor_file_stem(&descriptor.name);
+        if !seen_stems.insert(stem.clone()) {
+            return Err(format!(
+                "release pipeline descriptor file-name collision on `{stem}.toml`: \
+                 multiple installer targets normalize to the same descriptor file \
+                 (conflicting name `{}`); rename the installer target(s) to disambiguate",
+                descriptor.name
+            ));
+        }
+    }
+
     fs::create_dir_all(out_dir).map_err(|err| {
         format!(
             "unable to create release pipeline output dir `{}`: {err}",

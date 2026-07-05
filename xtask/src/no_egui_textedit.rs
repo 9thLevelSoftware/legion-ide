@@ -8,6 +8,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoEguiTextEditViolationKind {
     ForbiddenToken,
+    UnreadableFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,8 +73,23 @@ pub fn run_no_egui_textedit(
         {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                // Fail closed: a scanned (non-allowlisted) file we cannot
+                // read is a violation, not a silent skip, so the gate exits
+                // non-zero instead of failing open.
+                violations.push(NoEguiTextEditViolation {
+                    path: path
+                        .strip_prefix(workspace_root)
+                        .unwrap_or(&path)
+                        .to_path_buf(),
+                    line: 0,
+                    kind: NoEguiTextEditViolationKind::UnreadableFile,
+                    message: format!("unable to read scanned file: {err}"),
+                });
+                continue;
+            }
         };
         check_forbidden_tokens(workspace_root, &path, &text, config, &mut violations);
     }
@@ -238,7 +254,7 @@ fn is_scanned(root: &Path, file: &Path, config: &NoEguiTextEditConfig) -> bool {
     let rel = repo_relative_path(file.strip_prefix(root).unwrap_or(file));
     config.scanned_paths.iter().any(|prefix| {
         let prefix = normalize_prefix(prefix);
-        !prefix.is_empty() && rel.starts_with(&prefix)
+        path_has_prefix(&rel, &prefix)
     })
 }
 
@@ -246,8 +262,19 @@ fn is_allowlisted(root: &Path, file: &Path, config: &NoEguiTextEditConfig) -> bo
     let rel = repo_relative_path(file.strip_prefix(root).unwrap_or(file));
     config.allowlisted_paths.iter().any(|prefix| {
         let prefix = normalize_prefix(prefix);
-        !prefix.is_empty() && rel.starts_with(&prefix)
+        path_has_prefix(&rel, &prefix)
     })
+}
+
+/// Match `rel` against `prefix` on path-segment boundaries so a configured
+/// prefix `crates/foo` matches `crates/foo` and `crates/foo/bar.rs` but NOT
+/// a sibling such as `crates/foo-bar.rs` that merely shares the byte prefix.
+fn path_has_prefix(rel: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return false;
+    }
+    rel == prefix || rel.starts_with(&format!("{prefix}/"))
 }
 
 fn normalize_prefix(prefix: &str) -> String {

@@ -7,14 +7,19 @@ publish.workspace = true
 
 [features]
 default = ["ai"]
-ai = ["legion-app/ai"]
+ai = ["legion-app/ai", "dep:legion-ai"]
 offline = ["legion-app/offline"]
 
 [dependencies]
 anyhow = { workspace = true }
+legion-ai = { workspace = true, optional = true }
+legion-agent = { workspace = true }
 legion-app = { workspace = true, default-features = false }
 legion-project = { workspace = true }
 legion-protocol = { workspace = true }
+legion-remote = { workspace = true }
+legion-sandbox = { workspace = true }
+legion-terminal = { workspace = true }
 legion-ui = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
@@ -22,4 +27,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+legion-agent = { workspace = true }
+legion-sandbox = { workspace = true }
 uuid = { workspace = true }

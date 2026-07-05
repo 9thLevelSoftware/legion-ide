@@ -28,6 +28,7 @@ const DEFAULT_PHASE13_FINAL_GATES_PATH: &str =
     "plans/evidence/gui-productization/phase-13-final-gates.md";
 const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/phase-13-runbook.md";
 const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
+const DEFAULT_CLAIM_AUDIT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md";
 const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
@@ -473,6 +474,13 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH)]
         allowlist: String,
     },
+    /// Fail when current public docs make product claims the
+    /// product-readiness ledger does not support.
+    ClaimAudit {
+        /// Path to the product readiness ledger markdown.
+        #[arg(long, default_value = DEFAULT_CLAIM_AUDIT_LEDGER_PATH)]
+        ledger: String,
+    },
     /// Forbid egui::TextEdit in the desktop code-canvas/editor render path.
     NoEguiTextedit {
         /// Path to no-egui-textedit TOML configuration.
@@ -496,6 +504,11 @@ enum Commands {
     },
     /// Verify previously-written release pipeline descriptors.
     VerifyReleasePipeline {
+        /// Path to release pipeline TOML configuration. Must match the
+        /// `--config` used for `release-pipeline` so the plan is
+        /// reconstructed from the same config.
+        #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_CONFIG_PATH)]
+        config: String,
         /// Output directory holding descriptors and version stamp.
         #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH)]
         out: String,
@@ -514,10 +527,13 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_PERF_HARNESS_OUTPUT_PATH)]
         out: String,
         /// Treat any failed skeleton as a CI failure (default: true).
-        /// Set `--no-strict` to keep the report-only behavior even when
+        /// Pass `--no-strict` to keep the report-only behavior even when
         /// measurements exceed the configured budget.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when budgets are exceeded).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
     },
     /// Verify a previously-written perf-harness report.
     VerifyPerfHarness {
@@ -525,10 +541,13 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_PERF_HARNESS_OUTPUT_PATH)]
         out: String,
         /// Treat any failed skeleton as a CI failure (default: true).
-        /// Set `--no-strict` to keep the report-only behavior even when
+        /// Pass `--no-strict` to keep the report-only behavior even when
         /// measurements exceed the configured budget.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when budgets are exceeded).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
     },
     /// Run the Legion-Bench v0 eval suite and write a bench report.
     LegionBench {
@@ -539,18 +558,32 @@ enum Commands {
         /// live is reserved for the weekly external run.
         #[arg(long, default_value = "recorded")]
         mode: String,
-        /// Treat any failed task as a CI failure.
+        /// Treat any failed task as a CI failure (default: true).
+        /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when a task fails).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
     },
     /// Verify a previously-written Legion-Bench report.
     VerifyLegionBench {
         /// Output directory holding the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
-        /// Treat any failed task as a CI failure.
+        /// Treat any failed task as a CI failure (default: true).
+        /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
         strict: bool,
+        /// Disable strict mode (report-only even when a task fails).
+        #[arg(long = "no-strict")]
+        no_strict: bool,
+    },
+    /// Validate the machine-readable Kanban backlog file.
+    VerifyKanbanBacklog {
+        /// Path to the Kanban backlog TOML.
+        #[arg(long, default_value = xtask::kanban_backlog::DEFAULT_BACKLOG_PATH)]
+        backlog: String,
     },
     /// Run the ignored rust-analyzer integration smoke tests against a real rust-analyzer binary.
     ///
@@ -577,6 +610,7 @@ fn main() {
             }
         }
         Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
+        Commands::ClaimAudit { ledger } => run_claim_audit_command(&ledger),
         Commands::NoEguiTextedit { config } => run_no_egui_textedit_command(&config),
         Commands::ReleasePipeline {
             config,
@@ -584,17 +618,31 @@ fn main() {
             channel,
             dry_run,
         } => run_release_pipeline_command(&config, &out, &channel, dry_run),
-        Commands::VerifyReleasePipeline { out } => run_verify_release_pipeline_command(&out),
-        Commands::PerfHarness { out, strict } => run_perf_harness_command(&out, strict),
-        Commands::VerifyPerfHarness { out, strict } => {
-            run_verify_perf_harness_command(&out, strict)
+        Commands::VerifyReleasePipeline { config, out } => {
+            run_verify_release_pipeline_command(&config, &out)
         }
-        Commands::LegionBench { out, mode, strict } => {
-            run_legion_bench_command(&out, &mode, strict)
-        }
-        Commands::VerifyLegionBench { out, strict } => {
-            run_verify_legion_bench_command(&out, strict)
-        }
+        Commands::PerfHarness {
+            out,
+            strict,
+            no_strict,
+        } => run_perf_harness_command(&out, strict && !no_strict),
+        Commands::VerifyPerfHarness {
+            out,
+            strict,
+            no_strict,
+        } => run_verify_perf_harness_command(&out, strict && !no_strict),
+        Commands::LegionBench {
+            out,
+            mode,
+            strict,
+            no_strict,
+        } => run_legion_bench_command(&out, &mode, strict && !no_strict),
+        Commands::VerifyLegionBench {
+            out,
+            strict,
+            no_strict,
+        } => run_verify_legion_bench_command(&out, strict && !no_strict),
+        Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
         Commands::RustAnalyzerSmoke => run_rust_analyzer_smoke_command(),
     };
 
@@ -641,6 +689,110 @@ fn run_docs_hygiene_command(allowlist: &str) -> i32 {
             }
             1
         }
+    }
+}
+
+fn run_claim_audit_command(ledger: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("claim audit failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+
+    let ledger_path = workspace_root.join(ledger);
+    let ledger_text = match fs::read_to_string(&ledger_path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!(
+                "claim audit failed: unable to read readiness ledger `{}`: {err}",
+                ledger_path.display()
+            );
+            return 1;
+        }
+    };
+    let ledger_rows = match xtask::claim_audit::parse_ledger_rows(&ledger_text) {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("claim audit failed: {err}");
+            return 1;
+        }
+    };
+    let all_validated = ledger_rows
+        .iter()
+        .all(|row| row.status == "Product workflow validated");
+
+    // Canonical public-doc scan set: README.md, HERMESGOAL.md, and
+    // top-level docs/*.md only. docs/releases/ (forward templates),
+    // docs/superpowers/ (plans quote forbidden phrases as code literals),
+    // and plans/evidence/ (historical) are intentionally excluded, matching
+    // how docs-hygiene allowlists archived material.
+    let mut scan_files: Vec<String> = vec!["README.md".to_string(), "HERMESGOAL.md".to_string()];
+    let docs_dir = workspace_root.join("docs");
+    if let Ok(entries) = fs::read_dir(&docs_dir) {
+        let mut docs_files: Vec<String> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| format!("docs/{name}"))
+            })
+            .collect();
+        docs_files.sort();
+        scan_files.extend(docs_files);
+    }
+
+    let mut violations: Vec<xtask::claim_audit::ClaimViolation> = Vec::new();
+    let mut readme_text = String::new();
+    for rel_path in &scan_files {
+        let path = workspace_root.join(rel_path);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!(
+                    "claim audit failed: unable to read `{}`: {err}",
+                    path.display()
+                );
+                return 1;
+            }
+        };
+        if rel_path == "README.md" {
+            readme_text = text.clone();
+        }
+        violations.extend(xtask::claim_audit::audit_text(rel_path, &text));
+    }
+
+    if !all_validated && !xtask::claim_audit::readme_caveat_present(&readme_text) {
+        violations.push(xtask::claim_audit::ClaimViolation::MissingReadmeCaveat);
+    }
+
+    if violations.is_empty() {
+        println!("claim audit passed");
+        0
+    } else {
+        eprintln!("claim audit found {} violation(s):", violations.len());
+        for violation in &violations {
+            match violation {
+                xtask::claim_audit::ClaimViolation::ForbiddenPhrase {
+                    file,
+                    line_number,
+                    phrase,
+                } => {
+                    eprintln!("{file}:{line_number}: forbidden claim phrase `{phrase}`");
+                }
+                xtask::claim_audit::ClaimViolation::MissingReadmeCaveat => {
+                    eprintln!(
+                        "README.md: missing required caveat sentence \
+                         (\"Legion is not yet a general-availability desktop product\") \
+                         while ledger rows remain below `Product workflow validated`"
+                    );
+                }
+            }
+        }
+        1
     }
 }
 
@@ -735,7 +887,7 @@ fn run_release_pipeline_command(config_path: &str, out: &str, channel: &str, dry
     0
 }
 
-fn run_verify_release_pipeline_command(out: &str) -> i32 {
+fn run_verify_release_pipeline_command(config_path: &str, out: &str) -> i32 {
     let workspace_root = match env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -743,7 +895,7 @@ fn run_verify_release_pipeline_command(out: &str) -> i32 {
             return 1;
         }
     };
-    let config_path = workspace_root.join(DEFAULT_RELEASE_PIPELINE_CONFIG_PATH);
+    let config_path = workspace_root.join(config_path);
     let config = match xtask::release_pipeline::ReleasePipelineConfig::from_file(&config_path) {
         Ok(config) => config,
         Err(err) => {
@@ -1194,6 +1346,33 @@ fn run_rust_analyzer_smoke_command() -> i32 {
     }
     println!("rust-analyzer smoke: all invocations passed");
     0
+}
+
+fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("kanban backlog verify failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let path = workspace_root.join(backlog_path);
+    match xtask::kanban_backlog::run_verify_kanban_backlog(&path) {
+        Ok(summary) => {
+            println!(
+                "kanban backlog ok: {} epic(s), {} feature(s), {} task(s) at {}",
+                summary.epics,
+                summary.features,
+                summary.tasks,
+                path.display()
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("kanban backlog verify failed: {err}");
+            1
+        }
+    }
 }
 
 fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBenchRunMode, String> {
@@ -2788,13 +2967,64 @@ fn is_ascii_word_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+/// Parse an ATX Markdown heading line into its `(level, label)`. Returns
+/// `None` for non-heading lines and for empty labels. A valid ATX heading
+/// is 1..=6 leading `#` characters followed by whitespace, with any
+/// trailing closing `#` sequence stripped from the label.
+fn parse_atx_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let hashes = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = &trimmed[hashes..];
+    match rest.chars().next() {
+        Some(ch) if ch.is_whitespace() => {}
+        _ => return None,
+    }
+    let label = rest.trim().trim_end_matches('#').trim();
+    if label.is_empty() {
+        None
+    } else {
+        Some((hashes, label))
+    }
+}
+
+/// Extract the body of the Markdown section introduced by `heading`.
+///
+/// `heading` is itself an ATX heading string (e.g. `"## Acceptance status"`).
+/// The match requires a *line* that is an ATX heading with the same level
+/// and label -- a substring match in prose or a fenced code block no longer
+/// counts. The section terminates at the next heading line whose level is
+/// less than or equal to the matched heading's level.
 fn markdown_section<'a>(source: &'a str, heading: &str) -> Option<&'a str> {
-    let start = source.find(heading)?;
-    let tail = &source[start..];
-    let body_start = tail.find('\n').map_or(tail.len(), |idx| idx + 1);
-    let body = &tail[body_start..];
-    let end = body.find("\n## ").unwrap_or(body.len());
-    Some(&body[..end])
+    let (want_level, want_label) = parse_atx_heading(heading)?;
+
+    let mut body_start: Option<usize> = None;
+    let mut offset = 0usize;
+    for line in source.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+
+        if let Some(body) = body_start {
+            if let Some((level, _)) = parse_atx_heading(content)
+                && level <= want_level
+            {
+                return Some(&source[body..line_start]);
+            }
+        } else if let Some((level, label)) = parse_atx_heading(content)
+            && level == want_level
+            && label == want_label
+        {
+            body_start = Some(offset);
+        }
+    }
+    body_start.map(|body| &source[body..])
 }
 
 #[derive(Default)]
@@ -3065,6 +3295,51 @@ mod tests {
     fn read_workspace_file(relative_path: &str) -> String {
         fs::read_to_string(workspace_root().join(relative_path))
             .unwrap_or_else(|err| panic!("unable to read `{relative_path}`: {err}"))
+    }
+
+    #[test]
+    fn markdown_section_requires_real_heading_line_not_substring() {
+        // The heading label appears in prose and a code block before the
+        // real heading; the substring must not be matched.
+        let source = "\
+Intro mentioning ## Acceptance status in prose.\n\
+```\n\
+## Acceptance status (inside a code fence)\n\
+```\n\
+## Acceptance status\n\
+real body line\n\
+## Next\n\
+not part of the section\n";
+        let section = markdown_section(source, "## Acceptance status")
+            .expect("the real heading line should be found");
+        assert!(section.contains("real body line"));
+        assert!(!section.contains("not part of the section"));
+        assert!(!section.contains("in prose"));
+    }
+
+    #[test]
+    fn markdown_section_terminates_at_same_or_higher_level_heading() {
+        // A deeper (level-3) heading does not terminate a level-2 section;
+        // the next level-2 (or level-1) heading does.
+        let source = "\
+## Status\n\
+body a\n\
+### Subsection\n\
+body b\n\
+## Other\n\
+body c\n";
+        let section =
+            markdown_section(source, "## Status").expect("level-2 heading should be found");
+        assert!(section.contains("body a"));
+        assert!(section.contains("### Subsection"));
+        assert!(section.contains("body b"));
+        assert!(!section.contains("body c"));
+    }
+
+    #[test]
+    fn markdown_section_returns_none_when_heading_absent() {
+        let source = "## Something else\nbody\n";
+        assert!(markdown_section(source, "## Acceptance status").is_none());
     }
 
     fn source_block(text: &str, marker: &str) -> String {

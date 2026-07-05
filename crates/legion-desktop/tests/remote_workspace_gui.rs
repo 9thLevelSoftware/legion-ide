@@ -14,16 +14,21 @@ use legion_desktop::{
     workflow::{DesktopLaunchConfig, DesktopRemoteStatus, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use legion_protocol::{
-    CapabilityId, FileFingerprint, PrincipalId, ProposalAffectedTarget,
-    ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
-    ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
-    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
-    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
-    ProposalTargetKind, RedactionHint, RemoteGuiProjection, RemoteProposalReviewGuiRow,
-    RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionGuiRow, RemoteWorkspaceSessionId,
-    TimestampMillis, WorkspaceId,
+    CancellationTokenId, CapabilityDecision, CapabilityDecisionId, CapabilityId, CausalityId,
+    CorrelationId, EventSequence, FileFingerprint, LanguageId, LanguageServerId, LspRequestId,
+    PrincipalId, ProposalAffectedTarget, ProposalContextManifestSummary, ProposalDiffSummary,
+    ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection, ProposalLedgerRow,
+    ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
+    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, RedactionHint, RemoteFilesystemOperation,
+    RemoteFilesystemOperationKind, RemoteGuiProjection, RemoteLspDescriptor, RemoteOperationId,
+    RemoteProposalReviewGuiRow, RemotePtyDescriptor, RemoteTransportEnvelope,
+    RemoteTransportPayload, RemoteWorkspaceLifecycleState, RemoteWorkspaceSessionGuiRow,
+    RemoteWorkspaceSessionId, TerminalSessionId, TimestampMillis, WorkspaceId,
 };
+use legion_remote::RemoteOperationDisposition;
 use legion_ui::{CommandDispatchIntent, Shell};
+use uuid::Uuid;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -379,5 +384,231 @@ fn remote_workspace_gui_workflow_reports_connect_without_local_mutation() {
             .active_buffer_projection
             .small_buffer_text()
             .is_some_and(|text| text == "seed")
+    );
+}
+
+fn remote_envelope(
+    session_id: RemoteWorkspaceSessionId,
+    operation_id: RemoteOperationId,
+    payload: RemoteTransportPayload,
+) -> RemoteTransportEnvelope {
+    RemoteTransportEnvelope {
+        session_id,
+        operation_id,
+        correlation_id: CorrelationId(900 + operation_id.0 as u64),
+        causality_id: CausalityId(Uuid::now_v7()),
+        event_sequence: EventSequence(operation_id.0 as u64),
+        principal_id: PrincipalId("desktop".to_string()),
+        payload,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn remote_capability_decision(capability: &str) -> CapabilityDecision {
+    CapabilityDecision {
+        decision_id: CapabilityDecisionId(7001),
+        granted: true,
+        capability: CapabilityId(capability.to_string()),
+        reason: None,
+    }
+}
+
+/// Loopback/fake remote backend: drive connect, terminal (PTY) and LSP
+/// descriptors, reconnect, offline, and a proposal-mediated write through the
+/// production transport ingestion seam, then assert the GUI rows AND that the
+/// local workspace disk and active buffer are never mutated.
+#[test]
+fn remote_workspace_gui_loopback_transport_projects_lifecycle_descriptors_and_proposal_mediation() {
+    let (_workspace, mut runtime, target) = open_runtime();
+    let session_id = RemoteWorkspaceSessionId(7101);
+
+    runtime
+        .enable_remote_development_runtime()
+        .expect("remote runtime should enable through app policy");
+
+    // 1) Connect through the production action path.
+    let connected = runtime
+        .handle_action(DesktopAction::ConnectRemoteWorkspace {
+            session_id,
+            authority_label: "edge:test".to_string(),
+        })
+        .expect("connect should dispatch through app authority");
+    assert!(matches!(
+        connected,
+        DesktopWorkflowOutcome::RemoteUpdated {
+            status: DesktopRemoteStatus::Connected,
+            ..
+        }
+    ));
+
+    // Capture the app-owned descriptor as the authoritative source for
+    // round-tripping lifecycle envelopes.
+    let base_descriptor = runtime
+        .remote_session_descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.session_id == session_id)
+        .expect("connected session descriptor should be projected");
+
+    // 2) Terminal descriptor event (PTY) flows through the production path.
+    let pty_outcome = runtime
+        .ingest_remote_transport_envelope(remote_envelope(
+            session_id,
+            RemoteOperationId(8001),
+            RemoteTransportPayload::Pty(RemotePtyDescriptor {
+                session_id,
+                terminal_session_id: TerminalSessionId(42),
+                columns: 120,
+                rows: 30,
+                transcript_byte_limit: 64 * 1024,
+                capability_decision: remote_capability_decision("remote.pty.input"),
+                schema_version: 1,
+            }),
+        ))
+        .expect("pty descriptor should ingest through the production path");
+    assert_eq!(
+        pty_outcome.disposition,
+        RemoteOperationDisposition::Accepted
+    );
+
+    // 3) LSP descriptor event flows through the production path.
+    let lsp_outcome = runtime
+        .ingest_remote_transport_envelope(remote_envelope(
+            session_id,
+            RemoteOperationId(8002),
+            RemoteTransportPayload::Lsp(RemoteLspDescriptor {
+                session_id,
+                language_server_id: LanguageServerId(7),
+                request_id: LspRequestId(Uuid::now_v7()),
+                language_id: LanguageId("rust".to_string()),
+                capability_decision: remote_capability_decision("remote.lsp.launch"),
+                cancellation_token_id: CancellationTokenId(Uuid::now_v7()),
+                schema_version: 1,
+            }),
+        ))
+        .expect("lsp descriptor should ingest through the production path");
+    assert_eq!(
+        lsp_outcome.disposition,
+        RemoteOperationDisposition::Accepted
+    );
+
+    // Connected session row exposes terminal and LSP descriptor availability.
+    let connected_snapshot = runtime.projection_snapshot();
+    assert!(
+        connected_snapshot
+            .remote_gui_projection
+            .session_rows
+            .iter()
+            .any(|row| {
+                row.session_id == session_id
+                    && row.status_label == "connected"
+                    && row.terminal_descriptor_status == "terminal descriptor available"
+                    && row.lsp_descriptor_status == "lsp descriptor available"
+            }),
+        "connected row should advertise terminal and LSP descriptors"
+    );
+
+    // 4) Reconnect event: a session descriptor with a Reconnecting lifecycle
+    // state flows through the production path and updates the GUI row.
+    let mut reconnecting = base_descriptor.clone();
+    reconnecting.state = RemoteWorkspaceLifecycleState::Reconnecting;
+    let reconnect_outcome = runtime
+        .ingest_remote_transport_envelope(remote_envelope(
+            session_id,
+            RemoteOperationId(8003),
+            RemoteTransportPayload::Session(reconnecting),
+        ))
+        .expect("reconnect descriptor should ingest through the production path");
+    assert_eq!(
+        reconnect_outcome.disposition,
+        RemoteOperationDisposition::Accepted
+    );
+    let reconnect_snapshot = runtime.projection_snapshot();
+    assert_eq!(
+        reconnect_snapshot
+            .remote_gui_projection
+            .reconnecting_session_count,
+        1
+    );
+    assert!(
+        reconnect_snapshot
+            .remote_gui_projection
+            .session_rows
+            .iter()
+            .any(|row| row.session_id == session_id
+                && row.reconnecting
+                && row.status_label == "reconnecting"),
+        "reconnect row should surface the reconnecting lifecycle state"
+    );
+
+    // 5) Offline event: a session descriptor with an Offline lifecycle state
+    // flows through the production path and updates the GUI row.
+    let mut offline = base_descriptor.clone();
+    offline.state = RemoteWorkspaceLifecycleState::Offline;
+    let offline_outcome = runtime
+        .ingest_remote_transport_envelope(remote_envelope(
+            session_id,
+            RemoteOperationId(8004),
+            RemoteTransportPayload::Session(offline),
+        ))
+        .expect("offline descriptor should ingest through the production path");
+    assert_eq!(
+        offline_outcome.disposition,
+        RemoteOperationDisposition::Accepted
+    );
+    let offline_snapshot = runtime.projection_snapshot();
+    assert_eq!(
+        offline_snapshot.remote_gui_projection.offline_session_count,
+        1
+    );
+    assert!(
+        offline_snapshot
+            .remote_gui_projection
+            .session_rows
+            .iter()
+            .any(|row| row.session_id == session_id
+                && row.offline
+                && row.status_label == "offline: Offline"),
+        "offline row should surface the offline lifecycle state"
+    );
+
+    // 6) Remote proposal event: a filesystem write without a linked proposal is
+    // denied by the proposal-mediation gate, proving mutations stay proposal
+    // mediated through the production ingestion path.
+    let unmediated_write = runtime
+        .ingest_remote_transport_envelope(remote_envelope(
+            session_id,
+            RemoteOperationId(8005),
+            RemoteTransportPayload::FilesystemOperation(RemoteFilesystemOperation {
+                session_id,
+                operation_id: RemoteOperationId(8005),
+                kind: RemoteFilesystemOperationKind::Write,
+                path: legion_protocol::CanonicalPath("/remote/workspace/remote.txt".to_string()),
+                destination: None,
+                write_preconditions: None,
+                proposal_id: None,
+                schema_version: 1,
+            }),
+        ))
+        .expect("unmediated write should return a disposition through the production path");
+    assert_eq!(
+        unmediated_write.disposition,
+        RemoteOperationDisposition::Denied,
+        "remote write without a proposal must be denied by proposal mediation"
+    );
+
+    // Local workspace immutability: none of the remote transport traffic mutated
+    // the local on-disk file or the active buffer.
+    assert_eq!(
+        fs::read_to_string(&target).expect("local file readable"),
+        "seed",
+        "remote transport traffic must not mutate local disk"
+    );
+    assert!(
+        offline_snapshot
+            .active_buffer_projection
+            .small_buffer_text()
+            .is_some_and(|text| text == "seed"),
+        "active buffer must remain immutable under remote transport traffic"
     );
 }

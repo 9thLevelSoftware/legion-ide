@@ -14,7 +14,33 @@ use legion_ui::{CommandDispatchIntent, ShellLayoutProjection};
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn create_root() -> std::path::PathBuf {
+/// Drop-guarded temporary workspace root. The directory is removed on drop with a
+/// prefix/location check so a panic before the end of a test never leaks the temp dir.
+struct TempWorkspace {
+    root: std::path::PathBuf,
+}
+
+impl std::ops::Deref for TempWorkspace {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let temp_root = std::env::temp_dir();
+        let file_name = self.root.file_name().and_then(|name| name.to_str());
+        if self.root.starts_with(&temp_root)
+            && file_name.is_some_and(|name| name.starts_with("legion-app-daily-editing-"))
+        {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn create_root() -> TempWorkspace {
     let root = std::env::temp_dir().join(format!(
         "legion-app-daily-editing-{}-{}",
         std::process::id(),
@@ -24,7 +50,7 @@ fn create_root() -> std::path::PathBuf {
             + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&root).expect("create temp root");
-    root
+    TempWorkspace { root }
 }
 
 fn text_coordinate(line: u32, character: u32) -> TextCoordinate {
@@ -112,8 +138,6 @@ fn daily_editing_contracts_tabs_switch_active_buffer() {
     assert_eq!(viewport.cursor.character, 3);
     assert_eq!(viewport.selections.len(), 1);
     assert_eq!(viewport.scroll.left_column, 2);
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -169,8 +193,6 @@ fn daily_editing_contracts_active_projection_emits_visible_syntax_overlays() {
             "syntax overlays must be bounded to visible viewport lines"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -237,8 +259,6 @@ fn daily_editing_contracts_scrolled_projection_seeds_stateful_syntax_overlays() 
         "scrolled fenced Rust code should retain keyword highlighting; got {:?}",
         markdown_viewport.semantic_token_overlays
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -269,8 +289,7 @@ fn daily_editing_contracts_fallback_comment_detection_ignores_delimiters_inside_
             .filter(|token| token.line_number == 0)
             .all(|token| {
                 token.kind != ViewportSemanticTokenKind::Comment
-                    || token.end_col <= rust_slashes
-                    || token.start_col > rust_slashes
+                    || !(token.start_col < rust_slashes + 2 && token.end_col > rust_slashes)
             }),
         "Rust fallback must not mark // inside a string as a comment; got {:?}",
         rust_viewport.semantic_token_overlays
@@ -291,14 +310,11 @@ fn daily_editing_contracts_fallback_comment_detection_ignores_delimiters_inside_
             .filter(|token| token.line_number == 0)
             .all(|token| {
                 token.kind != ViewportSemanticTokenKind::Comment
-                    || token.end_col <= toml_hash
-                    || token.start_col > toml_hash
+                    || !(token.start_col <= toml_hash && token.end_col > toml_hash)
             }),
         "TOML fallback must not mark # inside a string as a comment; got {:?}",
         toml_viewport.semantic_token_overlays
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -346,8 +362,6 @@ fn daily_editing_contracts_save_all_preserves_rejected_dirty_buffers() {
             .is_dirty(conflicted_buffer)
             .expect("dirty preserved")
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -397,8 +411,6 @@ fn daily_editing_save_all_saves_all_dirty_buffers_in_tab_order() {
         std::fs::read_to_string(&second).expect("read second"),
         "second!"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -463,8 +475,6 @@ fn daily_editing_save_all_reports_mixed_conflict_metadata_and_dirty_state() {
         std::fs::read_to_string(&conflicted).expect("external content"),
         "external"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -477,8 +487,6 @@ fn daily_editing_save_all_no_open_buffers_returns_noop_outcome() {
     assert!(outcome.results.is_empty());
     assert_eq!(outcome.saved_count, 0);
     assert_eq!(outcome.rejected_count, 0);
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -521,8 +529,6 @@ fn daily_editing_contracts_close_dirty_requires_prompt() {
             .close_dirty_prompt
             .is_some()
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -555,8 +561,6 @@ fn daily_editing_contracts_session_record_is_metadata_only() {
             .session_record
             .is_some()
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -594,6 +598,4 @@ fn daily_editing_contracts_session_record_restores_memory_snapshot() {
         restored.memory_snapshot_json.as_deref(),
         Some(memory_snapshot_json.as_str())
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

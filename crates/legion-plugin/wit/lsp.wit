@@ -1,0 +1,17 @@
+package legion:plugin;
+
+interface lsp {
+    record lsp-adapter-contribution {
+        language-id: string,
+        server-label: string,
+        required-capability: string,
+    }
+
+    register-lsp-adapter: func(contribution: lsp-adapter-contribution);
+}
+
+world plugin-host {
+    import grammars;
+    import themes;
+    import lsp;
+}

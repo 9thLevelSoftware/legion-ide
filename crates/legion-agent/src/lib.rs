@@ -2,6 +2,23 @@
 
 #![warn(missing_docs)]
 
+/// Parsed communication log lines for agent workflows.
+pub mod comm;
+/// Approved-plan DAG helpers for Legion workflow coordination.
+pub mod dag;
+/// Merge-readiness reports with verification-evidence citations.
+pub mod merge_readiness;
+/// Editable plan construction helpers for agent workflows.
+pub mod plan;
+/// Task scheduling and lane management.
+pub mod scheduler;
+/// Scope enforcement for delegated task tool calls.
+pub mod scope;
+/// Tool definitions and re-exports.
+pub mod tools;
+
+pub use scope::{tool_call_feedback_for_scope_denial, validate_delegated_task_tool_call};
+
 use legion_protocol::{
     AgentReplayManifest, AgentRunId, AgentRunState, AgentStateTransitionRecord,
     AssistedAiContractError, AssistedAiEditProposalOutput, AssistedAiOperationClass,
@@ -12,8 +29,8 @@ use legion_protocol::{
     LegionEvidencePrivacyScope, LegionEvidenceRecord, LegionEvidenceSource, LegionModelCapability,
     LegionProviderLocalityPreference, LegionProviderPrivacyPolicy, LegionProviderRouteHealth,
     LegionProviderRouteMetadata, LegionTaskFileScope, LegionTaskOutputContract, LegionTaskPacket,
-    LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan, LegionWorkerResult,
-    LegionWorkerResultKind, LegionWorkflowConflict, LegionWorkflowConflictId,
+    LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan, LegionToolKind,
+    LegionWorkerResult, LegionWorkerResultKind, LegionWorkflowConflict, LegionWorkflowConflictId,
     LegionWorkflowConflictKind, LegionWorkflowConflictState, LegionWorkflowDependencyState,
     LegionWorkflowMergeReadiness, LegionWorkflowModelBackend, LegionWorkflowSession,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
@@ -29,6 +46,7 @@ use legion_protocol::{
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Agent runtime errors.
@@ -65,6 +83,16 @@ pub enum AgentError {
     /// Legion workflow dependency graph contains a cycle.
     #[error("legion workflow dependency cycle detected")]
     LegionWorkflowDependencyCycle,
+    /// Delegated task tool call was denied by scope policy.
+    #[error("delegated task scope denied: {tool:?} ({reason})")]
+    DelegatedTaskScopeDenied {
+        /// Tool that was denied.
+        tool: LegionToolKind,
+        /// Target path that was denied, if any.
+        target_path: Option<String>,
+        /// Reason for denial.
+        reason: String,
+    },
 }
 
 /// Mutation-safe output produced by the agent state machine.
@@ -201,7 +229,14 @@ fn legal_transition(from: AgentRunState, to: AgentRunState) -> bool {
 #[derive(Debug, Clone)]
 pub struct DelegatedTaskSandboxOrchestrator {
     sandbox_path: PathBuf,
+    source_root: Option<PathBuf>,
     is_worktree: bool,
+    /// Exclusive lock handle over the sandbox's `.lock` lease file. `Arc`
+    /// keeps this orchestrator `Clone`: every clone shares the same lease,
+    /// so the lease outlives any single clone and is only released when the
+    /// last clone drops it (or `cleanup` clears it explicitly). Best-effort:
+    /// `None` if the lease could not be acquired (see `initialize`).
+    lease: Option<Arc<std::fs::File>>,
 }
 
 impl DelegatedTaskSandboxOrchestrator {
@@ -210,7 +245,20 @@ impl DelegatedTaskSandboxOrchestrator {
         let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{}", run_id));
         Self {
             sandbox_path,
+            source_root: None,
             is_worktree: false,
+            lease: None,
+        }
+    }
+
+    /// Creates a new orchestrator that isolates a specific workspace root.
+    pub fn with_workspace_root(source_root: &Path, run_id: &str) -> Self {
+        let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{}", run_id));
+        Self {
+            sandbox_path,
+            source_root: Some(source_root.to_path_buf()),
+            is_worktree: false,
+            lease: None,
         }
     }
 
@@ -219,35 +267,120 @@ impl DelegatedTaskSandboxOrchestrator {
         &self.sandbox_path
     }
 
+    /// Returns the sibling lease file path for this sandbox
+    /// (`task-<run_id>.lock` next to `task-<run_id>/`).
+    fn lease_path(&self) -> PathBuf {
+        lease_path_for_sandbox(&self.sandbox_path)
+    }
+
     /// Initializes the sandbox using `git worktree add` with fallback to copy-based isolation.
+    ///
+    /// Ordering is deliberate and load-bearing: the lease is acquired
+    /// *before* the sandbox directory is created (published), not after. A
+    /// concurrent `reap_orphaned_sandboxes` call only treats a `task-<id>`
+    /// dir as protected if its sibling `.lock` is present and held; if the
+    /// dir were published first, a reaper scan landing in the gap between
+    /// dir creation and lease acquisition would see a lease-less directory
+    /// and could delete it mid-initialization. Acquiring the lease first
+    /// closes that window: by the time the sandbox dir exists at all, its
+    /// protection (if acquired) is already in place.
+    ///
+    /// Lease-unlink ownership rule applies here too: on publication
+    /// failure, the now-orphaned lease file is removed while
+    /// `acquired_lease` is still held, then the handle is dropped — never
+    /// the reverse. See the ownership-rule note on `reap_orphaned_sandboxes`
+    /// for why a lease path must only ever be unlinked while its lock is
+    /// held.
     pub fn initialize(
         &mut self,
         permission: &DelegatedTaskToolPermissionRequest,
     ) -> Result<(), std::io::Error> {
         validate_sandbox_permission(permission, "initialize")?;
+        // Create the delegated-tasks root (the sandbox dir's parent) first —
+        // this is shared, pre-existing infrastructure, not the sandbox
+        // itself, so publishing it early is not a TOCTOU concern.
         if let Some(parent) = self.sandbox_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Try git worktree first
-        let output = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                self.sandbox_path.to_str().unwrap(),
-                "HEAD",
-            ])
+        // Acquire a best-effort exclusive lease on the sandbox's sibling
+        // `.lock` file BEFORE the sandbox directory is created, so a
+        // concurrent reaper can never observe a published sandbox without
+        // its protection already in place. Lease acquisition is not a
+        // correctness gate: if it fails for any reason (permissions,
+        // unsupported filesystem, contention on an extremely unlikely stale
+        // lock), the sandbox still initializes successfully without
+        // protection — but the directory is only created after this
+        // attempt, regardless of whether it succeeded.
+        let lease_path = self.lease_path();
+        let acquired_lease = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease_path)
+        {
+            Ok(lock_file) if lock_file.try_lock().is_ok() => Some(Arc::new(lock_file)),
+            _ => None,
+        };
+
+        // Try git worktree first. Pass the path as an OsStr so a non-UTF-8
+        // PathBuf cannot panic the process.
+        let mut command = Command::new("git");
+        if let Some(source_root) = &self.source_root {
+            command.arg("-C").arg(source_root);
+        }
+        let output = command
+            .arg("worktree")
+            .arg("add")
+            .arg(&self.sandbox_path)
+            .arg("HEAD")
             .output();
 
-        match output {
+        let publish_result: Result<(), std::io::Error> = match output {
             Ok(output) if output.status.success() => {
                 self.is_worktree = true;
                 Ok(())
             }
             _ => {
                 self.is_worktree = false;
-                std::fs::create_dir_all(&self.sandbox_path)?;
+                std::fs::create_dir_all(&self.sandbox_path).and_then(|()| {
+                    if let Some(source_root) = &self.source_root {
+                        copy_workspace_tree(source_root, &self.sandbox_path)
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
+        };
+
+        match publish_result {
+            Ok(()) => {
+                self.lease = acquired_lease;
                 Ok(())
+            }
+            Err(error) => {
+                // Sandbox publication failed after a lease was acquired:
+                // best-effort remove the now-orphaned lease file so it is
+                // not mistaken for a live lease by a later reap pass (there
+                // is no sandbox dir left to protect). This follows the same
+                // hold-through-remove ownership rule as the reaper: a lease
+                // path is only ever unlinked while its lock is still held,
+                // so `remove_file` runs BEFORE `acquired_lease` is dropped,
+                // not after. On Windows, std opens files with
+                // FILE_SHARE_DELETE, so `remove_file` on a path we hold an
+                // open (locked) handle to succeeds by marking the file
+                // delete-on-close; the directory entry disappears once
+                // `acquired_lease` is dropped below. On Unix, unlinking a
+                // file while `flock`ed is unconditionally fine. Safe here
+                // for an additional, simpler reason too — no sandbox
+                // directory was ever published, so there is nothing another
+                // process could be protecting — but following the same
+                // sequencing everywhere keeps the invariant uniform rather
+                // than relying on a case-by-case justification.
+                let _ = std::fs::remove_file(&lease_path);
+                drop(acquired_lease);
+                Err(error)
             }
         }
     }
@@ -278,8 +411,260 @@ impl DelegatedTaskSandboxOrchestrator {
                 std::fs::remove_dir_all(&self.sandbox_path)?;
             }
         }
+        // Release the lease, but do NOT unlink the lock file here. Ownership
+        // rule: an orchestrator never removes its lease path after releasing
+        // the lock; only the reaper does, and only while re-acquiring the
+        // lock immediately beforehand (see `remove_stale_lease_files`). If
+        // cleanup dropped the lock and then called `remove_file`, a
+        // restarted same-run-id lane could acquire the now-unlocked lease
+        // in the gap between the drop and the unlink — cleanup's
+        // `remove_file` would then delete the NEW owner's lock file out
+        // from under it. Leaving the (now-unlocked) lock file in place is
+        // safe: it is indistinguishable from any other stale lease and will
+        // be cleaned up by the next `reap_orphaned_sandboxes` call, which
+        // removes it race-free by holding the lock across the removal.
+        self.lease = None;
         Ok(())
     }
+}
+
+/// Returns the sibling lease file path for a `task-<run_id>` sandbox
+/// directory: `task-<run_id>.lock` next to it.
+fn lease_path_for_sandbox(sandbox_path: &Path) -> PathBuf {
+    let mut lease_path = sandbox_path.to_path_buf();
+    let file_name = sandbox_path
+        .file_name()
+        .map(|name| {
+            let mut name = name.to_os_string();
+            name.push(".lock");
+            name
+        })
+        .unwrap_or_else(|| std::ffi::OsString::from("task.lock"));
+    lease_path.set_file_name(file_name);
+    lease_path
+}
+
+/// NOTE: `crates/legion-app/src/offline_ai.rs::reap_orphaned_sandboxes`
+/// mirrors this logic for offline builds — apply any change to both.
+///
+/// Removes orphaned sandbox directories under `delegated_tasks_root`.
+///
+/// A directory is an orphan when its name starts with `task-` and its
+/// run-id suffix is not in `active_run_ids`. Attempts `git worktree
+/// remove --force` first (mirroring `initialize`'s worktree-first
+/// strategy) and falls back to plain directory removal. Returns the
+/// paths that were removed. A missing root is a successful no-op.
+///
+/// Lock-file lease protocol: each sandbox may have a sibling
+/// `task-<run_id>.lock` file (see `DelegatedTaskSandboxOrchestrator`). A
+/// sandbox is only reaped if its lease file is absent (legacy sandbox from
+/// before this protocol existed, or one whose owner already released the
+/// lease) or its lease can be acquired here (owner is gone). If the lease
+/// is currently held elsewhere, `try_lock` fails and the reaper treats the
+/// owner as alive and skips that sandbox entirely — fail-closed toward NOT
+/// deleting. This makes the empty `active_run_ids` list used at startup
+/// safe even when another process instance has live sandboxes under the
+/// same relative root. Stale `.lock` files whose sandbox directory no
+/// longer exists are removed as housekeeping when they can be locked.
+///
+/// TOCTOU note: `acquire_reapable_lease` returns the still-locked file
+/// handle rather than a bool, and every caller here holds that handle for
+/// the entire duration of the delete (`remove_dir_all`/`remove_file`) before
+/// dropping it. This closes the window between "lease looked reapable" and
+/// "sandbox actually deleted" during which a restarted orchestrator could
+/// otherwise re-acquire the lease and start using a sandbox the reaper is
+/// mid-delete on.
+///
+/// Ordering guarantee: within a single `reap_orphaned_sandboxes` call, the
+/// main loop below removes each reaped sandbox's `.lock` file itself
+/// (while still holding its lease) before `remove_stale_lease_files` runs
+/// afterward, so the two passes never double-process the same lock file.
+///
+/// Publish-side TOCTOU note: this reaper's fail-closed check only protects
+/// against deleting a sandbox once it is published. The other half of the
+/// guarantee lives in `DelegatedTaskSandboxOrchestrator::initialize`, which
+/// acquires the lease BEFORE creating the sandbox directory — so a reaper
+/// scan can never observe a freshly-published `task-<id>` dir that does not
+/// yet have its lease in place.
+///
+/// Lease-unlink ownership rule (uniform across this file): a lease path is
+/// only ever unlinked while its lock is still held — never drop-then-unlink.
+/// Dropping the lock first and unlinking after leaves a window in which a
+/// restarted same-run-id lane can acquire the now-unlocked lease before the
+/// unlink runs, so the unlink would then delete that NEW owner's lock file
+/// instead of the stale one it meant to remove. Every removal site in this
+/// module follows hold-through-remove-then-drop:
+/// - This reaper's main loop above and `remove_stale_lease_files` below
+///   both remove a lock file only while still holding the lock they just
+///   (re-)acquired for that purpose.
+/// - `DelegatedTaskSandboxOrchestrator::initialize`'s publish-failure path
+///   removes the now-orphaned lease file while still holding
+///   `acquired_lease`, then drops it.
+/// - `DelegatedTaskSandboxOrchestrator::cleanup`, by contrast, never
+///   unlinks the lease file at all — it only releases the lock. Lock-file
+///   removal for a *successfully cleaned-up* sandbox is exclusively this
+///   reaper's job (a leftover unlocked lock file is swept up by the next
+///   `reap_orphaned_sandboxes` call), since `cleanup` has no way to hold
+///   the lock through a remove without reintroducing the same race for
+///   *its own* case (the sandbox may be reused by a restarted same-run-id
+///   lane immediately after cleanup, before any reap runs).
+pub fn reap_orphaned_sandboxes(
+    delegated_tasks_root: &Path,
+    active_run_ids: &[&str],
+) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut removed = Vec::new();
+    if !delegated_tasks_root.exists() {
+        return Ok(removed);
+    }
+    for entry in std::fs::read_dir(delegated_tasks_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(run_id) = name.strip_prefix("task-") else {
+            continue;
+        };
+        if active_run_ids.contains(&run_id) {
+            continue;
+        }
+        let path = entry.path();
+        let lease_path = lease_path_for_sandbox(&path);
+        let Some(held_lease) = acquire_reapable_lease(&lease_path) else {
+            // Owner process is alive and holding the lease: skip, do not delete.
+            continue;
+        };
+        let worktree_removed = Command::new("git")
+            .arg("worktree")
+            .arg("remove")
+            .arg("--force")
+            .arg(&path)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !worktree_removed {
+            std::fs::remove_dir_all(&path)?;
+        }
+        // Remove the lock file while still holding `held_lease`. On
+        // Windows, std opens files with FILE_SHARE_DELETE, so calling
+        // `remove_file` on a path we hold an open (locked) handle to
+        // succeeds by marking the file delete-on-close; the directory
+        // entry disappears once `held_lease` drops below. On Unix,
+        // unlinking a file while `flock`ed is unconditionally fine.
+        let _ = std::fs::remove_file(&lease_path);
+        drop(held_lease);
+        removed.push(path);
+    }
+    remove_stale_lease_files(delegated_tasks_root)?;
+    Ok(removed)
+}
+
+/// A lease held for the duration of a reap delete. `Locked` means this call
+/// acquired and now holds the file's exclusive lock; `Absent` means there
+/// was no lease file to lock in the first place (legacy sandbox, or no
+/// lease was ever acquired). Either way the sandbox is safe to reap. Kept
+/// alive (not `_`-discarded) by callers until after the delete completes:
+/// the `File` in `Locked` is a pure RAII guard, held only for its `Drop`
+/// side effect (releasing the OS lock), and is never read otherwise.
+enum ReapableLease {
+    Locked(#[allow(dead_code)] std::fs::File),
+    Absent,
+}
+
+/// Classifies a lease-file `open()` error for `acquire_reapable_lease`.
+/// Only `NotFound` means "no lease file exists" (legacy sandbox, or a lease
+/// that was never created) — every other error (permission denied, sharing
+/// violation, I/O error, etc.) is ambiguous and must be treated the same as
+/// "lease is held elsewhere": fail-closed toward NOT reaping, since we
+/// cannot distinguish a transient/permission failure to open an
+/// owner-locked file from genuine absence. Extracted as a standalone
+/// function so the classification itself is unit-testable without needing
+/// to simulate real OS-level permission or sharing-violation errors, which
+/// is awkward to do portably across Windows and Unix in an integration
+/// test.
+fn open_error_means_no_lease_file(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
+/// Attempts to acquire the lease for a sandbox slated for reaping, and
+/// returns the still-locked handle on success so the caller can hold it
+/// through the delete (closing the TOCTOU window between "reapable" and
+/// "reaped"). Returns `None` when the lease is currently held elsewhere
+/// (owner alive: `try_lock` fails) — fail-closed toward NOT deleting.
+/// Returns `None` on any lease-file open error other than `NotFound` too
+/// (see `open_error_means_no_lease_file`): a permission or sharing-violation
+/// error opening the lease file is ambiguous and must not be treated as
+/// "no lease" — an owner could plausibly hold the file in a way that also
+/// prevents this call from opening it.
+fn acquire_reapable_lease(lease_path: &Path) -> Option<ReapableLease> {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lease_path)
+    {
+        Ok(lock_file) => match lock_file.try_lock() {
+            Ok(()) => Some(ReapableLease::Locked(lock_file)),
+            Err(_) => None,
+        },
+        Err(error) if open_error_means_no_lease_file(&error) => Some(ReapableLease::Absent),
+        Err(_) => None,
+    }
+}
+
+/// Housekeeping: removes `task-<id>.lock` files whose corresponding
+/// `task-<id>` sandbox directory no longer exists, when the lock can be
+/// acquired (i.e. is not held by a live process). This can happen if a
+/// sandbox directory was removed by means other than `cleanup`/`reap`. Holds
+/// the acquired lease through the `remove_file` call for the same TOCTOU
+/// reasons as the main reap loop above.
+fn remove_stale_lease_files(delegated_tasks_root: &Path) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(delegated_tasks_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".lock") else {
+            continue;
+        };
+        if !stem.starts_with("task-") {
+            continue;
+        }
+        if delegated_tasks_root.join(stem).exists() {
+            continue;
+        }
+        if let Some(held_lease) = acquire_reapable_lease(&path) {
+            let _ = std::fs::remove_file(&path);
+            drop(held_lease);
+        }
+    }
+    Ok(())
+}
+
+fn copy_workspace_tree(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path == destination {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&destination_path)?;
+            copy_workspace_tree(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_sandbox_permission(
@@ -311,8 +696,14 @@ fn validate_sandbox_permission(
     ))
 }
 
-/// Validate that path is contained within the base directory.
-pub fn validate_containment(base: &Path, path: &Path) -> Result<(), AgentError> {
+/// Validate that `path` is contained within the base directory.
+///
+/// Returns the lexically-normalized path *relative to* `base` (with any `.`/`..`
+/// segments already collapsed) so callers emit a genuinely canonical path rather
+/// than one that still embeds traversal segments. Any path that escapes the base
+/// or retains residual traversal/root/prefix components after normalization is
+/// rejected.
+pub fn validate_containment(base: &Path, path: &Path) -> Result<PathBuf, AgentError> {
     let base_absolute =
         std::fs::canonicalize(base).unwrap_or_else(|_| std::env::current_dir().unwrap().join(base));
 
@@ -350,14 +741,30 @@ pub fn validate_containment(base: &Path, path: &Path) -> Result<(), AgentError> 
     let clean_stripped = strip_unc(&clean_path);
     let base_stripped = strip_unc(&base_absolute);
 
-    if !clean_stripped.starts_with(&base_stripped) {
+    let relative = clean_stripped.strip_prefix(&base_stripped).map_err(|_| {
+        AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
+            reason: "Path traversal escaped sandbox".to_string(),
+        })
+    })?;
+
+    // Defense in depth: a normalized, contained path must not retain any
+    // traversal, root, or prefix components.
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
         return Err(AgentError::InvalidMetadata(
             AssistedAiContractError::InvalidProposalMetadata {
-                reason: "Path traversal escaped sandbox".to_string(),
+                reason: "Normalized sandbox path retained traversal components".to_string(),
             },
         ));
     }
-    Ok(())
+
+    Ok(relative.to_path_buf())
 }
 
 /// Proposal generator inside `legion-agent`.
@@ -403,22 +810,69 @@ impl DelegatedTaskProposalGenerator {
         Self { sandbox_base }
     }
 
-    /// Compares sandbox directory state with HEAD checkout and builds AssistedAiEditProposalOutput.
+    /// Builds an `AssistedAiEditProposalOutput` for the sandbox target.
+    ///
+    /// Stats and reads the base target (the HEAD checkout / sandbox-base copy at
+    /// `target_path`) and compares it with the provider-produced
+    /// `modified_content` to decide the payload shape:
+    ///
+    /// * When the base target does **not** exist this is a genuine creation and a
+    ///   [`ProposalPayload::CreateFile`] is emitted with no preconditions.
+    /// * When the base target **already exists** a path-based
+    ///   [`ProposalPayload::CreateFile`] (create/overwrite) is emitted carrying
+    ///   the full modified content plus a content-level concurrency guard. The
+    ///   generator has no workspace `FileId` or open buffer, so it cannot emit a
+    ///   buffer-addressable `TextEdit` (the apply path resolves edits via
+    ///   `buffer_for_file`); a path-based proposal with preconditions is the
+    ///   appliable representation.
+    ///
+    /// For an existing base the size, last-modified timestamp, content
+    /// fingerprint, and a content-derived [`legion_protocol::FileContentVersion`]
+    /// are recorded in [`ProposalVersionPreconditions`] so an apply step can
+    /// detect concurrent modification. The proposal target path is the
+    /// normalized, sandbox-relative path returned by [`validate_containment`].
     pub fn generate_proposal(
         &self,
         input: DelegatedTaskProposalInput<'_>,
     ) -> Result<AssistedAiEditProposalOutput, AgentError> {
-        validate_containment(&self.sandbox_base, input.target_path)?;
-
-        let target_relative = input
-            .target_path
-            .strip_prefix(&self.sandbox_base)
-            .unwrap_or(input.target_path);
-        let target_relative = target_relative.to_str().ok_or_else(|| {
-            AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
-                reason: "Proposal target path is not valid UTF-8".to_string(),
+        let target_relative = validate_containment(&self.sandbox_base, input.target_path)?;
+        // Emit a canonical, forward-slash relative path regardless of host OS so
+        // the `CanonicalPath` payload is portable and free of `..` segments.
+        let target_relative = target_relative
+            .components()
+            .map(|component| {
+                component.as_os_str().to_str().ok_or_else(|| {
+                    AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
+                        reason: "Proposal target path is not valid UTF-8".to_string(),
+                    })
+                })
             })
-        })?;
+            .collect::<Result<Vec<_>, _>>()?
+            .join("/");
+
+        // Stat/read the base target so we can both populate a concurrency guard
+        // and decide whether this is a create (no base) or an edit (base exists).
+        let base_state = BaseTargetState::read(input.target_path);
+
+        let create_payload = || {
+            ProposalPayload::CreateFile(legion_protocol::CreateFileProposal {
+                path: CanonicalPath(target_relative.clone()),
+                initial_content: Some(input.modified_content.to_string()),
+            })
+        };
+
+        // The delegated generator works from the sandbox output and has no
+        // workspace `FileId` or open editor buffer. A `TextEdit` proposal would
+        // need a real buffer-addressable file id (the apply path resolves edits
+        // via `buffer_for_file`), so a synthetic id would make existing-file
+        // proposals reject at apply time. Always emit a path-based create/
+        // overwrite proposal; when a base already exists, attach a content-level
+        // concurrency guard derived from its snapshot.
+        let (payload, preconditions) = match &base_state {
+            Some(base) => (create_payload(), base.preconditions()),
+            None => (create_payload(), empty_preconditions()),
+        };
+        let preview_summary = "Create file proposal".to_string();
 
         Ok(AssistedAiEditProposalOutput {
             output_id: input.output_id,
@@ -429,23 +883,10 @@ impl DelegatedTaskProposalGenerator {
             capability: input.capability,
             correlation_id: input.correlation_id,
             causality_id: input.causality_id,
-            payload: ProposalPayload::CreateFile(legion_protocol::CreateFileProposal {
-                path: CanonicalPath(target_relative.to_string()),
-                initial_content: Some(input.modified_content.to_string()),
-            }),
-            preconditions: ProposalVersionPreconditions {
-                file_version: None,
-                buffer_version: None,
-                snapshot_id: None,
-                generation: None,
-                file_content_version: None,
-                workspace_generation: None,
-                expected_fingerprint: None,
-                expected_file_length: None,
-                expected_modified_at: None,
-            },
+            payload,
+            preconditions,
             preview: PreviewSummary {
-                summary: "Create file proposal".to_string(),
+                summary: preview_summary,
                 details: vec![],
             },
             expires_at: None,
@@ -456,6 +897,99 @@ impl DelegatedTaskProposalGenerator {
             schema_version: 1,
         })
     }
+}
+
+/// On-disk state of a base proposal target captured once so that both the
+/// concurrency guard and the create-vs-edit decision use a consistent snapshot.
+struct BaseTargetState {
+    /// Length of the base file in bytes.
+    len: u64,
+    /// Last-modified timestamp when the platform exposes one.
+    modified_at: Option<TimestampMillis>,
+    /// Stable FNV-1a digest of the base bytes when readable.
+    content_hash: Option<u64>,
+}
+
+impl BaseTargetState {
+    /// Reads the base target at `path`. Returns `None` when the target does not
+    /// exist or is not a regular file (a genuine create). Any read error after a
+    /// successful stat still yields a state (with `content_hash == None`) so the
+    /// generator treats an existing file as an overwrite rather than
+    /// misclassifying it as a create.
+    fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| TimestampMillis(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)));
+        let content_hash = std::fs::read(path)
+            .ok()
+            .map(|bytes| stable_hash_128(&bytes) as u64);
+        Some(Self {
+            len: metadata.len(),
+            modified_at,
+            content_hash,
+        })
+    }
+
+    /// Derives a concurrency guard from this base snapshot. The length and
+    /// modified timestamp always populate; the fingerprint and content version
+    /// populate only when the base bytes were readable.
+    fn preconditions(&self) -> ProposalVersionPreconditions {
+        ProposalVersionPreconditions {
+            file_version: None,
+            buffer_version: None,
+            snapshot_id: None,
+            generation: None,
+            file_content_version: self.content_hash.map(legion_protocol::FileContentVersion),
+            workspace_generation: None,
+            expected_fingerprint: self.content_hash.map(|hash| FileFingerprint {
+                algorithm: "fnv1a-64-v1".to_string(),
+                value: format!("{hash:016x}"),
+            }),
+            expected_file_length: Some(self.len),
+            expected_modified_at: self.modified_at,
+        }
+    }
+}
+
+/// Preconditions for a genuine create: nothing on disk to guard against.
+fn empty_preconditions() -> ProposalVersionPreconditions {
+    ProposalVersionPreconditions {
+        file_version: None,
+        buffer_version: None,
+        snapshot_id: None,
+        generation: None,
+        file_content_version: None,
+        workspace_generation: None,
+        expected_fingerprint: None,
+        expected_file_length: None,
+        expected_modified_at: None,
+    }
+}
+
+/// Deterministic, cross-version-stable 128-bit FNV-1a hash.
+///
+/// Unlike `std::collections::hash_map::DefaultHasher`, FNV-1a is a fixed
+/// published specification, so identifiers and fingerprints derived from it stay
+/// stable across compiler versions, platforms, and runs. The unit-separator
+/// (`\u{1f}`) between domain prefix and payload prevents prefix-collision
+/// ambiguity between distinct id namespaces.
+fn stable_hash_128(bytes: &[u8]) -> u128 {
+    // FNV-1a (128-bit) constants.
+    const FNV_OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= byte as u128;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// Metadata-only output from a Legion workflow coordinator action.
@@ -867,11 +1401,32 @@ impl LegionWorkflowCoordinator {
                 "proposal output must remain metadata-redacted".to_string(),
             ));
         }
+
+        // Fail closed on duplicate recording: the evidence/result ids are derived
+        // solely from the worker id, so a second call would mint colliding ids
+        // and duplicate worker results.
+        let evidence_id = format!("legion-evidence:{}", worker_id.0);
+        let result_id = format!("legion-result:{}", worker_id.0);
+        if self
+            .worker_results
+            .iter()
+            .any(|result| result.result_id == result_id)
+            || self
+                .evidence_records
+                .iter()
+                .any(|record| record.evidence_id == evidence_id)
+        {
+            return Err(AgentError::InvalidLegionWorkflow(format!(
+                "proposal output already recorded for worker {}",
+                worker_id.0
+            )));
+        }
+
         self.proposal_outputs.push(output.clone());
 
         let packet_id = self.packet_id_for_worker(worker_id);
         let evidence = LegionEvidenceRecord {
-            evidence_id: format!("legion-evidence:{}", worker_id.0),
+            evidence_id,
             kind: LegionEvidenceKind::CommandRun,
             source: LegionEvidenceSource::LocalCommand,
             payload_hash: FileFingerprint {
@@ -892,7 +1447,7 @@ impl LegionWorkflowCoordinator {
         self.evidence_records.push(evidence.clone());
 
         let result = LegionWorkerResult {
-            result_id: format!("legion-result:{}", worker_id.0),
+            result_id,
             packet_id,
             result_kind: LegionWorkerResultKind::PatchProposal,
             patch_proposal: Some(output.proposal_id),
@@ -1083,6 +1638,24 @@ fn has_dependency_path(
     false
 }
 
+/// Derives a per-worker cancellation token so provider routes do not share a
+/// single audit/cancellation identity. Deterministic for a given
+/// `(worker_id, correlation_id)` pair so replays stay stable.
+fn derive_cancellation_token(worker_id: &str, correlation_id: u64) -> CancellationTokenId {
+    CancellationTokenId(uuid::Uuid::from_u128(stable_hash_128(
+        format!("legion.workflow.cancellation\u{1f}{worker_id}\u{1f}{correlation_id}").as_bytes(),
+    )))
+}
+
+/// Derives a per-worker event sequence so provider-route audit records do not
+/// all collapse onto a single sequence value. Deterministic for a given
+/// `(worker_id, correlation_id)` pair.
+fn derive_event_sequence(worker_id: &str, correlation_id: u64) -> EventSequence {
+    EventSequence(stable_hash_128(
+        format!("legion.workflow.event_sequence\u{1f}{worker_id}\u{1f}{correlation_id}").as_bytes(),
+    ) as u64)
+}
+
 fn provider_route_request_from_worker(
     worker: &LegionWorkflowWorkerAssignment,
     route_ref: AssistedAiTrustProjectionReference,
@@ -1134,14 +1707,14 @@ fn provider_route_request_from_worker(
         policy_decision_id: None,
         required_capability: CapabilityId("legion.workflow.provider_route".to_string()),
         network_target: None,
-        cancellation_token: CancellationTokenId(uuid::Uuid::from_u128(13)),
+        cancellation_token: derive_cancellation_token(&worker.worker_id.0, worker.correlation_id.0),
         health_labels: vec!["provider_route.not_invoked".to_string()],
         cost_labels: vec!["cost.metadata_only".to_string()],
         principal_id: PrincipalId("legion.workflow.coordinator".to_string()),
         workspace_trust_state: WorkspaceTrustState::Trusted,
         correlation_id: worker.correlation_id,
         causality_id: worker.causality_id,
-        event_sequence: EventSequence(13),
+        event_sequence: derive_event_sequence(&worker.worker_id.0, worker.correlation_id.0),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
@@ -1213,6 +1786,39 @@ mod tests {
 
     fn causality(value: u128) -> CausalityId {
         CausalityId(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn open_error_means_no_lease_file_is_true_only_for_not_found() {
+        // NotFound (no lease file exists yet, or a legacy sandbox predating
+        // the lease protocol) is the only error classified as "safe to
+        // treat as an absent lease" — everything else must fail closed
+        // toward "possibly protected, do not reap", since a permission or
+        // sharing-violation error opening the lease file cannot be
+        // distinguished from an owner holding it in a way that also blocks
+        // this call from opening it. A real OS-level permission-denied or
+        // sharing-violation error is awkward to simulate portably across
+        // Windows and Unix in an integration test, so the classification
+        // itself is exercised directly here via synthetic `io::Error`
+        // values of each kind instead.
+        assert!(open_error_means_no_lease_file(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+
+        let non_absent_kinds = [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::AlreadyExists,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::TimedOut,
+        ];
+        for kind in non_absent_kinds {
+            assert!(
+                !open_error_means_no_lease_file(&std::io::Error::from(kind)),
+                "error kind {kind:?} must fail closed (not be treated as an absent lease)"
+            );
+        }
     }
 
     #[test]
@@ -2001,6 +2607,173 @@ mod tests {
             LegionWorkflowCoordinatorOutput::Blocked { .. }
         ));
         assert!(coordinator.next_ready_workers().is_empty());
+    }
+
+    #[test]
+    fn proposal_populates_concurrency_guard_when_target_exists() {
+        let sandbox = PathBuf::from("target/legion-agent-precondition-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("existing.txt");
+        std::fs::write(&target, b"existing base content").expect("write base file");
+
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let proposal = generator
+            .generate_proposal(proposal_input(&target, "updated content"))
+            .expect("proposal output");
+
+        assert_eq!(proposal.preconditions.expected_file_length, Some(21));
+        assert!(proposal.preconditions.expected_fingerprint.is_some());
+        assert!(proposal.preconditions.expected_modified_at.is_some());
+
+        // A non-existent target is a genuine create and carries no guard.
+        let missing = sandbox.join("missing.txt");
+        let create = generator
+            .generate_proposal(proposal_input(&missing, "new content"))
+            .expect("create proposal");
+        assert_eq!(create.preconditions.expected_file_length, None);
+        assert_eq!(create.preconditions.expected_fingerprint, None);
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn proposal_emits_create_file_when_base_absent() {
+        let sandbox = PathBuf::from("target/legion-agent-create-when-absent-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let missing = sandbox.join("brand-new.rs");
+
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let proposal = generator
+            .generate_proposal(proposal_input(&missing, "fn fresh() {}\n"))
+            .expect("create proposal");
+
+        match &proposal.payload {
+            ProposalPayload::CreateFile(create_file) => {
+                assert_eq!(create_file.path.0, "brand-new.rs");
+                assert_eq!(
+                    create_file.initial_content.as_deref(),
+                    Some("fn fresh() {}\n")
+                );
+            }
+            other => panic!("expected create-file proposal, got {other:?}"),
+        }
+        // A genuine create carries no concurrency guard.
+        assert_eq!(proposal.preconditions.expected_file_length, None);
+        assert_eq!(proposal.preconditions.expected_fingerprint, None);
+        assert_eq!(proposal.preconditions.expected_modified_at, None);
+        assert_eq!(proposal.preconditions.file_content_version, None);
+        assert_eq!(proposal.preview.summary, "Create file proposal");
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn proposal_emits_guarded_create_when_base_exists() {
+        let sandbox = PathBuf::from("target/legion-agent-edit-when-present-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("existing.rs");
+        let base = "hello world\n";
+        std::fs::write(&target, base.as_bytes()).expect("write base file");
+
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let modified = "hello brave world\n";
+        let proposal = generator
+            .generate_proposal(proposal_input(&target, modified))
+            .expect("create proposal");
+
+        // An existing base produces a path-based create/overwrite carrying the
+        // full modified content (the generator has no workspace FileId/open
+        // buffer, so an appliable TextEdit cannot be addressed here).
+        match &proposal.payload {
+            ProposalPayload::CreateFile(create_file) => {
+                assert_eq!(create_file.path.0, "existing.rs");
+                assert_eq!(create_file.initial_content.as_deref(), Some(modified));
+            }
+            other => panic!("expected create-file proposal, got {other:?}"),
+        }
+
+        // Content-level concurrency guard populated from the base snapshot.
+        assert_eq!(
+            proposal.preconditions.expected_file_length,
+            Some(base.len() as u64)
+        );
+        assert!(proposal.preconditions.expected_fingerprint.is_some());
+        assert!(proposal.preconditions.expected_modified_at.is_some());
+        assert!(proposal.preconditions.file_content_version.is_some());
+        assert_eq!(proposal.preview.summary, "Create file proposal");
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn legion_workflow_duplicate_proposal_record_fails_closed() {
+        let mut coordinator =
+            LegionWorkflowCoordinator::new(workflow_session()).expect("valid workflow");
+        let sandbox = PathBuf::from("target/legion-agent-duplicate-record-test");
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.clone());
+        let target = sandbox.join("dup.txt");
+        let worker = LegionWorkflowWorkerId("worker:local".to_string());
+
+        let first = generator
+            .generate_proposal(proposal_input(&target, "first"))
+            .expect("first proposal");
+        coordinator
+            .record_proposal_output(&worker, first)
+            .expect("first record");
+
+        let second = generator
+            .generate_proposal(proposal_input(&target, "second"))
+            .expect("second proposal");
+        let error = coordinator
+            .record_proposal_output(&worker, second)
+            .expect_err("duplicate recording must fail closed");
+
+        assert!(matches!(error, AgentError::InvalidLegionWorkflow(_)));
+        assert_eq!(coordinator.worker_results().len(), 1);
+        assert_eq!(coordinator.evidence_records().len(), 1);
+
+        std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
+    }
+
+    #[test]
+    fn legion_workflow_provider_routes_have_distinct_audit_identity() {
+        let mut session = workflow_session();
+        session.dependency_edges.clear();
+        session.worker_assignments = vec![
+            workflow_worker(
+                "worker:provider-a",
+                LegionWorkflowModelBackend::ProviderBacked,
+                "crates/legion-agent/src/a.rs",
+            ),
+            workflow_worker(
+                "worker:provider-b",
+                LegionWorkflowModelBackend::ProviderBacked,
+                "crates/legion-agent/src/b.rs",
+            ),
+        ];
+
+        let mut coordinator = LegionWorkflowCoordinator::new(session).expect("valid workflow");
+
+        let route_a = match coordinator
+            .provider_route_for_worker(&LegionWorkflowWorkerId("worker:provider-a".to_string()))
+            .expect("route a")
+        {
+            LegionWorkflowCoordinatorOutput::ProviderRouteRequired(route) => *route,
+            _ => panic!("expected provider route"),
+        };
+        let route_b = match coordinator
+            .provider_route_for_worker(&LegionWorkflowWorkerId("worker:provider-b".to_string()))
+            .expect("route b")
+        {
+            LegionWorkflowCoordinatorOutput::ProviderRouteRequired(route) => *route,
+            _ => panic!("expected provider route"),
+        };
+
+        assert_ne!(route_a.cancellation_token, route_b.cancellation_token);
+        assert_ne!(route_a.event_sequence, route_b.event_sequence);
+        assert_ne!(route_a.cancellation_token.0, uuid::Uuid::from_u128(13));
+        assert_ne!(route_a.event_sequence.0, 13);
     }
 
     #[test]

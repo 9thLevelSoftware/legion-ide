@@ -35,6 +35,90 @@ fn causality_id() -> CausalityId {
 }
 
 #[test]
+fn dto_contracts_canonical_product_mode_taxonomy_is_complete_and_consistent() {
+    // Canonical v1 user-facing product modes (P0.F1) are exactly four:
+    // Manual, Assist, Delegate, Legion Workflows.
+    let entries = CANONICAL_PRODUCT_MODES;
+    assert_eq!(
+        entries.len(),
+        4,
+        "canonical v1 product mode taxonomy must list exactly four entries; found {}: {:?}",
+        entries.len(),
+        entries.iter().map(|e| e.label).collect::<Vec<_>>()
+    );
+
+    let labels: Vec<&str> = entries.iter().map(|e| e.label).collect();
+    assert_eq!(
+        labels,
+        vec!["Manual", "Assist", "Delegate", "Legion Workflows"],
+        "canonical v1 product mode labels must be exactly these four and in this order"
+    );
+
+    let mut seen_shortcuts = std::collections::HashSet::new();
+    for entry in entries {
+        assert!(
+            !entry.shortcut_label.is_empty(),
+            "canonical mode `{}` must have a non-empty shortcut label",
+            entry.label
+        );
+        assert!(
+            seen_shortcuts.insert(entry.shortcut_label),
+            "canonical mode shortcut labels must be unique; duplicate `{}`",
+            entry.shortcut_label
+        );
+        assert!(
+            !entry.docs_anchor.is_empty(),
+            "canonical mode `{}` must have a non-empty docs anchor",
+            entry.label
+        );
+        assert!(
+            entry.docs_anchor.starts_with("docs/MODES.md#"),
+            "canonical mode `{}` docs anchor must point into docs/MODES.md, got `{}`",
+            entry.label,
+            entry.docs_anchor
+        );
+        assert!(
+            !entry.policy_summary.is_empty(),
+            "canonical mode `{}` must have a non-empty policy summary line",
+            entry.label
+        );
+        // Every canonical mode must map back to a known ProductMode variant.
+        assert!(
+            product_mode_allows_runtime_surface(entry.variant, ProductRuntimeSurface::ManualIde),
+            "canonical mode `{}` must allow ManualIde runtime surface",
+            entry.label
+        );
+    }
+
+    // Preserve the Manual mode invariant: no AI/network/cloud/worker/automation/telemetry/remote.
+    for surface in [
+        ProductRuntimeSurface::AssistedAi,
+        ProductRuntimeSurface::CloudProvider,
+        ProductRuntimeSurface::NetworkEgress,
+        ProductRuntimeSurface::HostedTelemetry,
+        ProductRuntimeSurface::DelegatedTask,
+        ProductRuntimeSurface::WorkerRuntime,
+        ProductRuntimeSurface::Automation,
+        ProductRuntimeSurface::Collaboration,
+        ProductRuntimeSurface::RemoteWorkspace,
+        ProductRuntimeSurface::PluginRuntime,
+    ] {
+        assert!(
+            !product_mode_allows_runtime_surface(ProductMode::Manual, surface),
+            "Manual canonical mode must deny {surface:?}"
+        );
+    }
+
+    // Stale/legacy labels must not appear inside the canonical taxonomy.
+    for stale in ["Automate", "Delegates", "Delegated"] {
+        assert!(
+            !labels.iter().any(|label| label.contains(stale)),
+            "canonical taxonomy must not contain stale label fragment `{stale}`; got {labels:?}"
+        );
+    }
+}
+
+#[test]
 fn dto_contracts_product_mode_runtime_surface_policy_is_shared_and_fail_closed_for_manual() {
     assert!(product_mode_allows_runtime_surface(
         ProductMode::Manual,
@@ -723,6 +807,7 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
             byte_offset: Some(12),
             utf16_offset: Some(10),
         },
+        cursors: Vec::new(),
         scroll: ViewportScroll {
             top_line: 120,
             left_column: 4,
@@ -791,6 +876,7 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
             }
         ],
         "cursor": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
+        "cursors": [],
         "scroll": {"top_line": 120, "left_column": 4},
         "dimensions": {"width_px": 1280, "height_px": 720},
         "line_wrapping_policy": "viewport",
@@ -4021,6 +4107,8 @@ fn dto_contracts_storage_request_response_schema_golden() {
         correlation_id: CorrelationId(901),
         causality_id: causality_id(),
         payload_summary: payload_summary(),
+        checkpoint_rollback_projection: None,
+        risk_rule_ids: Vec::new(),
         diagnostics: vec![diagnostic("audit")],
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
@@ -4626,6 +4714,7 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
             byte_offset: Some(20),
             utf16_offset: Some(18),
         },
+        cursors: Vec::new(),
         scroll: ViewportScroll {
             top_line: 1,
             left_column: 0,
@@ -4662,6 +4751,7 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
             "end": {"line": 1, "character": 6, "byte_offset": 14, "utf16_offset": 12}
         }],
         "cursor": {"line": 2, "character": 4, "byte_offset": 20, "utf16_offset": 18},
+        "cursors": [],
         "scroll": {"top_line": 1, "left_column": 0},
         "dimensions": {"width_px": 1280, "height_px": 720},
         "line_wrapping_policy": "off",

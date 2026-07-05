@@ -78,12 +78,21 @@ Every current workspace crate must have an explicit internal dependency policy e
 - `legion-ui` MUST NOT depend on `gpui`.
 
 - `legion-desktop` may depend on:
+  - `legion-agent`
+  - `legion-ai` (optional, feature-gated behind `ai`)
   - `legion-app`
   - `legion-project`
   - `legion-protocol`
+  - `legion-remote`
+  - `legion-sandbox`
+  - `legion-terminal`
   - `legion-ui`
 
 `legion-desktop` is the active Phase 2 crate authorized to host GUI renderer dependencies and project/workspace projection helpers. Phase 2 may use `eframe` and `egui` for the Windows-first desktop foundation proof, including their renderer/windowing/accessibility integration stack such as `egui-winit`, `egui-wgpu`, `winit`, `wgpu`, and `accesskit` when pulled in by or needed for the adapter. Slint is an explicit fallback candidate for native panel rendering if Phase 2 evidence shows the egui path cannot satisfy IME, clipboard, focus, accessibility, or high-DPI requirements. Tauri/WRY/TAO and GPUI are not approved for the core editor shell in Phase 2; Tauri/WRY remain auxiliary-only unless a later ADR supersedes ADR-0002, and GPUI remains a long-term architecture influence until its official Windows-first support is suitable for this project.
+
+`legion-desktop` may additionally use `legion-agent` and `legion-sandbox` as test-only dependencies for renderer-facing TDD projections that validate agent communication and sandbox-panel rows without moving product authority into the desktop adapter.
+
+- `legion-sandbox` may depend on:
 
 Renderer crates are adapter-only. They must not appear in `legion-ui`, app/editor/project/protocol/storage/security/observability/provider/runtime crates, or any core substrate crate until a later ADR and dependency-policy update explicitly authorize that edge.
 
@@ -93,6 +102,7 @@ Renderer crates are adapter-only. They must not appear in `legion-ui`, app/edito
   - `legion-ai-providers`
   - `legion-collaboration`
   - `legion-editor`
+  - `legion-debug`
   - `legion-index`
   - `legion-lsp`
   - `legion-memory`
@@ -198,6 +208,11 @@ WS03.T1 activates `legion-lsp` only for hand-rolled LSP JSON-RPC framing, reques
   - `legion-platform`
   - `legion-protocol`
   - `legion-security`
+
+- `legion-debug` may depend on:
+  - `legion-protocol`
+
+P2.F3.T1 activates `legion-debug` only for metadata-only DAP client lifecycle state and protocol projection contracts. It may not depend on app, UI, editor, project, terminal, platform/process, storage, security policy, provider, worker, or desktop internals until later debug-adapter resolution gates add explicit policy, sandbox/process evidence, and contract tests. Adapter stdout/stderr/source payloads remain outside this crate by default; the app composes `legion-debug` through protocol DTOs and app-owned trust checks.
 
 - `legion-remote-transport` may depend on:
   - `legion-observability`

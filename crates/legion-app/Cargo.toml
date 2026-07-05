@@ -24,6 +24,7 @@ legion-protocol = { workspace = true }
 legion-observability = { workspace = true }
 legion-security = { workspace = true }
 legion-storage = { workspace = true }
+legion-debug = { workspace = true }
 legion-terminal = { workspace = true }
 legion-ui = { workspace = true }
 legion-agent = { workspace = true, optional = true }

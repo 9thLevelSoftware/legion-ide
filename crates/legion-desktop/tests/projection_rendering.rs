@@ -30,12 +30,15 @@ use legion_ui::ui::{
     EditorViewportStateProjection,
 };
 use legion_ui::{
-    ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
-    AssistInlinePredictionStatusProjection, DockMode, ExplorerNodeProjection, ExplorerProjection,
-    ExplorerSelectionProjection, PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind,
-    SearchScopeProjection, SettingsProjection, Shell, StatusMessageProjection, StatusSeverity,
-    TOAST_VISIBLE_LIMIT, ThemePreferenceProjection, ToastVerbosityProjection,
+    ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,
+    AssistInlinePredictionRowProjection, AssistInlinePredictionStatusProjection, DockMode,
+    ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection, PaletteMode,
+    PaletteProjection, PaletteResult, PaletteResultKind, SearchScopeProjection, SettingsProjection,
+    Shell, StatusMessageProjection, StatusSeverity, TOAST_VISIBLE_LIMIT, ThemePreferenceProjection,
+    ToastVerbosityProjection,
 };
+
+mod common;
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
     TextCoordinate {
@@ -169,6 +172,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
     };
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
         file_id: Some(FileId(2)),
@@ -335,12 +339,15 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
     snapshot.assisted_ai_projection.request_count = 1;
     snapshot.delegated_task_projection.plan_count = 1;
     snapshot.plugin_contribution_projections = vec![PluginContributionProjection {
-        plugin_id: PluginId(4),
+        plugin_id: PluginId(7),
         contributions: vec![PluginContribution::Command(PluginCommandDescriptor {
-            command_id: "phase2.command".to_string(),
-            title: "Command".to_string(),
+            command_id: "phase5.run".to_string(),
+            title: "Phase 5 Run".to_string(),
             required_capability: CapabilityId("plugin.command".to_string()),
         })],
+        permission_review_rows: vec![
+            "permission review 1: capability=plugin.command reason=command phase5.run".to_string(),
+        ],
         status_label: "loaded".to_string(),
     }];
     snapshot.collaboration_presence_projections = vec![CollaborationPresenceProjection {
@@ -358,6 +365,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
 fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Degraded").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
         file_id: Some(FileId(2)),
@@ -371,6 +379,7 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
             visible_range: range(0, 10),
             selections: Vec::new(),
             cursor: coord(0, 0, 0),
+            cursors: vec![coord(0, 0, 0)],
             scroll: ViewportScroll {
                 top_line: 0,
                 left_column: 0,
@@ -424,9 +433,70 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
     snapshot
 }
 
+fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
+    let mut snapshot = Shell::empty("Streaming").projection_snapshot();
+    snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
+        workspace_id: Some(WorkspaceId(1)),
+        buffer_id: Some(BufferId(7)),
+        file_id: Some(FileId(9)),
+        file_path: Some(CanonicalPath("streamed.rs".to_string())),
+        viewport: Some(ViewportProjection {
+            workspace_id: WorkspaceId(1),
+            buffer_id: BufferId(7),
+            file_id: Some(FileId(9)),
+            snapshot_id: SnapshotId(12),
+            buffer_version: BufferVersion(13),
+            visible_range: range(0, 8),
+            selections: Vec::new(),
+            cursor: coord(0, 0, 0),
+            cursors: vec![coord(0, 0, 0)],
+            scroll: ViewportScroll {
+                top_line: 0,
+                left_column: 0,
+            },
+            dimensions: ViewportDimensions {
+                width_px: 800,
+                height_px: 600,
+            },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
+            mode: ViewportProjectionMode::Normal,
+            line_slices: vec![ViewportLineSlice {
+                line_number: 0,
+                visible_text: "visible streaming line".to_string(),
+                byte_range: ByteRange::new(0, 23),
+                utf16_range: Utf16Range {
+                    start: Utf16Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Utf16Position {
+                        line: 0,
+                        character: 23,
+                    },
+                },
+                chunk_hash: fingerprint("chunk-streaming"),
+                truncation_state: ViewportLineTruncationState::None,
+            }],
+            line_metrics: Vec::new(),
+            decoration_spans: Vec::new(),
+            fold_ranges: Vec::new(),
+            semantic_token_overlays: Vec::new(),
+            large_file_status: None,
+            schema_version: 2,
+        }),
+        degraded: false,
+        small_buffer_preview: None,
+        dirty: false,
+    };
+    snapshot
+}
+
 fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Highlighted").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
         file_id: Some(FileId(2)),
@@ -440,6 +510,7 @@ fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
             visible_range: range(0, 24),
             selections: Vec::new(),
             cursor: coord(0, 4, 4),
+            cursors: vec![coord(0, 4, 4)],
             scroll: ViewportScroll {
                 top_line: 0,
                 left_column: 0,
@@ -518,6 +589,7 @@ fn assist_inline_prediction_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Assist").projection_snapshot();
     snapshot.product_mode = DockMode::Assist;
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
         file_id: Some(FileId(2)),
@@ -688,7 +760,9 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             && row.contains("Run test")
             && row.contains("rust-analyzer.runSingle")
     }));
-    assert!(model.plugin_rows.iter().any(|row| row.contains("plugin 4")));
+    assert!(model.plugin_rows.iter().any(
+        |row| row.contains("permission review 1") && row.contains("capability=plugin.command")
+    ));
     assert!(
         model
             .collaboration_rows
@@ -1176,6 +1250,7 @@ fn projection_rendering_projects_editor_polish_summary_rows() {
         visible_range: range(0, 1),
         selections: Vec::new(),
         cursor: coord(0, 0, 0),
+        cursors: vec![coord(0, 0, 0)],
         scroll: ViewportScroll {
             top_line: 0,
             left_column: 0,
@@ -1323,6 +1398,20 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             && !row.contains('\n')
             && !row.contains('\0')
     }));
+
+    let streaming_model = DesktopProjectionViewModel::from_snapshot(&streaming_snapshot());
+    // There is no separate "streaming" buffer state; a chunked viewport renders
+    // its line slices directly, each prefixed with the 1-based line number.
+    assert_eq!(
+        streaming_model.active_buffer_lines,
+        vec!["   1: visible streaming line".to_string()]
+    );
+    assert!(
+        streaming_model
+            .active_buffer_lines
+            .iter()
+            .any(|row| row.contains("visible streaming line"))
+    );
 }
 
 #[test]
@@ -1499,6 +1588,5 @@ fn projection_rendering_tests_preserve_app_boundary() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/view.rs"))
         .expect("renderer source should be readable");
 
-    assert!(!source.contains("legion_app"));
-    assert!(!source.contains("AppComposition"));
+    common::assert_source_excludes(&source, "src/view.rs", &["legion_app", "AppComposition"]);
 }

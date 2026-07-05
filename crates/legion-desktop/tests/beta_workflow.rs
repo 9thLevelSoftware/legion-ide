@@ -6,7 +6,10 @@ use std::{
 };
 
 use legion_desktop::{
-    beta::{BetaWorkflowConfig, BetaWorkflowStatus, run_beta_workflow},
+    beta::{
+        BetaProposalMode, BetaSaveOutcome, BetaTerminalPolicyDecision, BetaWorkflowConfig,
+        BetaWorkflowStatus, run_beta_workflow,
+    },
     workflow::DesktopLaunchConfig,
 };
 
@@ -88,6 +91,12 @@ fn beta_workflow_runs_through_desktop_runtime_and_writes_metadata_evidence() {
     .expect("beta workflow should pass");
 
     assert_eq!(report.status, BetaWorkflowStatus::Passed);
+    // Assert the typed outcome fields directly rather than scraping prose status.
+    assert_eq!(report.save_outcome, BetaSaveOutcome::Saved);
+    assert_eq!(report.terminal_decision, BetaTerminalPolicyDecision::Denied);
+    assert_eq!(report.proposal_mode, BetaProposalMode::PreviewOnly);
+    assert!(report.errors.is_empty());
+    // Prose status strings remain populated for human-facing evidence only.
     assert!(report.edit_save_status.contains("saved"));
     assert!(report.terminal_status.contains("denied"));
     assert!(report.proposal_status.contains("preview"));
@@ -111,10 +120,14 @@ fn beta_workflow_rejects_write_workspace_outside_target() {
         std::env::temp_dir().join(format!("legion-phase7-beta-outside-{}", std::process::id()));
     let evidence = paths.path("outside-evidence.md");
 
-    let error = run_beta_workflow(beta_config(&paths, outside_target, evidence))
+    let error = run_beta_workflow(beta_config(&paths, outside_target, evidence.clone()))
         .expect_err("outside target beta workspace must be rejected");
 
     assert!(error.to_string().contains("blocked"));
+    // The blocked report is not returned (the run bails), so its blocked status
+    // is asserted through the persisted markdown evidence.
+    let evidence_text = fs::read_to_string(&evidence).expect("blocked evidence should be written");
+    assert!(evidence_text.contains("status: blocked"));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Legion IDE
 
-> **License notice:** This codebase is proprietary software. All rights reserved. The source in this repository is provided for internal development and review only; it is not open source, not OSI-licensed, and the workspace `publish` flag is `false` (see `Cargo.toml` `[workspace.package]`). Do not redistribute, sublicense, or treat the contents as permissively licensed. See `LICENSE` (or your internal distribution agreement) for the terms that govern use of this code.
+> **License notice:** This codebase is proprietary software. All rights reserved. The source in this repository is provided for internal development and review only; it is not open source, not OSI-licensed, and the workspace `publish` flag is `false` (see `Cargo.toml` `[workspace.package]`). Do not redistribute, sublicense, or treat the contents as permissively licensed. The governing terms are the repository's internal distribution agreement.
 
 Legion IDE is a control-first, AI-native Rust IDE substrate that keeps human authority, proposal review, and metadata-only evidence at the center of local and delegated development workflows.
 
@@ -25,7 +25,7 @@ Use these docs first:
 - `plans/product-readiness-ledger.md` — readiness matrix and remaining product gaps.
 - `plans/legion-production-master-plan-v0.2.md` — the current production master plan (current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, milestones to production utility).
 - `plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking the v0.2 rebaseline and product-readiness ledger.
-- `plans/legion-customizable-autonomy-continuation-plan-v0.1.md` — continuation plan: an old-school customizable manual IDE with a configurable autonomy continuum from zero AI to gated full automation (ADR-0041..0045, WS-21..WS-29, milestones C1..C5).
+- `plans/control-first-adaptive-ide-technical-design-v0.1.md` and `plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `.almanac/pages/getting-started.md` — local Almanac wiki entry point, if the wiki is checked out locally.
 
 ## Architecture at a Glance
@@ -45,6 +45,7 @@ Run these before claiming code work is complete:
 ```bash
 cargo run -p xtask -- check-deps
 cargo run -p xtask -- docs-hygiene
+cargo run -p xtask -- claim-audit
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets --no-fail-fast
@@ -70,7 +71,7 @@ cargo deny --version
 
 If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
-No GitHub Actions CI workflow is currently configured. Local developer machines must install the CLI before using `scripts/run-phase-gates.*`; those local gates are the active verification source.
+A single GitHub Actions workflow (`.github/workflows/legion-bench.yml`) runs the legion-bench live-mode benchmark weekly (and on manual dispatch) across Linux, Windows, and macOS runners and uploads the report artifact. It is not a full CI gate: local developer machines must install the CLI before using `scripts/run-phase-gates.*`, and those local gates remain the active verification source for all other checks.
 
 ## CLI Proof
 

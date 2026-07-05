@@ -397,17 +397,62 @@ fn stdio_lsp_session_refuses_policy_denied_launch_without_spawning() {
 }
 
 #[test]
+fn stdio_lsp_session_times_out_when_server_goes_silent() {
+    // Regression for F2: a server that accepts a request and then sends
+    // nothing must not hang the caller. The read path is bounded by the
+    // request's timeout budget even when no further frame ever arrives.
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = LspStdioSession::start(mock_server_config(), &mut launcher).unwrap();
+    session
+        .initialize(
+            json!({"processId": null, "capabilities": {}}),
+            operation_context(40, 5000),
+        )
+        .unwrap();
+
+    let budget_ms = 200;
+    let start = std::time::Instant::now();
+    // `mock.silent` is accepted by the mock but never answered.
+    let response = session
+        .request("mock.silent", json!({}), operation_context(41, budget_ms))
+        .expect("silent server must resolve as Timeout, not hang or error");
+    let elapsed = start.elapsed();
+
+    assert_eq!(response.status, LspResultStatus::Timeout);
+    // The call must return close to the budget, not block indefinitely. A
+    // generous upper bound keeps the assertion robust on slow CI while still
+    // failing hard if the read genuinely hangs.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "silent server hung the caller for {elapsed:?}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(budget_ms),
+        "timeout fired before the budget elapsed: {elapsed:?}"
+    );
+    // The process is left running; only the request is abandoned.
+    assert!(session.is_running());
+}
+
+// Live smoke against a real rust-analyzer. Gated by `#[ignore]` so it never
+// runs in the default `cargo test` pass; a dedicated CI job runs it with
+// `cargo test -- --ignored` and `LEGION_RUN_RUST_ANALYZER_SMOKE=1`. When it
+// *is* run, a missing/unconfigured binary is a hard failure rather than a
+// silent return so the real-server launch path cannot quietly rot.
+#[test]
+#[ignore = "live rust-analyzer smoke; run via dedicated CI job with `--ignored` and LEGION_RUN_RUST_ANALYZER_SMOKE=1"]
 fn rust_analyzer_initializes_against_legion_repo_when_opted_in() {
-    if std::env::var("LEGION_RUN_RUST_ANALYZER_SMOKE").as_deref() != Ok("1") {
-        eprintln!("skipping rust-analyzer smoke; set LEGION_RUN_RUST_ANALYZER_SMOKE=1 to run");
-        return;
-    }
+    assert_eq!(
+        std::env::var("LEGION_RUN_RUST_ANALYZER_SMOKE").as_deref(),
+        Ok("1"),
+        "rust-analyzer smoke must be run with LEGION_RUN_RUST_ANALYZER_SMOKE=1",
+    );
 
     let ra = std::env::var("RUST_ANALYZER").unwrap_or_else(|_| "rust-analyzer".to_string());
-    if Command::new(&ra).arg("--version").output().is_err() {
-        eprintln!("skipping rust-analyzer smoke; `{ra}` is not available");
-        return;
-    }
+    assert!(
+        Command::new(&ra).arg("--version").output().is_ok(),
+        "rust-analyzer binary `{ra}` is not available; install it or set RUST_ANALYZER",
+    );
 
     let temp_root = std::env::temp_dir().join(format!(
         "legion-ra-smoke-{}-{}",
@@ -541,7 +586,13 @@ mod tests {
             operation_context(11, 15_000),
         )
         .expect("completion response");
-    let _completion_rows = project_completion_response(&response.result, 10);
+    let completion_rows = project_completion_response(&response.result, 10);
+    assert!(
+        completion_rows
+            .iter()
+            .any(|row| row.label.starts_with("Alpha")),
+        "expected an `Alpha` completion at `Alp`, got {completion_rows:?}",
+    );
 
     let hover_pos = position_of("pub fn add(");
     let call_pos = position_of("add(value, 1)");
@@ -551,7 +602,14 @@ mod tests {
     let response = session
         .request("textDocument/hover", hover, operation_context(12, 15_000))
         .expect("hover response");
-    let _hover = project_hover_response(&response.result, Some(document.file_id));
+    let hover = project_hover_response(&response.result, Some(document.file_id))
+        .expect("hover over `pub fn add(` should project a result");
+    assert!(!hover.label.is_empty(), "hover label should be non-empty");
+    assert!(
+        hover.label.contains("add"),
+        "hover label should describe `add`, got {:?}",
+        hover.label,
+    );
 
     let definition = definition_request(102, &document, call_pos)
         .params
@@ -563,7 +621,11 @@ mod tests {
             operation_context(13, 15_000),
         )
         .expect("definition response");
-    let _definitions = project_location_response(&response.result, 10);
+    let definitions = project_location_response(&response.result, 10);
+    assert!(
+        !definitions.is_empty(),
+        "go-to-definition on the `add` call should resolve a location",
+    );
 
     let references = references_request(103, &document, position_of("pub fn add("), true)
         .params
@@ -575,7 +637,11 @@ mod tests {
             operation_context(14, 15_000),
         )
         .expect("references response");
-    let _references = project_location_response(&response.result, 10);
+    let references = project_location_response(&response.result, 10);
+    assert!(
+        !references.is_empty(),
+        "find-references on `add` should resolve at least the definition and call site",
+    );
 
     let declaration = declaration_request(104, &document, call_pos)
         .params
@@ -587,7 +653,11 @@ mod tests {
             operation_context(15, 15_000),
         )
         .expect("declaration response");
-    let _locations = project_location_response(&response.result, 10);
+    let declarations = project_location_response(&response.result, 10);
+    assert!(
+        !declarations.is_empty(),
+        "go-to-declaration on the `add` call should resolve a location",
+    );
 
     let implementation = implementation_request(105, &document, call_pos)
         .params
@@ -599,6 +669,9 @@ mod tests {
             operation_context(16, 15_000),
         )
         .expect("implementation response");
+    // `implementation` on a free function is legitimately empty, so this
+    // surface is only smoke-exercised (the request must round-trip without
+    // error); we deliberately do not assert on its contents.
     let _locations = project_location_response(&response.result, 10);
 
     let type_definition = type_definition_request(106, &document, call_pos)
@@ -611,6 +684,8 @@ mod tests {
             operation_context(17, 15_000),
         )
         .expect("type-definition response");
+    // `typeDefinition` at a call expression is environment-dependent and may
+    // be empty, so this surface is only smoke-exercised.
     let _locations = project_location_response(&response.result, 10);
 
     let signature_help = signature_help_request(107, &document, call_pos)
@@ -623,7 +698,15 @@ mod tests {
             operation_context(18, 15_000),
         )
         .expect("signature help response");
-    let _signature_help = response.result.get("signatures");
+    let signatures = response
+        .result
+        .get("signatures")
+        .and_then(|value| value.as_array())
+        .expect("signature help should carry a `signatures` array");
+    assert!(
+        !signatures.is_empty(),
+        "signature help inside the `add(..)` call should offer at least one signature",
+    );
 
     let response = session
         .request(
@@ -634,7 +717,11 @@ mod tests {
             operation_context(19, 15_000),
         )
         .expect("document symbol response");
-    let _outline = project_document_symbol_response(&response.result, 20);
+    let outline = project_document_symbol_response(&response.result, 20);
+    assert!(
+        outline.iter().any(|symbol| symbol.label.contains("add")),
+        "document outline should include the `add` function, got {outline:?}",
+    );
 
     let response = session
         .request(
@@ -645,7 +732,13 @@ mod tests {
             operation_context(20, 15_000),
         )
         .expect("workspace symbol response");
-    let _workspace_symbols = project_workspace_symbol_response(&response.result, 20);
+    let workspace_symbols = project_workspace_symbol_response(&response.result, 20);
+    assert!(
+        workspace_symbols
+            .iter()
+            .any(|symbol| symbol.label.contains("add")),
+        "workspace symbol search for `add` should match a symbol, got {workspace_symbols:?}",
+    );
 
     let response = session
         .request(
@@ -669,6 +762,8 @@ mod tests {
             operation_context(21, 15_000),
         )
         .expect("inlay hint response");
+    // Inlay hints depend on rust-analyzer's `inlayHints` config, which may be
+    // disabled by default; this surface is only smoke-exercised.
     let _hints = project_inlay_hint_response(&response.result, "rust-analyzer", 20);
 
     let response = session
@@ -680,6 +775,8 @@ mod tests {
             operation_context(22, 15_000),
         )
         .expect("code lens response");
+    // Code lenses (Run/Debug) depend on rust-analyzer's `lens` config, which
+    // may be disabled by default; this surface is only smoke-exercised.
     let _lenses = project_code_lens_response(&response.result, "rust-analyzer", 20);
 
     let response = session
@@ -691,7 +788,14 @@ mod tests {
             operation_context(23, 15_000),
         )
         .expect("folding range response");
-    let _folding_ranges = response.result.as_array();
+    let folding_ranges = response
+        .result
+        .as_array()
+        .expect("folding range response should be an array");
+    assert!(
+        !folding_ranges.is_empty(),
+        "folding ranges should be reported for the multi-line fixture",
+    );
 
     let response = session
         .request(
@@ -702,5 +806,13 @@ mod tests {
             operation_context(24, 15_000),
         )
         .expect("semantic tokens response");
-    let _semantic_tokens = response.result.get("data").and_then(|data| data.as_array());
+    let semantic_tokens = response
+        .result
+        .get("data")
+        .and_then(|data| data.as_array())
+        .expect("semantic tokens response should carry a `data` array");
+    assert!(
+        !semantic_tokens.is_empty(),
+        "semantic tokens should be produced for the non-trivial fixture",
+    );
 }

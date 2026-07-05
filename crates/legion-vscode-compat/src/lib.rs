@@ -158,19 +158,28 @@ pub fn manifest_from_package_json(
     let extension_kinds = extension_kinds(package_json.get("extensionKind"));
     let activation_events = activation_events(package_json.get("activationEvents"));
     let contributions = contributions(package_json.get("contributes"));
+    let has_executable_entrypoint = has_executable_entrypoint(&package_json);
 
     let mut diagnostics = Vec::new();
     collect_activation_diagnostics(&activation_events, &mut diagnostics);
     collect_contribution_diagnostics(&contributions, &mut diagnostics);
 
-    let required_tier = required_tier(&activation_events, &contributions);
+    let required_tier = required_tier(
+        &activation_events,
+        &contributions,
+        has_executable_entrypoint,
+    );
     let status = aggregate_status(
         required_tier,
         &activation_events,
         &contributions,
         &diagnostics,
     );
-    let requested_capabilities = requested_capabilities(&activation_events, &contributions);
+    let requested_capabilities = requested_capabilities(
+        &activation_events,
+        &contributions,
+        has_executable_entrypoint,
+    );
 
     Ok(VsCodeExtensionManifest {
         extension_id: VsCodeExtensionId(format!("{publisher}.{name}")),
@@ -256,8 +265,20 @@ fn validate_control_ids(
 
 fn required_string(value: &Value, field: &str) -> Result<String, VsCodeCompatError> {
     optional_string(value, field)
-        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| VsCodeCompatError::InvalidManifest(format!("missing `{field}`")))
+}
+
+/// Returns `true` when the manifest declares an executable extension entrypoint.
+///
+/// A non-empty `main` (Node host) or `browser` (web worker host) field means the
+/// extension ships activatable code, so it must be treated as requiring an
+/// extension-host policy decision even if it declares no activation events.
+fn has_executable_entrypoint(package_json: &Value) -> bool {
+    ["main", "browser"].iter().any(|field| {
+        optional_string(package_json, field).is_some_and(|entry| !entry.trim().is_empty())
+    })
 }
 
 fn optional_string(value: &Value, field: &str) -> Option<String> {
@@ -508,11 +529,22 @@ fn collect_contribution_diagnostics(
 fn required_tier(
     activation_events: &[VsCodeActivationEvent],
     contributions: &[VsCodeContributionDescriptor],
+    has_executable_entrypoint: bool,
 ) -> VsCodeCompatibilityTier {
+    // An executable entrypoint (`main`/`browser`) always requires at least the
+    // extension-host-sidecar tier, even with no activation events or declarative
+    // contributions, so it cannot silently resolve to Tier0/Supported.
+    let entrypoint_floor = if has_executable_entrypoint {
+        Some(VsCodeCompatibilityTier::Tier2ExtensionHostSidecar)
+    } else {
+        None
+    };
+
     activation_events
         .iter()
         .map(|event| event.tier)
         .chain(contributions.iter().map(|contribution| contribution.tier))
+        .chain(entrypoint_floor)
         .max()
         .unwrap_or(VsCodeCompatibilityTier::Tier0Declarative)
 }
@@ -550,8 +582,15 @@ fn aggregate_status(
 fn requested_capabilities(
     activation_events: &[VsCodeActivationEvent],
     contributions: &[VsCodeContributionDescriptor],
+    has_executable_entrypoint: bool,
 ) -> Vec<CapabilityId> {
     let mut capabilities = BTreeSet::new();
+
+    // An executable entrypoint must request extension-host activation so that a
+    // host policy decision is required even without declared activation events.
+    if has_executable_entrypoint {
+        capabilities.insert("vscode.extension.activate".to_string());
+    }
 
     for activation_event in activation_events {
         if activation_event.tier >= VsCodeCompatibilityTier::Tier1ProtocolAdapter {
@@ -641,6 +680,90 @@ mod tests {
 
         let session = extension_host_session_for_manifest(&manifest);
         assert_eq!(session.runtime, VsCodeExtensionHostRuntime::NoneRequired);
+    }
+
+    #[test]
+    fn executable_entrypoint_requires_host_policy_without_activation_events() {
+        let manifest = manifest_from_package_json(
+            PluginId(20),
+            json!({
+                "publisher": "legion",
+                "name": "entrypoint-fixture",
+                "version": "1.0.0",
+                "main": "./out/extension.js",
+                "contributes": {
+                    "themes": [{ "label": "Legion Dark" }]
+                }
+            }),
+            CorrelationId(20),
+            causality_id(),
+            EventSequence(20),
+        )
+        .expect("entrypoint manifest normalizes");
+
+        assert_eq!(
+            manifest.required_tier,
+            VsCodeCompatibilityTier::Tier2ExtensionHostSidecar
+        );
+        assert_eq!(
+            manifest.status,
+            VsCodeCompatibilityStatus::SupportedWithPolicy
+        );
+        assert!(
+            manifest
+                .requested_capabilities
+                .contains(&CapabilityId("vscode.extension.activate".to_string()))
+        );
+
+        let session = extension_host_session_for_manifest(&manifest);
+        assert_eq!(session.runtime, VsCodeExtensionHostRuntime::NodeSidecar);
+    }
+
+    #[test]
+    fn blank_executable_entrypoint_stays_declarative() {
+        let manifest = manifest_from_package_json(
+            PluginId(21),
+            json!({
+                "publisher": "legion",
+                "name": "blank-entrypoint-fixture",
+                "version": "1.0.0",
+                "main": "   ",
+                "contributes": {
+                    "themes": [{ "label": "Legion Dark" }]
+                }
+            }),
+            CorrelationId(21),
+            causality_id(),
+            EventSequence(21),
+        )
+        .expect("blank entrypoint manifest normalizes");
+
+        assert_eq!(
+            manifest.required_tier,
+            VsCodeCompatibilityTier::Tier0Declarative
+        );
+        assert_eq!(manifest.status, VsCodeCompatibilityStatus::Supported);
+    }
+
+    #[test]
+    fn identity_fields_are_trimmed_before_building_extension_id() {
+        let manifest = manifest_from_package_json(
+            PluginId(22),
+            json!({
+                "publisher": "  legion  ",
+                "name": "\ttrim-fixture\n",
+                "version": " 1.0.0 "
+            }),
+            CorrelationId(22),
+            causality_id(),
+            EventSequence(22),
+        )
+        .expect("whitespace-padded identity normalizes");
+
+        assert_eq!(manifest.publisher, "legion");
+        assert_eq!(manifest.name, "trim-fixture");
+        assert_eq!(manifest.version, "1.0.0");
+        assert_eq!(manifest.extension_id.0, "legion.trim-fixture");
     }
 
     #[test]

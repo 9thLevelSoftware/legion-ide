@@ -12,9 +12,9 @@ use legion_protocol::{
     TerminalSessionId, TextCoordinate, TimestampMillis, WorkspaceId,
 };
 use legion_ui::{
-    ActiveBufferProjection, CommandDispatchIntent, SearchScopeProjection,
-    SearchStatusKindProjection, SearchStatusProjection, Shell, StructuralSearchCaptureProjection,
-    StructuralSearchMatchProjection, StructuralSearchProjection,
+    ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent,
+    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, Shell,
+    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
 };
 
 fn position(byte_offset: u64) -> TextCoordinate {
@@ -37,6 +37,7 @@ fn range(start: u64, end: u64) -> ProtocolTextRange {
 fn desktop_language_panel_renders_projection() {
     let mut snapshot = Shell::empty("language-terminal").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(9)),
         ..ActiveBufferProjection::empty()
     };
@@ -233,6 +234,7 @@ fn desktop_structural_search_panel_renders_projection() {
 fn desktop_language_actions_dispatch_intents() {
     let mut snapshot = Shell::empty("bridge").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(9)),
         ..ActiveBufferProjection::empty()
     };

@@ -184,6 +184,7 @@ pub struct WorkspaceSearchQuery {
 pub struct WorkspaceSearchHit {
     pub file_id: FileId,
     pub canonical_path: CanonicalPath,
+    /// One-based line number of the match (matches the blame convention).
     pub line_number: u32,
     pub byte_range: Range<u64>,
     pub line_text: String,
@@ -276,13 +277,32 @@ fn now_millis() -> u64 {
         .map_or(0, |dur| dur.as_millis() as u64)
 }
 
-fn stable_hash(value: &str) -> u128 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+/// Algorithm version tag for [`stable_hash`]. Bump this when the hashing
+/// algorithm changes so that persisted/protocol-facing ids derived from it
+/// (WorkspaceId, git hunk ids, content-version digests) shift in a detectable,
+/// intentional way rather than silently colliding across versions.
+const STABLE_HASH_VERSION: u8 = 1;
 
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish() as u128
+/// Deterministic, cross-version-stable 128-bit hash (FNV-1a).
+///
+/// Used for persisted/protocol-facing ids. Unlike `std`'s `DefaultHasher`,
+/// FNV-1a is a fixed published specification, so its output does not change
+/// across compiler/std versions. The [`STABLE_HASH_VERSION`] tag is mixed in
+/// first so the id space is namespaced by algorithm version.
+fn stable_hash(value: &str) -> u128 {
+    // FNV-1a (128-bit) constants.
+    const FNV_OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    // Mix the algorithm version tag in first.
+    hash ^= STABLE_HASH_VERSION as u128;
+    hash = hash.wrapping_mul(FNV_PRIME);
+    for byte in value.as_bytes() {
+        hash ^= *byte as u128;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn trust_to_protocol(state: TrustState) -> WorkspaceTrustState {
@@ -1543,6 +1563,16 @@ fn git_stdout_owned(
 
 fn git_status_entries(root: &Path) -> Result<HashMap<String, String>, GitInspectionError> {
     let output = git_stdout(root, &["status", "--porcelain=v1", "-z"], None)?;
+    Ok(parse_git_porcelain_status(&output))
+}
+
+/// Parse the NUL-separated `git status --porcelain=v1 -z` payload into a
+/// path -> two-character status-code map.
+///
+/// For rename (`R`) and copy (`C`) records the porcelain `-z` format splits the
+/// path into two NUL-delimited fields; the trailing field is consumed and used
+/// as the map key (preserving the long-standing CLI parser behavior).
+fn parse_git_porcelain_status(output: &str) -> HashMap<String, String> {
     let entries = output
         .split('\0')
         .filter(|entry| !entry.is_empty())
@@ -1562,79 +1592,16 @@ fn git_status_entries(root: &Path) -> Result<HashMap<String, String>, GitInspect
         }
         index += 1;
     }
-    Ok(status)
+    status
 }
 
 fn git_status_entries_gix(root: &Path) -> Result<HashMap<String, String>, GitInspectionError> {
-    let repo = gix::open(root)
-        .map_err(|error| GitInspectionError::Parse(format!("gix open failed: {error}")))?;
-    let platform = repo
-        .status(gix::progress::Discard)
-        .map_err(|error| GitInspectionError::Parse(format!("gix status failed: {error}")))?;
-    let items = platform
-        .into_iter(Vec::<gix::bstr::BString>::new())
-        .map_err(|error| {
-            GitInspectionError::Parse(format!("gix status iteration failed: {error}"))
-        })?;
-
-    let mut status = HashMap::new();
-    for item in items {
-        let debug = format!("{item:?}");
-        let Some(path) = extract_gix_status_path(&debug) else {
-            continue;
-        };
-        let code = extract_gix_status_code(&debug).unwrap_or_else(|| "??".to_string());
-        status.insert(path, code);
-    }
-    Ok(status)
-}
-
-fn extract_gix_status_path(debug: &str) -> Option<String> {
-    if let Some(index) = debug.find("path: \"") {
-        let rest = &debug[index + 7..];
-        return rest.split('"').next().map(ToOwned::to_owned);
-    }
-    if let Some(index) = debug.find("path=") {
-        let rest = &debug[index + 5..];
-        let rest = rest.trim_start_matches([' ', ':']);
-        if let Some(stripped) = rest.strip_prefix('"') {
-            return stripped.split('"').next().map(ToOwned::to_owned);
-        }
-    }
-    debug
-        .split_whitespace()
-        .find(|token| token.contains('/') || token.contains('.'))
-        .map(|token| {
-            token
-                .trim_matches(|ch| matches!(ch, '"' | ',' | ')' | '('))
-                .to_string()
-        })
-}
-
-fn extract_gix_status_code(debug: &str) -> Option<String> {
-    let lowered = debug.to_ascii_lowercase();
-    if lowered.contains("untracked") {
-        return Some("??".to_string());
-    }
-    if lowered.contains("ignored") {
-        return Some("!!".to_string());
-    }
-    if lowered.contains("renamed") {
-        return Some("R ".to_string());
-    }
-    if lowered.contains("copied") {
-        return Some("C ".to_string());
-    }
-    if lowered.contains("added") || lowered.contains("new") {
-        return Some("A ".to_string());
-    }
-    if lowered.contains("deleted") {
-        return Some(" D".to_string());
-    }
-    if lowered.contains("modified") || lowered.contains("changed") {
-        return Some(" M".to_string());
-    }
-    None
+    // The previous implementation scraped paths and status codes out of the
+    // `gix` status item `Debug` representation, which is an unstable format with
+    // no cross-version contract (it silently breaks on rename/copy/delete and on
+    // any gix upgrade). Until a typed `gix` status mapping exists, defer to the
+    // authoritative CLI porcelain parser (mirroring `git_blame_lines_gix`).
+    git_status_entries(root)
 }
 
 fn git_blame_lines_gix(
@@ -2793,8 +2760,16 @@ impl WorkspaceActor {
         CausalityId(Uuid::now_v7())
     }
 
-    fn emit(&self, envelope: legion_protocol::EventEnvelope) {
-        let _ = self.event_sink.emit(EventSinkRequest { envelope });
+    fn emit(
+        &self,
+        envelope: Result<legion_protocol::EventEnvelope, legion_observability::ObservabilityError>,
+    ) {
+        // Observability envelope builders fail closed on invalid core ids; drop
+        // the event in that case rather than propagating an audit-build error
+        // into the workspace operation that is already returning its own result.
+        if let Ok(envelope) = envelope {
+            let _ = self.event_sink.emit(EventSinkRequest { envelope });
+        }
     }
 
     fn canonicalize_root_path(&self, state: &WorkspaceState) -> WorkspaceResult<PathBuf> {
@@ -3117,7 +3092,7 @@ impl WorkspaceActor {
                         pending_hits.push(WorkspaceSearchHit {
                             file_id: file_identity.file_id,
                             canonical_path: file_identity.canonical_path.clone(),
-                            line_number: line_number as u32,
+                            line_number: (line_number as u32).saturating_add(1),
                             byte_range: byte_start..byte_end,
                             line_text: line.to_string(),
                             snippet,
@@ -3224,10 +3199,12 @@ impl WorkspaceActor {
         } else {
             state.root_path.join(path)
         };
-        let normalized = self
-            .fs
-            .normalize_path(&absolute)
-            .map_err(WorkspaceError::Platform)?;
+        // Resolve symlinks like macOS /var → /private/var. For paths that do
+        // not exist yet (new-file/create flows), canonicalize the nearest
+        // existing parent and rebuild the candidate path under that canonical
+        // parent so security policy sees the same root spelling it pinned on
+        // workspace open.
+        let normalized = self.canonicalize_with_parent_fallback(&absolute)?;
         self.check_path_within_root(state, &normalized)?;
         Ok(normalized)
     }
@@ -4431,6 +4408,20 @@ impl WorkspaceActor {
             .canonicalize_path(requested_root)
             .or_else(|_| self.fs.normalize_path(requested_root))
             .map_err(WorkspaceError::Platform)?;
+
+        // Pin the security broker's filesystem authority to the canonical
+        // workspace root. The broker is constructed with the default relative
+        // `"./"` placeholder roots, which (correctly) never authorize an
+        // absolute in-workspace path once `fs.read`/`fs.write` are enforced.
+        // Without this, every absolute in-workspace read/write would be denied.
+        {
+            let mut security = self
+                .security
+                .lock()
+                .map_err(|_| WorkspaceError::Internal("security lock poisoned"))?;
+            security.pin_workspace_path_roots(root.to_string_lossy().into_owned());
+        }
+
         let principal_id = request.principal_id.clone();
         let workspace_id = WorkspaceId(stable_hash(&root.to_string_lossy()));
         let root_id = WorkspaceRootId(stable_hash(
@@ -4727,7 +4718,7 @@ impl WorkspaceActor {
                         pending_hits.push(WorkspaceSearchHit {
                             file_id: file_identity.file_id,
                             canonical_path: file_identity.canonical_path.clone(),
-                            line_number: line_number as u32,
+                            line_number: (line_number as u32).saturating_add(1),
                             byte_range: byte_start..byte_end,
                             line_text: line.to_string(),
                             snippet,
@@ -7189,6 +7180,59 @@ mod tests {
 
     fn next_test_temp_suffix() -> u64 {
         TEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[test]
+    fn stable_hash_is_deterministic_and_full_width() {
+        // FNV-1a is a fixed specification, so these are stable across builds.
+        let a = stable_hash("crates/legion-project");
+        let b = stable_hash("crates/legion-project");
+        assert_eq!(a, b, "stable_hash must be deterministic");
+        assert_ne!(
+            stable_hash("alpha"),
+            stable_hash("beta"),
+            "distinct inputs should not collide"
+        );
+        // Uses the full 128-bit width (DefaultHasher only filled the low 64).
+        assert_ne!(
+            a >> 64,
+            0,
+            "high 64 bits should carry entropy from the 128-bit hash"
+        );
+    }
+
+    #[test]
+    fn git_porcelain_status_parses_rename_copy_delete_untracked() {
+        // `-z` payload: code+space+space+path, NUL-separated; rename/copy carry a
+        // trailing source-path field.
+        let payload = concat!(
+            " M src/modified.rs\0",
+            "?? src/new.rs\0",
+            " D src/gone.rs\0",
+            "R  src/renamed_to.rs\0src/renamed_from.rs\0",
+            "C  src/copied_to.rs\0src/copied_from.rs\0"
+        );
+        let status = parse_git_porcelain_status(payload);
+
+        assert_eq!(
+            status.get("src/modified.rs").map(String::as_str),
+            Some(" M")
+        );
+        assert_eq!(status.get("src/new.rs").map(String::as_str), Some("??"));
+        assert_eq!(status.get("src/gone.rs").map(String::as_str), Some(" D"));
+        // Rename/copy key on the trailing (source) path; the source field must
+        // not leak in as a standalone entry.
+        assert_eq!(
+            status.get("src/renamed_from.rs").map(String::as_str),
+            Some("R ")
+        );
+        assert_eq!(
+            status.get("src/copied_from.rs").map(String::as_str),
+            Some("C ")
+        );
+        assert!(!status.contains_key("src/renamed_to.rs"));
+        assert!(!status.contains_key("src/copied_to.rs"));
+        assert_eq!(status.len(), 5);
     }
 
     #[test]

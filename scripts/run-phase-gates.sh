@@ -10,25 +10,28 @@ if ! command -v cargo-deny >/dev/null 2>&1 && ! cargo deny --version >/dev/null 
   exit 127
 fi
 
-printf '%s\n' '[1/7] Dependency policy gate'
+printf '%s\n' '[1/8] Dependency policy gate'
 cargo run -p xtask -- check-deps
 
-printf '%s\n' '[2/7] Documentation hygiene gate'
+printf '%s\n' '[2/8] Documentation hygiene gate'
 cargo run -p xtask -- docs-hygiene
 
-printf '%s\n' '[3/7] Formatting gate'
+printf '%s\n' '[3/8] Claim-audit gate'
+cargo run -p xtask -- claim-audit
+
+printf '%s\n' '[4/8] Formatting gate'
 cargo fmt --all --check
 
-printf '%s\n' '[4/7] Workspace check gate'
+printf '%s\n' '[5/8] Workspace check gate'
 cargo check --workspace --all-targets
 
-printf '%s\n' '[5/7] Workspace test gate'
+printf '%s\n' '[6/8] Workspace test gate'
 cargo test --workspace --all-targets
 
-printf '%s\n' '[6/7] Clippy gate'
+printf '%s\n' '[7/8] Clippy gate'
 cargo clippy --workspace --all-targets -- -D warnings
 
-printf '%s\n' '[7/7] Supply-chain policy gate'
+printf '%s\n' '[8/8] Supply-chain policy gate'
 cargo deny check
 
 printf '%s\n' 'All Legion IDE phase gates passed.'

@@ -6,16 +6,21 @@
 
 #![warn(missing_docs)]
 
+pub mod host;
+pub mod registry;
+
+pub use host::{PluginAuditEntry, PluginAuditKind, WasmPluginHost};
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Mutex,
 };
 
 use legion_protocol::{
-    CapabilityId, PluginDenialReason, PluginHostCallRequest, PluginHostCallResponse, PluginId,
-    PluginManifest, PluginPort, PluginRequest, PluginResponse, PluginSandboxOperationClass,
-    PluginStateNamespace, ProtocolError, ProtocolResult, validate_plugin_host_call_request,
-    validate_plugin_manifest,
+    CapabilityId, ContributionDescriptor, PluginCommandDescriptor, PluginContribution,
+    PluginDenialReason, PluginHostCallRequest, PluginHostCallResponse, PluginId, PluginManifest,
+    PluginPort, PluginRequest, PluginResponse, PluginSandboxOperationClass, PluginStateNamespace,
+    ProtocolError, ProtocolResult, validate_plugin_host_call_request, validate_plugin_manifest,
 };
 use legion_security::{DenyByDefaultBroker, TrustState};
 use thiserror::Error;
@@ -157,7 +162,10 @@ impl PluginRuntimeHost {
             });
         }
 
-        if request.metadata_label.len() as u64 > plugin.manifest.quotas.max_output_bytes {
+        let next_output_bytes = plugin
+            .output_bytes_used
+            .saturating_add(request.metadata_label.len() as u64);
+        if next_output_bytes > plugin.manifest.quotas.max_output_bytes {
             return Ok(PluginHostCallResponse::Denied {
                 reason: PluginDenialReason::QuotaExceeded,
                 message: "bounded output quota exceeded".to_string(),
@@ -192,13 +200,96 @@ impl PluginRuntimeHost {
         }
 
         plugin.host_calls_used = plugin.host_calls_used.saturating_add(1);
-        plugin.output_bytes_used = plugin
-            .output_bytes_used
-            .saturating_add(request.metadata_label.len() as u64);
+        plugin.output_bytes_used = next_output_bytes;
         plugin.state = PluginRuntimeState::Idle;
         Ok(PluginHostCallResponse::Accepted {
             metadata_label: request.metadata_label,
         })
+    }
+
+    /// Begin a plugin invocation, resetting the per-invocation quota counters
+    /// (`host_calls_used` and `output_bytes_used`) so quotas are enforced per
+    /// invocation rather than over the plugin's lifetime.
+    pub fn begin_invocation(&mut self, plugin_id: PluginId) -> ProtocolResult<()> {
+        let plugin = self
+            .plugins
+            .get_mut(&plugin_id)
+            .ok_or_else(|| ProtocolError {
+                code: "plugin_not_loaded".to_string(),
+                message: "plugin is not loaded".to_string(),
+            })?;
+        plugin.host_calls_used = 0;
+        plugin.output_bytes_used = 0;
+        plugin.state = PluginRuntimeState::Running;
+        Ok(())
+    }
+
+    /// End a plugin invocation, returning the plugin to an idle state.
+    pub fn end_invocation(&mut self, plugin_id: PluginId) -> ProtocolResult<()> {
+        let plugin = self
+            .plugins
+            .get_mut(&plugin_id)
+            .ok_or_else(|| ProtocolError {
+                code: "plugin_not_loaded".to_string(),
+                message: "plugin is not loaded".to_string(),
+            })?;
+        plugin.state = PluginRuntimeState::Idle;
+        Ok(())
+    }
+
+    /// Verify a command contribution belongs to a loaded/activated plugin that
+    /// declared the required capability, then return the registered command id.
+    pub fn register_command(&self, descriptor: &PluginCommandDescriptor) -> ProtocolResult<String> {
+        let registered = self.plugins.values().any(|plugin| {
+            matches!(
+                plugin.state,
+                PluginRuntimeState::Loaded | PluginRuntimeState::Activated
+            ) && plugin
+                .declared_capabilities
+                .contains(&descriptor.required_capability)
+                && plugin.manifest.contributions.iter().any(|contribution| {
+                    matches!(
+                        contribution,
+                        PluginContribution::Command(command)
+                            if command.command_id == descriptor.command_id
+                                && command.required_capability == descriptor.required_capability
+                    )
+                })
+        });
+        if registered {
+            Ok(descriptor.command_id.clone())
+        } else {
+            Err(ProtocolError {
+                code: "plugin_command_not_registered".to_string(),
+                message: "command does not belong to a loaded plugin with the declared capability"
+                    .to_string(),
+            })
+        }
+    }
+
+    /// Verify a contribution descriptor refers to a loaded/activated plugin
+    /// before acknowledging registration, then return the contribution name.
+    pub fn register_contribution(
+        &self,
+        descriptor: &ContributionDescriptor,
+    ) -> ProtocolResult<String> {
+        let Some(plugin) = self.plugins.get(&descriptor.plugin_id) else {
+            return Err(ProtocolError {
+                code: "plugin_not_loaded".to_string(),
+                message: "contribution references a plugin that is not loaded".to_string(),
+            });
+        };
+        if !matches!(
+            plugin.state,
+            PluginRuntimeState::Loaded | PluginRuntimeState::Activated
+        ) {
+            return Err(ProtocolError {
+                code: "plugin_not_active".to_string(),
+                message: "contribution references a plugin that is not loaded/activated"
+                    .to_string(),
+            });
+        }
+        Ok(descriptor.name.clone())
     }
 
     /// Return the loaded plugin state.
@@ -252,12 +343,12 @@ impl PluginPort for PluginRuntimePort {
             PluginRequest::Manifest(manifest) => {
                 host.load_manifest(manifest).map(PluginResponse::Loaded)
             }
-            PluginRequest::CommandDescriptor(descriptor) => {
-                Ok(PluginResponse::CommandRegistered(descriptor.command_id))
-            }
-            PluginRequest::Contribution(descriptor) => {
-                Ok(PluginResponse::ContributionRegistered(descriptor.name))
-            }
+            PluginRequest::CommandDescriptor(descriptor) => host
+                .register_command(&descriptor)
+                .map(PluginResponse::CommandRegistered),
+            PluginRequest::Contribution(descriptor) => host
+                .register_contribution(&descriptor)
+                .map(PluginResponse::ContributionRegistered),
             PluginRequest::HostCall(request) => host
                 .dispatch_host_call(request)
                 .map(PluginResponse::HostCall),
@@ -403,6 +494,105 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn plugin_runtime_accumulates_output_bytes_across_calls() {
+        let mut host = PluginRuntimeHost::new();
+        let mut manifest = manifest();
+        // Allow several host calls but a small cumulative output budget so the
+        // denial is driven by accumulated output, not the host-call quota.
+        manifest.quotas.max_host_calls = 5;
+        manifest.quotas.max_output_bytes = 20; // "context-label" is 13 bytes
+        host.load_manifest(manifest).expect("manifest loads");
+
+        assert!(matches!(
+            host.dispatch_host_call(host_call("plugin.command"))
+                .expect("first call"),
+            PluginHostCallResponse::Accepted { .. }
+        ));
+        assert!(matches!(
+            host.dispatch_host_call(host_call("plugin.command"))
+                .expect("second call exceeds cumulative output quota"),
+            PluginHostCallResponse::Denied {
+                reason: PluginDenialReason::QuotaExceeded,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn plugin_runtime_resets_quota_counters_on_invocation_boundary() {
+        let mut host = PluginRuntimeHost::new();
+        let plugin_id = host.load_manifest(manifest()).expect("manifest loads");
+        assert!(matches!(
+            host.dispatch_host_call(host_call("plugin.command"))
+                .expect("first call"),
+            PluginHostCallResponse::Accepted { .. }
+        ));
+        // Quota of 1 host call is now exhausted for this invocation.
+        assert!(matches!(
+            host.dispatch_host_call(host_call("plugin.command"))
+                .expect("quota response"),
+            PluginHostCallResponse::Denied {
+                reason: PluginDenialReason::QuotaExceeded,
+                ..
+            }
+        ));
+        host.begin_invocation(plugin_id)
+            .expect("invocation boundary resets counters");
+        assert!(matches!(
+            host.dispatch_host_call(host_call("plugin.command"))
+                .expect("call after reset"),
+            PluginHostCallResponse::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn plugin_runtime_registers_known_command() {
+        let port = PluginRuntimePort::new();
+        port.handle(PluginRequest::Manifest(manifest()))
+            .expect("manifest load through port");
+        let response = port
+            .handle(PluginRequest::CommandDescriptor(PluginCommandDescriptor {
+                command_id: "phase5.run".to_string(),
+                title: "Phase 5 Run".to_string(),
+                required_capability: CapabilityId("plugin.command".to_string()),
+            }))
+            .expect("known command registers");
+        assert!(matches!(
+            response,
+            PluginResponse::CommandRegistered(id) if id == "phase5.run"
+        ));
+    }
+
+    #[test]
+    fn plugin_runtime_rejects_unknown_command_registration() {
+        let port = PluginRuntimePort::new();
+        port.handle(PluginRequest::Manifest(manifest()))
+            .expect("manifest load through port");
+        let error = port
+            .handle(PluginRequest::CommandDescriptor(PluginCommandDescriptor {
+                command_id: "phase5.unknown".to_string(),
+                title: "Unknown".to_string(),
+                required_capability: CapabilityId("plugin.command".to_string()),
+            }))
+            .expect_err("unknown command is rejected");
+        assert_eq!(error.code, "plugin_command_not_registered");
+    }
+
+    #[test]
+    fn plugin_runtime_rejects_contribution_for_unloaded_plugin() {
+        let port = PluginRuntimePort::new();
+        let error = port
+            .handle(PluginRequest::Contribution(ContributionDescriptor {
+                plugin_id: PluginId(7),
+                name: "phase5.contrib".to_string(),
+                kind: "command".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .expect_err("contribution for unloaded plugin is rejected");
+        assert_eq!(error.code, "plugin_not_loaded");
     }
 
     #[test]

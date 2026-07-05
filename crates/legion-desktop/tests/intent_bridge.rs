@@ -14,11 +14,14 @@ use legion_protocol::{
 };
 use legion_ui::ui::{DailyEditingProjection, EditorTabProjection, EditorTabsProjection};
 use legion_ui::{
-    ActiveBufferProjection, AssistInlinePredictionProjection, AssistInlinePredictionRowProjection,
-    AssistInlinePredictionStatusProjection, CommandDispatchIntent, DebugConfigurationProjection,
-    DebugStepKindProjection, ExplorerNodeProjection, ExplorerProjection, PaletteMode,
-    SearchScopeProjection, Shell, ThemePreferenceProjection, ToastVerbosityProjection,
+    ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,
+    AssistInlinePredictionRowProjection, AssistInlinePredictionStatusProjection,
+    CommandDispatchIntent, DebugConfigurationProjection, DebugStepKindProjection,
+    ExplorerNodeProjection, ExplorerProjection, PaletteMode, SearchScopeProjection, Shell,
+    ThemePreferenceProjection, ToastVerbosityProjection,
 };
+
+mod common;
 
 fn coord(line: u32, character: u32, byte_offset: u64) -> TextCoordinate {
     TextCoordinate {
@@ -39,6 +42,7 @@ fn range(start: u64, end: u64) -> ProtocolTextRange {
 fn snapshot_with_active_buffer() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Bridge").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
         buffer_id: Some(BufferId(9)),
         ..ActiveBufferProjection::empty()
     };
@@ -1014,7 +1018,9 @@ fn intent_bridge_preserves_app_boundary() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bridge.rs"))
         .expect("bridge source should be readable");
 
-    assert!(!source.contains("AppComposition"));
-    assert!(!source.contains("WorkspaceActor"));
-    assert!(!source.contains("EditorEngine"));
+    common::assert_source_excludes(
+        &source,
+        "src/bridge.rs",
+        &["AppComposition", "WorkspaceActor", "EditorEngine"],
+    );
 }

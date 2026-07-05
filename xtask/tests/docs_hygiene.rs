@@ -42,10 +42,16 @@ impl Drop for TempRepo {
 }
 
 #[test]
-fn placeholder_docs_hygiene_test_file_compiles() {
-    let repo = TempRepo::new("placeholder");
-    repo.write("README.md", "# Test\n");
-    assert!(repo.path("README.md").exists());
+fn docs_hygiene_passes_for_clean_minimal_repo() {
+    let repo = TempRepo::new("clean-minimal");
+    repo.write(
+        "README.md",
+        "# Test\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n",
+    );
+    repo.write("plans/legion-production-master-plan-v0.2.md", "# Plan\n");
+
+    run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
+        .expect("clean minimal repo should pass docs hygiene");
 }
 
 #[test]
@@ -111,6 +117,81 @@ fn docs_hygiene_reports_unallowlisted_devil_reference() {
             .iter()
             .any(|violation| { violation.message.contains("devil-app") && violation.line == 3 })
     );
+}
+
+#[test]
+fn docs_hygiene_reports_stale_legacy_mode_label_as_section() {
+    let repo = TempRepo::new("legacy-mode-section");
+    repo.write(
+        "docs/MODES.md",
+        "# Modes\n\n## Manual\n\nManual mode.\n\n## Automate\n\nAutomate mode is legacy.\n",
+    );
+
+    let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
+    let violations = result.expect_err("expected stale Automate mode section violation");
+
+    assert!(
+        violations.iter().any(|violation| {
+            violation.message.contains("stale mode-taxonomy section")
+                && violation.message.contains("Automate")
+        }),
+        "expected violation mentioning stale Automate section, got: {:?}",
+        violations
+            .iter()
+            .map(|v| format!("{}:{}: {}", v.path.display(), v.line, v.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn docs_hygiene_reports_stale_delegates_label_as_section() {
+    let repo = TempRepo::new("legacy-delegates-section");
+    repo.write(
+        "docs/MODES.md",
+        "# Modes\n\n## Manual\n\n## Delegates\n\nOld wording.\n",
+    );
+
+    let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
+    let violations = result.expect_err("expected stale Delegates section violation");
+
+    assert!(
+        violations.iter().any(|violation| {
+            violation.message.contains("stale mode-taxonomy section")
+                && violation.message.contains("Delegates")
+        }),
+        "expected violation mentioning stale Delegates section, got: {:?}",
+        violations
+            .iter()
+            .map(|v| format!("{}:{}: {}", v.path.display(), v.line, v.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn docs_hygiene_accepts_canonical_mode_sections() {
+    let repo = TempRepo::new("canonical-mode-sections");
+    repo.write(
+        "docs/MODES.md",
+        "# Modes\n\n## Manual\n\n## Assist\n\n## Delegate\n\n## Legion Workflows\n",
+    );
+
+    run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
+        .expect("all four canonical mode sections must pass");
+}
+
+#[test]
+fn docs_hygiene_allows_stale_mode_label_in_allowlisted_archive() {
+    let repo = TempRepo::new("allowlist-mode-archive");
+    repo.write(
+        "plans/archive/old-modes.md",
+        "# Old\n\n## Automate\n\nOld mode taxonomy.\n",
+    );
+    let config = DocsHygieneConfig {
+        allowlisted_paths: vec!["plans/archive/".to_string()],
+    };
+
+    run_docs_hygiene(&repo.root, &config)
+        .expect("allowlisted historical path should be allowed to keep legacy mode labels");
 }
 
 #[test]
@@ -224,23 +305,35 @@ fn docs_hygiene_skips_git_target_almanac_directories() {
 #[test]
 fn docs_hygiene_checks_untracked_markdown_in_git_repo() {
     let repo = TempRepo::new("git-untracked-markdown");
-    Command::new("git")
+    let init = Command::new("git")
         .arg("init")
         .arg(&repo.root)
         .output()
         .expect("git init should run");
+    assert!(
+        init.status.success(),
+        "git init should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
     repo.write(
         "README.md",
         "# Clean\n\n- `plans/legion-production-master-plan-v0.2.md` - current production master plan.\n",
     );
     repo.write("plans/legion-production-master-plan-v0.2.md", "# Plan\n");
-    Command::new("git")
+    let add = Command::new("git")
         .arg("-C")
         .arg(&repo.root)
         .arg("add")
         .arg("README.md")
         .output()
         .expect("git add should run");
+    assert!(
+        add.status.success(),
+        "git add should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
     repo.write("NEW.md", "# New\n\nStale `devil-app` marker.\n");
     repo.write(
         ".almanac/page.md",

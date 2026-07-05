@@ -10,4 +10,19 @@ allowlisted_paths = [
   "plans/foundational-core-ide-platform-implementation-plan-v0.1.md",
   "plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md",
   "plans/evidence/production/M5/WS18-T3-platform-parity-matrix.md",
+  # Historical v0.1 architecture reviews with broken internal links
+  "plans/architecture-review-full-codebase-v0.1.md",
+  "plans/architecture-review-2026-ide-roadmap-v0.1.md",
+  "plans/architecture-review-phases-5-6-v0.1.md",
+  "plans/architecture-review-v0.1.md",
+  # Historical v0.1 plans with broken internal links
+  "plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md",
+  "plans/ide-core-architecture-spec-v0.1.md",
+  "plans/implementation-plan.md",
+  "plans/remaining-implementation-tasks-plan-v0.1.md",
+  "plans/semantic-index-boundary-remediation-plan-v0.1.md",
+  # Historical ADR with broken internal links
+  "plans/adrs/ADR-0015-streaming-text-viewport.md",
+  # Historical release docs with broken internal links
+  "docs/releases/v8.0.0/",
 ]

@@ -316,6 +316,31 @@ fn run_smoke_window(
     if observations.frame_count == 0 {
         errors.push("no frames were observed during smoke run".to_string());
     }
+
+    // Gate required adapter paths: a missing or failed adapter path is a smoke
+    // failure, not a silent pass.
+    let adapter_checks = observations.adapter_checks();
+    push_adapter_gate(
+        &mut errors,
+        "clipboard",
+        adapter_checks.clipboard_adapter_path,
+    );
+    push_adapter_gate(&mut errors, "ime", adapter_checks.ime_adapter_path);
+    push_adapter_gate(
+        &mut errors,
+        "file_dialog",
+        adapter_checks.file_dialog_adapter_path,
+    );
+
+    // Gate required native observations (focus and high-DPI scale).
+    if observations.focused.is_none() {
+        errors.push("viewport focus was not observed during smoke run".to_string());
+    }
+    match observations.pixels_per_point {
+        Some(scale) if scale.is_finite() && scale > 0.0 => {}
+        _ => errors.push("high-DPI scale was not observed during smoke run".to_string()),
+    }
+
     let status = if errors.is_empty() {
         RendererSmokeStatus::Passed
     } else {
@@ -348,23 +373,56 @@ fn run_smoke_window(
     })
 }
 
+/// Push a smoke-gate error when a required adapter path is missing or failed.
+fn push_adapter_gate(errors: &mut Vec<String>, name: &str, path: Option<bool>) {
+    match path {
+        Some(true) => {}
+        Some(false) => errors.push(format!("{name} adapter path failed during smoke run")),
+        None => errors.push(format!(
+            "{name} adapter path was not observed during smoke run"
+        )),
+    }
+}
+
 fn smoke_command(config: &DesktopLaunchConfig, smoke: &RendererSmokeConfig) -> String {
     let mut parts = vec![
         "cargo run -p legion-desktop -- --smoke".to_string(),
-        format!("--workspace {}", config.workspace_root.display()),
+        format!("--workspace {}", shell_quote_path(&config.workspace_root)),
     ];
     if let Some(file) = &config.initial_file {
-        parts.push(format!("--file {file}"));
+        parts.push(format!("--file {}", shell_quote(file)));
     }
     parts.push(format!("--duration-ms {}", smoke.duration_ms));
-    parts.push(format!("--evidence {}", smoke.evidence_path.display()));
+    parts.push(format!(
+        "--evidence {}",
+        shell_quote_path(&smoke.evidence_path)
+    ));
     if let Some(path) = &config.session_state {
-        parts.push(format!("--session-state {}", path.display()));
+        parts.push(format!("--session-state {}", shell_quote_path(path)));
     }
     if let Some(path) = &config.diagnostics_export {
-        parts.push(format!("--diagnostics-export {}", path.display()));
+        parts.push(format!("--diagnostics-export {}", shell_quote_path(path)));
     }
     parts.join(" ")
+}
+
+/// Render a path as a single, shell-safe argument so paths with spaces or shell
+/// metacharacters produce a re-runnable command line.
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.display().to_string())
+}
+
+/// POSIX shell single-quote a value, leaving simple unambiguous arguments bare.
+fn shell_quote(value: &str) -> String {
+    let is_simple = !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',')
+        });
+    if is_simple {
+        return value.to_string();
+    }
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -436,7 +494,9 @@ impl SmokeObservations {
 
     fn high_dpi_status(&self) -> String {
         match self.pixels_per_point {
-            Some(scale) if scale > 1.0 => format!("os-observed scale {scale:.3}"),
+            Some(scale) if scale.is_finite() && scale > 0.0 => {
+                format!("os-observed scale {scale:.3}")
+            }
             Some(_) | None => NOT_OBSERVED.to_string(),
         }
     }

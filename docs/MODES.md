@@ -59,9 +59,9 @@ Forbidden:
 
 Completion requirement: a delegated task can proceed from scoped packet to review-ready proposal with evidence and containment tests.
 
-## Automate
+## Legion Workflows
 
-Automate mode coordinates multi-step Legion workflows.
+Legion Workflows mode coordinates multi-step Legion workflows.
 
 Allowed:
 - task graphs and dependencies;
