@@ -2661,6 +2661,18 @@ impl LspStdioSession {
         &self.diagnostic_notifications
     }
 
+    /// Removes all buffered diagnostic notifications whose URI fingerprint
+    /// matches `uri_hash`.
+    ///
+    /// Used by the GP-1 smoke between the "introduce error" and "fix error"
+    /// diagnostic-cycle phases so that the next [`pump_diagnostics`] call in
+    /// [`RustAnalyzerSession`] waits for a fresh post-fix notification rather
+    /// than immediately returning the cached error set.
+    pub fn clear_diagnostics_for_uri(&mut self, uri_hash: FileFingerprint) {
+        self.diagnostic_notifications
+            .retain(|n| n.uri_hash != uri_hash);
+    }
+
     /// Returns whether the session has successfully completed an
     /// `initialize` exchange.
     pub fn is_ready(&self) -> bool {

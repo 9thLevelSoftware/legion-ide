@@ -77,7 +77,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest and golden-path smokes excluded) and `.github/workflows/legion-bench.yml` (weekly live-mode legion-bench). Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
+GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (weekly live-mode legion-bench), and `.github/workflows/legion-smoke.yml` (GP-1 golden-path smoke on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker). Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
 
 ## Evidence naming
 
@@ -161,6 +161,40 @@ The PR body must include:
 - security/authority boundary notes;
 - cloud/training operational notes;
 - no unsupported planned features in scope.
+
+## GP-1 smoke
+
+The GP-1 golden-path smoke exercises the full AppComposition product surface against a throwaway fixture workspace.
+
+Command:
+
+```sh
+cargo run -p xtask -- golden-path-1
+```
+
+Evidence report: `target/golden-path/gp1_report.toml` (written after every run, overwritten on re-run).
+
+To record a copy under the evidence tree (operator-only; CI uploads the `target/` artifact instead):
+
+```sh
+cargo run -p xtask -- golden-path-1 --record-evidence plans/evidence/production/M8/
+```
+
+### Step overview and skip semantics
+
+| Step | What it verifies | Skip condition |
+|------|-----------------|----------------|
+| s1 | Fixture copy to temp dir + workspace open as Trusted | None (always runs) |
+| s2 | rust-analyzer session init (real server, product path) | **Skipped** (not failed) if `rust-analyzer` absent from PATH |
+| s3 | Diagnostic cycle: introduce error → detect → fix → clear | Skipped when s2 is skipped |
+| s4 | Workspace search for known literal + case-sensitive variant | None |
+| s5 | Terminal: `cargo test` via product gate, poll for exit-0 | Skipped gracefully if PTY unavailable (reason logged) |
+| s6 | Git: edit via app save path → dirty-file check → stage + commit | None |
+| s7 | Evidence TOML written to `target/golden-path/gp1_report.toml` | None |
+
+A step-level `skipped` status is not a failure. The overall run exits 0 when all non-skipped steps pass. The CI workflow (`.github/workflows/legion-smoke.yml`) is independent and a red run there does not block PR merges.
+
+The smoke never writes inside the repo checkout (except `target/` and the optional `--record-evidence` path). Fixture copies live in the OS temp directory; they are cleaned on success and left for inspection on failure (path printed to stderr).
 
 ## Git remote auth paths
 

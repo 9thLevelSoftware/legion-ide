@@ -194,6 +194,118 @@ impl RustAnalyzerSession {
             .map_err(LanguageSessionError::Handshake)
     }
 
+    /// Sends `textDocument/didChange` with a full-document replacement.
+    ///
+    /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
+    /// is not in an initialized/live state. No write is made to the transport
+    /// in that case.
+    ///
+    /// `version` must be strictly greater than the version used in the matching
+    /// `did_open` (or prior `did_change`) call per the LSP spec.
+    pub fn did_change(
+        &mut self,
+        uri: &str,
+        version: i64,
+        text: &str,
+    ) -> Result<(), LanguageSessionError> {
+        if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
+            return Err(LanguageSessionError::Unavailable);
+        }
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "version": version,
+            },
+            "contentChanges": [{"text": text}]
+        });
+        self.session
+            .send_notification("textDocument/didChange", params)
+            .map_err(LanguageSessionError::Handshake)
+    }
+
+    /// Drains the buffered diagnostic notifications for `uri` and clears them
+    /// from the session, allowing the next `pump_diagnostics` call to wait for
+    /// fresh diagnostics issued after a `did_change`.
+    ///
+    /// This is needed between the "introduce error" and "fix error" phases of
+    /// the s3 diagnostic cycle: after the error diagnostics arrive, draining
+    /// lets the next `pump_diagnostics` wait for the post-fix (empty or clean)
+    /// notification rather than immediately returning the cached error set.
+    pub fn drain_diagnostics_for(&mut self, uri: &str) {
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
+        self.session.clear_diagnostics_for_uri(expected_hash);
+    }
+
+    /// Pumps until a diagnostic notification for `uri` arrives with
+    /// `error_count == 0` (all errors cleared), or the timeout elapses.
+    ///
+    /// Call this after [`drain_diagnostics_for`] + a fix [`did_change`] to
+    /// confirm the language server has acknowledged the repaired source.
+    ///
+    /// Returns `true` if a clean (0-error) notification was received before the
+    /// deadline, or `false` if the deadline elapsed.
+    pub fn pump_until_diagnostics_clear(
+        &mut self,
+        uri: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
+        let deadline = std::time::Instant::now() + timeout;
+        // Drain any stale buffered notifications first so we wait for a fresh one.
+        self.session.clear_diagnostics_for_uri(expected_hash.clone());
+        let outcome = self.session.pump_until(deadline, &mut |n| {
+            n.diagnostics
+                .iter()
+                .any(|d| d.uri_hash == expected_hash && d.error_count == 0)
+        });
+        // Also check if the buffered set (accumulated during the pump) shows clean.
+        let buffered_clean = self
+            .session
+            .diagnostic_notifications()
+            .iter()
+            .filter(|n| n.uri_hash == expected_hash)
+            .last()
+            .map(|n| n.error_count == 0)
+            .unwrap_or(false);
+        matches!(outcome, Ok(legion_lsp::PumpOutcome::PredicateMet)) || buffered_clean
+    }
+
+    /// Pumps until a diagnostic notification for `uri` arrives with at least one
+    /// error (`error_count > 0`), or the timeout elapses.
+    ///
+    /// Call this after a [`did_change`] that introduces a compile error.
+    /// Unlike [`pump_diagnostics`], this predicate skips "clear" notifications
+    /// (e.g. the acknowledgement batch rust-analyzer sends immediately after a
+    /// `didChange` before it has re-analysed the new content) and only returns
+    /// `true` once a notification with real errors has been observed.
+    ///
+    /// Internally drains any pre-existing buffered notifications for `uri`
+    /// before starting the pump so stale data does not trigger an early return.
+    ///
+    /// Returns `true` if an error notification was received before the deadline.
+    pub fn pump_until_has_error_for(&mut self, uri: &str, timeout: std::time::Duration) -> bool {
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
+        let deadline = std::time::Instant::now() + timeout;
+        // Drain stale buffered notifications (e.g. the pre-error clean batch) so we
+        // only match fresh ones produced after the erroneous did_change.
+        self.session.clear_diagnostics_for_uri(expected_hash.clone());
+        let outcome = self.session.pump_until(deadline, &mut |n| {
+            n.diagnostics
+                .iter()
+                .any(|d| d.uri_hash == expected_hash && d.error_count > 0)
+        });
+        // Honour the accumulated buffer as a secondary check: if pump_until
+        // returned Deadline but an error notification arrived anyway (e.g. just
+        // before the deadline), count it as a pass.
+        let buffered_error = self
+            .session
+            .diagnostic_notifications()
+            .iter()
+            .filter(|n| n.uri_hash == expected_hash)
+            .any(|n| n.error_count > 0);
+        matches!(outcome, Ok(legion_lsp::PumpOutcome::PredicateMet)) || buffered_error
+    }
+
     /// Returns diagnostics for `uri`, pumping until some arrive or the timeout
     /// elapses. Short-circuits if diagnostics for that specific URI are already
     /// buffered (e.g. emitted at/before initialize), so it never blocks
