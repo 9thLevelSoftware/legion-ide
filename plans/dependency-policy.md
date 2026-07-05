@@ -166,8 +166,11 @@ Phase 3 semantic fabric activation for `crates/legion-index/Cargo.toml` is limit
 
 - `legion-agent` may depend on:
   - `legion-ai`
+  - `legion-platform`
   - `legion-protocol`
   - `legion-tracker`
+
+  (`legion-platform` is permitted solely to consume the shared `resolve_existing_prefix` path-canonicalization helper — the unified replacement for three independently-written copies that previously duplicated the same defect-class fix across agent, app, and project crates. No PTY, process, or filesystem mutation authority is added.)
 
 Phase 4 activates `legion-agent`, `legion-tracker`, and `legion-memory` only for metadata-only local-provider planning, tracker ledger records, memory candidate review, and proposal-only agent outputs. These crates must not depend on app/UI/editor/workspace internals and must not gain direct filesystem, process, network, terminal, storage, settings, or buffer mutation authority.
 

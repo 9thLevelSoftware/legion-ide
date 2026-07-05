@@ -60,7 +60,7 @@ use legion_observability::{
     proposal_validated_event, remote_audit_recorded_event, save_denied_event,
     stale_proposal_rejected_event, terminal_audit_recorded_event, transaction_event,
 };
-use legion_platform::{NativeFileSystem, NativeWatcherService};
+use legion_platform::{NativeFileSystem, NativeWatcherService, resolve_existing_prefix};
 use legion_plugin::PluginRuntimeHost;
 use legion_project::{
     CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitDiffStrategy, GitHunkStage,
@@ -12202,33 +12202,6 @@ fn normalize_path_separators(path: &str) -> String {
     return path.replace('/', "\\");
     #[cfg(not(windows))]
     return path.replace('\\', "/");
-}
-
-/// Walk up `path` until a component exists on disk, canonicalize it, then re-append
-/// the non-existing suffix.  Resolves Windows 8.3 short names (`RUNNER~1` →
-/// `runneradmin`) and macOS /var symlinks (`/var/…` → `/private/var/…`), even
-/// when the leaf has not been created yet.
-fn resolve_existing_prefix(path: &std::path::Path) -> Option<std::path::PathBuf> {
-    use std::ffi::OsString;
-    let mut existing = path;
-    let mut suffix: Vec<OsString> = Vec::new();
-    loop {
-        if existing.symlink_metadata().is_ok() {
-            break;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-                suffix.push(name.to_os_string());
-                existing = parent;
-            }
-            _ => return Some(path.to_path_buf()),
-        }
-    }
-    let mut resolved = std::fs::canonicalize(existing).ok()?;
-    for part in suffix.into_iter().rev() {
-        resolved.push(part);
-    }
-    Some(resolved)
 }
 
 /// Strip the Windows UNC prefix `\\?\` from a `PathBuf` (no-op elsewhere).
