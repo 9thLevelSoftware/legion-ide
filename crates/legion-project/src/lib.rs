@@ -1348,6 +1348,44 @@ pub fn validate_commit_with_author(
     result
 }
 
+/// Walk up `path` until a component exists on disk, canonicalize it, then
+/// re-append the non-existing suffix.  Resolves Windows 8.3 short names
+/// (`RUNNER~1` → `runneradmin`) and macOS /var symlinks, even when the leaf
+/// has not been created yet.  Cannot be imported from `legion-agent` across
+/// the dependency boundary, so it is replicated here.
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    let mut existing = path;
+    let mut suffix: Vec<OsString> = Vec::new();
+    loop {
+        if existing.symlink_metadata().is_ok() {
+            break;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                suffix.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Some(path.to_path_buf()),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// Strip the Windows UNC prefix `\\?\` from a `PathBuf` (no-op elsewhere).
+fn strip_unc_pathbuf(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped.to_string())
+    } else {
+        p
+    }
+}
+
 /// Create a new git worktree for `branch` at `worktree_path`.
 ///
 /// Uses `git worktree add <worktree_path> <branch>`.  The branch must already
@@ -1378,26 +1416,20 @@ pub fn create_git_worktree(
     if worktree_ref.is_absolute() {
         let root_ref = root.as_ref();
         let allowed_parent = root_ref.parent().unwrap_or(root_ref);
-        // Canonicalize allowed_parent if possible; fall back to plain comparison.
-        // On Windows, canonicalize returns a UNC path (`\\?\C:\...`).  Strip that
-        // prefix so that raw (non-canonicalized) worktree paths — which may not
-        // exist on disk yet — can still be compared with starts_with.
-        let starts_within_parent = std::fs::canonicalize(allowed_parent)
-            .map(|canon_parent| {
-                let canon_str = canon_parent.to_string_lossy();
-                let normalized_str = canon_str.strip_prefix(r"\\?\").unwrap_or(&canon_str);
-                let normalized_parent = PathBuf::from(normalized_str);
-                std::fs::canonicalize(worktree_ref)
-                    .map(|canon_wt| {
-                        let wt_str = canon_wt.to_string_lossy();
-                        let wt_stripped = wt_str.strip_prefix(r"\\?\").unwrap_or(&wt_str);
-                        PathBuf::from(wt_stripped).starts_with(&normalized_parent)
-                    })
-                    // Not yet on disk: compare raw path against de-UNC'd parent.
-                    .unwrap_or_else(|_| worktree_ref.starts_with(&normalized_parent))
-            })
-            .unwrap_or_else(|_| worktree_ref.starts_with(allowed_parent));
-        if !starts_within_parent {
+
+        // Resolve both sides through their deepest existing ancestor so that
+        // Windows 8.3 short names (RUNNER~1 → runneradmin) and macOS /var
+        // symlinks are expanded before the containment comparison.  The target
+        // worktree may not exist yet, so resolve_existing_prefix canonicalizes
+        // the deepest ancestor that does exist and re-appends the rest.
+        let norm_parent = resolve_existing_prefix(allowed_parent)
+            .map(strip_unc_pathbuf)
+            .unwrap_or_else(|| allowed_parent.to_path_buf());
+        let norm_worktree = resolve_existing_prefix(worktree_ref)
+            .map(strip_unc_pathbuf)
+            .unwrap_or_else(|| worktree_ref.to_path_buf());
+
+        if !norm_worktree.starts_with(&norm_parent) {
             return Err(GitInspectionError::InvalidInput(
                 "worktree path must reside within the workspace parent directory".to_string(),
             ));

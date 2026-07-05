@@ -518,3 +518,141 @@ fn restore_from_local_history_uses_proposal_route() {
         ".legion/local-history/ should exist after saves"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Path-canonicalization regression tests (CI: Windows 8.3 / macOS /var symlink)
+// ---------------------------------------------------------------------------
+
+/// Windows regression: open the workspace via a directory junction pointing to
+/// the real temp dir.  Saving a file and then looking up history via the real
+/// path must find the entry even though the workspace was opened via the alias.
+///
+/// Uses `mklink /J` (available without elevation on Windows) to create the
+/// junction.  Gracefully skipped if junction creation fails (e.g. FAT volume).
+#[cfg(windows)]
+#[test]
+fn local_history_survives_junction_alias_on_windows() {
+    let ws = TempWorkspace::new();
+
+    // Create a directory junction that points to ws.root.
+    let alias = std::env::temp_dir().join(format!(
+        "legion_lh_junc_{}_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+
+    struct JuncGuard(PathBuf);
+    impl Drop for JuncGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("cmd")
+                .args(["/C", "rmdir", &self.0.to_string_lossy()])
+                .status();
+        }
+    }
+
+    let junc_status = Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &alias.to_string_lossy(),
+            &ws.root.to_string_lossy(),
+        ])
+        .status();
+    let junc_ok = junc_status.map(|s| s.success()).unwrap_or(false);
+    if !junc_ok || !alias.exists() {
+        // Junction unavailable on this runner; skip gracefully.
+        eprintln!("SKIP: junction creation failed, skipping Windows alias test");
+        return;
+    }
+    let _guard = JuncGuard(alias.clone());
+
+    // Write the file via the real path and open the workspace via the junction.
+    let real_path = ws.write("src/junc.rs", "fn junc() {}\n");
+
+    let mut app = AppComposition::new();
+    // Open workspace via the alias path (junction).
+    app.open_workspace(
+        &alias,
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("junc-test".to_string()),
+    )
+    .expect("workspace open via junction");
+    // Open the file via the real path.
+    app.open_file(real_path.to_string_lossy())
+        .expect("open file");
+
+    save_file(&mut app);
+
+    // Look up via the real path — must find 1 entry.
+    let entries = get_entries(&mut app, &real_path);
+    assert_eq!(
+        entries.len(),
+        1,
+        "one save → one entry even with junction alias; got {}",
+        entries.len()
+    );
+}
+
+/// Unix regression: open workspace via a symlink to the real temp dir.  Saving
+/// via the symlink path and looking up via the real (resolved) path must still
+/// find the entry.
+#[cfg(not(windows))]
+#[test]
+fn local_history_survives_symlinked_workspace_on_unix() {
+    let ws = TempWorkspace::new();
+
+    // Create a symlink that points to ws.root.
+    let link = std::env::temp_dir().join(format!(
+        "legion_lh_sym_{}_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+
+    struct SymGuard(PathBuf);
+    impl Drop for SymGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    if std::os::unix::fs::symlink(&ws.root, &link).is_err() {
+        eprintln!("SKIP: symlink creation failed, skipping Unix symlink test");
+        return;
+    }
+    let _guard = SymGuard(link.clone());
+
+    // Write and open the file via the symlink path.
+    let sym_file = link.join("src").join("sym.rs");
+    fs::create_dir_all(sym_file.parent().unwrap()).expect("sym parent dir");
+    fs::write(&sym_file, "fn sym() {}\n").expect("sym write");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &link,
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("sym-test".to_string()),
+    )
+    .expect("workspace open via symlink");
+    app.open_file(sym_file.to_string_lossy())
+        .expect("open file via symlink");
+
+    save_file(&mut app);
+
+    // Look up via the symlink path — must find 1 entry.
+    let entries = get_entries(&mut app, &sym_file);
+    assert_eq!(
+        entries.len(),
+        1,
+        "one save → one entry even with symlinked workspace; got {}",
+        entries.len()
+    );
+}

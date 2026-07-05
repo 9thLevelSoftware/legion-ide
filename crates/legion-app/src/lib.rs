@@ -12061,6 +12061,54 @@ fn normalize_path_separators(path: &str) -> String {
     return path.replace('\\', "/");
 }
 
+/// Walk up `path` until a component exists on disk, canonicalize it, then re-append
+/// the non-existing suffix.  Resolves Windows 8.3 short names (`RUNNER~1` →
+/// `runneradmin`) and macOS /var symlinks (`/var/…` → `/private/var/…`), even
+/// when the leaf has not been created yet.
+fn resolve_existing_prefix(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::ffi::OsString;
+    let mut existing = path;
+    let mut suffix: Vec<OsString> = Vec::new();
+    loop {
+        if existing.symlink_metadata().is_ok() {
+            break;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                suffix.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Some(path.to_path_buf()),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// Strip the Windows UNC prefix `\\?\` from a `PathBuf` (no-op elsewhere).
+fn strip_unc_from_pathbuf(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(stripped.to_string())
+    } else {
+        p
+    }
+}
+
+/// Resolve a path to its canonical OS form (expanding short names / symlinks),
+/// strip any UNC prefix, and normalize separators.  This is the uniform key
+/// used for local-history records and lookups so that the same file is
+/// identified consistently regardless of how its path was obtained.
+fn canonicalize_for_history(path: &str) -> String {
+    let resolved = resolve_existing_prefix(std::path::Path::new(path))
+        .unwrap_or_else(|| std::path::PathBuf::from(path));
+    let stripped = strip_unc_from_pathbuf(resolved);
+    normalize_path_separators(&stripped.to_string_lossy())
+}
+
 fn git_protocol_error(code: impl Into<String>, message: impl Into<String>) -> AppCompositionError {
     AppCompositionError::Protocol(ProtocolError {
         code: code.into(),
@@ -14709,39 +14757,15 @@ impl AppComposition {
                 self.navigate_git_hunk(false, true),
             )),
             AppCommandRequest::RequestLocalHistoryEntries { path } => {
-                // Resolve the lookup key: prefer the canonical path from an open buffer that
-                // matches the supplied path, so Windows UNC normalization and separator
-                // differences align correctly (e.g. PathBuf::join keeps forward slashes while
-                // fs::canonicalize always uses backslashes on Windows).
-                let path_normalized = normalize_path_separators(strip_unc_prefix(&path));
-                let lookup_path = self
-                    .active_documents
-                    .buffer_file_metadata
-                    .values()
-                    .find(|meta| {
-                        let stored = normalize_path_separators(strip_unc_prefix(
-                            &meta.identity.canonical_path.0,
-                        ));
-                        stored == path_normalized
-                    })
-                    .map(|meta| meta.identity.canonical_path.0.clone())
-                    .unwrap_or(path);
+                // Resolve 8.3 short names, symlinked temp dirs, and UNC prefixes so the
+                // lookup key always matches the one stored by record_local_history_entry.
+                let lookup_path = canonicalize_for_history(&path);
                 let entries = self.local_history_entries_for_file(&lookup_path);
                 Ok(AppCommandOutcome::LocalHistoryEntriesUpdated(entries))
             }
             AppCommandRequest::RestoreFromLocalHistory { path, entry_id } => {
-                // Resolve canonical path same way as RequestLocalHistoryEntries.
-                let path_normalized = normalize_path_separators(strip_unc_prefix(&path));
-                let lookup_path = self
-                    .active_documents
-                    .buffer_file_metadata
-                    .values()
-                    .find(|meta| {
-                        normalize_path_separators(strip_unc_prefix(&meta.identity.canonical_path.0))
-                            == path_normalized
-                    })
-                    .map(|meta| meta.identity.canonical_path.0.clone())
-                    .unwrap_or(path);
+                // Resolve canonical path the same way as RequestLocalHistoryEntries.
+                let lookup_path = canonicalize_for_history(&path);
                 self.restore_from_local_history(&lookup_path, &entry_id)?;
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
             }
@@ -18714,7 +18738,8 @@ impl AppComposition {
     /// Return the count of in-memory history entries for a given canonical path.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn test_local_history_entry_count(&self, path: &str) -> usize {
-        self.local_history_store.entry_count(path)
+        let canonical = canonicalize_for_history(path);
+        self.local_history_store.entry_count(&canonical)
     }
 
     /// Prune history for `path` to `max_count` entries and delete evicted blobs.
@@ -18723,11 +18748,12 @@ impl AppComposition {
     /// the production 50-entry cap.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn test_prune_local_history(&mut self, path: &str, max_count: usize) -> Vec<String> {
-        let evicted = self.local_history_store.prune(path, max_count, u64::MAX);
+        let canonical = canonicalize_for_history(path);
+        let evicted = self
+            .local_history_store
+            .prune(&canonical, max_count, u64::MAX);
         if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
-            let canonical_without_unc = strip_unc_prefix(path);
-            let path_key =
-                canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let path_key = canonical.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
             let blob_dir = std::path::PathBuf::from(root)
                 .join(".legion")
                 .join("local-history")
@@ -18757,6 +18783,12 @@ impl AppComposition {
         correlation_id_str: &str,
     ) {
         use sha2::{Digest, Sha256};
+
+        // Normalise to the real-filesystem canonical form so that Windows 8.3 short
+        // names and macOS /var symlinks are resolved before keying the store.  This
+        // ensures record_local_history_entry and the lookup helpers use the same key.
+        let canonical_path_normalized = canonicalize_for_history(canonical_path);
+        let canonical_path = canonical_path_normalized.as_str();
 
         let size_bytes = content.len() as u64;
 
@@ -18884,12 +18916,16 @@ impl AppComposition {
         })?;
 
         // Find the buffer for this canonical path, apply the full-replace via editor,
-        // then trigger a save through the proposal route.
+        // then trigger a save through the proposal route.  Normalise the stored path
+        // through canonicalize_for_history so that UNC prefixes and 8.3 forms from
+        // `fs::canonicalize` in the workspace actor match the already-normalised key.
         let buffer_id = self
             .active_documents
             .buffer_file_metadata
             .iter()
-            .find(|(_, meta)| meta.identity.canonical_path.0 == canonical_path)
+            .find(|(_, meta)| {
+                canonicalize_for_history(&meta.identity.canonical_path.0) == canonical_path
+            })
             .map(|(bid, _)| *bid)
             .ok_or_else(|| {
                 git_protocol_error(

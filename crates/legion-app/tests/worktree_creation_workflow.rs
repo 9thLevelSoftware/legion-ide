@@ -240,6 +240,178 @@ fn create_git_worktree_rejects_existing_path() {
     );
 }
 
+// ─── Path-canonicalization regression tests ───────────────────────────────────
+
+/// Windows regression: open the workspace via a directory junction and confirm
+/// that `CreateGitWorktree` still validates containment correctly when the repo
+/// root was accessed through an alias path.
+///
+/// Uses `mklink /J` (no elevation required).  Skipped gracefully if junction
+/// creation fails (FAT volume, or restricted policy).
+#[cfg(windows)]
+#[test]
+fn create_git_worktree_via_junction_alias_passes_containment() {
+    let repo = TempGitRepo::new();
+    make_initial_commit(&repo);
+    run_git(repo.path(), ["branch", "feature/junc-wt"]);
+
+    // Build a junction that points at the parent of the repo (the temp dir).
+    let alias = std::env::temp_dir().join(format!(
+        "legion_wt_junc_{}_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+
+    struct JuncGuard(PathBuf);
+    impl Drop for JuncGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("cmd")
+                .args(["/C", "rmdir", &self.0.to_string_lossy()])
+                .status();
+        }
+    }
+
+    // Junction points to the parent dir so the repo lives at alias/<repo_name>.
+    let parent = repo.path().parent().expect("repo parent");
+    let junc_status = Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &alias.to_string_lossy(),
+            &parent.to_string_lossy(),
+        ])
+        .status();
+    let junc_ok = junc_status.map(|s| s.success()).unwrap_or(false);
+    if !junc_ok || !alias.exists() {
+        eprintln!("SKIP: junction creation failed");
+        return;
+    }
+    let _guard = JuncGuard(alias.clone());
+
+    // Open workspace via the junction alias.
+    let repo_name = repo
+        .path()
+        .file_name()
+        .expect("repo dir name")
+        .to_string_lossy()
+        .to_string();
+    let alias_repo = alias.join(&repo_name);
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &alias_repo,
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("junc-wt-test".to_string()),
+    )
+    .expect("workspace open via junction");
+
+    // The worktree target lives next to the (aliased) repo dir — inside the alias parent.
+    let worktree_target = alias.join(format!("legion_wt_junc_target_{}", std::process::id()));
+
+    let result = app.dispatch_ui_intent(CommandDispatchIntent::CreateGitWorktree {
+        branch: "feature/junc-wt".to_string(),
+        worktree_path: worktree_target.to_string_lossy().to_string(),
+    });
+
+    // Cleanup regardless of outcome.
+    let _ = Command::new("git")
+        .current_dir(&alias_repo)
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_target.to_string_lossy(),
+        ])
+        .status();
+    let _ = fs::remove_dir_all(&worktree_target);
+
+    assert!(
+        result.is_ok(),
+        "worktree creation via junction alias must succeed: {:?}",
+        result.err()
+    );
+}
+
+/// Unix regression: open workspace via a symlink and confirm containment
+/// validation works when both the repo root and worktree path are accessed
+/// through symlinks.
+#[cfg(not(windows))]
+#[test]
+fn create_git_worktree_via_symlink_passes_containment() {
+    let repo = TempGitRepo::new();
+    make_initial_commit(&repo);
+    run_git(repo.path(), ["branch", "feature/sym-wt"]);
+
+    // Create a symlink that points to the parent dir of the repo.
+    let alias = std::env::temp_dir().join(format!(
+        "legion_wt_sym_{}_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+
+    struct SymGuard(PathBuf);
+    impl Drop for SymGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    let parent = repo.path().parent().expect("repo parent");
+    if std::os::unix::fs::symlink(parent, &alias).is_err() {
+        eprintln!("SKIP: symlink creation failed");
+        return;
+    }
+    let _guard = SymGuard(alias.clone());
+
+    let repo_name = repo
+        .path()
+        .file_name()
+        .expect("repo dir name")
+        .to_string_lossy()
+        .to_string();
+    let alias_repo = alias.join(&repo_name);
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &alias_repo,
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("sym-wt-test".to_string()),
+    )
+    .expect("workspace open via symlink");
+
+    let worktree_target = alias.join(format!("legion_wt_sym_target_{}", std::process::id()));
+
+    let result = app.dispatch_ui_intent(CommandDispatchIntent::CreateGitWorktree {
+        branch: "feature/sym-wt".to_string(),
+        worktree_path: worktree_target.to_string_lossy().to_string(),
+    });
+
+    // Cleanup regardless.
+    let _ = Command::new("git")
+        .current_dir(&alias_repo)
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_target.to_string_lossy(),
+        ])
+        .status();
+    let _ = fs::remove_dir_all(&worktree_target);
+
+    assert!(
+        result.is_ok(),
+        "worktree creation via symlinked workspace must succeed: {:?}",
+        result.err()
+    );
+}
+
 #[test]
 fn git_new_worktree_palette_command_exists() {
     // Verify that "Git: New Worktree" appears in the palette projection.
