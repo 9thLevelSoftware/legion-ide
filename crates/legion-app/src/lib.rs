@@ -31,6 +31,8 @@ pub mod offline_ai;
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
 
+pub mod terminal_policy;
+
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
 use legion_editor::{
@@ -41,8 +43,9 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
     StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
-    build_structural_rewrite_preview_payload, register_plugin_tree_sitter_grammars,
-    run_structural_search as index_run_structural_search, tree_sitter_supports_path,
+    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_tuple,
+    register_plugin_tree_sitter_grammars, run_structural_search as index_run_structural_search,
+    tree_sitter_supports_path,
 };
 use legion_memory::{
     LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryCompactionPolicy,
@@ -168,9 +171,11 @@ use legion_security::{
     CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy, SecurityPolicy,
     mcp_tool_permission_request,
 };
-use legion_storage::InMemoryStorageRepositoryPort;
+use legion_storage::{
+    InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, PaletteUsageRepository,
+};
 use legion_terminal::{
-    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeLaunchRequest,
+    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeError, TerminalRuntimeLaunchRequest,
     TerminalRuntimeOutputPollRequest,
 };
 use legion_tracker::{
@@ -207,6 +212,9 @@ use offline_ai::{
 use serde_json::{Value, json};
 use syntect::easy::ScopeRangeIterator;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
+use terminal_policy::{
+    SCROLLBACK_DEFAULT_MAX_ROWS, TerminalEnvPolicy, TerminalFailureKind, TerminalShellSelection,
+};
 use thiserror::Error;
 
 const SEARCH_DEFAULT_RESULT_LIMIT: usize = 50;
@@ -5221,6 +5229,18 @@ struct TerminalWorkflow {
     next_sequence: u64,
     active_command_started_at: Option<std::time::Instant>,
     current_cwd: Option<String>,
+    /// Whether the product gate has already enabled the runtime for this workflow.
+    /// Set to `true` the first time a trusted-workspace explicit launch succeeds the
+    /// product-gate check; prevents redundant re-initialization on subsequent launches.
+    product_enabled: bool,
+    /// Workspace-level shell override (highest precedence).
+    shell_selection: Option<TerminalShellSelection>,
+    /// User-level shell preference (overrides platform default; overridden by workspace).
+    user_shell_selection: Option<TerminalShellSelection>,
+    /// Maximum scrollback rows retained in the projection (sane default 5000).
+    scrollback_max_rows: usize,
+    /// Env passthrough policy for PTY spawns (deny-list always applied).
+    env_policy: TerminalEnvPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -5234,27 +5254,32 @@ struct TerminalDenial {
     clear_active_session: bool,
 }
 
-fn terminal_shell_command() -> (String, Vec<String>) {
-    #[cfg(windows)]
-    {
-        ("cmd".to_string(), vec!["/Q".to_string(), "/K".to_string()])
+/// Translate a `TerminalFailureKind` to the corresponding `TerminalPanelStatusKind`.
+///
+/// All five variants map to distinct status kinds so the renderer can display each
+/// failure mode differently without inspecting the message string.
+fn failure_kind_to_status_kind(kind: &TerminalFailureKind) -> TerminalPanelStatusKind {
+    match kind {
+        TerminalFailureKind::Denied => TerminalPanelStatusKind::Denied,
+        TerminalFailureKind::Unavailable => TerminalPanelStatusKind::Unavailable,
+        TerminalFailureKind::Exited => TerminalPanelStatusKind::Exited,
+        TerminalFailureKind::Crashed => TerminalPanelStatusKind::Crashed,
+        TerminalFailureKind::PolicyBlocked => TerminalPanelStatusKind::PolicyBlocked,
     }
+}
 
-    #[cfg(unix)]
-    {
-        (
-            "bash".to_string(),
-            vec![
-                "-lc".to_string(),
-                r#"export PROMPT_COMMAND='status=$?; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]133;D;%d\033\\" "$status"'; exec bash --noprofile --norc -i"#
-                    .to_string(),
-            ],
-        )
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        ("sh".to_string(), Vec::new())
+/// Translate a `TerminalRuntimeError` (from `legion-terminal`) to the appropriate
+/// `TerminalFailureKind` for projection.
+///
+/// - `Disabled` → `Unavailable` (runtime was not initialised / PTY subsystem absent).
+/// - `Denied { .. }` → `PolicyBlocked` (internal policy constraint, distinct from the
+///   trust-gate or capability-broker `Denied` which is handled before `runtime.launch`).
+/// - `Backend { .. }` → `Unavailable` (shell binary not found, OS spawn failure, etc.).
+fn runtime_error_to_failure_kind(err: &TerminalRuntimeError) -> TerminalFailureKind {
+    match err {
+        TerminalRuntimeError::Disabled => TerminalFailureKind::Unavailable,
+        TerminalRuntimeError::Denied { .. } => TerminalFailureKind::PolicyBlocked,
+        TerminalRuntimeError::Backend { .. } => TerminalFailureKind::Unavailable,
     }
 }
 
@@ -5304,6 +5329,11 @@ impl Default for TerminalWorkflow {
             next_sequence: 0,
             active_command_started_at: None,
             current_cwd: None,
+            product_enabled: false,
+            shell_selection: None,
+            user_shell_selection: None,
+            scrollback_max_rows: SCROLLBACK_DEFAULT_MAX_ROWS,
+            env_policy: TerminalEnvPolicy::default(),
         }
     }
 }
@@ -5314,6 +5344,25 @@ impl TerminalWorkflow {
     }
 
     fn enable_runtime_for_tests(&mut self) {
+        self.do_enable_runtime();
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Idle,
+            message: "Terminal runtime enabled".to_string(),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+    }
+
+    /// Enable the terminal runtime and security policy for a product launch.
+    /// Idempotent: subsequent calls are no-ops once already enabled.
+    fn ensure_product_enabled(&mut self) {
+        if !self.product_enabled {
+            self.do_enable_runtime();
+            self.product_enabled = true;
+        }
+    }
+
+    /// Internal helper: replaces the runtime and security broker with enabled configurations.
+    fn do_enable_runtime(&mut self) {
         self.runtime = TerminalRuntime::new(
             TerminalRuntimeConfig::enabled(),
             legion_platform::NativePtyService,
@@ -5322,11 +5371,6 @@ impl TerminalWorkflow {
         policy.terminal_policy.runtime_enabled = true;
         self.security_broker =
             DenyByDefaultBroker::new(policy, CapabilityNamespace("app.terminal".to_string()));
-        self.projection.status = TerminalPanelStatus {
-            kind: TerminalPanelStatusKind::Idle,
-            message: "Terminal runtime enabled".to_string(),
-        };
-        self.projection.generated_at = TimestampMillis::now();
     }
 
     fn take_last_audit(&mut self) -> Option<legion_protocol::TerminalAuditRecord> {
@@ -5339,11 +5383,39 @@ impl TerminalWorkflow {
         command_label: String,
         event_context: EventContext,
     ) -> TerminalPanelProjection {
+        // Product gate: auto-enable the runtime for trusted-workspace explicit launches.
+        // Untrusted workspaces are denied here before any capability decision, ensuring
+        // that untrusted callers cannot reach the PTY layer even if runtime_enabled was
+        // set by another path (e.g. enable_runtime_for_tests in a different test).
+        if context.trust != WorkspaceTrustState::Trusted {
+            let policy = Self::policy_projection(
+                &context,
+                "terminal.launch",
+                &CapabilityDecision {
+                    decision_id: CapabilityDecisionId(1),
+                    granted: false,
+                    capability: CapabilityId("terminal.launch".to_string()),
+                    reason: Some("terminal denied: workspace is untrusted".to_string()),
+                },
+            );
+            return self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: "terminal denied: workspace is untrusted".to_string(),
+                event_context,
+                session_id: None,
+                action: "launch".to_string(),
+                clear_active_session: true,
+            });
+        }
+        // Trust check passed: enable the product runtime on first launch.
+        self.ensure_product_enabled();
+
         // The security broker classifies the actual binary that will be
         // launched (a shell), not the user-facing command label. Passing the
         // display label here would classify as an unknown command and be denied
         // by the terminal launch taxonomy guard.
-        let (command, args) = terminal_shell_command();
+        let (command, args) = self.effective_shell_command();
         let decision = self.capability_decision(
             &context,
             "terminal.launch",
@@ -5382,10 +5454,21 @@ impl TerminalWorkflow {
         let runtime_label = std::any::type_name::<
             legion_terminal::TerminalRuntime<legion_platform::NativePtyService>,
         >();
+        // Compute the PTY env: enforced at spawn via PtyRequest::env.
+        // passthrough=true  → all parent vars minus deny-prefix secrets.
+        // passthrough=false → minimal platform-safe baseline (SystemRoot+PATH on Windows,
+        //                     PATH+HOME on Unix) minus deny-prefix secrets. Never empty.
+        let env_passthrough = self.env_policy.passthrough_env;
+        let env_deny_count = self.env_policy.deny_prefixes.len();
+        let pty_env: Vec<(String, String)> = self
+            .env_policy
+            .effective_env()
+            .expect("effective_env always returns Some");
         match self.runtime.launch(TerminalRuntimeLaunchRequest {
             policy: launch_policy,
             command,
             args,
+            env: Some(pty_env),
         }) {
             Ok(outcome) => {
                 let session_id = outcome.audit.session_id;
@@ -5395,6 +5478,14 @@ impl TerminalWorkflow {
                 self.current_cwd = None;
                 self.projection.active_session_id = Some(session_id);
                 self.projection.runtime_state = Some(runtime_state);
+                // Use the same three-tier precedence for the label as for the actual command:
+                // workspace settings → user settings → platform default.
+                let shell_label = self
+                    .shell_selection
+                    .as_ref()
+                    .or(self.user_shell_selection.as_ref())
+                    .map(|s| s.label())
+                    .unwrap_or_else(|| TerminalShellSelection::platform_default().label());
                 self.projection.status = TerminalPanelStatus {
                     kind: if runtime_state == TerminalRuntimeState::Running {
                         TerminalPanelStatusKind::Running
@@ -5402,17 +5493,20 @@ impl TerminalWorkflow {
                         TerminalPanelStatusKind::Degraded
                     },
                     message: format!(
-                        "Terminal runtime running: {command_label} via {runtime_label}"
+                        "Terminal running: {command_label} • shell={shell_label} via {runtime_label}"
                     ),
                 };
                 self.projection.last_denial = None;
                 self.projection.last_error = None;
+                // Audit env policy metadata. Deny-list is now enforced at PTY spawn level
+                // via PtyRequest::env; env_passthrough and env_deny_prefixes describe the
+                // policy that was applied.
                 self.record_audit(
                     session_id,
                     runtime_state,
                     event_context,
                     format!(
-                        "action=launch state={} decision_id={} command_label_bytes={} runtime={} output_bytes={} truncated={}",
+                        "action=launch state={} decision_id={} command_label_bytes={} runtime={} output_bytes={} truncated={} env_passthrough={env_passthrough} env_deny_prefixes={env_deny_count}",
                         if runtime_state == TerminalRuntimeState::Running {
                             "running"
                         } else {
@@ -5431,15 +5525,13 @@ impl TerminalWorkflow {
                 }
                 self.projection()
             }
-            Err(error) => self.deny(TerminalDenial {
-                workspace_id: context.workspace_id,
-                policy,
-                reason: format!("Terminal launch denied: {error}"),
-                event_context,
-                session_id: None,
-                action: "launch".to_string(),
-                clear_active_session: true,
-            }),
+            Err(error) => {
+                // Map runtime errors to the appropriate failure kind so the UI can
+                // distinguish between unavailable (binary not found / runtime disabled),
+                // policy-blocked (internal policy denial), and other failures.
+                let kind = runtime_error_to_failure_kind(&error);
+                self.apply_failure_kind(kind, format!("terminal launch failed: {error}"))
+            }
         }
     }
 
@@ -5888,6 +5980,29 @@ impl TerminalWorkflow {
         self.projection()
     }
 
+    /// Project a typed failure kind into the terminal panel projection.
+    ///
+    /// Used by the launch error path and by the test helper on `AppComposition`.
+    /// Produces a distinct `TerminalPanelStatusKind` for each `TerminalFailureKind`
+    /// variant so the renderer can display denied/unavailable/exited/crashed/policy-blocked
+    /// states differently.
+    fn apply_failure_kind(
+        &mut self,
+        kind: TerminalFailureKind,
+        reason: String,
+    ) -> TerminalPanelProjection {
+        self.active_command_started_at = None;
+        let label = kind.display_label();
+        self.projection.status = TerminalPanelStatus {
+            kind: failure_kind_to_status_kind(&kind),
+            message: format!("{label}: {}", bounded_label(reason.clone(), 120)),
+        };
+        self.projection.last_error = Some(bounded_label(reason, 120));
+        self.projection.runtime_state = Some(TerminalRuntimeState::Failed);
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
     fn capability_decision(
         &self,
         context: &ActiveWorkspaceContext,
@@ -6056,8 +6171,10 @@ impl TerminalWorkflow {
                 schema_version: 1,
             });
         let mut omitted = self.projection.scrollback.omitted_row_count;
-        if self.projection.output_rows.len() > 100 {
-            let excess = self.projection.output_rows.len() - 100;
+        // Enforce configurable scrollback limit (default SCROLLBACK_DEFAULT_MAX_ROWS = 5000).
+        // Evicted rows are counted in omitted_row_count so the UI can show "N rows omitted".
+        if self.projection.output_rows.len() > self.scrollback_max_rows {
+            let excess = self.projection.output_rows.len() - self.scrollback_max_rows;
             self.projection.output_rows.drain(0..excess);
             omitted = omitted.saturating_add(excess as u32);
         }
@@ -6068,6 +6185,29 @@ impl TerminalWorkflow {
             truncated: omitted > 0,
             schema_version: 1,
         };
+    }
+
+    /// Resolve the effective shell command and args using shell-selection precedence:
+    /// workspace settings → user settings → platform default.
+    /// Resolve the effective shell using the three-tier precedence chain:
+    /// workspace settings → user settings → platform default.
+    fn effective_shell_command(&self) -> (String, Vec<String>) {
+        self.shell_selection
+            .as_ref()
+            .or(self.user_shell_selection.as_ref())
+            .map(|s| s.to_command_args())
+            .unwrap_or_else(TerminalShellSelection::platform_default_command_args)
+    }
+
+    /// Set the workspace-level terminal shell selection (highest precedence).
+    fn set_shell_selection(&mut self, selection: TerminalShellSelection) {
+        self.shell_selection = Some(selection);
+    }
+
+    /// Set the user-level terminal shell preference (overrides platform default;
+    /// overridden by any workspace-level setting).
+    fn set_user_shell_selection(&mut self, selection: Option<TerminalShellSelection>) {
+        self.user_shell_selection = selection;
     }
 }
 
@@ -7714,6 +7854,12 @@ pub enum AppCommandRequest {
         query: String,
         /// Requested result limit; zero means app default.
         limit: usize,
+        /// Explicit case-sensitive override; `None` defers to text-prefix parsing.
+        case_sensitive: Option<bool>,
+        /// Explicit whole-word override; `None` defers to text-prefix parsing.
+        whole_word: Option<bool>,
+        /// Explicit regex mode override; `None` defers to text-prefix parsing.
+        use_regex: Option<bool>,
     },
     /// Run deterministic structural search/rewrite preview through app authority.
     RunStructuralSearch {
@@ -7788,6 +7934,40 @@ pub enum AppCommandRequest {
     RemoveGitWorktree {
         /// Worktree path.
         path: String,
+    },
+    /// Create a new git worktree at the given path on the given branch.
+    CreateGitWorktree {
+        /// Branch name.
+        branch: String,
+        /// Filesystem path for the new worktree.
+        worktree_path: String,
+    },
+    /// Navigate to the next diff hunk in the review surface.
+    GitNavNextHunk,
+    /// Navigate to the previous diff hunk in the review surface.
+    GitNavPrevHunk,
+    /// Navigate to the first hunk in the next changed file.
+    GitNavNextFile,
+    /// Navigate to the first hunk in the previous changed file.
+    GitNavPrevFile,
+    /// Request local history entries for the given canonical file path.
+    RequestLocalHistoryEntries {
+        /// Canonical file path.
+        path: String,
+    },
+    /// Restore a file from a local history entry via proposal route.
+    RestoreFromLocalHistory {
+        /// Canonical file path.
+        path: String,
+        /// Local history entry identifier.
+        entry_id: String,
+    },
+    /// Export worktree state evidence to `.legion/evidence/`.
+    ExportWorktreeEvidence,
+    /// Validate a git commit message and surface advisory warnings.
+    ValidateGitCommitMessage {
+        /// Draft commit message to validate.
+        message: String,
     },
     /// Request hover data through app-owned language tooling.
     RequestHover {
@@ -8322,6 +8502,15 @@ impl CommandExecutionService {
             | AppCommandRequest::PushGitRemote { .. }
             | AppCommandRequest::PruneGitWorktrees
             | AppCommandRequest::RemoveGitWorktree { .. }
+            | AppCommandRequest::CreateGitWorktree { .. }
+            | AppCommandRequest::GitNavNextHunk
+            | AppCommandRequest::GitNavPrevHunk
+            | AppCommandRequest::GitNavNextFile
+            | AppCommandRequest::GitNavPrevFile
+            | AppCommandRequest::RequestLocalHistoryEntries { .. }
+            | AppCommandRequest::RestoreFromLocalHistory { .. }
+            | AppCommandRequest::ExportWorktreeEvidence
+            | AppCommandRequest::ValidateGitCommitMessage { .. }
             | AppCommandRequest::RefreshDebugConfigurations
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
@@ -8572,11 +8761,17 @@ impl CommandDispatcher {
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             } => Ok(AppCommandRequest::RunSearch {
                 query_id: format!("search:{}", correlation_id.0),
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             }),
             CommandDispatchIntent::RunStructuralSearch {
                 scope,
@@ -8634,6 +8829,29 @@ impl CommandDispatcher {
             CommandDispatchIntent::PruneGitWorktrees => Ok(AppCommandRequest::PruneGitWorktrees),
             CommandDispatchIntent::RemoveGitWorktree { path } => {
                 Ok(AppCommandRequest::RemoveGitWorktree { path })
+            }
+            CommandDispatchIntent::CreateGitWorktree {
+                branch,
+                worktree_path,
+            } => Ok(AppCommandRequest::CreateGitWorktree {
+                branch,
+                worktree_path,
+            }),
+            CommandDispatchIntent::GitNavNextHunk => Ok(AppCommandRequest::GitNavNextHunk),
+            CommandDispatchIntent::GitNavPrevHunk => Ok(AppCommandRequest::GitNavPrevHunk),
+            CommandDispatchIntent::GitNavNextFile => Ok(AppCommandRequest::GitNavNextFile),
+            CommandDispatchIntent::GitNavPrevFile => Ok(AppCommandRequest::GitNavPrevFile),
+            CommandDispatchIntent::RequestLocalHistoryEntries { path } => {
+                Ok(AppCommandRequest::RequestLocalHistoryEntries { path })
+            }
+            CommandDispatchIntent::RestoreFromLocalHistory { path, entry_id } => {
+                Ok(AppCommandRequest::RestoreFromLocalHistory { path, entry_id })
+            }
+            CommandDispatchIntent::ExportWorktreeEvidence => {
+                Ok(AppCommandRequest::ExportWorktreeEvidence)
+            }
+            CommandDispatchIntent::ValidateGitCommitMessage { message } => {
+                Ok(AppCommandRequest::ValidateGitCommitMessage { message })
             }
             CommandDispatchIntent::RefreshDebugConfigurations => {
                 Ok(AppCommandRequest::RefreshDebugConfigurations)
@@ -10035,6 +10253,7 @@ fn workbench_settings_record_from_projection(
         indexed_workspace_search_enabled: settings.indexed_workspace_search_enabled,
         next_edit_prediction_enabled: settings.next_edit_prediction_enabled,
         telemetry: settings.telemetry.clone(),
+        terminal_shell_selection: settings.terminal_shell_selection.clone(),
         schema_version: settings.schema_version,
     }
 }
@@ -10072,6 +10291,7 @@ fn settings_projection_from_workbench_record(
         },
         indexed_workspace_search_enabled: record.indexed_workspace_search_enabled,
         next_edit_prediction_enabled: record.next_edit_prediction_enabled,
+        terminal_shell_selection: record.terminal_shell_selection.clone(),
         schema_version: record.schema_version,
     }
     .normalized()
@@ -11253,6 +11473,10 @@ pub enum AppCommandOutcome {
     DelegateToolPermissionRecorded(DelegatedTaskProjection),
     /// Automate workflow projection changed after human input or kill switch.
     LegionWorkflowUpdated(LegionWorkflowProjection),
+    /// Local history entries updated for the requested file path.
+    LocalHistoryEntriesUpdated(Vec<legion_ui::LocalHistoryEntryProjection>),
+    /// Worktree state evidence was exported; contains the absolute path to the written file.
+    WorktreeEvidenceExported(String),
 }
 
 /// Per-buffer save-all result.
@@ -11494,6 +11718,37 @@ impl AssistInlinePredictionState {
     }
 }
 
+/// Explicit search option overrides. `None` means "fall through to
+/// text-prefix parsing" for the corresponding option.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchQueryOptions {
+    /// Override case-sensitivity. `None` defers to `case` / `icase` prefixes.
+    pub case_sensitive: Option<bool>,
+    /// Override whole-word matching. `None` defers to `word:` prefix.
+    pub whole_word: Option<bool>,
+    /// Override regex mode. `None` defers to `regex:` / `re:` prefixes.
+    pub use_regex: Option<bool>,
+}
+
+/// Parsed and compiled search query, including effective option values.
+struct ParsedSearchQuery {
+    /// Compiled search pattern ready for `search_workspace_stream`.
+    pattern: SearchPattern,
+    /// Include/exclude glob filters (from `include:` / `exclude:` prefixes).
+    filters: WorkspaceSearchFilters,
+    /// The raw pattern text (without mode/option prefixes).
+    search_text: String,
+    /// Whether the pattern was compiled as literal (not regex). Used to
+    /// decide whether the indexed back-end can be used.
+    is_literal: bool,
+    /// Effective case-sensitivity after applying overrides.
+    case_sensitive: bool,
+    /// Effective whole-word mode after applying overrides.
+    whole_word: bool,
+    /// Effective regex mode after applying overrides.
+    use_regex: bool,
+}
+
 #[derive(Debug, Default)]
 struct SearchBuildResult {
     results: Vec<SearchResultProjection>,
@@ -11502,6 +11757,16 @@ struct SearchBuildResult {
     diagnostics: Vec<String>,
     degraded_limited: bool,
     validation_error: Option<String>,
+    /// Number of files skipped because they were detected as binary by the
+    /// NUL-byte heuristic.  Propagated from `WorkspaceSearchReport` into
+    /// `SearchProjection` so the desktop panel can display the count.
+    skipped_binary_count: usize,
+    /// Effective search options used for this result set.
+    case_sensitive: bool,
+    /// Effective whole-word option used for this result set.
+    whole_word: bool,
+    /// Effective regex mode used for this result set.
+    use_regex: bool,
 }
 
 #[derive(Debug, Default)]
@@ -11549,8 +11814,10 @@ struct SearchLineInput<'a> {
 
 fn parse_search_query(
     query: &str,
-) -> Result<(SearchPattern, WorkspaceSearchFilters, String, bool), String> {
+    options: SearchQueryOptions,
+) -> Result<ParsedSearchQuery, String> {
     let mut mode = SearchPatternKind::Literal;
+    // Text-prefix defaults; explicit overrides are applied below.
     let mut case_sensitive = true;
     let mut whole_word = false;
     let mut include_globs = Vec::<String>::new();
@@ -11615,6 +11882,20 @@ fn parse_search_query(
         pattern_parts.push(token.to_string());
     }
 
+    // Explicit override flags take precedence over text-prefix parsing.
+    if let Some(v) = options.case_sensitive {
+        case_sensitive = v;
+    }
+    if let Some(v) = options.whole_word {
+        whole_word = v;
+    }
+    if let Some(true) = options.use_regex {
+        mode = SearchPatternKind::Regex;
+    } else if options.use_regex == Some(false) {
+        mode = SearchPatternKind::Literal;
+    }
+    let effective_use_regex = matches!(mode, SearchPatternKind::Regex);
+
     let pattern = pattern_parts.join(" ").trim().to_string();
     if pattern.is_empty() {
         return Err("Search query is empty".to_string());
@@ -11630,12 +11911,15 @@ fn parse_search_query(
     let include = compile_search_globset(&include_globs)?;
     let exclude = compile_search_globset(&exclude_globs)?;
 
-    Ok((
-        compiled_pattern,
-        WorkspaceSearchFilters { include, exclude },
-        pattern,
-        matches!(mode, SearchPatternKind::Literal),
-    ))
+    Ok(ParsedSearchQuery {
+        pattern: compiled_pattern,
+        filters: WorkspaceSearchFilters { include, exclude },
+        search_text: pattern,
+        is_literal: !effective_use_regex,
+        case_sensitive,
+        whole_word,
+        use_regex: effective_use_regex,
+    })
 }
 
 fn compile_search_globset(patterns: &[String]) -> Result<Option<Arc<GlobSet>>, String> {
@@ -11722,6 +12006,10 @@ fn build_search_projection(
         result_limit,
         omitted_result_count: result.omitted_result_count,
         omitted_file_count: result.omitted_file_count,
+        skipped_binary_count: result.skipped_binary_count,
+        case_sensitive: result.case_sensitive,
+        whole_word: result.whole_word,
+        use_regex: result.use_regex,
         diagnostics: result.diagnostics,
         generated_at: TimestampMillis::now(),
         schema_version: 1,
@@ -11868,6 +12156,11 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
         diagnostics: snapshot.diagnostics,
         generated_at: snapshot.generated_at,
         schema_version: snapshot.schema_version,
+        // Navigation state and local history entries are injected at the app layer after build.
+        focused_hunk_id: None,
+        commit_validation_warnings: Vec::new(),
+        commit_validation_errors: Vec::new(),
+        local_history_entries: Vec::new(),
     }
 }
 
@@ -11883,6 +12176,73 @@ fn git_hunk_stage_projection(stage: GitHunkStage) -> GitHunkStageProjection {
         GitHunkStage::Unstaged => GitHunkStageProjection::Unstaged,
         GitHunkStage::Staged => GitHunkStageProjection::Staged,
     }
+}
+
+/// Strip the Windows UNC prefix `\\?\` from a path string (no-op on non-Windows paths).
+/// Used to normalise canonical paths for comparison when user-supplied paths may lack the prefix.
+fn strip_unc_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
+/// Normalize path separators to the platform-native form for cross-origin comparisons.
+///
+/// On Windows, `PathBuf::join("some/relative")` can embed forward slashes from the
+/// original string, while `fs::canonicalize` always returns backslashes. This helper
+/// converts forward slashes to backslashes on Windows so that paths from different
+/// origins compare equal.
+fn normalize_path_separators(path: &str) -> String {
+    #[cfg(windows)]
+    return path.replace('/', "\\");
+    #[cfg(not(windows))]
+    return path.replace('\\', "/");
+}
+
+/// Walk up `path` until a component exists on disk, canonicalize it, then re-append
+/// the non-existing suffix.  Resolves Windows 8.3 short names (`RUNNER~1` →
+/// `runneradmin`) and macOS /var symlinks (`/var/…` → `/private/var/…`), even
+/// when the leaf has not been created yet.
+fn resolve_existing_prefix(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::ffi::OsString;
+    let mut existing = path;
+    let mut suffix: Vec<OsString> = Vec::new();
+    loop {
+        if existing.symlink_metadata().is_ok() {
+            break;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                suffix.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Some(path.to_path_buf()),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// Strip the Windows UNC prefix `\\?\` from a `PathBuf` (no-op elsewhere).
+fn strip_unc_from_pathbuf(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(stripped.to_string())
+    } else {
+        p
+    }
+}
+
+/// Resolve a path to its canonical OS form (expanding short names / symlinks),
+/// strip any UNC prefix, and normalize separators.  This is the uniform key
+/// used for local-history records and lookups so that the same file is
+/// identified consistently regardless of how its path was obtained.
+fn canonicalize_for_history(path: &str) -> String {
+    let resolved = resolve_existing_prefix(std::path::Path::new(path))
+        .unwrap_or_else(|| std::path::PathBuf::from(path));
+    let stripped = strip_unc_from_pathbuf(resolved);
+    normalize_path_separators(&stripped.to_string_lossy())
 }
 
 fn git_protocol_error(code: impl Into<String>, message: impl Into<String>) -> AppCompositionError {
@@ -12111,6 +12471,24 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "git-new-worktree",
+            title: "Git: New Worktree",
+            detail: "Create a git worktree; query: <branch> <path>",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-local-history",
+            title: "Git: Local History",
+            detail: "Show local history entries for the active file",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-export-evidence",
+            title: "Git: Export Worktree Evidence",
+            detail: "Export metadata-only worktree state to .legion/evidence/",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
             id: "git-commit",
             title: "Git: Commit Staged Changes",
             detail: "Use the palette query as the commit message",
@@ -12175,6 +12553,9 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         }),
         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
         "git-remove-worktree" => None,
+        "git-new-worktree" => None, // Requires query args: <branch> <path>
+        "git-local-history" => None, // Populated by dispatch_palette_selection with active file path
+        "git-export-evidence" => Some(CommandDispatchIntent::ExportWorktreeEvidence),
         "close-palette" => Some(CommandDispatchIntent::ClosePalette),
         "preferences-open" => Some(CommandDispatchIntent::OpenSettings),
         "preferences-theme-dark" => Some(CommandDispatchIntent::SetThemePreference {
@@ -12194,68 +12575,8 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
     }
 }
 
-fn palette_fuzzy_score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Some((0, Vec::new()));
-    }
-
-    let query_chars = query
-        .chars()
-        .flat_map(char::to_lowercase)
-        .collect::<Vec<_>>();
-    let candidate_raw_chars = candidate.chars().collect::<Vec<_>>();
-    let candidate_chars = candidate_raw_chars
-        .iter()
-        .map(|&ch| ch.to_lowercase().next().unwrap_or(ch))
-        .collect::<Vec<_>>();
-
-    let mut matched_indices = Vec::with_capacity(query_chars.len());
-    let mut query_index = 0;
-    let mut score = 0_i32;
-    let mut last_match: Option<usize> = None;
-    for (candidate_index, candidate_char) in candidate_chars.iter().copied().enumerate() {
-        if query_index >= query_chars.len() {
-            break;
-        }
-        if candidate_char != query_chars[query_index] {
-            continue;
-        }
-
-        matched_indices.push(candidate_index);
-        score += 10;
-        if last_match.is_some_and(|last| last + 1 == candidate_index) {
-            score += 15;
-        }
-        if candidate_index == 0
-            || candidate_raw_chars
-                .get(candidate_index.saturating_sub(1))
-                .is_some_and(|previous| matches!(previous, '/' | '\\' | '-' | '_' | '.'))
-        {
-            score += 6;
-        }
-        if let Some(last) = last_match {
-            score -= candidate_index.saturating_sub(last + 1) as i32;
-        }
-        last_match = Some(candidate_index);
-        query_index += 1;
-    }
-
-    if query_index == query_chars.len() {
-        let lowercase_candidate = candidate.to_ascii_lowercase();
-        let lowercase_query = query.to_ascii_lowercase();
-        if lowercase_candidate == lowercase_query {
-            score += 100;
-        } else if lowercase_candidate.starts_with(&lowercase_query) {
-            score += 60;
-        } else if lowercase_candidate.contains(&lowercase_query) {
-            score += 35;
-        }
-        Some((score, matched_indices))
-    } else {
-        None
-    }
-}
+// palette_fuzzy_score is now provided by legion_index::fuzzy::fuzzy_score_tuple.
+// The import alias is already declared at the top of this file.
 
 fn sort_palette_results(results: &mut [PaletteScoredResult]) {
     results.sort_by(|left, right| {
@@ -12330,6 +12651,7 @@ fn collect_search_results_for_line(input: SearchLineInput<'_>) {
             },
             snippet,
             snippet_truncated,
+            stale: false,
         };
         push_bounded_search_result(input.result, input.limit, row);
     }
@@ -13055,6 +13377,12 @@ pub struct AppComposition {
     structural_search_projection: StructuralSearchProjection,
     git_projection: GitProjection,
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
+    /// Identifier of the keyboard-focused hunk in the diff review surface.
+    focused_git_hunk_id: Option<String>,
+    /// In-memory local history metadata store (content blobs live on disk).
+    local_history_store: legion_storage::local_history::LocalHistoryMetadataStore,
+    /// Last blob-write error, if any, propagated as a degraded-mode diagnostic.
+    local_history_last_write_error: Option<String>,
     debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
@@ -13068,6 +13396,11 @@ pub struct AppComposition {
     lsp_ui_hover_debounce: Option<(Instant, BufferId, TextCoordinate)>,
     /// Hover id last seen at auto-show time; prevents dismissed tooltip from re-opening (I1).
     lsp_ui_last_hover_id: Option<String>,
+    /// Metadata-only per-workspace palette usage counters.
+    /// No raw query text, AI context, or network I/O.
+    /// Defaults to `InMemoryPaletteUsageRepository` (no persistence); swap
+    /// via `set_palette_usage_repository` to enable disk persistence.
+    palette_usage: Box<dyn PaletteUsageRepository>,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -13132,6 +13465,9 @@ impl AppComposition {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             git_hunk_cache: HashMap::new(),
+            focused_git_hunk_id: None,
+            local_history_store: legion_storage::local_history::LocalHistoryMetadataStore::new(),
+            local_history_last_write_error: None,
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
@@ -13140,7 +13476,33 @@ impl AppComposition {
             lsp_ui_last_completion_count: 0,
             lsp_ui_hover_debounce: None,
             lsp_ui_last_hover_id: None,
+            palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
         }
+    }
+
+    /// Replace the palette usage repository with a disk-backed implementation.
+    ///
+    /// Call this before any palette operations to enable persistence. Product
+    /// entry points call [`Self::enable_palette_usage_persistence`] instead;
+    /// tests continue to use the in-memory default (or inject their own).
+    pub fn set_palette_usage_repository(&mut self, repo: Box<dyn PaletteUsageRepository>) {
+        self.palette_usage = repo;
+    }
+
+    /// Wires disk-backed palette usage persistence for a workspace. Usage
+    /// counts (item keys only — never raw query text) live under the
+    /// workspace-local `.legion/` state directory so ranking history survives
+    /// restarts. Composition-root API: renderer edges (legion-desktop) and
+    /// the CLI call this instead of constructing storage types themselves,
+    /// keeping storage dependencies out of projection-only crates.
+    pub fn enable_palette_usage_persistence(&mut self, workspace_root: &std::path::Path) {
+        let palette_usage_path = workspace_root.join(".legion").join("palette_usage.json");
+        if let Some(dir) = palette_usage_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        self.set_palette_usage_repository(Box::new(
+            legion_storage::FilePaletteUsageRepository::open(&palette_usage_path),
+        ));
     }
 
     fn next_event_context(&mut self) -> EventContext {
@@ -13972,6 +14334,13 @@ impl AppComposition {
             return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
         };
 
+        // Record metadata-only usage count for frequency blending.
+        // Uses `result.id` as the item key (stable command/file identifier).
+        // No raw query text is persisted.
+        if let Some(workspace_id) = self.active_documents.workspace_id() {
+            self.palette_usage.record_usage(workspace_id, &result.id);
+        }
+
         self.palette.close();
         self.dispatch_ui_intent(intent)
     }
@@ -14132,10 +14501,18 @@ impl AppComposition {
         let mut scored = paths
             .into_iter()
             .filter_map(|path| {
-                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
+                    // Frequency bonus: cap at 20 uses × 5 pts = +100 so
+                    // fuzzy quality and recency still dominate the ranking.
+                    let freq_count = self
+                        .palette_usage
+                        .usage_count(workspace_id, &format!("file:{path}"));
+                    let freq_bonus = (freq_count.min(20) as i32) * 5;
                     PaletteScoredResult {
-                        score: score.saturating_add(recency_bonus),
+                        score: score
+                            .saturating_add(recency_bonus)
+                            .saturating_add(freq_bonus),
                         result: PaletteResult {
                             id: format!("file:{path}"),
                             kind: PaletteResultKind::File,
@@ -14187,7 +14564,7 @@ impl AppComposition {
                     .clone()
                     .unwrap_or_else(|| symbol.symbol_name_hash.value.clone());
                 let searchable = format!("{title} {}", symbol.path.0);
-                palette_fuzzy_score(&searchable, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&searchable, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus
                         .get(&symbol.path.0)
                         .copied()
@@ -14232,7 +14609,7 @@ impl AppComposition {
             .filter_map(|buffer_id| {
                 let metadata = self.active_documents.metadata_for_buffer(*buffer_id)?;
                 let path = metadata.identity.canonical_path.0.clone();
-                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
                     PaletteScoredResult {
                         score: score.saturating_add(recency_bonus),
@@ -14278,10 +14655,11 @@ impl AppComposition {
 
     fn palette_command_results(&self, query: &str) -> Vec<PaletteResult> {
         let active_buffer_id = self.active_documents.active_buffer_id;
+        let workspace_id = self.active_documents.workspace_id();
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
-                palette_fuzzy_score(spec.title, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(spec.title, query).map(|(score, match_indices)| {
                     let (buffer_id, disabled_reason) = match spec.id {
                         "save-active-buffer" | "close-active-tab" => (
                             active_buffer_id,
@@ -14300,8 +14678,19 @@ impl AppComposition {
                         }
                         _ => (None, None),
                     };
+                    // Frequency bonus: frequently-used commands score a little
+                    // higher. Cap at 20 uses × 5 pts = +100 so fuzzy quality
+                    // still dominates the ranking.
+                    let freq_bonus = workspace_id
+                        .map(|wid| {
+                            let count = self
+                                .palette_usage
+                                .usage_count(wid, &format!("command:{}", spec.id));
+                            (count.min(20) as i32) * 5
+                        })
+                        .unwrap_or(0);
                     PaletteScoredResult {
-                        score,
+                        score: score.saturating_add(freq_bonus),
                         result: PaletteResult {
                             id: format!("command:{}", spec.id),
                             kind: PaletteResultKind::Command,
@@ -14462,6 +14851,31 @@ impl AppComposition {
                             (!path.is_empty())
                                 .then_some(CommandDispatchIntent::RemoveGitWorktree { path })
                         }
+                        "git-new-worktree" => {
+                            let body =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            let mut parts = body.splitn(2, ' ');
+                            let branch = parts.next().unwrap_or("").trim().to_string();
+                            let worktree_path = parts.next().unwrap_or("").trim().to_string();
+                            (!branch.is_empty() && !worktree_path.is_empty()).then_some(
+                                CommandDispatchIntent::CreateGitWorktree {
+                                    branch,
+                                    worktree_path,
+                                },
+                            )
+                        }
+                        "git-local-history" => {
+                            let path = self
+                                .active_documents
+                                .active_file_path
+                                .clone()
+                                .unwrap_or_default();
+                            (!path.is_empty()).then_some(
+                                CommandDispatchIntent::RequestLocalHistoryEntries { path },
+                            )
+                        }
                         _ => palette_command_intent(command_id),
                     })
             }
@@ -14473,6 +14887,10 @@ impl AppComposition {
                     scope: self.palette.scope,
                     query,
                     limit: 0,
+                    // Palette-driven searches defer to text-prefix parsing.
+                    case_sensitive: None,
+                    whole_word: None,
+                    use_regex: None,
                 })
             }
             PaletteResultKind::StructuralSearch => {
@@ -14672,9 +15090,20 @@ impl AppComposition {
                 scope,
                 query,
                 limit,
-            } => Ok(AppCommandOutcome::SearchUpdated(
-                self.run_search(query_id, scope, query, limit)?,
-            )),
+                case_sensitive,
+                whole_word,
+                use_regex,
+            } => Ok(AppCommandOutcome::SearchUpdated(self.run_search(
+                query_id,
+                scope,
+                query,
+                limit,
+                SearchQueryOptions {
+                    case_sensitive,
+                    whole_word,
+                    use_regex,
+                },
+            )?)),
             AppCommandRequest::RunStructuralSearch {
                 query_id,
                 scope,
@@ -14757,8 +15186,19 @@ impl AppComposition {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
                     return Err(AppCompositionError::WorkspaceNotOpen);
                 };
+                // Hard-fail validation: empty summary or missing author identity block the commit.
+                let validation =
+                    legion_project::validate_commit_with_author(Path::new(root_path), &message);
+                if !validation.is_valid() {
+                    self.git_projection.commit_validation_errors = validation.errors;
+                    self.git_projection.commit_validation_warnings = validation.warnings;
+                    return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
+                }
                 commit_git_changes(Path::new(root_path), &message)
                     .map_err(git_inspection_protocol_error)?;
+                // Clear stale validation state after a successful commit.
+                self.git_projection.commit_validation_errors = Vec::new();
+                self.git_projection.commit_validation_warnings = Vec::new();
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
             }
             AppCommandRequest::SwitchGitBranch { branch } => {
@@ -14821,6 +15261,63 @@ impl AppComposition {
                 remove_git_worktree(Path::new(root_path), Path::new(&path))
                     .map_err(git_inspection_protocol_error)?;
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::CreateGitWorktree {
+                branch,
+                worktree_path,
+            } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                legion_project::create_git_worktree(
+                    Path::new(root_path),
+                    &branch,
+                    Path::new(&worktree_path),
+                )
+                .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::GitNavNextHunk => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(true, false),
+            )),
+            AppCommandRequest::GitNavPrevHunk => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(false, false),
+            )),
+            AppCommandRequest::GitNavNextFile => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(true, true),
+            )),
+            AppCommandRequest::GitNavPrevFile => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(false, true),
+            )),
+            AppCommandRequest::RequestLocalHistoryEntries { path } => {
+                // Resolve 8.3 short names, symlinked temp dirs, and UNC prefixes so the
+                // lookup key always matches the one stored by record_local_history_entry.
+                let lookup_path = canonicalize_for_history(&path);
+                let entries = self.local_history_entries_for_file(&lookup_path);
+                Ok(AppCommandOutcome::LocalHistoryEntriesUpdated(entries))
+            }
+            AppCommandRequest::RestoreFromLocalHistory { path, entry_id } => {
+                // Resolve canonical path the same way as RequestLocalHistoryEntries.
+                let lookup_path = canonicalize_for_history(&path);
+                self.restore_from_local_history(&lookup_path, &entry_id)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::ExportWorktreeEvidence => {
+                let evidence_path = self.export_worktree_evidence()?;
+                Ok(AppCommandOutcome::WorktreeEvidenceExported(evidence_path))
+            }
+            AppCommandRequest::ValidateGitCommitMessage { message } => {
+                let root_path = self.active_documents.workspace_root_path.as_deref();
+                let (errors, warnings) = if let Some(root) = root_path {
+                    let result =
+                        legion_project::validate_commit_with_author(Path::new(root), &message);
+                    (result.errors, result.warnings)
+                } else {
+                    (vec![], vec![])
+                };
+                self.git_projection.commit_validation_errors = errors;
+                self.git_projection.commit_validation_warnings = warnings;
+                Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()))
             }
             AppCommandRequest::RequestHover {
                 buffer_id,
@@ -18196,8 +18693,30 @@ impl AppComposition {
     }
 
     fn save_buffer(&mut self, buffer_id: BufferId) -> Result<AppSaveOutcome, AppCompositionError> {
+        // Capture pre-save snapshot for local history (best-effort; errors here are non-fatal).
+        let local_history_snapshot: Option<(String, String, String)> = {
+            let path_and_id = self
+                .active_documents
+                .metadata_for_buffer(buffer_id)
+                .map(|meta| {
+                    (
+                        meta.identity.canonical_path.0.clone(),
+                        meta.identity.file_id.0.to_string(),
+                    )
+                });
+            if let Some((canonical_path, file_id_str)) = path_and_id {
+                self.editor
+                    .text(buffer_id)
+                    .ok()
+                    .map(|t| (canonical_path, file_id_str, t.to_string()))
+            } else {
+                None
+            }
+        };
+
         let context = self.active_documents.save_context_for_buffer(buffer_id)?;
         let event_context = self.next_event_context();
+        let correlation_id_str = event_context.correlation_id.0.to_string();
         match SaveWorkflowService::save_active_buffer(
             &mut self.editor,
             &self.workspace,
@@ -18213,6 +18732,15 @@ impl AppComposition {
                     .bind_saved_buffer(output.save.buffer_id, output.applied);
                 self.active_documents
                     .clear_dirty_prompt_for(output.save.buffer_id);
+                // Record local history snapshot after successful save.
+                if let Some((canonical_path, file_id_str, content)) = local_history_snapshot {
+                    self.record_local_history_entry(
+                        &canonical_path,
+                        &file_id_str,
+                        &content,
+                        &correlation_id_str,
+                    );
+                }
                 Ok(AppSaveOutcome::Saved(output.save))
             }
             Err(failure) => {
@@ -18499,13 +19027,45 @@ impl AppComposition {
     }
 
     /// Run bounded lexical search through app-owned editor/workspace authority.
+    ///
+    /// When a new query supersedes previous results, the existing
+    /// `SearchResultProjection` rows are immediately marked `stale = true` so
+    /// that callers can show de-emphasised results while the new search runs.
     pub fn run_search(
         &mut self,
         query_id: String,
         scope: SearchScopeProjection,
         query: String,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchProjection, AppCompositionError> {
+        // Mark current results stale before running the new query so that any
+        // caller holding a snapshot sees them de-emphasised.
+        //
+        // STALE-MARKER VISIBILITY LIMITATION (synchronous model): because
+        // `run_search` is synchronous and single-threaded, the stale flag set
+        // here is immediately overwritten by the `search_projection` assignment
+        // at the end of this call in the same stack frame.  In the current
+        // model there is therefore *zero practical visibility window* for the
+        // stale state — no external observer can read the transient stale
+        // snapshot.  The flag is meaningful only if/when an asynchronous
+        // search path is introduced (where the caller could read the stale
+        // projection between dispatching the new query and receiving its
+        // result).  Keep the logic in place as a forwards-compatible hook, but
+        // document that it has no effect today.
+        let incoming_query_id = query_id.as_str();
+        let current_is_different = self
+            .search_projection
+            .query_id
+            .as_deref()
+            .is_none_or(|prev| prev != incoming_query_id);
+        if current_is_different && !self.search_projection.results.is_empty() {
+            for row in &mut self.search_projection.results {
+                row.stale = true;
+            }
+            self.search_projection.generated_at = TimestampMillis::now();
+        }
+
         let result_limit = normalize_search_limit(limit);
         let query_label = query.trim().to_string();
         if query_label.is_empty() {
@@ -18525,10 +19085,10 @@ impl AppComposition {
 
         let result = match scope {
             SearchScopeProjection::ActiveFile => {
-                self.run_active_file_search(&query_id, &query_label, result_limit)?
+                self.run_active_file_search(&query_id, &query_label, result_limit, options)?
             }
             SearchScopeProjection::Workspace => {
-                self.run_workspace_search(&query_id, &query_label, result_limit)?
+                self.run_workspace_search(&query_id, &query_label, result_limit, options)?
             }
         };
 
@@ -18665,7 +19225,404 @@ impl AppComposition {
                 };
             }
         }
+        // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
+        // not in the project snapshot, so it must be injected after each build.
+        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        // Propagate any local-history blob-write degradation as a diagnostic.
+        if let Some(ref err) = self.local_history_last_write_error {
+            self.git_projection
+                .diagnostics
+                .push(format!("local_history.write_degraded: {err}"));
+        }
         self.git_projection.clone()
+    }
+
+    /// Navigate to the next or previous hunk in the diff review surface.
+    ///
+    /// `forward` — true = next, false = prev.
+    /// `by_file` — true = jump to first hunk of next/prev file, false = adjacent hunk.
+    fn navigate_git_hunk(&mut self, forward: bool, by_file: bool) -> GitProjection {
+        let hunks = &self.git_projection.hunks;
+        if hunks.is_empty() {
+            return self.git_projection.clone();
+        }
+
+        let current_idx = self
+            .focused_git_hunk_id
+            .as_deref()
+            .and_then(|id| hunks.iter().position(|h| h.hunk_id == id));
+
+        let new_id = if by_file {
+            // Jump to the first hunk of the next/prev file.
+            let current_path = current_idx
+                .and_then(|i| hunks.get(i))
+                .map(|h| h.path.as_str());
+            if forward {
+                // Find the first hunk whose path differs and comes after current.
+                let start = current_idx.map(|i| i + 1).unwrap_or(0);
+                hunks[start..]
+                    .iter()
+                    .find(|h| current_path.is_none_or(|p| h.path != p))
+                    .map(|h| h.hunk_id.clone())
+                    .or_else(|| hunks.first().map(|h| h.hunk_id.clone()))
+            } else {
+                // Find the last hunk whose path differs and comes before current.
+                let end = current_idx.unwrap_or(hunks.len());
+                hunks[..end]
+                    .iter()
+                    .rev()
+                    .find(|h| current_path.is_none_or(|p| h.path != p))
+                    .and_then(|h| {
+                        // Jump to the *first* hunk of that file.
+                        let target_path = h.path.clone();
+                        hunks.iter().find(|hh| hh.path == target_path)
+                    })
+                    .map(|h| h.hunk_id.clone())
+                    .or_else(|| hunks.last().map(|h| h.hunk_id.clone()))
+            }
+        } else if forward {
+            let next_idx = current_idx.map(|i| (i + 1) % hunks.len()).unwrap_or(0);
+            hunks.get(next_idx).map(|h| h.hunk_id.clone())
+        } else {
+            let prev_idx = current_idx
+                .map(|i| if i == 0 { hunks.len() - 1 } else { i - 1 })
+                .unwrap_or_else(|| hunks.len() - 1);
+            hunks.get(prev_idx).map(|h| h.hunk_id.clone())
+        };
+
+        self.focused_git_hunk_id = new_id;
+        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        self.git_projection.clone()
+    }
+
+    /// Return local history entries for the given canonical path, newest first.
+    fn local_history_entries_for_file(
+        &self,
+        canonical_path: &str,
+    ) -> Vec<legion_ui::LocalHistoryEntryProjection> {
+        self.local_history_store
+            .records_for_file(canonical_path, 50)
+            .into_iter()
+            .map(|r| legion_ui::LocalHistoryEntryProjection {
+                entry_id: r.entry_id.clone(),
+                timestamp_label: r.timestamp_ms.to_string(),
+                content_hash: r.content_hash.clone(),
+                size_bytes: r.size_bytes,
+            })
+            .collect()
+    }
+
+    /// Return the count of in-memory history entries for a given canonical path.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_local_history_entry_count(&self, path: &str) -> usize {
+        let canonical = canonicalize_for_history(path);
+        self.local_history_store.entry_count(&canonical)
+    }
+
+    /// Prune history for `path` to `max_count` entries and delete evicted blobs.
+    ///
+    /// Test-only helper for exercising the eviction boundary without needing
+    /// the production 50-entry cap.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_prune_local_history(&mut self, path: &str, max_count: usize) -> Vec<String> {
+        let canonical = canonicalize_for_history(path);
+        let evicted = self
+            .local_history_store
+            .prune(&canonical, max_count, u64::MAX);
+        if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
+            let path_key = canonical.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let blob_dir = std::path::PathBuf::from(root)
+                .join(".legion")
+                .join("local-history")
+                .join(&path_key);
+            for hash in &evicted {
+                let _ = std::fs::remove_file(blob_dir.join(format!("{hash}.blob")));
+            }
+        }
+        evicted
+    }
+
+    /// Return the last local-history write error, if any.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_local_history_last_write_error(&self) -> Option<&str> {
+        self.local_history_last_write_error.as_deref()
+    }
+
+    /// Record a local history entry for the given file save.
+    ///
+    /// This writes the content blob to `.legion/local-history/<path_key>/<hash>.blob`
+    /// and records metadata in `local_history_store`. Called from `save_buffer`.
+    fn record_local_history_entry(
+        &mut self,
+        canonical_path: &str,
+        file_id_str: &str,
+        content: &str,
+        correlation_id_str: &str,
+    ) {
+        use sha2::{Digest, Sha256};
+
+        // Normalise to the real-filesystem canonical form so that Windows 8.3 short
+        // names and macOS /var symlinks are resolved before keying the store.  This
+        // ensures record_local_history_entry and the lookup helpers use the same key.
+        let canonical_path_normalized = canonicalize_for_history(canonical_path);
+        let canonical_path = canonical_path_normalized.as_str();
+
+        let size_bytes = content.len() as u64;
+
+        // Compute a stable SHA-256 content hash (hex string, 64 chars).
+        let content_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+
+        // Build the blob directory path.
+        let blob_dir = if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
+            // Strip the UNC prefix (\\?\) before sanitizing so that the resulting
+            // directory name does not contain '?' which is illegal in Windows filenames.
+            let canonical_without_unc = strip_unc_prefix(canonical_path);
+            let path_key =
+                canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            std::path::PathBuf::from(root)
+                .join(".legion")
+                .join("local-history")
+                .join(&path_key)
+        } else {
+            return; // No workspace; skip.
+        };
+
+        // Ensure the .legion/local-history/ parent dir has a .gitignore so user git
+        // never picks up content blobs, regardless of the root .gitignore.
+        if let Some(parent) = blob_dir.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                self.local_history_last_write_error = Some(format!("create_dir {e}"));
+                return;
+            }
+            let gi_path = parent.join(".gitignore");
+            if !gi_path.exists() {
+                let _ = std::fs::write(&gi_path, "*\n");
+            }
+        }
+
+        // Write blob; capture errors for degraded-mode diagnostic — do not fail the save.
+        let dir_err = std::fs::create_dir_all(&blob_dir).err();
+        let write_err = if dir_err.is_none() {
+            let blob_path = blob_dir.join(format!("{content_hash}.blob"));
+            std::fs::write(&blob_path, content.as_bytes()).err()
+        } else {
+            dir_err
+        };
+        if let Some(err) = write_err {
+            self.local_history_last_write_error = Some(err.to_string());
+        } else {
+            self.local_history_last_write_error = None;
+        }
+
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Collision-proof entry identifier using UUID v7.
+        let entry_id = uuid::Uuid::now_v7().to_string();
+
+        let record = legion_storage::local_history::LocalHistoryRecord {
+            entry_id,
+            file_id_str: file_id_str.to_string(),
+            canonical_path: canonical_path.to_string(),
+            content_hash,
+            timestamp_ms,
+            correlation_id_str: correlation_id_str.to_string(),
+            size_bytes,
+            schema_version: legion_storage::local_history::LOCAL_HISTORY_SCHEMA_VERSION,
+        };
+
+        self.local_history_store.push_record(record);
+        // Prune returns evicted content hashes; delete the corresponding blob files.
+        let blob_dir_for_prune = blob_dir.clone();
+        let evicted_hashes = self
+            .local_history_store
+            .prune(canonical_path, 50, 50 * 1024 * 1024);
+        for hash in evicted_hashes {
+            let evicted_blob = blob_dir_for_prune.join(format!("{hash}.blob"));
+            let _ = std::fs::remove_file(&evicted_blob);
+        }
+    }
+
+    /// Restore a file from a local history entry by applying a full-replace edit through the
+    /// proposal-mediated save workflow (all mutations go through proposal routes).
+    fn restore_from_local_history(
+        &mut self,
+        canonical_path: &str,
+        entry_id: &str,
+    ) -> Result<(), AppCompositionError> {
+        let record = self
+            .local_history_store
+            .find_entry_by_id(entry_id)
+            .ok_or_else(|| {
+                git_protocol_error(
+                    "local_history.entry_not_found",
+                    format!("local history entry '{entry_id}' not found"),
+                )
+            })?
+            .clone();
+
+        // Build the blob path and read the content.
+        let root_path = self
+            .active_documents
+            .workspace_root_path
+            .as_deref()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?
+            .to_string();
+
+        // Strip UNC prefix before sanitizing to avoid '?' in directory names on Windows.
+        let canonical_without_unc = strip_unc_prefix(canonical_path);
+        let path_key =
+            canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        let blob_path = std::path::PathBuf::from(&root_path)
+            .join(".legion")
+            .join("local-history")
+            .join(&path_key)
+            .join(format!("{}.blob", record.content_hash));
+
+        let restored_text = std::fs::read_to_string(&blob_path).map_err(|e| {
+            git_protocol_error(
+                "local_history.blob_read_failed",
+                format!("cannot read history blob at {}: {e}", blob_path.display()),
+            )
+        })?;
+
+        // Find the buffer for this canonical path, apply the full-replace via editor,
+        // then trigger a save through the proposal route.  Normalise the stored path
+        // through canonicalize_for_history so that UNC prefixes and 8.3 forms from
+        // `fs::canonicalize` in the workspace actor match the already-normalised key.
+        let buffer_id = self
+            .active_documents
+            .buffer_file_metadata
+            .iter()
+            .find(|(_, meta)| {
+                canonicalize_for_history(&meta.identity.canonical_path.0) == canonical_path
+            })
+            .map(|(bid, _)| *bid)
+            .ok_or_else(|| {
+                git_protocol_error(
+                    "local_history.buffer_not_open",
+                    format!("no open buffer found for path '{canonical_path}'"),
+                )
+            })?;
+
+        // Full-replace edit: select entire buffer, replace with restored text.
+        let current_text = self
+            .editor
+            .text(buffer_id)
+            .map_err(|e| git_protocol_error("local_history.text_read_failed", format!("{e}")))?;
+        let line_count = current_text.lines().count().max(1);
+        let last_col = current_text.lines().last().map(|l| l.len()).unwrap_or(0);
+        let full_range = EditorTextRange::new(
+            TextPosition::new(0, 0),
+            TextPosition::new(line_count.saturating_sub(1), last_col),
+        );
+        let edit = TextEdit::new(full_range, restored_text);
+        EditorEngine::apply_edit(
+            &mut self.editor,
+            buffer_id,
+            edit,
+            TransactionSource::User,
+            None,
+            None,
+        )
+        .map_err(|e| git_protocol_error("local_history.apply_edit_failed", format!("{e}")))?;
+
+        // Now save through proposal route (same as regular save).
+        self.save_buffer(buffer_id)?;
+        Ok(())
+    }
+
+    /// Export metadata-only worktree state evidence to `.legion/evidence/`.
+    fn export_worktree_evidence(&self) -> Result<String, AppCompositionError> {
+        let root_path = self
+            .active_documents
+            .workspace_root_path
+            .as_deref()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+
+        let evidence_dir = std::path::PathBuf::from(root_path)
+            .join(".legion")
+            .join("evidence");
+        std::fs::create_dir_all(&evidence_dir).map_err(|e| {
+            git_protocol_error(
+                "evidence.dir_create_failed",
+                format!("cannot create evidence directory: {e}"),
+            )
+        })?;
+        // Ensure evidence dir has a .gitignore so user git never picks up evidence files.
+        let gi_path = evidence_dir.join(".gitignore");
+        if !gi_path.exists() {
+            let _ = std::fs::write(&gi_path, "*\n");
+        }
+
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Gather metadata-only counts from the current git projection.
+        let staged_count = self
+            .git_projection
+            .hunks
+            .iter()
+            .filter(|h| h.stage == legion_ui::GitHunkStageProjection::Staged)
+            .count();
+        let unstaged_count = self
+            .git_projection
+            .hunks
+            .iter()
+            .filter(|h| h.stage == legion_ui::GitHunkStageProjection::Unstaged)
+            .count();
+        let conflict_count = self.git_projection.conflicts.len();
+        let changed_file_paths: Vec<String> = self
+            .git_projection
+            .changed_files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+
+        // Build TOML content — metadata only, NO file content, NO diff text.
+        let mut toml = String::new();
+        toml.push_str("# Legion worktree state evidence — metadata only\n");
+        toml.push_str("# Generated by ExportWorktreeEvidence; no file content or diff text.\n\n");
+        toml.push_str("schema_version = 1\n");
+        toml.push_str(&format!("generated_at_ms = {timestamp_ms}\n"));
+        if let Some(root_label) = &self.git_projection.root_label {
+            let escaped = root_label.replace('\\', "\\\\").replace('"', "\\\"");
+            toml.push_str(&format!("root_label = \"{escaped}\"\n"));
+        }
+        if let Some(branch) = &self.git_projection.branch_label {
+            let escaped = branch.replace('\\', "\\\\").replace('"', "\\\"");
+            toml.push_str(&format!("branch_label = \"{escaped}\"\n"));
+        }
+        toml.push_str(&format!("staged_hunk_count = {staged_count}\n"));
+        toml.push_str(&format!("unstaged_hunk_count = {unstaged_count}\n"));
+        toml.push_str(&format!("conflict_count = {conflict_count}\n"));
+        toml.push_str("\n[changed_files]\n");
+        toml.push_str(&format!("count = {}\n", changed_file_paths.len()));
+        toml.push_str("paths = [\n");
+        for path in &changed_file_paths {
+            let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+            toml.push_str(&format!("  \"{escaped}\",\n"));
+        }
+        toml.push_str("]\n");
+
+        let filename = format!("worktree-state-{timestamp_ms}.toml");
+        let evidence_path = evidence_dir.join(&filename);
+        std::fs::write(&evidence_path, toml.as_bytes()).map_err(|e| {
+            git_protocol_error(
+                "evidence.write_failed",
+                format!("cannot write evidence file: {e}"),
+            )
+        })?;
+
+        Ok(evidence_path.to_string_lossy().into_owned())
     }
 
     fn stage_or_unstage_git_hunk(
@@ -18708,6 +19665,97 @@ impl AppComposition {
     /// separate fixture toggle.
     pub fn enable_terminal_runtime_for_tests(&mut self) {
         self.terminal_workflow.enable_runtime_for_tests();
+    }
+
+    /// Force the terminal panel into a specific failure state for integration tests.
+    ///
+    /// Exercises the `TerminalFailureKind` → `TerminalPanelStatusKind` translation path
+    /// so each failure variant can be verified to produce a distinct, labelled status.
+    /// This calls the same `apply_failure_kind` method that the real launch error handler uses.
+    pub fn project_terminal_failure_for_test(
+        &mut self,
+        kind: crate::terminal_policy::TerminalFailureKind,
+    ) -> legion_protocol::TerminalPanelProjection {
+        self.terminal_workflow
+            .apply_failure_kind(kind, "forced-for-test".to_string())
+    }
+
+    /// Set the terminal shell selection (workspace-level setting).
+    ///
+    /// Precedence: workspace settings (this call) → user settings → platform default.
+    /// The selection is projected in the terminal status message so the user can see
+    /// which shell is in use.
+    pub fn set_terminal_shell_selection(
+        &mut self,
+        selection: crate::terminal_policy::TerminalShellSelection,
+    ) {
+        self.terminal_workflow.set_shell_selection(selection);
+    }
+
+    /// Set the user-level terminal shell preference.
+    ///
+    /// This is the second tier in the shell selection precedence chain:
+    /// workspace settings → user settings (this call) → platform default.
+    /// A workspace-level setting (set via `set_terminal_shell_selection`) overrides
+    /// this; `None` clears the user preference and falls back to the platform default.
+    pub fn set_user_terminal_shell_selection(
+        &mut self,
+        selection: Option<crate::terminal_policy::TerminalShellSelection>,
+    ) {
+        self.terminal_workflow.set_user_shell_selection(selection);
+    }
+
+    /// Set the terminal scrollback row limit.
+    ///
+    /// The default is `SCROLLBACK_DEFAULT_MAX_ROWS` (5000 rows). Rows beyond this limit
+    /// are evicted from the oldest end; the eviction count is visible in
+    /// `TerminalPanelProjection::scrollback.omitted_row_count`.
+    pub fn set_terminal_scrollback_max_rows(&mut self, max_rows: usize) {
+        self.terminal_workflow.scrollback_max_rows = max_rows.max(1);
+    }
+
+    /// Trigger orphan PTY cleanup, killing any abandoned sessions and returning
+    /// metadata-only audit records for each cleaned-up session.
+    pub fn cleanup_terminal_orphans(
+        &mut self,
+    ) -> Result<Vec<legion_protocol::TerminalAuditRecord>, AppCompositionError> {
+        self.terminal_workflow
+            .runtime
+            .cleanup_orphans()
+            .map_err(|err| AppCompositionError::Terminal(format!("orphan cleanup failed: {err}")))
+    }
+
+    /// For testing: launch a terminal session using an explicit command and args,
+    /// bypassing the product gate and shell selection. This lets tests create sessions
+    /// with short-lived commands (e.g. `cmd /C exit`) so the process exits on its own
+    /// and the session becomes a genuine orphan for `cleanup_terminal_orphans` testing.
+    ///
+    /// The runtime must be enabled first via `enable_terminal_runtime_for_tests()` and a
+    /// workspace must be opened with `open_workspace()`.
+    pub fn launch_terminal_raw_for_orphan_test(
+        &mut self,
+        command: String,
+        args: Vec<String>,
+    ) -> Result<legion_terminal::TerminalRuntimeLaunchOutcome, AppCompositionError> {
+        let context = self.active_documents.require_workspace_context()?;
+        self.terminal_workflow
+            .runtime
+            .launch(legion_terminal::TerminalRuntimeLaunchRequest {
+                policy: legion_protocol::TerminalLaunchPolicyContract {
+                    principal_id: context.principal,
+                    workspace_id: context.workspace_id,
+                    trust_state: context.trust,
+                    capability_id: CapabilityId("terminal.launch".to_string()),
+                    cwd_policy: "workspace-root".to_string(),
+                    output_byte_limit: 64 * 1024,
+                    timeout_seconds: 30,
+                    schema_version: 1,
+                },
+                command,
+                args,
+                env: None,
+            })
+            .map_err(|err| AppCompositionError::Terminal(format!("raw launch failed: {err}")))
     }
 
     /// Enable the DAP debug runtime for app integration tests.
@@ -20289,6 +21337,7 @@ impl AppComposition {
         query_id: &str,
         query: &str,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let buffer_id = self.active_documents.require_active_buffer()?;
         let metadata = self
@@ -20298,12 +21347,13 @@ impl AppComposition {
             .ok_or(AppCompositionError::ActiveFileMissing)?;
 
         if matches!(self.editor.buffer_mode(buffer_id)?, BufferMode::Degraded) {
-            return self
-                .run_degraded_active_file_search(query_id, query, limit, buffer_id, metadata);
+            return self.run_degraded_active_file_search(
+                query_id, query, limit, buffer_id, metadata, options,
+            );
         }
 
         let text = self.editor.text(buffer_id)?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -20312,10 +21362,15 @@ impl AppComposition {
                 });
             }
         };
-        let mut result = SearchBuildResult::default();
+        let mut result = SearchBuildResult {
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
+            ..SearchBuildResult::default()
+        };
         collect_search_results_for_text(SearchTextInput {
             query_id,
-            pattern: &parsed.0,
+            pattern: &parsed.pattern,
             scope: SearchScopeProjection::ActiveFile,
             workspace_id: Some(metadata.identity.workspace_id),
             buffer_id: Some(buffer_id),
@@ -20335,6 +21390,7 @@ impl AppComposition {
         limit: usize,
         buffer_id: BufferId,
         metadata: ActiveFileMetadata,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let scroll = self.active_documents.viewport_scroll_for(buffer_id);
         let viewport = self
@@ -20347,7 +21403,7 @@ impl AppComposition {
                     height_px: 384,
                 },
             })?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -20362,13 +21418,16 @@ impl AppComposition {
                 "Active-file search is limited to the visible viewport in degraded mode"
                     .to_string(),
             ],
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
             ..SearchBuildResult::default()
         };
 
         for slice in &viewport.line_slices {
             collect_search_results_for_line(SearchLineInput {
                 query_id,
-                pattern: &parsed.0,
+                pattern: &parsed.pattern,
                 scope: SearchScopeProjection::ActiveFile,
                 workspace_id: Some(metadata.identity.workspace_id),
                 buffer_id: Some(buffer_id),
@@ -20390,9 +21449,10 @@ impl AppComposition {
         query_id: &str,
         query: &str,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let workspace_id = self.active_documents.require_workspace_id()?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -20401,19 +21461,26 @@ impl AppComposition {
                 });
             }
         };
-        let mut result = SearchBuildResult::default();
+        let mut result = SearchBuildResult {
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
+            ..SearchBuildResult::default()
+        };
         let backend_query = WorkspaceSearchQuery {
             workspace_id,
-            pattern: parsed.0,
-            search_text: parsed.2,
-            filters: parsed.1,
+            pattern: parsed.pattern,
+            search_text: parsed.search_text,
+            filters: parsed.filters,
             result_limit: limit,
             batch_size: 32,
-            use_indexed_backend: self.settings.indexed_workspace_search_enabled && parsed.3,
+            use_indexed_backend: self.settings.indexed_workspace_search_enabled
+                && parsed.is_literal,
         };
 
-        self.workspace
-            .search_workspace_stream(backend_query, |batch: WorkspaceSearchBatch| {
+        let report = self.workspace.search_workspace_stream(
+            backend_query,
+            |batch: WorkspaceSearchBatch| {
                 result.omitted_file_count = result
                     .omitted_file_count
                     .saturating_add(batch.omitted_file_count);
@@ -20450,10 +21517,15 @@ impl AppComposition {
                         },
                         snippet: hit.snippet,
                         snippet_truncated: hit.snippet_truncated,
+                        stale: false,
                     });
                 }
                 true
-            })?;
+            },
+        )?;
+        // Propagate binary-skip count from the workspace report so it is
+        // visible to the user via SearchProjection.skipped_binary_count.
+        result.skipped_binary_count = report.skipped_binary_count;
 
         Ok(result)
     }
@@ -20788,6 +21860,11 @@ impl AppComposition {
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
+        // Apply user-level terminal shell preference from loaded settings.
+        self.terminal_workflow
+            .set_user_shell_selection(TerminalShellSelection::from_label(
+                &record.workbench_settings.terminal_shell_selection,
+            ));
         if let Some(memory_snapshot_json) = &record.memory_snapshot_json {
             let snapshot: MemoryServiceSnapshot = serde_json::from_str(memory_snapshot_json)
                 .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
@@ -26137,6 +27214,65 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// SEARCH.06: frequency bonus lifts heavily-used palette commands.
+    ///
+    /// "Refresh Explorer" and "Refresh Git" score identically for query
+    /// "refresh" (same subsequence bonuses, both are start-prefixes).
+    /// The alphabetical tiebreaker puts "Refresh Explorer" first ("E" < "G").
+    /// After recording 20 usages for "command:refresh-git" that command
+    /// gains +100 frequency bonus and rises above "Refresh Explorer".
+    #[test]
+    fn palette_usage_frequency_bonus_lifts_heavily_used_command() {
+        let workspace_id = WorkspaceId(42);
+        let mut app = AppComposition::new();
+        // Give the composition a workspace so `workspace_id()` returns `Some`.
+        app.active_documents.opened_workspace = Some(WorkspaceOpened {
+            workspace_id,
+            root_id: legion_protocol::WorkspaceRootId(1),
+            generation: WorkspaceGeneration(1),
+            snapshot_id: legion_protocol::SnapshotId(0),
+            correlation_id: CorrelationId(0),
+        });
+
+        // Baseline: "Refresh Explorer" and "Refresh Git" tie on fuzzy score;
+        // the alphabetical tiebreaker puts "Refresh Explorer" first.
+        let baseline = app.palette_command_results("refresh");
+        let git_pos_base = baseline
+            .iter()
+            .position(|r| r.id == "command:refresh-git")
+            .expect("Refresh Git should match 'refresh'");
+        let explorer_pos_base = baseline
+            .iter()
+            .position(|r| r.id == "command:refresh-explorer")
+            .expect("Refresh Explorer should match 'refresh'");
+        assert!(
+            explorer_pos_base <= git_pos_base,
+            "Refresh Explorer should rank at least as high as Refresh Git without frequency boost \
+             (alphabetical tiebreak: 'E' < 'G')"
+        );
+
+        // Record 20 usages for refresh-git -> +100 frequency bonus.
+        for _ in 0..20 {
+            app.palette_usage
+                .record_usage(workspace_id, "command:refresh-git");
+        }
+
+        let boosted = app.palette_command_results("refresh");
+        let git_pos_boosted = boosted
+            .iter()
+            .position(|r| r.id == "command:refresh-git")
+            .expect("Refresh Git should still match 'refresh' after boost");
+        let explorer_pos_boosted = boosted
+            .iter()
+            .position(|r| r.id == "command:refresh-explorer")
+            .expect("Refresh Explorer should still match 'refresh' after boost");
+
+        assert!(
+            git_pos_boosted < explorer_pos_boosted,
+            "Refresh Git (20 usages, +100 freq bonus) must outrank Refresh Explorer (0 usages)"
+        );
     }
 
     #[test]

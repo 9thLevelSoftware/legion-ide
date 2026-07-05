@@ -245,10 +245,14 @@ fn beta_acceptance_e2e_policy_gated_local_loop() {
         "3) Rust LSP completion should request and cancel safely"
     );
     // 12a) terminal policy decision is asserted on the typed field, not prose.
+    // Terminal productization: trusted beta workspaces launch the selected
+    // shell through the product gate (labels never execute); the policy-gated
+    // outcome for this trusted loop is therefore Allowed. Untrusted denial
+    // stays covered by legion-app terminal_workflow tests.
     assert_eq!(
         report.terminal_decision,
-        BetaTerminalPolicyDecision::Denied,
-        "12a) terminal policy should deny by default"
+        BetaTerminalPolicyDecision::Allowed,
+        "12a) terminal policy should allow the trusted-workspace shell launch"
     );
     // 4) + 12b) The AI proposal mode is asserted on the typed enum: it must be
     // preview-only, which structurally excludes any autonomous apply.

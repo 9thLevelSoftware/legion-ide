@@ -115,6 +115,9 @@ fn diagnostics_export_writes_metadata_only_runtime_status() {
             scope: SearchScopeProjection::ActiveFile,
             query: "SECRET_PHASE7_QUERY".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("search should be routed through app authority");
     runtime
@@ -143,8 +146,8 @@ fn diagnostics_export_writes_metadata_only_runtime_status() {
     assert!(updated.contains("last_outcome: AssistedAiUpdated"));
     assert!(updated.contains("## Operational Health"));
     assert!(updated.contains("search_status: NoResults"));
-    assert!(updated.contains("terminal_status: Denied"));
-    assert!(updated.contains("terminal_denial: denied"));
+    assert!(updated.contains("terminal_status: Running"));
+    assert!(updated.contains("terminal_denial: none"));
     assert!(updated.contains("unsupported_surfaces:"));
     assert!(updated.contains("Autonomous apply: unsupported"));
     assert!(!updated.contains("SECRET_DIRTY_BODY"));

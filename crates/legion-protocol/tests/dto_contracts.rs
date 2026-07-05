@@ -4072,6 +4072,7 @@ fn dto_contracts_session_record_schema_golden() {
             "smooth_scrolling_enabled": true,
             "line_wrapping_policy": "off",
             "wrap_column": 120,
+            "terminal_shell_selection": "",
             "telemetry": {
                 "enabled": false,
                 "crash_reports_enabled": false,

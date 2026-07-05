@@ -71,7 +71,7 @@ cargo deny --version
 
 If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
-A single GitHub Actions workflow (`.github/workflows/legion-bench.yml`) runs the legion-bench live-mode benchmark weekly (and on manual dispatch) across Linux, Windows, and macOS runners and uploads the report artifact. It is not a full CI gate: local developer machines must install the CLI before using `scripts/run-phase-gates.*`, and those local gates remain the active verification source for all other checks.
+Two GitHub Actions workflows exist: `.github/workflows/legion-gates.yml` runs the standing gate set (xtask gates, fmt/check/test/clippy, cargo-deny, report-only perf-harness, and the real rust-analyzer smoke) across Linux, Windows, and macOS runners on every push to main and every pull request, and `.github/workflows/legion-bench.yml` runs the legion-bench live-mode benchmark weekly (and on manual dispatch) and uploads the report artifact. Local developer machines must still install the CLI before using `scripts/run-phase-gates.*`; those local gates remain the primary verification source (they additionally run the evals/training pytest suite and strict perf budgets) until the hosted gate history is proven stable.
 
 ## CLI Proof
 

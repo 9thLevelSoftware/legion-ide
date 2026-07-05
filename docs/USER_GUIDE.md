@@ -5,7 +5,9 @@ It assumes the reader already has a working build or a packaged desktop app.
 
 > **Current state caveat.** The repo currently proves a validated substrate and a deterministic desktop projection workflow (CLI `:w` / `:q`, projection-only UI, headless desktop smoke harness). It is **not** a renderer-backed daily-driver product yet. Treat anything below as a description of the design and the gated surfaces that are exercised by tests, not as a claim of a shipped user experience. For the readiness matrix and remaining product gaps, see `plans/product-readiness-ledger.md` and `README.md` "Current Status".
 
-> **Product areas that are currently projection-only, gated, or otherwise not yet productized.** The following are explicitly *not* full product paths today: terminal productization (real PTY behind capability policy; currently denied/fixture-gated in app-level paths), debug productization (DAP is fixture/projection; no real product debug adapter launch yet), runtime plugin execution (manifest/capability boundary only; no live WASM host), collaboration GUI / production collaboration, remote workspace / Cloud Lane UX, and signing / notarization / auto-update / crash reporting (dry-run descriptors only; no private signing credentials may be committed). Autonomous apply/merge is unsupported outside explicitly approved proposal paths. See `docs/LEGION_PIVOT.md` and `plans/legion-production-master-plan-v0.2.md` for the path to activating these surfaces.
+> **Product areas that are currently projection-only, gated, or otherwise not yet productized.** The following are explicitly *not* full product paths today: debug productization (DAP is fixture/projection; no real product debug adapter launch yet), runtime plugin execution (manifest/capability boundary only; no live WASM host), collaboration GUI / production collaboration, remote workspace / Cloud Lane UX, and signing / notarization / auto-update / crash reporting (dry-run descriptors only; no private signing credentials may be committed). Autonomous apply/merge is unsupported outside explicitly approved proposal paths. See `docs/LEGION_PIVOT.md` and `plans/legion-production-master-plan-v0.2.md` for the path to activating these surfaces.
+
+> **Terminal runtime (M8, productized).** The terminal is now backed by a real PTY via the workspace trust and capability policy gate. Trusted workspaces in Manual mode auto-enable the terminal on the first explicit launch intent; untrusted workspaces are denied unconditionally. Shell selection (PowerShell Core / cmd / bash / zsh) follows workspace → user → platform-default precedence. The `LEGION_SECRET*` and `LEGION_TOKEN*` environment variable deny-list is always applied regardless of trust state. Scrollback is bounded (default 5 000 rows). See `docs/TROUBLESHOOTING.md` for terminal failure states.
 
 ## Start here
 
@@ -20,6 +22,32 @@ It assumes the reader already has a working build or a packaged desktop app.
 
 Manual mode is the deterministic local editing path.
 Use it when you want the projection-only UI, workspace navigation, and trusted local file operations without any AI or worker surfaces.
+
+#### Workspace search
+
+Search operates on the active file or across the entire workspace without mutating any files.
+Multi-file search/replace is explicitly out of scope until M9; the search surface is read-only.
+
+Options available in workspace search:
+
+- **Literal / Regex** — search using a plain string or a regular expression.
+- **Case-sensitive** — match uppercase and lowercase exactly as typed.
+- **Whole-word** — restrict matches to word boundaries.
+- **Glob filter** — restrict which files are walked (e.g. `*.rs`, `src/**`).
+
+Binary files are detected by a NUL-byte heuristic (first 8 KiB window) and skipped automatically;
+the search report includes a `skipped_binary_count` field that records how many were bypassed.
+
+When a new query begins, results from the previous query are marked **stale** until the new
+results arrive.  Stale rows are rendered de-emphasised (tagged `[stale]` in the desktop projection).
+
+#### Command palette
+
+The command palette (opened from the app bar) supports three modes: file opener, symbol finder,
+and command dispatcher.  Results are ranked by fuzzy score (consecutive-run, word-boundary,
+camelCase, path-segment, and filename-region bonuses) blended with a recency signal and a
+frequency bonus.  The frequency bonus accumulates metadata-only usage counts per workspace;
+no raw query text, AI context, or network I/O is involved.
 
 ### Assist
 
@@ -66,6 +94,55 @@ See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
 - For packaging and release preparation, start with `docs/OPERATOR_RUNBOOK.md`.
 - For diagnostic exports, session state, and bug-report payloads, use `docs/TROUBLESHOOTING.md`.
 - For release-readiness status, check `plans/product-readiness-ledger.md`.
+
+## Source control (SCM)
+
+Legion integrates with Git through the command palette and the SCM panel.
+
+### Diff review navigation
+
+When a diff is open, use the following palette commands (or their projected key bindings) to move through changes:
+
+| Command | Description |
+| --- | --- |
+| Git: Next Hunk | Move focus to the next changed hunk in the current file. |
+| Git: Previous Hunk | Move focus to the previous changed hunk in the current file. |
+| Git: Next File | Move focus to the next changed file in the diff. |
+| Git: Previous File | Move focus to the previous changed file in the diff. |
+
+Focus state is tracked in the application layer; the desktop projection reflects the current `focused_hunk_id` from `GitProjection`.
+
+### Commit validation
+
+Before committing, Legion validates:
+
+- **Summary line** — must be non-empty (hard error; the commit action is blocked).
+- **Author identity** — name and email are read from `git config`; missing values are a hard error.
+- **Conventional Commits prefix** — if the summary does not start with a recognised CC prefix (`feat`, `fix`, `refactor`, etc.) an advisory warning is surfaced, but the commit is not blocked.
+
+### Local file history
+
+Legion records a content snapshot every time a file is successfully saved through the proposal workflow.
+Snapshots are bounded to 50 entries or 50 MiB per file (whichever limit is reached first).
+
+Metadata (timestamps, content hash, file identity) is stored in memory by `LocalHistoryMetadataStore`.
+Content blobs are written to `.legion/local-history/<path-key>/` inside the workspace and are workspace-local — they are never pushed to remote.
+
+To browse or restore from local history:
+
+1. Open the command palette and run **Git: Local History**.
+2. Select the entry to restore.
+3. The restore goes through the standard proposal/save workflow — it inherits fingerprint, version, generation, and correlation/causality tracking; no direct writes occur.
+
+### Git worktrees
+
+Use the **Git: New Worktree** palette command to create a linked worktree for an existing branch.
+Worktree creation never touches the network.
+
+### Evidence export
+
+Run **Git: Export Worktree Evidence** to write a metadata-only TOML snapshot of the current worktree state to `.legion/evidence/`.
+The export contains only metadata (branch, HEAD, path); no file content is included.
 
 ## What this guide does not cover
 

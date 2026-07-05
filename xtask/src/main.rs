@@ -977,6 +977,7 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
         xtask::perf_harness::SkeletonDescriptor::m0_input_to_paint(),
         xtask::perf_harness::SkeletonDescriptor::m1_line_galley_shaping_cache(),
         xtask::perf_harness::SkeletonDescriptor::m2_memory_ceiling_1mb(),
+        xtask::perf_harness::SkeletonDescriptor::m8_search_stream_50k(),
     ];
     for skeleton in &mut skeletons {
         xtask::perf_harness::apply_fail_on_budget_override(skeleton);
@@ -1111,6 +1112,12 @@ fn append_manual_renderer_measurement(
         }
     };
 
+    let mut measurement = measurement;
+    // The renderer measurement carries the desktop manual-perf report's own
+    // budget verdict; apply the LEGION_PERF_FAIL_ON_BUDGET_MS override so
+    // report-only CI legs (override 0) do not fail on shared-runner timing
+    // noise, matching the descriptor-driven skeletons.
+    xtask::perf_harness::apply_fail_on_budget_to_manual_measurement(&mut measurement);
     report.skeletons.push(measurement);
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
 }

@@ -576,6 +576,12 @@ pub enum DesktopAction {
         query: String,
         /// Requested result limit; zero means app default.
         limit: usize,
+        /// Explicit case-sensitive toggle; `None` defers to text-prefix parsing.
+        case_sensitive: Option<bool>,
+        /// Explicit whole-word toggle; `None` defers to text-prefix parsing.
+        whole_word: Option<bool>,
+        /// Explicit regex mode toggle; `None` defers to text-prefix parsing.
+        use_regex: Option<bool>,
     },
     /// Run bounded structural search and rewrite preview through app authority.
     RunStructuralSearch {
@@ -1701,10 +1707,16 @@ impl DesktopCommandBridge {
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             } => DesktopBridgeOutput::Intent(CommandDispatchIntent::RunSearch {
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             }),
             DesktopAction::RunStructuralSearch {
                 scope,
