@@ -565,8 +565,12 @@ fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<BetaWorkf
     );
     record_gate_error(
         &mut errors,
-        input.language_status.contains("status=Cancelled")
-            && input.language_status.contains("cancellations=1"),
+        // The durable proof of cancellation is the counter, not the transient
+        // status label: with a live rust-analyzer session the composite
+        // language status advances to `Ready` as soon as the session finishes
+        // initializing, which can race this gate on slow runners (PR #41
+        // windows leg) while `cancellations=1` remains recorded either way.
+        input.language_status.contains("cancellations=1"),
         "language workflow did not record cancellation",
         input.language_status,
     );
