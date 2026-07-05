@@ -74,6 +74,19 @@ If the smoke exits non-zero and a step reports `status = "failed"` (not `"skippe
 - Run `cargo run -p xtask -- rust-analyzer-smoke` (with `rust-analyzer` on PATH) to verify
   your local installation is functional.
 
+### Server not starting (lazy-start behavior)
+
+**Symptom:** Language features (completions, diagnostics, hover) do not appear after opening
+a workspace, even for a trusted Rust workspace.
+
+**What happens internally (PKT-LSP-C T1):** The language server now starts *lazily* — it is
+not spawned when the workspace opens. It starts automatically when you open the first `.rs`
+file in the workspace, or explicitly via the **"Language Server: Start"** palette command.
+
+**Resolution:**
+- Open any `.rs` file in the workspace, or
+- Run `> Language Server: Start` from the command palette.
+
 ### Server crash or `Failed` health status
 
 **Symptom:** Language health shows `Failed` or `Unavailable` after initial startup;
@@ -90,6 +103,27 @@ Restart attempts are subject to a supervision backoff to prevent a storm.
   cause rust-analyzer to time out during initialization.
 
 **Workaround:** Close and reopen the workspace to trigger a fresh startup attempt.
+
+### Circuit-breaker `BackingOff` state and countdown
+
+**Symptom:** Language health shows `BackingOff` with a countdown timer; language features
+are unavailable.
+
+**What happens internally (PKT-LSP-C T3):** After each startup failure the session enters a
+backoff wait before retrying. The backoff duration doubles with each attempt (base 500 ms,
+cap 30 s). After 3 consecutive failures the circuit breaker holds and the session enters
+`Failed` — no further automatic restarts occur.
+
+The current lifecycle state and countdown are projected in
+`LanguageToolingProjection::lsp_session_status` with fields:
+- `lifecycle`: `BackingOff` / `Failed` / `Refused` / `Starting` / `Live` / `Idle`
+- `backoff_remaining_ms`: milliseconds until the next automatic retry (only in `BackingOff`)
+- `restart_count` / `max_auto_restarts`: how many attempts remain
+- `failure_reason`: bounded metadata-only description of the most recent failure
+
+**Resolution:** Run **`> Language Server: Restart`** from the command palette. This resets
+`restart_count` to 0 (restoring the full auto-restart budget) and triggers an immediate fresh
+startup attempt regardless of the current state.
 
 ### Completions or hover are blank after typing
 
