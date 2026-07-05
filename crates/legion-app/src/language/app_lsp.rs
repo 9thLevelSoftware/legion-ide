@@ -560,7 +560,10 @@ impl LspSessionHandle {
     /// disconnected dummy channels.  Allows tests to set specific capabilities
     /// without starting a real server or touching the process environment.
     /// Named with `_for_test` suffix to signal production code must not call
-    /// this.
+    /// this.  Gated behind `cfg(any(test, feature = "test-helpers"))` so the
+    /// method (including `std::mem::forget`) is unreachable in production
+    /// builds.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_live_health_for_test(&mut self, health: LspServerHealthRecord) {
         // Use a generous capacity so `try_send` succeeds when the test probes
         // `issue_request`. We leak the request receiver so the sender side

@@ -2671,6 +2671,30 @@ impl DesktopEframeApp {
         })
     }
 
+    /// Headless test seam that runs a **complete** frame — `handle_keyboard`,
+    /// the full workbench projection view (so `render_problems_keyboard` and
+    /// similar view-level key bindings fire), and the command-palette overlay.
+    ///
+    /// Use this when a test needs to assert that a key event wired in
+    /// `view.rs` dispatches the expected action (e.g. ArrowDown →
+    /// `ProblemNext`).  For tests that only need to exercise editor shortcuts
+    /// or command-palette routing, prefer the lighter `run_headless_input`.
+    pub fn run_headless_full_frame(&mut self, raw_input: egui::RawInput) -> egui::FullOutput {
+        let ctx = self.ctx.clone();
+        ctx.run_ui(raw_input, |ui| {
+            self.render_app_frame(ui);
+        })
+    }
+
+    /// Return the zero-based index of the currently selected problem row.
+    ///
+    /// Test-only delegate that forwards to the runtime so tests that wrap a
+    /// [`DesktopEframeApp`] can assert navigation state without reaching inside
+    /// the runtime directly.
+    pub fn problems_selected_index_for_test(&self) -> usize {
+        self.runtime.problems_selected_index_for_test()
+    }
+
     /// Render one full application frame: keyboard handling, the projection
     /// view, and the command-palette overlay.
     fn render_app_frame(&mut self, ui: &mut egui::Ui) {
@@ -2802,6 +2826,37 @@ impl DesktopEframeApp {
                     actions.push(DesktopAction::Redo);
                 } else {
                     actions.push(DesktopAction::Undo);
+                }
+            }
+
+            // T4: Problems-panel keyboard navigation.
+            //
+            // Handled here in `handle_keyboard` (from a cloned `InputState`)
+            // rather than in a view-layer `ctx.input(|i| {...})` overlay
+            // function.  The view layer runs inside `egui::Panel` closures
+            // whose internal scroll areas can consume Arrow events through
+            // egui's focus-navigation mechanism before any overlay function
+            // gets to read them, making the key invisible even when called
+            // first in the render pass.  Cloning the `InputState` up-front
+            // (as `handle_keyboard` does for all other shortcuts) sidesteps
+            // that consumption window.
+            //
+            // Focus scope: fires only when the problems list is non-empty
+            // AND the completion popup is not open (completion popup already
+            // owns ArrowUp / ArrowDown / Enter through its own handler).
+            {
+                let view_state = self.runtime.projection_view_state();
+                let problems_non_empty = !snapshot.language_tooling_projection.problems.is_empty();
+                if problems_non_empty && !view_state.completion_popup_open {
+                    if input.key_pressed(egui::Key::ArrowDown) {
+                        actions.push(DesktopAction::ProblemNext);
+                    }
+                    if input.key_pressed(egui::Key::ArrowUp) {
+                        actions.push(DesktopAction::ProblemPrev);
+                    }
+                    if input.key_pressed(egui::Key::Enter) {
+                        actions.push(DesktopAction::ProblemActivate);
+                    }
                 }
             }
 

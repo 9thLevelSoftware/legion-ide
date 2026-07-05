@@ -13573,7 +13573,9 @@ impl AppComposition {
     /// Test-only: inject a live health record with given capabilities, so tests
     /// can drive capability-gated code paths without starting a real server.
     /// Named with `_for_test` suffix to signal that production code must never
-    /// call this.
+    /// call this.  Gated behind `cfg(any(test, feature = "test-helpers"))` so
+    /// the method is unreachable in production builds.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_lsp_health_for_test(&mut self, health: legion_protocol::LspServerHealthRecord) {
         self.lsp_session.set_live_health_for_test(health);
     }

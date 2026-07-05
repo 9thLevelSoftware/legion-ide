@@ -31,3 +31,6 @@ legion-agent = { workspace = true }
 legion-sandbox = { workspace = true }
 tempfile = "3"
 uuid = { workspace = true }
+# Enable `test-helpers` seams on AppComposition (e.g. `set_lsp_health_for_test`)
+# so integration tests in tests/ can reach them without a real LSP server.
+legion-app = { workspace = true, features = ["test-helpers"] }
