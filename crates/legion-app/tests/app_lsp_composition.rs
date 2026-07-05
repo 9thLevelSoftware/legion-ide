@@ -386,7 +386,9 @@ fn t5_refused_health_in_snapshot() {
         legion_protocol::PrincipalId("test".to_string()),
     )
     .expect("open workspace");
-    // No Cargo.toml → session refuses immediately.
+    // PKT-LSP-C T1: session start is now lazy (not triggered by open_workspace).
+    // Trigger it explicitly; with no Cargo.toml the session refuses immediately.
+    app.force_lsp_start_for_test();
     app.drain_lsp_session();
 
     let health = app

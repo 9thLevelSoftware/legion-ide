@@ -18,15 +18,23 @@
 //! bounded channel is full — callers retry on the next keystroke/frame).
 
 use std::{
+    collections::VecDeque,
+    io::BufRead,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Maximum number of redacted stderr lines retained in the ring buffer.
+const STDERR_RING_CAPACITY: usize = 100;
+/// Maximum byte length of a single retained stderr line (longer lines are
+/// truncated with `…` to prevent unbounded growth of the ring elements).
+const STDERR_LINE_MAX_LEN: usize = 512;
+
 use legion_protocol::{
     BufferId, LanguageId, LanguageServerId, LspResultStatus, LspServerHealthRecord,
-    LspSessionLifecycleKind, LspSessionStatusProjection, SnapshotId,
+    LspSessionLifecycleKind, LspSessionLogProjection, LspSessionStatusProjection, SnapshotId,
 };
 
 use super::{
@@ -115,6 +123,9 @@ struct LspWorkerHandle {
     request_tx: mpsc::SyncSender<LspWorkerRequest>,
     /// Receive results from the worker thread (non-blocking drain each frame).
     result_rx: mpsc::Receiver<LspWorkerResult>,
+    /// Shared ring buffer of redacted stderr lines (PKT-LSP-C T4).
+    /// Populated by the background drain thread spawned in `startup_session`.
+    stderr_ring: Arc<Mutex<VecDeque<String>>>,
 }
 
 /// Internal lifecycle state.
@@ -386,11 +397,15 @@ impl LspSessionHandle {
             Ok(Ok(session)) => {
                 // Spawn the worker thread; it owns the session from here on.
                 let health = session.health().clone();
+                // Extract the shared stderr ring before moving session into the
+                // worker thread (PKT-LSP-C T4).
+                let stderr_ring = session.stderr_ring();
                 let worker = spawn_session_worker(session);
                 self.state = LspSessionState::Live(Box::new(LspWorkerHandle {
                     health,
                     request_tx: worker.0,
                     result_rx: worker.1,
+                    stderr_ring,
                 }));
                 true
             }
@@ -528,6 +543,27 @@ impl LspSessionHandle {
             _ => None,
         }
     }
+
+    /// Returns the redacted stderr ring-buffer projection when the session is
+    /// `Live` and the ring contains at least one line; `None` otherwise
+    /// (PKT-LSP-C T4).
+    ///
+    /// The lines are copies of the redacted strings stored in the ring buffer
+    /// at the time of the call; they are metadata-only (all file paths have
+    /// been replaced with `[REDACTED]` by the drain thread).
+    pub fn stderr_log_projection(&self) -> Option<LspSessionLogProjection> {
+        let LspSessionState::Live(worker) = &self.state else {
+            return None;
+        };
+        let guard = worker.stderr_ring.lock().ok()?;
+        if guard.is_empty() {
+            return None;
+        }
+        Some(LspSessionLogProjection {
+            lines: guard.iter().cloned().collect(),
+            schema_version: 1,
+        })
+    }
 }
 
 /// Spawns the session worker thread.  Returns `(request_tx, result_rx)`.
@@ -600,6 +636,37 @@ fn run_session_worker(
                 // down).  Exit cleanly.
                 break;
             }
+        }
+    }
+}
+
+/// Background drain thread for LSP server stderr (PKT-LSP-C T4).
+///
+/// Reads `stderr` line by line, redacts each line via
+/// `redact_lsp_stderr_line`, truncates lines exceeding
+/// `STDERR_LINE_MAX_LEN`, and appends to the shared `ring` buffer.
+/// When the ring is at capacity the oldest line is evicted (FIFO).
+/// The thread exits when the child process closes its stderr pipe.
+fn drain_stderr(
+    stderr: std::process::ChildStderr,
+    ring: Arc<Mutex<VecDeque<String>>>,
+) {
+    let reader = std::io::BufReader::new(stderr);
+    for raw in reader.lines() {
+        let Ok(raw_line) = raw else { break };
+        // Truncate if necessary — prevents a single pathological line from
+        // consuming a disproportionate share of the bounded ring.
+        let truncated: String = if raw_line.len() > STDERR_LINE_MAX_LEN {
+            format!("{}…", &raw_line[..STDERR_LINE_MAX_LEN])
+        } else {
+            raw_line
+        };
+        let redacted = super::redact_lsp_stderr_line(&truncated);
+        if let Ok(mut guard) = ring.lock() {
+            if guard.len() >= STDERR_RING_CAPACITY {
+                guard.pop_front();
+            }
+            guard.push_back(redacted);
         }
     }
 }
@@ -704,6 +771,17 @@ fn startup_session(
     let mut launcher = LspStdioLauncher::new();
     let mut session = RustAnalyzerSession::launch(config, &mut launcher)?;
     session.initialize(root_uri)?;
+
+    // Spawn the stderr drain thread now that the session is initialised.
+    // The ring Arc is cloned into the thread; the session keeps the other
+    // clone so `drain()` can extract it when transitioning to Live.
+    if let Some(stderr) = session.take_stderr() {
+        let ring = session.stderr_ring();
+        thread::spawn(move || {
+            drain_stderr(stderr, ring);
+        });
+    }
+
     Ok(session)
 }
 
@@ -727,7 +805,28 @@ impl LspSessionHandle {
             health,
             request_tx,
             result_rx,
+            stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
         }));
+    }
+
+    /// Test-only: directly inject lines (already-redacted) into the stderr ring
+    /// buffer of a `Live` session handle.  A no-op when the handle is not Live.
+    /// Used by T4 tests to exercise `stderr_log_projection()` without a real
+    /// child process (PKT-LSP-C T4).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_stderr_ring_for_test(&mut self, lines: Vec<String>) {
+        let LspSessionState::Live(worker) = &mut self.state else {
+            return;
+        };
+        let Ok(mut guard) = worker.stderr_ring.lock() else {
+            return;
+        };
+        for line in lines {
+            if guard.len() >= STDERR_RING_CAPACITY {
+                guard.pop_front();
+            }
+            guard.push_back(line);
+        }
     }
 
     /// Test-only: inject a `BackingOff` state with a given restart count and a
@@ -935,6 +1034,140 @@ mod backoff_tests {
         assert!(
             !handle.is_backing_off(),
             "should not still be BackingOff after timer fired"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKT-LSP-C T4: stderr ring buffer as redacted projection — TDD tests
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod stderr_tests {
+    use super::*;
+    use legion_protocol::LspServerBinaryProvenance;
+
+    fn make_live_handle() -> LspSessionHandle {
+        let mut handle = LspSessionHandle::new();
+        let health = LspServerHealthRecord {
+            server_id: LanguageServerId(1),
+            language_id: LanguageId("rust".to_string()),
+            binary_provenance: LspServerBinaryProvenance::SystemPath,
+            binary_path_hash: None,
+            artifact_hash: None,
+            version: None,
+            init_status: LspResultStatus::Unavailable,
+            capabilities: Vec::new(),
+            diagnostics_latency_ms: None,
+            restart_count: 0,
+            download_decision_id: None,
+            schema_version: LspServerHealthRecord::schema_version(),
+        };
+        handle.set_live_health_for_test(health);
+        handle
+    }
+
+    // ── T4-1: Projection is None when session is Idle ────────────────────────
+
+    #[test]
+    fn t4_stderr_projection_none_when_idle() {
+        let handle = LspSessionHandle::new();
+        assert!(
+            handle.stderr_log_projection().is_none(),
+            "idle handle must not project stderr"
+        );
+    }
+
+    // ── T4-2: Projection is None when ring is empty ──────────────────────────
+
+    #[test]
+    fn t4_stderr_projection_none_when_ring_empty() {
+        let handle = make_live_handle();
+        assert!(
+            handle.stderr_log_projection().is_none(),
+            "empty ring must yield None projection"
+        );
+    }
+
+    // ── T4-3: Ring cap is respected ──────────────────────────────────────────
+
+    /// Inject 110 lines into a cap-100 ring; the projection must contain
+    /// exactly 100 lines (oldest evicted).
+    #[test]
+    fn t4_ring_buffer_cap_respected() {
+        let mut handle = make_live_handle();
+        let lines: Vec<String> = (0..110).map(|i| format!("line {i}")).collect();
+        handle.inject_stderr_ring_for_test(lines);
+
+        let proj = handle
+            .stderr_log_projection()
+            .expect("projection must be Some after injecting lines");
+        assert_eq!(
+            proj.lines.len(),
+            STDERR_RING_CAPACITY,
+            "ring must be capped at STDERR_RING_CAPACITY"
+        );
+        // The oldest lines (0..10) should have been evicted; the newest
+        // (10..110) should remain.
+        assert_eq!(proj.lines[0], "line 10", "oldest surviving line is line 10");
+        assert_eq!(
+            proj.lines[STDERR_RING_CAPACITY - 1],
+            "line 109",
+            "newest line is line 109"
+        );
+    }
+
+    // ── T4-4: Lines injected are returned by projection ──────────────────────
+
+    #[test]
+    fn t4_injected_lines_appear_in_projection() {
+        let mut handle = make_live_handle();
+        handle.inject_stderr_ring_for_test(vec![
+            "[REDACTED]".to_string(),
+            "ERROR: initialization failed".to_string(),
+        ]);
+
+        let proj = handle
+            .stderr_log_projection()
+            .expect("projection must be Some");
+        assert_eq!(proj.lines.len(), 2);
+        assert_eq!(proj.lines[0], "[REDACTED]");
+        assert_eq!(proj.lines[1], "ERROR: initialization failed");
+    }
+
+    // ── T4-5: No raw secret path reaches the projection ──────────────────────
+
+    /// Simulate the drain thread's redaction: run `redact_lsp_stderr_line` on
+    /// a sentinel-containing line, inject the result, and confirm the sentinel
+    /// never appears in the projection.
+    #[test]
+    fn t4_no_raw_secret_in_projection() {
+        let sentinel = "/very/secret/workspace/src/main.rs";
+        let raw_line = format!("rust-analyzer analysing {sentinel}");
+
+        // The drain thread calls `redact_lsp_stderr_line` before storing.
+        let redacted = super::super::redact_lsp_stderr_line(&raw_line);
+
+        let mut handle = make_live_handle();
+        handle.inject_stderr_ring_for_test(vec![redacted]);
+
+        let proj = handle
+            .stderr_log_projection()
+            .expect("projection must be Some");
+
+        for line in &proj.lines {
+            assert!(
+                !line.contains(sentinel),
+                "sentinel must not appear in projection line: {line}"
+            );
+            assert!(
+                !line.contains("secret"),
+                "any fragment of the sentinel path must not appear: {line}"
+            );
+        }
+        // At least one line must contain the redaction marker.
+        assert!(
+            proj.lines.iter().any(|l| l.contains("[REDACTED]")),
+            "at least one line must carry the [REDACTED] marker"
         );
     }
 }

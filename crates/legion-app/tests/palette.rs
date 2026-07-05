@@ -367,6 +367,8 @@ fn palette_command_mode_covers_registered_command_catalog() {
         GitUpdated,
         PaletteClosed,
         SettingsUpdated,
+        /// Command that returns `AppCommandOutcome::Noop` (e.g. LSP lifecycle).
+        Noop,
     }
 
     struct CommandCase {
@@ -455,6 +457,19 @@ fn palette_command_mode_covers_registered_command_catalog() {
             expected_outcome: ExpectedOutcome::SettingsUpdated,
             dirty_before_save: false,
         },
+        // PKT-LSP-C T1: lazy session start / restart palette commands.
+        CommandCase {
+            query: ">language server start",
+            expected_title: "Language Server: Start",
+            expected_outcome: ExpectedOutcome::Noop,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">language server restart",
+            expected_title: "Language Server: Restart",
+            expected_outcome: ExpectedOutcome::Noop,
+            dirty_before_save: false,
+        },
     ];
 
     let workspace = TempWorkspace::new();
@@ -519,6 +534,12 @@ fn palette_command_mode_covers_registered_command_catalog() {
             },
             ExpectedOutcome::SettingsUpdated => {
                 assert!(matches!(outcome, AppCommandOutcome::SettingsUpdated(_)))
+            }
+            ExpectedOutcome::Noop => {
+                assert!(
+                    matches!(outcome, AppCommandOutcome::Noop),
+                    "expected Noop outcome, got {outcome:?}"
+                )
             }
         }
 

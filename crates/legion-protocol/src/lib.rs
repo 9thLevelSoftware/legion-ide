@@ -16231,6 +16231,20 @@ pub struct LspSessionStatusProjection {
     pub schema_version: u16,
 }
 
+/// Metadata-safe projection of the LSP server stderr ring buffer (PKT-LSP-C T4).
+///
+/// Lines are redacted before storage via `redact_lsp_stderr_line`: absolute
+/// file paths are replaced with `[REDACTED]`, preserving the surrounding
+/// diagnostic context (log levels, error messages, module names).  The ring
+/// is capped at a fixed capacity so projections are always bounded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspSessionLogProjection {
+    /// Redacted stderr lines, oldest-first, capped to the ring capacity.
+    pub lines: Vec<String>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
 /// Projection-only language tooling panel state for the active editor buffer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageToolingProjection {
@@ -16292,6 +16306,13 @@ pub struct LanguageToolingProjection {
     /// Refused/Failed); `None` when the session is `Idle` (no startup yet).
     #[serde(default)]
     pub lsp_session_status: Option<LspSessionStatusProjection>,
+    /// Redacted ring-buffer projection of the LSP server stderr (PKT-LSP-C T4).
+    ///
+    /// `Some` only when the session is `Live` and the ring contains at least
+    /// one line.  `None` when the session is `Idle`, `Starting`, or failed,
+    /// or when no stderr output has been received yet.
+    #[serde(default)]
+    pub lsp_session_log: Option<LspSessionLogProjection>,
 }
 
 impl LanguageToolingProjection {
@@ -16322,6 +16343,7 @@ impl LanguageToolingProjection {
             schema_version: 1,
             lsp_health_records: Vec::new(),
             lsp_session_status: None,
+            lsp_session_log: None,
         }
     }
 }

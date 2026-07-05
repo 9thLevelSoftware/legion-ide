@@ -3747,6 +3747,7 @@ name = "legion-agent"
 version = "0.1.0"
 dependencies = [
  "legion-ai",
+ "legion-platform",
  "legion-protocol",
  "legion-tracker",
  "thiserror 2.0.18",

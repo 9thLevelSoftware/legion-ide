@@ -2603,6 +2603,13 @@ impl LspStdioSession {
         self.process.is_running()
     }
 
+    /// Detaches the child process stderr handle so a supervisor/drain thread
+    /// can read it independently.  Returns `None` if stderr was not captured
+    /// or has already been detached.
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.process.take_stderr()
+    }
+
     /// Sends a JSON-RPC request and returns its pending correlation metadata.
     pub fn send_request(
         &mut self,

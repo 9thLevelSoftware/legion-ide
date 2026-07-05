@@ -5215,6 +5215,7 @@ impl LanguageToolingWorkflow {
             schema_version: 1,
             lsp_health_records: previous_projection.lsp_health_records,
             lsp_session_status: previous_projection.lsp_session_status,
+            lsp_session_log: previous_projection.lsp_session_log,
         };
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -14093,6 +14094,15 @@ impl AppComposition {
             .set_backing_off_for_test(restart_count, deadline_passed);
     }
 
+    /// Test-only: explicitly trigger a session start for the current workspace,
+    /// mirroring what the lazy trigger or palette command does.  Useful for
+    /// tests that want to put the session into Refused/Starting state without
+    /// opening an actual `.rs` file.  PKT-LSP-C T1 / T5.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn force_lsp_start_for_test(&mut self) {
+        self.try_start_lsp_session_for_current_workspace();
+    }
+
     /// Attempt to start the LSP session for the currently-open workspace.
     ///
     /// Called from the lazy-start trigger in `bind_opened_file` (first `.rs`
@@ -22444,6 +22454,10 @@ impl AppComposition {
                 let status = self.lsp_session.session_status_projection();
                 if !matches!(status.lifecycle, legion_protocol::LspSessionLifecycleKind::Idle) {
                     p.lsp_session_status = Some(status);
+                }
+                // PKT-LSP-C T4: inject redacted stderr ring-buffer projection.
+                if let Some(log) = self.lsp_session.stderr_log_projection() {
+                    p.lsp_session_log = Some(log);
                 }
                 p
             },

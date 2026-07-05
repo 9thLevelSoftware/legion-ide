@@ -20,7 +20,7 @@ mod proposal;
 pub use proposal::workspace_edit_to_proposal_input;
 
 mod redaction;
-pub use redaction::{StderrSummary, redact_lsp_stderr};
+pub use redaction::{StderrSummary, redact_lsp_stderr, redact_lsp_stderr_line};
 
 mod translate;
 pub use translate::{
