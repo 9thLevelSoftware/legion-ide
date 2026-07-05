@@ -36,6 +36,31 @@ Use it when a task should run in a disposable lane with explicit scope, evidence
 Legion Workflows coordinates multi-step product workflows.
 Use it for task graphs, approval gates, risk tracking, and release-oriented orchestration.
 
+### Language tooling (Rust LSP — read-side)
+
+Language tooling is available for trusted Rust workspaces that contain a `Cargo.toml`.
+It activates automatically when the workspace is opened with `WorkspaceTrustState::Trusted`.
+
+**What is currently wired (read-side):**
+
+- **Diagnostics panel** — workspace errors and warnings from rust-analyzer appear in the
+  problems panel (`language_tooling_projection.problems`) and refresh on every file change.
+- **Completion popup** — triggered on text edits with a 50 ms debounce. Navigate with
+  `↓`/`↑`, accept with `Tab` or `Enter`, dismiss with `Esc`. Stale results (from before the
+  last edit) are automatically discarded by the snapshot gate.
+- **Hover tooltip** — appears after a 200 ms settle period when the cursor rests over a symbol.
+  Dismiss with `Esc`. The tooltip stays closed after explicit dismiss until a new response
+  arrives with a different hover id.
+- **Go to definition** — available through the command palette (`GoToDefinition`). Use
+  `NavigateToDefinition { index }` to open a specific result.
+- **Language health status** — the language status panel projects `Starting`, `Live`,
+  `Unavailable`, or `Failed` states from `lsp_server_health_record()`.
+
+**What is deferred (write-side, P2.F1.T5):**
+Rename, format, code actions, and organize imports remain deferred.
+They will be routed through the proposal pipeline in a future release.
+See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
+
 ## Support and release surfaces
 
 - For packaging and release preparation, start with `docs/OPERATOR_RUNBOOK.md`.
