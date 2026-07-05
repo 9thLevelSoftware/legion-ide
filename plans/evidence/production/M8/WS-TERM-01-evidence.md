@@ -296,3 +296,41 @@ test terminal_failure_ux_distinct_status_kinds ... ok   (9/9 terminal_workflow t
 - `TerminalRuntimeConfig::default()` remains `enabled: false`. The product gate calls `ensure_product_enabled()` on first trusted-workspace launch.
 - `enable_terminal_runtime_for_tests()` still works as before (test helper only); untrusted workspaces are still denied even if this is called.
 - `TerminalFailureKind` is fully wired into `TerminalPanelStatusKind` as of the fix round. All 5 failure kinds project distinct status variants with `display_label()` text.
+
+## Merged-tree standing-gate run (2026-07-05, branch m8/terminal-product)
+
+Context: main merged at 5b9f592 (LSP substrate PR #34); working directory
+C:/Users/dasbl/RustroverProjects/legion-ide-term; Windows 11; builds at -j 4.
+The controller-run workspace chain surfaced and resolved the following
+cross-crate integration items before going green (each adapted with its
+original test purpose preserved, none weakened):
+
+- SettingsProjection initializers from main lacking the new
+  terminal_shell_selection field (2 sites, compiler-driven sweep).
+- dto_contracts session-record golden updated for the new
+  WorkbenchSettingsRecord field (serde-defaulted; old records deserialize
+  with an empty selection -- backward compatible, no migration action).
+- Pre-productization terminal-denial contract retired across
+  operational_health, language_terminal_workflow, diagnostics_export,
+  beta.rs product gate (now REQUIRES a live trusted-launch session -- a
+  strictly stronger beta smoke), beta_workflow, and beta_acceptance_e2e
+  step 12a. Untrusted-workspace denial coverage remains in
+  legion-app terminal_workflow tests.
+- Clippy gate: sort_by_key for the ConPTY env block, snake_case test name,
+  is_some_and in two camelCase test helpers.
+
+| Gate | Result |
+| --- | --- |
+| cargo fmt --all --check | PASS |
+| xtask check-deps / docs-hygiene / claim-audit / no-egui-textedit / verify-kanban-backlog | PASS |
+| xtask release-pipeline --dry-run + verify-release-pipeline | PASS |
+| cargo check --workspace --all-targets | PASS |
+| cargo test --workspace --all-targets --no-fail-fast | PASS (all targets) |
+| cargo clippy --workspace --all-targets -- -D warnings | PASS (exit 0) |
+| xtask perf-harness + verify-perf-harness | PASS (strict) |
+| cargo deny check | PASS |
+| xtask rust-analyzer-smoke | PASS (real rust-analyzer 1.95.0) |
+
+Note: the workspace test gate and the clippy/tail gates ran on trees separated
+only by the three clippy-suggested, behavior-identical lint transforms listed
+above (each edited suite re-run green individually after the transform).
