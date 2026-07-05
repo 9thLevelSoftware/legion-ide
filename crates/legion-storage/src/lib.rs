@@ -274,7 +274,7 @@ impl PaletteUsageRepository for InMemoryPaletteUsageRepository {
                 usage_count: count,
             })
             .collect();
-        records.sort_by(|a, b| b.usage_count.cmp(&a.usage_count));
+        records.sort_by_key(|record| std::cmp::Reverse(record.usage_count));
         records
     }
 
@@ -363,8 +363,7 @@ impl FilePaletteUsageRepository {
                 })
                 .collect(),
         };
-        let body = serde_json::to_vec_pretty(&file_state)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let body = serde_json::to_vec_pretty(&file_state).map_err(std::io::Error::other)?;
 
         // Atomic rename: write to a temp file then rename.
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
@@ -442,7 +441,7 @@ impl PaletteUsageRepository for FilePaletteUsageRepository {
                 usage_count: count,
             })
             .collect();
-        records.sort_by(|a, b| b.usage_count.cmp(&a.usage_count));
+        records.sort_by_key(|record| std::cmp::Reverse(record.usage_count));
         records
     }
 
