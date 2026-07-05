@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (fix round complete — all review findings addressed).
+Accepted (all review rounds complete — all findings addressed with named passing tests).
 
 ## Acceptance targets
 
@@ -26,7 +26,8 @@ Accepted (fix round complete — all review findings addressed).
 - SEARCH.06: Per-workspace palette usage counts with real disk persistence via
   `FilePaletteUsageRepository` (atomic-rename write, LRU cap at 500 entries,
   load-on-open); `AppComposition.palette_usage` is `Box<dyn PaletteUsageRepository>`;
-  `set_palette_usage_repository()` allows swap-in at startup.
+  `DesktopRuntime::open` wires `FilePaletteUsageRepository` at
+  `workspace_root/.legion/palette_usage.json`; product-path restart-survival test passes.
 - P2.F4.T4: `SkeletonKind::SearchStream50K` in xtask perf harness; `run_search_stream_50k`
   delegates to `classify_skeleton_status` (no longer hardcodes `Skipped`); gate can
   be activated via `LEGION_PERF_FAIL_ON_BUDGET_ENV`; `SkeletonDescriptor` has explicit
@@ -37,7 +38,9 @@ Accepted (fix round complete — all review findings addressed).
 - `b115e0b` feat(search): extract fuzzy scorer to legion-index/src/fuzzy.rs (P2.F4.T3)
 - `3ad8304` feat(search): search options, stale markers, and binary/size safeguards
 - `3cdfcbb` feat: SEARCH.06 palette usage history + P2.F4.T4 search-stream perf workload
-- `9a97879` fix(search): address all M8 PKT-SEARCH code review findings
+- `9a97879` fix(search): address all M8 PKT-SEARCH code review findings (round 2)
+- `8f0f8fe` docs: update WS-SEARCH-01 evidence with fix-round findings
+- `9076c15` fix(search): round 3 — wire persistence, add behavior tests, fix tag logic
 
 ## What was verified
 
@@ -61,10 +64,15 @@ output (trimmed): test result: ok. 14 passed; 0 failed
   protocol layers: `DesktopAction::RunSearch`, `CommandDispatchIntent::RunSearch`,
   `AppCommandRequest::RunSearch`, `SearchQueryOptions`, `ParsedSearchQuery`,
   `SearchBuildResult`, `SearchProjection`.
-- Desktop header renders active option tags (`[Cc]`/`[W]`/`[.*]`).
-- `crates/legion-project/src/lib.rs`: `search_glob_filter_restricts_to_matching_files` test
-  added — creates `match_me.rs` and `skip_me.txt` both containing GLOB_NEEDLE; builds
-  `WorkspaceSearchFilters` with `include: *.rs`; asserts exactly 1 hit from `match_me.rs`.
+- Desktop header renders active option tags (`[Cc]`/`[W]`/`[.*]`) for non-default options;
+  plain case-insensitive search has clean header (NEW-1 fix: `[ci]` else-branch removed).
+- App-level behavior tests (all dispatch through `DesktopAction::RunSearch`):
+  - `search_options_case_sensitive_yields_different_result_counts`
+  - `search_options_use_regex_matches_pattern_literal_does_not`
+  - `search_options_invalid_regex_surfaces_validation_error`
+  - `search_options_whole_word_restricts_partial_matches`
+  - `search_options_header_tags_reflect_active_options`
+- `search_glob_filter_restricts_to_matching_files` (legion-project): glob filter test.
 - Original tests: `cancellation_stops_workspace_search_walker`,
   `search_skips_binary_files_and_counts_them`, `search_options_literal_case_whole_word`.
 
@@ -73,6 +81,13 @@ command: cargo test -p legion-project
 cwd: C:/Users/dasbl/RustroverProjects/legion-ide-search
 exit code: 0
 output (trimmed): test result: ok. 19 passed; 0 failed
+```
+
+```
+command: cargo test -p legion-desktop --test search_workflow
+cwd: C:/Users/dasbl/RustroverProjects/legion-ide-search
+exit code: 0
+output (trimmed): test result: ok. 11 passed; 0 failed
 ```
 
 ### SEARCH.10 — Stale markers (MIN-3 fix: limitation documented)
@@ -99,21 +114,35 @@ output (trimmed): test result: ok. 30 passed; 0 failed (unit) + integration test
 - `crates/legion-desktop/src/search.rs`: renders "N binary files skipped" when > 0.
 - `search_skips_binary_files_and_counts_them` test verifies `skipped_binary_count == 1`.
 
-### SEARCH.06 — Palette usage history (IMP-2 fix: real disk persistence)
+### SEARCH.06 — Palette usage history (IMP-2 fix: wired into product path)
 
 - `crates/legion-storage/src/lib.rs`: `FilePaletteUsageRepository` with atomic-rename write
   pattern, LRU cap at 500 entries (evicts lowest-count), and load-on-open from JSON.
 - `InMemoryPaletteUsageRepository` retained for tests.
 - `AppComposition.palette_usage` is now `Box<dyn PaletteUsageRepository>`; public
   `set_palette_usage_repository()` method allows swap-in at startup.
-- New tests: `file_palette_usage_round_trip`, `file_palette_usage_restart_retains_ranking_boost`,
+- `crates/legion-desktop/src/workflow.rs`: `DesktopRuntime::open` calls
+  `app.set_palette_usage_repository(Box::new(FilePaletteUsageRepository::open(&path)))`
+  at `workspace_root/.legion/palette_usage.json`.
+- Storage-layer tests: `file_palette_usage_round_trip`, `file_palette_usage_restart_retains_ranking_boost`,
   `file_palette_usage_cap_eviction`.
+- Product-path test: `palette_usage_persists_ranking_boost_across_desktop_runtime_restart`
+  in `crates/legion-desktop/tests/palette_persistence.rs` — records 20 usages via
+  DesktopRuntime, verifies `.legion/palette_usage.json` written, reopens fresh runtime,
+  asserts ranking boost survived.
 
 ```
 command: cargo test -p legion-storage
 cwd: C:/Users/dasbl/RustroverProjects/legion-ide-search
 exit code: 0
 output (trimmed): test result: ok. 36 passed; 0 failed
+```
+
+```
+command: cargo test -p legion-desktop --test palette_persistence
+cwd: C:/Users/dasbl/RustroverProjects/legion-ide-search
+exit code: 0
+output (trimmed): test result: ok. 1 passed; 0 failed
 ```
 
 ```
