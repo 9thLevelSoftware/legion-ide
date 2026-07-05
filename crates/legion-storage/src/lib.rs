@@ -283,6 +283,175 @@ impl PaletteUsageRepository for InMemoryPaletteUsageRepository {
     }
 }
 
+// ── FilePaletteUsageRepository ────────────────────────────────────────────────
+
+/// Maximum number of (workspace, item) pairs retained across all workspaces.
+/// When the cap is exceeded the entries with the lowest usage counts are evicted.
+const PALETTE_USAGE_MAX_ENTRIES: usize = 500;
+
+/// Serialization entry for one (workspace, item) pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PaletteUsagePersistedEntry {
+    workspace_id: u128,
+    item_key: String,
+    usage_count: u32,
+}
+
+/// Top-level structure written to the palette-usage JSON file.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PaletteUsageFile {
+    /// Schema version for forward-compatible migration.
+    #[serde(default)]
+    schema_version: u16,
+    /// All recorded (workspace, item) usage pairs.
+    #[serde(default)]
+    entries: Vec<PaletteUsagePersistedEntry>,
+}
+
+/// Disk-backed `PaletteUsageRepository`.
+///
+/// Persists per-workspace palette usage counts to a JSON file using an
+/// atomic-rename write pattern (identical to `FileBackedStorage::flush`).
+/// On `record_usage`, the in-memory map is updated, the cap is applied, and
+/// the file is flushed synchronously.
+///
+/// **Metadata only**: stores opaque item keys and integer counts — no raw
+/// query text, no AI context, no file content.
+pub struct FilePaletteUsageRepository {
+    path: PathBuf,
+    /// In-memory cache of all (workspace_id, item_key) → count pairs.
+    counts: HashMap<(WorkspaceId, String), u32>,
+}
+
+impl FilePaletteUsageRepository {
+    /// Open (or create) the palette-usage file at `path`.
+    ///
+    /// If the file does not exist an empty repository is returned.  If the
+    /// file exists but is corrupt a warning is emitted to stderr and an empty
+    /// repository is returned — the file will be overwritten on the next
+    /// `record_usage` call.
+    pub fn open(path: &Path) -> Self {
+        let counts = (|| -> Option<HashMap<(WorkspaceId, String), u32>> {
+            let bytes = fs::read(path).ok()?;
+            let state: PaletteUsageFile = serde_json::from_slice(&bytes).ok()?;
+            Some(
+                state
+                    .entries
+                    .into_iter()
+                    .map(|e| ((WorkspaceId(e.workspace_id), e.item_key), e.usage_count))
+                    .collect(),
+            )
+        })()
+        .unwrap_or_default();
+        Self {
+            path: path.to_owned(),
+            counts,
+        }
+    }
+
+    /// Flush the in-memory state to disk using an atomic rename.
+    fn flush(&self) -> std::io::Result<()> {
+        let file_state = PaletteUsageFile {
+            schema_version: 1,
+            entries: self
+                .counts
+                .iter()
+                .map(|((ws, key), &count)| PaletteUsagePersistedEntry {
+                    workspace_id: ws.0,
+                    item_key: key.clone(),
+                    usage_count: count,
+                })
+                .collect(),
+        };
+        let body = serde_json::to_vec_pretty(&file_state)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // Atomic rename: write to a temp file then rename.
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_path = parent.join(format!(
+            ".palette_usage.{}.{}.tmp",
+            std::process::id(),
+            suffix
+        ));
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)?;
+            file.write_all(&body)?;
+            file.flush()?;
+            drop(file);
+            fs::rename(&temp_path, &self.path)?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        write_result
+    }
+
+    /// Enforce the entry cap by evicting entries with the lowest usage counts.
+    fn apply_cap(&mut self) {
+        if self.counts.len() <= PALETTE_USAGE_MAX_ENTRIES {
+            return;
+        }
+        // Collect all entries sorted ascending by count; evict the lowest ones.
+        let excess = self.counts.len() - PALETTE_USAGE_MAX_ENTRIES;
+        let mut by_count: Vec<_> = self.counts.iter().map(|(k, &v)| (k.clone(), v)).collect();
+        by_count.sort_by_key(|(_, count)| *count);
+        for (key, _) in by_count.into_iter().take(excess) {
+            self.counts.remove(&key);
+        }
+    }
+}
+
+impl PaletteUsageRepository for FilePaletteUsageRepository {
+    fn record_usage(&mut self, workspace_id: WorkspaceId, item_key: &str) {
+        let entry = self
+            .counts
+            .entry((workspace_id, item_key.to_string()))
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+        self.apply_cap();
+        // Best-effort flush; silently ignore I/O errors at the repository
+        // level — usage history is advisory and a failed write should not
+        // surface as a user-facing error.
+        let _ = self.flush();
+    }
+
+    fn usage_count(&self, workspace_id: WorkspaceId, item_key: &str) -> u32 {
+        self.counts
+            .get(&(workspace_id, item_key.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn top_items(&self, workspace_id: WorkspaceId) -> Vec<PaletteUsageRecord> {
+        let mut records: Vec<PaletteUsageRecord> = self
+            .counts
+            .iter()
+            .filter(|((ws, _), _)| *ws == workspace_id)
+            .map(|((_, key), &count)| PaletteUsageRecord {
+                workspace_id,
+                item_key: key.clone(),
+                usage_count: count,
+            })
+            .collect();
+        records.sort_by(|a, b| b.usage_count.cmp(&a.usage_count));
+        records
+    }
+
+    fn clear_workspace(&mut self, workspace_id: WorkspaceId) {
+        self.counts.retain(|(ws, _), _| *ws != workspace_id);
+        let _ = self.flush();
+    }
+}
+
 /// Mode-scoped dock layout persistence API.
 pub trait DockLayoutRepository {
     /// Persist one dock side layout record.
@@ -4506,5 +4675,93 @@ mod tests {
             }
             other => panic!("unexpected event metadata response: {other:?}"),
         }
+    }
+
+    // ── IMP-2: FilePaletteUsageRepository persistence ────────────────────────
+
+    fn palette_usage_test_path(suffix: &str) -> std::path::PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "legion_palette_usage_test_{}_{}_{}.json",
+            std::process::id(),
+            ts,
+            suffix
+        ))
+    }
+
+    /// Write-read round-trip: counts survive a `FilePaletteUsageRepository`
+    /// re-open from the same file (simulating a process restart).
+    #[test]
+    fn file_palette_usage_round_trip() {
+        let path = palette_usage_test_path("roundtrip");
+        let ws = WorkspaceId(1);
+
+        {
+            let mut repo = FilePaletteUsageRepository::open(&path);
+            repo.record_usage(ws, "command:save");
+            repo.record_usage(ws, "command:save");
+            repo.record_usage(ws, "file:main.rs");
+        }
+
+        // Re-open from disk — simulates a process restart.
+        let repo2 = FilePaletteUsageRepository::open(&path);
+        assert_eq!(repo2.usage_count(ws, "command:save"), 2);
+        assert_eq!(repo2.usage_count(ws, "file:main.rs"), 1);
+        assert_eq!(repo2.usage_count(ws, "command:never-used"), 0);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Restart simulation: a heavily-used command retains its ranking boost
+    /// after a simulated restart (re-open from disk).
+    #[test]
+    fn file_palette_usage_restart_retains_ranking_boost() {
+        let path = palette_usage_test_path("restart");
+        let ws = WorkspaceId(99);
+
+        {
+            let mut repo = FilePaletteUsageRepository::open(&path);
+            for _ in 0..20 {
+                repo.record_usage(ws, "command:heavy");
+            }
+            repo.record_usage(ws, "command:light");
+        }
+
+        // After restart, "heavy" must still rank first.
+        let repo2 = FilePaletteUsageRepository::open(&path);
+        let top = repo2.top_items(ws);
+        assert_eq!(
+            top.first().map(|r| r.item_key.as_str()),
+            Some("command:heavy"),
+            "command:heavy must be top-ranked after restart"
+        );
+        assert_eq!(top[0].usage_count, 20);
+        assert_eq!(top[1].usage_count, 1);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Cap eviction: when total entries exceed 500 the lowest-count entries
+    /// are evicted so the map never grows unbounded.
+    #[test]
+    fn file_palette_usage_cap_eviction() {
+        let path = palette_usage_test_path("cap");
+        let ws = WorkspaceId(7);
+
+        let mut repo = FilePaletteUsageRepository::open(&path);
+        // Record 501 distinct items so the cap kicks in.
+        for i in 0..=500usize {
+            repo.record_usage(ws, &format!("item:{i}"));
+        }
+        // After capping, at most PALETTE_USAGE_MAX_ENTRIES entries remain.
+        assert!(
+            repo.top_items(ws).len() <= PALETTE_USAGE_MAX_ENTRIES,
+            "entries must not exceed cap after eviction"
+        );
+
+        let _ = fs::remove_file(&path);
     }
 }

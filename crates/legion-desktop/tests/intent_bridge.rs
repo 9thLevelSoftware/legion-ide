@@ -474,11 +474,17 @@ fn intent_bridge_routes_search_actions() {
             scope: SearchScopeProjection::ActiveFile,
             query: "needle".to_string(),
             limit: 7,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         }),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::RunSearch {
             scope: SearchScopeProjection::ActiveFile,
             query: "needle".to_string(),
             limit: 7,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
     );
     assert_eq!(

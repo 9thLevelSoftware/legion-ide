@@ -129,7 +129,16 @@ impl SkeletonKind {
 pub struct SkeletonDescriptor {
     pub name: String,
     pub kind: SkeletonKind,
+    /// Fixture size in bytes.  For skeletons that measure file-count
+    /// throughput rather than byte throughput, use `file_count` instead
+    /// — set this field to `0` to avoid the semantic mismatch.
     pub fixture_bytes: usize,
+    /// Number of files in the fixture for skeletons where the workload
+    /// unit is a file count rather than a byte count (e.g. SearchStream50K).
+    /// When `Some`, this value drives fixture generation; `fixture_bytes`
+    /// is ignored for that skeleton's workload.
+    #[serde(default)]
+    pub file_count: Option<usize>,
     pub sample_count: usize,
     /// Per-skeleton budget in milliseconds, inclusive. The CI leg can
     /// override the budget via the `LEGION_PERF_FAIL_ON_BUDGET_MS`
@@ -146,6 +155,7 @@ impl SkeletonDescriptor {
             name: "m0.input_to_paint_microbenchmark".to_string(),
             kind: SkeletonKind::InputToPaintMicrobenchmark,
             fixture_bytes: SKELETON_FIXTURE_BYTES,
+            file_count: None,
             sample_count: SKELETON_EDIT_SAMPLES,
             budget_millis: SKELETON_DEFAULT_BUDGET_MILLIS,
             note: concat!(
@@ -163,6 +173,7 @@ impl SkeletonDescriptor {
             name: "m1.line_galley_shaping_cache".to_string(),
             kind: SkeletonKind::LineGalleyShapingCache,
             fixture_bytes: LINE_GALLEY_FIXTURE_LINES,
+            file_count: None,
             sample_count: 1,
             budget_millis: LINE_GALLEY_DEFAULT_BUDGET_MILLIS,
             note: concat!(
@@ -179,6 +190,7 @@ impl SkeletonDescriptor {
             name: "m2.memory_ceiling_1mb".to_string(),
             kind: SkeletonKind::MemoryCeiling1MB,
             fixture_bytes: MEMORY_CEILING_FIXTURE_BYTES,
+            file_count: None,
             sample_count: 1,
             budget_millis: 0, // report-only by default (measured in bytes, not millis)
             note: concat!(
@@ -195,15 +207,20 @@ impl SkeletonDescriptor {
         Self {
             name: "m8.search_stream_50k".to_string(),
             kind: SkeletonKind::SearchStream50K,
-            fixture_bytes: SEARCH_STREAM_50K_FILE_COUNT,
+            // fixture_bytes is not meaningful for file-count workloads; use
+            // file_count instead so the field names match their units.
+            fixture_bytes: 0,
+            file_count: Some(SEARCH_STREAM_50K_FILE_COUNT),
             sample_count: 1,
             budget_millis: SEARCH_STREAM_50K_BUDGET_MILLIS,
             note: concat!(
                 "M8 P2.F4.T4: exercises search_workspace_stream against a ",
                 "50 K-file synthetic fixture generated at runtime under the ",
                 "system temp directory.  Measures total scan wall-clock time ",
-                "and early-cancellation latency.  Budget is report-only (0) ",
-                "until reference-machine baselines are collected.",
+                "and early-cancellation latency.  Budget is 0 (report-only) ",
+                "so classify_skeleton_status always returns Skipped until a ",
+                "reference-machine baseline is set.  Set LEGION_PERF_FAIL_ON_BUDGET_MS ",
+                "to a positive millisecond count to activate the gate.",
             )
             .to_string(),
         }
@@ -549,7 +566,8 @@ fn run_search_stream_50k(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
         .as_micros();
     let fixture_root = std::env::temp_dir().join(format!("legion_perf_search_{pid}_{ts}"));
 
-    let file_count = skeleton.fixture_bytes; // reused as file count for this skeleton kind
+    // Use the dedicated file_count field; fixture_bytes is 0 for this skeleton kind.
+    let file_count = skeleton.file_count.unwrap_or(0);
     let needle = "PERF_NEEDLE_XYZ";
 
     let fixture_created = (|| {
@@ -694,7 +712,12 @@ fn run_search_stream_50k(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
         p50_micros: total_us,
         p95_micros: cancel_us,
         budget_millis: skeleton.budget_millis,
-        status: SkeletonStatus::Skipped, // report-only until baselines collected
+        // Delegate to classify_skeleton_status like every other skeleton.
+        // With budget_millis=0 (the default), skeleton.budget() returns None
+        // and this always evaluates to Skipped (report-only).  Set
+        // SEARCH_STREAM_50K_BUDGET_MILLIS to a positive value (or set
+        // LEGION_PERF_FAIL_ON_BUDGET_MS at runtime) to activate the gate.
+        status: classify_skeleton_status(scan_elapsed, skeleton.budget()),
         message,
     }
 }
@@ -944,4 +967,64 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── IMP-4: classify_skeleton_status delegation ────────────────────────────
+
+    /// Verify that `classify_skeleton_status` drives the status for the 50K
+    /// skeleton: a zero budget (the default) → Skipped; a positive budget →
+    /// Passed or Failed depending on elapsed time.
+    #[test]
+    fn search_stream_50k_classify_skeleton_status_report_only_by_default() {
+        let skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // Default budget is 0 → report-only.
+        let status = classify_skeleton_status(Duration::from_millis(9999), skeleton.budget());
+        assert_eq!(status, SkeletonStatus::Skipped);
+    }
+
+    #[test]
+    fn search_stream_50k_env_override_activates_gate_failed() {
+        let mut skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // Simulate the env override: budget = 1 ms.
+        apply_fail_on_budget_value(&mut skeleton, "1");
+        assert_eq!(skeleton.budget(), Some(Duration::from_millis(1)));
+        // A scan that took 100 ms exceeds budget → Failed.
+        let status = classify_skeleton_status(Duration::from_millis(100), skeleton.budget());
+        assert_eq!(status, SkeletonStatus::Failed);
+    }
+
+    #[test]
+    fn search_stream_50k_env_override_activates_gate_passed() {
+        let mut skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // Simulate the env override: budget = 60_000 ms (generous).
+        apply_fail_on_budget_value(&mut skeleton, "60000");
+        // A scan that took 1 ms is within budget → Passed.
+        let status = classify_skeleton_status(Duration::from_millis(1), skeleton.budget());
+        assert_eq!(status, SkeletonStatus::Passed);
+    }
+
+    // ── MIN-2: file_count field is properly used ──────────────────────────────
+
+    #[test]
+    fn m8_search_stream_50k_descriptor_uses_file_count_field() {
+        let skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // fixture_bytes must NOT carry the file count; file_count must.
+        assert_eq!(
+            skeleton.fixture_bytes, 0,
+            "fixture_bytes should be 0 for file-count skeletons"
+        );
+        assert_eq!(
+            skeleton.file_count,
+            Some(SEARCH_STREAM_50K_FILE_COUNT),
+            "file_count must carry the file count"
+        );
+    }
+
+    // ── MIN-1: fuzzy_score_tuple wrapper ─────────────────────────────────────
+
+    // (Covered by crates/legion-index/src/fuzzy.rs#tuple_adapter_returns_tuple)
 }

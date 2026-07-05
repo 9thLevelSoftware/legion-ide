@@ -8560,4 +8560,70 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// MIN-4: glob filter (include pattern) restricts search to matching files only.
+    #[test]
+    fn search_glob_filter_restricts_to_matching_files() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+        let needle = "GLOB_NEEDLE";
+
+        // Write two files: one .rs and one .txt — both containing the needle.
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "match_me.rs",
+            &format!("{needle} in a rust file\n"),
+        )
+        .expect("save .rs file");
+
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "skip_me.txt",
+            &format!("{needle} in a text file\n"),
+        )
+        .expect("save .txt file");
+
+        // Build an include-glob that only accepts *.rs files.
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new("*.rs").expect("valid glob"));
+        let include_set = Arc::new(builder.build().expect("build globset"));
+        let filters = WorkspaceSearchFilters {
+            include: Some(include_set),
+            exclude: None,
+        };
+
+        let pattern = SearchPattern::literal(needle, true, false).expect("pattern");
+        let q = WorkspaceSearchQuery {
+            workspace_id: opened.workspace_id,
+            pattern,
+            search_text: needle.to_string(),
+            filters,
+            result_limit: 500,
+            batch_size: 1,
+            use_indexed_backend: false,
+        };
+
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+
+        // Only the .rs file should have been searched; skip_me.txt must not appear.
+        assert_eq!(
+            hits.len(),
+            1,
+            "glob include *.rs: exactly 1 hit from .rs file"
+        );
+        let path = &hits[0].canonical_path.0;
+        assert!(
+            path.ends_with("match_me.rs"),
+            "hit must be from match_me.rs, got {path}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

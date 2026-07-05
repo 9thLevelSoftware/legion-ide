@@ -115,6 +115,9 @@ fn diagnostics_export_writes_metadata_only_runtime_status() {
             scope: SearchScopeProjection::ActiveFile,
             query: "SECRET_PHASE7_QUERY".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("search should be routed through app authority");
     runtime

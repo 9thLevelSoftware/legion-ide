@@ -98,6 +98,9 @@ fn search_workflow_runs_active_file_search() {
                 scope: SearchScopeProjection::ActiveFile,
                 query: "needle".to_string(),
                 limit: 10,
+                case_sensitive: None,
+                whole_word: None,
+                use_regex: None,
             })
             .expect("search should route through app authority"),
         DesktopWorkflowOutcome::SearchUpdated
@@ -126,6 +129,9 @@ fn search_workflow_runs_workspace_search() {
             scope: SearchScopeProjection::Workspace,
             query: "needle".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("workspace search should route through app authority");
 
@@ -203,6 +209,9 @@ fn search_workflow_projects_no_results_and_empty_query_errors() {
             scope: SearchScopeProjection::ActiveFile,
             query: "missing".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("no-results search should route");
     assert_eq!(
@@ -215,6 +224,9 @@ fn search_workflow_projects_no_results_and_empty_query_errors() {
             scope: SearchScopeProjection::ActiveFile,
             query: " ".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("empty search should route");
     assert_eq!(
@@ -234,6 +246,9 @@ fn search_workflow_cancels_current_query_by_id() {
             scope: SearchScopeProjection::ActiveFile,
             query: "needle".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("search should route");
     let query_id = runtime
@@ -277,6 +292,10 @@ fn search_workflow_displays_degraded_limited_projection() {
         result_limit: 10,
         omitted_result_count: 0,
         omitted_file_count: 0,
+        skipped_binary_count: 0,
+        case_sensitive: true,
+        whole_word: false,
+        use_regex: false,
         diagnostics: vec!["limited to the visible viewport".to_string()],
         generated_at: TimestampMillis(1),
         schema_version: 1,

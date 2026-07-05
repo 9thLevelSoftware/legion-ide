@@ -157,11 +157,16 @@ pub fn fuzzy_score(candidate: &str, query: &str) -> Option<FuzzyScore> {
     })
 }
 
-/// Convenience: convert a [`FuzzyScore`] to the `(i32, Vec<usize>)` tuple
-/// format used by the legacy `palette_fuzzy_score` call sites in
-/// `legion-app`.  Callers that used the old private function can migrate
-/// transparently by calling this adapter.
-pub fn fuzzy_score_legacy(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
+/// Returns `fuzzy_score` results as a raw `(score, match_indices)` tuple.
+///
+/// This adapter exists for call sites that previously consumed the private
+/// `palette_fuzzy_score` function, which returned the same tuple shape.
+/// **Behavioral note**: the scores and match-indices produced here are
+/// *identical* to those of `fuzzy_score` — there is no legacy scoring
+/// algorithm; the name of the old function was the only legacy aspect.
+/// Prefer calling `fuzzy_score` directly when the `FuzzyScore` struct is
+/// more convenient.
+pub fn fuzzy_score_tuple(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
     fuzzy_score(candidate, query).map(|fs| (fs.score, fs.match_indices))
 }
 
@@ -303,11 +308,11 @@ mod tests {
         assert!(fuzzy_score("HELLO", "hello").is_some());
     }
 
-    // ── legacy adapter ────────────────────────────────────────────────────────
+    // ── tuple adapter ─────────────────────────────────────────────────────────
 
     #[test]
-    fn legacy_adapter_returns_tuple() {
-        let result = fuzzy_score_legacy("hello", "hel");
+    fn tuple_adapter_returns_tuple() {
+        let result = fuzzy_score_tuple("hello", "hel");
         assert!(result.is_some());
         let (score, indices) = result.unwrap();
         assert!(score > 0);

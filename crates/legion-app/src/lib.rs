@@ -35,7 +35,7 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
     StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
-    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_legacy,
+    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_tuple,
     register_plugin_tree_sitter_grammars, run_structural_search as index_run_structural_search,
     tree_sitter_supports_path,
 };
@@ -7655,6 +7655,12 @@ pub enum AppCommandRequest {
         query: String,
         /// Requested result limit; zero means app default.
         limit: usize,
+        /// Explicit case-sensitive override; `None` defers to text-prefix parsing.
+        case_sensitive: Option<bool>,
+        /// Explicit whole-word override; `None` defers to text-prefix parsing.
+        whole_word: Option<bool>,
+        /// Explicit regex mode override; `None` defers to text-prefix parsing.
+        use_regex: Option<bool>,
     },
     /// Run deterministic structural search/rewrite preview through app authority.
     RunStructuralSearch {
@@ -8513,11 +8519,17 @@ impl CommandDispatcher {
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             } => Ok(AppCommandRequest::RunSearch {
                 query_id: format!("search:{}", correlation_id.0),
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             }),
             CommandDispatchIntent::RunStructuralSearch {
                 scope,
@@ -11435,6 +11447,37 @@ impl AssistInlinePredictionState {
     }
 }
 
+/// Explicit search option overrides. `None` means "fall through to
+/// text-prefix parsing" for the corresponding option.
+#[derive(Debug, Clone, Copy, Default)]
+struct SearchQueryOptions {
+    /// Override case-sensitivity. `None` defers to `case` / `icase` prefixes.
+    pub case_sensitive: Option<bool>,
+    /// Override whole-word matching. `None` defers to `word:` prefix.
+    pub whole_word: Option<bool>,
+    /// Override regex mode. `None` defers to `regex:` / `re:` prefixes.
+    pub use_regex: Option<bool>,
+}
+
+/// Parsed and compiled search query, including effective option values.
+struct ParsedSearchQuery {
+    /// Compiled search pattern ready for `search_workspace_stream`.
+    pattern: SearchPattern,
+    /// Include/exclude glob filters (from `include:` / `exclude:` prefixes).
+    filters: WorkspaceSearchFilters,
+    /// The raw pattern text (without mode/option prefixes).
+    search_text: String,
+    /// Whether the pattern was compiled as literal (not regex). Used to
+    /// decide whether the indexed back-end can be used.
+    is_literal: bool,
+    /// Effective case-sensitivity after applying overrides.
+    case_sensitive: bool,
+    /// Effective whole-word mode after applying overrides.
+    whole_word: bool,
+    /// Effective regex mode after applying overrides.
+    use_regex: bool,
+}
+
 #[derive(Debug, Default)]
 struct SearchBuildResult {
     results: Vec<SearchResultProjection>,
@@ -11443,6 +11486,16 @@ struct SearchBuildResult {
     diagnostics: Vec<String>,
     degraded_limited: bool,
     validation_error: Option<String>,
+    /// Number of files skipped because they were detected as binary by the
+    /// NUL-byte heuristic.  Propagated from `WorkspaceSearchReport` into
+    /// `SearchProjection` so the desktop panel can display the count.
+    skipped_binary_count: usize,
+    /// Effective search options used for this result set.
+    case_sensitive: bool,
+    /// Effective whole-word option used for this result set.
+    whole_word: bool,
+    /// Effective regex mode used for this result set.
+    use_regex: bool,
 }
 
 #[derive(Debug, Default)]
@@ -11490,8 +11543,10 @@ struct SearchLineInput<'a> {
 
 fn parse_search_query(
     query: &str,
-) -> Result<(SearchPattern, WorkspaceSearchFilters, String, bool), String> {
+    options: SearchQueryOptions,
+) -> Result<ParsedSearchQuery, String> {
     let mut mode = SearchPatternKind::Literal;
+    // Text-prefix defaults; explicit overrides are applied below.
     let mut case_sensitive = true;
     let mut whole_word = false;
     let mut include_globs = Vec::<String>::new();
@@ -11556,6 +11611,20 @@ fn parse_search_query(
         pattern_parts.push(token.to_string());
     }
 
+    // Explicit override flags take precedence over text-prefix parsing.
+    if let Some(v) = options.case_sensitive {
+        case_sensitive = v;
+    }
+    if let Some(v) = options.whole_word {
+        whole_word = v;
+    }
+    if let Some(true) = options.use_regex {
+        mode = SearchPatternKind::Regex;
+    } else if options.use_regex == Some(false) {
+        mode = SearchPatternKind::Literal;
+    }
+    let effective_use_regex = matches!(mode, SearchPatternKind::Regex);
+
     let pattern = pattern_parts.join(" ").trim().to_string();
     if pattern.is_empty() {
         return Err("Search query is empty".to_string());
@@ -11571,12 +11640,15 @@ fn parse_search_query(
     let include = compile_search_globset(&include_globs)?;
     let exclude = compile_search_globset(&exclude_globs)?;
 
-    Ok((
-        compiled_pattern,
-        WorkspaceSearchFilters { include, exclude },
-        pattern,
-        matches!(mode, SearchPatternKind::Literal),
-    ))
+    Ok(ParsedSearchQuery {
+        pattern: compiled_pattern,
+        filters: WorkspaceSearchFilters { include, exclude },
+        search_text: pattern,
+        is_literal: !effective_use_regex,
+        case_sensitive,
+        whole_word,
+        use_regex: effective_use_regex,
+    })
 }
 
 fn compile_search_globset(patterns: &[String]) -> Result<Option<Arc<GlobSet>>, String> {
@@ -11663,6 +11735,10 @@ fn build_search_projection(
         result_limit,
         omitted_result_count: result.omitted_result_count,
         omitted_file_count: result.omitted_file_count,
+        skipped_binary_count: result.skipped_binary_count,
+        case_sensitive: result.case_sensitive,
+        whole_word: result.whole_word,
+        use_regex: result.use_regex,
         diagnostics: result.diagnostics,
         generated_at: TimestampMillis::now(),
         schema_version: 1,
@@ -12135,7 +12211,7 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
     }
 }
 
-// palette_fuzzy_score is now provided by legion_index::fuzzy::fuzzy_score_legacy.
+// palette_fuzzy_score is now provided by legion_index::fuzzy::fuzzy_score_tuple.
 // The import alias is already declared at the top of this file.
 
 fn sort_palette_results(results: &mut [PaletteScoredResult]) {
@@ -12918,7 +12994,9 @@ pub struct AppComposition {
     terminal_workflow: TerminalWorkflow,
     /// Metadata-only per-workspace palette usage counters.
     /// No raw query text, AI context, or network I/O.
-    palette_usage: InMemoryPaletteUsageRepository,
+    /// Defaults to `InMemoryPaletteUsageRepository` (no persistence); swap
+    /// via `set_palette_usage_repository` to enable disk persistence.
+    palette_usage: Box<dyn PaletteUsageRepository>,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -12986,8 +13064,17 @@ impl AppComposition {
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
-            palette_usage: InMemoryPaletteUsageRepository::new(),
+            palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
         }
+    }
+
+    /// Replace the palette usage repository with a disk-backed implementation.
+    ///
+    /// Call this before any palette operations to enable persistence.  The
+    /// CLI and desktop binaries wire in a `FilePaletteUsageRepository` here;
+    /// tests continue to use the in-memory default.
+    pub fn set_palette_usage_repository(&mut self, repo: Box<dyn PaletteUsageRepository>) {
+        self.palette_usage = repo;
     }
 
     fn next_event_context(&mut self) -> EventContext {
@@ -13646,7 +13733,7 @@ impl AppComposition {
         let mut scored = paths
             .into_iter()
             .filter_map(|path| {
-                fuzzy_score_legacy(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
                     // Frequency bonus: cap at 20 uses × 5 pts = +100 so
                     // fuzzy quality and recency still dominate the ranking.
@@ -13709,7 +13796,7 @@ impl AppComposition {
                     .clone()
                     .unwrap_or_else(|| symbol.symbol_name_hash.value.clone());
                 let searchable = format!("{title} {}", symbol.path.0);
-                fuzzy_score_legacy(&searchable, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&searchable, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus
                         .get(&symbol.path.0)
                         .copied()
@@ -13754,7 +13841,7 @@ impl AppComposition {
             .filter_map(|buffer_id| {
                 let metadata = self.active_documents.metadata_for_buffer(*buffer_id)?;
                 let path = metadata.identity.canonical_path.0.clone();
-                fuzzy_score_legacy(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
                     PaletteScoredResult {
                         score: score.saturating_add(recency_bonus),
@@ -13804,7 +13891,7 @@ impl AppComposition {
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
-                fuzzy_score_legacy(spec.title, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(spec.title, query).map(|(score, match_indices)| {
                     let (buffer_id, disabled_reason) = match spec.id {
                         "save-active-buffer" | "close-active-tab" => (
                             active_buffer_id,
@@ -14007,6 +14094,10 @@ impl AppComposition {
                     scope: self.palette.scope,
                     query,
                     limit: 0,
+                    // Palette-driven searches defer to text-prefix parsing.
+                    case_sensitive: None,
+                    whole_word: None,
+                    use_regex: None,
                 })
             }
             PaletteResultKind::StructuralSearch => {
@@ -14202,9 +14293,18 @@ impl AppComposition {
                 scope,
                 query,
                 limit,
-            } => Ok(AppCommandOutcome::SearchUpdated(
-                self.run_search(query_id, scope, query, limit)?,
-            )),
+                case_sensitive,
+                whole_word,
+                use_regex,
+            } => Ok(AppCommandOutcome::SearchUpdated(self.run_search(
+                query_id,
+                scope,
+                query,
+                limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
+            )?)),
             AppCommandRequest::RunStructuralSearch {
                 query_id,
                 scope,
@@ -18027,9 +18127,24 @@ impl AppComposition {
         scope: SearchScopeProjection,
         query: String,
         limit: usize,
+        case_sensitive: Option<bool>,
+        whole_word: Option<bool>,
+        use_regex: Option<bool>,
     ) -> Result<SearchProjection, AppCompositionError> {
         // Mark current results stale before running the new query so that any
         // caller holding a snapshot sees them de-emphasised.
+        //
+        // STALE-MARKER VISIBILITY LIMITATION (synchronous model): because
+        // `run_search` is synchronous and single-threaded, the stale flag set
+        // here is immediately overwritten by the `search_projection` assignment
+        // at the end of this call in the same stack frame.  In the current
+        // model there is therefore *zero practical visibility window* for the
+        // stale state — no external observer can read the transient stale
+        // snapshot.  The flag is meaningful only if/when an asynchronous
+        // search path is introduced (where the caller could read the stale
+        // projection between dispatching the new query and receiving its
+        // result).  Keep the logic in place as a forwards-compatible hook, but
+        // document that it has no effect today.
         let incoming_query_id = query_id.as_str();
         let current_is_different = self
             .search_projection
@@ -18060,12 +18175,17 @@ impl AppComposition {
             return Ok(self.search_projection.clone());
         }
 
+        let options = SearchQueryOptions {
+            case_sensitive,
+            whole_word,
+            use_regex,
+        };
         let result = match scope {
             SearchScopeProjection::ActiveFile => {
-                self.run_active_file_search(&query_id, &query_label, result_limit)?
+                self.run_active_file_search(&query_id, &query_label, result_limit, options)?
             }
             SearchScopeProjection::Workspace => {
-                self.run_workspace_search(&query_id, &query_label, result_limit)?
+                self.run_workspace_search(&query_id, &query_label, result_limit, options)?
             }
         };
 
@@ -19826,6 +19946,7 @@ impl AppComposition {
         query_id: &str,
         query: &str,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let buffer_id = self.active_documents.require_active_buffer()?;
         let metadata = self
@@ -19835,12 +19956,13 @@ impl AppComposition {
             .ok_or(AppCompositionError::ActiveFileMissing)?;
 
         if matches!(self.editor.buffer_mode(buffer_id)?, BufferMode::Degraded) {
-            return self
-                .run_degraded_active_file_search(query_id, query, limit, buffer_id, metadata);
+            return self.run_degraded_active_file_search(
+                query_id, query, limit, buffer_id, metadata, options,
+            );
         }
 
         let text = self.editor.text(buffer_id)?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -19849,10 +19971,15 @@ impl AppComposition {
                 });
             }
         };
-        let mut result = SearchBuildResult::default();
+        let mut result = SearchBuildResult {
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
+            ..SearchBuildResult::default()
+        };
         collect_search_results_for_text(SearchTextInput {
             query_id,
-            pattern: &parsed.0,
+            pattern: &parsed.pattern,
             scope: SearchScopeProjection::ActiveFile,
             workspace_id: Some(metadata.identity.workspace_id),
             buffer_id: Some(buffer_id),
@@ -19872,6 +19999,7 @@ impl AppComposition {
         limit: usize,
         buffer_id: BufferId,
         metadata: ActiveFileMetadata,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let scroll = self.active_documents.viewport_scroll_for(buffer_id);
         let viewport = self
@@ -19884,7 +20012,7 @@ impl AppComposition {
                     height_px: 384,
                 },
             })?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -19899,13 +20027,16 @@ impl AppComposition {
                 "Active-file search is limited to the visible viewport in degraded mode"
                     .to_string(),
             ],
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
             ..SearchBuildResult::default()
         };
 
         for slice in &viewport.line_slices {
             collect_search_results_for_line(SearchLineInput {
                 query_id,
-                pattern: &parsed.0,
+                pattern: &parsed.pattern,
                 scope: SearchScopeProjection::ActiveFile,
                 workspace_id: Some(metadata.identity.workspace_id),
                 buffer_id: Some(buffer_id),
@@ -19927,9 +20058,10 @@ impl AppComposition {
         query_id: &str,
         query: &str,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let workspace_id = self.active_documents.require_workspace_id()?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -19938,19 +20070,26 @@ impl AppComposition {
                 });
             }
         };
-        let mut result = SearchBuildResult::default();
+        let mut result = SearchBuildResult {
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
+            ..SearchBuildResult::default()
+        };
         let backend_query = WorkspaceSearchQuery {
             workspace_id,
-            pattern: parsed.0,
-            search_text: parsed.2,
-            filters: parsed.1,
+            pattern: parsed.pattern,
+            search_text: parsed.search_text,
+            filters: parsed.filters,
             result_limit: limit,
             batch_size: 32,
-            use_indexed_backend: self.settings.indexed_workspace_search_enabled && parsed.3,
+            use_indexed_backend: self.settings.indexed_workspace_search_enabled
+                && parsed.is_literal,
         };
 
-        self.workspace
-            .search_workspace_stream(backend_query, |batch: WorkspaceSearchBatch| {
+        let report = self.workspace.search_workspace_stream(
+            backend_query,
+            |batch: WorkspaceSearchBatch| {
                 result.omitted_file_count = result
                     .omitted_file_count
                     .saturating_add(batch.omitted_file_count);
@@ -19991,7 +20130,11 @@ impl AppComposition {
                     });
                 }
                 true
-            })?;
+            },
+        )?;
+        // Propagate binary-skip count from the workspace report so it is
+        // visible to the user via SearchProjection.skipped_binary_count.
+        result.skipped_binary_count = report.skipped_binary_count;
 
         Ok(result)
     }
