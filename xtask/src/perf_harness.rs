@@ -697,6 +697,57 @@ pub fn apply_fail_on_budget_value(skeleton: &mut SkeletonDescriptor, value: &str
     skeleton.budget_millis = parsed;
 }
 
+/// Applies the [`FAIL_ON_BUDGET_ENV`] override to the renderer-backed Manual
+/// measurement. Unlike the descriptor-driven skeletons (which flow through
+/// [`apply_fail_on_budget_override`] before classification), this measurement
+/// is derived from the desktop manual-perf report with its own internal
+/// budgets, so without this hook the env override silently does not apply —
+/// hosted CI running report-only (`0`) would still fail the step on a shared
+/// runner's timing noise.
+pub fn apply_fail_on_budget_to_manual_measurement(measurement: &mut SkeletonMeasurement) {
+    let Ok(value) = std::env::var(FAIL_ON_BUDGET_ENV) else {
+        return;
+    };
+    apply_fail_on_budget_value_to_manual_measurement(measurement, &value);
+}
+
+/// Value-based twin of [`apply_fail_on_budget_to_manual_measurement`] so
+/// tests can exercise the override without mutating process-global
+/// environment state. Semantics mirror [`apply_fail_on_budget_value`]:
+/// non-numeric values are ignored; `0` means report-only (a budget failure is
+/// reclassified as Skipped, measured numbers preserved); a non-zero value
+/// re-gates the measured p95 against the override budget in milliseconds.
+/// Measurements already Skipped (environment-blocked placeholders) are left
+/// untouched.
+pub fn apply_fail_on_budget_value_to_manual_measurement(
+    measurement: &mut SkeletonMeasurement,
+    value: &str,
+) {
+    let Ok(parsed) = value.trim().parse::<u64>() else {
+        return;
+    };
+    if measurement.status == SkeletonStatus::Skipped {
+        return;
+    }
+    measurement.budget_millis = parsed;
+    if parsed == 0 {
+        if measurement.status == SkeletonStatus::Failed {
+            measurement.status = SkeletonStatus::Skipped;
+            measurement.message = format!(
+                "budget override 0; report-only (no gate). {}",
+                measurement.message
+            );
+        }
+    } else {
+        let budget_micros = parsed.saturating_mul(1_000);
+        measurement.status = if measurement.p95_micros > budget_micros {
+            SkeletonStatus::Failed
+        } else {
+            SkeletonStatus::Passed
+        };
+    }
+}
+
 fn current_utc_rfc3339() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
