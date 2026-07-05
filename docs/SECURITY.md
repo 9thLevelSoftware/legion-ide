@@ -125,11 +125,22 @@ Please do not:
 
 After triage, the maintainers can coordinate a fix and a disclosure timeline. If a private reporting channel is available in your deployment, use that channel; otherwise use the project’s normal private maintainer path and request a confidential follow-up.
 
+## Terminal policy (M8)
+
+The terminal runtime is gated behind workspace trust and capability policy:
+
+- Untrusted workspaces are denied at the product gate — unconditionally, before any capability broker evaluation. `enable_terminal_runtime_for_tests()` cannot override this for untrusted callers.
+- Trusted workspaces in Manual mode auto-enable the terminal on the first explicit launch intent.
+- The `LEGION_SECRET*` and `LEGION_TOKEN*` environment variable prefixes are on the hard deny-list and are stripped before any PTY spawn, regardless of trust state or `passthrough_env` setting. The effective env configuration (passthrough enabled/disabled + deny-prefix count) is recorded in the launch audit record as metadata only.
+- No raw command output, shell command lines, or process arguments are written to audit records. Redaction stays.
+- Shell binary taxonomy: only classified shell binaries (`cmd`, `powershell`, `pwsh`, `bash`, `sh`, `zsh`) are permitted; unrecognized commands are denied by `DenyByDefaultBroker`.
+
 ## Implementation anchors
 
 This document is reviewed against the current implementation in these areas:
 
-- `crates/legion-security` — trust, path, egress, remote, cloud, telemetry, raw-source, and redaction policy.
+- `crates/legion-security` — trust, path, egress, remote, cloud, telemetry, raw-source, and redaction policy; terminal command taxonomy.
+- `crates/legion-app/src/terminal_policy.rs` — shell selection, env allow/deny policy, scrollback limit, failure kind enum.
 - `crates/legion-plugin` — manifest validation, capability/quota checks, deny-by-default plugin host calls, and namespace isolation.
 - `crates/legion-ai-providers` — provider metadata, including metadata-only redaction defaults and local/offline support labels.
 

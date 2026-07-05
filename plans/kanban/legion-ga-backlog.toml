@@ -469,6 +469,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-app --test terminal_workflow"]
     acceptance = ["Manual mode can run `cargo test` in a terminal tab and capture exit status metadata."]
     stop_condition = "Test must fail because runtime is disabled, not because of fixture plumbing."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T2"
@@ -480,6 +482,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-terminal", "cargo test -p legion-app", "cargo test -p legion-security"]
     acceptance = ["Denied/untrusted terminal paths still fail closed."]
     stop_condition = "Do not add a second ad-hoc test-only flag for terminal activation."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T3"
