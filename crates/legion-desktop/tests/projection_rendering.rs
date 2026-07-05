@@ -1382,13 +1382,14 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             .iter()
             .any(|row| row.contains("DegradedLargeFile"))
     );
-    // SCALE.05 changed banner format from "capability reduced: {reason}" to
-    // "  • {sanitized_reason}".  Assert the disabled overlay reason appears.
+    // SCALE.05 moved capability reductions into per-reason banner bullet rows
+    // ("  • capability reduced: {reason}", view.rs). Assert the disabled
+    // overlay reason appears in one of them.
     assert!(
         degraded_model
             .large_file_banner_rows
             .iter()
-            .any(|row| row.contains("semantic overlays disabled"))
+            .any(|row| row.contains("capability reduced: semantic overlays disabled"))
     );
     assert!(degraded_model.large_file_banner_rows.iter().all(|row| {
         !row.contains("HIDDEN_NEEDLE_AFTER_VIEWPORT")
