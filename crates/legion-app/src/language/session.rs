@@ -273,10 +273,9 @@ impl RustAnalyzerSession {
             .session
             .diagnostic_notifications()
             .iter()
-            .filter(|n| n.uri_hash == expected_hash)
-            .last()
-            .map(|n| n.error_count == 0)
-            .unwrap_or(false);
+            .rev()
+            .find(|n| n.uri_hash == expected_hash)
+            .is_some_and(|n| n.error_count == 0);
         matches!(outcome, Ok(legion_lsp::PumpOutcome::PredicateMet)) || buffered_clean
     }
 

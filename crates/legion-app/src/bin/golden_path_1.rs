@@ -283,13 +283,9 @@ fn poll_terminal_for_marker(
 ) -> Option<String> {
     let mut last_row_count = 0usize;
     let mut last_status = TerminalPanelStatusKind::Running;
-    loop {
-        let projection = match app
-            .dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id })
-        {
-            Ok(AppCommandOutcome::TerminalPanelUpdated(p)) => p,
-            _ => break,
-        };
+    while let Ok(AppCommandOutcome::TerminalPanelUpdated(projection)) =
+        app.dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id })
+    {
         // Log whenever rows are added so we can see output accumulating.
         let row_count = projection.output_rows.len();
         if row_count != last_row_count || projection.status.kind != last_status {
@@ -1074,7 +1070,7 @@ fn write_evidence(
     toml.push_str(&format!("overall_status = \"{overall_status}\"\n\n"));
 
     for step in steps {
-        toml.push_str(&format!("[[steps]]\n"));
+        toml.push_str("[[steps]]\n");
         toml.push_str(&format!("id = \"{}\"\n", step.id));
         toml.push_str(&format!("status = \"{}\"\n", step.status.as_str()));
         toml.push_str(&format!("started_utc = \"{}\"\n", step.started_utc));
