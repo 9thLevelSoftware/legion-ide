@@ -131,9 +131,12 @@ pub enum BetaSaveOutcome {
 /// Typed terminal policy decision recorded by the beta workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BetaTerminalPolicyDecision {
-    /// Terminal launch was denied by default policy (the expected beta outcome).
+    /// Terminal launch was denied by policy (expected only for untrusted
+    /// workspaces since terminal productization).
     Denied,
-    /// Terminal launch was allowed by policy.
+    /// Terminal launch was allowed by policy (the expected outcome for the
+    /// trusted beta loop: the three-tier-selected shell launches through the
+    /// product gate).
     Allowed,
     /// The step did not run because the workflow was blocked before it.
     Blocked,
