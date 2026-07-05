@@ -262,6 +262,33 @@ impl DelegatedTaskSandboxOrchestrator {
         }
     }
 
+    /// Creates a new orchestrator that places the sandbox under an explicit
+    /// root directory instead of the shared `target/delegated-tasks` default.
+    ///
+    /// Intended for test callers that need hermetic, per-test sandbox
+    /// isolation: pass a unique temporary directory as `sandbox_root` so
+    /// concurrent test threads cannot see or reap each other's lease files.
+    /// The `source_root` argument has the same semantics as in
+    /// `with_workspace_root`: `Some(path)` enables the fallback workspace-copy
+    /// path when `git worktree add` is unavailable, `None` creates an empty
+    /// sandbox directory.
+    ///
+    /// Product callers should continue to use `new` or `with_workspace_root`
+    /// so that the canonical `target/delegated-tasks` root is preserved.
+    pub fn with_sandbox_root(
+        sandbox_root: &Path,
+        run_id: &str,
+        source_root: Option<&Path>,
+    ) -> Self {
+        let sandbox_path = sandbox_root.join(format!("task-{run_id}"));
+        Self {
+            sandbox_path,
+            source_root: source_root.map(|p| p.to_path_buf()),
+            is_worktree: false,
+            lease: None,
+        }
+    }
+
     /// Returns the sandbox path.
     pub fn sandbox_path(&self) -> &Path {
         &self.sandbox_path
@@ -1782,10 +1809,32 @@ mod tests {
         PrivacyClassification, ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetKind,
         RedactionHint, WorkspaceId, validate_legion_workflow_session,
     };
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     fn causality(value: u128) -> CausalityId {
         CausalityId(Uuid::from_u128(value))
+    }
+
+    /// Creates a unique temporary directory for per-test sandbox isolation.
+    /// Uses PID + nanosecond timestamp to avoid collisions between parallel
+    /// test threads in the same binary.
+    fn unique_sandbox_root(tag: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let unique = format!(
+            "legion-agent-unit-sb-{tag}-{}-{nanos:x}",
+            std::process::id()
+        );
+        let path = std::env::temp_dir().join(unique);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).expect("remove stale temp dir");
+        }
+        std::fs::create_dir_all(&path).expect("create temp sandbox root");
+        path
     }
 
     #[test]
@@ -1986,7 +2035,9 @@ mod tests {
 
     #[test]
     fn test_sandbox_orchestration_and_containment_and_proposal_generation() {
-        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new("test-run");
+        let sandbox_root = unique_sandbox_root("orch-proposal");
+        let mut orchestrator =
+            DelegatedTaskSandboxOrchestrator::with_sandbox_root(&sandbox_root, "test-run", None);
         let permission = approved_sandbox_permission("sandbox:init");
         orchestrator
             .initialize(&permission)
@@ -2054,11 +2105,17 @@ mod tests {
         // Cleanup
         orchestrator.cleanup(&permission).expect("cleanup sandbox");
         assert!(!sandbox_path.exists());
+        let _ = std::fs::remove_dir_all(&sandbox_root);
     }
 
     #[test]
     fn delegated_sandbox_requires_approved_write_tool_permission() {
-        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new("permission-test-run");
+        let sandbox_root = unique_sandbox_root("perm-denied");
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
+            &sandbox_root,
+            "permission-test-run",
+            None,
+        );
         let denied = legion_protocol::delegated_task_tool_permission_request(
             legion_protocol::DelegatedTaskToolPermissionRequestInput {
                 request_id: "sandbox:denied".to_string(),
@@ -2077,6 +2134,7 @@ mod tests {
             .expect_err("denied permission blocks sandbox init");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!orchestrator.sandbox_path().exists());
+        let _ = std::fs::remove_dir_all(&sandbox_root);
     }
 
     fn approved_sandbox_permission(
