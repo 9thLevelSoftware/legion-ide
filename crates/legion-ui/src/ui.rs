@@ -5382,6 +5382,7 @@ mod tests {
             zoom_percent: 999,
             editor_font_family: "  JetBrains Mono<script>\n".to_string(),
             editor_font_size_pt: 1,
+            terminal_shell_selection: String::new(),
             font_fallback_diagnostics: (0..9)
                 .map(|index| WorkbenchFontFallbackDiagnostic {
                     requested_family_label: "JetBrains Mono".to_string(),
