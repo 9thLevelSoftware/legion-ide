@@ -1111,6 +1111,12 @@ fn append_manual_renderer_measurement(
         }
     };
 
+    let mut measurement = measurement;
+    // The renderer measurement carries the desktop manual-perf report's own
+    // budget verdict; apply the LEGION_PERF_FAIL_ON_BUDGET_MS override so
+    // report-only CI legs (override 0) do not fail on shared-runner timing
+    // noise, matching the descriptor-driven skeletons.
+    xtask::perf_harness::apply_fail_on_budget_to_manual_measurement(&mut measurement);
     report.skeletons.push(measurement);
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
 }

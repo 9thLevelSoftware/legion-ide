@@ -7,7 +7,8 @@ use std::{
 
 use xtask::perf_harness::{
     ManualRendererPerfToml, PERF_REPORT_FILE, PerfReport, SkeletonDescriptor, SkeletonKind,
-    SkeletonMeasurement, SkeletonStatus, apply_fail_on_budget_value, classify_skeleton_status,
+    SkeletonMeasurement, SkeletonStatus, apply_fail_on_budget_value,
+    apply_fail_on_budget_value_to_manual_measurement, classify_skeleton_status,
     manual_renderer_perf_measurement, plan_m0_skeletons, plan_perf_harness, plan_perf_skeletons,
     read_manual_renderer_perf_report, read_report, resolve_workspace_git_sha, write_report,
 };
@@ -520,4 +521,58 @@ fn perf_harness_skeleton_kind_serializes_stable_snake_case() {
             toml::from_str(&legacy).expect("legacy skeleton kind should deserialize");
         assert_eq!(parsed.kind, kind);
     }
+}
+
+fn manual_renderer_measurement(status: SkeletonStatus) -> SkeletonMeasurement {
+    SkeletonMeasurement {
+        name: "manual.renderer_input_to_paint".to_string(),
+        kind: SkeletonKind::RendererBackedManualInputToPaint,
+        fixture_bytes: 0,
+        sample_count: 24,
+        total_micros: 35301,
+        p50_micros: 3122,
+        p95_micros: 32205,
+        budget_millis: 32,
+        status,
+        message: "Manual renderer measurement exceeded budget".to_string(),
+    }
+}
+
+/// The renderer-backed Manual measurement is derived from the desktop
+/// manual-perf report rather than a SkeletonDescriptor, so it must apply the
+/// LEGION_PERF_FAIL_ON_BUDGET_MS semantics itself: an override of `0`
+/// reclassifies a budget failure as report-only (Skipped) while preserving
+/// the measured numbers (hosted CI runs report-only; a 0.6% p95 overage on a
+/// shared runner must not fail the gate step).
+#[test]
+fn perf_harness_zero_override_reclassifies_manual_renderer_failure_as_report_only() {
+    let mut measurement = manual_renderer_measurement(SkeletonStatus::Failed);
+    apply_fail_on_budget_value_to_manual_measurement(&mut measurement, "0");
+    assert_eq!(measurement.status, SkeletonStatus::Skipped);
+    assert_eq!(measurement.budget_millis, 0);
+    assert_eq!(measurement.p95_micros, 32205, "numbers preserved");
+    assert!(measurement.message.contains("report-only"));
+}
+
+/// A non-zero override re-gates the manual renderer measurement against the
+/// override budget in milliseconds (both directions).
+#[test]
+fn perf_harness_nonzero_override_regates_manual_renderer_measurement() {
+    let mut relaxed = manual_renderer_measurement(SkeletonStatus::Failed);
+    apply_fail_on_budget_value_to_manual_measurement(&mut relaxed, "40");
+    assert_eq!(relaxed.status, SkeletonStatus::Passed, "32.2ms within 40ms");
+
+    let mut tightened = manual_renderer_measurement(SkeletonStatus::Passed);
+    apply_fail_on_budget_value_to_manual_measurement(&mut tightened, "10");
+    assert_eq!(tightened.status, SkeletonStatus::Failed, "32.2ms over 10ms");
+}
+
+/// A non-numeric override value leaves the measurement untouched (parity
+/// with apply_fail_on_budget_value on descriptors).
+#[test]
+fn perf_harness_invalid_override_leaves_manual_renderer_measurement_unchanged() {
+    let mut measurement = manual_renderer_measurement(SkeletonStatus::Failed);
+    apply_fail_on_budget_value_to_manual_measurement(&mut measurement, "not-a-number");
+    assert_eq!(measurement.status, SkeletonStatus::Failed);
+    assert_eq!(measurement.budget_millis, 32);
 }
