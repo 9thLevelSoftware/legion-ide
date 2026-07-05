@@ -35,8 +35,9 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
     StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
-    build_structural_rewrite_preview_payload, register_plugin_tree_sitter_grammars,
-    run_structural_search as index_run_structural_search, tree_sitter_supports_path,
+    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_legacy,
+    register_plugin_tree_sitter_grammars, run_structural_search as index_run_structural_search,
+    tree_sitter_supports_path,
 };
 use legion_memory::{
     LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryCompactionPolicy,
@@ -12132,68 +12133,8 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
     }
 }
 
-fn palette_fuzzy_score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Some((0, Vec::new()));
-    }
-
-    let query_chars = query
-        .chars()
-        .flat_map(char::to_lowercase)
-        .collect::<Vec<_>>();
-    let candidate_raw_chars = candidate.chars().collect::<Vec<_>>();
-    let candidate_chars = candidate_raw_chars
-        .iter()
-        .map(|&ch| ch.to_lowercase().next().unwrap_or(ch))
-        .collect::<Vec<_>>();
-
-    let mut matched_indices = Vec::with_capacity(query_chars.len());
-    let mut query_index = 0;
-    let mut score = 0_i32;
-    let mut last_match: Option<usize> = None;
-    for (candidate_index, candidate_char) in candidate_chars.iter().copied().enumerate() {
-        if query_index >= query_chars.len() {
-            break;
-        }
-        if candidate_char != query_chars[query_index] {
-            continue;
-        }
-
-        matched_indices.push(candidate_index);
-        score += 10;
-        if last_match.is_some_and(|last| last + 1 == candidate_index) {
-            score += 15;
-        }
-        if candidate_index == 0
-            || candidate_raw_chars
-                .get(candidate_index.saturating_sub(1))
-                .is_some_and(|previous| matches!(previous, '/' | '\\' | '-' | '_' | '.'))
-        {
-            score += 6;
-        }
-        if let Some(last) = last_match {
-            score -= candidate_index.saturating_sub(last + 1) as i32;
-        }
-        last_match = Some(candidate_index);
-        query_index += 1;
-    }
-
-    if query_index == query_chars.len() {
-        let lowercase_candidate = candidate.to_ascii_lowercase();
-        let lowercase_query = query.to_ascii_lowercase();
-        if lowercase_candidate == lowercase_query {
-            score += 100;
-        } else if lowercase_candidate.starts_with(&lowercase_query) {
-            score += 60;
-        } else if lowercase_candidate.contains(&lowercase_query) {
-            score += 35;
-        }
-        Some((score, matched_indices))
-    } else {
-        None
-    }
-}
+// palette_fuzzy_score is now provided by legion_index::fuzzy::fuzzy_score_legacy.
+// The import alias is already declared at the top of this file.
 
 fn sort_palette_results(results: &mut [PaletteScoredResult]) {
     results.sort_by(|left, right| {
@@ -13691,7 +13632,7 @@ impl AppComposition {
         let mut scored = paths
             .into_iter()
             .filter_map(|path| {
-                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_legacy(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
                     PaletteScoredResult {
                         score: score.saturating_add(recency_bonus),
@@ -13746,7 +13687,7 @@ impl AppComposition {
                     .clone()
                     .unwrap_or_else(|| symbol.symbol_name_hash.value.clone());
                 let searchable = format!("{title} {}", symbol.path.0);
-                palette_fuzzy_score(&searchable, query).map(|(score, match_indices)| {
+                fuzzy_score_legacy(&searchable, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus
                         .get(&symbol.path.0)
                         .copied()
@@ -13791,7 +13732,7 @@ impl AppComposition {
             .filter_map(|buffer_id| {
                 let metadata = self.active_documents.metadata_for_buffer(*buffer_id)?;
                 let path = metadata.identity.canonical_path.0.clone();
-                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_legacy(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
                     PaletteScoredResult {
                         score: score.saturating_add(recency_bonus),
@@ -13840,7 +13781,7 @@ impl AppComposition {
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
-                palette_fuzzy_score(spec.title, query).map(|(score, match_indices)| {
+                fuzzy_score_legacy(spec.title, query).map(|(score, match_indices)| {
                     let (buffer_id, disabled_reason) = match spec.id {
                         "save-active-buffer" | "close-active-tab" => (
                             active_buffer_id,

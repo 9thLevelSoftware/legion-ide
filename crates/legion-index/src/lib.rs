@@ -3,6 +3,8 @@
 
 #![warn(missing_docs)]
 
+pub mod fuzzy;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{OnceLock, PoisonError};
 
