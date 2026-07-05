@@ -117,21 +117,17 @@ fn large_file_guardrails_degraded_banner_names_capability_reduction() {
     let snapshot = runtime.projection_snapshot();
     let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
 
-    // SCALE.05 changed the banner format from "large-file degraded: bytes=..."
-    // to "⚠ Large file (X MB) — some features disabled" with sanitized
-    // bullet-point disabled_overlay_reasons.  Assert the current format.
     assert!(
-        !model.large_file_banner_rows.is_empty(),
-        "large file banner should have at least one row; got: {:?}",
-        model.large_file_banner_rows
+        model
+            .large_file_banner_rows
+            .iter()
+            .any(|row| row.contains("large-file degraded"))
     );
     assert!(
         model
             .large_file_banner_rows
             .iter()
-            .any(|row| row.contains("Large file") && row.contains("features disabled")),
-        "first banner row should name file size and disabled features; got: {:?}",
-        model.large_file_banner_rows
+            .any(|row| row.contains("capability reduced"))
     );
     assert!(
         model
