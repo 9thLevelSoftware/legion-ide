@@ -1860,6 +1860,63 @@ impl Default for DebugProjection {
     }
 }
 
+/// Projection-only metadata row for a supervised language-server health record.
+///
+/// No authority. All fields are display-safe labels derived from protocol metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspServerHealthProjection {
+    /// Display label for the server identity (e.g. "rust-analyzer#1").
+    pub server_label: String,
+    /// Display label for the binary provenance (e.g. "system PATH").
+    pub provenance_label: String,
+    /// Version string reported by the server, or "unknown".
+    pub version_label: String,
+    /// Display label for the initialization status (e.g. "ready").
+    pub status_label: String,
+    /// Number of restarts observed in this session.
+    pub restart_count: u32,
+    /// Whether a policy-gated binary download was refused.
+    pub download_refused: bool,
+}
+
+/// Maps a protocol [`legion_protocol::LspServerHealthRecord`] to a
+/// [`LspServerHealthProjection`] without claiming any product authority.
+pub fn project_lsp_health(
+    record: &legion_protocol::LspServerHealthRecord,
+    download_refused: bool,
+) -> LspServerHealthProjection {
+    use legion_protocol::{LspResultStatus, LspServerBinaryProvenance as P};
+
+    let provenance_label = match record.binary_provenance {
+        P::Configured => "configured path",
+        P::ProjectLocal => "project-local",
+        P::SystemPath => "system PATH",
+        P::Bundled => "bundled",
+        P::Downloaded => "downloaded",
+    }
+    .to_string();
+
+    let status_label = match record.init_status {
+        LspResultStatus::Fresh => "ready",
+        LspResultStatus::Stale => "stale",
+        LspResultStatus::Partial => "partial",
+        LspResultStatus::Cancelled => "cancelled",
+        LspResultStatus::Timeout => "timed out",
+        LspResultStatus::Unavailable => "unavailable",
+        LspResultStatus::Degraded => "degraded",
+    }
+    .to_string();
+
+    LspServerHealthProjection {
+        server_label: format!("{}#{}", record.language_id.0, record.server_id.0),
+        provenance_label,
+        version_label: record.version.clone().unwrap_or_else(|| "unknown".into()),
+        status_label,
+        restart_count: record.restart_count,
+        download_refused,
+    }
+}
+
 /// UI status severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusSeverity {
@@ -2155,6 +2212,10 @@ pub struct SettingsProjection {
     pub indexed_workspace_search_enabled: bool,
     /// Whether next-edit prediction should auto-trigger after edits.
     pub next_edit_prediction_enabled: bool,
+    /// User-level terminal shell preference label (e.g. `"pwsh"`, `"bash"`, `"cmd"`).
+    /// Empty string means "use platform default." Workspace-level setting overrides this.
+    #[serde(default)]
+    pub terminal_shell_selection: String,
     /// Projection schema version.
     pub schema_version: u16,
 }
@@ -2238,6 +2299,7 @@ impl Default for SettingsProjection {
             telemetry: WorkbenchTelemetryConsent::default(),
             indexed_workspace_search_enabled: false,
             next_edit_prediction_enabled: false,
+            terminal_shell_selection: String::new(),
             schema_version: 1,
         }
     }
@@ -5444,6 +5506,7 @@ mod tests {
             zoom_percent: 999,
             editor_font_family: "  JetBrains Mono<script>\n".to_string(),
             editor_font_size_pt: 1,
+            terminal_shell_selection: String::new(),
             font_fallback_diagnostics: (0..9)
                 .map(|index| WorkbenchFontFallbackDiagnostic {
                     requested_family_label: "JetBrains Mono".to_string(),

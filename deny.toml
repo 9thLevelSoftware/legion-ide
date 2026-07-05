@@ -9,16 +9,20 @@ unmaintained = "workspace"
 unsound = "workspace"
 yanked = "deny"
 unused-ignored-advisory = "warn"
-# RUSTSEC-2026-0194 (quick-xml 0.39.4, quadratic-time attribute-duplicate check):
-# reached only transitively via plist 1.9.0 <- syntect 5.3.0 (bundled/local
-# .tmTheme syntax-highlighting theme parsing, not attacker-controlled network
-# XML). plist 1.9.0 is the latest release on crates.io and pins
+# RUSTSEC-2026-0194 (quick-xml 0.39.4, quadratic-time attribute-duplicate check)
+# and RUSTSEC-2026-0195 (quick-xml 0.39.4, unbounded NsReader namespace-
+# declaration allocation): reached transitively via plist 1.9.0 <- syntect
+# 5.3.0 (bundled/local .tmTheme syntax-highlighting theme parsing), plus two
+# non-attacker-surface consumers — wayland-scanner (build-time proc-macro
+# only) and zbus_xml (system D-Bus introspection). None of the three paths
+# parses attacker-controlled network XML, which both vulnerabilities require.
+# The blocking pin: plist 1.9.0 is the latest release on crates.io and pins
 # `quick-xml = "^0.39.2"`, so no in-repo dependency bump can reach the fixed
 # 0.41.0 line (`cargo update -p quick-xml --precise 0.41.0` fails: no matching
 # version satisfies plist's constraint). Upstream plist must relax/bump its
 # quick-xml pin before this can be resolved from our side. Revisit when plist
 # releases a version compatible with quick-xml >=0.41.0.
-ignore = ["RUSTSEC-2026-0194"]
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
 
 [bans]
 # Duplicate crate versions fail the gate. The `skip` list below is a REVIEWED

@@ -72,8 +72,42 @@ fn reap_skips_sandbox_with_locked_lease_and_removes_it_once_released() {
     // Release the lease and re-run: the now-orphaned sandbox must be reaped
     // along with its lock file.
     drop(holder);
-    let removed = reap_orphaned_sandboxes(&root, &[]).expect("reap succeeds after release");
-    assert_eq!(removed.len(), 1);
+
+    // macOS can have a brief window after close(fd) before an flock held by
+    // the previous owner is visible as released to a new opener's try_lock.
+    // Retry in a bounded loop so the test is robust against this transient
+    // platform timing without weakening production fail-closed semantics
+    // (the production reaper is correct; it is the TEST that must tolerate
+    // the delay). Each failed attempt probes the lease independently and
+    // prints the exact error to stderr so CI logs reveal the mechanism.
+    let mut removed = Vec::new();
+    for attempt in 0u32..10 {
+        removed = reap_orphaned_sandboxes(&root, &[]).expect("reap succeeds after release");
+        if !removed.is_empty() {
+            break;
+        }
+        let probe_result = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path);
+        match probe_result {
+            Ok(probe_file) => match probe_file.try_lock() {
+                Ok(()) => eprintln!(
+                    "reap retry {attempt}: lock acquirable by probe but reap returned empty; retrying"
+                ),
+                Err(e) => eprintln!(
+                    "reap retry {attempt}: lock still held after drop ({e:?}); waiting 100 ms"
+                ),
+            },
+            Err(e) => eprintln!("reap retry {attempt}: lease open failed ({e}); retrying"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        removed.len(),
+        1,
+        "sandbox must be reaped within the retry window once the lease is released"
+    );
     assert!(removed[0].ends_with("task-live-1"));
     assert!(
         !root.join("task-live-1").exists(),

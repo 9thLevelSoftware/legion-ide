@@ -262,6 +262,33 @@ impl DelegatedTaskSandboxOrchestrator {
         }
     }
 
+    /// Creates a new orchestrator that places the sandbox under an explicit
+    /// root directory instead of the shared `target/delegated-tasks` default.
+    ///
+    /// Intended for test callers that need hermetic, per-test sandbox
+    /// isolation: pass a unique temporary directory as `sandbox_root` so
+    /// concurrent test threads cannot see or reap each other's lease files.
+    /// The `source_root` argument has the same semantics as in
+    /// `with_workspace_root`: `Some(path)` enables the fallback workspace-copy
+    /// path when `git worktree add` is unavailable, `None` creates an empty
+    /// sandbox directory.
+    ///
+    /// Product callers should continue to use `new` or `with_workspace_root`
+    /// so that the canonical `target/delegated-tasks` root is preserved.
+    pub fn with_sandbox_root(
+        sandbox_root: &Path,
+        run_id: &str,
+        source_root: Option<&Path>,
+    ) -> Self {
+        let sandbox_path = sandbox_root.join(format!("task-{run_id}"));
+        Self {
+            sandbox_path,
+            source_root: source_root.map(|p| p.to_path_buf()),
+            is_worktree: false,
+            lease: None,
+        }
+    }
+
     /// Returns the sandbox path.
     pub fn sandbox_path(&self) -> &Path {
         &self.sandbox_path
@@ -698,11 +725,22 @@ fn validate_sandbox_permission(
 
 /// Validate that `path` is contained within the base directory.
 ///
-/// Returns the lexically-normalized path *relative to* `base` (with any `.`/`..`
-/// segments already collapsed) so callers emit a genuinely canonical path rather
-/// than one that still embeds traversal segments. Any path that escapes the base
-/// or retains residual traversal/root/prefix components after normalization is
-/// rejected.
+/// Returns the normalized path *relative to* `base` (with any `.`/`..`
+/// segments already collapsed) so callers emit a genuinely canonical path
+/// rather than one that still embeds traversal segments. Any path that
+/// escapes the base or retains residual traversal/root/prefix components
+/// after normalization is rejected.
+///
+/// Symlink discipline: both sides of the check are resolved through
+/// `std::fs::canonicalize` so the comparison happens in real-filesystem
+/// space, not lexical space. For the target path (which may name a file
+/// that does not exist yet), the deepest EXISTING ancestor is canonicalized
+/// and the non-existent remainder is re-appended after lexical cleaning.
+/// This simultaneously fixes a false REJECT (symlink-aliased bases, e.g.
+/// macOS `/var` -> `/private/var` temp dirs) and a false ALLOW (an existing
+/// in-sandbox symlink pointing outside passed the previous lexical check
+/// while real I/O would follow it out). A component whose symlink cannot be
+/// resolved (dangling) fails closed.
 pub fn validate_containment(base: &Path, path: &Path) -> Result<PathBuf, AgentError> {
     let base_absolute =
         std::fs::canonicalize(base).unwrap_or_else(|_| std::env::current_dir().unwrap().join(base));
@@ -726,7 +764,13 @@ pub fn validate_containment(base: &Path, path: &Path) -> Result<PathBuf, AgentEr
         }
     }
 
-    let clean_path: PathBuf = clean_components.into_iter().collect();
+    let clean_lexical: PathBuf = clean_components.into_iter().collect();
+    let clean_path = resolve_existing_prefix(&clean_lexical).ok_or_else(|| {
+        AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata {
+            reason: "Sandbox path contains an unresolvable (dangling) symlink component"
+                .to_string(),
+        })
+    })?;
 
     // Strip Windows UNC prefix if present to prevent starts_with discrepancies
     let strip_unc = |p: &Path| -> PathBuf {
@@ -765,6 +809,39 @@ pub fn validate_containment(base: &Path, path: &Path) -> Result<PathBuf, AgentEr
     }
 
     Ok(relative.to_path_buf())
+}
+
+/// Resolves the deepest existing ancestor of `path` through
+/// `std::fs::canonicalize` and re-appends the non-existent remainder (which
+/// is already lexically clean — no `..`/`.` components survive the caller's
+/// normalization). Returns `None` when the deepest existing component is a
+/// symlink that cannot be canonicalized (dangling): writing "through" such a
+/// link would create the target at an unverified location, so containment
+/// must fail closed.
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut existing = path;
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        // `symlink_metadata` (not `exists`) so a dangling symlink counts as a
+        // present-but-unresolvable component instead of being walked past.
+        if existing.symlink_metadata().is_ok() {
+            break;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                suffix.push(name.to_os_string());
+                existing = parent;
+            }
+            // No existing ancestor at all: nothing on disk to resolve; the
+            // lexically-cleaned path is the best available representation.
+            _ => return Some(path.to_path_buf()),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
 }
 
 /// Proposal generator inside `legion-agent`.

@@ -10,12 +10,16 @@ use std::path::{Path, PathBuf};
 #[test]
 fn initialize_copies_workspace_contents_when_git_worktree_is_unavailable() {
     let source_root = unique_temp_dir("legion-agent-worktree-source");
+    let sandbox_root = unique_temp_dir("legion-agent-sb-fallback-copy");
     fs::create_dir_all(source_root.join("src")).expect("source tree");
     fs::write(source_root.join("README.md"), "workspace root\n").expect("write root file");
     fs::write(source_root.join("src/lib.rs"), "pub fn copied() {}\n").expect("write source file");
 
-    let mut orchestrator =
-        DelegatedTaskSandboxOrchestrator::with_workspace_root(&source_root, "fallback-copy");
+    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
+        &sandbox_root,
+        "fallback-copy",
+        Some(&source_root),
+    );
     let permission = approved_sandbox_permission("sandbox:init");
 
     orchestrator
@@ -43,7 +47,8 @@ fn initialize_copies_workspace_contents_when_git_worktree_is_unavailable() {
         "sandbox should be removed after cleanup"
     );
 
-    fs::remove_dir_all(&source_root).expect("remove temp source root");
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&sandbox_root);
 }
 
 /// Derives the sibling `.lock` lease path for a sandbox dir, mirroring the
@@ -64,10 +69,14 @@ fn lease_path_for(sandbox_path: &Path) -> PathBuf {
 #[test]
 fn initialize_holds_the_sandbox_lease_immediately_on_return() {
     let source_root = unique_temp_dir("legion-agent-worktree-source-lease");
+    let sandbox_root = unique_temp_dir("legion-agent-sb-lease-held");
     fs::write(source_root.join("README.md"), "workspace root\n").expect("write root file");
 
-    let mut orchestrator =
-        DelegatedTaskSandboxOrchestrator::with_workspace_root(&source_root, "lease-held-on-return");
+    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
+        &sandbox_root,
+        "lease-held-on-return",
+        Some(&source_root),
+    );
     let permission = approved_sandbox_permission("sandbox:init-lease");
 
     orchestrator
@@ -110,29 +119,48 @@ fn initialize_holds_the_sandbox_lease_immediately_on_return() {
         "cleanup must leave the (now-unlocked) lease file in place; \
          unlinking it is exclusively the reaper's job"
     );
-    let probe = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lease_path)
-        .expect("open leftover lease file for probing");
+    // macOS flock releases can lag the closing `drop` by a brief window (the
+    // same latency the reaping test's bounded retry absorbs); poll instead of
+    // asserting on the first attempt. Production semantics are unaffected —
+    // this is purely the test observing the release.
+    let mut unlocked = false;
+    for attempt in 0..10 {
+        let probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path)
+            .expect("open leftover lease file for probing");
+        if probe.try_lock().is_ok() {
+            unlocked = true;
+            drop(probe);
+            break;
+        }
+        drop(probe);
+        eprintln!(
+            "lease probe retry {attempt}: lock not yet observable as released; waiting 100 ms"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     assert!(
-        probe.try_lock().is_ok(),
-        "the leftover lease file must be unlocked after cleanup releases it"
+        unlocked,
+        "the leftover lease file must become unlocked within the retry window after cleanup releases it"
     );
-    drop(probe);
 
-    fs::remove_dir_all(&source_root).expect("remove temp source root");
+    let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_file(&lease_path);
+    let _ = fs::remove_dir_all(&sandbox_root);
 }
 
 #[test]
 fn reap_removes_a_leftover_unlocked_lease_file_left_by_cleanup() {
     let source_root = unique_temp_dir("legion-agent-worktree-source-lease-reap");
+    let sandbox_root = unique_temp_dir("legion-agent-sb-lease-reap");
     fs::write(source_root.join("README.md"), "workspace root\n").expect("write root file");
 
-    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_workspace_root(
-        &source_root,
+    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
+        &sandbox_root,
         "lease-leftover-reaped",
+        Some(&source_root),
     );
     let permission = approved_sandbox_permission("sandbox:init-lease-reap");
 
@@ -153,8 +181,9 @@ fn reap_removes_a_leftover_unlocked_lease_file_left_by_cleanup() {
     );
 
     // The reaper only scans `task-*` directories directly under a given
-    // root, so point it at the lease file's parent directory (the shared
-    // `target/delegated-tasks` root under this crate).
+    // root, so point it at the lease file's parent directory. With the
+    // hermetic sandbox_root, this is the test's own isolated root — the
+    // reaper cannot see or disturb other tests' files.
     let delegated_tasks_root = lease_path
         .parent()
         .expect("lease file has a parent directory")
@@ -166,7 +195,8 @@ fn reap_removes_a_leftover_unlocked_lease_file_left_by_cleanup() {
         "the next reap pass must remove the leftover lease file left by cleanup"
     );
 
-    fs::remove_dir_all(&source_root).expect("remove temp source root");
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&sandbox_root);
 }
 
 #[test]
@@ -178,10 +208,12 @@ fn failed_initialize_leaves_no_stale_lease_file() {
     // failure.
     let missing_source_root =
         unique_temp_dir("legion-agent-worktree-missing-source").join("does-not-exist");
+    let sandbox_root = unique_temp_dir("legion-agent-sb-failed-init");
 
-    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_workspace_root(
-        &missing_source_root,
+    let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
+        &sandbox_root,
         "failed-init-no-stale-lock",
+        Some(&missing_source_root),
     );
     let permission = approved_sandbox_permission("sandbox:init-failure");
 
@@ -199,6 +231,11 @@ fn failed_initialize_leaves_no_stale_lease_file() {
     );
 
     let _ = fs::remove_dir_all(&sandbox_path);
+    let _ = fs::remove_dir_all(&sandbox_root);
+    // source_root's parent was created by unique_temp_dir; clean it up too.
+    if let Some(parent) = missing_source_root.parent() {
+        let _ = fs::remove_dir_all(parent);
+    }
 }
 
 fn approved_sandbox_permission(

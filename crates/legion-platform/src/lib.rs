@@ -706,6 +706,12 @@ pub struct PtyRequest {
     pub args: Vec<String>,
     /// Optional working directory.
     pub cwd: Option<PathBuf>,
+    /// Optional explicit environment for the child process.
+    ///
+    /// `None` = inherit the sanitised parent environment via `child_environment_vars`.
+    /// `Some(vars)` = use exactly these key-value pairs (caller is responsible for
+    /// applying any deny-list; the platform layer passes them verbatim to the PTY).
+    pub env: Option<Vec<(String, String)>>,
 }
 
 /// PTY session descriptor.
@@ -1200,7 +1206,13 @@ fn spawn_native_pty(request: &PtyRequest) -> Result<PtySession, PlatformError> {
     if let Some(cwd) = &request.cwd {
         command.current_dir(cwd);
     }
-    for (key, value) in child_environment_vars(&[]) {
+    // Use caller-supplied env when provided (e.g. with deny-list applied); fall back to
+    // the sanitised parent environment so that the shell has a usable PATH/HOME.
+    let child_env = request
+        .env
+        .clone()
+        .unwrap_or_else(|| child_environment_vars(&[]));
+    for (key, value) in child_env {
         command.env(key, value);
     }
     command
@@ -1344,7 +1356,13 @@ fn spawn_windows_conpty(request: &PtyRequest) -> Result<WindowsPtySessionHandle,
             .as_ref()
             .map(|cwd| PCWSTR(cwd.as_ptr()))
             .unwrap_or(PCWSTR(ptr::null()));
-        let env_block = windows_environment_block(&child_environment_vars(&[]));
+        // Use caller-supplied env when provided (deny-list pre-applied); fall back to
+        // the sanitised parent environment so that the shell has a usable PATH/WINDIR.
+        let resolved_env = request
+            .env
+            .clone()
+            .unwrap_or_else(|| child_environment_vars(&[]));
+        let env_block = windows_environment_block(&resolved_env);
 
         let spawn_result = CreateProcessW(
             PCWSTR(ptr::null()),
@@ -1615,8 +1633,11 @@ fn push_windows_backslashes(output: &mut String, count: usize) {
 
 #[cfg(windows)]
 fn windows_environment_block(vars: &[(String, String)]) -> Vec<u16> {
+    // CreateProcessW requires the environment block to be sorted case-insensitively by key.
+    let mut sorted: Vec<&(String, String)> = vars.iter().collect();
+    sorted.sort_by_key(|(key, _)| key.to_ascii_uppercase());
     let mut block = Vec::new();
-    for (key, value) in vars {
+    for (key, value) in sorted {
         block.extend(wide_null(&format!("{key}={value}")));
     }
     block.push(0);
@@ -2420,18 +2441,21 @@ mod tests {
             command: "cmd".to_string(),
             args: vec!["/C".to_string(), "echo hello".to_string()],
             cwd: None,
+            env: None,
         };
         #[cfg(unix)]
         let request = PtyRequest {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), "printf hello".to_string()],
             cwd: None,
+            env: None,
         };
         #[cfg(not(any(unix, windows)))]
         let request = PtyRequest {
             command: "unsupported".to_string(),
             args: vec![],
             cwd: None,
+            env: None,
         };
         let session = service.spawn_pty(&request).expect("spawn native pty");
         assert!(session.id.starts_with("native-"));
@@ -2472,6 +2496,7 @@ mod tests {
                 "if : </dev/tty 2>/dev/null; then printf ctty; else printf no-ctty; fi".to_string(),
             ],
             cwd: None,
+            env: None,
         };
         let session = service
             .spawn_pty(&request)
@@ -2608,5 +2633,31 @@ mod tests {
         fake.write_text_file(Path::new("/tmp"), "x").expect("ok");
         assert_eq!(text, "ok");
         assert_eq!(list.len(), 2);
+    }
+
+    /// CreateProcessW requires the env block to be sorted case-insensitively by key.
+    #[test]
+    #[cfg(windows)]
+    fn windows_environment_block_is_sorted_case_insensitively() {
+        let vars = vec![
+            ("zeta".to_string(), "1".to_string()),
+            ("ALPHA".to_string(), "2".to_string()),
+            ("Beta".to_string(), "3".to_string()),
+            ("GAMMA".to_string(), "4".to_string()),
+            ("alpha_extra".to_string(), "5".to_string()),
+        ];
+        let block = windows_environment_block(&vars);
+
+        // Decode the wide block back to key=value strings (strip the trailing double-null).
+        let block_str = String::from_utf16_lossy(&block);
+        let entries: Vec<&str> = block_str.trim_end_matches('\0').split('\0').collect();
+        let keys: Vec<&str> = entries.iter().filter_map(|e| e.split('=').next()).collect();
+
+        // Keys must appear in case-insensitive alphabetical order.
+        let expected = ["ALPHA", "alpha_extra", "Beta", "GAMMA", "zeta"];
+        assert_eq!(
+            keys, expected,
+            "windows_environment_block keys must be sorted case-insensitively; got: {keys:?}"
+        );
     }
 }
