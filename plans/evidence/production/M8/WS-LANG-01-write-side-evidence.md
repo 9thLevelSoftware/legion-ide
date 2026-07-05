@@ -133,11 +133,11 @@ Full log: `C:\Users\dasbl\RustroverProjects\legion-ide\.superpowers\sdd\m8\gp1-g
 | workspace-check | PASS |
 | workspace-test | PASS |
 | clippy | PASS |
-| perf-harness | (pending) |
-| verify-perf-harness | (pending) |
-| cargo-deny | (pending) |
-| rust-analyzer-smoke | (pending) |
-| golden-path-1 | (pending) |
+| perf-harness | PASS |
+| verify-perf-harness | PASS |
+| cargo-deny | PASS |
+| rust-analyzer-smoke | PASS |
+| golden-path-1 | PASS |
 
 ---
 
