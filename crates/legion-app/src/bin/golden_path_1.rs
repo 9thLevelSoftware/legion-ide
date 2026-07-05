@@ -318,15 +318,18 @@ fn poll_terminal_for_marker(
                 | TerminalPanelStatusKind::Crashed
         );
         if session_done || Instant::now() >= deadline {
-            // Dump accumulated rows for post-mortem diagnostics.
+            // Dump accumulated rows for post-mortem diagnostics.  Full
+            // scrollback, full payloads: rows are already capped by the
+            // product's per-row limit, and a failed s5 has at most a few
+            // dozen rows — completeness beats brevity when the only
+            // diagnostics channel is a CI log (LSP-B lesson).
             eprintln!("[s5-poll] loop exit: session_done={session_done} rows={row_count}");
-            for (i, row) in projection.output_rows.iter().enumerate().rev().take(5) {
+            for (i, row) in projection.output_rows.iter().enumerate() {
                 eprintln!(
                     "[s5-poll] row[{i}] len={} truncated={} payload={:?}",
                     row.redacted_payload.len(),
                     row.truncated,
-                    // Limit to 120 chars to avoid flooding stderr.
-                    &row.redacted_payload.chars().take(120).collect::<String>()
+                    row.redacted_payload
                 );
             }
             break;
@@ -858,8 +861,25 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
         (bat_path, cmd)
     } else {
         let sh_path = std::env::temp_dir().join(format!("gp1_smoke_test_{pid}.sh"));
+        // Sidecar transcript: ground truth that survives even when the PTY
+        // scrollback projection loses rows (observed on macOS CI, run
+        // 28741840232: block exited 0 in 173ms yet no script output row —
+        // including the marker — ever appeared in the projection).  The
+        // script records (1) whether/where cargo resolves and (2) the real
+        // exit code, WITHOUT altering what flows to the PTY: cargo's
+        // stdout/stderr and the marker echo reach the terminal exactly as
+        // before.
+        let sidecar = std::env::temp_dir().join(format!("gp1_smoke_sidecar_{pid}.txt"));
+        let sidecar_str = sidecar.to_string_lossy();
         let sh_content = format!(
-            "#!/bin/sh\ncd '{temp_str}'; cargo test -q --no-fail-fast --color=never; echo \"SMOKE_EXIT:$?\"\n"
+            "#!/bin/sh\n\
+             command -v cargo > '{sidecar_str}' 2>&1\n\
+             echo \"PROBE_CARGO_STATUS:$?\" >> '{sidecar_str}'\n\
+             cd '{temp_str}'\n\
+             cargo test -q --no-fail-fast --color=never\n\
+             gp1_code=$?\n\
+             echo \"SMOKE_EXIT:$gp1_code\" >> '{sidecar_str}'\n\
+             echo \"SMOKE_EXIT:$gp1_code\"\n"
         );
         fs::write(&sh_path, sh_content.as_bytes()).map_err(|e| format!("s5: write script: {e}"))?;
         let cmd = format!("sh '{}'\n", sh_path.to_string_lossy());
@@ -888,9 +908,27 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
     let hit = poll_terminal_for_marker(app, session_id, SMOKE_EXIT_MARKER, deadline);
 
     match hit {
-        None => Err(format!(
-            "s5: timeout ({TERMINAL_POLL_DEADLINE_SECS}s) waiting for '{SMOKE_EXIT_MARKER}' in terminal output"
-        )),
+        None => {
+            // Post-mortem: dump the sidecar transcript (Unix script writes
+            // it; absent on Windows or if the script never ran).  This is
+            // the ground-truth channel when the PTY projection lost rows.
+            let sidecar = std::env::temp_dir().join(format!("gp1_smoke_sidecar_{pid}.txt"));
+            match fs::read_to_string(&sidecar) {
+                Ok(text) => {
+                    eprintln!("[s5] sidecar transcript ({}):", sidecar.display());
+                    for line in text.lines() {
+                        eprintln!("[s5-sidecar] {line}");
+                    }
+                }
+                Err(e) => eprintln!(
+                    "[s5] sidecar transcript unavailable ({}): {e}",
+                    sidecar.display()
+                ),
+            }
+            Err(format!(
+                "s5: timeout ({TERMINAL_POLL_DEADLINE_SECS}s) waiting for '{SMOKE_EXIT_MARKER}' in terminal output"
+            ))
+        }
         Some(row) => {
             eprintln!("[s5] exit marker found in row: {row:?}");
             // Parse exit code from the marker payload (best-effort; redaction may truncate).
