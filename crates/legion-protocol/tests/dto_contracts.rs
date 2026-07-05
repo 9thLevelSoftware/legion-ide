@@ -9081,7 +9081,10 @@ fn dto_contracts_phase4_runtime_surfaces_are_protocol_mediated() {
     let agent_manifest = include_str!("../../legion-agent/Cargo.toml");
     let tracker_manifest = include_str!("../../legion-tracker/Cargo.toml");
     let memory_manifest = include_str!("../../legion-memory/Cargo.toml");
-    assert!(!agent_manifest.contains("legion-platform"));
+    // legion-platform is permitted in legion-agent solely to consume the shared
+    // resolve_existing_prefix path-canonicalization helper (see plans/dependency-policy.md —
+    // "permitted solely to consume the shared resolve_existing_prefix … No PTY, process, or
+    // filesystem mutation authority is added"). The heavyweight surface guards remain:
     assert!(!agent_manifest.contains("legion-observability"));
     assert!(!agent_manifest.contains("legion-project"));
     assert!(!agent_manifest.contains("legion-editor"));
