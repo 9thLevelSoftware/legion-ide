@@ -262,6 +262,33 @@ impl DelegatedTaskSandboxOrchestrator {
         }
     }
 
+    /// Creates a new orchestrator that places the sandbox under an explicit
+    /// root directory instead of the shared `target/delegated-tasks` default.
+    ///
+    /// Intended for test callers that need hermetic, per-test sandbox
+    /// isolation: pass a unique temporary directory as `sandbox_root` so
+    /// concurrent test threads cannot see or reap each other's lease files.
+    /// The `source_root` argument has the same semantics as in
+    /// `with_workspace_root`: `Some(path)` enables the fallback workspace-copy
+    /// path when `git worktree add` is unavailable, `None` creates an empty
+    /// sandbox directory.
+    ///
+    /// Product callers should continue to use `new` or `with_workspace_root`
+    /// so that the canonical `target/delegated-tasks` root is preserved.
+    pub fn with_sandbox_root(
+        sandbox_root: &Path,
+        run_id: &str,
+        source_root: Option<&Path>,
+    ) -> Self {
+        let sandbox_path = sandbox_root.join(format!("task-{run_id}"));
+        Self {
+            sandbox_path,
+            source_root: source_root.map(|p| p.to_path_buf()),
+            is_worktree: false,
+            lease: None,
+        }
+    }
+
     /// Returns the sandbox path.
     pub fn sandbox_path(&self) -> &Path {
         &self.sandbox_path
