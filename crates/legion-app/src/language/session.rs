@@ -223,24 +223,22 @@ impl RustAnalyzerSession {
             .map_err(LanguageSessionError::Handshake)
     }
 
-    /// Drains the buffered diagnostic notifications for `uri` and clears them
-    /// from the session, allowing the next `pump_diagnostics` call to wait for
-    /// fresh diagnostics issued after a `did_change`.
+    /// Returns and removes the most recently received raw `publishDiagnostics`
+    /// params for `uri`, if any.
     ///
-    /// This is needed between the "introduce error" and "fix error" phases of
-    /// the s3 diagnostic cycle: after the error diagnostics arrive, draining
-    /// lets the next `pump_diagnostics` wait for the post-fix (empty or clean)
-    /// notification rather than immediately returning the cached error set.
-    pub fn drain_diagnostics_for(&mut self, uri: &str) {
+    /// The returned value can be passed to
+    /// `AppComposition::ingest_lsp_publish_diagnostics_for_buffer` to project
+    /// the diagnostics through the app-owned `LanguageToolingProjection`.
+    pub fn take_last_diagnostic_params_for(&mut self, uri: &str) -> Option<serde_json::Value> {
         let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
-        self.session.clear_diagnostics_for_uri(expected_hash);
+        self.session.take_raw_diagnostic_params_for(&expected_hash)
     }
 
     /// Pumps until a diagnostic notification for `uri` arrives with
     /// `error_count == 0` (all errors cleared), or the timeout elapses.
     ///
-    /// Call this after [`drain_diagnostics_for`] + a fix [`did_change`] to
-    /// confirm the language server has acknowledged the repaired source.
+    /// Call this after a fix [`did_change`] to confirm the language server has
+    /// acknowledged the repaired source.
     ///
     /// Returns `true` if a clean (0-error) notification was received before the
     /// deadline, or `false` if the deadline elapsed.
@@ -251,14 +249,28 @@ impl RustAnalyzerSession {
     ) -> bool {
         let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
         let deadline = std::time::Instant::now() + timeout;
-        // Drain any stale buffered notifications first so we wait for a fresh one.
-        self.session.clear_diagnostics_for_uri(expected_hash.clone());
+        // Do NOT pre-clear the notification buffer before pumping.
+        //
+        // rust-analyzer sometimes sends an immediate "clearing ack" notification
+        // (publishDiagnostics with an empty diagnostics array) right after it
+        // processes a textDocument/didChange, before re-analysing the new content.
+        // This ack can arrive in the background reader's MPSC channel before
+        // pump_until_diagnostics_clear is even called.  Pre-clearing the buffer
+        // is unnecessary: pump_until reads fresh frames from the channel regardless
+        // of what is already buffered.
+        //
+        // pump_until_has_error_for always calls clear_diagnostics_for_uri at its
+        // start, so after it returns the buffer contains only notifications received
+        // during that pump.  The last such notification is the error notification that
+        // matched its predicate — so buffered_clean is false and the pump starts fresh.
         let outcome = self.session.pump_until(deadline, &mut |n| {
             n.diagnostics
                 .iter()
                 .any(|d| d.uri_hash == expected_hash && d.error_count == 0)
         });
-        // Also check if the buffered set (accumulated during the pump) shows clean.
+        // Check the most recent buffered notification for this URI as a secondary
+        // success signal: a clean notification received during the pump will be the
+        // last entry in the buffer when PredicateMet is returned.
         let buffered_clean = self
             .session
             .diagnostic_notifications()
@@ -288,7 +300,8 @@ impl RustAnalyzerSession {
         let deadline = std::time::Instant::now() + timeout;
         // Drain stale buffered notifications (e.g. the pre-error clean batch) so we
         // only match fresh ones produced after the erroneous did_change.
-        self.session.clear_diagnostics_for_uri(expected_hash.clone());
+        self.session
+            .clear_diagnostics_for_uri(expected_hash.clone());
         let outcome = self.session.pump_until(deadline, &mut |n| {
             n.diagnostics
                 .iter()

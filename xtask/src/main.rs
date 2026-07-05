@@ -1439,12 +1439,18 @@ fn run_golden_path_1_command(
     if code == 0 {
         println!(
             "golden-path-1: smoke passed; report written to {}",
-            workspace_root.join(out_dir).join("gp1_report.toml").display()
+            workspace_root
+                .join(out_dir)
+                .join("gp1_report.toml")
+                .display()
         );
     } else {
         eprintln!(
             "golden-path-1: smoke exited with code {code}; check {}",
-            workspace_root.join(out_dir).join("gp1_report.toml").display()
+            workspace_root
+                .join(out_dir)
+                .join("gp1_report.toml")
+                .display()
         );
     }
     code

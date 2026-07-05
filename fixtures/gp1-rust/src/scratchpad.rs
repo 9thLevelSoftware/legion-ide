@@ -5,4 +5,5 @@
 // `cargo test` in the fixture passes without intervention.
 
 /// No-op placeholder function. The smoke replaces this entire file at runtime.
+#[allow(dead_code)]
 pub fn scratchpad() {}

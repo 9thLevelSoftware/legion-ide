@@ -5351,6 +5351,7 @@ impl TerminalWorkflow {
         &mut self,
         context: ActiveWorkspaceContext,
         command_label: String,
+        timeout_secs: Option<u64>,
         event_context: EventContext,
     ) -> TerminalPanelProjection {
         // Product gate: auto-enable the runtime for trusted-workspace explicit launches.
@@ -5418,7 +5419,7 @@ impl TerminalWorkflow {
             capability_id: CapabilityId("terminal.launch".to_string()),
             cwd_policy: "workspace-root".to_string(),
             output_byte_limit: 256 * 1024,
-            timeout_seconds: 30,
+            timeout_seconds: timeout_secs.unwrap_or(30),
             schema_version: 1,
         };
         let runtime_label = std::any::type_name::<
@@ -7973,6 +7974,8 @@ pub enum AppCommandRequest {
     TerminalLaunch {
         /// Display-safe command label or fixture command.
         command_label: String,
+        /// Optional session-timeout override in seconds (default: 30).
+        timeout_secs: Option<u64>,
     },
     /// Send input to an active terminal session.
     TerminalInput {
@@ -8887,9 +8890,13 @@ impl CommandDispatcher {
             CommandDispatchIntent::CancelLanguageOperation { operation_id } => {
                 Ok(AppCommandRequest::CancelLanguageOperation { operation_id })
             }
-            CommandDispatchIntent::TerminalLaunch { command_label } => {
-                Ok(AppCommandRequest::TerminalLaunch { command_label })
-            }
+            CommandDispatchIntent::TerminalLaunch {
+                command_label,
+                timeout_secs,
+            } => Ok(AppCommandRequest::TerminalLaunch {
+                command_label,
+                timeout_secs,
+            }),
             CommandDispatchIntent::TerminalInput {
                 session_id,
                 payload,
@@ -14752,16 +14759,22 @@ impl AppComposition {
                 let event_context = self.next_event_context();
                 let projection =
                     self.terminal_workflow
-                        .launch(context, lens.command_label, event_context);
+                        .launch(context, lens.command_label, None, event_context);
                 self.persist_latest_terminal_audit()?;
                 Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
             }
-            AppCommandRequest::TerminalLaunch { command_label } => {
+            AppCommandRequest::TerminalLaunch {
+                command_label,
+                timeout_secs,
+            } => {
                 let context = self.active_documents.require_workspace_context()?;
                 let event_context = self.next_event_context();
-                let projection =
-                    self.terminal_workflow
-                        .launch(context, command_label, event_context);
+                let projection = self.terminal_workflow.launch(
+                    context,
+                    command_label,
+                    timeout_secs,
+                    event_context,
+                );
                 self.persist_latest_terminal_audit()?;
                 Ok(AppCommandOutcome::TerminalPanelUpdated(projection))
             }

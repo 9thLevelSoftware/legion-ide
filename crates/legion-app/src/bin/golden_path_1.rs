@@ -37,10 +37,10 @@ use legion_app::{
 use legion_editor::{TextEdit, TextPosition, TextRange};
 use legion_lsp::{LspServerProcessConfig, LspStdioLauncher, LspSupervisorConfig};
 use legion_protocol::{
-    CapabilityDecisionId, CapabilityId, CausalityId, CorrelationId, FileFingerprint,
+    BufferId, CapabilityDecisionId, CapabilityId, CausalityId, CorrelationId, FileFingerprint,
     LanguageId, LanguageServerId, LspConfiguredServerIdentity, LspLaunchPolicyDecision,
-    LspWorkspaceTrustPosture, PrincipalId, RedactionHint, SemanticPrivacyScope, TerminalPanelStatusKind,
-    TerminalSessionId, WorkspaceId, WorkspaceRootId, WorkspaceTrustState,
+    LspWorkspaceTrustPosture, PrincipalId, RedactionHint, SemanticPrivacyScope,
+    TerminalPanelStatusKind, TerminalSessionId, WorkspaceId, WorkspaceRootId, WorkspaceTrustState,
 };
 use legion_ui::{CommandDispatchIntent, GitHunkStageProjection, SearchScopeProjection};
 use uuid::Uuid;
@@ -95,7 +95,9 @@ fn parse_args() -> Result<Args, String> {
         match args[i].as_str() {
             "--fixture-dir" => {
                 i += 1;
-                fixture_dir = Some(PathBuf::from(args.get(i).ok_or("--fixture-dir needs value")?));
+                fixture_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("--fixture-dir needs value")?,
+                ));
             }
             "--out-dir" => {
                 i += 1;
@@ -103,8 +105,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--record-evidence" => {
                 i += 1;
-                evidence_dir =
-                    Some(PathBuf::from(args.get(i).ok_or("--record-evidence needs value")?));
+                evidence_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("--record-evidence needs value")?,
+                ));
             }
             _ => {}
         }
@@ -121,11 +124,42 @@ fn parse_args() -> Result<Args, String> {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Convert Unix epoch seconds to an RFC 3339 UTC timestamp string.
+///
+/// Uses the civil-from-days algorithm by Howard Hinnant so that no external
+/// date/time dependency is required.
+fn epoch_secs_to_rfc3339(secs: u64) -> String {
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    let (year, month, day) = days_to_ymd(days as i64);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Convert days since Unix epoch (1970-01-01) to a Gregorian (year, month, day) triple.
+///
+/// Algorithm: civil_from_days — Howard Hinnant, https://howardhinnant.github.io/date_algorithms.html
+fn days_to_ymd(days: i64) -> (u32, u32, u32) {
+    let z = days + 719468; // shift epoch to 0000-03-01
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month prime [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let mon = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let y = yoe as i64 + era * 400;
+    let y = if mon <= 2 { y + 1 } else { y };
+    (y as u32, mon as u32, d as u32)
+}
+
 fn utc_now() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}s", now.as_secs())
+    epoch_secs_to_rfc3339(now.as_secs())
 }
 
 fn run_timer<F, T>(f: F) -> (T, u128)
@@ -139,8 +173,7 @@ where
 
 /// Copy a directory tree (shallow: files only, no nested dirs beyond one level).
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst)
-        .map_err(|e| format!("create dir {}: {e}", dst.display()))?;
+    fs::create_dir_all(dst).map_err(|e| format!("create dir {}: {e}", dst.display()))?;
     for entry in fs::read_dir(src).map_err(|e| format!("read dir {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| format!("read entry: {e}"))?;
         let ft = entry.file_type().map_err(|e| format!("file type: {e}"))?;
@@ -149,8 +182,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         if ft.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else if ft.is_file() {
-            fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("copy {} -> {}: {e}", src_path.display(), dst_path.display()))?;
+            fs::copy(&src_path, &dst_path).map_err(|e| {
+                format!("copy {} -> {}: {e}", src_path.display(), dst_path.display())
+            })?;
         }
     }
     Ok(())
@@ -289,9 +323,7 @@ fn poll_terminal_for_marker(
         );
         if session_done || Instant::now() >= deadline {
             // Dump accumulated rows for post-mortem diagnostics.
-            eprintln!(
-                "[s5-poll] loop exit: session_done={session_done} rows={row_count}"
-            );
+            eprintln!("[s5-poll] loop exit: session_done={session_done} rows={row_count}");
             for (i, row) in projection.output_rows.iter().enumerate().rev().take(5) {
                 eprintln!(
                     "[s5-poll] row[{i}] len={} truncated={} payload={:?}",
@@ -322,20 +354,23 @@ fn run_s1(fixture_dir: &Path) -> Result<S1Result, String> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "legion-gp1-smoke-{}-{}",
-        process::id(),
-        nanos
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("legion-gp1-smoke-{}-{}", process::id(), nanos));
 
     copy_dir_recursive(fixture_dir, &temp_dir)?;
 
     // git init in the temp dir
     git_cmd(&temp_dir, &["init", "-b", "main"])?;
-    git_cmd(&temp_dir, &["config", "user.email", "gp1-smoke@legion.test"])?;
+    git_cmd(
+        &temp_dir,
+        &["config", "user.email", "gp1-smoke@legion.test"],
+    )?;
     git_cmd(&temp_dir, &["config", "user.name", "GP-1 Smoke"])?;
     git_cmd(&temp_dir, &["add", "."])?;
-    git_cmd(&temp_dir, &["commit", "-m", "initial: smoke fixture baseline"])?;
+    git_cmd(
+        &temp_dir,
+        &["commit", "-m", "initial: smoke fixture baseline"],
+    )?;
 
     let mut app = AppComposition::new();
     app.open_workspace(
@@ -419,9 +454,15 @@ pub fn scratchpad() {
 }
 "#;
 
-const SCRATCHPAD_FIXED_TEXT: &str = r#"// scratchpad module — smoke-fixed
-pub fn scratchpad() {}
-"#;
+/// Content used for the "fix" phase of the s3 diagnostics cycle.
+///
+/// This is intentionally DIFFERENT from the at-rest fixture content so that
+/// rust-analyzer does not deduplicate the `publishDiagnostics` notification.
+/// RA tracks previously-seen file content per URI: if the fix content equals
+/// the at-rest content it already analysed during `didOpen` (version 1), RA
+/// may skip the re-analysis and never re-emit the "no errors" notification.
+/// Using a distinct but still-valid Rust snippet forces a fresh analysis.
+const SCRATCHPAD_FIXED_TEXT: &str = "// scratchpad module — smoke-fixed\npub fn scratchpad() {}\n";
 
 fn run_s3(
     temp_dir: &Path,
@@ -437,9 +478,15 @@ fn run_s3(
         .open_file(&scratchpad_str)
         .map_err(|e| format!("open scratchpad.rs: {e:?}"))?;
 
+    // Capture the active buffer id — needed to project diagnostics through
+    // AppComposition::ingest_lsp_publish_diagnostics_for_buffer (I-1).
+    let buffer_id: BufferId = app
+        .active_buffer_id()
+        .ok_or("s3: no active buffer after open_file(scratchpad.rs)")?;
+
     // Read the at-rest content and send did_open.
-    let at_rest_text = fs::read_to_string(&scratchpad_path)
-        .map_err(|e| format!("read scratchpad: {e}"))?;
+    let at_rest_text =
+        fs::read_to_string(&scratchpad_path).map_err(|e| format!("read scratchpad: {e}"))?;
     session
         .did_open(&scratchpad_uri, "rust", 1, &at_rest_text)
         .map_err(|e| format!("did_open: {e}"))?;
@@ -467,6 +514,18 @@ fn run_s3(
         .map_err(|e| format!("edit_active_buffer (error): {e:?}"))?;
 
     // Sync edit to rust-analyzer via did_change.
+    //
+    // We intentionally do NOT write ERROR_TEXT to disk before sending
+    // did_change.  Writing the file before didChange triggers RA's FS-watcher,
+    // which on Windows can enter a race that leaves RA's internal document
+    // state inconsistent.  Specifically: if RA processes the FS event at a
+    // point when its in-memory version and the didChange version conflict,
+    // RA may silently stop responding to subsequent didChange messages (C and
+    // D notifications are never sent for did_change(3)).  Omitting the disk
+    // write keeps RA's in-memory model as the authoritative source and avoids
+    // this race entirely.  The error pump (pump_until_has_error_for) already
+    // handles the initial clearing ack by skipping it and waiting for a
+    // notification with error_count > 0.
     session
         .did_change(&scratchpad_uri, 2, SCRATCHPAD_ERROR_TEXT)
         .map_err(|e| format!("did_change (error): {e}"))?;
@@ -476,13 +535,35 @@ fn run_s3(
     // immediately after didChange as an acknowledgement before re-analysing; we
     // skip that with pump_until_has_error_for which only returns true on the
     // first notification that has error_count > 0.
-    eprintln!("[s3] pumping for error diagnostic (up to 90s) ...");
-    let got_error = session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(90));
+    eprintln!("[s3] pumping for error diagnostic (up to 120s) ...");
+    let got_error = session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(120));
     eprintln!("[s3] error diagnostic received: {got_error}");
     if !got_error {
         return Err(
             "s3: expected >=1 error diagnostic after introducing type mismatch; \
-             none arrived within 90s deadline"
+             none arrived within 120s deadline"
+                .to_string(),
+        );
+    }
+
+    // Prove the error appears through AppComposition's projection layer (I-1).
+    // Route the raw publishDiagnostics payload through the product path the
+    // desktop uses: ingest_lsp_publish_diagnostics_for_buffer → LanguageToolingProjection.
+    eprintln!("[s3] asserting error through AppComposition projection ...");
+    let error_raw = session
+        .take_last_diagnostic_params_for(&scratchpad_uri)
+        .ok_or("s3: raw publishDiagnostics params absent after pump_until_has_error_for")?;
+    let error_projection = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &error_raw, false, None)
+        .map_err(|e| format!("s3: ingest_lsp_publish_diagnostics_for_buffer (error): {e:?}"))?;
+    eprintln!(
+        "[s3] projection.problems (error phase): {}",
+        error_projection.problems.len()
+    );
+    if error_projection.problems.is_empty() {
+        return Err(
+            "s3: LanguageToolingProjection.problems is empty after error ingested; \
+             expected >=1 — projection layer not seeing the diagnostic"
                 .to_string(),
         );
     }
@@ -504,7 +585,16 @@ fn run_s3(
         .edit_active_buffer(fix_edit)
         .map_err(|e| format!("edit_active_buffer (fix): {e:?}"))?;
 
-    // Sync fix to rust-analyzer.
+    // Sync fix to rust-analyzer with the distinct FIXED content.
+    // Using SCRATCHPAD_FIXED_TEXT (≠ at_rest_text) prevents RA from
+    // de-duplicating the re-analysis result against the at_rest_text it
+    // already analysed during did_open (version 1).
+    //
+    // We do NOT write to disk before sending did_change here: writing
+    // at_rest_text to disk before the fix did_change causes RA's FS-watcher
+    // to fire, publishing a 0-error notification E.  RA then deduplicates
+    // did_change(3)'s analysis result (also 0 errors) against E and skips the
+    // publishDiagnostics, so the clear pump sees nothing and times out.
     session
         .did_change(&scratchpad_uri, 3, SCRATCHPAD_FIXED_TEXT)
         .map_err(|e| format!("did_change (fix): {e}"))?;
@@ -513,15 +603,45 @@ fn run_s3(
     eprintln!("[s3] pumping until errors clear (up to 60s) ...");
     let cleared = session.pump_until_diagnostics_clear(&scratchpad_uri, Duration::from_secs(60));
     eprintln!("[s3] errors cleared: {cleared}");
+
+    // Write the at-rest content to disk after the pump completes (success or
+    // failure) so the fixture is in a clean, committed state for s6's
+    // git-clean check.  We never wrote ERROR_TEXT to disk, so the file still
+    // holds its original at_rest_text — but we write it explicitly here to
+    // ensure idempotency and to make s6's expectations clear regardless of
+    // future edits to this function.
+    fs::write(&scratchpad_path, &at_rest_text)
+        .map_err(|e| format!("write at-rest content to scratchpad: {e}"))?;
+
     if !cleared {
-        return Err("s3: error diagnostics did not clear after fix within 60s deadline".to_string());
+        return Err(
+            "s3: error diagnostics did not clear after fix within 60s deadline".to_string(),
+        );
     }
 
-    // Also write the fix to disk so git step sees clean state.
-    fs::write(&scratchpad_path, SCRATCHPAD_FIXED_TEXT)
-        .map_err(|e| format!("write fixed scratchpad: {e}"))?;
+    // Prove the clear is visible through AppComposition's projection layer (I-1).
+    eprintln!("[s3] asserting clear through AppComposition projection ...");
+    let clear_raw = session
+        .take_last_diagnostic_params_for(&scratchpad_uri)
+        .ok_or("s3: raw publishDiagnostics params absent after pump_until_diagnostics_clear")?;
+    let clear_projection = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &clear_raw, false, None)
+        .map_err(|e| format!("s3: ingest_lsp_publish_diagnostics_for_buffer (clear): {e:?}"))?;
+    eprintln!(
+        "[s3] projection.problems (clear phase): {}",
+        clear_projection.problems.len()
+    );
+    if !clear_projection.problems.is_empty() {
+        return Err(format!(
+            "s3: LanguageToolingProjection.problems has {} item(s) after error fixed; \
+             expected 0 -- projection layer not clearing correctly",
+            clear_projection.problems.len()
+        ));
+    }
 
-    eprintln!("[s3] diagnostics cycle complete (error introduced + cleared)");
+    eprintln!(
+        "[s3] diagnostics cycle complete (error introduced, projected, fixed, projection cleared)"
+    );
     Ok(())
 }
 
@@ -555,9 +675,48 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
             projection.status.kind
         ));
     }
+    // M-2: bound the count tightly — the fixture is a 2-file project; the marker
+    // appears only in main.rs so the result set should be small.
+    if hit_count > 5 {
+        return Err(format!(
+            "s4: suspiciously large hit count for '{MARKER}'; got {hit_count}, expected <=5 — \
+             fixture may have been modified or the search is matching unintended files"
+        ));
+    }
 
-    // Exercise case-sensitive option: "nocase" prefix makes it case-insensitive,
-    // default is case-sensitive. Verify we also get hits with nocase variant.
+    // M-1: case-sensitivity proof — lowercase "smoke_marker_alpha" must return 0 hits
+    // because the fixture marker is ALL CAPS.  Without this check a case-insensitive
+    // search engine would pass the upper-case query yet silently undercount nothing.
+    let cs_lower_query = MARKER.to_ascii_lowercase(); // "smoke_marker_alpha"
+    eprintln!(
+        "[s4] case-sensitivity proof: searching lowercase '{cs_lower_query}' (expected 0) ..."
+    );
+    let cs_lower_result = app
+        .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
+            scope: SearchScopeProjection::Workspace,
+            query: cs_lower_query.clone(),
+            limit: 50,
+        })
+        .map_err(|e| format!("cs-lower search dispatch: {e:?}"))?;
+    let cs_lower_projection = match cs_lower_result {
+        AppCommandOutcome::SearchUpdated(p) => p,
+        other => {
+            return Err(format!(
+                "s4: expected SearchUpdated for cs-lower, got {other:?}"
+            ));
+        }
+    };
+    let cs_lower_count = cs_lower_projection.results.len();
+    eprintln!("[s4] case-sensitive lowercase results: {cs_lower_count} (expected 0)");
+    if cs_lower_count != 0 {
+        return Err(format!(
+            "s4: case-sensitive search for '{cs_lower_query}' returned {cs_lower_count} hit(s); \
+             expected 0 — marker is ALL-CAPS in fixture, search must be case-sensitive by default"
+        ));
+    }
+
+    // Exercise case-insensitive option: "nocase" prefix makes it case-insensitive.
+    // Verify we also get hits when we explicitly opt into case-insensitive mode.
     let nocase_query = format!("nocase {}", MARKER.to_ascii_lowercase());
     eprintln!("[s4] running case-insensitive search: '{nocase_query}' ...");
     let nocase_result = app
@@ -569,7 +728,11 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
         .map_err(|e| format!("nocase search dispatch: {e:?}"))?;
     let nocase_projection = match nocase_result {
         AppCommandOutcome::SearchUpdated(p) => p,
-        other => return Err(format!("s4: expected SearchUpdated for nocase, got {other:?}")),
+        other => {
+            return Err(format!(
+                "s4: expected SearchUpdated for nocase, got {other:?}"
+            ));
+        }
     };
     let nocase_count = nocase_projection.results.len();
     eprintln!("[s4] nocase search results: {nocase_count}");
@@ -579,7 +742,9 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
         ));
     }
 
-    eprintln!("[s4] search step passed (hits={hit_count}, nocase_hits={nocase_count})");
+    eprintln!(
+        "[s4] search step passed (hits={hit_count}, cs_lower_hits={cs_lower_count}, nocase_hits={nocase_count})"
+    );
     Ok(())
 }
 
@@ -625,6 +790,9 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
     let launch_outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "gp1-smoke-cargo-test".to_string(),
+            // 300 s gives CI cold-start plenty of headroom (reviewer item h).
+            // The product default is 30 s; here we override for the smoke only.
+            timeout_secs: Some(300),
         })
         .map_err(|e| format!("terminal launch: {e:?}"))?;
     let launch_projection = match launch_outcome {
@@ -634,9 +802,10 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
 
     // Check if the terminal is running; skip gracefully if unavailable.
     if launch_projection.status.kind != TerminalPanelStatusKind::Running {
-        let reason = launch_projection.last_denial.clone().unwrap_or_else(|| {
-            format!("terminal status={:?}", launch_projection.status.kind)
-        });
+        let reason = launch_projection
+            .last_denial
+            .clone()
+            .unwrap_or_else(|| format!("terminal status={:?}", launch_projection.status.kind));
         eprintln!("[s5] terminal not running — SKIP: {reason}");
         return Ok(Some(reason));
     }
@@ -663,9 +832,12 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
     //   --color=never strip ANSI escape codes (they inflate character count)
     // Both are needed to keep output + SMOKE_EXIT: well under the product's
     // 240-char per-row scrollback limit.
+    // Write the runner script into the OS temp dir (NOT the fixture workspace git
+    // root) so it never shows up as an untracked file during the s6 git step (I-2).
     let temp_str = temp_dir.to_string_lossy();
+    let pid = process::id();
     let (script_path, terminal_cmd) = if cfg!(windows) {
-        let bat_path = temp_dir.join("gp1_smoke_test.bat");
+        let bat_path = std::env::temp_dir().join(format!("gp1_smoke_test_{pid}.bat"));
         // Use \r\n line endings — cmd.exe in ConPTY requires CRLF.
         // Use /D in `cd` to change drive if temp is on a different drive.
         let bat_content = format!(
@@ -678,17 +850,20 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
         let cmd = format!("call \"{}\"\r\n", bat_path.to_string_lossy());
         (bat_path, cmd)
     } else {
-        let sh_path = temp_dir.join("gp1_smoke_test.sh");
+        let sh_path = std::env::temp_dir().join(format!("gp1_smoke_test_{pid}.sh"));
         let sh_content = format!(
             "#!/bin/sh\ncd '{temp_str}'; cargo test -q --no-fail-fast --color=never; echo \"SMOKE_EXIT:$?\"\n"
         );
-        fs::write(&sh_path, sh_content.as_bytes())
-            .map_err(|e| format!("s5: write script: {e}"))?;
+        fs::write(&sh_path, sh_content.as_bytes()).map_err(|e| format!("s5: write script: {e}"))?;
         let cmd = format!("sh '{}'\n", sh_path.to_string_lossy());
         (sh_path, cmd)
     };
     eprintln!("[s5] runner script: {}", script_path.display());
-    eprintln!("[s5] sending command: {} ({} bytes)", terminal_cmd.trim(), terminal_cmd.len());
+    eprintln!(
+        "[s5] sending command: {} ({} bytes)",
+        terminal_cmd.trim(),
+        terminal_cmd.len()
+    );
 
     let _ = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalInput {
@@ -772,11 +947,18 @@ fn run_s6(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
         .map_err(|e| format!("s6: RefreshGit: {e:?}"))?
     {
         AppCommandOutcome::GitUpdated(p) => p,
-        other => return Err(format!("s6: expected GitUpdated from RefreshGit, got {other:?}")),
+        other => {
+            return Err(format!(
+                "s6: expected GitUpdated from RefreshGit, got {other:?}"
+            ));
+        }
     };
 
     if git_projection.changed_files.is_empty() {
-        return Err("s6: expected >=1 dirty file after save; git projection shows 0 changed files".to_string());
+        return Err(
+            "s6: expected >=1 dirty file after save; git projection shows 0 changed files"
+                .to_string(),
+        );
     }
     eprintln!("[s6] dirty files: {}", git_projection.changed_files.len());
 
@@ -795,7 +977,11 @@ fn run_s6(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
         .map_err(|e| format!("s6: StageGitHunk: {e:?}"))?
     {
         AppCommandOutcome::GitUpdated(_) => {}
-        other => return Err(format!("s6: expected GitUpdated from StageGitHunk, got {other:?}")),
+        other => {
+            return Err(format!(
+                "s6: expected GitUpdated from StageGitHunk, got {other:?}"
+            ));
+        }
     };
 
     // Commit via app authority.
@@ -807,15 +993,35 @@ fn run_s6(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
         .map_err(|e| format!("s6: CommitGitChanges: {e:?}"))?
     {
         AppCommandOutcome::GitUpdated(p) => p,
-        other => return Err(format!("s6: expected GitUpdated from CommitGitChanges, got {other:?}")),
+        other => {
+            return Err(format!(
+                "s6: expected GitUpdated from CommitGitChanges, got {other:?}"
+            ));
+        }
     };
-    eprintln!("[s6] committed; post-commit changed_files={}", committed.changed_files.len());
+    eprintln!(
+        "[s6] committed; post-commit changed_files={}",
+        committed.changed_files.len()
+    );
+
+    // Assert the worktree is clean after commit (I-2).  Any remaining changed
+    // files would indicate that the smoke left untracked or modified content
+    // inside the fixture workspace root, which is a constraint violation.
+    if !committed.changed_files.is_empty() {
+        return Err(format!(
+            "s6: worktree not clean after commit; {} changed file(s) still present — \
+             smoke may have left artefacts inside the fixture git root",
+            committed.changed_files.len()
+        ));
+    }
 
     // Verify git log shows our commit.
     let log = git_cmd(temp_dir, &["log", "-1", "--pretty=%s"])
         .map_err(|e| format!("s6: git log: {e}"))?;
     if !log.trim().contains("smoke: gp1 git workflow verification") {
-        return Err(format!("s6: expected commit message not found in git log; got: {log:?}"));
+        return Err(format!(
+            "s6: expected commit message not found in git log; got: {log:?}"
+        ));
     }
 
     eprintln!("[s6] git step passed");
@@ -846,7 +1052,10 @@ fn write_evidence(
 
     let overall_status = if steps.iter().any(|s| s.status == StepStatus::Failed) {
         "failed"
-    } else if steps.iter().all(|s| s.status == StepStatus::Passed || s.status == StepStatus::Skipped) {
+    } else if steps
+        .iter()
+        .all(|s| s.status == StepStatus::Passed || s.status == StepStatus::Skipped)
+    {
         "passed"
     } else {
         "unknown"
@@ -870,8 +1079,7 @@ fn write_evidence(
     }
 
     let out_path = out_dir.join("gp1_report.toml");
-    fs::write(&out_path, &toml)
-        .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+    fs::write(&out_path, &toml).map_err(|e| format!("write {}: {e}", out_path.display()))?;
     eprintln!("[s7] wrote evidence: {}", out_path.display());
 
     if let Some(ev_dir) = evidence_dir {
@@ -895,7 +1103,9 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("golden-path-1: argument error: {e}");
-            eprintln!("Usage: golden_path_1 --fixture-dir <path> [--out-dir <path>] [--record-evidence <path>]");
+            eprintln!(
+                "Usage: golden_path_1 --fixture-dir <path> [--out-dir <path>] [--record-evidence <path>]"
+            );
             process::exit(2);
         }
     };
@@ -928,7 +1138,11 @@ fn main() {
     let s1_end = utc_now();
     let (temp_dir, mut app) = match s1_result {
         Ok(r) => {
-            eprintln!("[s1] passed ({}ms); temp_dir={}", s1_ms, r.temp_dir.display());
+            eprintln!(
+                "[s1] passed ({}ms); temp_dir={}",
+                s1_ms,
+                r.temp_dir.display()
+            );
             record_step!(
                 "s1",
                 StepStatus::Passed,
@@ -1036,7 +1250,10 @@ fn main() {
             record_step!(
                 "s4",
                 StepStatus::Passed,
-                format!("workspace search returned hits for SMOKE_MARKER_ALPHA ({}ms)", s4_ms),
+                format!(
+                    "workspace search returned hits for SMOKE_MARKER_ALPHA ({}ms)",
+                    s4_ms
+                ),
                 s4_ms,
                 s4_start,
                 s4_end
@@ -1058,7 +1275,10 @@ fn main() {
             record_step!(
                 "s5",
                 StepStatus::Passed,
-                format!("cargo test exited 0 via product terminal gate ({}ms)", s5_ms),
+                format!(
+                    "cargo test exited 0 via product terminal gate ({}ms)",
+                    s5_ms
+                ),
                 s5_ms,
                 s5_start,
                 s5_end
@@ -1104,57 +1324,85 @@ fn main() {
     }
 
     // ── s7 ──────────────────────────────────────────────────────────────────
+    // Two-pass write so s7 is included in the final TOML (M-4):
+    //   Pass 1: write s1-s6, capture timing.
+    //   Push s7 record.
+    //   Pass 2: overwrite with s1-s7 and copy to --record-evidence path.
     let s7_start = utc_now();
+    let s7_wall = Instant::now();
     let finished_utc = utc_now();
-    let (s7_result, s7_ms) = run_timer(|| {
-        write_evidence(
-            &args.out_dir,
-            args.evidence_dir.as_deref(),
-            &legion_sha,
-            &started_utc,
-            &finished_utc,
-            &steps,
-        )
-    });
+    let first_result = write_evidence(
+        &args.out_dir,
+        None, // evidence_dir copy deferred to pass 2
+        &legion_sha,
+        &started_utc,
+        &finished_utc,
+        &steps,
+    );
+    let s7_ms = s7_wall.elapsed().as_millis();
     let s7_end = utc_now();
-    match s7_result {
-        Ok(path) => {
-            eprintln!("[s7] evidence written: {}", path.display());
-            steps.push(StepRecord {
-                id: "s7",
-                started_utc: s7_start,
-                finished_utc: s7_end,
-                duration_ms: s7_ms,
-                status: StepStatus::Passed,
-                detail: format!("evidence TOML written ({}ms)", s7_ms),
-            });
-        }
-        Err(e) => {
-            eprintln!("[s7] FAILED to write evidence: {e}");
-            steps.push(StepRecord {
-                id: "s7",
-                started_utc: s7_start,
-                finished_utc: s7_end,
-                duration_ms: s7_ms,
-                status: StepStatus::Failed,
-                detail: e.clone(),
-            });
-        }
+
+    match &first_result {
+        Ok(path) => eprintln!(
+            "[s7] evidence written (preliminary, s1-s6): {}",
+            path.display()
+        ),
+        Err(e) => eprintln!("[s7] FAILED to write evidence (pass 1): {e}"),
+    }
+    steps.push(StepRecord {
+        id: "s7",
+        started_utc: s7_start,
+        finished_utc: s7_end.clone(),
+        duration_ms: s7_ms,
+        status: if first_result.is_ok() {
+            StepStatus::Passed
+        } else {
+            StepStatus::Failed
+        },
+        detail: match &first_result {
+            Ok(_) => format!("evidence TOML written ({}ms)", s7_ms),
+            Err(e) => e.clone(),
+        },
+    });
+
+    // Pass 2: rewrite with all steps including s7, and copy to evidence_dir.
+    match write_evidence(
+        &args.out_dir,
+        args.evidence_dir.as_deref(),
+        &legion_sha,
+        &started_utc,
+        &s7_end,
+        &steps,
+    ) {
+        Ok(path) => eprintln!("[s7] evidence rewritten (final, s1-s7): {}", path.display()),
+        Err(e) => eprintln!("[s7] WARNING: pass-2 rewrite failed: {e}"),
     }
 
     // Print per-step summary.
     eprintln!("\n[gp1] SMOKE SUMMARY");
     for step in &steps {
-        eprintln!("  {} {} ({}ms): {}", step.id, step.status.as_str(), step.duration_ms, &step.detail[..step.detail.len().min(80)]);
+        eprintln!(
+            "  {} {} ({}ms): {}",
+            step.id,
+            step.status.as_str(),
+            step.duration_ms,
+            &step.detail[..step.detail.len().min(80)]
+        );
     }
 
     // Clean up temp dir on success; leave it for inspection on failure.
     let any_failed = steps.iter().any(|s| s.status == StepStatus::Failed);
     if any_failed {
-        eprintln!("\n[gp1] FAILED — temp workspace left for inspection: {}", temp_dir.display());
+        eprintln!(
+            "\n[gp1] FAILED — temp workspace left for inspection: {}",
+            temp_dir.display()
+        );
         process::exit(1);
     } else {
-        eprintln!("\n[gp1] PASSED — cleaning up temp workspace: {}", temp_dir.display());
+        eprintln!(
+            "\n[gp1] PASSED — cleaning up temp workspace: {}",
+            temp_dir.display()
+        );
         let _ = fs::remove_dir_all(&temp_dir);
         process::exit(0);
     }
