@@ -1250,6 +1250,10 @@ pub struct SearchResultProjection {
     pub snippet: String,
     /// Whether the snippet was truncated.
     pub snippet_truncated: bool,
+    /// `true` when this result belongs to a superseded query.  The desktop
+    /// should render stale rows de-emphasised (dimmed) until they are replaced
+    /// by results from the current query.
+    pub stale: bool,
 }
 
 /// Projection-only bounded search surface.
@@ -1271,6 +1275,16 @@ pub struct SearchProjection {
     pub omitted_result_count: usize,
     /// Count of files skipped or omitted by bounds/errors.
     pub omitted_file_count: usize,
+    /// Count of files skipped because they were detected as binary by the
+    /// NUL-byte heuristic.  Distinct from `omitted_file_count` which
+    /// covers error / oversized skips.
+    pub skipped_binary_count: usize,
+    /// Effective case-sensitive setting for this search result.
+    pub case_sensitive: bool,
+    /// Effective whole-word setting for this search result.
+    pub whole_word: bool,
+    /// Effective regex mode for this search result.
+    pub use_regex: bool,
     /// Display-safe diagnostics for skipped/limited search.
     pub diagnostics: Vec<String>,
     /// Projection generation timestamp.
@@ -1291,6 +1305,10 @@ impl SearchProjection {
             result_limit: 0,
             omitted_result_count: 0,
             omitted_file_count: 0,
+            skipped_binary_count: 0,
+            case_sensitive: true,
+            whole_word: false,
+            use_regex: false,
             diagnostics: Vec::new(),
             generated_at: TimestampMillis(0),
             schema_version: 1,
@@ -2500,6 +2518,12 @@ pub enum CommandDispatchIntent {
         query: String,
         /// Requested result limit; zero means app default.
         limit: usize,
+        /// Explicit case-sensitive override; `None` defers to text-prefix parsing.
+        case_sensitive: Option<bool>,
+        /// Explicit whole-word override; `None` defers to text-prefix parsing.
+        whole_word: Option<bool>,
+        /// Explicit regex mode override; `None` defers to text-prefix parsing.
+        use_regex: Option<bool>,
     },
     /// Run deterministic structural search/rewrite preview through app authority.
     RunStructuralSearch {
@@ -4145,6 +4169,9 @@ impl Shell {
                 scope: SearchScopeProjection::ActiveFile,
                 query: query.trim().to_string(),
                 limit: 0,
+                case_sensitive: None,
+                whole_word: None,
+                use_regex: None,
             })));
         }
         if let Some(query) = trimmed.strip_prefix(":search-workspace ") {
@@ -4152,6 +4179,9 @@ impl Shell {
                 scope: SearchScopeProjection::Workspace,
                 query: query.trim().to_string(),
                 limit: 0,
+                case_sensitive: None,
+                whole_word: None,
+                use_regex: None,
             })));
         }
         if let Some(query_id) = trimmed.strip_prefix(":search-cancel ") {

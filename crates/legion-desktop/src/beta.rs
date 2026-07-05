@@ -653,6 +653,9 @@ fn run_search_action(
         scope,
         query: query.to_string(),
         limit: 20,
+        case_sensitive: None,
+        whole_word: None,
+        use_regex: None,
     }) {
         Ok(DesktopWorkflowOutcome::SearchUpdated) => {
             let projection = &runtime.projection_snapshot().search_projection;

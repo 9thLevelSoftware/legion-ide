@@ -23,6 +23,32 @@ It assumes the reader already has a working build or a packaged desktop app.
 Manual mode is the deterministic local editing path.
 Use it when you want the projection-only UI, workspace navigation, and trusted local file operations without any AI or worker surfaces.
 
+#### Workspace search
+
+Search operates on the active file or across the entire workspace without mutating any files.
+Multi-file search/replace is explicitly out of scope until M9; the search surface is read-only.
+
+Options available in workspace search:
+
+- **Literal / Regex** — search using a plain string or a regular expression.
+- **Case-sensitive** — match uppercase and lowercase exactly as typed.
+- **Whole-word** — restrict matches to word boundaries.
+- **Glob filter** — restrict which files are walked (e.g. `*.rs`, `src/**`).
+
+Binary files are detected by a NUL-byte heuristic (first 8 KiB window) and skipped automatically;
+the search report includes a `skipped_binary_count` field that records how many were bypassed.
+
+When a new query begins, results from the previous query are marked **stale** until the new
+results arrive.  Stale rows are rendered de-emphasised (tagged `[stale]` in the desktop projection).
+
+#### Command palette
+
+The command palette (opened from the app bar) supports three modes: file opener, symbol finder,
+and command dispatcher.  Results are ranked by fuzzy score (consecutive-run, word-boundary,
+camelCase, path-segment, and filename-region bonuses) blended with a recency signal and a
+frequency bonus.  The frequency bonus accumulates metadata-only usage counts per workspace;
+no raw query text, AI context, or network I/O is involved.
+
 ### Assist
 
 Assist mode keeps the human in control while exposing AI-backed suggestions.

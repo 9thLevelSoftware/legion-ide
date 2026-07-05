@@ -102,6 +102,9 @@ fn manual_mode_open_edit_save_search_records_no_hosted_egress() {
             scope: SearchScopeProjection::ActiveFile,
             query: "local_only".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("active-file search should route through app authority");
     let AppCommandOutcome::SearchUpdated(search_projection) = search else {

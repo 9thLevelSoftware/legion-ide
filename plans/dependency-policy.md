@@ -13,6 +13,15 @@ Every current workspace crate must have an explicit internal dependency policy e
 - `xtask` may depend on:
   - `legion-protocol`
   - `legion-text`
+  - `legion-project`
+  - `legion-platform`
+  - `legion-security`
+
+  (`legion-project`/`legion-platform`/`legion-security` are permitted solely so
+  the perf-harness reference workloads exercise the REAL product search stack —
+  streaming walker, native filesystem/watcher, deny-by-default broker — per the
+  WS18.T1 follow-on. `xtask` is tooling at the top of the dependency graph; it
+  gains no product authority and no crate may depend on `xtask`.)
 
 - `legion-protocol` may depend on:
 

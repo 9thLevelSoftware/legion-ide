@@ -601,6 +601,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-project", "cargo test -p legion-index", "cargo test -p legion-desktop"]
     acceptance = ["Search is fast enough for the Legion repo."]
     stop_condition = "Stop if cancellation does not actually stop the underlying search job."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F4.T2"
@@ -623,6 +625,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop --test palette_coverage"]
     acceptance = ["Every command exposed in the palette is reachable from a keybinding or command-id list."]
     stop_condition = "Stop if a palette entry lacks a test that proves it can dispatch."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F4.T4"
@@ -634,6 +638,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo run -p xtask -- perf-harness"]
     acceptance = ["Search is bounded for large fixtures."]
     stop_condition = "Stop if the fixture is regenerated as a side effect of running the harness."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
   [[epics.features]]
   id = "P2.F5"

@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
+use std::io::{Read as IoRead, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -72,6 +72,9 @@ const WATCHER_EVENT_BUFFER: usize = 1_024;
 const WATCHER_RENAME_DEBOUNCE_MILLIS: u64 = 64;
 const WATCHER_RECOVERY_MAX_RESCANS: usize = 2;
 const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
+/// Number of bytes inspected by the binary sniff in the streaming search path.
+/// Matches the 8 KiB heuristic used by `git diff --stat` and GNU `grep`.
+const SEARCH_BINARY_SNIFF_WINDOW: usize = 8192;
 
 type WorkspaceScanResult = (
     Vec<FileTreeNode>,
@@ -207,6 +210,10 @@ pub struct WorkspaceSearchReport {
     pub hit_count: usize,
     pub omitted_hit_count: usize,
     pub omitted_file_count: usize,
+    /// Number of files skipped because they were detected as binary by the
+    /// NUL-byte heuristic.  These are not counted in `omitted_file_count`
+    /// so callers can distinguish "binary skipped" from "error / oversized".
+    pub skipped_binary_count: usize,
     pub diagnostics: Vec<String>,
     pub cancelled: bool,
 }
@@ -4657,6 +4664,20 @@ impl WorkspaceActor {
                 continue;
             }
 
+            // Binary sniff: scan the first SEARCH_BINARY_SNIFF_WINDOW bytes for NUL.
+            // This avoids passing binary files through the UTF-8 text pipeline.
+            {
+                let mut sniff_buf = [0u8; SEARCH_BINARY_SNIFF_WINDOW];
+                let is_binary = std::fs::File::open(path)
+                    .and_then(|mut f| f.read(&mut sniff_buf))
+                    .map(|n| sniff_buf[..n].contains(&0u8))
+                    .unwrap_or(false);
+                if is_binary {
+                    report.skipped_binary_count = report.skipped_binary_count.saturating_add(1);
+                    continue;
+                }
+            }
+
             let file_identity = match self.resolve_file(workspace_id, &relative_label) {
                 Ok(identity) => identity,
                 Err(err) => {
@@ -8359,5 +8380,249 @@ mod tests {
                 state.watcher_sequence += 1;
             }
         }
+    }
+
+    // ── Search tests (Tasks 2, 4) ────────────────────────────────────────────
+
+    fn search_query(
+        workspace_id: WorkspaceId,
+        pattern: SearchPattern,
+        text: &str,
+    ) -> WorkspaceSearchQuery {
+        WorkspaceSearchQuery {
+            workspace_id,
+            pattern,
+            search_text: text.to_string(),
+            filters: WorkspaceSearchFilters::default(),
+            result_limit: 500,
+            batch_size: 1,
+            use_indexed_backend: false,
+        }
+    }
+
+    #[test]
+    fn cancellation_stops_workspace_search_walker() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        // Write 10 text files all containing the same needle.
+        for i in 0..10 {
+            save_new_file_for_tests(
+                &actor,
+                opened.workspace_id,
+                &format!("cancel_test_{i}.txt"),
+                "needle_unique_cancel_token\n",
+            )
+            .expect("save test file");
+        }
+
+        let pattern =
+            SearchPattern::literal("needle_unique_cancel_token", true, false).expect("pattern");
+        let query = search_query(opened.workspace_id, pattern, "needle_unique_cancel_token");
+
+        // Return false on the very first batch to cancel the search.
+        let mut batch_count = 0usize;
+        let report = actor
+            .search_workspace_stream(query, |_batch| {
+                batch_count += 1;
+                false // Cancel immediately.
+            })
+            .expect("search_workspace_stream returns Ok even when cancelled");
+
+        assert!(
+            report.cancelled,
+            "report should be marked cancelled when callback returns false"
+        );
+        // The walker must stop before producing all 10 hits (batch_size=1, cancel on first batch).
+        assert!(
+            report.hit_count < 10,
+            "walker should stop before visiting all 10 files; hit_count={}",
+            report.hit_count
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_skips_binary_files_and_counts_them() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        // Write one text file with a needle.
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "text_file.txt",
+            "binary_test_needle text content\n",
+        )
+        .expect("save text file");
+
+        // Write one binary file (contains a NUL byte).
+        let binary_path = root.join("binary_file.bin");
+        let mut binary_content = b"binary_test_needle fake binary\x00data".to_vec();
+        binary_content.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&binary_path, &binary_content).expect("write binary file");
+
+        let pattern = SearchPattern::literal("binary_test_needle", true, false).expect("pattern");
+        let query = WorkspaceSearchQuery {
+            workspace_id: opened.workspace_id,
+            pattern,
+            search_text: "binary_test_needle".to_string(),
+            filters: WorkspaceSearchFilters::default(),
+            result_limit: 100,
+            batch_size: 64,
+            use_indexed_backend: false,
+        };
+
+        let mut all_hits = Vec::new();
+        let report = actor
+            .search_workspace_stream(query, |batch| {
+                all_hits.extend(batch.hits);
+                true
+            })
+            .expect("search succeeds");
+
+        // The text file should yield one hit.
+        assert_eq!(
+            all_hits.len(),
+            1,
+            "expected exactly one hit from the text file"
+        );
+        assert!(
+            all_hits[0].canonical_path.0.contains("text_file"),
+            "hit should be from text_file.txt"
+        );
+
+        // The binary file should be counted as skipped.
+        assert!(
+            report.skipped_binary_count >= 1,
+            "binary file should be counted; skipped_binary_count={}",
+            report.skipped_binary_count
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_options_literal_case_whole_word() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "options_test.txt",
+            "Hello World hello world HELLO\n",
+        )
+        .expect("save test file");
+
+        // Case-sensitive literal: only "Hello" (capital H) matches.
+        let pattern = SearchPattern::literal("Hello", true, false).expect("pattern");
+        let q = search_query(opened.workspace_id, pattern, "Hello");
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+        assert_eq!(hits.len(), 1, "case-sensitive: only 1 'Hello' match");
+
+        // Case-insensitive literal: "hello", "Hello", "HELLO" all match.
+        let pattern = SearchPattern::literal("hello", false, false).expect("pattern");
+        let q = search_query(opened.workspace_id, pattern, "hello");
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+        assert_eq!(hits.len(), 3, "case-insensitive: 3 'hello' matches");
+
+        // Whole-word: "World" should match but not "hello" part of "helloworld".
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "whole_word_test.txt",
+            "foo foobar\n",
+        )
+        .expect("save file");
+        let pattern = SearchPattern::literal("foo", true, true).expect("pattern");
+        let q = search_query(opened.workspace_id, pattern, "foo");
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+        // Only "foo" (standalone word) should match; "foobar" should not.
+        assert_eq!(hits.len(), 1, "whole-word: only standalone 'foo' matches");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// MIN-4: glob filter (include pattern) restricts search to matching files only.
+    #[test]
+    fn search_glob_filter_restricts_to_matching_files() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+        let needle = "GLOB_NEEDLE";
+
+        // Write two files: one .rs and one .txt — both containing the needle.
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "match_me.rs",
+            &format!("{needle} in a rust file\n"),
+        )
+        .expect("save .rs file");
+
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "skip_me.txt",
+            &format!("{needle} in a text file\n"),
+        )
+        .expect("save .txt file");
+
+        // Build an include-glob that only accepts *.rs files.
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new("*.rs").expect("valid glob"));
+        let include_set = Arc::new(builder.build().expect("build globset"));
+        let filters = WorkspaceSearchFilters {
+            include: Some(include_set),
+            exclude: None,
+        };
+
+        let pattern = SearchPattern::literal(needle, true, false).expect("pattern");
+        let q = WorkspaceSearchQuery {
+            workspace_id: opened.workspace_id,
+            pattern,
+            search_text: needle.to_string(),
+            filters,
+            result_limit: 500,
+            batch_size: 1,
+            use_indexed_backend: false,
+        };
+
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+
+        // Only the .rs file should have been searched; skip_me.txt must not appear.
+        assert_eq!(
+            hits.len(),
+            1,
+            "glob include *.rs: exactly 1 hit from .rs file"
+        );
+        let path = &hits[0].canonical_path.0;
+        assert!(
+            path.ends_with("match_me.rs"),
+            "hit must be from match_me.rs, got {path}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

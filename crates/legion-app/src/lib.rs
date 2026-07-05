@@ -42,8 +42,9 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
     StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
-    build_structural_rewrite_preview_payload, register_plugin_tree_sitter_grammars,
-    run_structural_search as index_run_structural_search, tree_sitter_supports_path,
+    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_tuple,
+    register_plugin_tree_sitter_grammars, run_structural_search as index_run_structural_search,
+    tree_sitter_supports_path,
 };
 use legion_memory::{
     LegionWorkflowOutcomeCandidate, MemoryCandidateRecord, MemoryCompactionPolicy,
@@ -169,7 +170,9 @@ use legion_security::{
     CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy, SecurityPolicy,
     mcp_tool_permission_request,
 };
-use legion_storage::InMemoryStorageRepositoryPort;
+use legion_storage::{
+    InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, PaletteUsageRepository,
+};
 use legion_terminal::{
     TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeError, TerminalRuntimeLaunchRequest,
     TerminalRuntimeOutputPollRequest,
@@ -7794,6 +7797,12 @@ pub enum AppCommandRequest {
         query: String,
         /// Requested result limit; zero means app default.
         limit: usize,
+        /// Explicit case-sensitive override; `None` defers to text-prefix parsing.
+        case_sensitive: Option<bool>,
+        /// Explicit whole-word override; `None` defers to text-prefix parsing.
+        whole_word: Option<bool>,
+        /// Explicit regex mode override; `None` defers to text-prefix parsing.
+        use_regex: Option<bool>,
     },
     /// Run deterministic structural search/rewrite preview through app authority.
     RunStructuralSearch {
@@ -8652,11 +8661,17 @@ impl CommandDispatcher {
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             } => Ok(AppCommandRequest::RunSearch {
                 query_id: format!("search:{}", correlation_id.0),
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             }),
             CommandDispatchIntent::RunStructuralSearch {
                 scope,
@@ -11576,6 +11591,37 @@ impl AssistInlinePredictionState {
     }
 }
 
+/// Explicit search option overrides. `None` means "fall through to
+/// text-prefix parsing" for the corresponding option.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchQueryOptions {
+    /// Override case-sensitivity. `None` defers to `case` / `icase` prefixes.
+    pub case_sensitive: Option<bool>,
+    /// Override whole-word matching. `None` defers to `word:` prefix.
+    pub whole_word: Option<bool>,
+    /// Override regex mode. `None` defers to `regex:` / `re:` prefixes.
+    pub use_regex: Option<bool>,
+}
+
+/// Parsed and compiled search query, including effective option values.
+struct ParsedSearchQuery {
+    /// Compiled search pattern ready for `search_workspace_stream`.
+    pattern: SearchPattern,
+    /// Include/exclude glob filters (from `include:` / `exclude:` prefixes).
+    filters: WorkspaceSearchFilters,
+    /// The raw pattern text (without mode/option prefixes).
+    search_text: String,
+    /// Whether the pattern was compiled as literal (not regex). Used to
+    /// decide whether the indexed back-end can be used.
+    is_literal: bool,
+    /// Effective case-sensitivity after applying overrides.
+    case_sensitive: bool,
+    /// Effective whole-word mode after applying overrides.
+    whole_word: bool,
+    /// Effective regex mode after applying overrides.
+    use_regex: bool,
+}
+
 #[derive(Debug, Default)]
 struct SearchBuildResult {
     results: Vec<SearchResultProjection>,
@@ -11584,6 +11630,16 @@ struct SearchBuildResult {
     diagnostics: Vec<String>,
     degraded_limited: bool,
     validation_error: Option<String>,
+    /// Number of files skipped because they were detected as binary by the
+    /// NUL-byte heuristic.  Propagated from `WorkspaceSearchReport` into
+    /// `SearchProjection` so the desktop panel can display the count.
+    skipped_binary_count: usize,
+    /// Effective search options used for this result set.
+    case_sensitive: bool,
+    /// Effective whole-word option used for this result set.
+    whole_word: bool,
+    /// Effective regex mode used for this result set.
+    use_regex: bool,
 }
 
 #[derive(Debug, Default)]
@@ -11631,8 +11687,10 @@ struct SearchLineInput<'a> {
 
 fn parse_search_query(
     query: &str,
-) -> Result<(SearchPattern, WorkspaceSearchFilters, String, bool), String> {
+    options: SearchQueryOptions,
+) -> Result<ParsedSearchQuery, String> {
     let mut mode = SearchPatternKind::Literal;
+    // Text-prefix defaults; explicit overrides are applied below.
     let mut case_sensitive = true;
     let mut whole_word = false;
     let mut include_globs = Vec::<String>::new();
@@ -11697,6 +11755,20 @@ fn parse_search_query(
         pattern_parts.push(token.to_string());
     }
 
+    // Explicit override flags take precedence over text-prefix parsing.
+    if let Some(v) = options.case_sensitive {
+        case_sensitive = v;
+    }
+    if let Some(v) = options.whole_word {
+        whole_word = v;
+    }
+    if let Some(true) = options.use_regex {
+        mode = SearchPatternKind::Regex;
+    } else if options.use_regex == Some(false) {
+        mode = SearchPatternKind::Literal;
+    }
+    let effective_use_regex = matches!(mode, SearchPatternKind::Regex);
+
     let pattern = pattern_parts.join(" ").trim().to_string();
     if pattern.is_empty() {
         return Err("Search query is empty".to_string());
@@ -11712,12 +11784,15 @@ fn parse_search_query(
     let include = compile_search_globset(&include_globs)?;
     let exclude = compile_search_globset(&exclude_globs)?;
 
-    Ok((
-        compiled_pattern,
-        WorkspaceSearchFilters { include, exclude },
-        pattern,
-        matches!(mode, SearchPatternKind::Literal),
-    ))
+    Ok(ParsedSearchQuery {
+        pattern: compiled_pattern,
+        filters: WorkspaceSearchFilters { include, exclude },
+        search_text: pattern,
+        is_literal: !effective_use_regex,
+        case_sensitive,
+        whole_word,
+        use_regex: effective_use_regex,
+    })
 }
 
 fn compile_search_globset(patterns: &[String]) -> Result<Option<Arc<GlobSet>>, String> {
@@ -11804,6 +11879,10 @@ fn build_search_projection(
         result_limit,
         omitted_result_count: result.omitted_result_count,
         omitted_file_count: result.omitted_file_count,
+        skipped_binary_count: result.skipped_binary_count,
+        case_sensitive: result.case_sensitive,
+        whole_word: result.whole_word,
+        use_regex: result.use_regex,
         diagnostics: result.diagnostics,
         generated_at: TimestampMillis::now(),
         schema_version: 1,
@@ -12276,68 +12355,8 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
     }
 }
 
-fn palette_fuzzy_score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Some((0, Vec::new()));
-    }
-
-    let query_chars = query
-        .chars()
-        .flat_map(char::to_lowercase)
-        .collect::<Vec<_>>();
-    let candidate_raw_chars = candidate.chars().collect::<Vec<_>>();
-    let candidate_chars = candidate_raw_chars
-        .iter()
-        .map(|&ch| ch.to_lowercase().next().unwrap_or(ch))
-        .collect::<Vec<_>>();
-
-    let mut matched_indices = Vec::with_capacity(query_chars.len());
-    let mut query_index = 0;
-    let mut score = 0_i32;
-    let mut last_match: Option<usize> = None;
-    for (candidate_index, candidate_char) in candidate_chars.iter().copied().enumerate() {
-        if query_index >= query_chars.len() {
-            break;
-        }
-        if candidate_char != query_chars[query_index] {
-            continue;
-        }
-
-        matched_indices.push(candidate_index);
-        score += 10;
-        if last_match.is_some_and(|last| last + 1 == candidate_index) {
-            score += 15;
-        }
-        if candidate_index == 0
-            || candidate_raw_chars
-                .get(candidate_index.saturating_sub(1))
-                .is_some_and(|previous| matches!(previous, '/' | '\\' | '-' | '_' | '.'))
-        {
-            score += 6;
-        }
-        if let Some(last) = last_match {
-            score -= candidate_index.saturating_sub(last + 1) as i32;
-        }
-        last_match = Some(candidate_index);
-        query_index += 1;
-    }
-
-    if query_index == query_chars.len() {
-        let lowercase_candidate = candidate.to_ascii_lowercase();
-        let lowercase_query = query.to_ascii_lowercase();
-        if lowercase_candidate == lowercase_query {
-            score += 100;
-        } else if lowercase_candidate.starts_with(&lowercase_query) {
-            score += 60;
-        } else if lowercase_candidate.contains(&lowercase_query) {
-            score += 35;
-        }
-        Some((score, matched_indices))
-    } else {
-        None
-    }
-}
+// palette_fuzzy_score is now provided by legion_index::fuzzy::fuzzy_score_tuple.
+// The import alias is already declared at the top of this file.
 
 fn sort_palette_results(results: &mut [PaletteScoredResult]) {
     results.sort_by(|left, right| {
@@ -12412,6 +12431,7 @@ fn collect_search_results_for_line(input: SearchLineInput<'_>) {
             },
             snippet,
             snippet_truncated,
+            stale: false,
         };
         push_bounded_search_result(input.result, input.limit, row);
     }
@@ -13116,6 +13136,11 @@ pub struct AppComposition {
     debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
+    /// Metadata-only per-workspace palette usage counters.
+    /// No raw query text, AI context, or network I/O.
+    /// Defaults to `InMemoryPaletteUsageRepository` (no persistence); swap
+    /// via `set_palette_usage_repository` to enable disk persistence.
+    palette_usage: Box<dyn PaletteUsageRepository>,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -13183,7 +13208,33 @@ impl AppComposition {
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
+            palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
         }
+    }
+
+    /// Replace the palette usage repository with a disk-backed implementation.
+    ///
+    /// Call this before any palette operations to enable persistence. Product
+    /// entry points call [`Self::enable_palette_usage_persistence`] instead;
+    /// tests continue to use the in-memory default (or inject their own).
+    pub fn set_palette_usage_repository(&mut self, repo: Box<dyn PaletteUsageRepository>) {
+        self.palette_usage = repo;
+    }
+
+    /// Wires disk-backed palette usage persistence for a workspace. Usage
+    /// counts (item keys only — never raw query text) live under the
+    /// workspace-local `.legion/` state directory so ranking history survives
+    /// restarts. Composition-root API: renderer edges (legion-desktop) and
+    /// the CLI call this instead of constructing storage types themselves,
+    /// keeping storage dependencies out of projection-only crates.
+    pub fn enable_palette_usage_persistence(&mut self, workspace_root: &std::path::Path) {
+        let palette_usage_path = workspace_root.join(".legion").join("palette_usage.json");
+        if let Some(dir) = palette_usage_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        self.set_palette_usage_repository(Box::new(
+            legion_storage::FilePaletteUsageRepository::open(&palette_usage_path),
+        ));
     }
 
     fn next_event_context(&mut self) -> EventContext {
@@ -13675,6 +13726,13 @@ impl AppComposition {
             return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
         };
 
+        // Record metadata-only usage count for frequency blending.
+        // Uses `result.id` as the item key (stable command/file identifier).
+        // No raw query text is persisted.
+        if let Some(workspace_id) = self.active_documents.workspace_id() {
+            self.palette_usage.record_usage(workspace_id, &result.id);
+        }
+
         self.palette.close();
         self.dispatch_ui_intent(intent)
     }
@@ -13835,10 +13893,18 @@ impl AppComposition {
         let mut scored = paths
             .into_iter()
             .filter_map(|path| {
-                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
+                    // Frequency bonus: cap at 20 uses × 5 pts = +100 so
+                    // fuzzy quality and recency still dominate the ranking.
+                    let freq_count = self
+                        .palette_usage
+                        .usage_count(workspace_id, &format!("file:{path}"));
+                    let freq_bonus = (freq_count.min(20) as i32) * 5;
                     PaletteScoredResult {
-                        score: score.saturating_add(recency_bonus),
+                        score: score
+                            .saturating_add(recency_bonus)
+                            .saturating_add(freq_bonus),
                         result: PaletteResult {
                             id: format!("file:{path}"),
                             kind: PaletteResultKind::File,
@@ -13890,7 +13956,7 @@ impl AppComposition {
                     .clone()
                     .unwrap_or_else(|| symbol.symbol_name_hash.value.clone());
                 let searchable = format!("{title} {}", symbol.path.0);
-                palette_fuzzy_score(&searchable, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&searchable, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus
                         .get(&symbol.path.0)
                         .copied()
@@ -13935,7 +14001,7 @@ impl AppComposition {
             .filter_map(|buffer_id| {
                 let metadata = self.active_documents.metadata_for_buffer(*buffer_id)?;
                 let path = metadata.identity.canonical_path.0.clone();
-                palette_fuzzy_score(&path, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
                     PaletteScoredResult {
                         score: score.saturating_add(recency_bonus),
@@ -13981,10 +14047,11 @@ impl AppComposition {
 
     fn palette_command_results(&self, query: &str) -> Vec<PaletteResult> {
         let active_buffer_id = self.active_documents.active_buffer_id;
+        let workspace_id = self.active_documents.workspace_id();
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
-                palette_fuzzy_score(spec.title, query).map(|(score, match_indices)| {
+                fuzzy_score_tuple(spec.title, query).map(|(score, match_indices)| {
                     let (buffer_id, disabled_reason) = match spec.id {
                         "save-active-buffer" | "close-active-tab" => (
                             active_buffer_id,
@@ -14003,8 +14070,19 @@ impl AppComposition {
                         }
                         _ => (None, None),
                     };
+                    // Frequency bonus: frequently-used commands score a little
+                    // higher. Cap at 20 uses × 5 pts = +100 so fuzzy quality
+                    // still dominates the ranking.
+                    let freq_bonus = workspace_id
+                        .map(|wid| {
+                            let count = self
+                                .palette_usage
+                                .usage_count(wid, &format!("command:{}", spec.id));
+                            (count.min(20) as i32) * 5
+                        })
+                        .unwrap_or(0);
                     PaletteScoredResult {
-                        score,
+                        score: score.saturating_add(freq_bonus),
                         result: PaletteResult {
                             id: format!("command:{}", spec.id),
                             kind: PaletteResultKind::Command,
@@ -14176,6 +14254,10 @@ impl AppComposition {
                     scope: self.palette.scope,
                     query,
                     limit: 0,
+                    // Palette-driven searches defer to text-prefix parsing.
+                    case_sensitive: None,
+                    whole_word: None,
+                    use_regex: None,
                 })
             }
             PaletteResultKind::StructuralSearch => {
@@ -14371,9 +14453,20 @@ impl AppComposition {
                 scope,
                 query,
                 limit,
-            } => Ok(AppCommandOutcome::SearchUpdated(
-                self.run_search(query_id, scope, query, limit)?,
-            )),
+                case_sensitive,
+                whole_word,
+                use_regex,
+            } => Ok(AppCommandOutcome::SearchUpdated(self.run_search(
+                query_id,
+                scope,
+                query,
+                limit,
+                SearchQueryOptions {
+                    case_sensitive,
+                    whole_word,
+                    use_regex,
+                },
+            )?)),
             AppCommandRequest::RunStructuralSearch {
                 query_id,
                 scope,
@@ -18186,13 +18279,45 @@ impl AppComposition {
     }
 
     /// Run bounded lexical search through app-owned editor/workspace authority.
+    ///
+    /// When a new query supersedes previous results, the existing
+    /// `SearchResultProjection` rows are immediately marked `stale = true` so
+    /// that callers can show de-emphasised results while the new search runs.
     pub fn run_search(
         &mut self,
         query_id: String,
         scope: SearchScopeProjection,
         query: String,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchProjection, AppCompositionError> {
+        // Mark current results stale before running the new query so that any
+        // caller holding a snapshot sees them de-emphasised.
+        //
+        // STALE-MARKER VISIBILITY LIMITATION (synchronous model): because
+        // `run_search` is synchronous and single-threaded, the stale flag set
+        // here is immediately overwritten by the `search_projection` assignment
+        // at the end of this call in the same stack frame.  In the current
+        // model there is therefore *zero practical visibility window* for the
+        // stale state — no external observer can read the transient stale
+        // snapshot.  The flag is meaningful only if/when an asynchronous
+        // search path is introduced (where the caller could read the stale
+        // projection between dispatching the new query and receiving its
+        // result).  Keep the logic in place as a forwards-compatible hook, but
+        // document that it has no effect today.
+        let incoming_query_id = query_id.as_str();
+        let current_is_different = self
+            .search_projection
+            .query_id
+            .as_deref()
+            .is_none_or(|prev| prev != incoming_query_id);
+        if current_is_different && !self.search_projection.results.is_empty() {
+            for row in &mut self.search_projection.results {
+                row.stale = true;
+            }
+            self.search_projection.generated_at = TimestampMillis::now();
+        }
+
         let result_limit = normalize_search_limit(limit);
         let query_label = query.trim().to_string();
         if query_label.is_empty() {
@@ -18212,10 +18337,10 @@ impl AppComposition {
 
         let result = match scope {
             SearchScopeProjection::ActiveFile => {
-                self.run_active_file_search(&query_id, &query_label, result_limit)?
+                self.run_active_file_search(&query_id, &query_label, result_limit, options)?
             }
             SearchScopeProjection::Workspace => {
-                self.run_workspace_search(&query_id, &query_label, result_limit)?
+                self.run_workspace_search(&query_id, &query_label, result_limit, options)?
             }
         };
 
@@ -20067,6 +20192,7 @@ impl AppComposition {
         query_id: &str,
         query: &str,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let buffer_id = self.active_documents.require_active_buffer()?;
         let metadata = self
@@ -20076,12 +20202,13 @@ impl AppComposition {
             .ok_or(AppCompositionError::ActiveFileMissing)?;
 
         if matches!(self.editor.buffer_mode(buffer_id)?, BufferMode::Degraded) {
-            return self
-                .run_degraded_active_file_search(query_id, query, limit, buffer_id, metadata);
+            return self.run_degraded_active_file_search(
+                query_id, query, limit, buffer_id, metadata, options,
+            );
         }
 
         let text = self.editor.text(buffer_id)?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -20090,10 +20217,15 @@ impl AppComposition {
                 });
             }
         };
-        let mut result = SearchBuildResult::default();
+        let mut result = SearchBuildResult {
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
+            ..SearchBuildResult::default()
+        };
         collect_search_results_for_text(SearchTextInput {
             query_id,
-            pattern: &parsed.0,
+            pattern: &parsed.pattern,
             scope: SearchScopeProjection::ActiveFile,
             workspace_id: Some(metadata.identity.workspace_id),
             buffer_id: Some(buffer_id),
@@ -20113,6 +20245,7 @@ impl AppComposition {
         limit: usize,
         buffer_id: BufferId,
         metadata: ActiveFileMetadata,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let scroll = self.active_documents.viewport_scroll_for(buffer_id);
         let viewport = self
@@ -20125,7 +20258,7 @@ impl AppComposition {
                     height_px: 384,
                 },
             })?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -20140,13 +20273,16 @@ impl AppComposition {
                 "Active-file search is limited to the visible viewport in degraded mode"
                     .to_string(),
             ],
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
             ..SearchBuildResult::default()
         };
 
         for slice in &viewport.line_slices {
             collect_search_results_for_line(SearchLineInput {
                 query_id,
-                pattern: &parsed.0,
+                pattern: &parsed.pattern,
                 scope: SearchScopeProjection::ActiveFile,
                 workspace_id: Some(metadata.identity.workspace_id),
                 buffer_id: Some(buffer_id),
@@ -20168,9 +20304,10 @@ impl AppComposition {
         query_id: &str,
         query: &str,
         limit: usize,
+        options: SearchQueryOptions,
     ) -> Result<SearchBuildResult, AppCompositionError> {
         let workspace_id = self.active_documents.require_workspace_id()?;
-        let parsed = match parse_search_query(query) {
+        let parsed = match parse_search_query(query, options) {
             Ok(parsed) => parsed,
             Err(message) => {
                 return Ok(SearchBuildResult {
@@ -20179,19 +20316,26 @@ impl AppComposition {
                 });
             }
         };
-        let mut result = SearchBuildResult::default();
+        let mut result = SearchBuildResult {
+            case_sensitive: parsed.case_sensitive,
+            whole_word: parsed.whole_word,
+            use_regex: parsed.use_regex,
+            ..SearchBuildResult::default()
+        };
         let backend_query = WorkspaceSearchQuery {
             workspace_id,
-            pattern: parsed.0,
-            search_text: parsed.2,
-            filters: parsed.1,
+            pattern: parsed.pattern,
+            search_text: parsed.search_text,
+            filters: parsed.filters,
             result_limit: limit,
             batch_size: 32,
-            use_indexed_backend: self.settings.indexed_workspace_search_enabled && parsed.3,
+            use_indexed_backend: self.settings.indexed_workspace_search_enabled
+                && parsed.is_literal,
         };
 
-        self.workspace
-            .search_workspace_stream(backend_query, |batch: WorkspaceSearchBatch| {
+        let report = self.workspace.search_workspace_stream(
+            backend_query,
+            |batch: WorkspaceSearchBatch| {
                 result.omitted_file_count = result
                     .omitted_file_count
                     .saturating_add(batch.omitted_file_count);
@@ -20228,10 +20372,15 @@ impl AppComposition {
                         },
                         snippet: hit.snippet,
                         snippet_truncated: hit.snippet_truncated,
+                        stale: false,
                     });
                 }
                 true
-            })?;
+            },
+        )?;
+        // Propagate binary-skip count from the workspace report so it is
+        // visible to the user via SearchProjection.skipped_binary_count.
+        result.skipped_binary_count = report.skipped_binary_count;
 
         Ok(result)
     }
@@ -25913,6 +26062,65 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// SEARCH.06: frequency bonus lifts heavily-used palette commands.
+    ///
+    /// "Refresh Explorer" and "Refresh Git" score identically for query
+    /// "refresh" (same subsequence bonuses, both are start-prefixes).
+    /// The alphabetical tiebreaker puts "Refresh Explorer" first ("E" < "G").
+    /// After recording 20 usages for "command:refresh-git" that command
+    /// gains +100 frequency bonus and rises above "Refresh Explorer".
+    #[test]
+    fn palette_usage_frequency_bonus_lifts_heavily_used_command() {
+        let workspace_id = WorkspaceId(42);
+        let mut app = AppComposition::new();
+        // Give the composition a workspace so `workspace_id()` returns `Some`.
+        app.active_documents.opened_workspace = Some(WorkspaceOpened {
+            workspace_id,
+            root_id: legion_protocol::WorkspaceRootId(1),
+            generation: WorkspaceGeneration(1),
+            snapshot_id: legion_protocol::SnapshotId(0),
+            correlation_id: CorrelationId(0),
+        });
+
+        // Baseline: "Refresh Explorer" and "Refresh Git" tie on fuzzy score;
+        // the alphabetical tiebreaker puts "Refresh Explorer" first.
+        let baseline = app.palette_command_results("refresh");
+        let git_pos_base = baseline
+            .iter()
+            .position(|r| r.id == "command:refresh-git")
+            .expect("Refresh Git should match 'refresh'");
+        let explorer_pos_base = baseline
+            .iter()
+            .position(|r| r.id == "command:refresh-explorer")
+            .expect("Refresh Explorer should match 'refresh'");
+        assert!(
+            explorer_pos_base <= git_pos_base,
+            "Refresh Explorer should rank at least as high as Refresh Git without frequency boost \
+             (alphabetical tiebreak: 'E' < 'G')"
+        );
+
+        // Record 20 usages for refresh-git -> +100 frequency bonus.
+        for _ in 0..20 {
+            app.palette_usage
+                .record_usage(workspace_id, "command:refresh-git");
+        }
+
+        let boosted = app.palette_command_results("refresh");
+        let git_pos_boosted = boosted
+            .iter()
+            .position(|r| r.id == "command:refresh-git")
+            .expect("Refresh Git should still match 'refresh' after boost");
+        let explorer_pos_boosted = boosted
+            .iter()
+            .position(|r| r.id == "command:refresh-explorer")
+            .expect("Refresh Explorer should still match 'refresh' after boost");
+
+        assert!(
+            git_pos_boosted < explorer_pos_boosted,
+            "Refresh Git (20 usages, +100 freq bonus) must outrank Refresh Explorer (0 usages)"
+        );
     }
 
     #[test]

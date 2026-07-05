@@ -560,6 +560,11 @@ impl DesktopRuntime {
             config.principal.clone(),
         )?;
 
+        // Palette usage persistence is app-composition work: the app owns the
+        // storage wiring (workspace-local `.legion/` state dir); the renderer
+        // edge only asks for it, keeping legion-desktop free of storage deps.
+        app.enable_palette_usage_persistence(&config.workspace_root);
+
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
         let mut dock_layouts = DockLayout::standard_all_modes();
