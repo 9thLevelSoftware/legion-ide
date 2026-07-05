@@ -661,6 +661,9 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
             scope: SearchScopeProjection::Workspace,
             query: MARKER.to_string(),
             limit: 50,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .map_err(|e| format!("search dispatch: {e:?}"))?;
     let projection = match search_result {
@@ -696,6 +699,11 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
             scope: SearchScopeProjection::Workspace,
             query: cs_lower_query.clone(),
             limit: 50,
+            // Explicit end-to-end exercise of the WS-SEARCH-01 option
+            // threading (stronger than relying on the default).
+            case_sensitive: Some(true),
+            whole_word: None,
+            use_regex: None,
         })
         .map_err(|e| format!("cs-lower search dispatch: {e:?}"))?;
     let cs_lower_projection = match cs_lower_result {
@@ -724,6 +732,9 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
             scope: SearchScopeProjection::Workspace,
             query: nocase_query.clone(),
             limit: 50,
+            case_sensitive: Some(false),
+            whole_word: None,
+            use_regex: None,
         })
         .map_err(|e| format!("nocase search dispatch: {e:?}"))?;
     let nocase_projection = match nocase_result {
