@@ -42,6 +42,18 @@ Use `.github/ISSUE_TEMPLATE/bug_report.md` and attach or reference:
 - the package manifest, if the problem is packaging-related;
 - the expected versus actual behavior in one or two sentences.
 
+## GP-1 smoke common skips
+
+The GP-1 smoke (`cargo run -p xtask -- golden-path-1`) may skip individual steps rather than failing when optional infrastructure is absent. A skip is recorded as `status = "skipped"` in `target/golden-path/gp1_report.toml` and does not cause the smoke to exit non-zero.
+
+| Step | Skip condition | How to resolve |
+|------|---------------|----------------|
+| s2 LSP init | `rust-analyzer` not found on PATH | `rustup component add rust-analyzer` |
+| s3 diagnostics | s2 was skipped (LSP unavailable) | Resolve the s2 skip condition above |
+| s5 terminal | PTY subsystem unavailable or shell binary absent | Typically only on headless Linux; ensure a PTY-capable shell is available |
+
+If the smoke exits non-zero and a step reports `status = "failed"` (not `"skipped"`), capture `target/golden-path/gp1_report.toml` and the temp fixture path printed to stderr for triage.
+
 ## Language server (LSP) issues
 
 ### Server does not start

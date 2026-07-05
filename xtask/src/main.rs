@@ -594,6 +594,38 @@ enum Commands {
     /// A clean skip (rust-analyzer absent) is treated as success (exit 0).
     /// Returns non-zero only on a real test failure.
     RustAnalyzerSmoke,
+    /// Run the scripted GP-1 golden-path smoke against a throwaway fixture workspace.
+    ///
+    /// Drives legion-app product APIs (AppComposition, RustAnalyzerSession,
+    /// terminal gate, git workflow) against a copy of `fixtures/gp1-rust` in a
+    /// temp directory.  Writes `target/golden-path/gp1_report.toml`.
+    ///
+    /// Steps:
+    ///   s1 copy-fixture + open workspace (Trusted)
+    ///   s2 rust-analyzer session (SKIP if absent)
+    ///   s3 diagnostics cycle (SKIP if s2 skipped)
+    ///   s4 workspace search for known literal
+    ///   s5 terminal cargo-test (SKIP if no PTY)
+    ///   s6 app-edit + save + stage + commit
+    ///   s7 write evidence TOML
+    ///
+    /// Failures are non-blocking for PRs (runs in the separate legion-smoke
+    /// workflow); pass `--record-evidence <dir>` to also copy the report into
+    /// the plans/evidence tree.
+    #[command(name = "golden-path-1")]
+    GoldenPath1 {
+        /// Path to the fixture directory relative to workspace root.
+        #[arg(long, default_value = "fixtures/gp1-rust")]
+        fixture_dir: String,
+        /// Output directory for the evidence TOML.
+        #[arg(long, default_value = "target/golden-path")]
+        out_dir: String,
+        /// If provided, copy the evidence TOML to this directory after the
+        /// smoke completes (typically `plans/evidence/production/M8/`).
+        /// Omit for routine runs to avoid churning the evidence tree.
+        #[arg(long)]
+        record_evidence: Option<String>,
+    },
 }
 
 fn main() {
@@ -644,6 +676,11 @@ fn main() {
         } => run_verify_legion_bench_command(&out, strict && !no_strict),
         Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
         Commands::RustAnalyzerSmoke => run_rust_analyzer_smoke_command(),
+        Commands::GoldenPath1 {
+            fixture_dir,
+            out_dir,
+            record_evidence,
+        } => run_golden_path_1_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
     };
 
     process::exit(code);
@@ -1380,6 +1417,44 @@ fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
             1
         }
     }
+}
+
+fn run_golden_path_1_command(
+    fixture_dir: &str,
+    out_dir: &str,
+    record_evidence: Option<&str>,
+) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("golden-path-1 failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let opts = xtask::golden_path::GoldenPath1Options {
+        fixture_dir: fixture_dir.to_string(),
+        out_dir: out_dir.to_string(),
+        record_evidence: record_evidence.map(|s| s.to_string()),
+    };
+    let code = xtask::golden_path::run_golden_path_1(&workspace_root, &opts);
+    if code == 0 {
+        println!(
+            "golden-path-1: smoke passed; report written to {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp1_report.toml")
+                .display()
+        );
+    } else {
+        eprintln!(
+            "golden-path-1: smoke exited with code {code}; check {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp1_report.toml")
+                .display()
+        );
+    }
+    code
 }
 
 fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBenchRunMode, String> {

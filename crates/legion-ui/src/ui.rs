@@ -2814,6 +2814,13 @@ pub enum CommandDispatchIntent {
     TerminalLaunch {
         /// Display-safe command label or fixture command.
         command_label: String,
+        /// Optional session-timeout override in seconds.
+        ///
+        /// When `None`, the product default (30 s) applies.  Operators that
+        /// need a longer deadline (e.g. a CI smoke running `cargo test` on a
+        /// cold builder cache) may pass a larger value here; the policy
+        /// contract enforces the tighter of this value and the platform limit.
+        timeout_secs: Option<u64>,
     },
     /// Send input to an active terminal session through app authority.
     TerminalInput {
@@ -4563,6 +4570,7 @@ impl Shell {
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::TerminalLaunch {
                     command_label: command_label.trim().to_string(),
+                    timeout_secs: None,
                 },
             )));
         }

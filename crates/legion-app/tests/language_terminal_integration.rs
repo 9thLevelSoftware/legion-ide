@@ -197,6 +197,7 @@ fn terminal_actions_cannot_mutate_editor_or_disk() {
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
+            timeout_secs: None,
         })
         .expect("terminal launch");
     let mut terminal = match launched {
@@ -291,6 +292,7 @@ fn language_cancellation_and_terminal_denial_are_projected_fail_closed() {
     let denied = untrusted_app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
+            timeout_secs: None,
         })
         .expect("untrusted terminal launch dispatch");
     let terminal = match denied {

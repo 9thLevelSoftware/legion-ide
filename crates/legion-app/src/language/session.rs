@@ -219,6 +219,103 @@ impl RustAnalyzerSession {
             .map_err(LanguageSessionError::Handshake)
     }
 
+    /// Sends `textDocument/didChange` with a full-document replacement.
+    ///
+    /// Returns and removes the most recently received raw `publishDiagnostics`
+    /// params for `uri`, if any.
+    ///
+    /// The returned value can be passed to
+    /// `AppComposition::ingest_lsp_publish_diagnostics_for_buffer` to project
+    /// the diagnostics through the app-owned `LanguageToolingProjection`.
+    pub fn take_last_diagnostic_params_for(&mut self, uri: &str) -> Option<serde_json::Value> {
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
+        self.session.take_raw_diagnostic_params_for(&expected_hash)
+    }
+
+    /// Pumps until a diagnostic notification for `uri` arrives with
+    /// `error_count == 0` (all errors cleared), or the timeout elapses.
+    ///
+    /// Call this after a fix [`did_change`] to confirm the language server has
+    /// acknowledged the repaired source.
+    ///
+    /// Returns `true` if a clean (0-error) notification was received before the
+    /// deadline, or `false` if the deadline elapsed.
+    pub fn pump_until_diagnostics_clear(
+        &mut self,
+        uri: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
+        let deadline = std::time::Instant::now() + timeout;
+        // Do NOT pre-clear the notification buffer before pumping.
+        //
+        // rust-analyzer sometimes sends an immediate "clearing ack" notification
+        // (publishDiagnostics with an empty diagnostics array) right after it
+        // processes a textDocument/didChange, before re-analysing the new content.
+        // This ack can arrive in the background reader's MPSC channel before
+        // pump_until_diagnostics_clear is even called.  Pre-clearing the buffer
+        // is unnecessary: pump_until reads fresh frames from the channel regardless
+        // of what is already buffered.
+        //
+        // pump_until_has_error_for always calls clear_diagnostics_for_uri at its
+        // start, so after it returns the buffer contains only notifications received
+        // during that pump.  The last such notification is the error notification that
+        // matched its predicate — so buffered_clean is false and the pump starts fresh.
+        let outcome = self.session.pump_until(deadline, &mut |n| {
+            n.diagnostics
+                .iter()
+                .any(|d| d.uri_hash == expected_hash && d.error_count == 0)
+        });
+        // Check the most recent buffered notification for this URI as a secondary
+        // success signal: a clean notification received during the pump will be the
+        // last entry in the buffer when PredicateMet is returned.
+        let buffered_clean = self
+            .session
+            .diagnostic_notifications()
+            .iter()
+            .rev()
+            .find(|n| n.uri_hash == expected_hash)
+            .is_some_and(|n| n.error_count == 0);
+        matches!(outcome, Ok(legion_lsp::PumpOutcome::PredicateMet)) || buffered_clean
+    }
+
+    /// Pumps until a diagnostic notification for `uri` arrives with at least one
+    /// error (`error_count > 0`), or the timeout elapses.
+    ///
+    /// Call this after a [`did_change`] that introduces a compile error.
+    /// Unlike [`pump_diagnostics`], this predicate skips "clear" notifications
+    /// (e.g. the acknowledgement batch rust-analyzer sends immediately after a
+    /// `didChange` before it has re-analysed the new content) and only returns
+    /// `true` once a notification with real errors has been observed.
+    ///
+    /// Internally drains any pre-existing buffered notifications for `uri`
+    /// before starting the pump so stale data does not trigger an early return.
+    ///
+    /// Returns `true` if an error notification was received before the deadline.
+    pub fn pump_until_has_error_for(&mut self, uri: &str, timeout: std::time::Duration) -> bool {
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
+        let deadline = std::time::Instant::now() + timeout;
+        // Drain stale buffered notifications (e.g. the pre-error clean batch) so we
+        // only match fresh ones produced after the erroneous did_change.
+        self.session
+            .clear_diagnostics_for_uri(expected_hash.clone());
+        let outcome = self.session.pump_until(deadline, &mut |n| {
+            n.diagnostics
+                .iter()
+                .any(|d| d.uri_hash == expected_hash && d.error_count > 0)
+        });
+        // Honour the accumulated buffer as a secondary check: if pump_until
+        // returned Deadline but an error notification arrived anyway (e.g. just
+        // before the deadline), count it as a pass.
+        let buffered_error = self
+            .session
+            .diagnostic_notifications()
+            .iter()
+            .filter(|n| n.uri_hash == expected_hash)
+            .any(|n| n.error_count > 0);
+        matches!(outcome, Ok(legion_lsp::PumpOutcome::PredicateMet)) || buffered_error
+    }
+
     /// Returns diagnostics for `uri`, pumping until some arrive or the timeout
     /// elapses. Short-circuits if diagnostics for that specific URI are already
     /// buffered (e.g. emitted at/before initialize), so it never blocks
@@ -292,7 +389,9 @@ impl RustAnalyzerSession {
     /// can be added later when performance requires it.
     ///
     /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
-    /// is not in an initialized/live state.
+    /// is not in an initialized/live state (no write reaches the transport).
+    /// Per the LSP spec, `version` must be strictly greater than the version
+    /// used in the matching `did_open` (or prior `did_change`) call.
     pub fn did_change(
         &mut self,
         uri: &str,

@@ -104,6 +104,7 @@ fn terminal_product_gate_trusted_workspace_launches_without_test_helper() {
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "product-gate-test".to_string(),
+            timeout_secs: None,
         })
         .expect("trusted launch dispatch");
     let projection = match launched {
@@ -135,6 +136,7 @@ fn terminal_product_gate_trusted_workspace_launches_without_test_helper() {
     let denied = untrusted
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "product-gate-test".to_string(),
+            timeout_secs: None,
         })
         .expect("untrusted launch dispatch");
     let projection = match denied {
@@ -181,6 +183,7 @@ fn terminal_denial_is_visible_and_fail_closed() {
     let denied = untrusted
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
+            timeout_secs: None,
         })
         .expect("untrusted terminal launch");
     let projection = match denied {
@@ -228,6 +231,7 @@ fn terminal_fixture_lifecycle_projects_status() {
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
+            timeout_secs: None,
         })
         .expect("fixture terminal launch");
     let mut projection = match launched {
@@ -391,6 +395,7 @@ fn terminal_workflow_cannot_mutate_editor_or_disk() {
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
+            timeout_secs: None,
         })
         .expect("fixture terminal launch");
     let projection = match launched {
@@ -461,6 +466,7 @@ fn terminal_shell_selection_is_projected_in_status() {
     let projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "shell-precedence-workspace".to_string(),
+            timeout_secs: None,
         })
         .expect("tier-1 launch")
     {
@@ -508,6 +514,7 @@ fn terminal_shell_selection_is_projected_in_status() {
     let projection2 = match app2
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "shell-precedence-user".to_string(),
+            timeout_secs: None,
         })
         .expect("tier-2 launch")
     {
@@ -551,6 +558,7 @@ fn terminal_scrollback_limit_enforced_and_eviction_counted() {
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "scrollback-test".to_string(),
+            timeout_secs: None,
         })
         .expect("scrollback launch");
     let projection = match launched {
@@ -611,6 +619,7 @@ fn terminal_resize_propagates_to_projection() {
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "resize-test".to_string(),
+            timeout_secs: None,
         })
         .expect("resize launch");
     let projection = match launched {
@@ -735,6 +744,7 @@ fn terminal_failure_ux_distinct_status_kinds() {
     let denied = untrusted
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "ux-test".to_string(),
+            timeout_secs: None,
         })
         .expect("denied launch");
     let projection = match denied {
@@ -760,6 +770,7 @@ fn terminal_failure_ux_distinct_status_kinds() {
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "ux-kill-test".to_string(),
+            timeout_secs: None,
         })
         .expect("ux launch");
     let projection = match launched {

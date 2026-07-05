@@ -2526,6 +2526,14 @@ pub struct LspStdioSession {
     supervision_events: Vec<LspSupervisionEvent>,
     progress_notifications: Vec<LspProgressNotification>,
     diagnostic_notifications: Vec<LspDiagnosticNotificationMetadata>,
+    /// Raw `publishDiagnostics` params, keyed by URI fingerprint.
+    ///
+    /// Updated any time a new `textDocument/publishDiagnostics` notification
+    /// is received; allows callers that need the full JSON payload (e.g. to
+    /// project it through `AppComposition::ingest_lsp_publish_diagnostics_for_buffer`)
+    /// to retrieve the last raw params for a URI.
+    /// [`Self::clear_diagnostics_for_uri`] removes the entry for the matching URI.
+    raw_diagnostic_params: HashMap<FileFingerprint, serde_json::Value>,
     /// Correlated responses that arrived while we were waiting for a
     /// different request's response, keyed by JSON-RPC id. Drained by
     /// [`Self::read_response_for`] so an out-of-order response is never
@@ -2572,6 +2580,7 @@ impl LspStdioSession {
             supervision_events: events,
             progress_notifications: Vec::new(),
             diagnostic_notifications: Vec::new(),
+            raw_diagnostic_params: HashMap::new(),
             response_stash: HashMap::new(),
         })
     }
@@ -2686,6 +2695,32 @@ impl LspStdioSession {
         &self.diagnostic_notifications
     }
 
+    /// Removes all buffered diagnostic notifications whose URI fingerprint
+    /// matches `uri_hash`, and discards the cached raw params for that URI.
+    ///
+    /// Call this before pumping for fresh diagnostics on a document that has
+    /// just been updated via `didChange`: without a prior clear, the next pump
+    /// may immediately return stale buffered data from before the edit.
+    pub fn clear_diagnostics_for_uri(&mut self, uri_hash: FileFingerprint) {
+        self.diagnostic_notifications
+            .retain(|n| n.uri_hash != uri_hash);
+        self.raw_diagnostic_params.remove(&uri_hash);
+    }
+
+    /// Returns and removes the most recently received raw `publishDiagnostics`
+    /// params for the given URI fingerprint, if any.
+    ///
+    /// The returned `Value` is the full JSON-RPC params object as received from
+    /// the language server.  It can be passed directly to
+    /// `AppComposition::ingest_lsp_publish_diagnostics_for_buffer` to project
+    /// LSP diagnostics through the app-owned `LanguageToolingProjection`.
+    pub fn take_raw_diagnostic_params_for(
+        &mut self,
+        uri_hash: &FileFingerprint,
+    ) -> Option<serde_json::Value> {
+        self.raw_diagnostic_params.remove(uri_hash)
+    }
+
     /// Non-blocking drain of raw `textDocument/publishDiagnostics` notification
     /// params from the reader channel.
     ///
@@ -2736,6 +2771,12 @@ impl LspStdioSession {
             }
             Some("textDocument/publishDiagnostics") => {
                 if let Some(d) = diagnostic_notification_from_params(envelope.params.as_ref()) {
+                    // Store the raw params alongside the metadata so callers can
+                    // retrieve the full JSON payload for projection through
+                    // AppComposition::ingest_lsp_publish_diagnostics_for_buffer.
+                    if let Some(raw) = envelope.params.clone() {
+                        self.raw_diagnostic_params.insert(d.uri_hash.clone(), raw);
+                    }
                     self.diagnostic_notifications.push(d.clone());
                     if let Some(acc) = acc {
                         acc.diagnostics.push(d);

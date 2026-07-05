@@ -1,0 +1,88 @@
+name: Legion Smoke
+
+# GP-1 golden-path headless smoke: open fixture repo → edit Rust → diagnostics →
+# search → terminal cargo test → git workflow → evidence artifact.
+#
+# This is an INDEPENDENT workflow: its failures do NOT block pull-request merges
+# unless the team explicitly adds it to a branch-protection required-check set.
+# It runs on workflow_dispatch and weekly (Mondays 06:00 UTC).
+#
+# Deliberately separate from legion-gates.yml (comment in that file documents this):
+# the smoke runs heavy cargo builds and a real rust-analyzer server; gating every
+# PR on that cost is deferred until the smoke history is proven stable.
+#
+# Zero hosted egress: rust-analyzer is a local process; git operations are local.
+# No push, no fetch, no external network access during the smoke.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly on Mondays at 06:00 UTC
+    - cron: '0 6 * * 1'
+
+concurrency:
+  group: legion-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: GP-1 smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report available disk space
+        shell: bash
+        run: |
+          echo "=== disk space report ==="
+          if command -v df >/dev/null 2>&1; then
+            df -h . || true
+          else
+            echo "(df not available on this runner)"
+          fi
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Provision rust-analyzer
+        id: provision_ra
+        continue-on-error: true
+        run: rustup component add rust-analyzer
+
+      - name: Record skipped rust-analyzer provisioning
+        if: steps.provision_ra.outcome != 'success'
+        run: echo "::warning::rust-analyzer component provisioning failed on ${{ matrix.os }}; s2 and s3 will be skipped inside the smoke"
+
+      - name: Run GP-1 smoke
+        run: cargo run -p xtask -- golden-path-1
+
+      - name: Upload GP-1 evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gp1-report-${{ matrix.os }}
+          path: target/golden-path/gp1_report.toml
+          if-no-files-found: warn

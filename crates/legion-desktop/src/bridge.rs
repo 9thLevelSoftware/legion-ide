@@ -1854,7 +1854,12 @@ impl DesktopCommandBridge {
                 DesktopBridgeOutput::Noop
             }
             DesktopAction::TerminalLaunch { command_label } => {
-                DesktopBridgeOutput::Intent(CommandDispatchIntent::TerminalLaunch { command_label })
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::TerminalLaunch {
+                    command_label,
+                    // Interactive desktop launches use the product default;
+                    // only headless smokes override the session deadline.
+                    timeout_secs: None,
+                })
             }
             DesktopAction::TerminalInput { payload } => {
                 self.with_active_terminal(snapshot, |session_id| {
