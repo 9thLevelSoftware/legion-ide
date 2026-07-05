@@ -67,6 +67,10 @@ pub struct DesktopProjectionViewState {
     pub dismissed_toast_ids: BTreeSet<u64>,
     /// Whether the first-run onboarding card should be rendered.
     pub first_run_onboarding_visible: bool,
+    /// Whether the LSP completion popup is currently visible (T6).
+    pub completion_popup_open: bool,
+    /// Zero-based index of the selected completion item (T6).
+    pub completion_selected_index: usize,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -77,6 +81,8 @@ impl Default for DesktopProjectionViewState {
             dock_layouts: DockLayout::standard_all_modes(),
             dismissed_toast_ids: BTreeSet::new(),
             first_run_onboarding_visible: false,
+            completion_popup_open: false,
+            completion_selected_index: 0,
         }
     }
 }
@@ -790,6 +796,7 @@ impl ProjectionView {
             });
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
+        render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
 
         ProjectionViewOutput {
             needs_repaint: false,
@@ -1253,6 +1260,109 @@ fn render_toast_overlay(
                     });
                 }
             });
+        });
+}
+
+/// Render the LSP completion popup overlay (T6).
+///
+/// Visible only when `state.completion_popup_open` is true AND the snapshot
+/// carries at least one projected completion item.  Keyboard actions
+/// (↓ next, ↑ prev, Tab/Enter accept, Esc dismiss) are appended to `actions`
+/// so the runtime can handle them through the normal `handle_action` path.
+fn render_completion_popup(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if !state.completion_popup_open {
+        return;
+    }
+    let completions = &snapshot.language_tooling_projection.completions;
+    if completions.is_empty() {
+        return;
+    }
+
+    // Keyboard navigation — consume before the popup frame so the editor does
+    // not also receive these keys.
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            actions.push(DesktopAction::CompletionDismiss);
+        }
+        if i.key_pressed(egui::Key::ArrowDown) {
+            actions.push(DesktopAction::CompletionNext);
+        }
+        if i.key_pressed(egui::Key::ArrowUp) {
+            actions.push(DesktopAction::CompletionPrev);
+        }
+        if i.key_pressed(egui::Key::Tab) || i.key_pressed(egui::Key::Enter) {
+            actions.push(DesktopAction::CompletionAccept);
+        }
+    });
+
+    let tokens = theme::tokens();
+    egui::Area::new("legion_desktop_completion_popup".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(320.0, -60.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(300.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(4))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .id_salt("completion_popup_scroll")
+                        .show(ui, |ui| {
+                            for (i, completion) in completions.iter().enumerate().take(10) {
+                                let selected = i == state.completion_selected_index;
+                                let bg = if selected {
+                                    tokens.accent.blue.linear_multiply(0.2)
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                };
+                                let response = egui::Frame::new()
+                                    .fill(bg)
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .inner_margin(egui::Margin::symmetric(6, 2))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(280.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(theme::muted(format!(
+                                                "[{}]",
+                                                &completion.kind_label
+                                            )));
+                                            ui.add_space(4.0);
+                                            ui.label(if selected {
+                                                theme::body_strong(&completion.label)
+                                            } else {
+                                                theme::body(&completion.label)
+                                            });
+                                            if let Some(detail) = &completion.detail_label {
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        ui.label(theme::code_muted(detail));
+                                                    },
+                                                );
+                                            }
+                                        });
+                                    })
+                                    .response;
+                                if response.clicked() {
+                                    actions.push(DesktopAction::CompletionAccept);
+                                }
+                            }
+                        });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(theme::muted("↑↓ navigate  Tab accept  Esc dismiss"));
+                    });
+                });
         });
 }
 

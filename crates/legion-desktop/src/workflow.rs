@@ -6,6 +6,7 @@ use std::{
     collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
@@ -544,6 +545,14 @@ pub struct DesktopRuntime {
     last_status: Option<StatusMessageProjection>,
     last_status_details: Vec<StatusMessageProjection>,
     last_outcome: DesktopWorkflowOutcome,
+    /// Whether the LSP completion popup is currently visible (T6).
+    completion_popup_open: bool,
+    /// Zero-based index of the selected item in the completion popup (T6).
+    completion_selected_index: usize,
+    /// Debounce state for completion requests: (keystroke_instant, buffer_id, position) (T6).
+    completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
+    /// Completion count from the last projection refresh, for detecting new arrivals (T6).
+    last_completion_count: usize,
 }
 
 impl DesktopRuntime {
@@ -619,6 +628,10 @@ impl DesktopRuntime {
             last_status: Some(status),
             last_status_details: status_details,
             last_outcome: DesktopWorkflowOutcome::Noop,
+            completion_popup_open: false,
+            completion_selected_index: 0,
+            completion_debounce: None,
+            last_completion_count: 0,
         };
         runtime.persist_diagnostics_if_configured();
         Ok(runtime)
@@ -641,8 +654,78 @@ impl DesktopRuntime {
                 self.persist_diagnostics_if_configured();
                 Ok(DesktopWorkflowOutcome::Noop)
             }
+            // T6: completion popup navigation — handled before the bridge.
+            DesktopAction::CompletionNext => {
+                let count = self
+                    .shell
+                    .projection_snapshot()
+                    .language_tooling_projection
+                    .completions
+                    .len();
+                if count > 0 {
+                    self.completion_selected_index = (self.completion_selected_index + 1) % count;
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::CompletionPrev => {
+                let count = self
+                    .shell
+                    .projection_snapshot()
+                    .language_tooling_projection
+                    .completions
+                    .len();
+                if count > 0 {
+                    self.completion_selected_index =
+                        (self.completion_selected_index + count.saturating_sub(1)) % count;
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::CompletionDismiss => {
+                self.completion_popup_open = false;
+                self.completion_debounce = None;
+                // Pre-sync the completion count so refresh_projection doesn't
+                // treat the same batch as "newly arrived" and re-open the popup.
+                if let Ok(snap) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+                    self.last_completion_count = snap.language_tooling_projection.completions.len();
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::CompletionAccept => {
+                let outcome = self.accept_completion()?;
+                self.persist_session_if_configured();
+                self.refresh_projection()?;
+                self.last_outcome = outcome.clone();
+                self.persist_diagnostics_if_configured();
+                Ok(outcome)
+            }
             action => {
                 let snapshot = self.shell.projection_snapshot();
+
+                // T6: dismiss popup and arm debounce on text-edit actions.
+                if let Some((buffer_id, at)) = completion_debounce_info(&action, &snapshot) {
+                    self.completion_popup_open = false;
+                    self.completion_debounce = Some((Instant::now(), buffer_id, at));
+                }
+
+                // T6: dismiss popup on tab switch/close (stale popup rule).
+                if matches!(
+                    action,
+                    DesktopAction::SwitchTab { .. } | DesktopAction::CloseTab { .. }
+                ) {
+                    self.completion_popup_open = false;
+                    self.completion_debounce = None;
+                    self.completion_selected_index = 0;
+                }
+
                 if editor_text_action_blocked_by_palette(&action, &snapshot) {
                     self.set_status(
                         StatusSeverity::Info,
@@ -973,7 +1056,75 @@ impl DesktopRuntime {
             dock_layouts: self.dock_layouts.clone(),
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
             first_run_onboarding_visible: self.onboarding_visible,
+            completion_popup_open: self.completion_popup_open,
+            completion_selected_index: self.completion_selected_index,
         }
+    }
+
+    /// Accept the currently selected completion item by inserting its label
+    /// into the active buffer through the existing editor insert path (T6).
+    ///
+    /// Returns `Noop` when no completions are projected or the active buffer
+    /// is unknown; returns `Edited` on successful insertion.
+    fn accept_completion(&mut self) -> Result<DesktopWorkflowOutcome> {
+        // Read current app state directly so we see the latest completions
+        // even if the shell snapshot is one frame stale.
+        let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+        let completions = &snapshot.language_tooling_projection.completions;
+        let Some(completion) = completions.get(self.completion_selected_index) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        let label = completion.label.clone();
+        let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        // Locate the primary cursor from the per-buffer viewport state.
+        let cursor = snapshot
+            .daily_editing_projection
+            .viewport_states
+            .iter()
+            .find(|vs| vs.buffer_id == buffer_id)
+            .and_then(|vs| vs.cursor)
+            .unwrap_or(TextCoordinate {
+                line: 0,
+                character: 0,
+                byte_offset: None,
+                utf16_offset: None,
+            });
+        self.completion_popup_open = false;
+        self.completion_debounce = None;
+        self.completion_selected_index = 0;
+        // Pre-sync count so refresh_projection doesn't re-open for same batch.
+        self.last_completion_count = snapshot.language_tooling_projection.completions.len();
+        self.dispatch_intent(CommandDispatchIntent::Insert {
+            buffer_id,
+            at: cursor,
+            text: label,
+        })
+    }
+
+    /// Test-only accessor to inject app-level state for completion popup tests.
+    ///
+    /// Exposed as `pub` so integration tests (tests/*) can reach it without a
+    /// feature flag.  Named with a `_for_test` suffix to signal that production
+    /// code must never call this.
+    pub fn app_mut_for_test(&mut self) -> &mut AppComposition {
+        &mut self.app
+    }
+
+    /// Test-only setter for completion popup visibility.
+    pub fn set_completion_popup_open_for_test(&mut self, open: bool) {
+        self.completion_popup_open = open;
+    }
+
+    /// Expose popup state for assertion in tests.
+    pub fn completion_popup_open_for_test(&self) -> bool {
+        self.completion_popup_open
+    }
+
+    /// Expose selected index for assertion in tests.
+    pub fn completion_selected_index_for_test(&self) -> usize {
+        self.completion_selected_index
     }
 
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
@@ -1806,9 +1957,36 @@ impl DesktopRuntime {
     }
 
     fn refresh_projection(&mut self) -> Result<()> {
+        // T6: fire pending completion request when debounce has elapsed.
+        if let Some((last_keystroke, buffer_id, position)) = self.completion_debounce {
+            if last_keystroke.elapsed() >= Duration::from_millis(50) {
+                self.completion_debounce = None;
+                // Non-fatal: LSP may be unavailable; swallow error.
+                let _ = self
+                    .app
+                    .dispatch_ui_intent(CommandDispatchIntent::RequestCompletion {
+                        buffer_id,
+                        position,
+                    });
+            }
+        }
+
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
         self.app.drain_lsp_session();
         let mut snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+
+        // T6: auto-open popup when new completions arrive from the LSP worker.
+        let new_count = snapshot.language_tooling_projection.completions.len();
+        if new_count > 0 && new_count != self.last_completion_count {
+            self.completion_popup_open = true;
+            self.completion_selected_index = 0;
+        }
+        if new_count == 0 {
+            // Completions were cleared (e.g. new request in-flight); close popup.
+            self.completion_popup_open = false;
+        }
+        self.last_completion_count = new_count;
+
         if let Some(status) = &self.last_status {
             snapshot.status_messages.push(status.clone());
         }
@@ -2090,6 +2268,22 @@ fn editor_text_action_blocked_by_palette(
                 | DesktopAction::ImeCommit { .. }
                 | DesktopAction::SelectAll { .. }
         )
+}
+
+/// Extract `(buffer_id, cursor)` from text-edit actions that should arm the
+/// completion debounce timer (T6).  Returns `None` for non-edit actions.
+fn completion_debounce_info(
+    action: &DesktopAction,
+    snapshot: &ShellProjectionSnapshot,
+) -> Option<(BufferId, TextCoordinate)> {
+    let at = match action {
+        DesktopAction::InsertText { at, .. }
+        | DesktopAction::ClipboardPaste { at, .. }
+        | DesktopAction::ImeCommit { at, .. } => *at,
+        _ => return None,
+    };
+    let buffer_id = snapshot.active_buffer_projection.buffer_id?;
+    Some((buffer_id, at))
 }
 
 fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, String)> {

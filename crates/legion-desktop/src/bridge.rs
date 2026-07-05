@@ -659,6 +659,17 @@ pub enum DesktopAction {
         /// Zero-based line number from the problem range start.
         line: u32,
     },
+    /// Move selection down in the LSP completion popup (T6).
+    CompletionNext,
+    /// Move selection up in the LSP completion popup (T6).
+    CompletionPrev,
+    /// Accept the currently selected item in the LSP completion popup (T6).
+    ///
+    /// Inserts the selected completion label into the active buffer through
+    /// the existing editor insert path (editor authority).
+    CompletionAccept,
+    /// Dismiss the LSP completion popup without accepting any item (T6).
+    CompletionDismiss,
     /// Launch a terminal session through app authority.
     TerminalLaunch {
         /// Command label.
@@ -1801,6 +1812,12 @@ impl DesktopCommandBridge {
                     },
                 })
             }
+            // T6: completion popup actions are intercepted in DesktopRuntime::handle_action
+            // before reaching the bridge.  These arms exist solely for exhaustiveness.
+            DesktopAction::CompletionNext
+            | DesktopAction::CompletionPrev
+            | DesktopAction::CompletionAccept
+            | DesktopAction::CompletionDismiss => DesktopBridgeOutput::Noop,
             DesktopAction::TerminalLaunch { command_label } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::TerminalLaunch { command_label })
             }
