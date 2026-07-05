@@ -552,8 +552,8 @@ fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<BetaWorkf
     );
     record_gate_error(
         &mut errors,
-        input.terminal_status.contains("terminal_denied_expected"),
-        "terminal workflow did not record expected denial",
+        input.terminal_status.contains("terminal_running_expected"),
+        "terminal workflow did not record expected trusted-launch session",
         input.terminal_status,
     );
     record_gate_error(
@@ -691,7 +691,7 @@ fn run_terminal_actions(runtime: &mut DesktopRuntime) -> (String, BetaTerminalPo
     if terminal.last_denial.is_some() {
         (
             format!(
-                "terminal_denied_expected status={:?} rows={} omitted={}",
+                "terminal_denied status={:?} rows={} omitted={}",
                 terminal.status.kind,
                 terminal.output_rows.len(),
                 terminal.scrollback.omitted_row_count
@@ -699,9 +699,13 @@ fn run_terminal_actions(runtime: &mut DesktopRuntime) -> (String, BetaTerminalPo
             BetaTerminalPolicyDecision::Denied,
         )
     } else {
+        // Trusted workspaces launch the three-tier-selected shell through the
+        // product gate; a live session is the expected beta outcome since
+        // terminal productization (the pre-productization contract expected
+        // a default denial here).
         (
             format!(
-                "terminal_status={:?} rows={} omitted={}",
+                "terminal_running_expected status={:?} rows={} omitted={}",
                 terminal.status.kind,
                 terminal.output_rows.len(),
                 terminal.scrollback.omitted_row_count
@@ -840,7 +844,7 @@ mod tests {
             active_file_search_status: "completed Completed results=2 omitted_files=0 omitted_results=0",
             workspace_search_status: "completed Completed results=5 omitted_files=0 omitted_results=0",
             language_status: "status=Running operations=1 cancellations=0 problems=0",
-            terminal_status: "terminal_denied_expected status=Denied rows=0 omitted=0",
+            terminal_status: "terminal_running_expected status=Running rows=1 omitted=0",
             proposal_status: "proposal=2 preview=Some(...) ledger_rows=2 selected=Some(ProposalId(2))",
             diagnostics_export_written: false,
             diagnostics_export_label: "target/gui-phase7-diagnostics.md",
@@ -866,7 +870,7 @@ mod tests {
             active_file_search_status: "completed Completed results=2 omitted_files=0 omitted_results=0",
             workspace_search_status: "completed Completed results=5 omitted_files=0 omitted_results=0",
             language_status: "status=Cancelled operations=2 cancellations=1 problems=0",
-            terminal_status: "terminal_denied_expected status=Denied rows=0 omitted=0",
+            terminal_status: "terminal_running_expected status=Running rows=1 omitted=0",
             proposal_status: "proposal=2 preview=Some(...) ledger_rows=2 selected=Some(ProposalId(2))",
             diagnostics_export_written: true,
             diagnostics_export_label: "target/gui-phase7-diagnostics.md",
