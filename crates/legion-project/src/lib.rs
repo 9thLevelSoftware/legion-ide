@@ -1218,6 +1218,148 @@ pub fn validate_git_commit_message(message: &str) -> Result<(), GitInspectionErr
     Ok(())
 }
 
+/// Read a single git config value by key (e.g. `"user.name"`).
+///
+/// Returns `Ok(None)` when the key is not set; errors from git invocation are
+/// silently treated as "not configured" since missing config is the normal case
+/// for validation purposes.
+pub fn get_git_config_value(
+    root: impl AsRef<Path>,
+    key: &str,
+) -> Result<Option<String>, GitInspectionError> {
+    match git_stdout(root.as_ref(), &["config", "--get", key], None) {
+        Ok(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        // `git config --get` exits non-zero when the key is absent; treat as
+        // "not configured" rather than a hard error.
+        Err(_) => Ok(None),
+    }
+}
+
+/// Result of combined commit message and author validation.
+///
+/// Hard errors block the commit; warn-level messages are advisory only (the
+/// conventional-commits prefix lint lives here).
+#[derive(Debug, Clone, Default)]
+pub struct CommitValidationResult {
+    /// Hard errors that MUST be resolved before the commit is allowed.
+    pub errors: Vec<String>,
+    /// Advisory warnings — surfaced in the UI but do not block the commit.
+    pub warnings: Vec<String>,
+}
+
+impl CommitValidationResult {
+    /// `true` when there are no hard errors (warnings are still permitted).
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Conventional-commits type prefixes recognised by the warn-level lint.
+const CC_PREFIXES: &[&str] = &[
+    "feat", "fix", "refactor", "test", "docs", "build", "chore", "perf", "style", "ci", "revert",
+];
+
+/// Validate a commit message together with the author identity from git config.
+///
+/// Hard errors are returned for:
+/// - an empty or blank commit message,
+/// - a commit message containing NUL bytes,
+/// - missing `user.name` in the local git config,
+/// - missing `user.email` in the local git config.
+///
+/// A single advisory warning is returned when the commit subject does not
+/// start with a recognised conventional-commits type prefix.  This warning
+/// does **not** block the commit.
+pub fn validate_commit_with_author(
+    root: impl AsRef<Path>,
+    message: &str,
+) -> CommitValidationResult {
+    let mut result = CommitValidationResult::default();
+    let root = root.as_ref();
+
+    // Hard error: empty / blank message.
+    let subject = message
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("");
+    if subject.is_empty() {
+        result
+            .errors
+            .push("commit message cannot be empty".to_string());
+        return result;
+    }
+
+    // Hard error: NUL bytes.
+    if message.contains('\0') {
+        result
+            .errors
+            .push("commit message cannot contain NUL bytes".to_string());
+    }
+
+    // Hard error: missing author name.
+    let name = get_git_config_value(root, "user.name")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if name.is_empty() {
+        result.errors.push(
+            "git user.name is not configured; run: git config user.name \"Your Name\"".to_string(),
+        );
+    }
+
+    // Hard error: missing author email.
+    let email = get_git_config_value(root, "user.email")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if email.is_empty() {
+        result.errors.push(
+            "git user.email is not configured; run: git config user.email \"you@example.com\""
+                .to_string(),
+        );
+    }
+
+    // Advisory warning: non-conventional-commits subject prefix.
+    let is_conventional = CC_PREFIXES.iter().any(|prefix| {
+        subject.starts_with(&format!("{prefix}:"))
+            || subject.starts_with(&format!("{prefix}("))
+            || subject.starts_with(&format!("{prefix}!"))
+    });
+    if !is_conventional {
+        result.warnings.push(
+            "subject does not start with a conventional-commits type prefix \
+             (feat/fix/refactor/test/docs/build/chore); \
+             this is advisory only and does not block the commit"
+                .to_string(),
+        );
+    }
+
+    result
+}
+
+/// Create a new git worktree for `branch` at `worktree_path`.
+///
+/// Uses `git worktree add <worktree_path> <branch>`.  The branch must already
+/// exist; creating the branch alongside the worktree is the caller's
+/// responsibility.
+pub fn create_git_worktree(
+    root: impl AsRef<Path>,
+    branch: &str,
+    worktree_path: impl AsRef<Path>,
+) -> Result<(), GitInspectionError> {
+    let path_str = worktree_path.as_ref().to_string_lossy().into_owned();
+    git_stdout(root.as_ref(), &["worktree", "add", &path_str, branch], None)?;
+    Ok(())
+}
+
 /// Commit the current index with the supplied message.
 ///
 /// Git inherits the caller's authentication environment unchanged, so SSH agent

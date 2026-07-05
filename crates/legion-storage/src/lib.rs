@@ -5,6 +5,9 @@
 /// Plan revision ledger and audit persistence helpers.
 pub mod plan;
 
+/// Local file history metadata store.
+pub mod local_history;
+
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
