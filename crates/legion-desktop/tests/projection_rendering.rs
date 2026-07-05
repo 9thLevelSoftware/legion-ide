@@ -1155,6 +1155,7 @@ fn projection_rendering_projects_workbench_settings_model() {
         editor_font_size_pt: 8,
         font_fallback_diagnostics: Vec::new(),
         toast_verbosity: ToastVerbosityProjection::All,
+        terminal_shell_selection: String::new(),
         editor: legion_ui::EditorSettingsProjection {
             line_numbers_visible: false,
             current_line_highlight: false,
