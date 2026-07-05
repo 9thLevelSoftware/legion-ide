@@ -158,5 +158,7 @@
 - Phase 13 is accepted with metadata-first Legion workflow DTOs, bounded agent coordination, tracker/memory evidence, app-owned execution and readiness, projection-only UI/desktop command-center surfaces, final evidence, and full repository gates passing.
 - Phase 13 review found and fixed incomplete-worker merge readiness and resumed dependency-chain scheduling before rerunning targeted and full repository gates.
 
+- WS-LANG-01 (Rust LSP substrate) is accepted: mock-gate tests across all four crate tiers (legion-lsp, legion-app, legion-ui, legion-desktop) pass; real rust-analyzer 1.95.0 single-OS smoke validated via `cargo run -p xtask -- rust-analyzer-smoke`; xtask subcommand wired; evidence at `plans/evidence/production/WS-LANG-01/`; PR-LANG-001 ledger row updated. 3-OS hosted CI smoke deferred pending CI infrastructure.
+
 ## Next Action
-Commit the Phase 13 build and review artifacts.
+Commit WS-LANG-01 evidence and xtask command (Task 12).

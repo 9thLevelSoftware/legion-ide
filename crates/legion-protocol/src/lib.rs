@@ -16739,6 +16739,57 @@ pub struct LspCapabilitySummary {
     pub schema_version: u16,
 }
 
+/// Provenance of a launched language-server binary. Metadata-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LspServerBinaryProvenance {
+    /// Resolved from an explicit user/workspace-configured path.
+    Configured,
+    /// Resolved from a project-local vendored location.
+    ProjectLocal,
+    /// Resolved from the system PATH.
+    SystemPath,
+    /// Resolved from an application-bundled binary.
+    Bundled,
+    /// Materialized from a policy-gated download.
+    Downloaded,
+}
+
+/// Metadata-only health/provenance record for a supervised language server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspServerHealthRecord {
+    /// Server identity.
+    pub server_id: LanguageServerId,
+    /// Language served.
+    pub language_id: LanguageId,
+    /// How the binary was resolved.
+    pub binary_provenance: LspServerBinaryProvenance,
+    /// Hash of the resolved binary path (never the raw path bytes elsewhere).
+    pub binary_path_hash: Option<FileFingerprint>,
+    /// Hash of a downloaded artifact when provenance is `Downloaded`.
+    pub artifact_hash: Option<FileFingerprint>,
+    /// Version string reported by `--version`.
+    pub version: Option<String>,
+    /// Status of the `initialize` handshake.
+    pub init_status: LspResultStatus,
+    /// Capability summaries reported at initialize.
+    pub capabilities: Vec<LspCapabilitySummary>,
+    /// Latency from didOpen to first diagnostics, when observed.
+    pub diagnostics_latency_ms: Option<u64>,
+    /// Number of restarts observed in this session's lifetime.
+    pub restart_count: u32,
+    /// Capability decision id authorizing a download, when provenance is `Downloaded`.
+    pub download_decision_id: Option<CapabilityDecisionId>,
+    /// Health record schema version.
+    pub schema_version: u16,
+}
+
+impl LspServerHealthRecord {
+    /// Current schema version for the health record.
+    pub fn schema_version() -> u16 {
+        1
+    }
+}
+
 /// Metadata-only summary of LSP diagnostics without source bodies or messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LspDiagnosticSummary {
