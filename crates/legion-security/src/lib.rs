@@ -415,8 +415,12 @@ impl CommandTaxonomy {
                 ("wget".to_string(), CommandClass::Network),
                 ("cmd".to_string(), CommandClass::Terminal),
                 ("powershell".to_string(), CommandClass::Terminal),
+                // PowerShell Core (cross-platform); `pwsh` is the selectable Windows shell added
+                // by the terminal product gate (TERM.01/WS-TERM-01).
+                ("pwsh".to_string(), CommandClass::Terminal),
                 ("bash".to_string(), CommandClass::Terminal),
                 ("sh".to_string(), CommandClass::Terminal),
+                ("zsh".to_string(), CommandClass::Terminal),
             ]),
         }
     }
