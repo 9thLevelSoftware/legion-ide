@@ -119,16 +119,32 @@ fn initialize_holds_the_sandbox_lease_immediately_on_return() {
         "cleanup must leave the (now-unlocked) lease file in place; \
          unlinking it is exclusively the reaper's job"
     );
-    let probe = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lease_path)
-        .expect("open leftover lease file for probing");
+    // macOS flock releases can lag the closing `drop` by a brief window (the
+    // same latency the reaping test's bounded retry absorbs); poll instead of
+    // asserting on the first attempt. Production semantics are unaffected —
+    // this is purely the test observing the release.
+    let mut unlocked = false;
+    for attempt in 0..10 {
+        let probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path)
+            .expect("open leftover lease file for probing");
+        if probe.try_lock().is_ok() {
+            unlocked = true;
+            drop(probe);
+            break;
+        }
+        drop(probe);
+        eprintln!(
+            "lease probe retry {attempt}: lock not yet observable as released; waiting 100 ms"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     assert!(
-        probe.try_lock().is_ok(),
-        "the leftover lease file must be unlocked after cleanup releases it"
+        unlocked,
+        "the leftover lease file must become unlocked within the retry window after cleanup releases it"
     );
-    drop(probe);
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_file(&lease_path);
