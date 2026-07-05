@@ -19,7 +19,6 @@ legion-project = { workspace = true }
 legion-protocol = { workspace = true }
 legion-remote = { workspace = true }
 legion-sandbox = { workspace = true }
-legion-storage = { workspace = true }
 legion-terminal = { workspace = true }
 legion-ui = { workspace = true }
 eframe = { workspace = true }

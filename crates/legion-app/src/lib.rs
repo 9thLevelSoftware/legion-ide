@@ -13214,12 +13214,27 @@ impl AppComposition {
 
     /// Replace the palette usage repository with a disk-backed implementation.
     ///
-    /// Call this before any palette operations to enable persistence.  The
-    /// desktop binary (`legion-desktop`) wires in a `FilePaletteUsageRepository`
-    /// inside `DesktopRuntime::open`; tests continue to use the in-memory
-    /// default.
+    /// Call this before any palette operations to enable persistence. Product
+    /// entry points call [`Self::enable_palette_usage_persistence`] instead;
+    /// tests continue to use the in-memory default (or inject their own).
     pub fn set_palette_usage_repository(&mut self, repo: Box<dyn PaletteUsageRepository>) {
         self.palette_usage = repo;
+    }
+
+    /// Wires disk-backed palette usage persistence for a workspace. Usage
+    /// counts (item keys only — never raw query text) live under the
+    /// workspace-local `.legion/` state directory so ranking history survives
+    /// restarts. Composition-root API: renderer edges (legion-desktop) and
+    /// the CLI call this instead of constructing storage types themselves,
+    /// keeping storage dependencies out of projection-only crates.
+    pub fn enable_palette_usage_persistence(&mut self, workspace_root: &std::path::Path) {
+        let palette_usage_path = workspace_root.join(".legion").join("palette_usage.json");
+        if let Some(dir) = palette_usage_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        self.set_palette_usage_repository(Box::new(
+            legion_storage::FilePaletteUsageRepository::open(&palette_usage_path),
+        ));
     }
 
     fn next_event_context(&mut self) -> EventContext {

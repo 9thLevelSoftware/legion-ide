@@ -25,7 +25,6 @@ use legion_protocol::{
     TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
-use legion_storage::FilePaletteUsageRepository;
 use legion_ui::{
     CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
     SearchScopeProjection, SettingsProjection, Shell, ShellProjectionSnapshot,
@@ -561,20 +560,10 @@ impl DesktopRuntime {
             config.principal.clone(),
         )?;
 
-        // Wire file-backed palette usage repository at the workspace-local
-        // `.legion/` state directory — the same directory used for instruction
-        // rules and other workspace-scoped metadata.  The in-memory default is
-        // replaced here so that usage history survives runtime restarts.
-        let palette_usage_path = config
-            .workspace_root
-            .join(".legion")
-            .join("palette_usage.json");
-        if let Some(dir) = palette_usage_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        app.set_palette_usage_repository(Box::new(FilePaletteUsageRepository::open(
-            &palette_usage_path,
-        )));
+        // Palette usage persistence is app-composition work: the app owns the
+        // storage wiring (workspace-local `.legion/` state dir); the renderer
+        // edge only asks for it, keeping legion-desktop free of storage deps.
+        app.enable_palette_usage_persistence(&config.workspace_root);
 
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
