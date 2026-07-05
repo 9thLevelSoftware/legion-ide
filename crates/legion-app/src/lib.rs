@@ -7727,6 +7727,40 @@ pub enum AppCommandRequest {
         /// Worktree path.
         path: String,
     },
+    /// Create a new git worktree at the given path on the given branch.
+    CreateGitWorktree {
+        /// Branch name.
+        branch: String,
+        /// Filesystem path for the new worktree.
+        worktree_path: String,
+    },
+    /// Navigate to the next diff hunk in the review surface.
+    GitNavNextHunk,
+    /// Navigate to the previous diff hunk in the review surface.
+    GitNavPrevHunk,
+    /// Navigate to the first hunk in the next changed file.
+    GitNavNextFile,
+    /// Navigate to the first hunk in the previous changed file.
+    GitNavPrevFile,
+    /// Request local history entries for the given canonical file path.
+    RequestLocalHistoryEntries {
+        /// Canonical file path.
+        path: String,
+    },
+    /// Restore a file from a local history entry via proposal route.
+    RestoreFromLocalHistory {
+        /// Canonical file path.
+        path: String,
+        /// Local history entry identifier.
+        entry_id: String,
+    },
+    /// Export worktree state evidence to `.legion/evidence/`.
+    ExportWorktreeEvidence,
+    /// Validate a git commit message and surface advisory warnings.
+    ValidateGitCommitMessage {
+        /// Draft commit message to validate.
+        message: String,
+    },
     /// Request hover data through app-owned language tooling.
     RequestHover {
         /// Target buffer identifier.
@@ -8260,6 +8294,15 @@ impl CommandExecutionService {
             | AppCommandRequest::PushGitRemote { .. }
             | AppCommandRequest::PruneGitWorktrees
             | AppCommandRequest::RemoveGitWorktree { .. }
+            | AppCommandRequest::CreateGitWorktree { .. }
+            | AppCommandRequest::GitNavNextHunk
+            | AppCommandRequest::GitNavPrevHunk
+            | AppCommandRequest::GitNavNextFile
+            | AppCommandRequest::GitNavPrevFile
+            | AppCommandRequest::RequestLocalHistoryEntries { .. }
+            | AppCommandRequest::RestoreFromLocalHistory { .. }
+            | AppCommandRequest::ExportWorktreeEvidence
+            | AppCommandRequest::ValidateGitCommitMessage { .. }
             | AppCommandRequest::RefreshDebugConfigurations
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
@@ -8572,6 +8615,29 @@ impl CommandDispatcher {
             CommandDispatchIntent::PruneGitWorktrees => Ok(AppCommandRequest::PruneGitWorktrees),
             CommandDispatchIntent::RemoveGitWorktree { path } => {
                 Ok(AppCommandRequest::RemoveGitWorktree { path })
+            }
+            CommandDispatchIntent::CreateGitWorktree {
+                branch,
+                worktree_path,
+            } => Ok(AppCommandRequest::CreateGitWorktree {
+                branch,
+                worktree_path,
+            }),
+            CommandDispatchIntent::GitNavNextHunk => Ok(AppCommandRequest::GitNavNextHunk),
+            CommandDispatchIntent::GitNavPrevHunk => Ok(AppCommandRequest::GitNavPrevHunk),
+            CommandDispatchIntent::GitNavNextFile => Ok(AppCommandRequest::GitNavNextFile),
+            CommandDispatchIntent::GitNavPrevFile => Ok(AppCommandRequest::GitNavPrevFile),
+            CommandDispatchIntent::RequestLocalHistoryEntries { path } => {
+                Ok(AppCommandRequest::RequestLocalHistoryEntries { path })
+            }
+            CommandDispatchIntent::RestoreFromLocalHistory { path, entry_id } => {
+                Ok(AppCommandRequest::RestoreFromLocalHistory { path, entry_id })
+            }
+            CommandDispatchIntent::ExportWorktreeEvidence => {
+                Ok(AppCommandRequest::ExportWorktreeEvidence)
+            }
+            CommandDispatchIntent::ValidateGitCommitMessage { message } => {
+                Ok(AppCommandRequest::ValidateGitCommitMessage { message })
             }
             CommandDispatchIntent::RefreshDebugConfigurations => {
                 Ok(AppCommandRequest::RefreshDebugConfigurations)
@@ -11191,6 +11257,10 @@ pub enum AppCommandOutcome {
     DelegateToolPermissionRecorded(DelegatedTaskProjection),
     /// Automate workflow projection changed after human input or kill switch.
     LegionWorkflowUpdated(LegionWorkflowProjection),
+    /// Local history entries updated for the requested file path.
+    LocalHistoryEntriesUpdated(Vec<legion_ui::LocalHistoryEntryProjection>),
+    /// Worktree state evidence was exported; contains the absolute path to the written file.
+    WorktreeEvidenceExported(String),
 }
 
 /// Per-buffer save-all result.
@@ -11806,6 +11876,10 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
         diagnostics: snapshot.diagnostics,
         generated_at: snapshot.generated_at,
         schema_version: snapshot.schema_version,
+        // Navigation state and local history entries are injected at the app layer after build.
+        focused_hunk_id: None,
+        commit_validation_warnings: Vec::new(),
+        local_history_entries: Vec::new(),
     }
 }
 
@@ -11821,6 +11895,25 @@ fn git_hunk_stage_projection(stage: GitHunkStage) -> GitHunkStageProjection {
         GitHunkStage::Unstaged => GitHunkStageProjection::Unstaged,
         GitHunkStage::Staged => GitHunkStageProjection::Staged,
     }
+}
+
+/// Strip the Windows UNC prefix `\\?\` from a path string (no-op on non-Windows paths).
+/// Used to normalise canonical paths for comparison when user-supplied paths may lack the prefix.
+fn strip_unc_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
+/// Normalize path separators to the platform-native form for cross-origin comparisons.
+///
+/// On Windows, `PathBuf::join("some/relative")` can embed forward slashes from the
+/// original string, while `fs::canonicalize` always returns backslashes. This helper
+/// converts forward slashes to backslashes on Windows so that paths from different
+/// origins compare equal.
+fn normalize_path_separators(path: &str) -> String {
+    #[cfg(windows)]
+    return path.replace('/', "\\");
+    #[cfg(not(windows))]
+    return path.replace('\\', "/");
 }
 
 fn git_protocol_error(code: impl Into<String>, message: impl Into<String>) -> AppCompositionError {
@@ -12049,6 +12142,24 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "git-new-worktree",
+            title: "Git: New Worktree",
+            detail: "Create a git worktree; query: <branch> <path>",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-local-history",
+            title: "Git: Local History",
+            detail: "Show local history entries for the active file",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-export-evidence",
+            title: "Git: Export Worktree Evidence",
+            detail: "Export metadata-only worktree state to .legion/evidence/",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
             id: "git-commit",
             title: "Git: Commit Staged Changes",
             detail: "Use the palette query as the commit message",
@@ -12113,6 +12224,9 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         }),
         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
         "git-remove-worktree" => None,
+        "git-new-worktree" => None, // Requires query args: <branch> <path>
+        "git-local-history" => None, // Populated by dispatch_palette_selection with active file path
+        "git-export-evidence" => Some(CommandDispatchIntent::ExportWorktreeEvidence),
         "close-palette" => Some(CommandDispatchIntent::ClosePalette),
         "preferences-open" => Some(CommandDispatchIntent::OpenSettings),
         "preferences-theme-dark" => Some(CommandDispatchIntent::SetThemePreference {
@@ -12969,6 +13083,10 @@ pub struct AppComposition {
     structural_search_projection: StructuralSearchProjection,
     git_projection: GitProjection,
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
+    /// Identifier of the keyboard-focused hunk in the diff review surface.
+    focused_git_hunk_id: Option<String>,
+    /// In-memory local history metadata store (content blobs live on disk).
+    local_history_store: legion_storage::local_history::LocalHistoryMetadataStore,
     debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
@@ -13036,6 +13154,8 @@ impl AppComposition {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             git_hunk_cache: HashMap::new(),
+            focused_git_hunk_id: None,
+            local_history_store: legion_storage::local_history::LocalHistoryMetadataStore::new(),
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
@@ -14021,6 +14141,31 @@ impl AppComposition {
                             (!path.is_empty())
                                 .then_some(CommandDispatchIntent::RemoveGitWorktree { path })
                         }
+                        "git-new-worktree" => {
+                            let body =
+                                palette_query_body(PaletteMode::Command, &self.palette.query)
+                                    .trim()
+                                    .to_string();
+                            let mut parts = body.splitn(2, ' ');
+                            let branch = parts.next().unwrap_or("").trim().to_string();
+                            let worktree_path = parts.next().unwrap_or("").trim().to_string();
+                            (!branch.is_empty() && !worktree_path.is_empty()).then_some(
+                                CommandDispatchIntent::CreateGitWorktree {
+                                    branch,
+                                    worktree_path,
+                                },
+                            )
+                        }
+                        "git-local-history" => {
+                            let path = self
+                                .active_documents
+                                .active_file_path
+                                .clone()
+                                .unwrap_or_default();
+                            (!path.is_empty()).then_some(
+                                CommandDispatchIntent::RequestLocalHistoryEntries { path },
+                            )
+                        }
                         _ => palette_command_intent(command_id),
                     })
             }
@@ -14376,6 +14521,86 @@ impl AppComposition {
                 remove_git_worktree(Path::new(root_path), Path::new(&path))
                     .map_err(git_inspection_protocol_error)?;
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::CreateGitWorktree {
+                branch,
+                worktree_path,
+            } => {
+                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+                    return Err(AppCompositionError::WorkspaceNotOpen);
+                };
+                legion_project::create_git_worktree(
+                    Path::new(root_path),
+                    &branch,
+                    Path::new(&worktree_path),
+                )
+                .map_err(git_inspection_protocol_error)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::GitNavNextHunk => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(true, false),
+            )),
+            AppCommandRequest::GitNavPrevHunk => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(false, false),
+            )),
+            AppCommandRequest::GitNavNextFile => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(true, true),
+            )),
+            AppCommandRequest::GitNavPrevFile => Ok(AppCommandOutcome::GitUpdated(
+                self.navigate_git_hunk(false, true),
+            )),
+            AppCommandRequest::RequestLocalHistoryEntries { path } => {
+                // Resolve the lookup key: prefer the canonical path from an open buffer that
+                // matches the supplied path, so Windows UNC normalization and separator
+                // differences align correctly (e.g. PathBuf::join keeps forward slashes while
+                // fs::canonicalize always uses backslashes on Windows).
+                let path_normalized = normalize_path_separators(strip_unc_prefix(&path));
+                let lookup_path = self
+                    .active_documents
+                    .buffer_file_metadata
+                    .values()
+                    .find(|meta| {
+                        let stored = normalize_path_separators(strip_unc_prefix(
+                            &meta.identity.canonical_path.0,
+                        ));
+                        stored == path_normalized
+                    })
+                    .map(|meta| meta.identity.canonical_path.0.clone())
+                    .unwrap_or(path);
+                let entries = self.local_history_entries_for_file(&lookup_path);
+                Ok(AppCommandOutcome::LocalHistoryEntriesUpdated(entries))
+            }
+            AppCommandRequest::RestoreFromLocalHistory { path, entry_id } => {
+                // Resolve canonical path same way as RequestLocalHistoryEntries.
+                let path_normalized = normalize_path_separators(strip_unc_prefix(&path));
+                let lookup_path = self
+                    .active_documents
+                    .buffer_file_metadata
+                    .values()
+                    .find(|meta| {
+                        normalize_path_separators(strip_unc_prefix(&meta.identity.canonical_path.0))
+                            == path_normalized
+                    })
+                    .map(|meta| meta.identity.canonical_path.0.clone())
+                    .unwrap_or(path);
+                self.restore_from_local_history(&lookup_path, &entry_id)?;
+                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+            }
+            AppCommandRequest::ExportWorktreeEvidence => {
+                let evidence_path = self.export_worktree_evidence()?;
+                Ok(AppCommandOutcome::WorktreeEvidenceExported(evidence_path))
+            }
+            AppCommandRequest::ValidateGitCommitMessage { message } => {
+                let root_path = self.active_documents.workspace_root_path.as_deref();
+                let warnings = if let Some(root) = root_path {
+                    let result =
+                        legion_project::validate_commit_with_author(Path::new(root), &message);
+                    result.warnings
+                } else {
+                    vec![]
+                };
+                self.git_projection.commit_validation_warnings = warnings;
+                Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()))
             }
             AppCommandRequest::RequestHover {
                 buffer_id,
@@ -17739,8 +17964,30 @@ impl AppComposition {
     }
 
     fn save_buffer(&mut self, buffer_id: BufferId) -> Result<AppSaveOutcome, AppCompositionError> {
+        // Capture pre-save snapshot for local history (best-effort; errors here are non-fatal).
+        let local_history_snapshot: Option<(String, String, String)> = {
+            let path_and_id = self
+                .active_documents
+                .metadata_for_buffer(buffer_id)
+                .map(|meta| {
+                    (
+                        meta.identity.canonical_path.0.clone(),
+                        meta.identity.file_id.0.to_string(),
+                    )
+                });
+            if let Some((canonical_path, file_id_str)) = path_and_id {
+                self.editor
+                    .text(buffer_id)
+                    .ok()
+                    .map(|t| (canonical_path, file_id_str, t.to_string()))
+            } else {
+                None
+            }
+        };
+
         let context = self.active_documents.save_context_for_buffer(buffer_id)?;
         let event_context = self.next_event_context();
+        let correlation_id_str = event_context.correlation_id.0.to_string();
         match SaveWorkflowService::save_active_buffer(
             &mut self.editor,
             &self.workspace,
@@ -17756,6 +18003,15 @@ impl AppComposition {
                     .bind_saved_buffer(output.save.buffer_id, output.applied);
                 self.active_documents
                     .clear_dirty_prompt_for(output.save.buffer_id);
+                // Record local history snapshot after successful save.
+                if let Some((canonical_path, file_id_str, content)) = local_history_snapshot {
+                    self.record_local_history_entry(
+                        &canonical_path,
+                        &file_id_str,
+                        &content,
+                        &correlation_id_str,
+                    );
+                }
                 Ok(AppSaveOutcome::Saved(output.save))
             }
             Err(failure) => {
@@ -18208,7 +18464,316 @@ impl AppComposition {
                 };
             }
         }
+        // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
+        // not in the project snapshot, so it must be injected after each build.
+        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
         self.git_projection.clone()
+    }
+
+    /// Navigate to the next or previous hunk in the diff review surface.
+    ///
+    /// `forward` — true = next, false = prev.
+    /// `by_file` — true = jump to first hunk of next/prev file, false = adjacent hunk.
+    fn navigate_git_hunk(&mut self, forward: bool, by_file: bool) -> GitProjection {
+        let hunks = &self.git_projection.hunks;
+        if hunks.is_empty() {
+            return self.git_projection.clone();
+        }
+
+        let current_idx = self
+            .focused_git_hunk_id
+            .as_deref()
+            .and_then(|id| hunks.iter().position(|h| h.hunk_id == id));
+
+        let new_id = if by_file {
+            // Jump to the first hunk of the next/prev file.
+            let current_path = current_idx
+                .and_then(|i| hunks.get(i))
+                .map(|h| h.path.as_str());
+            if forward {
+                // Find the first hunk whose path differs and comes after current.
+                let start = current_idx.map(|i| i + 1).unwrap_or(0);
+                hunks[start..]
+                    .iter()
+                    .find(|h| current_path.map_or(true, |p| h.path != p))
+                    .map(|h| h.hunk_id.clone())
+                    .or_else(|| hunks.first().map(|h| h.hunk_id.clone()))
+            } else {
+                // Find the last hunk whose path differs and comes before current.
+                let end = current_idx.unwrap_or(hunks.len());
+                hunks[..end]
+                    .iter()
+                    .rev()
+                    .find(|h| current_path.map_or(true, |p| h.path != p))
+                    .and_then(|h| {
+                        // Jump to the *first* hunk of that file.
+                        let target_path = h.path.clone();
+                        hunks.iter().find(|hh| hh.path == target_path)
+                    })
+                    .map(|h| h.hunk_id.clone())
+                    .or_else(|| hunks.last().map(|h| h.hunk_id.clone()))
+            }
+        } else if forward {
+            let next_idx = current_idx.map(|i| (i + 1) % hunks.len()).unwrap_or(0);
+            hunks.get(next_idx).map(|h| h.hunk_id.clone())
+        } else {
+            let prev_idx = current_idx
+                .map(|i| if i == 0 { hunks.len() - 1 } else { i - 1 })
+                .unwrap_or_else(|| hunks.len() - 1);
+            hunks.get(prev_idx).map(|h| h.hunk_id.clone())
+        };
+
+        self.focused_git_hunk_id = new_id;
+        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        self.git_projection.clone()
+    }
+
+    /// Return local history entries for the given canonical path, newest first.
+    fn local_history_entries_for_file(
+        &self,
+        canonical_path: &str,
+    ) -> Vec<legion_ui::LocalHistoryEntryProjection> {
+        self.local_history_store
+            .records_for_file(canonical_path, 50)
+            .into_iter()
+            .map(|r| legion_ui::LocalHistoryEntryProjection {
+                entry_id: r.entry_id.clone(),
+                timestamp_label: r.timestamp_ms.to_string(),
+                content_hash: r.content_hash.clone(),
+                size_bytes: r.size_bytes,
+            })
+            .collect()
+    }
+
+    /// Record a local history entry for the given file save.
+    ///
+    /// This writes the content blob to `.legion/local-history/<path_key>/<hash>.blob`
+    /// and records metadata in `local_history_store`. Called from `save_buffer`.
+    fn record_local_history_entry(
+        &mut self,
+        canonical_path: &str,
+        file_id_str: &str,
+        content: &str,
+        correlation_id_str: &str,
+    ) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let size_bytes = content.len() as u64;
+
+        // Compute a deterministic hash from the content (hex string).
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        let content_hash = format!("{:016x}", hasher.finish());
+
+        // Build the blob directory path.
+        let blob_dir = if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
+            // Strip the UNC prefix (\\?\) before sanitizing so that the resulting
+            // directory name does not contain '?' which is illegal in Windows filenames.
+            let canonical_without_unc = strip_unc_prefix(canonical_path);
+            let path_key =
+                canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            std::path::PathBuf::from(root)
+                .join(".legion")
+                .join("local-history")
+                .join(&path_key)
+        } else {
+            return; // No workspace; skip.
+        };
+
+        // Write blob (best-effort; do not fail save if this fails).
+        let _ = std::fs::create_dir_all(&blob_dir);
+        let blob_path = blob_dir.join(format!("{content_hash}.blob"));
+        let _ = std::fs::write(&blob_path, content.as_bytes());
+
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let entry_id = format!("{}-{}", canonical_path.len(), timestamp_ms);
+
+        let record = legion_storage::local_history::LocalHistoryRecord {
+            entry_id,
+            file_id_str: file_id_str.to_string(),
+            canonical_path: canonical_path.to_string(),
+            content_hash,
+            timestamp_ms,
+            correlation_id_str: correlation_id_str.to_string(),
+            size_bytes,
+            schema_version: legion_storage::local_history::LOCAL_HISTORY_SCHEMA_VERSION,
+        };
+
+        self.local_history_store.push_record(record);
+        self.local_history_store
+            .prune(canonical_path, 50, 50 * 1024 * 1024);
+    }
+
+    /// Restore a file from a local history entry by applying a full-replace edit through the
+    /// proposal-mediated save workflow (all mutations go through proposal routes).
+    fn restore_from_local_history(
+        &mut self,
+        canonical_path: &str,
+        entry_id: &str,
+    ) -> Result<(), AppCompositionError> {
+        let record = self
+            .local_history_store
+            .find_entry_by_id(entry_id)
+            .ok_or_else(|| {
+                git_protocol_error(
+                    "local_history.entry_not_found",
+                    &format!("local history entry '{entry_id}' not found"),
+                )
+            })?
+            .clone();
+
+        // Build the blob path and read the content.
+        let root_path = self
+            .active_documents
+            .workspace_root_path
+            .as_deref()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?
+            .to_string();
+
+        // Strip UNC prefix before sanitizing to avoid '?' in directory names on Windows.
+        let canonical_without_unc = strip_unc_prefix(canonical_path);
+        let path_key =
+            canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        let blob_path = std::path::PathBuf::from(&root_path)
+            .join(".legion")
+            .join("local-history")
+            .join(&path_key)
+            .join(format!("{}.blob", record.content_hash));
+
+        let restored_text = std::fs::read_to_string(&blob_path).map_err(|e| {
+            git_protocol_error(
+                "local_history.blob_read_failed",
+                &format!("cannot read history blob at {}: {e}", blob_path.display()),
+            )
+        })?;
+
+        // Find the buffer for this canonical path, apply the full-replace via editor,
+        // then trigger a save through the proposal route.
+        let buffer_id = self
+            .active_documents
+            .buffer_file_metadata
+            .iter()
+            .find(|(_, meta)| meta.identity.canonical_path.0 == canonical_path)
+            .map(|(bid, _)| *bid)
+            .ok_or_else(|| {
+                git_protocol_error(
+                    "local_history.buffer_not_open",
+                    &format!("no open buffer found for path '{canonical_path}'"),
+                )
+            })?;
+
+        // Full-replace edit: select entire buffer, replace with restored text.
+        let current_text = self
+            .editor
+            .text(buffer_id)
+            .map_err(|e| git_protocol_error("local_history.text_read_failed", &format!("{e}")))?;
+        let line_count = current_text.lines().count().max(1);
+        let last_col = current_text.lines().last().map(|l| l.len()).unwrap_or(0);
+        let full_range = EditorTextRange::new(
+            TextPosition::new(0, 0),
+            TextPosition::new(line_count.saturating_sub(1), last_col),
+        );
+        let edit = TextEdit::new(full_range, restored_text);
+        EditorEngine::apply_edit(
+            &mut self.editor,
+            buffer_id,
+            edit,
+            TransactionSource::User,
+            None,
+            None,
+        )
+        .map_err(|e| git_protocol_error("local_history.apply_edit_failed", &format!("{e}")))?;
+
+        // Now save through proposal route (same as regular save).
+        self.save_buffer(buffer_id)?;
+        Ok(())
+    }
+
+    /// Export metadata-only worktree state evidence to `.legion/evidence/`.
+    fn export_worktree_evidence(&self) -> Result<String, AppCompositionError> {
+        let root_path = self
+            .active_documents
+            .workspace_root_path
+            .as_deref()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+
+        let evidence_dir = std::path::PathBuf::from(root_path)
+            .join(".legion")
+            .join("evidence");
+        std::fs::create_dir_all(&evidence_dir).map_err(|e| {
+            git_protocol_error(
+                "evidence.dir_create_failed",
+                &format!("cannot create evidence directory: {e}"),
+            )
+        })?;
+
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Gather metadata-only counts from the current git projection.
+        let staged_count = self
+            .git_projection
+            .hunks
+            .iter()
+            .filter(|h| h.stage == legion_ui::GitHunkStageProjection::Staged)
+            .count();
+        let unstaged_count = self
+            .git_projection
+            .hunks
+            .iter()
+            .filter(|h| h.stage == legion_ui::GitHunkStageProjection::Unstaged)
+            .count();
+        let conflict_count = self.git_projection.conflicts.len();
+        let changed_file_paths: Vec<String> = self
+            .git_projection
+            .changed_files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+
+        // Build TOML content — metadata only, NO file content, NO diff text.
+        let mut toml = String::new();
+        toml.push_str("# Legion worktree state evidence — metadata only\n");
+        toml.push_str("# Generated by ExportWorktreeEvidence; no file content or diff text.\n\n");
+        toml.push_str(&format!("schema_version = 1\n"));
+        toml.push_str(&format!("generated_at_ms = {timestamp_ms}\n"));
+        if let Some(root_label) = &self.git_projection.root_label {
+            let escaped = root_label.replace('\\', "\\\\").replace('"', "\\\"");
+            toml.push_str(&format!("root_label = \"{escaped}\"\n"));
+        }
+        if let Some(branch) = &self.git_projection.branch_label {
+            let escaped = branch.replace('\\', "\\\\").replace('"', "\\\"");
+            toml.push_str(&format!("branch_label = \"{escaped}\"\n"));
+        }
+        toml.push_str(&format!("staged_hunk_count = {staged_count}\n"));
+        toml.push_str(&format!("unstaged_hunk_count = {unstaged_count}\n"));
+        toml.push_str(&format!("conflict_count = {conflict_count}\n"));
+        toml.push_str("\n[changed_files]\n");
+        toml.push_str(&format!("count = {}\n", changed_file_paths.len()));
+        toml.push_str("paths = [\n");
+        for path in &changed_file_paths {
+            let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+            toml.push_str(&format!("  \"{escaped}\",\n"));
+        }
+        toml.push_str("]\n");
+
+        let filename = format!("worktree-state-{timestamp_ms}.toml");
+        let evidence_path = evidence_dir.join(&filename);
+        std::fs::write(&evidence_path, toml.as_bytes()).map_err(|e| {
+            git_protocol_error(
+                "evidence.write_failed",
+                &format!("cannot write evidence file: {e}"),
+            )
+        })?;
+
+        Ok(evidence_path.to_string_lossy().into_owned())
     }
 
     fn stage_or_unstage_git_hunk(
