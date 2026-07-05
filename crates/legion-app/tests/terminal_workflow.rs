@@ -797,9 +797,7 @@ fn terminal_failure_ux_distinct_status_kinds() {
     for kind in &kinds {
         let label = kind.display_label();
         let has_pascal = label.chars().enumerate().any(|(i, c)| {
-            i > 0
-                && c.is_uppercase()
-                && label.chars().nth(i - 1).map_or(false, |p| p.is_lowercase())
+            i > 0 && c.is_uppercase() && label.chars().nth(i - 1).is_some_and(|p| p.is_lowercase())
         });
         assert!(
             !has_pascal,

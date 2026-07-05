@@ -40,7 +40,7 @@ fn status_label_is_human_readable_for_all_kinds() {
 
         // Must not be a Rust debug string (no PascalCase: no uppercase letter after lowercase).
         let has_pascal = text.chars().enumerate().any(|(i, c)| {
-            i > 0 && c.is_uppercase() && text.chars().nth(i - 1).map_or(false, |p| p.is_lowercase())
+            i > 0 && c.is_uppercase() && text.chars().nth(i - 1).is_some_and(|p| p.is_lowercase())
         });
         assert!(
             !has_pascal,

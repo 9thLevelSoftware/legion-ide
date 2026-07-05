@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_selection_powerShell_generates_pwsh_command() {
+    fn shell_selection_powershell_generates_pwsh_command() {
         let (cmd, _args) = TerminalShellSelection::PowerShell.to_command_args();
         assert_eq!(cmd, "pwsh");
     }
