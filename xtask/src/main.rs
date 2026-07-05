@@ -967,6 +967,7 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
         xtask::perf_harness::SkeletonDescriptor::m0_input_to_paint(),
         xtask::perf_harness::SkeletonDescriptor::m1_line_galley_shaping_cache(),
         xtask::perf_harness::SkeletonDescriptor::m2_memory_ceiling_1mb(),
+        xtask::perf_harness::SkeletonDescriptor::m8_search_stream_50k(),
     ];
     for skeleton in &mut skeletons {
         xtask::perf_harness::apply_fail_on_budget_override(skeleton);

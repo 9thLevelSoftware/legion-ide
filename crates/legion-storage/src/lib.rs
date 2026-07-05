@@ -204,6 +204,85 @@ pub trait WorkspaceSessionRepository {
     fn delete_session(&mut self, session_id: &str) -> StorageResult<()>;
 }
 
+/// Metadata-only record of how many times a palette item (file path or command
+/// id) was confirmed in a given workspace.  No raw query text, no AI context,
+/// no telemetry — only an opaque item key and a use counter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaletteUsageRecord {
+    /// Workspace that owns this usage record.
+    pub workspace_id: WorkspaceId,
+    /// Opaque item key; typically a canonical path or command id string.
+    pub item_key: String,
+    /// Number of times the item was confirmed in this workspace.
+    pub usage_count: u32,
+}
+
+/// Metadata-only palette usage counter API.
+///
+/// Stores per-workspace, per-item confirmation counts so the fuzzy scorer can
+/// blend a local frequency bonus into palette ranking.  No query text, AI
+/// context, or telemetry leaves the machine through this interface.
+pub trait PaletteUsageRepository {
+    /// Increment the usage counter for `item_key` in `workspace_id`.
+    fn record_usage(&mut self, workspace_id: WorkspaceId, item_key: &str);
+    /// Return the usage count for `item_key`, or 0 if not yet recorded.
+    fn usage_count(&self, workspace_id: WorkspaceId, item_key: &str) -> u32;
+    /// Return all records for the workspace, ordered by descending usage count.
+    fn top_items(&self, workspace_id: WorkspaceId) -> Vec<PaletteUsageRecord>;
+    /// Clear all usage records for a workspace (e.g. on workspace close).
+    fn clear_workspace(&mut self, workspace_id: WorkspaceId);
+}
+
+/// In-memory `PaletteUsageRepository` implementation.  Satisfies the
+/// metadata-only requirement: no raw query text, no AI context, no network I/O.
+#[derive(Debug, Default)]
+pub struct InMemoryPaletteUsageRepository {
+    counts: HashMap<(WorkspaceId, String), u32>,
+}
+
+impl InMemoryPaletteUsageRepository {
+    /// Create an empty repository.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PaletteUsageRepository for InMemoryPaletteUsageRepository {
+    fn record_usage(&mut self, workspace_id: WorkspaceId, item_key: &str) {
+        let entry = self
+            .counts
+            .entry((workspace_id, item_key.to_string()))
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    fn usage_count(&self, workspace_id: WorkspaceId, item_key: &str) -> u32 {
+        self.counts
+            .get(&(workspace_id, item_key.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn top_items(&self, workspace_id: WorkspaceId) -> Vec<PaletteUsageRecord> {
+        let mut records: Vec<PaletteUsageRecord> = self
+            .counts
+            .iter()
+            .filter(|((ws, _), _)| *ws == workspace_id)
+            .map(|((_, key), &count)| PaletteUsageRecord {
+                workspace_id,
+                item_key: key.clone(),
+                usage_count: count,
+            })
+            .collect();
+        records.sort_by(|a, b| b.usage_count.cmp(&a.usage_count));
+        records
+    }
+
+    fn clear_workspace(&mut self, workspace_id: WorkspaceId) {
+        self.counts.retain(|(ws, _), _| *ws != workspace_id);
+    }
+}
+
 /// Mode-scoped dock layout persistence API.
 pub trait DockLayoutRepository {
     /// Persist one dock side layout record.

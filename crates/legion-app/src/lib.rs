@@ -163,7 +163,9 @@ use legion_security::{
     CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy, SecurityPolicy,
     mcp_tool_permission_request,
 };
-use legion_storage::InMemoryStorageRepositoryPort;
+use legion_storage::{
+    InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, PaletteUsageRepository,
+};
 use legion_terminal::{
     TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeLaunchRequest,
     TerminalRuntimeOutputPollRequest,
@@ -12914,6 +12916,9 @@ pub struct AppComposition {
     debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
+    /// Metadata-only per-workspace palette usage counters.
+    /// No raw query text, AI context, or network I/O.
+    palette_usage: InMemoryPaletteUsageRepository,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -12981,6 +12986,7 @@ impl AppComposition {
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
+            palette_usage: InMemoryPaletteUsageRepository::new(),
         }
     }
 
@@ -13473,6 +13479,13 @@ impl AppComposition {
             return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
         };
 
+        // Record metadata-only usage count for frequency blending.
+        // Uses `result.id` as the item key (stable command/file identifier).
+        // No raw query text is persisted.
+        if let Some(workspace_id) = self.active_documents.workspace_id() {
+            self.palette_usage.record_usage(workspace_id, &result.id);
+        }
+
         self.palette.close();
         self.dispatch_ui_intent(intent)
     }
@@ -13635,8 +13648,16 @@ impl AppComposition {
             .filter_map(|path| {
                 fuzzy_score_legacy(&path, query).map(|(score, match_indices)| {
                     let recency_bonus = recent_bonus.get(&path).copied().unwrap_or_default();
+                    // Frequency bonus: cap at 20 uses × 5 pts = +100 so
+                    // fuzzy quality and recency still dominate the ranking.
+                    let freq_count = self
+                        .palette_usage
+                        .usage_count(workspace_id, &format!("file:{path}"));
+                    let freq_bonus = (freq_count.min(20) as i32) * 5;
                     PaletteScoredResult {
-                        score: score.saturating_add(recency_bonus),
+                        score: score
+                            .saturating_add(recency_bonus)
+                            .saturating_add(freq_bonus),
                         result: PaletteResult {
                             id: format!("file:{path}"),
                             kind: PaletteResultKind::File,
@@ -13779,6 +13800,7 @@ impl AppComposition {
 
     fn palette_command_results(&self, query: &str) -> Vec<PaletteResult> {
         let active_buffer_id = self.active_documents.active_buffer_id;
+        let workspace_id = self.active_documents.workspace_id();
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
@@ -13801,8 +13823,19 @@ impl AppComposition {
                         }
                         _ => (None, None),
                     };
+                    // Frequency bonus: frequently-used commands score a little
+                    // higher. Cap at 20 uses × 5 pts = +100 so fuzzy quality
+                    // still dominates the ranking.
+                    let freq_bonus = workspace_id
+                        .map(|wid| {
+                            let count = self
+                                .palette_usage
+                                .usage_count(wid, &format!("command:{}", spec.id));
+                            (count.min(20) as i32) * 5
+                        })
+                        .unwrap_or(0);
                     PaletteScoredResult {
-                        score,
+                        score: score.saturating_add(freq_bonus),
                         result: PaletteResult {
                             id: format!("command:{}", spec.id),
                             kind: PaletteResultKind::Command,
@@ -25635,6 +25668,65 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// SEARCH.06: frequency bonus lifts heavily-used palette commands.
+    ///
+    /// "Refresh Explorer" and "Refresh Git" score identically for query
+    /// "refresh" (same subsequence bonuses, both are start-prefixes).
+    /// The alphabetical tiebreaker puts "Refresh Explorer" first ("E" < "G").
+    /// After recording 20 usages for "command:refresh-git" that command
+    /// gains +100 frequency bonus and rises above "Refresh Explorer".
+    #[test]
+    fn palette_usage_frequency_bonus_lifts_heavily_used_command() {
+        let workspace_id = WorkspaceId(42);
+        let mut app = AppComposition::new();
+        // Give the composition a workspace so `workspace_id()` returns `Some`.
+        app.active_documents.opened_workspace = Some(WorkspaceOpened {
+            workspace_id,
+            root_id: legion_protocol::WorkspaceRootId(1),
+            generation: WorkspaceGeneration(1),
+            snapshot_id: legion_protocol::SnapshotId(0),
+            correlation_id: CorrelationId(0),
+        });
+
+        // Baseline: "Refresh Explorer" and "Refresh Git" tie on fuzzy score;
+        // the alphabetical tiebreaker puts "Refresh Explorer" first.
+        let baseline = app.palette_command_results("refresh");
+        let git_pos_base = baseline
+            .iter()
+            .position(|r| r.id == "command:refresh-git")
+            .expect("Refresh Git should match 'refresh'");
+        let explorer_pos_base = baseline
+            .iter()
+            .position(|r| r.id == "command:refresh-explorer")
+            .expect("Refresh Explorer should match 'refresh'");
+        assert!(
+            explorer_pos_base <= git_pos_base,
+            "Refresh Explorer should rank at least as high as Refresh Git without frequency boost \
+             (alphabetical tiebreak: 'E' < 'G')"
+        );
+
+        // Record 20 usages for refresh-git -> +100 frequency bonus.
+        for _ in 0..20 {
+            app.palette_usage
+                .record_usage(workspace_id, "command:refresh-git");
+        }
+
+        let boosted = app.palette_command_results("refresh");
+        let git_pos_boosted = boosted
+            .iter()
+            .position(|r| r.id == "command:refresh-git")
+            .expect("Refresh Git should still match 'refresh' after boost");
+        let explorer_pos_boosted = boosted
+            .iter()
+            .position(|r| r.id == "command:refresh-explorer")
+            .expect("Refresh Explorer should still match 'refresh' after boost");
+
+        assert!(
+            git_pos_boosted < explorer_pos_boosted,
+            "Refresh Git (20 usages, +100 freq bonus) must outrank Refresh Explorer (0 usages)"
+        );
     }
 
     #[test]
