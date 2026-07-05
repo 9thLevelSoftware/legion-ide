@@ -42,6 +42,24 @@ Use `.github/ISSUE_TEMPLATE/bug_report.md` and attach or reference:
 - the package manifest, if the problem is packaging-related;
 - the expected versus actual behavior in one or two sentences.
 
+## Terminal failure states
+
+When the terminal panel is not in the `Running` state, the projection exposes one of the following failure kinds:
+
+| Kind | Meaning | Typical cause |
+|------|---------|---------------|
+| `Denied` | Policy denied the launch | Workspace is untrusted; trust state is `Untrusted` |
+| `Unavailable` | Shell binary or PTY subsystem not present | `pwsh` / `bash` not installed or not on PATH |
+| `Exited` | Session exited cleanly (exit code 0) | Shell process terminated normally |
+| `Crashed` | Session exited with non-zero code or was killed | Shell panic / OOM / explicit kill |
+| `PolicyBlocked` | Mode or network policy blocked the operation | Mode policy disallows terminal surface |
+
+To diagnose a `Denied` or `PolicyBlocked` result, check `TerminalPanelProjection::last_denial` — it contains a metadata-only reason string with no raw output.
+
+To diagnose `Unavailable` on Windows, verify that `pwsh` (PowerShell Core) is on PATH: run `where pwsh` in a Command Prompt.
+
+Terminal orphans (sessions left running after the workspace was closed) are cleaned up via `AppComposition::cleanup_terminal_orphans()`. Metadata-only audit records are returned; no raw command output is included.
+
 ## When to escalate
 
 Escalate when the failure involves one of these:

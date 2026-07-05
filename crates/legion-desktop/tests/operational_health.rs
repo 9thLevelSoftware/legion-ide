@@ -107,7 +107,7 @@ fn operational_health_snapshot_and_view_rows_are_metadata_only() {
 
     assert!(joined.contains("tabs: open=1 dirty=1"));
     assert!(joined.contains("search: status=Completed"));
-    assert!(joined.contains("terminal: status=Denied"));
+    assert!(joined.contains("terminal: status=Running"));
     assert!(joined.contains("proposals: rows="));
     assert!(joined.contains("unsupported: Remote production GUI: unsupported"));
     assert!(!joined.contains("SECRET_PHASE7_DIRTY_BODY"));
@@ -119,7 +119,7 @@ fn operational_health_snapshot_and_view_rows_are_metadata_only() {
     let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
     let rendered_health = model.operational_health_rows.join("\n");
     assert!(rendered_health.contains("unsupported_surfaces:"));
-    assert!(rendered_health.contains("terminal: status=Denied"));
+    assert!(rendered_health.contains("terminal: status=Running"));
     assert!(!rendered_health.contains("SECRET_PHASE7_DIRTY_BODY"));
     assert!(!rendered_health.contains("SECRET_PHASE7_TERMINAL_PAYLOAD"));
     assert!(!rendered_health.contains("SECRET_PHASE7_PROMPT"));

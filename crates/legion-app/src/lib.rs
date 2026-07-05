@@ -30,6 +30,8 @@ pub mod offline_ai;
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
 
+pub mod terminal_policy;
+
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
 use legion_editor::{
@@ -169,7 +171,7 @@ use legion_security::{
 };
 use legion_storage::InMemoryStorageRepositoryPort;
 use legion_terminal::{
-    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeLaunchRequest,
+    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeError, TerminalRuntimeLaunchRequest,
     TerminalRuntimeOutputPollRequest,
 };
 use legion_tracker::{
@@ -206,6 +208,9 @@ use offline_ai::{
 use serde_json::{Value, json};
 use syntect::easy::ScopeRangeIterator;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
+use terminal_policy::{
+    SCROLLBACK_DEFAULT_MAX_ROWS, TerminalEnvPolicy, TerminalFailureKind, TerminalShellSelection,
+};
 use thiserror::Error;
 
 const SEARCH_DEFAULT_RESULT_LIMIT: usize = 50;
@@ -5194,6 +5199,18 @@ struct TerminalWorkflow {
     next_sequence: u64,
     active_command_started_at: Option<std::time::Instant>,
     current_cwd: Option<String>,
+    /// Whether the product gate has already enabled the runtime for this workflow.
+    /// Set to `true` the first time a trusted-workspace explicit launch succeeds the
+    /// product-gate check; prevents redundant re-initialization on subsequent launches.
+    product_enabled: bool,
+    /// Workspace-level shell override (highest precedence).
+    shell_selection: Option<TerminalShellSelection>,
+    /// User-level shell preference (overrides platform default; overridden by workspace).
+    user_shell_selection: Option<TerminalShellSelection>,
+    /// Maximum scrollback rows retained in the projection (sane default 5000).
+    scrollback_max_rows: usize,
+    /// Env passthrough policy for PTY spawns (deny-list always applied).
+    env_policy: TerminalEnvPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -5207,27 +5224,32 @@ struct TerminalDenial {
     clear_active_session: bool,
 }
 
-fn terminal_shell_command() -> (String, Vec<String>) {
-    #[cfg(windows)]
-    {
-        ("cmd".to_string(), vec!["/Q".to_string(), "/K".to_string()])
+/// Translate a `TerminalFailureKind` to the corresponding `TerminalPanelStatusKind`.
+///
+/// All five variants map to distinct status kinds so the renderer can display each
+/// failure mode differently without inspecting the message string.
+fn failure_kind_to_status_kind(kind: &TerminalFailureKind) -> TerminalPanelStatusKind {
+    match kind {
+        TerminalFailureKind::Denied => TerminalPanelStatusKind::Denied,
+        TerminalFailureKind::Unavailable => TerminalPanelStatusKind::Unavailable,
+        TerminalFailureKind::Exited => TerminalPanelStatusKind::Exited,
+        TerminalFailureKind::Crashed => TerminalPanelStatusKind::Crashed,
+        TerminalFailureKind::PolicyBlocked => TerminalPanelStatusKind::PolicyBlocked,
     }
+}
 
-    #[cfg(unix)]
-    {
-        (
-            "bash".to_string(),
-            vec![
-                "-lc".to_string(),
-                r#"export PROMPT_COMMAND='status=$?; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]133;D;%d\033\\" "$status"'; exec bash --noprofile --norc -i"#
-                    .to_string(),
-            ],
-        )
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        ("sh".to_string(), Vec::new())
+/// Translate a `TerminalRuntimeError` (from `legion-terminal`) to the appropriate
+/// `TerminalFailureKind` for projection.
+///
+/// - `Disabled` → `Unavailable` (runtime was not initialised / PTY subsystem absent).
+/// - `Denied { .. }` → `PolicyBlocked` (internal policy constraint, distinct from the
+///   trust-gate or capability-broker `Denied` which is handled before `runtime.launch`).
+/// - `Backend { .. }` → `Unavailable` (shell binary not found, OS spawn failure, etc.).
+fn runtime_error_to_failure_kind(err: &TerminalRuntimeError) -> TerminalFailureKind {
+    match err {
+        TerminalRuntimeError::Disabled => TerminalFailureKind::Unavailable,
+        TerminalRuntimeError::Denied { .. } => TerminalFailureKind::PolicyBlocked,
+        TerminalRuntimeError::Backend { .. } => TerminalFailureKind::Unavailable,
     }
 }
 
@@ -5277,6 +5299,11 @@ impl Default for TerminalWorkflow {
             next_sequence: 0,
             active_command_started_at: None,
             current_cwd: None,
+            product_enabled: false,
+            shell_selection: None,
+            user_shell_selection: None,
+            scrollback_max_rows: SCROLLBACK_DEFAULT_MAX_ROWS,
+            env_policy: TerminalEnvPolicy::default(),
         }
     }
 }
@@ -5287,6 +5314,25 @@ impl TerminalWorkflow {
     }
 
     fn enable_runtime_for_tests(&mut self) {
+        self.do_enable_runtime();
+        self.projection.status = TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Idle,
+            message: "Terminal runtime enabled".to_string(),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+    }
+
+    /// Enable the terminal runtime and security policy for a product launch.
+    /// Idempotent: subsequent calls are no-ops once already enabled.
+    fn ensure_product_enabled(&mut self) {
+        if !self.product_enabled {
+            self.do_enable_runtime();
+            self.product_enabled = true;
+        }
+    }
+
+    /// Internal helper: replaces the runtime and security broker with enabled configurations.
+    fn do_enable_runtime(&mut self) {
         self.runtime = TerminalRuntime::new(
             TerminalRuntimeConfig::enabled(),
             legion_platform::NativePtyService,
@@ -5295,11 +5341,6 @@ impl TerminalWorkflow {
         policy.terminal_policy.runtime_enabled = true;
         self.security_broker =
             DenyByDefaultBroker::new(policy, CapabilityNamespace("app.terminal".to_string()));
-        self.projection.status = TerminalPanelStatus {
-            kind: TerminalPanelStatusKind::Idle,
-            message: "Terminal runtime enabled".to_string(),
-        };
-        self.projection.generated_at = TimestampMillis::now();
     }
 
     fn take_last_audit(&mut self) -> Option<legion_protocol::TerminalAuditRecord> {
@@ -5312,11 +5353,39 @@ impl TerminalWorkflow {
         command_label: String,
         event_context: EventContext,
     ) -> TerminalPanelProjection {
+        // Product gate: auto-enable the runtime for trusted-workspace explicit launches.
+        // Untrusted workspaces are denied here before any capability decision, ensuring
+        // that untrusted callers cannot reach the PTY layer even if runtime_enabled was
+        // set by another path (e.g. enable_runtime_for_tests in a different test).
+        if context.trust != WorkspaceTrustState::Trusted {
+            let policy = Self::policy_projection(
+                &context,
+                "terminal.launch",
+                &CapabilityDecision {
+                    decision_id: CapabilityDecisionId(1),
+                    granted: false,
+                    capability: CapabilityId("terminal.launch".to_string()),
+                    reason: Some("terminal denied: workspace is untrusted".to_string()),
+                },
+            );
+            return self.deny(TerminalDenial {
+                workspace_id: context.workspace_id,
+                policy,
+                reason: "terminal denied: workspace is untrusted".to_string(),
+                event_context,
+                session_id: None,
+                action: "launch".to_string(),
+                clear_active_session: true,
+            });
+        }
+        // Trust check passed: enable the product runtime on first launch.
+        self.ensure_product_enabled();
+
         // The security broker classifies the actual binary that will be
         // launched (a shell), not the user-facing command label. Passing the
         // display label here would classify as an unknown command and be denied
         // by the terminal launch taxonomy guard.
-        let (command, args) = terminal_shell_command();
+        let (command, args) = self.effective_shell_command();
         let decision = self.capability_decision(
             &context,
             "terminal.launch",
@@ -5355,10 +5424,21 @@ impl TerminalWorkflow {
         let runtime_label = std::any::type_name::<
             legion_terminal::TerminalRuntime<legion_platform::NativePtyService>,
         >();
+        // Compute the PTY env: enforced at spawn via PtyRequest::env.
+        // passthrough=true  → all parent vars minus deny-prefix secrets.
+        // passthrough=false → minimal platform-safe baseline (SystemRoot+PATH on Windows,
+        //                     PATH+HOME on Unix) minus deny-prefix secrets. Never empty.
+        let env_passthrough = self.env_policy.passthrough_env;
+        let env_deny_count = self.env_policy.deny_prefixes.len();
+        let pty_env: Vec<(String, String)> = self
+            .env_policy
+            .effective_env()
+            .expect("effective_env always returns Some");
         match self.runtime.launch(TerminalRuntimeLaunchRequest {
             policy: launch_policy,
             command,
             args,
+            env: Some(pty_env),
         }) {
             Ok(outcome) => {
                 let session_id = outcome.audit.session_id;
@@ -5368,6 +5448,14 @@ impl TerminalWorkflow {
                 self.current_cwd = None;
                 self.projection.active_session_id = Some(session_id);
                 self.projection.runtime_state = Some(runtime_state);
+                // Use the same three-tier precedence for the label as for the actual command:
+                // workspace settings → user settings → platform default.
+                let shell_label = self
+                    .shell_selection
+                    .as_ref()
+                    .or(self.user_shell_selection.as_ref())
+                    .map(|s| s.label())
+                    .unwrap_or_else(|| TerminalShellSelection::platform_default().label());
                 self.projection.status = TerminalPanelStatus {
                     kind: if runtime_state == TerminalRuntimeState::Running {
                         TerminalPanelStatusKind::Running
@@ -5375,17 +5463,20 @@ impl TerminalWorkflow {
                         TerminalPanelStatusKind::Degraded
                     },
                     message: format!(
-                        "Terminal runtime running: {command_label} via {runtime_label}"
+                        "Terminal running: {command_label} • shell={shell_label} via {runtime_label}"
                     ),
                 };
                 self.projection.last_denial = None;
                 self.projection.last_error = None;
+                // Audit env policy metadata. Deny-list is now enforced at PTY spawn level
+                // via PtyRequest::env; env_passthrough and env_deny_prefixes describe the
+                // policy that was applied.
                 self.record_audit(
                     session_id,
                     runtime_state,
                     event_context,
                     format!(
-                        "action=launch state={} decision_id={} command_label_bytes={} runtime={} output_bytes={} truncated={}",
+                        "action=launch state={} decision_id={} command_label_bytes={} runtime={} output_bytes={} truncated={} env_passthrough={env_passthrough} env_deny_prefixes={env_deny_count}",
                         if runtime_state == TerminalRuntimeState::Running {
                             "running"
                         } else {
@@ -5404,15 +5495,13 @@ impl TerminalWorkflow {
                 }
                 self.projection()
             }
-            Err(error) => self.deny(TerminalDenial {
-                workspace_id: context.workspace_id,
-                policy,
-                reason: format!("Terminal launch denied: {error}"),
-                event_context,
-                session_id: None,
-                action: "launch".to_string(),
-                clear_active_session: true,
-            }),
+            Err(error) => {
+                // Map runtime errors to the appropriate failure kind so the UI can
+                // distinguish between unavailable (binary not found / runtime disabled),
+                // policy-blocked (internal policy denial), and other failures.
+                let kind = runtime_error_to_failure_kind(&error);
+                self.apply_failure_kind(kind, format!("terminal launch failed: {error}"))
+            }
         }
     }
 
@@ -5861,6 +5950,29 @@ impl TerminalWorkflow {
         self.projection()
     }
 
+    /// Project a typed failure kind into the terminal panel projection.
+    ///
+    /// Used by the launch error path and by the test helper on `AppComposition`.
+    /// Produces a distinct `TerminalPanelStatusKind` for each `TerminalFailureKind`
+    /// variant so the renderer can display denied/unavailable/exited/crashed/policy-blocked
+    /// states differently.
+    fn apply_failure_kind(
+        &mut self,
+        kind: TerminalFailureKind,
+        reason: String,
+    ) -> TerminalPanelProjection {
+        self.active_command_started_at = None;
+        let label = kind.display_label();
+        self.projection.status = TerminalPanelStatus {
+            kind: failure_kind_to_status_kind(&kind),
+            message: format!("{label}: {}", bounded_label(reason.clone(), 120)),
+        };
+        self.projection.last_error = Some(bounded_label(reason, 120));
+        self.projection.runtime_state = Some(TerminalRuntimeState::Failed);
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
+    }
+
     fn capability_decision(
         &self,
         context: &ActiveWorkspaceContext,
@@ -6029,8 +6141,10 @@ impl TerminalWorkflow {
                 schema_version: 1,
             });
         let mut omitted = self.projection.scrollback.omitted_row_count;
-        if self.projection.output_rows.len() > 100 {
-            let excess = self.projection.output_rows.len() - 100;
+        // Enforce configurable scrollback limit (default SCROLLBACK_DEFAULT_MAX_ROWS = 5000).
+        // Evicted rows are counted in omitted_row_count so the UI can show "N rows omitted".
+        if self.projection.output_rows.len() > self.scrollback_max_rows {
+            let excess = self.projection.output_rows.len() - self.scrollback_max_rows;
             self.projection.output_rows.drain(0..excess);
             omitted = omitted.saturating_add(excess as u32);
         }
@@ -6041,6 +6155,29 @@ impl TerminalWorkflow {
             truncated: omitted > 0,
             schema_version: 1,
         };
+    }
+
+    /// Resolve the effective shell command and args using shell-selection precedence:
+    /// workspace settings → user settings → platform default.
+    /// Resolve the effective shell using the three-tier precedence chain:
+    /// workspace settings → user settings → platform default.
+    fn effective_shell_command(&self) -> (String, Vec<String>) {
+        self.shell_selection
+            .as_ref()
+            .or(self.user_shell_selection.as_ref())
+            .map(|s| s.to_command_args())
+            .unwrap_or_else(TerminalShellSelection::platform_default_command_args)
+    }
+
+    /// Set the workspace-level terminal shell selection (highest precedence).
+    fn set_shell_selection(&mut self, selection: TerminalShellSelection) {
+        self.shell_selection = Some(selection);
+    }
+
+    /// Set the user-level terminal shell preference (overrides platform default;
+    /// overridden by any workspace-level setting).
+    fn set_user_shell_selection(&mut self, selection: Option<TerminalShellSelection>) {
+        self.user_shell_selection = selection;
     }
 }
 
@@ -9978,6 +10115,7 @@ fn workbench_settings_record_from_projection(
         indexed_workspace_search_enabled: settings.indexed_workspace_search_enabled,
         next_edit_prediction_enabled: settings.next_edit_prediction_enabled,
         telemetry: settings.telemetry.clone(),
+        terminal_shell_selection: settings.terminal_shell_selection.clone(),
         schema_version: settings.schema_version,
     }
 }
@@ -10015,6 +10153,7 @@ fn settings_projection_from_workbench_record(
         },
         indexed_workspace_search_enabled: record.indexed_workspace_search_enabled,
         next_edit_prediction_enabled: record.next_edit_prediction_enabled,
+        terminal_shell_selection: record.terminal_shell_selection.clone(),
         schema_version: record.schema_version,
     }
     .normalized()
@@ -18258,6 +18397,97 @@ impl AppComposition {
         self.terminal_workflow.enable_runtime_for_tests();
     }
 
+    /// Force the terminal panel into a specific failure state for integration tests.
+    ///
+    /// Exercises the `TerminalFailureKind` → `TerminalPanelStatusKind` translation path
+    /// so each failure variant can be verified to produce a distinct, labelled status.
+    /// This calls the same `apply_failure_kind` method that the real launch error handler uses.
+    pub fn project_terminal_failure_for_test(
+        &mut self,
+        kind: crate::terminal_policy::TerminalFailureKind,
+    ) -> legion_protocol::TerminalPanelProjection {
+        self.terminal_workflow
+            .apply_failure_kind(kind, "forced-for-test".to_string())
+    }
+
+    /// Set the terminal shell selection (workspace-level setting).
+    ///
+    /// Precedence: workspace settings (this call) → user settings → platform default.
+    /// The selection is projected in the terminal status message so the user can see
+    /// which shell is in use.
+    pub fn set_terminal_shell_selection(
+        &mut self,
+        selection: crate::terminal_policy::TerminalShellSelection,
+    ) {
+        self.terminal_workflow.set_shell_selection(selection);
+    }
+
+    /// Set the user-level terminal shell preference.
+    ///
+    /// This is the second tier in the shell selection precedence chain:
+    /// workspace settings → user settings (this call) → platform default.
+    /// A workspace-level setting (set via `set_terminal_shell_selection`) overrides
+    /// this; `None` clears the user preference and falls back to the platform default.
+    pub fn set_user_terminal_shell_selection(
+        &mut self,
+        selection: Option<crate::terminal_policy::TerminalShellSelection>,
+    ) {
+        self.terminal_workflow.set_user_shell_selection(selection);
+    }
+
+    /// Set the terminal scrollback row limit.
+    ///
+    /// The default is `SCROLLBACK_DEFAULT_MAX_ROWS` (5000 rows). Rows beyond this limit
+    /// are evicted from the oldest end; the eviction count is visible in
+    /// `TerminalPanelProjection::scrollback.omitted_row_count`.
+    pub fn set_terminal_scrollback_max_rows(&mut self, max_rows: usize) {
+        self.terminal_workflow.scrollback_max_rows = max_rows.max(1);
+    }
+
+    /// Trigger orphan PTY cleanup, killing any abandoned sessions and returning
+    /// metadata-only audit records for each cleaned-up session.
+    pub fn cleanup_terminal_orphans(
+        &mut self,
+    ) -> Result<Vec<legion_protocol::TerminalAuditRecord>, AppCompositionError> {
+        self.terminal_workflow
+            .runtime
+            .cleanup_orphans()
+            .map_err(|err| AppCompositionError::Terminal(format!("orphan cleanup failed: {err}")))
+    }
+
+    /// For testing: launch a terminal session using an explicit command and args,
+    /// bypassing the product gate and shell selection. This lets tests create sessions
+    /// with short-lived commands (e.g. `cmd /C exit`) so the process exits on its own
+    /// and the session becomes a genuine orphan for `cleanup_terminal_orphans` testing.
+    ///
+    /// The runtime must be enabled first via `enable_terminal_runtime_for_tests()` and a
+    /// workspace must be opened with `open_workspace()`.
+    pub fn launch_terminal_raw_for_orphan_test(
+        &mut self,
+        command: String,
+        args: Vec<String>,
+    ) -> Result<legion_terminal::TerminalRuntimeLaunchOutcome, AppCompositionError> {
+        let context = self.active_documents.require_workspace_context()?;
+        self.terminal_workflow
+            .runtime
+            .launch(legion_terminal::TerminalRuntimeLaunchRequest {
+                policy: legion_protocol::TerminalLaunchPolicyContract {
+                    principal_id: context.principal,
+                    workspace_id: context.workspace_id,
+                    trust_state: context.trust,
+                    capability_id: CapabilityId("terminal.launch".to_string()),
+                    cwd_policy: "workspace-root".to_string(),
+                    output_byte_limit: 64 * 1024,
+                    timeout_seconds: 30,
+                    schema_version: 1,
+                },
+                command,
+                args,
+                env: None,
+            })
+            .map_err(|err| AppCompositionError::Terminal(format!("raw launch failed: {err}")))
+    }
+
     /// Enable the DAP debug runtime for app integration tests.
     pub fn enable_debug_runtime_for_tests(&mut self) {
         self.debug_workflow.enable_runtime();
@@ -20336,6 +20566,11 @@ impl AppComposition {
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
+        // Apply user-level terminal shell preference from loaded settings.
+        self.terminal_workflow
+            .set_user_shell_selection(TerminalShellSelection::from_label(
+                &record.workbench_settings.terminal_shell_selection,
+            ));
         if let Some(memory_snapshot_json) = &record.memory_snapshot_json {
             let snapshot: MemoryServiceSnapshot = serde_json::from_str(memory_snapshot_json)
                 .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;

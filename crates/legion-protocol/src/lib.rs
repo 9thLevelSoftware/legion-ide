@@ -16270,11 +16270,11 @@ impl Default for LanguageToolingProjection {
 }
 
 /// High-level terminal panel status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TerminalPanelStatusKind {
     /// Terminal workflow is disabled.
     Disabled,
-    /// Terminal workflow was denied by policy.
+    /// Terminal workflow was denied by policy (workspace untrusted or capability not granted).
     Denied,
     /// No terminal session is active.
     Idle,
@@ -16282,12 +16282,40 @@ pub enum TerminalPanelStatusKind {
     Starting,
     /// Terminal session is running.
     Running,
-    /// Terminal session exited.
+    /// Terminal session exited cleanly.
     Exited,
-    /// Terminal workflow failed.
+    /// Terminal workflow failed (generic).
     Failed,
     /// Terminal output is degraded or bounded.
     Degraded,
+    /// Shell binary or PTY subsystem is unavailable on this platform.
+    Unavailable,
+    /// Session exited with a non-zero code or was killed externally.
+    Crashed,
+    /// A mode or network policy blocked the terminal operation.
+    PolicyBlocked,
+}
+
+impl TerminalPanelStatusKind {
+    /// Return a short human-readable label for the renderer.
+    ///
+    /// These strings must never contain Rust debug format (no `PascalCase`). They are
+    /// shown directly in the terminal panel status row.
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Denied => "denied",
+            Self::Idle => "idle",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Exited => "exited",
+            Self::Failed => "failed",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Crashed => "crashed",
+            Self::PolicyBlocked => "policy-blocked",
+        }
+    }
 }
 
 /// Terminal panel status row.
@@ -20047,6 +20075,11 @@ pub struct WorkbenchSettingsRecord {
     /// Telemetry consent state.
     #[serde(default)]
     pub telemetry: WorkbenchTelemetryConsent,
+    /// User-level terminal shell selection label (e.g. "pwsh", "bash", "zsh", "cmd", or an
+    /// explicit path). Empty string means "use platform default". Applied as the second tier
+    /// in the workspace → user → platform-default precedence chain.
+    #[serde(default)]
+    pub terminal_shell_selection: String,
     /// DTO schema version.
     pub schema_version: u16,
 }
@@ -20080,6 +20113,7 @@ impl Default for WorkbenchSettingsRecord {
             indexed_workspace_search_enabled: false,
             next_edit_prediction_enabled: false,
             telemetry: WorkbenchTelemetryConsent::default(),
+            terminal_shell_selection: String::new(),
             schema_version: 1,
         }
     }

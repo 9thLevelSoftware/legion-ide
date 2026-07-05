@@ -191,19 +191,9 @@ fn terminal_actions_cannot_mutate_editor_or_disk() {
         .to_string();
     let original_disk_text = std::fs::read_to_string(&source).expect("disk source");
 
-    let denied = app
-        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
-            command_label: "fixture".to_string(),
-        })
-        .expect("default-deny terminal launch");
-    let denied_terminal = match denied {
-        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
-        other => panic!("expected terminal projection, got {other:?}"),
-    };
-    assert_eq!(denied_terminal.status.kind, TerminalPanelStatusKind::Denied);
-    assert!(denied_terminal.active_session_id.is_none());
-
-    app.enable_terminal_runtime_for_tests();
+    // Product gate: trusted workspace auto-enables the terminal runtime on explicit launch.
+    // The old "default-deny without enable_terminal_runtime_for_tests" behavior was superseded
+    // by the product gate (PKT-TERM T1); untrusted-workspace denial is tested separately.
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
@@ -286,11 +276,23 @@ fn language_cancellation_and_terminal_denial_are_projected_fail_closed() {
     };
     assert_eq!(language.cancellation_count, 1);
 
-    let denied = app
+    // The product gate auto-enables terminal for trusted workspaces; untrusted workspaces
+    // are still denied. Verify the denial path on a separate untrusted app instance.
+    let untrusted_workspace = TempWorkspace::new();
+    let _untrusted_src = untrusted_workspace.write("lib.rs", "pub fn item() {}\n");
+    let mut untrusted_app = AppComposition::new();
+    untrusted_app
+        .open_workspace(
+            &untrusted_workspace.root,
+            WorkspaceTrustState::Untrusted,
+            PrincipalId("principal-language-terminal".to_string()),
+        )
+        .expect("open untrusted workspace");
+    let denied = untrusted_app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "fixture".to_string(),
         })
-        .expect("default-deny terminal launch");
+        .expect("untrusted terminal launch dispatch");
     let terminal = match denied {
         AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
         other => panic!("expected terminal projection, got {other:?}"),

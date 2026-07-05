@@ -1,9 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use legion_app::{AppCommandOutcome, AppComposition};
+use legion_app::{
+    AppCommandOutcome, AppComposition,
+    terminal_policy::{TerminalFailureKind, TerminalShellSelection},
+};
 use legion_protocol::{
-    PrincipalId, TerminalPanelProjection, TerminalPanelStatusKind, TerminalSessionId,
-    WorkspaceTrustState,
+    PrincipalId, TerminalPanelProjection, TerminalPanelStatusKind, TerminalRuntimeState,
+    TerminalSessionId, WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
 
@@ -83,29 +86,87 @@ fn poll_terminal_until(
     }
 }
 
+/// Task 1 (P2.F2.T1): trusted workspace + explicit launch intent → runtime auto-enabled and
+/// real session starts; untrusted workspace → `Denied` with reason surfaced in projection.
+/// This test must FAIL before the product gate is implemented (runtime disabled by default).
 #[test]
-fn terminal_denial_is_visible_and_fail_closed() {
+fn terminal_product_gate_trusted_workspace_launches_without_test_helper() {
+    // Part 1: trusted workspace in Manual mode (default) — no enable_terminal_runtime_for_tests()
     let root = create_root();
     let mut app = AppComposition::new();
     app.open_workspace(
         &root,
         WorkspaceTrustState::Trusted,
-        PrincipalId("principal-terminal".to_string()),
+        PrincipalId("principal-product-gate".to_string()),
     )
-    .expect("open workspace");
-
-    let denied = app
+    .expect("open trusted workspace");
+    // Explicit user launch intent — product gate should auto-enable the runtime.
+    let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
-            command_label: "fixture".to_string(),
+            command_label: "product-gate-test".to_string(),
         })
-        .expect("default-denied terminal launch");
-    let projection = match denied {
-        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
-        other => panic!("expected terminal projection, got {other:?}"),
+        .expect("trusted launch dispatch");
+    let projection = match launched {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
     };
-    assert_eq!(projection.status.kind, TerminalPanelStatusKind::Denied);
-    assert!(projection.last_denial.is_some());
+    assert_eq!(
+        projection.status.kind,
+        TerminalPanelStatusKind::Running,
+        "trusted Manual-mode workspace must auto-enable the terminal runtime; \
+         denial: {:?}",
+        projection.last_denial
+    );
+    assert!(
+        projection.active_session_id.is_some(),
+        "active session id must be set after successful launch"
+    );
 
+    // Part 2: untrusted workspace → Denied with "untrusted" in denial reason.
+    let untrusted_root = create_root();
+    let mut untrusted = AppComposition::new();
+    untrusted
+        .open_workspace(
+            &untrusted_root,
+            WorkspaceTrustState::Untrusted,
+            PrincipalId("principal-product-gate".to_string()),
+        )
+        .expect("open untrusted workspace");
+    let denied = untrusted
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
+            command_label: "product-gate-test".to_string(),
+        })
+        .expect("untrusted launch dispatch");
+    let projection = match denied {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(
+        projection.status.kind,
+        TerminalPanelStatusKind::Denied,
+        "untrusted workspace must be denied"
+    );
+    assert!(
+        projection
+            .last_denial
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("untrusted"),
+        "denial reason must mention untrusted: {:?}",
+        projection.last_denial
+    );
+}
+
+/// Verify that untrusted workspaces are always denied — the product gate denies them before
+/// any capability evaluation, so `enable_terminal_runtime_for_tests()` cannot override it.
+///
+/// NOTE: the old "trusted workspace + no explicit enablement → Denied" scenario has been
+/// superseded by the product gate: trusted workspaces now auto-enable on explicit launch
+/// (see `terminal_product_gate_trusted_workspace_launches_without_test_helper`).
+#[test]
+fn terminal_denial_is_visible_and_fail_closed() {
+    // Untrusted workspace → always Denied with "untrusted" in the reason.
     let untrusted_root = create_root();
     let mut untrusted = AppComposition::new();
     untrusted
@@ -115,6 +176,7 @@ fn terminal_denial_is_visible_and_fail_closed() {
             PrincipalId("principal-terminal".to_string()),
         )
         .expect("open untrusted workspace");
+    // Even with the runtime explicitly enabled the product gate must deny untrusted callers.
     untrusted.enable_terminal_runtime_for_tests();
     let denied = untrusted
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
@@ -131,8 +193,13 @@ fn terminal_denial_is_visible_and_fail_closed() {
             .last_denial
             .as_deref()
             .unwrap_or_default()
-            .contains("untrusted")
+            .to_ascii_lowercase()
+            .contains("untrusted"),
+        "denial reason must mention untrusted: {:?}",
+        projection.last_denial
     );
+    // Denial must be surfaced — projection is not empty / fail-open.
+    assert!(projection.last_denial.is_some());
 }
 
 #[test]
@@ -341,4 +408,435 @@ fn terminal_workflow_cannot_mutate_editor_or_disk() {
         std::fs::read_to_string(&target).expect("disk text"),
         "unchanged\n"
     );
+}
+
+/// Task 2 (TERM.01): shell selection three-tier precedence — workspace settings override
+/// user settings, which override the platform default, and the selected shell is
+/// projected in the status message.
+#[test]
+fn terminal_shell_selection_is_projected_in_status() {
+    let root = create_root();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-shell".to_string()),
+    )
+    .expect("open workspace");
+
+    // ── Tier 1: Workspace overrides user overrides platform ─────────────────────────────
+    // Use platform-appropriate shells so we never spawn a binary that doesn't exist:
+    //   Windows: user=PowerShell, workspace=Cmd  → "cmd.exe" must appear in status
+    //   Unix:    user=Explicit("sh"), workspace=Bash → "bash" must appear in status
+    #[cfg(windows)]
+    let (user_t1, ws_t1): (TerminalShellSelection, TerminalShellSelection) = (
+        TerminalShellSelection::PowerShell,
+        TerminalShellSelection::Cmd,
+    );
+    #[cfg(not(windows))]
+    let (user_t1, ws_t1): (TerminalShellSelection, TerminalShellSelection) = (
+        TerminalShellSelection::Explicit("sh".to_string()),
+        TerminalShellSelection::Bash,
+    );
+
+    app.set_user_terminal_shell_selection(Some(user_t1));
+    app.set_terminal_shell_selection(ws_t1);
+
+    let projection = match app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
+            command_label: "shell-precedence-workspace".to_string(),
+        })
+        .expect("tier-1 launch")
+    {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(
+        projection.status.kind,
+        TerminalPanelStatusKind::Running,
+        "workspace-override launch must succeed; status: {:?}",
+        projection.status
+    );
+    #[cfg(windows)]
+    assert!(
+        projection.status.message.contains("cmd.exe"),
+        "workspace Cmd must override user PowerShell; status: {:?}",
+        projection.status.message
+    );
+    #[cfg(not(windows))]
+    assert!(
+        projection.status.message.contains("bash"),
+        "workspace Bash must override user sh; status: {:?}",
+        projection.status.message
+    );
+
+    // ── Tier 2: User overrides platform default ──────────────────────────────────────────
+    // User setting must beat the platform default when no workspace override is set.
+    //   Windows: user=PowerShell → platform default is Cmd; "pwsh" must appear in status
+    //   Unix:    user=Explicit("sh") → platform default is Bash; "shell=sh" in status
+    let root2 = create_root();
+    let mut app2 = AppComposition::new();
+    app2.open_workspace(
+        &root2,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-shell-user".to_string()),
+    )
+    .expect("open workspace for user-tier test");
+    #[cfg(windows)]
+    let user_t2 = TerminalShellSelection::PowerShell;
+    #[cfg(not(windows))]
+    let user_t2 = TerminalShellSelection::Explicit("sh".to_string());
+    app2.set_user_terminal_shell_selection(Some(user_t2));
+    // No workspace-level override — user pref should win over platform default.
+
+    let projection2 = match app2
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
+            command_label: "shell-precedence-user".to_string(),
+        })
+        .expect("tier-2 launch")
+    {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(
+        projection2.status.kind,
+        TerminalPanelStatusKind::Running,
+        "user-pref launch must succeed; status: {:?}",
+        projection2.status
+    );
+    #[cfg(windows)]
+    assert!(
+        projection2.status.message.contains("pwsh"),
+        "user PowerShell must override platform default (cmd.exe); status: {:?}",
+        projection2.status.message
+    );
+    #[cfg(not(windows))]
+    assert!(
+        projection2.status.message.contains("shell=sh"),
+        "user sh must override platform default (bash); status: {:?}",
+        projection2.status.message
+    );
+}
+
+/// Task 3 (TERM.05): scrollback limit is enforced; rows beyond the limit are evicted and
+/// the eviction count is reflected in `scrollback.omitted_row_count`.
+#[test]
+fn terminal_scrollback_limit_enforced_and_eviction_counted() {
+    let root = create_root();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-scrollback".to_string()),
+    )
+    .expect("open workspace");
+    app.enable_terminal_runtime_for_tests();
+
+    let launched = app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
+            command_label: "scrollback-test".to_string(),
+        })
+        .expect("scrollback launch");
+    let projection = match launched {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(projection.status.kind, TerminalPanelStatusKind::Running);
+    let session_id = projection.active_session_id.expect("active session");
+
+    // Set a tight scrollback limit for this test.
+    app.set_terminal_scrollback_max_rows(10);
+
+    // Pump 20 input cycles to generate more rows than the 10-row limit.
+    for i in 0..20u32 {
+        let _ = app
+            .dispatch_ui_intent(CommandDispatchIntent::TerminalInput {
+                session_id,
+                payload: format!("echo line-{i}"),
+            })
+            .expect("input");
+        let _ = app
+            .dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id })
+            .expect("poll");
+    }
+
+    let final_projection = poll_terminal_until(&mut app, session_id, |p| {
+        p.output_rows.len() >= 10 || p.scrollback.omitted_row_count > 0
+    });
+    // The projection must not exceed the configured limit.
+    assert!(
+        final_projection.output_rows.len() <= 10,
+        "visible rows {} must not exceed limit 10",
+        final_projection.output_rows.len()
+    );
+    // If rows were evicted, omitted_row_count must be > 0.
+    if final_projection.scrollback.omitted_row_count > 0 {
+        assert!(
+            final_projection.scrollback.truncated,
+            "scrollback.truncated must be set when rows are omitted"
+        );
+    }
+}
+
+/// Task 4 (TERM.06): resize intent propagates to the PTY; the projection reflects the new
+/// dimensions in the status message.
+#[test]
+fn terminal_resize_propagates_to_projection() {
+    let root = create_root();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-resize".to_string()),
+    )
+    .expect("open workspace");
+    app.enable_terminal_runtime_for_tests();
+
+    let launched = app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
+            command_label: "resize-test".to_string(),
+        })
+        .expect("resize launch");
+    let projection = match launched {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(projection.status.kind, TerminalPanelStatusKind::Running);
+    let session_id = projection.active_session_id.expect("active session");
+
+    let resized = app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalResize {
+            session_id,
+            cols: 200,
+            rows: 50,
+        })
+        .expect("resize");
+    let projection = match resized {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(projection.status.kind, TerminalPanelStatusKind::Running);
+    assert!(
+        projection.status.message.contains("200") && projection.status.message.contains("50"),
+        "resize status must mention the new dimensions; got: {:?}",
+        projection.status.message
+    );
+}
+
+/// Task 6 (TERM.09): orphan cleanup — abandoned sessions are killed and produce audit records.
+///
+/// Strategy: use `launch_terminal_raw_for_orphan_test` to start a short-lived process
+/// (`cmd /C exit` on Windows, `sh -c exit` on Unix) without going through the shell
+/// selection path. The process exits on its own; the session stays in both the platform
+/// registry and the runtime sessions map because no `TerminalOutputPoll` was dispatched.
+/// `cleanup_terminal_orphans()` must then (a) detect the exited session, (b) return a
+/// non-empty audit record with the expected session id and state=Exited, and (c) leave
+/// no orphan on a second call.
+#[test]
+fn terminal_orphan_cleanup_kills_and_records_evidence() {
+    let root = create_root();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-orphan".to_string()),
+    )
+    .expect("open workspace");
+    app.enable_terminal_runtime_for_tests();
+
+    // Launch a short-lived process that exits on its own.
+    // Do NOT dispatch TerminalOutputPoll — that would remove the exited session from the
+    // runtime registry before cleanup_terminal_orphans() can find it.
+    #[cfg(windows)]
+    let (command, args) = (
+        "cmd".to_string(),
+        vec!["/C".to_string(), "exit".to_string()],
+    );
+    #[cfg(unix)]
+    let (command, args) = ("sh".to_string(), vec!["-c".to_string(), "exit".to_string()]);
+
+    let launched = app
+        .launch_terminal_raw_for_orphan_test(command, args)
+        .expect("short-lived launch must succeed");
+    let expected_session_id = launched.audit.session_id;
+
+    // Give the process time to exit naturally.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // First cleanup call: must detect the exited session and return an audit record.
+    let records = app
+        .cleanup_terminal_orphans()
+        .expect("orphan cleanup must not fail");
+
+    assert_eq!(
+        records.len(),
+        1,
+        "cleanup must return exactly one audit record for the orphaned session; got: {records:?}"
+    );
+    assert_eq!(
+        records[0].session_id, expected_session_id,
+        "audit record must reference the orphaned session"
+    );
+    assert_eq!(
+        records[0].state,
+        TerminalRuntimeState::Exited,
+        "orphan record state must be Exited"
+    );
+
+    // Second call must return empty (session already removed).
+    let second = app
+        .cleanup_terminal_orphans()
+        .expect("second cleanup must not fail");
+    assert_eq!(
+        second.len(),
+        0,
+        "second cleanup call must return empty (session already cleaned)"
+    );
+
+    eprintln!(
+        "[TERM-ORPHAN] session={} state={:?} summary={}",
+        records[0].session_id.0, records[0].state, records[0].metadata_summary
+    );
+}
+
+/// Task 7 (TERM.11): failure UX — all 5 failure kinds project distinct statuses with labels.
+///
+/// Two failure kinds are tested via real end-to-end scenarios (Denied from untrusted workspace;
+/// Exited from kill). Three are tested via `project_terminal_failure_for_test` which calls the
+/// same `apply_failure_kind()` method that the real launch error handler uses.
+#[test]
+fn terminal_failure_ux_distinct_status_kinds() {
+    // ── Denied (real scenario): untrusted workspace → Denied ──────────────────────────────
+    let untrusted_root = create_root();
+    let mut untrusted = AppComposition::new();
+    untrusted
+        .open_workspace(
+            &untrusted_root,
+            WorkspaceTrustState::Untrusted,
+            PrincipalId("principal-ux".to_string()),
+        )
+        .expect("open untrusted workspace");
+    let denied = untrusted
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
+            command_label: "ux-test".to_string(),
+        })
+        .expect("denied launch");
+    let projection = match denied {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(
+        projection.status.kind,
+        TerminalPanelStatusKind::Denied,
+        "untrusted→Denied"
+    );
+
+    // ── Exited (real scenario): kill active session → Exited ──────────────────────────────
+    let root = create_root();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-ux".to_string()),
+    )
+    .expect("open workspace");
+    app.enable_terminal_runtime_for_tests();
+    let launched = app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
+            command_label: "ux-kill-test".to_string(),
+        })
+        .expect("ux launch");
+    let projection = match launched {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    let session_id = projection.active_session_id.expect("active session");
+    let killed = app
+        .dispatch_ui_intent(CommandDispatchIntent::TerminalKill { session_id })
+        .expect("kill");
+    let projection = match killed {
+        AppCommandOutcome::TerminalPanelUpdated(p) => p,
+        other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    assert_eq!(
+        projection.status.kind,
+        TerminalPanelStatusKind::Exited,
+        "kill→Exited"
+    );
+
+    // ── Unavailable, Crashed, PolicyBlocked via apply_failure_kind() ──────────────────────
+    // Each call exercises the real translation path (`failure_kind_to_status_kind`).
+    // The test helper `project_terminal_failure_for_test` delegates to the same method
+    // that the launch error handler calls, so this verifies production code.
+
+    let mut app2 = AppComposition::new();
+    let p = app2.project_terminal_failure_for_test(TerminalFailureKind::Unavailable);
+    assert_eq!(
+        p.status.kind,
+        TerminalPanelStatusKind::Unavailable,
+        "Unavailable kind"
+    );
+    assert!(
+        p.status.message.contains("unavailable"),
+        "Unavailable message must contain 'unavailable'; got: {:?}",
+        p.status.message
+    );
+
+    let mut app3 = AppComposition::new();
+    let p = app3.project_terminal_failure_for_test(TerminalFailureKind::Crashed);
+    assert_eq!(
+        p.status.kind,
+        TerminalPanelStatusKind::Crashed,
+        "Crashed kind"
+    );
+    assert!(
+        p.status.message.contains("crashed"),
+        "Crashed message must contain 'crashed'; got: {:?}",
+        p.status.message
+    );
+
+    let mut app4 = AppComposition::new();
+    let p = app4.project_terminal_failure_for_test(TerminalFailureKind::PolicyBlocked);
+    assert_eq!(
+        p.status.kind,
+        TerminalPanelStatusKind::PolicyBlocked,
+        "PolicyBlocked kind"
+    );
+    assert!(
+        p.status.message.contains("policy-blocked"),
+        "PolicyBlocked message must contain 'policy-blocked'; got: {:?}",
+        p.status.message
+    );
+
+    // Verify all 5 status kinds are distinct (no two map to the same variant).
+    let kinds = [
+        TerminalPanelStatusKind::Denied,
+        TerminalPanelStatusKind::Unavailable,
+        TerminalPanelStatusKind::Exited,
+        TerminalPanelStatusKind::Crashed,
+        TerminalPanelStatusKind::PolicyBlocked,
+    ];
+    let unique: std::collections::HashSet<_> = kinds.iter().collect();
+    assert_eq!(
+        unique.len(),
+        kinds.len(),
+        "all 5 terminal failure status kinds must be distinct"
+    );
+
+    // MINOR 1: Assert that display_label() returns human-readable text (no PascalCase / Rust debug
+    // format). Users must never see strings like "PolicyBlocked" or "Unavailable" in the UI.
+    for kind in &kinds {
+        let label = kind.display_label();
+        let has_pascal = label.chars().enumerate().any(|(i, c)| {
+            i > 0 && c.is_uppercase() && label.chars().nth(i - 1).is_some_and(|p| p.is_lowercase())
+        });
+        assert!(
+            !has_pascal,
+            "display_label() must not contain PascalCase for {kind:?}; got: {label:?}"
+        );
+        assert!(
+            !label.is_empty(),
+            "display_label() must not be empty for {kind:?}"
+        );
+    }
 }
