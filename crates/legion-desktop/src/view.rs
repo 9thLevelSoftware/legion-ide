@@ -479,6 +479,8 @@ pub struct DesktopProjectionViewModel {
     pub legion_workflow_rows: Vec<String>,
     /// Language tooling summary rows.
     pub language_rows: Vec<String>,
+    /// LSP server health and download-refusal rows (projection-only, read-only).
+    pub lsp_health_rows: Vec<String>,
     /// Structural search and replace summary rows.
     pub structural_search_rows: Vec<String>,
     /// Git status, diff, blame, graph, and conflict rows.
@@ -652,6 +654,7 @@ impl DesktopProjectionViewModel {
             assistant_rows: assistant_rows(snapshot),
             legion_workflow_rows: legion_workflow_rows(snapshot),
             language_rows: language_rows(snapshot),
+            lsp_health_rows: lsp_health_rows(snapshot),
             structural_search_rows: structural_search_rows(snapshot),
             git_rows: git_rows(snapshot),
             terminal_rows: terminal_rows(snapshot),
@@ -2836,6 +2839,13 @@ fn render_manual_context_inspector(
         "{} problems",
         snapshot.language_tooling_projection.problems.len()
     )));
+    section_label(ui, "LSP Health", None);
+    render_compact_rows(
+        ui,
+        &model.lsp_health_rows,
+        "No LSP health rows projected",
+        4,
+    );
     section_label(ui, "Debug", Some(theme::tokens().accent.orange));
     render_compact_rows(ui, &model.debug_rows, "No projected debug state", 6);
     section_label(ui, "Structural Search", Some(theme::tokens().accent.cyan));
@@ -7035,6 +7045,20 @@ fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         )
     }));
     rows
+}
+
+/// Projection-only LSP health rows derived from the snapshot.
+///
+/// The snapshot does not yet carry `LspServerHealthRecord` data directly (that
+/// requires app-layer wiring); this function reserves the render slot and
+/// returns an empty vec until the snapshot is extended.  No authority is
+/// claimed here — all rendering is read-only.
+fn lsp_health_rows(_snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    // Deferred: the ShellProjectionSnapshot does not yet expose
+    // LspServerHealthRecord entries.  The projection struct and
+    // `project_lsp_health` mapping are complete; wiring the app layer to
+    // populate the snapshot is tracked separately.
+    Vec::new()
 }
 
 fn structural_search_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

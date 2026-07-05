@@ -1382,20 +1382,9 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             .iter()
             .any(|row| row.contains("DegradedLargeFile"))
     );
-
-    let streaming_model = DesktopProjectionViewModel::from_snapshot(&streaming_snapshot());
-    // There is no separate "streaming" buffer state; a chunked viewport renders
-    // its line slices directly, each prefixed with the 1-based line number.
-    assert_eq!(
-        streaming_model.active_buffer_lines,
-        vec!["   1: visible streaming line".to_string()]
-    );
-    assert!(
-        streaming_model
-            .active_buffer_lines
-            .iter()
-            .any(|row| row.contains("visible streaming line"))
-    );
+    // SCALE.05 moved capability reductions into per-reason banner bullet rows
+    // ("  • capability reduced: {reason}", view.rs). Assert the disabled
+    // overlay reason appears in one of them.
     assert!(
         degraded_model
             .large_file_banner_rows
@@ -1410,6 +1399,20 @@ fn projection_rendering_handles_empty_and_degraded_snapshots() {
             && !row.contains('\n')
             && !row.contains('\0')
     }));
+
+    let streaming_model = DesktopProjectionViewModel::from_snapshot(&streaming_snapshot());
+    // There is no separate "streaming" buffer state; a chunked viewport renders
+    // its line slices directly, each prefixed with the 1-based line number.
+    assert_eq!(
+        streaming_model.active_buffer_lines,
+        vec!["   1: visible streaming line".to_string()]
+    );
+    assert!(
+        streaming_model
+            .active_buffer_lines
+            .iter()
+            .any(|row| row.contains("visible streaming line"))
+    );
 }
 
 #[test]
