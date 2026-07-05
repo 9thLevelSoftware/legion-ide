@@ -16270,11 +16270,11 @@ impl Default for LanguageToolingProjection {
 }
 
 /// High-level terminal panel status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TerminalPanelStatusKind {
     /// Terminal workflow is disabled.
     Disabled,
-    /// Terminal workflow was denied by policy.
+    /// Terminal workflow was denied by policy (workspace untrusted or capability not granted).
     Denied,
     /// No terminal session is active.
     Idle,
@@ -16282,12 +16282,18 @@ pub enum TerminalPanelStatusKind {
     Starting,
     /// Terminal session is running.
     Running,
-    /// Terminal session exited.
+    /// Terminal session exited cleanly.
     Exited,
-    /// Terminal workflow failed.
+    /// Terminal workflow failed (generic).
     Failed,
     /// Terminal output is degraded or bounded.
     Degraded,
+    /// Shell binary or PTY subsystem is unavailable on this platform.
+    Unavailable,
+    /// Session exited with a non-zero code or was killed externally.
+    Crashed,
+    /// A mode or network policy blocked the terminal operation.
+    PolicyBlocked,
 }
 
 /// Terminal panel status row.

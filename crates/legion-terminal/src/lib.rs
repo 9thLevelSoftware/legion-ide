@@ -365,6 +365,13 @@ pub struct TerminalRuntimeLaunchRequest {
     pub command: String,
     /// Command arguments selected by policy-owned caller.
     pub args: Vec<String>,
+    /// Explicit environment for the PTY child process.
+    ///
+    /// `None` = inherit the sanitised parent env (backward-compatible default for
+    /// callers that do not own an env policy).
+    /// `Some(vars)` = use exactly these key-value pairs; the deny-list must already
+    /// have been applied by the policy-owning layer (`legion-app::TerminalEnvPolicy`).
+    pub env: Option<Vec<(String, String)>>,
 }
 
 /// Terminal launch outcome.
@@ -627,6 +634,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                 command: request.command,
                 args: request.args,
                 cwd: None,
+                env: request.env,
             })
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
@@ -1555,6 +1563,7 @@ mod tests {
                 policy: policy(),
                 command: "bash".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("launch");
         let session_id = launched.audit.session_id;
@@ -1625,6 +1634,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             }),
             Err(TerminalRuntimeError::Disabled)
         ));
@@ -1641,6 +1651,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("launch");
         assert_eq!(outcome.audit.state, TerminalRuntimeState::Degraded);
@@ -1658,6 +1669,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("launch");
         assert_eq!(outcome.audit.state, TerminalRuntimeState::Degraded);
@@ -1669,6 +1681,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         assert_eq!(outcome.audit.state, TerminalRuntimeState::Running);
@@ -1685,6 +1698,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let session_id = outcome.audit.session_id;
@@ -1739,6 +1753,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let close_session_id = outcome.audit.session_id;
@@ -1762,6 +1777,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let kill_session_id = outcome.audit.session_id;
@@ -1792,6 +1808,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let session_id = outcome.audit.session_id;
@@ -1826,6 +1843,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let killed_session_id = killed.audit.session_id;
@@ -1856,6 +1874,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         pty.set_orphaned(vec!["native-unix-pty-test".to_string()]);
@@ -1876,6 +1895,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let session_id = outcome.audit.session_id;
@@ -1921,6 +1941,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let session_id = outcome.audit.session_id;
@@ -1962,6 +1983,7 @@ mod tests {
                 },
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             }),
             Err(TerminalRuntimeError::Denied { .. })
         ));
@@ -1980,6 +2002,7 @@ mod tests {
                 },
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         // The smaller per-launch limit (4) wins over the global config max (1024).
@@ -1995,6 +2018,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let session_id = launch.audit.session_id;
@@ -2020,6 +2044,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let session_id = launch.audit.session_id;
@@ -2057,6 +2082,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                env: None,
             })
             .expect("native launch");
         let session_id = launch.audit.session_id;

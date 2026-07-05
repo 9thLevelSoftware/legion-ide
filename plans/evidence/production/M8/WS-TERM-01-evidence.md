@@ -120,16 +120,49 @@ All tests passed.
 
 The trust check lives at the top of `TerminalWorkflow::launch()`, before any capability broker evaluation. This means `enable_runtime_for_tests()` cannot override it for untrusted workspaces: the deny is unconditional and happens before the security broker is consulted.
 
-### Env policy without `PtyRequest::env` (Task 5)
+### Env policy enforcement at PTY spawn (Task 5 — FIX ROUND)
 
-`PtyRequest` has no `env` field, so we cannot inject the filtered env at PTY spawn time without a protocol change. The `TerminalEnvPolicy` type is fully implemented, unit-tested, and its configuration (passthrough enabled/disabled + deny-prefix count) is audited in the launch record. Actual env injection at PTY spawn requires a future `PtyRequest::env` field addition to `legion-protocol`. This is noted in the code comment and is a tracked concern.
+Initial implementation only audited the env deny-list; it did not enforce it because `PtyRequest` lacked an `env` field. The fix round added `env: Option<Vec<(String, String)>>` to `PtyRequest` in `legion-platform`, plumbed it through `TerminalRuntimeLaunchRequest` in `legion-terminal`, wired both Windows ConPTY (`lpEnvironment` block) and Unix exec paths, and updated `TerminalWorkflow::launch()` to pass `env_policy.effective_env()`. A TDD smoke test (`windows_env_deny_list_stripped_at_pty_spawn`) verifies the secret var is absent from PTY output while the control var is present.
 
 ### Orphan cleanup (Task 6)
 
 `TerminalRuntime::cleanup_orphans()` is the runtime-level hook. `AppComposition::cleanup_terminal_orphans()` wraps it and returns metadata-only `TerminalAuditRecord` values. No raw command output is included in the records; redaction stays.
 
+## Fix-round changes
+
+### FIX 1 — Env deny-list enforcement at PTY spawn
+
+**Problem**: `TerminalEnvPolicy` was audited but not enforced. `PtyRequest` had no `env` field so filtered vars were computed but discarded.
+
+**Changes**:
+- `crates/legion-platform/src/lib.rs` — added `env: Option<Vec<(String, String)>>` to `PtyRequest`; Windows ConPTY path builds UTF-16 `lpEnvironment` block from `request.env.unwrap_or_else(|| child_environment_vars(&[]))`; Unix path uses `command.env(key, value)` loop; 4 test constructors patched with `env: None`
+- `crates/legion-terminal/src/lib.rs` — added `env: Option<Vec<(String, String)>>` to `TerminalRuntimeLaunchRequest`; `launch()` passes `env: request.env` to `PtyRequest`; all test constructors patched with `env: None`
+- `crates/legion-app/src/lib.rs` — `TerminalWorkflow::launch()` computes `pty_env = env_policy.effective_env().unwrap_or_default()` and passes `env: Some(pty_env)` to the runtime
+- `crates/legion-terminal/tests/platform_shell_smoke.rs` — `windows_env_deny_list_stripped_at_pty_spawn` uses `NativePtyService::spawn_pty` + `read_pty` polling to await the echo output after ConPTY init burst; `unix_env_deny_list_stripped_at_pty_spawn` twin added
+
+**Test result** (Windows):
+```
+test windows_env_deny_list_stripped_at_pty_spawn ... ok
+output: "...\u{1b}[H\u{1b}[?25hdeny=%LEGION_SECRET_TEST_TOKEN_PTY% allow=visible123-pkt-term-pty\r\n"
+```
+Secret key not expanded (env var absent); control value `visible123-pkt-term-pty` is visible.
+
+### FIX 2 — TerminalFailureKind wired into TerminalPanelStatusKind
+
+**Problem**: `TerminalFailureKind` existed but was not translated into `TerminalPanelStatusKind`; all failure paths called `deny()` which always projected `StatusKind::Denied`.
+
+**Changes**:
+- `crates/legion-protocol/src/lib.rs` — added `Hash` derive and three new variants `Unavailable`, `Crashed`, `PolicyBlocked` to `TerminalPanelStatusKind`
+- `crates/legion-app/src/lib.rs` — added `failure_kind_to_status_kind()` and `runtime_error_to_failure_kind()` free functions; added `TerminalWorkflow::apply_failure_kind()` method; `Err(error)` arm in `launch()` now calls `apply_failure_kind`; `AppComposition::project_terminal_failure_for_test()` test helper added
+- `crates/legion-app/tests/terminal_workflow.rs` — `terminal_failure_ux_distinct_status_kinds` exercises all 5 failure kinds; verifies they are all distinct via `HashSet`
+
+**Test result**:
+```
+test terminal_failure_ux_distinct_status_kinds ... ok   (9/9 terminal_workflow tests pass)
+```
+
 ## Notes
 
 - `TerminalRuntimeConfig::default()` remains `enabled: false`. The product gate calls `ensure_product_enabled()` on first trusted-workspace launch.
 - `enable_terminal_runtime_for_tests()` still works as before (test helper only); untrusted workspaces are still denied even if this is called.
-- `TerminalFailureKind` is defined in `terminal_policy.rs` but is not yet wired into `TerminalPanelStatusKind`; it is available for the projection layer to consume when the renderer is productized.
+- `TerminalFailureKind` is fully wired into `TerminalPanelStatusKind` as of the fix round. All 5 failure kinds project distinct status variants with `display_label()` text.

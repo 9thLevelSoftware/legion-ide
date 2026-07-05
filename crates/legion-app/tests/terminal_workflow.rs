@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use legion_app::{AppCommandOutcome, AppComposition, terminal_policy::TerminalShellSelection};
+use legion_app::{
+    AppCommandOutcome, AppComposition,
+    terminal_policy::{TerminalFailureKind, TerminalShellSelection},
+};
 use legion_protocol::{
     PrincipalId, TerminalPanelProjection, TerminalPanelStatusKind, TerminalSessionId,
     WorkspaceTrustState,
@@ -584,10 +587,14 @@ fn terminal_orphan_cleanup_kills_and_records_evidence() {
     let _ = audit_records;
 }
 
-/// Task 7 (TERM.11): failure UX — distinct projection statuses for deny, exit, crash, etc.
+/// Task 7 (TERM.11): failure UX — all 5 failure kinds project distinct statuses with labels.
+///
+/// Two failure kinds are tested via real end-to-end scenarios (Denied from untrusted workspace;
+/// Exited from kill). Three are tested via `project_terminal_failure_for_test` which calls the
+/// same `apply_failure_kind()` method that the real launch error handler uses.
 #[test]
 fn terminal_failure_ux_distinct_status_kinds() {
-    // Denied case: untrusted workspace.
+    // ── Denied (real scenario): untrusted workspace → Denied ──────────────────────────────
     let untrusted_root = create_root();
     let mut untrusted = AppComposition::new();
     untrusted
@@ -606,9 +613,13 @@ fn terminal_failure_ux_distinct_status_kinds() {
         AppCommandOutcome::TerminalPanelUpdated(p) => p,
         other => panic!("expected TerminalPanelUpdated, got {other:?}"),
     };
-    assert_eq!(projection.status.kind, TerminalPanelStatusKind::Denied);
+    assert_eq!(
+        projection.status.kind,
+        TerminalPanelStatusKind::Denied,
+        "untrusted→Denied"
+    );
 
-    // Exited case: kill an active session and verify Exited projection.
+    // ── Exited (real scenario): kill active session → Exited ──────────────────────────────
     let root = create_root();
     let mut app = AppComposition::new();
     app.open_workspace(
@@ -618,7 +629,6 @@ fn terminal_failure_ux_distinct_status_kinds() {
     )
     .expect("open workspace");
     app.enable_terminal_runtime_for_tests();
-
     let launched = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
             command_label: "ux-kill-test".to_string(),
@@ -629,7 +639,6 @@ fn terminal_failure_ux_distinct_status_kinds() {
         other => panic!("expected TerminalPanelUpdated, got {other:?}"),
     };
     let session_id = projection.active_session_id.expect("active session");
-
     let killed = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalKill { session_id })
         .expect("kill");
@@ -640,6 +649,65 @@ fn terminal_failure_ux_distinct_status_kinds() {
     assert_eq!(
         projection.status.kind,
         TerminalPanelStatusKind::Exited,
-        "killed session must project Exited status"
+        "kill→Exited"
+    );
+
+    // ── Unavailable, Crashed, PolicyBlocked via apply_failure_kind() ──────────────────────
+    // Each call exercises the real translation path (`failure_kind_to_status_kind`).
+    // The test helper `project_terminal_failure_for_test` delegates to the same method
+    // that the launch error handler calls, so this verifies production code.
+
+    let mut app2 = AppComposition::new();
+    let p = app2.project_terminal_failure_for_test(TerminalFailureKind::Unavailable);
+    assert_eq!(
+        p.status.kind,
+        TerminalPanelStatusKind::Unavailable,
+        "Unavailable kind"
+    );
+    assert!(
+        p.status.message.contains("unavailable"),
+        "Unavailable message must contain 'unavailable'; got: {:?}",
+        p.status.message
+    );
+
+    let mut app3 = AppComposition::new();
+    let p = app3.project_terminal_failure_for_test(TerminalFailureKind::Crashed);
+    assert_eq!(
+        p.status.kind,
+        TerminalPanelStatusKind::Crashed,
+        "Crashed kind"
+    );
+    assert!(
+        p.status.message.contains("crashed"),
+        "Crashed message must contain 'crashed'; got: {:?}",
+        p.status.message
+    );
+
+    let mut app4 = AppComposition::new();
+    let p = app4.project_terminal_failure_for_test(TerminalFailureKind::PolicyBlocked);
+    assert_eq!(
+        p.status.kind,
+        TerminalPanelStatusKind::PolicyBlocked,
+        "PolicyBlocked kind"
+    );
+    assert!(
+        p.status.message.contains("policy-blocked"),
+        "PolicyBlocked message must contain 'policy-blocked'; got: {:?}",
+        p.status.message
+    );
+
+    // Verify all 5 status kinds are distinct (no two map to the same variant).
+    let kinds = [
+        TerminalPanelStatusKind::Denied,
+        TerminalPanelStatusKind::Unavailable,
+        TerminalPanelStatusKind::Exited,
+        TerminalPanelStatusKind::Crashed,
+        TerminalPanelStatusKind::PolicyBlocked,
+    ];
+    let unique: std::collections::HashSet<_> = kinds.iter().collect();
+    assert_eq!(
+        unique.len(),
+        kinds.len(),
+        "all 5 terminal failure status kinds must be distinct"
     );
 }

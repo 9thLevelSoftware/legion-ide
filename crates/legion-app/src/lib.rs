@@ -165,7 +165,7 @@ use legion_security::{
 };
 use legion_storage::InMemoryStorageRepositoryPort;
 use legion_terminal::{
-    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeLaunchRequest,
+    TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeError, TerminalRuntimeLaunchRequest,
     TerminalRuntimeOutputPollRequest,
 };
 use legion_tracker::{
@@ -202,7 +202,9 @@ use offline_ai::{
 use serde_json::{Value, json};
 use syntect::easy::ScopeRangeIterator;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
-use terminal_policy::{SCROLLBACK_DEFAULT_MAX_ROWS, TerminalEnvPolicy, TerminalShellSelection};
+use terminal_policy::{
+    SCROLLBACK_DEFAULT_MAX_ROWS, TerminalEnvPolicy, TerminalFailureKind, TerminalShellSelection,
+};
 use thiserror::Error;
 
 const SEARCH_DEFAULT_RESULT_LIMIT: usize = 50;
@@ -5214,6 +5216,35 @@ struct TerminalDenial {
     clear_active_session: bool,
 }
 
+/// Translate a `TerminalFailureKind` to the corresponding `TerminalPanelStatusKind`.
+///
+/// All five variants map to distinct status kinds so the renderer can display each
+/// failure mode differently without inspecting the message string.
+fn failure_kind_to_status_kind(kind: &TerminalFailureKind) -> TerminalPanelStatusKind {
+    match kind {
+        TerminalFailureKind::Denied => TerminalPanelStatusKind::Denied,
+        TerminalFailureKind::Unavailable => TerminalPanelStatusKind::Unavailable,
+        TerminalFailureKind::Exited => TerminalPanelStatusKind::Exited,
+        TerminalFailureKind::Crashed => TerminalPanelStatusKind::Crashed,
+        TerminalFailureKind::PolicyBlocked => TerminalPanelStatusKind::PolicyBlocked,
+    }
+}
+
+/// Translate a `TerminalRuntimeError` (from `legion-terminal`) to the appropriate
+/// `TerminalFailureKind` for projection.
+///
+/// - `Disabled` → `Unavailable` (runtime was not initialised / PTY subsystem absent).
+/// - `Denied { .. }` → `PolicyBlocked` (internal policy constraint, distinct from the
+///   trust-gate or capability-broker `Denied` which is handled before `runtime.launch`).
+/// - `Backend { .. }` → `Unavailable` (shell binary not found, OS spawn failure, etc.).
+fn runtime_error_to_failure_kind(err: &TerminalRuntimeError) -> TerminalFailureKind {
+    match err {
+        TerminalRuntimeError::Disabled => TerminalFailureKind::Unavailable,
+        TerminalRuntimeError::Denied { .. } => TerminalFailureKind::PolicyBlocked,
+        TerminalRuntimeError::Backend { .. } => TerminalFailureKind::Unavailable,
+    }
+}
+
 fn terminal_command_block_start_payload(byte_count: usize, cwd: Option<&str>) -> String {
     match cwd {
         Some(cwd) => format!(
@@ -5384,10 +5415,18 @@ impl TerminalWorkflow {
         let runtime_label = std::any::type_name::<
             legion_terminal::TerminalRuntime<legion_platform::NativePtyService>,
         >();
+        // Compute the PTY env: parent env minus deny-prefix vars (enforced at spawn).
+        // `effective_env()` returns Some(filtered) for passthrough=true and None for
+        // passthrough=false; we convert None → Some(Vec::new()) so the PTY always gets
+        // an explicit env (no inherited-parent fallback when passthrough is disabled).
+        let env_passthrough = self.env_policy.passthrough_env;
+        let env_deny_count = self.env_policy.deny_prefixes.len();
+        let pty_env: Vec<(String, String)> = self.env_policy.effective_env().unwrap_or_default();
         match self.runtime.launch(TerminalRuntimeLaunchRequest {
             policy: launch_policy,
             command,
             args,
+            env: Some(pty_env),
         }) {
             Ok(outcome) => {
                 let session_id = outcome.audit.session_id;
@@ -5414,11 +5453,9 @@ impl TerminalWorkflow {
                 };
                 self.projection.last_denial = None;
                 self.projection.last_error = None;
-                // Compute the effective env for audit metadata (deny-list always applied).
-                // NOTE: actual env injection at PTY spawn level requires a future PtyRequest::env
-                // field; for now the policy is evaluated and audited here.
-                let env_passthrough = self.env_policy.passthrough_env;
-                let env_deny_count = self.env_policy.deny_prefixes.len();
+                // Audit env policy metadata. Deny-list is now enforced at PTY spawn level
+                // via PtyRequest::env; env_passthrough and env_deny_prefixes describe the
+                // policy that was applied.
                 self.record_audit(
                     session_id,
                     runtime_state,
@@ -5443,15 +5480,13 @@ impl TerminalWorkflow {
                 }
                 self.projection()
             }
-            Err(error) => self.deny(TerminalDenial {
-                workspace_id: context.workspace_id,
-                policy,
-                reason: format!("Terminal launch denied: {error}"),
-                event_context,
-                session_id: None,
-                action: "launch".to_string(),
-                clear_active_session: true,
-            }),
+            Err(error) => {
+                // Map runtime errors to the appropriate failure kind so the UI can
+                // distinguish between unavailable (binary not found / runtime disabled),
+                // policy-blocked (internal policy denial), and other failures.
+                let kind = runtime_error_to_failure_kind(&error);
+                self.apply_failure_kind(kind, format!("terminal launch failed: {error}"))
+            }
         }
     }
 
@@ -5897,6 +5932,29 @@ impl TerminalWorkflow {
                 )
             ),
         );
+        self.projection()
+    }
+
+    /// Project a typed failure kind into the terminal panel projection.
+    ///
+    /// Used by the launch error path and by the test helper on `AppComposition`.
+    /// Produces a distinct `TerminalPanelStatusKind` for each `TerminalFailureKind`
+    /// variant so the renderer can display denied/unavailable/exited/crashed/policy-blocked
+    /// states differently.
+    fn apply_failure_kind(
+        &mut self,
+        kind: TerminalFailureKind,
+        reason: String,
+    ) -> TerminalPanelProjection {
+        self.active_command_started_at = None;
+        let label = kind.display_label();
+        self.projection.status = TerminalPanelStatus {
+            kind: failure_kind_to_status_kind(&kind),
+            message: format!("{label}: {}", bounded_label(reason.clone(), 120)),
+        };
+        self.projection.last_error = Some(bounded_label(reason, 120));
+        self.projection.runtime_state = Some(TerminalRuntimeState::Failed);
+        self.projection.generated_at = TimestampMillis::now();
         self.projection()
     }
 
@@ -18311,6 +18369,19 @@ impl AppComposition {
     /// separate fixture toggle.
     pub fn enable_terminal_runtime_for_tests(&mut self) {
         self.terminal_workflow.enable_runtime_for_tests();
+    }
+
+    /// Force the terminal panel into a specific failure state for integration tests.
+    ///
+    /// Exercises the `TerminalFailureKind` → `TerminalPanelStatusKind` translation path
+    /// so each failure variant can be verified to produce a distinct, labelled status.
+    /// This calls the same `apply_failure_kind` method that the real launch error handler uses.
+    pub fn project_terminal_failure_for_test(
+        &mut self,
+        kind: crate::terminal_policy::TerminalFailureKind,
+    ) -> legion_protocol::TerminalPanelProjection {
+        self.terminal_workflow
+            .apply_failure_kind(kind, "forced-for-test".to_string())
     }
 
     /// Set the terminal shell selection (workspace-level setting).
