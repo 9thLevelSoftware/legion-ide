@@ -12,7 +12,7 @@ use std::{
 
 use legion_desktop::{
     bridge::DesktopAction,
-    workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
+    workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use legion_ui::DockMode;
 
@@ -101,5 +101,277 @@ fn product_mode_switch_accepts_keyboard_activation() {
         app.runtime_snapshot().product_mode,
         DockMode::Manual,
         "keyboard activation should select the Manual product mode"
+    );
+}
+
+// ─── T4: Problems panel keyboard navigation ───────────────────────────────────
+
+/// `ProblemNext` moves the focused index forward and wraps around.
+#[test]
+fn t4_problem_next_increments_selection() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.root.join("main.rs");
+    std::fs::write(&file, "fn main() {}\n").expect("write file");
+    let mut runtime = open_runtime(workspace.path());
+
+    // ProblemNext on a runtime with no problems is a no-op (no crash).
+    let outcome = runtime
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext must not error");
+    assert_eq!(outcome, DesktopWorkflowOutcome::Noop);
+    assert_eq!(runtime.problems_selected_index_for_test(), 0);
+
+    // Open the file through the app so a buffer is created.
+    let src_file = file.to_string_lossy().to_string();
+    runtime
+        .app_mut_for_test()
+        .open_file(file.to_string_lossy())
+        .expect("open_file must succeed");
+    let uri = format!(
+        "file:///{}",
+        src_file.replace('\\', "/").trim_start_matches('/')
+    );
+    let buffer_id = runtime
+        .app_mut_for_test()
+        .active_buffer_id()
+        .expect("active buffer must exist after open_file");
+    let params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [
+            {
+                "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} },
+                "severity": 1, "message": "error 1"
+            },
+            {
+                "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1} },
+                "severity": 2, "message": "warning 2"
+            }
+        ]
+    });
+    runtime
+        .app_mut_for_test()
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &params, false, None)
+        .expect("inject diagnostics");
+
+    // ProblemNext moves from index 0 → 1.
+    runtime
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext");
+    assert_eq!(runtime.problems_selected_index_for_test(), 1);
+
+    // ProblemNext wraps 1 → 0.
+    runtime
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext wraps");
+    assert_eq!(runtime.problems_selected_index_for_test(), 0);
+}
+
+/// `ProblemPrev` moves the focused index backward and wraps around.
+#[test]
+fn t4_problem_prev_decrements_selection() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.root.join("lib.rs");
+    std::fs::write(&file, "pub fn f() {}\n").expect("write file");
+    let mut runtime = open_runtime(workspace.path());
+
+    // Open the file through the app so a buffer is created.
+    runtime
+        .app_mut_for_test()
+        .open_file(file.to_string_lossy())
+        .expect("open_file must succeed");
+    let src_file = file.to_string_lossy().to_string();
+    let uri = format!(
+        "file:///{}",
+        src_file.replace('\\', "/").trim_start_matches('/')
+    );
+    let buffer_id = runtime
+        .app_mut_for_test()
+        .active_buffer_id()
+        .expect("active buffer");
+    let params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [
+            { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} },
+              "severity": 1, "message": "e1" },
+            { "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1} },
+              "severity": 1, "message": "e2" }
+        ]
+    });
+    runtime
+        .app_mut_for_test()
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &params, false, None)
+        .expect("inject");
+
+    // Start at 0; ProblemPrev wraps to 1 (last item).
+    runtime
+        .handle_action(DesktopAction::ProblemPrev)
+        .expect("ProblemPrev");
+    assert_eq!(runtime.problems_selected_index_for_test(), 1);
+
+    // ProblemPrev again → 0.
+    runtime
+        .handle_action(DesktopAction::ProblemPrev)
+        .expect("ProblemPrev again");
+    assert_eq!(runtime.problems_selected_index_for_test(), 0);
+}
+
+/// `ProblemActivate` with no problems is a Noop (guard condition).
+#[test]
+fn t4_problem_activate_with_no_problems_is_noop() {
+    let workspace = TempWorkspace::new();
+    let mut runtime = open_runtime(workspace.path());
+    let outcome = runtime
+        .handle_action(DesktopAction::ProblemActivate)
+        .expect("ProblemActivate must not error");
+    assert_eq!(outcome, DesktopWorkflowOutcome::Noop);
+}
+
+/// `ProblemActivate` with a real problem (path + range) opens the file.
+///
+/// This is the happy-path app-level test for T4: a diagnostic with a
+/// disclosed path and range is selected, then activating it must route
+/// through `OpenPathAtPosition` and return `DesktopWorkflowOutcome::Opened`.
+#[test]
+fn t4_problem_activate_happy_path() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.root.join("activate.rs");
+    // Write ten lines so line 5 exists when `OpenPathAtPosition` is dispatched.
+    let content: String = (0..10).map(|i| format!("// line {i}\n")).collect();
+    std::fs::write(&file, &content).expect("write activate.rs");
+    let mut runtime = open_runtime(workspace.path());
+
+    // Open through app so a `FileId` and buffer are registered.
+    runtime
+        .app_mut_for_test()
+        .open_file(file.to_string_lossy())
+        .expect("open_file must succeed");
+    let buffer_id = runtime
+        .app_mut_for_test()
+        .active_buffer_id()
+        .expect("active buffer must exist after open_file");
+
+    // Inject a single diagnostic at line 5 with range disclosure so both
+    // `path` (backfilled from file identity) and `range` are available.
+    let src_file = file.to_string_lossy().to_string();
+    let uri = format!(
+        "file:///{}",
+        src_file.replace('\\', "/").trim_start_matches('/')
+    );
+    let params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [{
+            "range": {
+                "start": { "line": 5, "character": 0 },
+                "end":   { "line": 5, "character": 4 }
+            },
+            "severity": 1,
+            "message": "activate me"
+        }]
+    });
+    runtime
+        .app_mut_for_test()
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &params, true, None)
+        .expect("inject diagnostic");
+
+    // Activate — the diagnostic has a real path so the file should open.
+    let outcome = runtime
+        .handle_action(DesktopAction::ProblemActivate)
+        .expect("ProblemActivate must not error");
+    assert_eq!(
+        outcome,
+        DesktopWorkflowOutcome::Opened,
+        "ProblemActivate with a disclosed path+range should open the file at the diagnostic location"
+    );
+}
+
+/// Pressing ArrowDown in egui dispatches `ProblemNext` through the keyboard handler.
+///
+/// This is the desktop-level T4 test: a synthetic ArrowDown `RawInput` is
+/// fed through `run_headless_input`, which exercises the same `handle_keyboard`
+/// path that production uses. Arrow-key events are routed to problem-panel
+/// navigation from the cloned `InputState` inside `handle_keyboard`, which is
+/// immune to the egui focus-navigation mechanism that can consume these events
+/// once widget rendering begins. The test asserts that the problems-selected
+/// index advances, proving the wiring from egui event to `ProblemNext` action.
+#[test]
+fn t4_problem_key_dispatch_via_egui() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.root.join("key_dispatch.rs");
+    std::fs::write(&file, "fn a() {}\nfn b() {}\n").expect("write key_dispatch.rs");
+    let mut runtime = open_runtime(workspace.path());
+
+    // Open file so a buffer exists and diagnostics can be attached to it.
+    runtime
+        .app_mut_for_test()
+        .open_file(file.to_string_lossy())
+        .expect("open_file must succeed");
+    let buffer_id = runtime
+        .app_mut_for_test()
+        .active_buffer_id()
+        .expect("active buffer must exist after open_file");
+
+    let src_file = file.to_string_lossy().to_string();
+    let uri = format!(
+        "file:///{}",
+        src_file.replace('\\', "/").trim_start_matches('/')
+    );
+    let params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [
+            {
+                "range": { "start": { "line": 0, "character": 0 },
+                           "end":   { "line": 0, "character": 1 } },
+                "severity": 1, "message": "err 0"
+            },
+            {
+                "range": { "start": { "line": 1, "character": 0 },
+                           "end":   { "line": 1, "character": 1 } },
+                "severity": 1, "message": "err 1"
+            }
+        ]
+    });
+    runtime
+        .app_mut_for_test()
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &params, false, None)
+        .expect("inject diagnostics");
+
+    // Force a projection refresh so the shell snapshot (used by the render
+    // frame) already contains the two problems.  ProblemNext advances to 1;
+    // ProblemPrev resets to 0.  Index is 0 going into the egui frame.
+    runtime
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext to force snapshot refresh");
+    runtime
+        .handle_action(DesktopAction::ProblemPrev)
+        .expect("ProblemPrev to reset index to 0");
+
+    let mut app = DesktopEframeApp::new(runtime);
+    assert_eq!(
+        app.problems_selected_index_for_test(),
+        0,
+        "index should be 0 before the egui key event"
+    );
+
+    // Synthesise an ArrowDown key event and drive it through handle_keyboard.
+    // The problems-navigation binding lives in the cloned-InputState block of
+    // `handle_keyboard`, so `run_headless_input` (which calls that function)
+    // is the correct harness — it exercises the same routing as production.
+    let raw_input = egui::RawInput {
+        focused: true,
+        events: vec![egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: Some(egui::Key::ArrowDown),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        ..egui::RawInput::default()
+    };
+    let _ = app.run_headless_input(raw_input);
+
+    assert_eq!(
+        app.problems_selected_index_for_test(),
+        1,
+        "ArrowDown egui event should dispatch ProblemNext and advance the selected index from 0 to 1"
     );
 }

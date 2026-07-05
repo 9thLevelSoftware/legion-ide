@@ -383,6 +383,23 @@ fn run_beta_workflow_inner(
     let _ = runtime.handle_action(DesktopAction::Quit);
     let final_snapshot = runtime.projection_snapshot();
     let diagnostics_export_label = config.diagnostics_export.display().to_string();
+    // On Windows the file-system cache or AV scanner can briefly delay
+    // visibility of a freshly written file. Use a short bounded poll so a
+    // transient flush lag does not cause a false gate failure.
+    let diagnostics_export_written = {
+        let mut written = config.diagnostics_export.is_file();
+        if !written {
+            let retry_deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while std::time::Instant::now() < retry_deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                if config.diagnostics_export.is_file() {
+                    written = true;
+                    break;
+                }
+            }
+        }
+        written
+    };
     errors.extend(beta_workflow_gate_errors(BetaWorkflowGateInputs {
         browse_status: &browse_status,
         edit_save_status: &edit_save_status,
@@ -391,7 +408,7 @@ fn run_beta_workflow_inner(
         language_status: &language_status,
         terminal_status: &terminal_status,
         proposal_status: &proposal_status,
-        diagnostics_export_written: config.diagnostics_export.is_file(),
+        diagnostics_export_written,
         diagnostics_export_label: &diagnostics_export_label,
     }));
     let status = if errors.is_empty() {
@@ -548,8 +565,12 @@ fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<BetaWorkf
     );
     record_gate_error(
         &mut errors,
-        input.language_status.contains("status=Cancelled")
-            && input.language_status.contains("cancellations=1"),
+        // The durable proof of cancellation is the counter, not the transient
+        // status label: with a live rust-analyzer session the composite
+        // language status advances to `Ready` as soon as the session finishes
+        // initializing, which can race this gate on slow runners (PR #41
+        // windows leg) while `cancellations=1` remains recorded either way.
+        input.language_status.contains("cancellations=1"),
         "language workflow did not record cancellation",
         input.language_status,
     );

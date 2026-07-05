@@ -16142,6 +16142,11 @@ pub struct LanguageCompletionProjection {
     pub score_basis_points: u16,
     /// Whether this completion was produced from degraded semantic data.
     pub degraded: bool,
+    /// LSP `insertText` field when provided by the server and different from
+    /// the label. Used by `accept_completion` to insert the correct text.
+    /// `None` means fall back to `label` on insertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_text: Option<String>,
     /// Completion row schema version.
     pub schema_version: u16,
 }
@@ -16231,6 +16236,14 @@ pub struct LanguageToolingProjection {
     pub redaction_hints: Vec<RedactionHint>,
     /// Projection schema version.
     pub schema_version: u16,
+    /// Live LSP server health records for the active workspace (D2).
+    ///
+    /// Populated by `AppComposition::shell_projection_snapshot()` from the
+    /// background `LspSessionHandle`.  Empty when no LSP session is active.
+    /// `lsp_health_rows()` in `legion-desktop` renders these into the
+    /// language tooling status section.
+    #[serde(default)]
+    pub lsp_health_records: Vec<LspServerHealthRecord>,
 }
 
 impl LanguageToolingProjection {
@@ -16259,6 +16272,7 @@ impl LanguageToolingProjection {
             generated_at: TimestampMillis(0),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
+            lsp_health_records: Vec::new(),
         }
     }
 }

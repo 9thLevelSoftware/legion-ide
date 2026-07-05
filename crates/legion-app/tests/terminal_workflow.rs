@@ -281,16 +281,32 @@ fn terminal_fixture_lifecycle_projects_status() {
             .any(|row| row.redacted_payload.contains("command block finished"));
         (expect_finish_markers && has_finish) || (!expect_finish_markers && has_ready)
     });
-    projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::TerminalSearch {
-            session_id,
-            query: "ready".to_string(),
-        })
-        .expect("terminal search")
-    {
-        AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
-        other => panic!("expected terminal projection, got {other:?}"),
-    };
+    // On a 2-core CI runner under load the PTY flush that satisfies the poll
+    // above may not yet be reflected in the search index. Re-drain output before
+    // each retry so the search sees up-to-date output_rows.
+    let search_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let _ = app.dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll { session_id });
+        projection = match app
+            .dispatch_ui_intent(CommandDispatchIntent::TerminalSearch {
+                session_id,
+                query: "ready".to_string(),
+            })
+            .expect("terminal search")
+        {
+            AppCommandOutcome::TerminalPanelUpdated(projection) => projection,
+            other => panic!("expected terminal projection, got {other:?}"),
+        };
+        if projection.search.match_count > 0 {
+            break;
+        }
+        if std::time::Instant::now() >= search_deadline {
+            panic!(
+                "search match_count stayed 0 after 5 s; output_rows={:?}",
+                projection.output_rows
+            );
+        }
+    }
     assert!(!projection.output_rows.is_empty());
     assert!(projection.search.match_count > 0);
     let start_index = projection
@@ -754,9 +770,20 @@ fn terminal_failure_ux_distinct_status_kinds() {
     let killed = app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalKill { session_id })
         .expect("kill");
-    let projection = match killed {
+    let kill_projection = match killed {
         AppCommandOutcome::TerminalPanelUpdated(p) => p,
         other => panic!("expected TerminalPanelUpdated, got {other:?}"),
+    };
+    // On a 2-core CI runner under load the SIGTERM/SIGKILL escalation inside
+    // kill_pty may not complete within its 500 ms deadline, producing a
+    // transient Failed status. Poll until the session settles to a non-Running
+    // state, then assert the runtime-contract outcome (killed → Exited).
+    let projection = if kill_projection.status.kind == TerminalPanelStatusKind::Exited {
+        kill_projection
+    } else {
+        poll_terminal_until(&mut app, session_id, |p| {
+            p.status.kind != TerminalPanelStatusKind::Running
+        })
     };
     assert_eq!(
         projection.status.kind,

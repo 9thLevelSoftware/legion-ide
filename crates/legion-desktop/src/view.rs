@@ -67,6 +67,14 @@ pub struct DesktopProjectionViewState {
     pub dismissed_toast_ids: BTreeSet<u64>,
     /// Whether the first-run onboarding card should be rendered.
     pub first_run_onboarding_visible: bool,
+    /// Whether the LSP completion popup is currently visible (T6).
+    pub completion_popup_open: bool,
+    /// Zero-based index of the selected completion item (T6).
+    pub completion_selected_index: usize,
+    /// Whether the LSP hover tooltip is currently visible (T7).
+    pub hover_tooltip_visible: bool,
+    /// Keyboard-focused row index in the Problems panel (T4).
+    pub problems_selected_index: usize,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -77,6 +85,10 @@ impl Default for DesktopProjectionViewState {
             dock_layouts: DockLayout::standard_all_modes(),
             dismissed_toast_ids: BTreeSet::new(),
             first_run_onboarding_visible: false,
+            completion_popup_open: false,
+            completion_selected_index: 0,
+            hover_tooltip_visible: false,
+            problems_selected_index: 0,
         }
     }
 }
@@ -790,6 +802,8 @@ impl ProjectionView {
             });
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
+        render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
+        render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
 
         ProjectionViewOutput {
             needs_repaint: false,
@@ -1041,7 +1055,13 @@ fn render_right_dock(
 ) {
     render_dock_side_summary(ui, DockSide::Right, model);
     match projected_product_mode(snapshot) {
-        DesktopProductMode::Manual => render_manual_context_inspector(ui, snapshot, model, actions),
+        DesktopProductMode::Manual => render_manual_context_inspector(
+            ui,
+            snapshot,
+            model,
+            state.problems_selected_index,
+            actions,
+        ),
         DesktopProductMode::Assist => {
             if snapshot.assisted_ai_projection.preview_ready_count > 0 {
                 render_pair_session_panel(ui, snapshot, model, actions)
@@ -1253,6 +1273,163 @@ fn render_toast_overlay(
                     });
                 }
             });
+        });
+}
+
+/// Render the LSP completion popup overlay (T6).
+///
+/// Visible only when `state.completion_popup_open` is true AND the snapshot
+/// carries at least one projected completion item.  Keyboard actions
+/// (↓ next, ↑ prev, Tab/Enter accept, Esc dismiss) are appended to `actions`
+/// so the runtime can handle them through the normal `handle_action` path.
+fn render_completion_popup(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if !state.completion_popup_open {
+        return;
+    }
+    let completions = &snapshot.language_tooling_projection.completions;
+    if completions.is_empty() {
+        return;
+    }
+
+    // Keyboard navigation — consume before the popup frame so the editor does
+    // not also receive these keys.
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            actions.push(DesktopAction::CompletionDismiss);
+        }
+        if i.key_pressed(egui::Key::ArrowDown) {
+            actions.push(DesktopAction::CompletionNext);
+        }
+        if i.key_pressed(egui::Key::ArrowUp) {
+            actions.push(DesktopAction::CompletionPrev);
+        }
+        if i.key_pressed(egui::Key::Tab) || i.key_pressed(egui::Key::Enter) {
+            actions.push(DesktopAction::CompletionAccept);
+        }
+    });
+
+    let tokens = theme::tokens();
+    egui::Area::new("legion_desktop_completion_popup".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(320.0, -60.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(300.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(4))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .id_salt("completion_popup_scroll")
+                        .show(ui, |ui| {
+                            for (i, completion) in completions.iter().enumerate().take(10) {
+                                let selected = i == state.completion_selected_index;
+                                let bg = if selected {
+                                    tokens.accent.blue.linear_multiply(0.2)
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                };
+                                let response = egui::Frame::new()
+                                    .fill(bg)
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .inner_margin(egui::Margin::symmetric(6, 2))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(280.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(theme::muted(format!(
+                                                "[{}]",
+                                                &completion.kind_label
+                                            )));
+                                            ui.add_space(4.0);
+                                            ui.label(if selected {
+                                                theme::body_strong(&completion.label)
+                                            } else {
+                                                theme::body(&completion.label)
+                                            });
+                                            if let Some(detail) = &completion.detail_label {
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        ui.label(theme::code_muted(detail));
+                                                    },
+                                                );
+                                            }
+                                        });
+                                    })
+                                    .response;
+                                if response.clicked() {
+                                    actions.push(DesktopAction::CompletionAccept);
+                                }
+                            }
+                        });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(theme::muted("↑↓ navigate  Tab accept  Esc dismiss"));
+                    });
+                });
+        });
+}
+
+/// Render the LSP hover tooltip overlay (T7).
+///
+/// Visible only when `state.hover_tooltip_visible` is true AND the snapshot
+/// carries hover data.  Esc appends `HoverDismiss` to `actions`.
+/// The tooltip is redaction-safe: it shows `label` and `summary` fields from
+/// `LanguageHoverProjection` which are already bounded/redacted by the app layer.
+fn render_hover_tooltip(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if !state.hover_tooltip_visible {
+        return;
+    }
+    let Some(hover) = &snapshot.language_tooling_projection.hover else {
+        return;
+    };
+
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            actions.push(DesktopAction::HoverDismiss);
+        }
+    });
+
+    let tokens = theme::tokens();
+    egui::Area::new("legion_desktop_hover_tooltip".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(320.0, -160.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(400.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(theme::body_strong(&hover.label));
+                        if !hover.summary.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(theme::code_muted(&hover.summary));
+                        }
+                        if hover.degraded {
+                            ui.add_space(2.0);
+                            ui.label(theme::muted("(degraded)"));
+                        }
+                        ui.add_space(4.0);
+                        ui.label(theme::muted("Esc dismiss"));
+                    });
+                });
         });
 }
 
@@ -2816,6 +2993,7 @@ fn render_manual_context_inspector(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
+    problems_selected_index: usize,
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Context", DesktopProductMode::Manual);
@@ -2835,10 +3013,9 @@ fn render_manual_context_inspector(
         });
     }
     section_label(ui, "Problems", None);
-    ui.label(theme::muted(format!(
-        "{} problems",
-        snapshot.language_tooling_projection.problems.len()
-    )));
+    // D3: clickable per-diagnostic rows with file:line navigation.
+    // T4: pass keyboard-focused index for focus indicator rendering.
+    render_problem_rows(ui, snapshot, problems_selected_index, actions);
     section_label(ui, "LSP Health", None);
     render_compact_rows(
         ui,
@@ -3814,6 +3991,74 @@ fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
             ui.label(theme::code_muted(trim_middle(row, 88)));
         }
     });
+}
+
+/// Renders per-diagnostic problem rows as clickable labels (D3, T4).
+///
+/// Each row shows `severity path:line message`. Clicking opens the file at
+/// the problem's start line via `DesktopAction::NavigateToProblem`.
+/// Problems without a path or range render as non-clickable text.
+///
+/// The row at `selected_index` is highlighted as the keyboard-focused row (T4).
+/// Focus is reached via tab-traversal; `ProblemNext`/`ProblemPrev`/`ProblemActivate`
+/// move selection and trigger navigation.
+fn render_problem_rows(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    selected_index: usize,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let problems = &snapshot.language_tooling_projection.problems;
+    if problems.is_empty() {
+        ui.label(theme::muted("No problems"));
+        return;
+    }
+    const LIMIT: usize = 12;
+    for (i, problem) in problems.iter().take(LIMIT).enumerate() {
+        let location = problem
+            .path
+            .as_ref()
+            .map(|path| {
+                if let Some(range) = &problem.range {
+                    format!("{}:{}", path.0, range.start.line)
+                } else {
+                    path.0.clone()
+                }
+            })
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let raw_label = trim_middle(
+            &format!("{:?} {} {}", problem.severity, location, problem.message),
+            110,
+        );
+        // T4: prefix the keyboard-focused row with a focus indicator.
+        let label = if i == selected_index {
+            format!("› {raw_label}")
+        } else {
+            format!("  {raw_label}")
+        };
+        // Only show clickable link if we have a path; otherwise plain text.
+        if let (Some(path), nav_line) = (
+            problem.path.as_ref().map(|p| p.0.clone()),
+            problem.range.as_ref().map(|r| r.start.line).unwrap_or(0),
+        ) {
+            let response =
+                ui.add(egui::Label::new(theme::body(&label)).sense(egui::Sense::click()));
+            if response.clicked() {
+                actions.push(DesktopAction::NavigateToProblem {
+                    path,
+                    line: nav_line,
+                });
+            }
+        } else {
+            ui.label(theme::body(&label));
+        }
+    }
+    if problems.len() > LIMIT {
+        ui.label(theme::muted(format!(
+            "{} more problems",
+            problems.len() - LIMIT
+        )));
+    }
 }
 
 fn render_compact_rows(ui: &mut egui::Ui, rows: &[String], empty: &str, limit: usize) {
@@ -7047,18 +7292,31 @@ fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     rows
 }
 
-/// Projection-only LSP health rows derived from the snapshot.
+/// Projection-only LSP health rows derived from the snapshot (D2 wired).
 ///
-/// The snapshot does not yet carry `LspServerHealthRecord` data directly (that
-/// requires app-layer wiring); this function reserves the render slot and
-/// returns an empty vec until the snapshot is extended.  No authority is
-/// claimed here — all rendering is read-only.
-fn lsp_health_rows(_snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    // Deferred: the ShellProjectionSnapshot does not yet expose
-    // LspServerHealthRecord entries.  The projection struct and
-    // `project_lsp_health` mapping are complete; wiring the app layer to
-    // populate the snapshot is tracked separately.
-    Vec::new()
+/// Reads `LspServerHealthRecord` entries from
+/// `snapshot.language_tooling_projection.lsp_health_records` — populated by
+/// `AppComposition::shell_projection_snapshot()` via the background
+/// `LspSessionHandle`.  Returns an empty vec when no health data is available.
+/// No authority is claimed here; all rendering is projection-only read-only.
+fn lsp_health_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    use legion_ui::project_lsp_health;
+    snapshot
+        .language_tooling_projection
+        .lsp_health_records
+        .iter()
+        .map(|record| {
+            let proj = project_lsp_health(record, false);
+            format!(
+                "lsp server={} provenance={} version={} status={} restarts={}",
+                proj.server_label,
+                proj.provenance_label,
+                proj.version_label,
+                proj.status_label,
+                proj.restart_count,
+            )
+        })
+        .collect()
 }
 
 fn structural_search_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

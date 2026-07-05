@@ -1,3 +1,4 @@
+use legion_desktop::view::DesktopProjectionViewModel;
 use legion_protocol::{
     LanguageId, LanguageServerId, LspResultStatus, LspServerBinaryProvenance, LspServerHealthRecord,
 };
@@ -172,4 +173,79 @@ fn health_projection_version_unknown_when_none() {
     assert_eq!(p.version_label, "unknown");
     assert_eq!(p.provenance_label, "configured path");
     assert_eq!(p.restart_count, 5);
+}
+
+/// M4: `lsp_health_rows` (via `DesktopProjectionViewModel`) emits a
+/// well-formed formatted string containing server, provenance, version, status,
+/// and restart fields that the projection snapshot has populated.
+#[test]
+fn m4_lsp_health_rows_formatted_output() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        dir.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+
+    let health = LspServerHealthRecord {
+        server_id: LanguageServerId(1),
+        language_id: LanguageId("rust".into()),
+        binary_provenance: LspServerBinaryProvenance::Configured,
+        binary_path_hash: None,
+        artifact_hash: None,
+        version: Some("1.77.0".into()),
+        init_status: LspResultStatus::Fresh,
+        capabilities: Vec::new(),
+        diagnostics_latency_ms: None,
+        restart_count: 2,
+        download_decision_id: None,
+        schema_version: LspServerHealthRecord::schema_version(),
+    };
+    app.set_lsp_health_for_test(health);
+
+    let snapshot = app
+        .shell_projection_snapshot("test")
+        .expect("snapshot must succeed");
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(
+        !model.lsp_health_rows.is_empty(),
+        "lsp_health_rows must be non-empty when a health record is injected"
+    );
+
+    let row = &model.lsp_health_rows[0];
+    assert!(
+        row.contains("lsp server="),
+        "row must contain 'lsp server=': {row:?}"
+    );
+    assert!(
+        row.contains("provenance="),
+        "row must contain 'provenance=': {row:?}"
+    );
+    assert!(
+        row.contains("version="),
+        "row must contain 'version=': {row:?}"
+    );
+    assert!(
+        row.contains("status="),
+        "row must contain 'status=': {row:?}"
+    );
+    assert!(
+        row.contains("restarts="),
+        "row must contain 'restarts=': {row:?}"
+    );
+    assert!(
+        row.contains("1.77.0"),
+        "row must contain the injected version '1.77.0': {row:?}"
+    );
+    assert!(
+        row.contains("ready"),
+        "row must contain 'ready' (Fresh status label): {row:?}"
+    );
+    assert!(
+        row.contains("restarts=2"),
+        "row must contain 'restarts=2' (injected restart count): {row:?}"
+    );
 }

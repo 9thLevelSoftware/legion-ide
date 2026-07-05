@@ -5,7 +5,7 @@
 
 use legion_lsp::{DiscoveredBinary, LspStdioSession, LspStdioSpawner, LspSupervisorConfig};
 use legion_protocol::{
-    LanguageId, LanguageServerId, LspResultStatus, LspServerBinaryProvenance,
+    LanguageId, LanguageServerId, LspCapabilitySummary, LspResultStatus, LspServerBinaryProvenance,
     LspServerHealthRecord, SnapshotId,
 };
 
@@ -154,6 +154,31 @@ impl RustAnalyzerSession {
 
         self.health.init_status = response.status;
 
+        // Parse capability summaries from the initialize result body.
+        // Only populate when the handshake succeeded; an error result has no capabilities.
+        if self.health.init_status == LspResultStatus::Fresh
+            && let Some(caps) = response
+                .result
+                .get("capabilities")
+                .and_then(|v| v.as_object())
+        {
+            // Track the capability keys we care about for read-side gating.
+            for cap_name in ["hoverProvider", "definitionProvider", "completionProvider"] {
+                let supported = caps
+                    .get(cap_name)
+                    .map(|v| v.as_bool().unwrap_or(false))
+                    .unwrap_or(false);
+                self.health.capabilities.push(LspCapabilitySummary {
+                    capability: cap_name.to_string(),
+                    supported,
+                    dynamic_registration: false,
+                    option_hash: None,
+                    redaction_hints: Vec::new(),
+                    schema_version: 1,
+                });
+            }
+        }
+
         self.session
             .send_notification("initialized", serde_json::json!({}))
             .map_err(LanguageSessionError::Handshake)?;
@@ -232,6 +257,11 @@ impl RustAnalyzerSession {
     /// freshness status — allowing callers to gate ingestion via
     /// [`super::is_stale_response`] before projecting into buffer state.
     ///
+    /// `snapshot_id` is the buffer's current snapshot at the time the request
+    /// is issued.  It is threaded through the `LspOperationContext` and
+    /// surfaces in `LspReadOutcome::issued_snapshot`, enabling the
+    /// `is_stale_response` gate at the drain/ingest point (D1 fix).
+    ///
     /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
     /// is not in an initialized/live state (e.g. post-crash backoff). No write
     /// is made to the transport in that case.
@@ -239,19 +269,58 @@ impl RustAnalyzerSession {
         &mut self,
         method: &str,
         params: serde_json::Value,
+        snapshot_id: SnapshotId,
     ) -> Result<LspReadOutcome, LanguageSessionError> {
         if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
             return Err(LanguageSessionError::Unavailable);
         }
+        let ctx = super::operation_context_for_snapshot(snapshot_id);
         let response = self
             .session
-            .request(method.to_string(), params, super::operation_context())
+            .request(method.to_string(), params, ctx)
             .map_err(LanguageSessionError::ReadRequest)?;
         Ok(LspReadOutcome {
             result: response.result,
             issued_snapshot: response.context.snapshot_id,
             status: response.status,
         })
+    }
+
+    /// Sends `textDocument/didChange` for a buffer (full-text sync, v1).
+    ///
+    /// Full-text sync is acceptable for v1 per the brief; incremental sync
+    /// can be added later when performance requires it.
+    ///
+    /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
+    /// is not in an initialized/live state.
+    pub fn did_change(
+        &mut self,
+        uri: &str,
+        version: i64,
+        text: &str,
+    ) -> Result<(), LanguageSessionError> {
+        if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
+            return Err(LanguageSessionError::Unavailable);
+        }
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "version": version,
+            },
+            "contentChanges": [{ "text": text }],
+        });
+        self.session
+            .send_notification("textDocument/didChange", params)
+            .map_err(LanguageSessionError::Handshake)
+    }
+
+    /// Non-blocking drain of raw `publishDiagnostics` notification params.
+    ///
+    /// Delegates to [`LspStdioSession::try_drain_diagnostic_params`].  Safe to
+    /// call only when no request is in flight (i.e. the session worker thread
+    /// should call this in the idle/timeout branch of its recv loop).
+    pub fn try_drain_diagnostic_params(&mut self) -> Vec<serde_json::Value> {
+        self.session.try_drain_diagnostic_params()
     }
 
     /// Mutable access to the underlying stdio session (for later tasks: doc sync, restart).

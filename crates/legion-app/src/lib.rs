@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -4548,6 +4549,24 @@ impl ActiveDocumentController {
             .ok_or(AppCompositionError::WorkspaceNotOpen)
     }
 
+    /// Finds the `BufferId` for an open buffer whose canonical path matches
+    /// `path`.  Returns `None` if no open buffer has that path.
+    fn buffer_id_for_path(&self, path: &str) -> Option<BufferId> {
+        // Check active buffer first (fast path).
+        if let Some(meta) = &self.active_file_metadata
+            && meta.identity.canonical_path.0 == path
+        {
+            return self.active_buffer_id;
+        }
+        // Fall back to iterating the open buffer metadata map.
+        for (buffer_id, meta) in &self.buffer_file_metadata {
+            if meta.identity.canonical_path.0 == path {
+                return Some(*buffer_id);
+            }
+        }
+        None
+    }
+
     fn require_workspace_context(&self) -> Result<ActiveWorkspaceContext, AppCompositionError> {
         let opened = self
             .opened_workspace
@@ -4772,6 +4791,12 @@ impl LanguageToolingWorkflow {
             if problem.file_id.is_none() {
                 problem.file_id = Some(input.metadata.identity.file_id);
             }
+            // Set canonical path for navigation if not already present.
+            // LSP-projected diagnostics always have path:None; we backfill it
+            // from the buffer metadata so the problems panel can render clickable rows.
+            if problem.path.is_none() && problem.file_id == Some(input.metadata.identity.file_id) {
+                problem.path = Some(input.metadata.identity.canonical_path.clone());
+            }
             problem.redaction_hints.push(RedactionHint::MetadataOnly);
             problem
                 .redaction_hints
@@ -4990,6 +5015,7 @@ impl LanguageToolingWorkflow {
                 kind_label: format!("{:?}", result.kind),
                 score_basis_points: result.score_basis_points,
                 degraded: false,
+                insert_text: None,
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
@@ -5081,6 +5107,7 @@ impl LanguageToolingWorkflow {
             generated_at: TimestampMillis::now(),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
+            lsp_health_records: previous_projection.lsp_health_records,
         };
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -6642,6 +6669,36 @@ impl DebugWorkflow {
     fn next_event_sequence(&mut self) -> EventSequence {
         self.next_sequence = self.next_sequence.saturating_add(1).max(1);
         EventSequence(self.next_sequence)
+    }
+}
+
+/// Converts a `file://` URI to a canonical path string (platform-aware).
+///
+/// Strips `file:///` (Windows) or `file://` (Unix) and replaces `/` with `\`
+/// on Windows so comparisons against `meta.identity.canonical_path.0` work.
+fn uri_to_canonical_path(uri: &str) -> String {
+    let stripped = uri
+        .strip_prefix("file:///")
+        .or_else(|| uri.strip_prefix("file://"))
+        .unwrap_or(uri);
+    // On Windows, restore backslashes for consistency with the editor's path.
+    #[cfg(target_os = "windows")]
+    {
+        stripped.replace('/', "\\")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        stripped.to_string()
+    }
+}
+
+/// Converts a canonical path string to a `file://` URI.
+fn canonical_path_to_uri(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with('/') {
+        format!("file://{normalized}")
+    } else {
+        format!("file:///{normalized}")
     }
 }
 
@@ -13262,6 +13319,30 @@ fn default_ai_registry() -> ProviderRegistry {
     make_stub_registry()
 }
 
+/// Which debounce timer fired (completion vs hover). App-side classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspDebounceKind {
+    /// The completion debounce timer elapsed; a completion request should fire.
+    Completion,
+    /// The hover debounce timer elapsed; a hover request should fire.
+    Hover,
+}
+
+/// A debounce event returned by [`AppComposition::tick_lsp_debounces`].
+///
+/// The desktop receives these events each frame and dispatches them as
+/// `CommandDispatchIntent` values through the app. The desktop never decides
+/// whether the elapsed threshold has been crossed — that logic lives here.
+#[derive(Debug, Clone)]
+pub struct LspDebounceEvent {
+    /// Buffer in which the triggering edit or cursor movement occurred.
+    pub buffer_id: BufferId,
+    /// Position at which the request should be issued.
+    pub position: TextCoordinate,
+    /// Which request kind fired.
+    pub kind: LspDebounceKind,
+}
+
 /// Root application composition.
 pub struct AppComposition {
     workspace: WorkspaceActor,
@@ -13305,6 +13386,16 @@ pub struct AppComposition {
     debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
+    /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
+    lsp_session: crate::language::LspSessionHandle,
+    /// Arming instant, buffer, and position for the completion debounce (I1).
+    lsp_ui_completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
+    /// Count of completions seen at the last pre-sync; used for new-arrival detection (I1).
+    lsp_ui_last_completion_count: usize,
+    /// Arming instant, buffer, and position for the hover debounce (I1).
+    lsp_ui_hover_debounce: Option<(Instant, BufferId, TextCoordinate)>,
+    /// Hover id last seen at auto-show time; prevents dismissed tooltip from re-opening (I1).
+    lsp_ui_last_hover_id: Option<String>,
     /// Metadata-only per-workspace palette usage counters.
     /// No raw query text, AI context, or network I/O.
     /// Defaults to `InMemoryPaletteUsageRepository` (no persistence); swap
@@ -13380,6 +13471,11 @@ impl AppComposition {
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
+            lsp_session: crate::language::LspSessionHandle::new(),
+            lsp_ui_completion_debounce: None,
+            lsp_ui_last_completion_count: 0,
+            lsp_ui_hover_debounce: None,
+            lsp_ui_last_hover_id: None,
             palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
         }
     }
@@ -13602,11 +13698,351 @@ impl AppComposition {
             }
         };
         self.active_documents
-            .bind_workspace(opened.clone(), root_path, principal, trust);
+            .bind_workspace(opened.clone(), root_path, principal, trust.clone());
         self.debug_workflow.clear_workspace_state();
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
+
+        // PKT-LSP-B T1 (D4): Start LSP session for trusted Rust workspaces.
+        // `start_for_workspace` checks for Cargo.toml and refuses immediately if
+        // absent, so this is always safe to call for any trusted workspace.
+        if trust == WorkspaceTrustState::Trusted {
+            self.lsp_session.start_for_workspace(root.as_ref(), true);
+        }
+
         Ok(opened)
+    }
+
+    /// Non-blocking LSP session drain. Call once per frame tick (mirrors
+    /// `TerminalWorkflow::poll`). Returns `true` if session state changed,
+    /// indicating the projection snapshot should be refreshed.
+    ///
+    /// PKT-LSP-B T1 / D4.
+    /// Non-blocking LSP session drain — call once per frame tick (PKT-LSP-B T1).
+    ///
+    /// 1. Advances the startup lifecycle (Starting → Live or Failed) via `drain()`.
+    /// 2. Drains completed worker results and dispatches them to the appropriate
+    ///    ingest method (completions, hover, definition, diagnostics).
+    ///
+    /// Returns `true` if the lifecycle state changed (startup transition).
+    pub fn drain_lsp_session(&mut self) -> bool {
+        let changed = self.lsp_session.drain();
+        // Drain any completed worker results (non-blocking).
+        let results = self.lsp_session.try_drain_results();
+        for result in results {
+            use crate::language::LspWorkerResult;
+            match result {
+                LspWorkerResult::ReadResult { outcome, tag } => {
+                    self.ingest_lsp_worker_result(outcome, tag);
+                }
+                LspWorkerResult::DiagnosticBatch { raw_params } => {
+                    self.ingest_lsp_diagnostic_batch(raw_params);
+                }
+            }
+        }
+        changed
+    }
+
+    /// Ingests a completed LSP read-request result from the worker thread.
+    fn ingest_lsp_worker_result(
+        &mut self,
+        outcome: Result<crate::language::LspReadOutcome, crate::language::LanguageSessionError>,
+        tag: crate::language::LspRequestTag,
+    ) {
+        use crate::language::{LspReadKind, is_stale_response};
+        let Ok(lsp_outcome) = outcome else {
+            return; // session error; ignore
+        };
+        // Stale-response gate: discard if snapshot moved on since the request.
+        if let Ok(current_snapshot) = self.editor.current_snapshot(tag.buffer_id)
+            && is_stale_response(lsp_outcome.issued_snapshot, current_snapshot.snapshot_id)
+        {
+            return;
+        }
+        match tag.kind {
+            LspReadKind::Completion => {
+                let _ = self.ingest_lsp_completion_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    None,
+                );
+            }
+            LspReadKind::Hover => {
+                let _ = self.ingest_lsp_hover_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    None,
+                );
+            }
+            LspReadKind::Definition => {
+                let _ = self.ingest_lsp_definition_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Ingests a raw `publishDiagnostics` notification batch from the worker.
+    fn ingest_lsp_diagnostic_batch(&mut self, raw_params: serde_json::Value) {
+        // Extract URI from params to look up the buffer.
+        let Some(uri) = raw_params.get("uri").and_then(|v| v.as_str()) else {
+            return;
+        };
+        // Convert file URI to a canonical path for lookup.
+        let canonical_path = uri_to_canonical_path(uri);
+        // Find the buffer_id for this URI.
+        let Some(buffer_id) = self.active_documents.buffer_id_for_path(&canonical_path) else {
+            return; // Not an open buffer; ignore (uri-filtered).
+        };
+        // Project + ingest through redaction layer.
+        let _ = self.ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &raw_params, true, None);
+    }
+
+    /// Returns true when the live LSP server advertises support for `capability`.
+    ///
+    /// If the server has not yet advertised capabilities (empty list, e.g. during
+    /// startup or when the session is idle/refused), returns `false` so callers
+    /// silently skip the request rather than firing into a dead session.
+    ///
+    /// An empty capability list from a live session is treated as *not supported*
+    /// (fail-closed) rather than "assume all" — callers must wait until capabilities
+    /// are populated by a successful `initialize` handshake.
+    fn lsp_server_supports_capability(&self, capability: &str) -> bool {
+        let Some(record) = self.lsp_session.health_record() else {
+            return false; // No session at all.
+        };
+        if record.capabilities.is_empty() {
+            // No capability list published yet (e.g. startup refused, or initialize
+            // has not been called). Fail-closed: do not fire the request.
+            return false;
+        }
+        record
+            .capabilities
+            .iter()
+            .any(|c| c.capability == capability && c.supported)
+    }
+
+    /// Issues a non-blocking LSP completion request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `completionProvider` in the initialize response (silent skip).
+    pub fn issue_lsp_completion_request(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("completionProvider") {
+            return false;
+        }
+        let Some(meta) = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
+            return false;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character }
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::Completion,
+            snapshot_id: snapshot.snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/completion", params, tag)
+    }
+
+    /// Issues a non-blocking LSP hover request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `hoverProvider` in the initialize response (silent skip).
+    pub fn issue_lsp_hover_request(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("hoverProvider") {
+            return false;
+        }
+        let Some(meta) = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
+            return false;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character }
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::Hover,
+            snapshot_id: snapshot.snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/hover", params, tag)
+    }
+
+    /// Issues a non-blocking LSP go-to-definition request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `definitionProvider` in the initialize response (silent skip).
+    pub fn issue_lsp_definition_request(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("definitionProvider") {
+            return false;
+        }
+        let Some(meta) = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
+            return false;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character }
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::Definition,
+            snapshot_id: snapshot.snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/definition", params, tag)
+    }
+
+    /// Test-only: inject a live health record with given capabilities, so tests
+    /// can drive capability-gated code paths without starting a real server.
+    /// Named with `_for_test` suffix to signal that production code must never
+    /// call this.  Gated behind `cfg(any(test, feature = "test-helpers"))` so
+    /// the method is unreachable in production builds.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_lsp_health_for_test(&mut self, health: legion_protocol::LspServerHealthRecord) {
+        self.lsp_session.set_live_health_for_test(health);
+    }
+
+    /// Sends `textDocument/didChange` to the live LSP session after a buffer
+    /// edit (PKT-LSP-B T3).  Fire-and-forget via worker channel: never blocks.
+    fn notify_lsp_did_change(
+        &mut self,
+        buffer_id: BufferId,
+        descriptor: &legion_protocol::TextTransactionDescriptor,
+    ) {
+        let Some(meta) = self.active_documents.metadata_for_buffer(buffer_id) else {
+            return;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let version = descriptor.post_buffer_version.0 as i64;
+        if let Ok(text) = self.editor.text(buffer_id) {
+            self.lsp_session
+                .send_did_change(uri, version, text.to_string());
+        }
+    }
+
+    /// Returns the current LSP server health record, if available.
+    ///
+    /// Returns `None` when the session is in the Idle state (no workspace
+    /// opened or startup not yet attempted). Returns `Some` with
+    /// `init_status = Unavailable` when the session is Refused/Failed/Starting,
+    /// and `Some` with `init_status = Fresh` when it is Live.
+    ///
+    /// PKT-LSP-B T1 / D2.
+    pub fn lsp_server_health_record(&self) -> Option<legion_protocol::LspServerHealthRecord> {
+        self.lsp_session.health_record()
+    }
+
+    // ── LSP UI debounce authority (I1) ──────────────────────────────────────
+    // Timing and armed-state decisions live here; the desktop only forwards
+    // typed intents and renders (brief hard rule).
+
+    /// Arm the completion debounce.  Resets the timer to `now` on each call.
+    pub fn arm_lsp_completion_debounce(&mut self, buffer_id: BufferId, position: TextCoordinate) {
+        self.lsp_ui_completion_debounce = Some((Instant::now(), buffer_id, position));
+    }
+
+    /// Disarm the completion debounce without firing it.
+    pub fn disarm_lsp_completion_debounce(&mut self) {
+        self.lsp_ui_completion_debounce = None;
+    }
+
+    /// Arm the hover debounce.  Resets the settle timer to `now` on each call.
+    pub fn arm_lsp_hover_debounce(&mut self, buffer_id: BufferId, position: TextCoordinate) {
+        self.lsp_ui_hover_debounce = Some((Instant::now(), buffer_id, position));
+    }
+
+    /// Disarm the hover debounce without firing it.
+    pub fn disarm_lsp_hover_debounce(&mut self) {
+        self.lsp_ui_hover_debounce = None;
+    }
+
+    /// Check all armed debounces against `now`.  Returns events for any that
+    /// have elapsed; clears those timers.  Desktop dispatches returned events.
+    ///
+    /// Completion threshold: 50 ms.  Hover threshold: 200 ms.
+    pub fn tick_lsp_debounces(&mut self, now: Instant) -> Vec<LspDebounceEvent> {
+        let mut fired = Vec::new();
+        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_completion_debounce
+            && now.duration_since(armed_at) >= std::time::Duration::from_millis(50)
+        {
+            self.lsp_ui_completion_debounce = None;
+            fired.push(LspDebounceEvent {
+                buffer_id,
+                position,
+                kind: LspDebounceKind::Completion,
+            });
+        }
+        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_hover_debounce
+            && now.duration_since(armed_at) >= std::time::Duration::from_millis(200)
+        {
+            self.lsp_ui_hover_debounce = None;
+            fired.push(LspDebounceEvent {
+                buffer_id,
+                position,
+                kind: LspDebounceKind::Hover,
+            });
+        }
+        fired
+    }
+
+    /// Update the saved completion count after a refresh (auto-show detection).
+    pub fn pre_sync_lsp_completion_count(&mut self, count: usize) {
+        self.lsp_ui_last_completion_count = count;
+    }
+
+    /// Update the saved hover id after an auto-show or dismiss.
+    pub fn pre_sync_lsp_hover_id(&mut self, id: Option<String>) {
+        self.lsp_ui_last_hover_id = id;
+    }
+
+    /// Last completion count seen at a refresh; used by the desktop to detect new arrivals.
+    pub fn last_lsp_completion_count(&self) -> usize {
+        self.lsp_ui_last_completion_count
+    }
+
+    /// Last hover id that triggered auto-show; used by the desktop to skip re-opens.
+    pub fn last_lsp_hover_id(&self) -> Option<&str> {
+        self.lsp_ui_last_hover_id.as_deref()
     }
 
     /// Open a file through workspace authority and bind it into editor engine.
@@ -14497,6 +14933,10 @@ impl AppComposition {
                 )?;
                 self.set_cursor_after_edit(*buffer_id, edit)?;
                 self.emit_transaction_event(&descriptor);
+                // PKT-LSP-B T3: notify live LSP session of the buffer change.
+                // `did_change` is a fire-and-forget notification; the underlying
+                // `send_notification` is a buffered stdin write that does not block.
+                self.notify_lsp_did_change(*buffer_id, &descriptor);
                 return Ok(AppCommandOutcome::Edited(descriptor));
             }
             AppCommandRequest::ClipboardCopy { buffer_id } => {
@@ -14882,15 +15322,23 @@ impl AppComposition {
             AppCommandRequest::RequestHover {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_read(buffer_id, LanguageReadKind::Hover, position)?,
-            )),
+            } => {
+                // Issue async LSP hover (non-blocking; result arrives next frame via drain).
+                self.issue_lsp_hover_request(buffer_id, position);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(buffer_id, LanguageReadKind::Hover, position)?,
+                ))
+            }
             AppCommandRequest::RequestCompletion {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_read(buffer_id, LanguageReadKind::Completion, position)?,
-            )),
+            } => {
+                // Issue async LSP completion (non-blocking; result arrives next frame via drain).
+                self.issue_lsp_completion_request(buffer_id, position);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(buffer_id, LanguageReadKind::Completion, position)?,
+                ))
+            }
             AppCommandRequest::RequestAssistInlinePrediction {
                 buffer_id,
                 position,
@@ -14922,9 +15370,13 @@ impl AppComposition {
             AppCommandRequest::GoToDefinition {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_read(buffer_id, LanguageReadKind::Definition, position)?,
-            )),
+            } => {
+                // Issue async LSP definition (non-blocking; result arrives next frame via drain).
+                self.issue_lsp_definition_request(buffer_id, position);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(buffer_id, LanguageReadKind::Definition, position)?,
+                ))
+            }
             AppCommandRequest::FindReferences {
                 buffer_id,
                 position,
@@ -21761,7 +22213,14 @@ impl AppComposition {
             structural_search_projection: self.structural_search_projection.clone(),
             git_projection: self.git_projection.clone(),
             debug_projection: self.debug_workflow.projection(),
-            language_tooling_projection: self.language_tooling.projection(),
+            language_tooling_projection: {
+                // D2: inject live LSP health records from the background session handle.
+                let mut p = self.language_tooling.projection();
+                if let Some(record) = self.lsp_session.health_record() {
+                    p.lsp_health_records.push(record);
+                }
+                p
+            },
             terminal_panel_projection: self.terminal_workflow.projection(),
         })
     }

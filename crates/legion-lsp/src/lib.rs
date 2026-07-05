@@ -1205,6 +1205,13 @@ fn completion_projection_for_item(
         .map(|kind| format!("lsp.completion.kind.{kind}"))
         .unwrap_or_else(|| "lsp.completion.kind.unknown".to_string());
     let label = bounded_lsp_label(label, 120);
+    // Extract LSP `insertText` only when it differs from the label and is
+    // non-empty; identical values add no information.
+    let insert_text_raw = item
+        .get("insertText")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && *s != label.as_str());
+    let insert_text = insert_text_raw.map(|s| bounded_lsp_label(s, 512));
     Some(LanguageCompletionProjection {
         completion_id: format!("lsp-completion-{index}-{:016x}", stable_hash(&label)),
         label,
@@ -1218,6 +1225,7 @@ fn completion_projection_for_item(
             10_000u32.saturating_sub(penalty) as u16
         },
         degraded: item.get("insertText").is_none(),
+        insert_text,
         schema_version: 1,
     })
 }
@@ -2247,6 +2255,23 @@ impl LspStdioProcess {
         }
     }
 
+    /// Non-blocking check for a pending frame in the reader channel.
+    ///
+    /// Returns `Some(envelope)` if a frame is immediately available, or `None`
+    /// if the channel is empty.  Never blocks.  Callers that need this for
+    /// diagnostic notification draining (e.g. the session worker thread) should
+    /// call this in a loop, breaking on `None`.
+    pub fn try_recv_envelope(&mut self) -> Option<LspRuntimeResult<JsonRpcEnvelope>> {
+        let reader = self.reader.as_ref()?;
+        match reader.rx.try_recv() {
+            Ok(StdoutReaderEvent::Frame(envelope)) => Some(Ok(*envelope)),
+            Ok(StdoutReaderEvent::Eof) => None,
+            Ok(StdoutReaderEvent::Err(err)) => Some(Err(*err)),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        }
+    }
+
     /// Detaches the stderr handle so the supervisor/drain loop can read
     /// it independently. Returns `None` if stderr was not captured or
     /// already detached.
@@ -2659,6 +2684,30 @@ impl LspStdioSession {
     /// Returns metadata-only diagnostic notifications observed while reading frames.
     pub fn diagnostic_notifications(&self) -> &[LspDiagnosticNotificationMetadata] {
         &self.diagnostic_notifications
+    }
+
+    /// Non-blocking drain of raw `textDocument/publishDiagnostics` notification
+    /// params from the reader channel.
+    ///
+    /// Drains all frames currently queued in the reader without blocking.  For
+    /// each `publishDiagnostics` notification the raw params JSON is collected
+    /// (to be projected by callers through `project_publish_diagnostics`).  All
+    /// other frame types are routed through `record_notification` as normal.
+    ///
+    /// Safe to call at any time when no request is in flight.  Do NOT call
+    /// while a `request` / `read_response_for` call is in progress on the same
+    /// thread — that would steal frames from the correlation loop.
+    pub fn try_drain_diagnostic_params(&mut self) -> Vec<serde_json::Value> {
+        let mut raw_params = Vec::new();
+        while let Some(Ok(envelope)) = self.process.try_recv_envelope() {
+            if envelope.method.as_deref() == Some("textDocument/publishDiagnostics")
+                && let Some(params) = envelope.params.clone()
+            {
+                raw_params.push(params);
+            }
+            self.record_notification(&envelope, None);
+        }
+        raw_params
     }
 
     /// Returns whether the session has successfully completed an
